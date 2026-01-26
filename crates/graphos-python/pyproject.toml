@@ -3,7 +3,7 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "graphos"
+name = "pygraphos"
 version = "0.1.0"
 description = "A high-performance, embeddable graph database with Python bindings"
 readme = "README.md"

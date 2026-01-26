@@ -134,8 +134,9 @@ impl PyValue {
         }
 
         if obj.is_instance_of::<PyDict>() {
-            let dict = obj.downcast::<PyDict>().map_err(|e| {
-                PyGraphosError::Type(format!("Cannot downcast to dict: {}", e))
+            // SAFETY: We just checked it's a PyDict instance
+            let dict: &Bound<'_, PyDict> = obj.cast().map_err(|e| {
+                PyGraphosError::Type(format!("Cannot cast to dict: {}", e))
             })?;
             let mut map = BTreeMap::new();
             for (key, value) in dict.iter() {

@@ -4,7 +4,7 @@ use super::WalRecord;
 use graphos_common::utils::error::{Error, Result};
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 /// Manages the Write-Ahead Log.

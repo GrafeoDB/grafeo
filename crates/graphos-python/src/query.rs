@@ -57,7 +57,7 @@ impl PyQueryResult {
     }
 
     /// Get next row.
-    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> Option<PyObject> {
+    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> Option<Py<PyAny>> {
         if slf.current_row >= slf.rows.len() {
             return None;
         }
@@ -72,7 +72,7 @@ impl PyQueryResult {
         for (col, val) in columns.iter().zip(row.iter()) {
             dict.set_item(col, PyValue::to_py(val, py)).ok()?;
         }
-        Some(dict.into())
+        Some(dict.unbind().into_any())
     }
 
     /// Get all nodes from the result.
@@ -86,7 +86,7 @@ impl PyQueryResult {
     }
 
     /// Convert to list of dictionaries.
-    fn to_list(&self, py: Python<'_>) -> PyObject {
+    fn to_list(&self, py: Python<'_>) -> Py<PyAny> {
         let list = pyo3::types::PyList::empty(py);
         for row in &self.rows {
             let dict = pyo3::types::PyDict::new(py);
@@ -95,11 +95,11 @@ impl PyQueryResult {
             }
             list.append(dict).unwrap();
         }
-        list.into()
+        list.unbind().into_any()
     }
 
     /// Get single value (first column of first row).
-    fn scalar(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn scalar(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if self.rows.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err("No rows in result"));
         }

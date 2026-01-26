@@ -1,0 +1,41 @@
+[package]
+name = "graphos-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Common types, memory allocators, and utilities for Graphos"
+
+[dependencies]
+# Error handling
+thiserror.workspace = true
+
+# Data structures
+smallvec.workspace = true
+bumpalo.workspace = true
+hashbrown.workspace = true
+
+# Hashing
+ahash.workspace = true
+
+# Serialization
+serde.workspace = true
+bincode.workspace = true
+byteorder.workspace = true
+bytes.workspace = true
+
+# Concurrency
+parking_lot.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "arena_bench"
+harness = false

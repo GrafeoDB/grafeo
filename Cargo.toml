@@ -1,0 +1,96 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/graphos-common",
+    "crates/graphos-core",
+    "crates/graphos-adapters",
+    "crates/graphos-engine",
+    "crates/graphos-python",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.0"
+license = "Apache-2.0"
+repository = "https://github.com/StevenBtw/graphos"
+authors = ["Graphos Contributors"]
+description = "A pure-Rust, high-performance, embeddable graph database"
+
+[workspace.dependencies]
+# Internal crates
+graphos-common = { path = "crates/graphos-common" }
+graphos-core = { path = "crates/graphos-core" }
+graphos-adapters = { path = "crates/graphos-adapters" }
+graphos-engine = { path = "crates/graphos-engine" }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Concurrency & synchronization
+parking_lot = "0.12"
+crossbeam = "0.8"
+rayon = "1.10"
+
+# Data structures
+hashbrown = "0.16.1"
+smallvec = "1.13"
+bumpalo = "3.16"
+indexmap = "2.7"
+
+# Memory & I/O
+memmap2 = "0.9"
+bytes = "1.9"
+byteorder = "1.5"
+
+# Checksums & hashing
+crc32fast = "1.4"
+ahash = "0.8"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+bincode = "3.0.0"
+
+# Arrow & Polars
+arrow = "57.2.0"
+polars = "0.52.0"
+
+# Python bindings
+pyo3 = "0.27.2"
+
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Testing
+proptest = "1.6"
+criterion = "0.8.1"
+tempfile = "3.15"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+# Allow some common patterns
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

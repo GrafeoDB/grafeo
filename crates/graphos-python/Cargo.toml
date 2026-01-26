@@ -1,0 +1,24 @@
+[package]
+name = "graphos-python"
+version = "0.1.0"
+edition = "2021"
+description = "Python bindings for Graphos graph database"
+license = "Apache-2.0"
+repository = "https://github.com/StevenBtw/graphos"
+
+[lib]
+name = "graphos"
+crate-type = ["cdylib"]
+
+[dependencies]
+graphos-engine = { path = "../graphos-engine" }
+graphos-core = { path = "../graphos-core" }
+graphos-common = { path = "../graphos-common" }
+graphos-adapters = { path = "../graphos-adapters" }
+
+pyo3 = { workspace = true, features = ["extension-module"] }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = []

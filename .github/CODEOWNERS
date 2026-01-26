@@ -1,0 +1,18 @@
+# Default owners for everything
+* @StevenBtw
+
+# Rust crates
+/crates/graphos-common/ @StevenBtw
+/crates/graphos-core/ @StevenBtw
+/crates/graphos-adapters/ @StevenBtw
+/crates/graphos-engine/ @StevenBtw
+
+# Python bindings
+/crates/graphos-python/ @StevenBtw
+
+# CI/CD
+/.github/ @StevenBtw
+
+# Documentation
+*.md @StevenBtw
+/docs/ @StevenBtw

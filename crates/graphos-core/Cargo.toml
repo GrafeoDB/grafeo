@@ -1,0 +1,48 @@
+[package]
+name = "graphos-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Core graph models, indexes, and execution primitives for Graphos"
+
+[dependencies]
+graphos-common.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Data structures
+smallvec.workspace = true
+hashbrown.workspace = true
+indexmap.workspace = true
+
+# Hashing
+ahash.workspace = true
+
+# Serialization
+serde.workspace = true
+byteorder.workspace = true
+bytes.workspace = true
+
+# Concurrency
+parking_lot.workspace = true
+crossbeam.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+tempfile.workspace = true
+
+[features]
+default = []
+rdf = []  # Enable RDF graph model
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "index_bench"
+harness = false

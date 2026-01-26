@@ -1,0 +1,50 @@
+[package]
+name = "graphos-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Query engine and database management for Graphos"
+
+[dependencies]
+graphos-common.workspace = true
+graphos-core.workspace = true
+graphos-adapters.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Data structures
+smallvec.workspace = true
+hashbrown.workspace = true
+indexmap.workspace = true
+
+# Concurrency
+parking_lot.workspace = true
+crossbeam.workspace = true
+rayon.workspace = true
+
+# Async
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+
+# Tracing
+tracing.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
+
+[features]
+default = ["gql"]
+gql = ["graphos-adapters/gql"]
+cypher = ["graphos-adapters/cypher"]
+full = ["gql", "cypher"]
+
+[lints]
+workspace = true

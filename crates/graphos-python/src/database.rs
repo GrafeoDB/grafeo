@@ -89,23 +89,37 @@ impl PyGraphosDB {
         labels: Vec<String>,
         properties: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyNode> {
-        let props = if let Some(p) = properties {
-            let mut map = HashMap::new();
+        let db = self.inner.read();
+
+        // Convert labels from Vec<String> to Vec<&str>
+        let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+
+        // Create node with or without properties
+        let id = if let Some(p) = properties {
+            // Convert properties
+            let mut props: Vec<(graphos_common::types::PropertyKey, graphos_common::types::Value)> = Vec::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
                 let val = PyValue::from_py(&value).map_err(PyGraphosError::from)?;
-                map.insert(key_str, val);
+                props.push((graphos_common::types::PropertyKey::new(key_str), val));
             }
-            map
+            db.create_node_with_props(&label_refs, props)
         } else {
-            HashMap::new()
+            db.create_node(&label_refs)
         };
 
-        // TODO: Actually create in database
-        // For now, return a placeholder
-        let id = NodeId(1);
-
-        Ok(PyNode::new(id, labels, props))
+        // Fetch the node back to get the full representation
+        if let Some(node) = db.get_node(id) {
+            let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
+            let properties: HashMap<String, graphos_common::types::Value> = node
+                .properties
+                .into_iter()
+                .map(|(k, v)| (k.as_str().to_string(), v))
+                .collect();
+            Ok(PyNode::new(id, labels, properties))
+        } else {
+            Err(PyGraphosError::Database("Failed to create node".into()).into())
+        }
     }
 
     /// Create an edge between two nodes.
@@ -117,56 +131,94 @@ impl PyGraphosDB {
         edge_type: String,
         properties: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyEdge> {
-        let props = if let Some(p) = properties {
-            let mut map = HashMap::new();
+        let db = self.inner.read();
+        let src = NodeId(source_id);
+        let dst = NodeId(target_id);
+
+        // Create edge with or without properties
+        let id = if let Some(p) = properties {
+            // Convert properties
+            let mut props: Vec<(graphos_common::types::PropertyKey, graphos_common::types::Value)> = Vec::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
                 let val = PyValue::from_py(&value).map_err(PyGraphosError::from)?;
-                map.insert(key_str, val);
+                props.push((graphos_common::types::PropertyKey::new(key_str), val));
             }
-            map
+            db.create_edge_with_props(src, dst, &edge_type, props)
         } else {
-            HashMap::new()
+            db.create_edge(src, dst, &edge_type)
         };
 
-        // TODO: Actually create in database
-        let id = EdgeId(1);
-
-        Ok(PyEdge::new(
-            id,
-            edge_type,
-            NodeId(source_id),
-            NodeId(target_id),
-            props,
-        ))
+        // Fetch the edge back to get the full representation
+        if let Some(edge) = db.get_edge(id) {
+            let properties: HashMap<String, graphos_common::types::Value> = edge
+                .properties
+                .into_iter()
+                .map(|(k, v)| (k.as_str().to_string(), v))
+                .collect();
+            Ok(PyEdge::new(
+                id,
+                edge.edge_type.to_string(),
+                edge.src,
+                edge.dst,
+                properties,
+            ))
+        } else {
+            Err(PyGraphosError::Database("Failed to create edge".into()).into())
+        }
     }
 
     /// Get a node by ID.
     fn get_node(&self, id: u64) -> PyResult<Option<PyNode>> {
-        // TODO: Actually fetch from database
-        let _ = id;
-        Ok(None)
+        let db = self.inner.read();
+        let node_id = NodeId(id);
+
+        if let Some(node) = db.get_node(node_id) {
+            let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
+            let properties: HashMap<String, graphos_common::types::Value> = node
+                .properties
+                .into_iter()
+                .map(|(k, v)| (k.as_str().to_string(), v))
+                .collect();
+            Ok(Some(PyNode::new(node_id, labels, properties)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Get an edge by ID.
     fn get_edge(&self, id: u64) -> PyResult<Option<PyEdge>> {
-        // TODO: Actually fetch from database
-        let _ = id;
-        Ok(None)
+        let db = self.inner.read();
+        let edge_id = EdgeId(id);
+
+        if let Some(edge) = db.get_edge(edge_id) {
+            let properties: HashMap<String, graphos_common::types::Value> = edge
+                .properties
+                .into_iter()
+                .map(|(k, v)| (k.as_str().to_string(), v))
+                .collect();
+            Ok(Some(PyEdge::new(
+                edge_id,
+                edge.edge_type.to_string(),
+                edge.src,
+                edge.dst,
+                properties,
+            )))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Delete a node by ID.
     fn delete_node(&self, id: u64) -> PyResult<bool> {
-        // TODO: Actually delete from database
-        let _ = id;
-        Ok(false)
+        let db = self.inner.read();
+        Ok(db.delete_node(NodeId(id)))
     }
 
     /// Delete an edge by ID.
     fn delete_edge(&self, id: u64) -> PyResult<bool> {
-        // TODO: Actually delete from database
-        let _ = id;
-        Ok(false)
+        let db = self.inner.read();
+        Ok(db.delete_edge(EdgeId(id)))
     }
 
     /// Begin a transaction.
@@ -180,12 +232,12 @@ impl PyGraphosDB {
 
     /// Get database statistics.
     fn stats(&self) -> PyResult<PyDbStats> {
-        // TODO: Get actual stats
+        let db = self.inner.read();
         Ok(PyDbStats {
-            node_count: 0,
-            edge_count: 0,
-            label_count: 0,
-            property_count: 0,
+            node_count: db.node_count() as u64,
+            edge_count: db.edge_count() as u64,
+            label_count: 0, // TODO: Add label_count to GraphosDB
+            property_count: 0, // TODO: Add property_count to GraphosDB
         })
     }
 

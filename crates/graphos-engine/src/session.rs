@@ -33,30 +33,51 @@ impl Session {
         }
     }
 
-    /// Executes a query.
+    /// Executes a GQL query.
     ///
     /// # Errors
     ///
     /// Returns an error if the query fails.
+    #[cfg(feature = "gql")]
     pub fn execute(&self, query: &str) -> Result<QueryResult> {
-        #[cfg(feature = "gql")]
-        {
-            use graphos_adapters::query::gql;
+        use graphos_adapters::query::gql;
 
-            // Parse the query
-            let _ast = gql::parse(query)?;
+        // Parse the query
+        let _ast = gql::parse(query)?;
 
-            // TODO: Bind, plan, optimize, execute
-            // For now, return an empty result
-            Ok(QueryResult::new(vec![]))
-        }
+        // TODO: Bind, plan, optimize, execute
+        // For now, return an empty result
+        Ok(QueryResult::new(vec![]))
+    }
 
-        #[cfg(not(feature = "gql"))]
-        {
-            Err(graphos_common::utils::error::Error::Internal(
-                "No query language enabled".to_string(),
-            ))
-        }
+    /// Executes a GQL query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no query language is enabled.
+    #[cfg(not(any(feature = "gql", feature = "cypher")))]
+    pub fn execute(&self, _query: &str) -> Result<QueryResult> {
+        Err(graphos_common::utils::error::Error::Internal(
+            "No query language enabled".to_string(),
+        ))
+    }
+
+    /// Executes a Cypher query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    #[cfg(feature = "cypher")]
+    pub fn execute_cypher(&self, query: &str) -> Result<QueryResult> {
+        use crate::query::cypher_translator;
+
+        // Parse and translate the query to a logical plan
+        let plan = cypher_translator::translate(query)?;
+
+        // TODO: Optimize and execute the plan
+        // For now, return an empty result
+        let _ = plan;
+        Ok(QueryResult::new(vec![]))
     }
 
     /// Begins a new transaction.

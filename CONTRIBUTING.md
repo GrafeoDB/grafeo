@@ -7,7 +7,7 @@ Thank you for your interest in contributing to Graphos! This document provides g
 ### Prerequisites
 
 - Rust 1.80.0 or later
-- Python 3.9+ (for Python bindings)
+- Python 3.12+ (for Python bindings)
 - Git
 
 ### Setup

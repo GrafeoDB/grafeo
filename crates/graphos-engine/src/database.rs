@@ -108,6 +108,67 @@ impl GraphosDB {
     pub fn edge_count(&self) -> usize {
         self.store.edge_count()
     }
+
+    // === Node Operations ===
+
+    /// Creates a new node with the given labels.
+    pub fn create_node(&self, labels: &[&str]) -> graphos_common::types::NodeId {
+        self.store.create_node(labels)
+    }
+
+    /// Creates a new node with labels and properties.
+    pub fn create_node_with_props(
+        &self,
+        labels: &[&str],
+        properties: impl IntoIterator<Item = (impl Into<graphos_common::types::PropertyKey>, impl Into<graphos_common::types::Value>)>,
+    ) -> graphos_common::types::NodeId {
+        self.store.create_node_with_props(labels, properties)
+    }
+
+    /// Gets a node by ID.
+    #[must_use]
+    pub fn get_node(&self, id: graphos_common::types::NodeId) -> Option<graphos_core::graph::lpg::Node> {
+        self.store.get_node(id)
+    }
+
+    /// Deletes a node and all its edges.
+    pub fn delete_node(&self, id: graphos_common::types::NodeId) -> bool {
+        self.store.delete_node(id)
+    }
+
+    // === Edge Operations ===
+
+    /// Creates a new edge between two nodes.
+    pub fn create_edge(
+        &self,
+        src: graphos_common::types::NodeId,
+        dst: graphos_common::types::NodeId,
+        edge_type: &str,
+    ) -> graphos_common::types::EdgeId {
+        self.store.create_edge(src, dst, edge_type)
+    }
+
+    /// Creates a new edge with properties.
+    pub fn create_edge_with_props(
+        &self,
+        src: graphos_common::types::NodeId,
+        dst: graphos_common::types::NodeId,
+        edge_type: &str,
+        properties: impl IntoIterator<Item = (impl Into<graphos_common::types::PropertyKey>, impl Into<graphos_common::types::Value>)>,
+    ) -> graphos_common::types::EdgeId {
+        self.store.create_edge_with_props(src, dst, edge_type, properties)
+    }
+
+    /// Gets an edge by ID.
+    #[must_use]
+    pub fn get_edge(&self, id: graphos_common::types::EdgeId) -> Option<graphos_core::graph::lpg::Edge> {
+        self.store.get_edge(id)
+    }
+
+    /// Deletes an edge.
+    pub fn delete_edge(&self, id: graphos_common::types::EdgeId) -> bool {
+        self.store.delete_edge(id)
+    }
 }
 
 impl Drop for GraphosDB {

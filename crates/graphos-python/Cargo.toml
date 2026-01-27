@@ -1,10 +1,10 @@
 [package]
 name = "graphos-python"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Python bindings for Graphos graph database"
-license = "Apache-2.0"
-repository = "https://github.com/StevenBtw/graphos"
 
 [lib]
 name = "graphos"
@@ -21,4 +21,13 @@ parking_lot = { workspace = true }
 thiserror = { workspace = true }
 
 [features]
-default = []
+default = ["gql"]
+gql = ["graphos-engine/gql"]
+cypher = ["graphos-engine/cypher"]
+sparql = ["graphos-engine/sparql"]
+gremlin = ["graphos-engine/gremlin"]
+graphql = ["graphos-engine/graphql"]
+full = ["gql", "cypher", "sparql", "gremlin", "graphql"]
+
+[lints]
+workspace = true

@@ -1,8 +1,11 @@
 //! LPG graph store implementation.
 
+use super::property::CompareOp;
 use super::{Edge, EdgeRecord, Node, NodeRecord, PropertyStorage};
 use crate::graph::Direction;
 use crate::index::adjacency::ChunkedAdjacency;
+use crate::index::zone_map::ZoneMapEntry;
+use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
 use graphos_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use graphos_common::utils::hash::FxHashMap;
 use parking_lot::RwLock;
@@ -36,6 +39,7 @@ impl Default for LpgStoreConfig {
 /// efficient node/edge storage and adjacency indexing.
 pub struct LpgStore {
     /// Configuration.
+    #[allow(dead_code)]
     config: LpgStoreConfig,
 
     /// Node records indexed by NodeId.
@@ -80,6 +84,9 @@ pub struct LpgStore {
 
     /// Current epoch.
     current_epoch: AtomicU64,
+
+    /// Statistics for cost-based optimization.
+    statistics: RwLock<Statistics>,
 }
 
 impl LpgStore {
@@ -113,6 +120,7 @@ impl LpgStore {
             next_node_id: AtomicU64::new(0),
             next_edge_id: AtomicU64::new(0),
             current_epoch: AtomicU64::new(0),
+            statistics: RwLock::new(Statistics::new()),
             config,
         }
     }
@@ -197,11 +205,7 @@ impl LpgStore {
         }
 
         // Get properties
-        node.properties = self
-            .node_properties
-            .get_all(id)
-            .into_iter()
-            .collect();
+        node.properties = self.node_properties.get_all(id).into_iter().collect();
 
         Some(node)
     }
@@ -228,7 +232,7 @@ impl LpgStore {
             drop(nodes); // Release lock before removing properties
             self.node_properties.remove_all(id);
 
-            // TODO: Delete incident edges
+            // FIXME(delete-node): Delete incident edges when removing node
 
             true
         } else {
@@ -244,6 +248,20 @@ impl LpgStore {
             .values()
             .filter(|r| !r.is_deleted())
             .count()
+    }
+
+    /// Returns all node IDs in the store.
+    ///
+    /// This returns a snapshot of current node IDs. The returned vector
+    /// excludes deleted nodes.
+    #[must_use]
+    pub fn node_ids(&self) -> Vec<NodeId> {
+        self.nodes
+            .read()
+            .iter()
+            .filter(|(_, r)| !r.is_deleted())
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     // === Edge Operations ===
@@ -301,11 +319,7 @@ impl LpgStore {
         let mut edge = Edge::new(id, record.src, record.dst, edge_type);
 
         // Get properties
-        edge.properties = self
-            .edge_properties
-            .get_all(id)
-            .into_iter()
-            .collect();
+        edge.properties = self.edge_properties.get_all(id).into_iter().collect();
 
         Some(edge)
     }
@@ -353,11 +367,13 @@ impl LpgStore {
     // === Traversal ===
 
     /// Returns an iterator over neighbors of a node.
-    pub fn neighbors(&self, node: NodeId, direction: Direction) -> impl Iterator<Item = NodeId> + '_ {
+    pub fn neighbors(
+        &self,
+        node: NodeId,
+        direction: Direction,
+    ) -> impl Iterator<Item = NodeId> + '_ {
         let forward: Box<dyn Iterator<Item = NodeId>> = match direction {
-            Direction::Outgoing | Direction::Both => {
-                Box::new(self.forward_adj.neighbors(node))
-            }
+            Direction::Outgoing | Direction::Both => Box::new(self.forward_adj.neighbors(node)),
             Direction::Incoming => Box::new(std::iter::empty()),
         };
 
@@ -375,6 +391,42 @@ impl LpgStore {
         forward.chain(backward)
     }
 
+    /// Returns edges from a node with their targets.
+    ///
+    /// Returns an iterator of (target_node, edge_id) pairs.
+    pub fn edges_from(
+        &self,
+        node: NodeId,
+        direction: Direction,
+    ) -> impl Iterator<Item = (NodeId, EdgeId)> + '_ {
+        let forward: Box<dyn Iterator<Item = (NodeId, EdgeId)>> = match direction {
+            Direction::Outgoing | Direction::Both => Box::new(self.forward_adj.edges_from(node)),
+            Direction::Incoming => Box::new(std::iter::empty()),
+        };
+
+        let backward: Box<dyn Iterator<Item = (NodeId, EdgeId)>> = match direction {
+            Direction::Incoming | Direction::Both => {
+                if let Some(ref adj) = self.backward_adj {
+                    Box::new(adj.edges_from(node))
+                } else {
+                    Box::new(std::iter::empty())
+                }
+            }
+            Direction::Outgoing => Box::new(std::iter::empty()),
+        };
+
+        forward.chain(backward)
+    }
+
+    /// Gets the type of an edge by ID.
+    #[must_use]
+    pub fn edge_type(&self, id: EdgeId) -> Option<Arc<str>> {
+        let edges = self.edges.read();
+        let record = edges.get(&id)?;
+        let id_to_type = self.id_to_edge_type.read();
+        id_to_type.get(record.type_id as usize).cloned()
+    }
+
     /// Returns nodes with a specific label.
     pub fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
         let label_to_id = self.label_to_id.read();
@@ -385,6 +437,133 @@ impl LpgStore {
             }
         }
         Vec::new()
+    }
+
+    // === Zone Map Support ===
+
+    /// Checks if a node property predicate might match any nodes.
+    ///
+    /// Uses zone maps for early filtering. Returns `true` if there might be
+    /// matching nodes, `false` if there definitely aren't.
+    #[must_use]
+    pub fn node_property_might_match(
+        &self,
+        property: &PropertyKey,
+        op: CompareOp,
+        value: &Value,
+    ) -> bool {
+        self.node_properties.might_match(property, op, value)
+    }
+
+    /// Checks if an edge property predicate might match any edges.
+    #[must_use]
+    pub fn edge_property_might_match(
+        &self,
+        property: &PropertyKey,
+        op: CompareOp,
+        value: &Value,
+    ) -> bool {
+        self.edge_properties.might_match(property, op, value)
+    }
+
+    /// Gets the zone map for a node property.
+    #[must_use]
+    pub fn node_property_zone_map(&self, property: &PropertyKey) -> Option<ZoneMapEntry> {
+        self.node_properties.zone_map(property)
+    }
+
+    /// Gets the zone map for an edge property.
+    #[must_use]
+    pub fn edge_property_zone_map(&self, property: &PropertyKey) -> Option<ZoneMapEntry> {
+        self.edge_properties.zone_map(property)
+    }
+
+    /// Rebuilds zone maps for all properties.
+    pub fn rebuild_zone_maps(&self) {
+        self.node_properties.rebuild_zone_maps();
+        self.edge_properties.rebuild_zone_maps();
+    }
+
+    // === Statistics ===
+
+    /// Returns the current statistics.
+    #[must_use]
+    pub fn statistics(&self) -> Statistics {
+        self.statistics.read().clone()
+    }
+
+    /// Updates statistics from current data.
+    ///
+    /// This scans all labels and edge types to compute cardinality statistics.
+    pub fn compute_statistics(&self) {
+        let mut stats = Statistics::new();
+
+        // Compute total counts
+        stats.total_nodes = self.node_count() as u64;
+        stats.total_edges = self.edge_count() as u64;
+
+        // Compute per-label statistics
+        let id_to_label = self.id_to_label.read();
+        let label_index = self.label_index.read();
+
+        for (label_id, label_name) in id_to_label.iter().enumerate() {
+            let node_count = label_index
+                .get(label_id)
+                .map(|set| set.len() as u64)
+                .unwrap_or(0);
+
+            if node_count > 0 {
+                // Estimate average degree
+                let avg_out_degree = if stats.total_nodes > 0 {
+                    stats.total_edges as f64 / stats.total_nodes as f64
+                } else {
+                    0.0
+                };
+
+                let label_stats = LabelStatistics::new(node_count)
+                    .with_degrees(avg_out_degree, avg_out_degree);
+
+                stats.update_label(label_name.as_ref(), label_stats);
+            }
+        }
+
+        // Compute per-edge-type statistics
+        let id_to_edge_type = self.id_to_edge_type.read();
+        let edges = self.edges.read();
+
+        let mut edge_type_counts: FxHashMap<u32, u64> = FxHashMap::default();
+        for record in edges.values() {
+            if !record.is_deleted() {
+                *edge_type_counts.entry(record.type_id).or_default() += 1;
+            }
+        }
+
+        for (type_id, count) in edge_type_counts {
+            if let Some(type_name) = id_to_edge_type.get(type_id as usize) {
+                let avg_degree = if stats.total_nodes > 0 {
+                    count as f64 / stats.total_nodes as f64
+                } else {
+                    0.0
+                };
+
+                let edge_stats = EdgeTypeStatistics::new(count, avg_degree, avg_degree);
+                stats.update_edge_type(type_name.as_ref(), edge_stats);
+            }
+        }
+
+        *self.statistics.write() = stats;
+    }
+
+    /// Estimates cardinality for a label scan.
+    #[must_use]
+    pub fn estimate_label_cardinality(&self, label: &str) -> f64 {
+        self.statistics.read().estimate_label_cardinality(label)
+    }
+
+    /// Estimates average degree for an edge type.
+    #[must_use]
+    pub fn estimate_avg_degree(&self, edge_type: &str, outgoing: bool) -> f64 {
+        self.statistics.read().estimate_avg_degree(edge_type, outgoing)
     }
 
     // === Internal Helpers ===
@@ -472,8 +651,14 @@ mod tests {
         );
 
         let node = store.get_node(id).unwrap();
-        assert_eq!(node.get_property("name").and_then(|v| v.as_str()), Some("Alice"));
-        assert_eq!(node.get_property("age").and_then(|v| v.as_int64()), Some(30));
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+        assert_eq!(
+            node.get_property("age").and_then(|v| v.as_int64()),
+            Some(30)
+        );
     }
 
     #[test]

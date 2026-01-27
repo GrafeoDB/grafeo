@@ -27,8 +27,12 @@ impl<'a> Parser<'a> {
     pub fn parse(&mut self) -> Result<Statement> {
         match self.current.kind {
             TokenKind::Match => self.parse_query().map(Statement::Query),
-            TokenKind::Insert => self.parse_insert().map(|s| Statement::DataModification(DataModificationStatement::Insert(s))),
-            TokenKind::Delete => self.parse_delete().map(|s| Statement::DataModification(DataModificationStatement::Delete(s))),
+            TokenKind::Insert => self
+                .parse_insert()
+                .map(|s| Statement::DataModification(DataModificationStatement::Insert(s))),
+            TokenKind::Delete => self
+                .parse_delete()
+                .map(|s| Statement::DataModification(DataModificationStatement::Delete(s))),
             TokenKind::Create => self.parse_create_schema().map(Statement::Schema),
             _ => Err(self.error("Expected MATCH, INSERT, DELETE, or CREATE")),
         }
@@ -37,19 +41,30 @@ impl<'a> Parser<'a> {
     fn parse_query(&mut self) -> Result<QueryStatement> {
         let span_start = self.current.span.start;
 
-        // Parse MATCH clause
-        let match_clause = if self.current.kind == TokenKind::Match {
-            Some(self.parse_match_clause()?)
-        } else {
-            None
-        };
+        // Parse MATCH clauses (including OPTIONAL MATCH)
+        let mut match_clauses = Vec::new();
+        while self.current.kind == TokenKind::Match || self.current.kind == TokenKind::Optional {
+            match_clauses.push(self.parse_match_clause()?);
+        }
 
-        // Parse WHERE clause
+        // Parse WHERE clause (after all MATCH clauses)
         let where_clause = if self.current.kind == TokenKind::Where {
             Some(self.parse_where_clause()?)
         } else {
             None
         };
+
+        // Parse WITH clauses
+        let mut with_clauses = Vec::new();
+        while self.current.kind == TokenKind::With {
+            with_clauses.push(self.parse_with_clause()?);
+
+            // After WITH, we can have more MATCH clauses
+            while self.current.kind == TokenKind::Match || self.current.kind == TokenKind::Optional
+            {
+                match_clauses.push(self.parse_match_clause()?);
+            }
+        }
 
         // Parse RETURN clause
         if self.current.kind != TokenKind::Return {
@@ -58,8 +73,9 @@ impl<'a> Parser<'a> {
         let return_clause = self.parse_return_clause()?;
 
         Ok(QueryStatement {
-            match_clause,
+            match_clauses,
             where_clause,
+            with_clauses,
             return_clause,
             span: Some(SourceSpan::new(span_start, self.current.span.end, 1, 1)),
         })
@@ -67,6 +83,15 @@ impl<'a> Parser<'a> {
 
     fn parse_match_clause(&mut self) -> Result<MatchClause> {
         let span_start = self.current.span.start;
+
+        // Check for OPTIONAL MATCH
+        let optional = if self.current.kind == TokenKind::Optional {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         self.expect(TokenKind::Match)?;
 
         let mut patterns = Vec::new();
@@ -78,7 +103,42 @@ impl<'a> Parser<'a> {
         }
 
         Ok(MatchClause {
+            optional,
             patterns,
+            span: Some(SourceSpan::new(span_start, self.current.span.end, 1, 1)),
+        })
+    }
+
+    fn parse_with_clause(&mut self) -> Result<WithClause> {
+        let span_start = self.current.span.start;
+        self.expect(TokenKind::With)?;
+
+        let distinct = if self.current.kind == TokenKind::Distinct {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        let mut items = Vec::new();
+        items.push(self.parse_return_item()?);
+
+        while self.current.kind == TokenKind::Comma {
+            self.advance();
+            items.push(self.parse_return_item()?);
+        }
+
+        // Optional WHERE after WITH
+        let where_clause = if self.current.kind == TokenKind::Where {
+            Some(self.parse_where_clause()?)
+        } else {
+            None
+        };
+
+        Ok(WithClause {
+            distinct,
+            items,
+            where_clause,
             span: Some(SourceSpan::new(span_start, self.current.span.end, 1, 1)),
         })
     }
@@ -88,10 +148,16 @@ impl<'a> Parser<'a> {
 
         // Check for path continuation
         // Handle both `-[...]->`/`<-[...]-` style and `->` style
-        if matches!(self.current.kind, TokenKind::Arrow | TokenKind::LeftArrow | TokenKind::DoubleDash | TokenKind::Minus) {
+        if matches!(
+            self.current.kind,
+            TokenKind::Arrow | TokenKind::LeftArrow | TokenKind::DoubleDash | TokenKind::Minus
+        ) {
             let mut edges = Vec::new();
 
-            while matches!(self.current.kind, TokenKind::Arrow | TokenKind::LeftArrow | TokenKind::DoubleDash | TokenKind::Minus) {
+            while matches!(
+                self.current.kind,
+                TokenKind::Arrow | TokenKind::LeftArrow | TokenKind::DoubleDash | TokenKind::Minus
+            ) {
                 edges.push(self.parse_edge_pattern()?);
             }
 
@@ -156,7 +222,9 @@ impl<'a> Parser<'a> {
             let (var, edge_types) = if self.current.kind == TokenKind::LBracket {
                 self.advance();
 
-                let v = if self.current.kind == TokenKind::Identifier && self.peek_kind() != TokenKind::Colon {
+                let v = if self.current.kind == TokenKind::Identifier
+                    && self.peek_kind() != TokenKind::Colon
+                {
                     let name = self.current.text.clone();
                     self.advance();
                     Some(name)
@@ -199,7 +267,9 @@ impl<'a> Parser<'a> {
             let (var, edge_types) = if self.current.kind == TokenKind::LBracket {
                 self.advance();
 
-                let v = if self.current.kind == TokenKind::Identifier && self.peek_kind() != TokenKind::Colon {
+                let v = if self.current.kind == TokenKind::Identifier
+                    && self.peek_kind() != TokenKind::Colon
+                {
                     let name = self.current.text.clone();
                     self.advance();
                     Some(name)
@@ -507,12 +577,20 @@ impl<'a> Parser<'a> {
                 Ok(Expression::Literal(Literal::Bool(false)))
             }
             TokenKind::Integer => {
-                let value = self.current.text.parse().map_err(|_| self.error("Invalid integer"))?;
+                let value = self
+                    .current
+                    .text
+                    .parse()
+                    .map_err(|_| self.error("Invalid integer"))?;
                 self.advance();
                 Ok(Expression::Literal(Literal::Integer(value)))
             }
             TokenKind::Float => {
-                let value = self.current.text.parse().map_err(|_| self.error("Invalid float"))?;
+                let value = self
+                    .current
+                    .text
+                    .parse()
+                    .map_err(|_| self.error("Invalid float"))?;
                 self.advance();
                 Ok(Expression::Literal(Literal::Float(value)))
             }
@@ -824,5 +902,85 @@ mod tests {
         let mut parser = Parser::new("INSERT (n:Person {name: 'Alice'})");
         let result = parser.parse();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_optional_match() {
+        let mut parser =
+            Parser::new("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a, b");
+        let result = parser.parse();
+        assert!(result.is_ok());
+
+        if let Statement::Query(query) = result.unwrap() {
+            assert_eq!(query.match_clauses.len(), 2);
+            assert!(!query.match_clauses[0].optional);
+            assert!(query.match_clauses[1].optional);
+        } else {
+            panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_with_clause() {
+        let mut parser =
+            Parser::new("MATCH (n:Person) WITH n.name AS name, n.age AS age RETURN name, age");
+        let result = parser.parse();
+        assert!(result.is_ok());
+
+        if let Statement::Query(query) = result.unwrap() {
+            assert_eq!(query.with_clauses.len(), 1);
+            assert_eq!(query.with_clauses[0].items.len(), 2);
+        } else {
+            panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_order_by() {
+        let mut parser = Parser::new("MATCH (n:Person) RETURN n.name ORDER BY n.age DESC");
+        let result = parser.parse();
+        assert!(result.is_ok());
+
+        if let Statement::Query(query) = result.unwrap() {
+            let order_by = query.return_clause.order_by.as_ref().unwrap();
+            assert_eq!(order_by.items.len(), 1);
+            assert_eq!(order_by.items[0].order, SortOrder::Desc);
+        } else {
+            panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_limit_skip() {
+        let mut parser = Parser::new("MATCH (n) RETURN n SKIP 10 LIMIT 5");
+        let result = parser.parse();
+        assert!(result.is_ok());
+
+        if let Statement::Query(query) = result.unwrap() {
+            assert!(query.return_clause.skip.is_some());
+            assert!(query.return_clause.limit.is_some());
+        } else {
+            panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_aggregation() {
+        let mut parser = Parser::new("MATCH (n:Person) RETURN count(n), avg(n.age)");
+        let result = parser.parse();
+        assert!(result.is_ok());
+
+        if let Statement::Query(query) = result.unwrap() {
+            assert_eq!(query.return_clause.items.len(), 2);
+            // Check that function calls are parsed
+            if let Expression::FunctionCall { name, .. } = &query.return_clause.items[0].expression
+            {
+                assert_eq!(name, "count");
+            } else {
+                panic!("Expected function call");
+            }
+        } else {
+            panic!("Expected Query statement");
+        }
     }
 }

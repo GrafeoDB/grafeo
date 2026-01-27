@@ -16,10 +16,12 @@ pub enum Statement {
 /// A query statement.
 #[derive(Debug, Clone)]
 pub struct QueryStatement {
-    /// Optional MATCH clause.
-    pub match_clause: Option<MatchClause>,
+    /// MATCH clauses (regular and optional).
+    pub match_clauses: Vec<MatchClause>,
     /// Optional WHERE clause.
     pub where_clause: Option<WhereClause>,
+    /// WITH clauses for query chaining.
+    pub with_clauses: Vec<WithClause>,
     /// Required RETURN clause.
     pub return_clause: ReturnClause,
     /// Source span in the original query.
@@ -29,8 +31,23 @@ pub struct QueryStatement {
 /// A MATCH clause.
 #[derive(Debug, Clone)]
 pub struct MatchClause {
+    /// Whether this is an OPTIONAL MATCH.
+    pub optional: bool,
     /// Graph patterns to match.
     pub patterns: Vec<Pattern>,
+    /// Source span.
+    pub span: Option<SourceSpan>,
+}
+
+/// A WITH clause for query chaining.
+#[derive(Debug, Clone)]
+pub struct WithClause {
+    /// Whether to use DISTINCT.
+    pub distinct: bool,
+    /// Items to pass to the next query part.
+    pub items: Vec<ReturnItem>,
+    /// Optional WHERE clause after WITH.
+    pub where_clause: Option<WhereClause>,
     /// Source span.
     pub span: Option<SourceSpan>,
 }

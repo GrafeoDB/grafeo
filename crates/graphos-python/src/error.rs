@@ -36,5 +36,17 @@ impl From<PyGraphosError> for PyErr {
     }
 }
 
+impl From<graphos_common::utils::error::Error> for PyGraphosError {
+    fn from(err: graphos_common::utils::error::Error) -> Self {
+        match err {
+            graphos_common::utils::error::Error::Query(e) => PyGraphosError::Query(e.to_string()),
+            graphos_common::utils::error::Error::Transaction(e) => {
+                PyGraphosError::Transaction(e.to_string())
+            }
+            other => PyGraphosError::Database(other.to_string()),
+        }
+    }
+}
+
 /// Result type for Python bindings.
 pub type PyGraphosResult<T> = Result<T, PyGraphosError>;

@@ -22,6 +22,7 @@ struct TxInfo {
     /// Transaction state.
     state: TxState,
     /// Start epoch.
+    #[allow(dead_code)]
     start_epoch: EpochId,
 }
 

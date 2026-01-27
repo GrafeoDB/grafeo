@@ -2,7 +2,7 @@
 //!
 //! Implements ISO/IEC 39075:2024 GQL standard.
 
-mod ast;
+pub mod ast;
 mod lexer;
 mod parser;
 
@@ -24,6 +24,7 @@ pub fn parse(query: &str) -> Result<Statement> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]

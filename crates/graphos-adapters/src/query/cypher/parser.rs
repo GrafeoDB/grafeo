@@ -511,69 +511,68 @@ impl<'a> Parser<'a> {
         };
 
         // Parse relationship details [r:TYPE*1..3 {props}]
-        let (variable, types, length, properties, final_direction) = if has_bracket
-            || self.current.kind == TokenKind::LBracket
-        {
-            if self.current.kind == TokenKind::LBracket {
-                self.advance();
-            }
+        let (variable, types, length, properties, final_direction) =
+            if has_bracket || self.current.kind == TokenKind::LBracket {
+                if self.current.kind == TokenKind::LBracket {
+                    self.advance();
+                }
 
-            let var = if self.current.kind == TokenKind::Identifier
-                && self.peek_kind() != TokenKind::Colon
-            {
-                let name = self.current.text.clone();
-                self.advance();
-                Some(name)
-            } else {
-                None
-            };
+                let var = if self.current.kind == TokenKind::Identifier
+                    && self.peek_kind() != TokenKind::Colon
+                {
+                    let name = self.current.text.clone();
+                    self.advance();
+                    Some(name)
+                } else {
+                    None
+                };
 
-            let mut rel_types = Vec::new();
-            while self.current.kind == TokenKind::Colon {
-                self.advance();
-                rel_types.push(self.expect_identifier()?);
-                // Handle type alternatives with |
-                while self.current.kind == TokenKind::Pipe {
+                let mut rel_types = Vec::new();
+                while self.current.kind == TokenKind::Colon {
                     self.advance();
                     rel_types.push(self.expect_identifier()?);
+                    // Handle type alternatives with |
+                    while self.current.kind == TokenKind::Pipe {
+                        self.advance();
+                        rel_types.push(self.expect_identifier()?);
+                    }
                 }
-            }
 
-            // Parse variable length *min..max
-            let len = if self.current.kind == TokenKind::Star {
-                self.advance();
-                Some(self.parse_length_range()?)
-            } else {
-                None
-            };
-
-            let props = if self.current.kind == TokenKind::LBrace {
-                self.parse_property_map()?
-            } else {
-                Vec::new()
-            };
-
-            self.expect(TokenKind::RBracket)?;
-
-            // Determine direction from closing symbol
-            let dir = if self.current.kind == TokenKind::Arrow {
-                self.advance();
-                Direction::Outgoing
-            } else if self.current.kind == TokenKind::Minus {
-                self.advance();
-                if direction == Direction::Incoming {
-                    Direction::Incoming
+                // Parse variable length *min..max
+                let len = if self.current.kind == TokenKind::Star {
+                    self.advance();
+                    Some(self.parse_length_range()?)
                 } else {
-                    Direction::Undirected
-                }
-            } else {
-                direction
-            };
+                    None
+                };
 
-            (var, rel_types, len, props, dir)
-        } else {
-            (None, Vec::new(), None, Vec::new(), direction)
-        };
+                let props = if self.current.kind == TokenKind::LBrace {
+                    self.parse_property_map()?
+                } else {
+                    Vec::new()
+                };
+
+                self.expect(TokenKind::RBracket)?;
+
+                // Determine direction from closing symbol
+                let dir = if self.current.kind == TokenKind::Arrow {
+                    self.advance();
+                    Direction::Outgoing
+                } else if self.current.kind == TokenKind::Minus {
+                    self.advance();
+                    if direction == Direction::Incoming {
+                        Direction::Incoming
+                    } else {
+                        Direction::Undirected
+                    }
+                } else {
+                    direction
+                };
+
+                (var, rel_types, len, props, dir)
+            } else {
+                (None, Vec::new(), None, Vec::new(), direction)
+            };
 
         let target = self.parse_node_pattern()?;
 

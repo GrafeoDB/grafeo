@@ -89,7 +89,10 @@ impl Operator for ScanOperator {
         let count = end - self.position;
 
         {
-            let col = chunk.column_mut(0).unwrap();
+            // Column 0 guaranteed to exist: chunk created with single-column schema above
+            let col = chunk
+                .column_mut(0)
+                .expect("column 0 exists: chunk created with single-column schema");
             for i in self.position..end {
                 col.push_node_id(self.batch[i]);
             }

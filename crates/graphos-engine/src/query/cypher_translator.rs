@@ -64,7 +64,9 @@ impl CypherTranslator {
             ast::Clause::OrderBy(order_by) => self.translate_order_by(order_by, input),
             ast::Clause::Skip(expr) => self.translate_skip(expr, input),
             ast::Clause::Limit(expr) => self.translate_limit(expr, input),
-            ast::Clause::Create(create_clause) => self.translate_create_clause(create_clause, input),
+            ast::Clause::Create(create_clause) => {
+                self.translate_create_clause(create_clause, input)
+            }
             ast::Clause::Merge(_) => Err(Error::Internal("MERGE not yet supported".into())),
             ast::Clause::Delete(_) => Err(Error::Internal("DELETE not yet supported".into())),
             ast::Clause::Set(_) => Err(Error::Internal("SET not yet supported".into())),
@@ -135,7 +137,11 @@ impl CypherTranslator {
         let from_variable = self.get_last_variable(&input)?;
         let edge_variable = rel.variable.clone();
         let edge_type = rel.types.first().cloned();
-        let to_variable = rel.target.variable.clone().unwrap_or_else(|| "_anon".to_string());
+        let to_variable = rel
+            .target
+            .variable
+            .clone()
+            .unwrap_or_else(|| "_anon".to_string());
         let target_label = rel.target.labels.first().cloned();
 
         let direction = match rel.direction {
@@ -245,17 +251,15 @@ impl CypherTranslator {
                     alias: None,
                 }]
             }
-            ast::ReturnItems::Explicit(items) => {
-                items
-                    .iter()
-                    .map(|item| {
-                        Ok(ReturnItem {
-                            expression: self.translate_expression(&item.expression)?,
-                            alias: item.alias.clone(),
-                        })
+            ast::ReturnItems::Explicit(items) => items
+                .iter()
+                .map(|item| {
+                    Ok(ReturnItem {
+                        expression: self.translate_expression(&item.expression)?,
+                        alias: item.alias.clone(),
                     })
-                    .collect::<Result<_>>()?
-            }
+                })
+                .collect::<Result<_>>()?,
         };
 
         Ok(LogicalOperator::Return(ReturnOp {
@@ -357,15 +361,21 @@ impl CypherTranslator {
                 }))
             }
             ast::Pattern::Path(path) => {
-                let mut current = self.translate_create_pattern(
-                    &ast::Pattern::Node(path.start.clone()),
-                    input,
-                )?;
+                let mut current =
+                    self.translate_create_pattern(&ast::Pattern::Node(path.start.clone()), input)?;
 
                 for rel in &path.chain {
                     let from_variable = self.get_last_node_variable(&Some(current.clone()))?;
-                    let to_variable = rel.target.variable.clone().unwrap_or_else(|| "_anon".to_string());
-                    let edge_type = rel.types.first().cloned().unwrap_or_else(|| "RELATED".to_string());
+                    let to_variable = rel
+                        .target
+                        .variable
+                        .clone()
+                        .unwrap_or_else(|| "_anon".to_string());
+                    let edge_type = rel
+                        .types
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "RELATED".to_string());
 
                     let target_labels = rel.target.labels.clone();
                     let target_props: Vec<(String, LogicalExpression)> = rel
@@ -429,7 +439,9 @@ impl CypherTranslator {
                         property: property.clone(),
                     })
                 } else {
-                    Err(Error::Internal("Nested property access not supported".into()))
+                    Err(Error::Internal(
+                        "Nested property access not supported".into(),
+                    ))
                 }
             }
             ast::Expression::IndexAccess { .. } => {
@@ -480,7 +492,11 @@ impl CypherTranslator {
             ast::Expression::Map(_) => {
                 Err(Error::Internal("Map literals not yet supported".into()))
             }
-            ast::Expression::Case { input, whens, else_clause } => {
+            ast::Expression::Case {
+                input,
+                whens,
+                else_clause,
+            } => {
                 let translated_operand = if let Some(op) = input {
                     Some(Box::new(self.translate_expression(op)?))
                 } else {
@@ -509,15 +525,13 @@ impl CypherTranslator {
                     else_clause: translated_else,
                 })
             }
-            ast::Expression::ListComprehension { .. } => {
-                Err(Error::Internal("List comprehension not yet supported".into()))
-            }
-            ast::Expression::PatternComprehension { .. } => {
-                Err(Error::Internal("Pattern comprehension not yet supported".into()))
-            }
-            ast::Expression::Exists(_) => {
-                Err(Error::Internal("EXISTS not yet supported".into()))
-            }
+            ast::Expression::ListComprehension { .. } => Err(Error::Internal(
+                "List comprehension not yet supported".into(),
+            )),
+            ast::Expression::PatternComprehension { .. } => Err(Error::Internal(
+                "Pattern comprehension not yet supported".into(),
+            )),
+            ast::Expression::Exists(_) => Err(Error::Internal("EXISTS not yet supported".into())),
             ast::Expression::CountSubquery(_) => {
                 Err(Error::Internal("COUNT subquery not yet supported".into()))
             }

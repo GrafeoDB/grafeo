@@ -125,7 +125,10 @@ impl LogicalType {
     /// Returns true if this type is a graph element type.
     #[must_use]
     pub const fn is_graph_element(&self) -> bool {
-        matches!(self, LogicalType::Node | LogicalType::Edge | LogicalType::Path)
+        matches!(
+            self,
+            LogicalType::Node | LogicalType::Edge | LogicalType::Path
+        )
     }
 
     /// Returns true if this type is nullable (can hold NULL values).

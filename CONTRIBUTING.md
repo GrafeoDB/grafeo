@@ -6,8 +6,8 @@ Thank you for your interest in contributing to Graphos! This document provides g
 
 ### Prerequisites
 
-- Rust 1.80.0 or later
-- Python 3.12+ (for Python bindings)
+- Rust 1.91.1 or later
+- Python 3.9+ (for Python bindings)
 - Git
 
 ### Setup
@@ -20,7 +20,7 @@ cargo build --workspace
 
 ## Architecture
 
-For detailed architecture documentation, see [architecture.md](architecture.md).
+For detailed architecture documentation, see [.claude/ARCHITECTURE.md](.claude/ARCHITECTURE.md).
 
 ### Crate Overview
 
@@ -31,6 +31,33 @@ For detailed architecture documentation, see [architecture.md](architecture.md).
 | `graphos-adapters` | GQL parser, storage backends, plugins          |
 | `graphos-engine`   | Database facade, sessions, transactions        |
 | `graphos-python`   | Python bindings via PyO3                       |
+
+### Query Language Architecture
+
+Graphos supports multiple query languages through a translator pattern:
+
+```
+Query String → Parser → AST → Translator → LogicalPlan → Optimizer → Executor
+```
+
+| Component | LPG Path | RDF Path |
+|-----------|----------|----------|
+| **Parser** | `graphos-adapters/query/gql/` | `graphos-adapters/query/sparql/` |
+| | `graphos-adapters/query/cypher/` | |
+| **Translator** | `graphos-engine/query/gql_translator.rs` | `graphos-engine/query/sparql_translator.rs` |
+| | `graphos-engine/query/cypher_translator.rs` | |
+| **Storage** | `graphos-core/graph/lpg/` | `graphos-core/graph/rdf/` |
+| **Operators** | NodeScan, Expand, CreateNode | TripleScan, LeftJoin, AntiJoin |
+
+### Data Model Compatibility
+
+| Query Language | LPG | RDF | Notes |
+|----------------|-----|-----|-------|
+| GQL | ✅ | ❌ | Primary language, ISO standard |
+| Cypher | ✅ | ❌ | Feature-gated, openCypher compatible |
+| SPARQL | ❌ | 🚧 | Parser ready, RDF store exists, integration planned |
+| Gremlin | 🚧 | ❌ | Planned - imperative traversal language |
+| GraphQL | 🚧 | 🚧 | Planned - schema-driven, maps to both models |
 
 ### Implementation Plan
 

@@ -1,7 +1,8 @@
 //! ValueVector for columnar data storage.
 
-use graphos_common::types::{LogicalType, NodeId, Value};
 use std::sync::Arc;
+
+use graphos_common::types::{EdgeId, LogicalType, NodeId, Value};
 
 /// Default vector capacity (tuples per vector).
 pub const DEFAULT_VECTOR_CAPACITY: usize = 2048;
@@ -35,15 +36,32 @@ enum VectorData {
     String(Vec<Arc<str>>),
     /// Node IDs.
     NodeId(Vec<NodeId>),
+    /// Edge IDs.
+    EdgeId(Vec<EdgeId>),
     /// Generic values (fallback for complex types).
     Generic(Vec<Value>),
 }
 
 impl ValueVector {
+    /// Creates a new empty generic vector.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_capacity(LogicalType::Any, DEFAULT_VECTOR_CAPACITY)
+    }
+
     /// Creates a new empty vector with the given type.
     #[must_use]
-    pub fn new(data_type: LogicalType) -> Self {
+    pub fn with_type(data_type: LogicalType) -> Self {
         Self::with_capacity(data_type, DEFAULT_VECTOR_CAPACITY)
+    }
+
+    /// Creates a vector from a slice of values.
+    pub fn from_values(values: &[Value]) -> Self {
+        let mut vec = Self::new();
+        for value in values {
+            vec.push_value(value.clone());
+        }
+        vec
     }
 
     /// Creates a new vector with the given capacity.
@@ -59,6 +77,7 @@ impl ValueVector {
             }
             LogicalType::String => VectorData::String(Vec::with_capacity(capacity)),
             LogicalType::Node => VectorData::NodeId(Vec::with_capacity(capacity)),
+            LogicalType::Edge => VectorData::EdgeId(Vec::with_capacity(capacity)),
             _ => VectorData::Generic(Vec::with_capacity(capacity)),
         };
 
@@ -148,8 +167,32 @@ impl ValueVector {
         }
     }
 
+    /// Pushes an edge ID.
+    pub fn push_edge_id(&mut self, value: EdgeId) {
+        if let VectorData::EdgeId(vec) = &mut self.data {
+            vec.push(value);
+            self.len += 1;
+        }
+    }
+
     /// Pushes a generic value.
     pub fn push_value(&mut self, value: Value) {
+        // Handle null values specially - push a default and mark as null
+        if matches!(value, Value::Null) {
+            match &mut self.data {
+                VectorData::Bool(vec) => vec.push(false),
+                VectorData::Int64(vec) => vec.push(0),
+                VectorData::Float64(vec) => vec.push(0.0),
+                VectorData::String(vec) => vec.push("".into()),
+                VectorData::NodeId(vec) => vec.push(NodeId::new(0)),
+                VectorData::EdgeId(vec) => vec.push(EdgeId::new(0)),
+                VectorData::Generic(vec) => vec.push(Value::Null),
+            }
+            self.len += 1;
+            self.set_null(self.len - 1);
+            return;
+        }
+
         match (&mut self.data, &value) {
             (VectorData::Bool(vec), Value::Bool(b)) => vec.push(*b),
             (VectorData::Int64(vec), Value::Int64(i)) => vec.push(*i),
@@ -157,8 +200,16 @@ impl ValueVector {
             (VectorData::String(vec), Value::String(s)) => vec.push(s.clone()),
             (VectorData::Generic(vec), _) => vec.push(value),
             _ => {
-                // Type mismatch - convert to generic
-                // This shouldn't happen in well-typed execution
+                // Type mismatch - push a default value to maintain vector alignment
+                match &mut self.data {
+                    VectorData::Bool(vec) => vec.push(false),
+                    VectorData::Int64(vec) => vec.push(0),
+                    VectorData::Float64(vec) => vec.push(0.0),
+                    VectorData::String(vec) => vec.push("".into()),
+                    VectorData::NodeId(vec) => vec.push(NodeId::new(0)),
+                    VectorData::EdgeId(vec) => vec.push(EdgeId::new(0)),
+                    VectorData::Generic(vec) => vec.push(value),
+                }
             }
         }
         self.len += 1;
@@ -229,6 +280,19 @@ impl ValueVector {
         }
     }
 
+    /// Gets an edge ID at index.
+    #[must_use]
+    pub fn get_edge_id(&self, index: usize) -> Option<EdgeId> {
+        if self.is_null(index) {
+            return None;
+        }
+        if let VectorData::EdgeId(vec) = &self.data {
+            vec.get(index).copied()
+        } else {
+            None
+        }
+    }
+
     /// Gets a value at index as a generic Value.
     #[must_use]
     pub fn get_value(&self, index: usize) -> Option<Value> {
@@ -242,8 +306,20 @@ impl ValueVector {
             VectorData::Float64(vec) => vec.get(index).map(|&v| Value::Float64(v)),
             VectorData::String(vec) => vec.get(index).map(|v| Value::String(v.clone())),
             VectorData::NodeId(vec) => vec.get(index).map(|&v| Value::Int64(v.as_u64() as i64)),
+            VectorData::EdgeId(vec) => vec.get(index).map(|&v| Value::Int64(v.as_u64() as i64)),
             VectorData::Generic(vec) => vec.get(index).cloned(),
         }
+    }
+
+    /// Alias for get_value.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<Value> {
+        self.get_value(index)
+    }
+
+    /// Alias for push_value.
+    pub fn push(&mut self, value: Value) {
+        self.push_value(value);
     }
 
     /// Returns a slice of the underlying boolean data.
@@ -286,6 +362,16 @@ impl ValueVector {
         }
     }
 
+    /// Returns a slice of the underlying edge ID data.
+    #[must_use]
+    pub fn as_edge_id_slice(&self) -> Option<&[EdgeId]> {
+        if let VectorData::EdgeId(vec) = &self.data {
+            Some(vec)
+        } else {
+            None
+        }
+    }
+
     /// Clears all data from this vector.
     pub fn clear(&mut self) {
         match &mut self.data {
@@ -294,10 +380,17 @@ impl ValueVector {
             VectorData::Float64(vec) => vec.clear(),
             VectorData::String(vec) => vec.clear(),
             VectorData::NodeId(vec) => vec.clear(),
+            VectorData::EdgeId(vec) => vec.clear(),
             VectorData::Generic(vec) => vec.clear(),
         }
         self.len = 0;
         self.validity = None;
+    }
+}
+
+impl Default for ValueVector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -307,7 +400,7 @@ mod tests {
 
     #[test]
     fn test_int64_vector() {
-        let mut vec = ValueVector::new(LogicalType::Int64);
+        let mut vec = ValueVector::with_type(LogicalType::Int64);
 
         vec.push_int64(1);
         vec.push_int64(2);
@@ -321,7 +414,7 @@ mod tests {
 
     #[test]
     fn test_string_vector() {
-        let mut vec = ValueVector::new(LogicalType::String);
+        let mut vec = ValueVector::with_type(LogicalType::String);
 
         vec.push_string("hello");
         vec.push_string("world");
@@ -333,7 +426,7 @@ mod tests {
 
     #[test]
     fn test_null_values() {
-        let mut vec = ValueVector::new(LogicalType::Int64);
+        let mut vec = ValueVector::with_type(LogicalType::Int64);
 
         vec.push_int64(1);
         vec.push_int64(2);
@@ -350,7 +443,7 @@ mod tests {
 
     #[test]
     fn test_get_value() {
-        let mut vec = ValueVector::new(LogicalType::Int64);
+        let mut vec = ValueVector::with_type(LogicalType::Int64);
         vec.push_int64(42);
 
         let value = vec.get_value(0);
@@ -359,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_slice_access() {
-        let mut vec = ValueVector::new(LogicalType::Int64);
+        let mut vec = ValueVector::with_type(LogicalType::Int64);
         vec.push_int64(1);
         vec.push_int64(2);
         vec.push_int64(3);
@@ -370,7 +463,7 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let mut vec = ValueVector::new(LogicalType::Int64);
+        let mut vec = ValueVector::with_type(LogicalType::Int64);
         vec.push_int64(1);
         vec.push_int64(2);
 

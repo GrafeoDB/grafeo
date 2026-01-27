@@ -44,7 +44,10 @@ tempfile.workspace = true
 default = ["gql"]
 gql = ["graphos-adapters/gql"]
 cypher = ["graphos-adapters/cypher"]
-full = ["gql", "cypher"]
+sparql = ["graphos-adapters/sparql"]
+gremlin = ["graphos-adapters/gremlin"]
+graphql = ["graphos-adapters/graphql"]
+full = ["gql", "cypher", "sparql", "gremlin", "graphql"]
 
 [lints]
 workspace = true

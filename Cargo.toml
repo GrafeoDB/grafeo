@@ -9,9 +9,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.80.0"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.91.1"
 license = "Apache-2.0"
 repository = "https://github.com/StevenBtw/graphos"
 authors = ["Graphos Contributors"]
@@ -19,10 +19,10 @@ description = "A pure-Rust, high-performance, embeddable graph database"
 
 [workspace.dependencies]
 # Internal crates
-graphos-common = { path = "crates/graphos-common", version = "0.1.0" }
-graphos-core = { path = "crates/graphos-core", version = "0.1.0" }
-graphos-adapters = { path = "crates/graphos-adapters", version = "0.1.0" }
-graphos-engine = { path = "crates/graphos-engine", version = "0.1.0" }
+graphos-common = { path = "crates/graphos-common", version = "0.0.1" }
+graphos-core = { path = "crates/graphos-core", version = "0.0.1" }
+graphos-adapters = { path = "crates/graphos-adapters", version = "0.0.1" }
+graphos-engine = { path = "crates/graphos-engine", version = "0.0.1" }
 
 # Error handling
 thiserror = "2.0"
@@ -75,8 +75,8 @@ tempfile = "3.15"
 unsafe_code = "warn"
 
 [workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
 # Allow some common patterns
 module_name_repetitions = "allow"
 must_use_candidate = "allow"

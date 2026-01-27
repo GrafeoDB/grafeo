@@ -47,9 +47,12 @@ tempfile.workspace = true
 
 [features]
 default = ["gql"]
-gql = []       # GQL parser (always available)
-cypher = []    # Cypher parser (optional)
-full = ["gql", "cypher"]
+gql = []       # GQL parser (ISO/IEC 39075:2024)
+cypher = []    # Cypher parser (openCypher 9.0)
+sparql = []    # SPARQL parser (W3C SPARQL 1.1)
+gremlin = []   # Gremlin parser (Apache TinkerPop)
+graphql = []   # GraphQL parser (spec-compliant)
+full = ["gql", "cypher", "sparql", "gremlin", "graphql"]
 
 [lints]
 workspace = true

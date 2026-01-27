@@ -1,0 +1,305 @@
+# Project Information
+site_name: Graphos
+site_url: https://graphos.tech
+site_author: Steven
+site_description: >-
+  A pure-Rust, high-performance, embeddable graph database with Python bindings.
+  Uses GQL (ISO standard) as its query language.
+
+# Repository
+repo_name: StevenBtw/graphos
+repo_url: https://github.com/StevenBtw/graphos
+edit_uri: edit/main/docs/
+
+# Copyright
+copyright: Copyright &copy; 2024-2026 Steven - Apache-2.0 License
+
+# Theme Configuration
+theme:
+  name: material
+  custom_dir: docs/overrides
+  favicon: assets/favicon.ico
+  logo: assets/logo.svg
+
+  features:
+    # Navigation
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.path
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+
+    # Table of contents
+    - toc.follow
+
+    # Search
+    - search.suggest
+    - search.highlight
+    - search.share
+
+    # Content
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.tooltips
+
+    # Header
+    - header.autohide
+    - announce.dismiss
+
+  palette:
+    # Light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    # Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+# Plugins
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  - minify:
+      minify_html: true
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: timeago
+  - tags:
+      tags_file: tags.md
+
+# Extensions
+markdown_extensions:
+  # Python Markdown
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+
+  # PyMdown Extensions
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets:
+      auto_append:
+        - includes/abbreviations.md
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+# Extra CSS/JS
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+# Extra Configuration
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/StevenBtw/graphos
+      name: GitHub
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/pygraphos/
+      name: PyPI
+    - icon: simple/rust
+      link: https://crates.io/crates/graphos
+      name: crates.io
+
+  version:
+    provider: mike
+    default: latest
+
+  generator: false
+
+# Navigation Structure
+nav:
+  - Home: index.md
+
+  - Getting Started:
+    - getting-started/index.md
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quickstart.md
+    - Your First Graph: getting-started/first-graph.md
+    - Configuration: getting-started/configuration.md
+
+  - User Guide:
+    - user-guide/index.md
+    - Data Model:
+      - user-guide/data-model/index.md
+      - Nodes and Labels: user-guide/data-model/nodes.md
+      - Edges and Types: user-guide/data-model/edges.md
+      - Properties: user-guide/data-model/properties.md
+      - LPG vs RDF: user-guide/data-model/lpg-vs-rdf.md
+      - GQL vs SPARQL: user-guide/data-model/gql-vs-sparql.md
+    - GQL Query Language:
+      - user-guide/gql/index.md
+      - Basic Queries: user-guide/gql/basic-queries.md
+      - Pattern Matching: user-guide/gql/patterns.md
+      - Filtering: user-guide/gql/filtering.md
+      - Aggregations: user-guide/gql/aggregations.md
+      - Path Queries: user-guide/gql/paths.md
+      - Mutations: user-guide/gql/mutations.md
+    - Cypher Query Language:
+      - user-guide/cypher/index.md
+      - Basic Queries: user-guide/cypher/basic-queries.md
+      - Pattern Matching: user-guide/cypher/patterns.md
+      - Filtering: user-guide/cypher/filtering.md
+      - Aggregations: user-guide/cypher/aggregations.md
+      - Path Queries: user-guide/cypher/paths.md
+      - Mutations: user-guide/cypher/mutations.md
+    - SPARQL Query Language:
+      - user-guide/sparql/index.md
+      - Basic Queries: user-guide/sparql/basic-queries.md
+      - Triple Patterns: user-guide/sparql/patterns.md
+      - Filtering: user-guide/sparql/filtering.md
+      - Aggregations: user-guide/sparql/aggregations.md
+      - Property Paths: user-guide/sparql/paths.md
+      - Built-in Functions: user-guide/sparql/functions.md
+    - Python API:
+      - user-guide/python/index.md
+      - Database Operations: user-guide/python/database.md
+      - Working with Nodes: user-guide/python/nodes.md
+      - Working with Edges: user-guide/python/edges.md
+      - Transactions: user-guide/python/transactions.md
+      - Query Results: user-guide/python/results.md
+    - Rust API:
+      - user-guide/rust/index.md
+      - Database Setup: user-guide/rust/database.md
+      - Graph Operations: user-guide/rust/operations.md
+      - Sessions: user-guide/rust/sessions.md
+    - Persistence:
+      - user-guide/persistence/index.md
+      - In-Memory Mode: user-guide/persistence/in-memory.md
+      - Persistent Storage: user-guide/persistence/persistent.md
+      - WAL Recovery: user-guide/persistence/wal.md
+    - Extending Graphos:
+      - user-guide/extending/index.md
+      - Plugins: user-guide/extending/plugins.md
+      - Storage Backends: user-guide/extending/storage-backends.md
+      - Custom Functions: user-guide/extending/custom-functions.md
+      - Rust Extensions: user-guide/extending/rust-extensions.md
+
+  - Tutorials:
+    - tutorials/index.md
+    - Social Network Graph: tutorials/social-network.md
+    - Knowledge Graph: tutorials/knowledge-graph.md
+    - Recommendation Engine: tutorials/recommendations.md
+    - Fraud Detection: tutorials/fraud-detection.md
+
+  - Algorithms:
+    - algorithms/index.md
+    - Path Finding: algorithms/path-finding.md
+    - Centrality: algorithms/centrality.md
+    - Community Detection: algorithms/community.md
+    - Link Prediction: algorithms/link-prediction.md
+    - Similarity: algorithms/similarity.md
+    - Graph Metrics: algorithms/metrics.md
+
+  - Architecture:
+    - architecture/index.md
+    - System Overview: architecture/overview.md
+    - Crate Structure: architecture/crates.md
+    - Storage Model:
+      - architecture/storage/index.md
+      - Columnar Properties: architecture/storage/columnar.md
+      - Adjacency Lists: architecture/storage/adjacency.md
+      - Zone Maps: architecture/storage/zone-maps.md
+      - Compression: architecture/storage/compression.md
+    - Execution Engine:
+      - architecture/execution/index.md
+      - Push-Based Model: architecture/execution/push-based.md
+      - Vectorized Operations: architecture/execution/vectorized.md
+      - Adaptive Chunks: architecture/execution/chunks.md
+    - Query Optimization:
+      - architecture/optimization/index.md
+      - Cost Model: architecture/optimization/cost.md
+      - Cardinality Estimation: architecture/optimization/cardinality.md
+      - Join Ordering: architecture/optimization/joins.md
+    - Memory Management:
+      - architecture/memory/index.md
+      - Buffer Manager: architecture/memory/buffer.md
+      - Arena Allocators: architecture/memory/arena.md
+      - Spill to Disk: architecture/memory/spill.md
+    - Transactions:
+      - architecture/transactions/index.md
+      - MVCC: architecture/transactions/mvcc.md
+      - Isolation Levels: architecture/transactions/isolation.md
+
+  - API Reference:
+    - api/index.md
+    - Python:
+      - api/python/index.md
+      - graphos.Database: api/python/database.md
+      - graphos.Node: api/python/node.md
+      - graphos.Edge: api/python/edge.md
+      - graphos.QueryResult: api/python/result.md
+      - graphos.Transaction: api/python/transaction.md
+    - Rust:
+      - api/rust/index.md
+      - graphos-common: api/rust/common.md
+      - graphos-core: api/rust/core.md
+      - graphos-adapters: api/rust/adapters.md
+      - graphos-engine: api/rust/engine.md
+
+  - Comparisons:
+    - comparisons/index.md
+    - Cypher vs GQL: comparisons/cypher-vs-gql.md
+    - SPARQL vs GQL: comparisons/sparql-vs-gql.md
+
+  - Contributing:
+    - contributing/index.md
+    - Development Setup: contributing/setup.md
+    - Code Style: contributing/code-style.md
+    - Testing: contributing/testing.md
+    - Pull Requests: contributing/pull-requests.md
+
+  - Changelog: changelog.md
+  - Tags: tags.md

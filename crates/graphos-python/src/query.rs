@@ -1,7 +1,8 @@
 //! Python query interface.
 
-use pyo3::prelude::*;
 use std::collections::HashMap;
+
+use pyo3::prelude::*;
 
 use graphos_common::types::Value;
 
@@ -40,7 +41,9 @@ impl PyQueryResult {
         };
 
         if idx >= self.rows.len() {
-            return Err(pyo3::exceptions::PyIndexError::new_err("Row index out of range"));
+            return Err(pyo3::exceptions::PyIndexError::new_err(
+                "Row index out of range",
+            ));
         }
 
         let row = &self.rows[idx];
@@ -86,14 +89,20 @@ impl PyQueryResult {
     }
 
     /// Convert to list of dictionaries.
+    ///
+    /// # Panics
+    ///
+    /// Panics on memory exhaustion during Python list/dict allocation.
     fn to_list(&self, py: Python<'_>) -> Py<PyAny> {
         let list = pyo3::types::PyList::empty(py);
         for row in &self.rows {
             let dict = pyo3::types::PyDict::new(py);
             for (col, val) in self.columns.iter().zip(row.iter()) {
-                dict.set_item(col, PyValue::to_py(val, py)).unwrap();
+                dict.set_item(col, PyValue::to_py(val, py))
+                    .expect("dict.set_item only fails on memory exhaustion");
             }
-            list.append(dict).unwrap();
+            list.append(dict)
+                .expect("list.append only fails on memory exhaustion");
         }
         list.unbind().into_any()
     }
@@ -104,7 +113,9 @@ impl PyQueryResult {
             return Err(pyo3::exceptions::PyValueError::new_err("No rows in result"));
         }
         if self.columns.is_empty() {
-            return Err(pyo3::exceptions::PyValueError::new_err("No columns in result"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "No columns in result",
+            ));
         }
         Ok(PyValue::to_py(&self.rows[0][0], py))
     }

@@ -108,7 +108,10 @@ impl AdjacencyList {
         // Check if last chunk has room, and if so, pop it to continue filling
         let last_has_room = self.chunks.last().is_some_and(|c| !c.is_full());
         let mut current_chunk = if last_has_room {
-            self.chunks.pop().unwrap()
+            // Invariant: is_some_and() returned true, so chunks is non-empty
+            self.chunks
+                .pop()
+                .expect("chunks is non-empty: is_some_and() succeeded on previous line")
         } else {
             AdjacencyChunk::new(chunk_capacity)
         };

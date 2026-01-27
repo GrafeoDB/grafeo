@@ -1,9 +1,10 @@
 //! Python type conversions.
 
-use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 
 use graphos_common::types::{PropertyKey, Value};
 
@@ -135,14 +136,14 @@ impl PyValue {
 
         if obj.is_instance_of::<PyDict>() {
             // SAFETY: We just checked it's a PyDict instance
-            let dict: &Bound<'_, PyDict> = obj.cast().map_err(|e| {
-                PyGraphosError::Type(format!("Cannot cast to dict: {}", e))
-            })?;
+            let dict: &Bound<'_, PyDict> = obj
+                .cast()
+                .map_err(|e| PyGraphosError::Type(format!("Cannot cast to dict: {}", e)))?;
             let mut map = BTreeMap::new();
             for (key, value) in dict.iter() {
-                let key_str: String = key.extract().map_err(|e| {
-                    PyGraphosError::Type(format!("Dict key must be string: {}", e))
-                })?;
+                let key_str: String = key
+                    .extract()
+                    .map_err(|e| PyGraphosError::Type(format!("Dict key must be string: {}", e)))?;
                 map.insert(PropertyKey::new(key_str), Self::from_py(&value)?);
             }
             return Ok(Value::Map(Arc::new(map)));
@@ -160,26 +161,42 @@ impl PyValue {
     }
 
     /// Convert Value to Python object.
+    ///
+    /// # Panics
+    ///
+    /// Panics on memory exhaustion during Python object allocation.
     pub fn to_py(value: &Value, py: Python<'_>) -> Py<PyAny> {
         use pyo3::conversion::IntoPyObjectExt;
 
         match value {
             Value::Null => py.None(),
-            Value::Bool(v) => (*v).into_py_any(py).unwrap(),
-            Value::Int64(v) => (*v).into_py_any(py).unwrap(),
-            Value::Float64(v) => (*v).into_py_any(py).unwrap(),
+            // PyO3 conversions for primitive types only fail on memory exhaustion
+            Value::Bool(v) => (*v)
+                .into_py_any(py)
+                .expect("bool to Python conversion cannot fail"),
+            Value::Int64(v) => (*v)
+                .into_py_any(py)
+                .expect("i64 to Python conversion cannot fail"),
+            Value::Float64(v) => (*v)
+                .into_py_any(py)
+                .expect("f64 to Python conversion cannot fail"),
             Value::String(v) => {
                 let s: &str = v.as_ref();
-                s.into_py_any(py).unwrap()
+                s.into_py_any(py)
+                    .expect("str to Python conversion cannot fail")
             }
             Value::List(items) => {
                 let py_items: Vec<Py<PyAny>> = items.iter().map(|v| Self::to_py(v, py)).collect();
-                PyList::new(py, py_items).unwrap().unbind().into_any()
+                PyList::new(py, py_items)
+                    .expect("PyList creation only fails on memory exhaustion")
+                    .unbind()
+                    .into_any()
             }
             Value::Map(map) => {
                 let dict = PyDict::new(py);
                 for (k, v) in map.as_ref() {
-                    dict.set_item(k.as_str(), Self::to_py(v, py)).unwrap();
+                    dict.set_item(k.as_str(), Self::to_py(v, py))
+                        .expect("dict.set_item only fails on memory exhaustion");
                 }
                 dict.unbind().into_any()
             }

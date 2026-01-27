@@ -87,6 +87,10 @@ pub enum TokenKind {
     Else,
     /// END keyword.
     End,
+    /// OPTIONAL keyword.
+    Optional,
+    /// WITH keyword.
+    With,
 
     // Literals
     /// Integer literal.
@@ -426,6 +430,8 @@ impl<'a> Lexer<'a> {
             "THEN" => TokenKind::Then,
             "ELSE" => TokenKind::Else,
             "END" => TokenKind::End,
+            "OPTIONAL" => TokenKind::Optional,
+            "WITH" => TokenKind::With,
             _ => TokenKind::Identifier,
         }
     }

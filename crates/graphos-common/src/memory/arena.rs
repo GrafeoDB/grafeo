@@ -6,11 +6,16 @@
 //! - Epoch-based versioning for MVCC
 //! - Bulk deallocation when epochs become unreachable
 
-use crate::types::EpochId;
-use parking_lot::RwLock;
+// Arena allocators require unsafe code for memory management
+#![allow(unsafe_code)]
+
 use std::alloc::{alloc, dealloc, Layout};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use parking_lot::RwLock;
+
+use crate::types::EpochId;
 
 /// Default chunk size for arena allocations (1 MB).
 const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
@@ -77,6 +82,7 @@ impl Chunk {
     }
 
     /// Returns the remaining capacity in this chunk.
+    #[allow(dead_code)]
     fn remaining(&self) -> usize {
         self.capacity - self.used()
     }
@@ -309,7 +315,10 @@ impl ArenaAllocator {
     pub fn alloc(&self, size: usize, align: usize) -> NonNull<u8> {
         let epoch = self.current_epoch();
         let arenas = self.arenas.read();
-        arenas.get(&epoch).expect("Current epoch exists").alloc(size, align)
+        arenas
+            .get(&epoch)
+            .expect("Current epoch exists")
+            .alloc(size, align)
     }
 
     /// Drops an epoch, freeing all its memory.
@@ -379,8 +388,7 @@ mod tests {
         let arena = Arena::with_chunk_size(EpochId::INITIAL, 1024);
 
         // Allocate something larger than the chunk size
-        let ptr = arena.alloc(2048, 8);
-        assert!(!ptr.as_ptr().is_null());
+        let _ptr = arena.alloc(2048, 8);
 
         // Should have created a new chunk
         assert!(arena.stats().chunk_count >= 2);

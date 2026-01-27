@@ -1,13 +1,17 @@
 //! GraphosDB main database struct.
 
+use std::path::Path;
+use std::sync::Arc;
+
+use parking_lot::RwLock;
+
+use graphos_common::memory::buffer::{BufferManager, BufferManagerConfig};
+use graphos_common::utils::error::Result;
+use graphos_core::graph::lpg::LpgStore;
+
 use crate::config::Config;
 use crate::session::Session;
 use crate::transaction::TransactionManager;
-use graphos_common::utils::error::Result;
-use graphos_core::graph::lpg::LpgStore;
-use parking_lot::RwLock;
-use std::path::Path;
-use std::sync::Arc;
 
 /// The main Graphos database.
 pub struct GraphosDB {
@@ -17,12 +21,23 @@ pub struct GraphosDB {
     store: Arc<LpgStore>,
     /// Transaction manager.
     tx_manager: Arc<TransactionManager>,
+    /// Unified buffer manager.
+    buffer_manager: Arc<BufferManager>,
     /// Whether the database is open.
     is_open: RwLock<bool>,
 }
 
 impl GraphosDB {
     /// Creates a new in-memory database.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use graphos_engine::GraphosDB;
+    ///
+    /// let db = GraphosDB::new_in_memory();
+    /// let session = db.session();
+    /// ```
     #[must_use]
     pub fn new_in_memory() -> Self {
         Self::with_config(Config::in_memory())
@@ -33,25 +48,67 @@ impl GraphosDB {
     /// # Errors
     ///
     /// Returns an error if the database cannot be opened or created.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use graphos_engine::GraphosDB;
+    ///
+    /// let db = GraphosDB::open("./my_database").expect("Failed to open database");
+    /// ```
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::with_config(Config::persistent(path.as_ref())))
     }
 
     /// Creates a database with the given configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use graphos_engine::{GraphosDB, Config};
+    ///
+    /// let config = Config::in_memory()
+    ///     .with_memory_limit(512 * 1024 * 1024); // 512MB
+    ///
+    /// let db = GraphosDB::with_config(config);
+    /// ```
     #[must_use]
     pub fn with_config(config: Config) -> Self {
         let store = Arc::new(LpgStore::new());
         let tx_manager = Arc::new(TransactionManager::new());
 
+        // Create buffer manager with configured limits
+        let buffer_config = BufferManagerConfig {
+            budget: config.memory_limit.unwrap_or_else(|| {
+                (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize
+            }),
+            spill_path: config.spill_path.clone().or_else(|| {
+                config.path.as_ref().map(|p| p.join("spill"))
+            }),
+            ..BufferManagerConfig::default()
+        };
+        let buffer_manager = BufferManager::new(buffer_config);
+
         Self {
             config,
             store,
             tx_manager,
+            buffer_manager,
             is_open: RwLock::new(true),
         }
     }
 
     /// Creates a new session for interacting with the database.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use graphos_engine::GraphosDB;
+    ///
+    /// let db = GraphosDB::new_in_memory();
+    /// let session = db.session();
+    /// // Use session for queries and transactions
+    /// ```
     #[must_use]
     pub fn session(&self) -> Session {
         Session::new(Arc::clone(&self.store), Arc::clone(&self.tx_manager))
@@ -70,6 +127,28 @@ impl GraphosDB {
         session.execute(query)
     }
 
+    /// Executes a Gremlin query and returns the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    #[cfg(feature = "gremlin")]
+    pub fn execute_gremlin(&self, query: &str) -> Result<QueryResult> {
+        let session = self.session();
+        session.execute_gremlin(query)
+    }
+
+    /// Executes a GraphQL query and returns the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    #[cfg(feature = "graphql")]
+    pub fn execute_graphql(&self, query: &str) -> Result<QueryResult> {
+        let session = self.session();
+        session.execute_graphql(query)
+    }
+
     /// Executes a query and returns a single scalar value.
     ///
     /// # Errors
@@ -86,10 +165,18 @@ impl GraphosDB {
         &self.config
     }
 
-    /// Returns the underlying store (for internal use).
+    /// Returns the underlying store.
+    ///
+    /// This provides direct access to the LPG store for algorithm implementations.
     #[must_use]
-    pub(crate) fn store(&self) -> &Arc<LpgStore> {
+    pub fn store(&self) -> &Arc<LpgStore> {
         &self.store
+    }
+
+    /// Returns the buffer manager for memory-aware operations.
+    #[must_use]
+    pub fn buffer_manager(&self) -> &Arc<BufferManager> {
+        &self.buffer_manager
     }
 
     /// Closes the database.
@@ -120,14 +207,22 @@ impl GraphosDB {
     pub fn create_node_with_props(
         &self,
         labels: &[&str],
-        properties: impl IntoIterator<Item = (impl Into<graphos_common::types::PropertyKey>, impl Into<graphos_common::types::Value>)>,
+        properties: impl IntoIterator<
+            Item = (
+                impl Into<graphos_common::types::PropertyKey>,
+                impl Into<graphos_common::types::Value>,
+            ),
+        >,
     ) -> graphos_common::types::NodeId {
         self.store.create_node_with_props(labels, properties)
     }
 
     /// Gets a node by ID.
     #[must_use]
-    pub fn get_node(&self, id: graphos_common::types::NodeId) -> Option<graphos_core::graph::lpg::Node> {
+    pub fn get_node(
+        &self,
+        id: graphos_common::types::NodeId,
+    ) -> Option<graphos_core::graph::lpg::Node> {
         self.store.get_node(id)
     }
 
@@ -154,14 +249,23 @@ impl GraphosDB {
         src: graphos_common::types::NodeId,
         dst: graphos_common::types::NodeId,
         edge_type: &str,
-        properties: impl IntoIterator<Item = (impl Into<graphos_common::types::PropertyKey>, impl Into<graphos_common::types::Value>)>,
+        properties: impl IntoIterator<
+            Item = (
+                impl Into<graphos_common::types::PropertyKey>,
+                impl Into<graphos_common::types::Value>,
+            ),
+        >,
     ) -> graphos_common::types::EdgeId {
-        self.store.create_edge_with_props(src, dst, edge_type, properties)
+        self.store
+            .create_edge_with_props(src, dst, edge_type, properties)
     }
 
     /// Gets an edge by ID.
     #[must_use]
-    pub fn get_edge(&self, id: graphos_common::types::EdgeId) -> Option<graphos_core::graph::lpg::Edge> {
+    pub fn get_edge(
+        &self,
+        id: graphos_common::types::EdgeId,
+    ) -> Option<graphos_core::graph::lpg::Edge> {
         self.store.get_edge(id)
     }
 
@@ -245,46 +349,45 @@ pub trait FromValue: Sized {
 
 impl FromValue for i64 {
     fn from_value(value: &graphos_common::types::Value) -> Result<Self> {
-        value.as_int64().ok_or_else(|| {
-            graphos_common::utils::error::Error::TypeMismatch {
-                expected: "INT64".to_string(),
-                found: value.type_name().to_string(),
-            }
-        })
-    }
-}
-
-impl FromValue for f64 {
-    fn from_value(value: &graphos_common::types::Value) -> Result<Self> {
-        value.as_float64().ok_or_else(|| {
-            graphos_common::utils::error::Error::TypeMismatch {
-                expected: "FLOAT64".to_string(),
-                found: value.type_name().to_string(),
-            }
-        })
-    }
-}
-
-impl FromValue for String {
-    fn from_value(value: &graphos_common::types::Value) -> Result<Self> {
         value
-            .as_str()
-            .map(String::from)
+            .as_int64()
             .ok_or_else(|| graphos_common::utils::error::Error::TypeMismatch {
-                expected: "STRING".to_string(),
+                expected: "INT64".to_string(),
                 found: value.type_name().to_string(),
             })
     }
 }
 
-impl FromValue for bool {
+impl FromValue for f64 {
     fn from_value(value: &graphos_common::types::Value) -> Result<Self> {
-        value.as_bool().ok_or_else(|| {
+        value
+            .as_float64()
+            .ok_or_else(|| graphos_common::utils::error::Error::TypeMismatch {
+                expected: "FLOAT64".to_string(),
+                found: value.type_name().to_string(),
+            })
+    }
+}
+
+impl FromValue for String {
+    fn from_value(value: &graphos_common::types::Value) -> Result<Self> {
+        value.as_str().map(String::from).ok_or_else(|| {
             graphos_common::utils::error::Error::TypeMismatch {
-                expected: "BOOL".to_string(),
+                expected: "STRING".to_string(),
                 found: value.type_name().to_string(),
             }
         })
+    }
+}
+
+impl FromValue for bool {
+    fn from_value(value: &graphos_common::types::Value) -> Result<Self> {
+        value
+            .as_bool()
+            .ok_or_else(|| graphos_common::utils::error::Error::TypeMismatch {
+                expected: "BOOL".to_string(),
+                found: value.type_name().to_string(),
+            })
     }
 }
 
@@ -301,9 +404,7 @@ mod tests {
 
     #[test]
     fn test_database_config() {
-        let config = Config::in_memory()
-            .with_threads(4)
-            .with_query_logging();
+        let config = Config::in_memory().with_threads(4).with_query_logging();
 
         let db = GraphosDB::with_config(config);
         assert_eq!(db.config().threads, 4);

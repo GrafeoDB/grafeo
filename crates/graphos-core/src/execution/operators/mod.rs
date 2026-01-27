@@ -3,18 +3,50 @@
 //! This module provides the physical operators that form the execution tree:
 //!
 //! - Scan: Read nodes/edges from storage
+//! - Expand: Traverse edges from nodes
 //! - Filter: Apply predicates to filter rows
 //! - Project: Select and transform columns
 //! - Join: Hash join and nested loop join
 //! - Aggregate: Group by and aggregation functions
+//! - Sort: Order results by columns
+//! - Limit: Limit the number of results
+//!
+//! The `push` submodule contains push-based operator implementations.
 
-mod scan;
+mod aggregate;
+mod distinct;
+mod expand;
 mod filter;
+mod join;
+mod limit;
 mod project;
+pub mod push;
+mod scan;
+mod sort;
 
+pub use aggregate::{
+    AggregateExpr, AggregateFunction, HashAggregateOperator, SimpleAggregateOperator,
+};
+pub use distinct::DistinctOperator;
+pub use expand::ExpandOperator;
+pub use filter::{
+    BinaryFilterOp, ExpressionPredicate, FilterExpression, FilterOperator, Predicate,
+    UnaryFilterOp,
+};
+pub use join::{
+    EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType, NestedLoopJoinOperator,
+};
+pub use limit::{LimitOperator, LimitSkipOperator, SkipOperator};
+pub use project::{ProjectExpr, ProjectOperator};
+pub use push::{
+    AggregatePushOperator, DistinctMaterializingOperator, DistinctPushOperator, FilterPushOperator,
+    LimitPushOperator, ProjectPushOperator, SkipLimitPushOperator, SkipPushOperator,
+    SortPushOperator, SpillableAggregatePushOperator, SpillableSortPushOperator,
+};
 pub use scan::ScanOperator;
-pub use filter::FilterOperator;
-pub use project::ProjectOperator;
+pub use sort::{NullOrder, SortDirection, SortKey, SortOperator};
+
+use thiserror::Error;
 
 use super::DataChunk;
 
@@ -22,29 +54,23 @@ use super::DataChunk;
 pub type OperatorResult = Result<Option<DataChunk>, OperatorError>;
 
 /// Error during operator execution.
-#[derive(Debug, Clone)]
+#[derive(Error, Debug, Clone)]
 pub enum OperatorError {
     /// Type mismatch during execution.
-    TypeMismatch { expected: String, found: String },
+    #[error("type mismatch: expected {expected}, found {found}")]
+    TypeMismatch {
+        /// Expected type name.
+        expected: String,
+        /// Found type name.
+        found: String,
+    },
     /// Column not found.
+    #[error("column not found: {0}")]
     ColumnNotFound(String),
     /// Execution error.
+    #[error("execution error: {0}")]
     Execution(String),
 }
-
-impl std::fmt::Display for OperatorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OperatorError::TypeMismatch { expected, found } => {
-                write!(f, "Type mismatch: expected {expected}, found {found}")
-            }
-            OperatorError::ColumnNotFound(name) => write!(f, "Column not found: {name}"),
-            OperatorError::Execution(msg) => write!(f, "Execution error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for OperatorError {}
 
 /// Trait for physical operators.
 pub trait Operator: Send + Sync {

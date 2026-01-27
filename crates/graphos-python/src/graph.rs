@@ -1,7 +1,8 @@
 //! Python graph element wrappers.
 
-use pyo3::prelude::*;
 use std::collections::HashMap;
+
+use pyo3::prelude::*;
 
 use graphos_common::types::{EdgeId, NodeId, Value};
 
@@ -36,10 +37,15 @@ impl PyNode {
     }
 
     /// Get all properties as a dictionary.
+    ///
+    /// # Panics
+    ///
+    /// Panics on memory exhaustion during Python dict allocation.
     fn properties(&self, py: Python<'_>) -> Py<PyAny> {
         let dict = pyo3::types::PyDict::new(py);
         for (k, v) in &self.properties {
-            dict.set_item(k, PyValue::to_py(v, py)).unwrap();
+            dict.set_item(k, PyValue::to_py(v, py))
+                .expect("dict.set_item only fails on memory exhaustion");
         }
         dict.unbind().into_any()
     }
@@ -128,10 +134,15 @@ impl PyEdge {
     }
 
     /// Get all properties as a dictionary.
+    ///
+    /// # Panics
+    ///
+    /// Panics on memory exhaustion during Python dict allocation.
     fn properties(&self, py: Python<'_>) -> Py<PyAny> {
         let dict = pyo3::types::PyDict::new(py);
         for (k, v) in &self.properties {
-            dict.set_item(k, PyValue::to_py(v, py)).unwrap();
+            dict.set_item(k, PyValue::to_py(v, py))
+                .expect("dict.set_item only fails on memory exhaustion");
         }
         dict.unbind().into_any()
     }
@@ -144,10 +155,7 @@ impl PyEdge {
     }
 
     fn __str__(&self) -> String {
-        format!(
-            "()-[:{}]->() (id={})",
-            self.edge_type, self.id.0
-        )
+        format!("()-[:{}]->() (id={})", self.edge_type, self.id.0)
     }
 
     fn __getitem__(&self, key: &str) -> PyResult<PyValue> {

@@ -433,10 +433,16 @@ mod tests {
 
     #[test]
     fn test_term_display() {
-        assert_eq!(Term::iri("http://example.org").to_string(), "<http://example.org>");
+        assert_eq!(
+            Term::iri("http://example.org").to_string(),
+            "<http://example.org>"
+        );
         assert_eq!(Term::blank("b0").to_string(), "_:b0");
         assert_eq!(Term::literal("Hello").to_string(), "\"Hello\"");
-        assert_eq!(Term::lang_literal("Bonjour", "fr").to_string(), "\"Bonjour\"@fr");
+        assert_eq!(
+            Term::lang_literal("Bonjour", "fr").to_string(),
+            "\"Bonjour\"@fr"
+        );
         assert_eq!(
             Term::typed_literal("42", Literal::XSD_INTEGER).to_string(),
             "\"42\"^^<http://www.w3.org/2001/XMLSchema#integer>"

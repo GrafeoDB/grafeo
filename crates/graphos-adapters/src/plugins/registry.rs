@@ -26,7 +26,9 @@ impl PluginRegistry {
     /// Registers a plugin.
     pub fn register_plugin(&self, plugin: Arc<dyn Plugin>) -> Result<()> {
         plugin.on_load()?;
-        self.plugins.write().insert(plugin.name().to_string(), plugin);
+        self.plugins
+            .write()
+            .insert(plugin.name().to_string(), plugin);
         Ok(())
     }
 
@@ -45,7 +47,9 @@ impl PluginRegistry {
 
     /// Registers an algorithm.
     pub fn register_algorithm(&self, algorithm: Arc<dyn Algorithm>) {
-        self.algorithms.write().insert(algorithm.name().to_string(), algorithm);
+        self.algorithms
+            .write()
+            .insert(algorithm.name().to_string(), algorithm);
     }
 
     /// Gets an algorithm by name.

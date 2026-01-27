@@ -329,7 +329,9 @@ mod tests {
         assert!(TriplePattern::any().matches(&triple));
 
         // Match by subject
-        assert!(TriplePattern::with_subject(Term::iri("http://example.org/alice")).matches(&triple));
+        assert!(
+            TriplePattern::with_subject(Term::iri("http://example.org/alice")).matches(&triple)
+        );
         assert!(!TriplePattern::with_subject(Term::iri("http://example.org/bob")).matches(&triple));
 
         // Match by predicate

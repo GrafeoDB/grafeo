@@ -62,7 +62,10 @@ pub fn stable_hash(bytes: &[u8]) -> u64 {
 #[inline]
 pub const fn combine_hashes(h1: u64, h2: u64) -> u64 {
     // Based on boost::hash_combine
-    h1 ^ (h2.wrapping_add(0x9e3779b9).wrapping_add(h1 << 6).wrapping_add(h1 >> 2))
+    h1 ^ (h2
+        .wrapping_add(0x9e3779b9)
+        .wrapping_add(h1 << 6)
+        .wrapping_add(h1 >> 2))
 }
 
 /// A hash builder that produces consistent hashes.

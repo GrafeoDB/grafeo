@@ -38,6 +38,12 @@ pub enum LogicalOperator {
     /// Project specific columns.
     Project(ProjectOp),
 
+    /// Join two inputs.
+    Join(JoinOp),
+
+    /// Aggregate with grouping.
+    Aggregate(AggregateOp),
+
     /// Limit the number of results.
     Limit(LimitOp),
 
@@ -67,6 +73,23 @@ pub enum LogicalOperator {
 
     /// Empty result set.
     Empty,
+
+    // ==================== RDF/SPARQL Operators ====================
+
+    /// Scan RDF triples matching a pattern.
+    TripleScan(TripleScanOp),
+
+    /// Union of multiple result sets.
+    Union(UnionOp),
+
+    /// Left outer join for OPTIONAL patterns.
+    LeftJoin(LeftJoinOp),
+
+    /// Anti-join for MINUS patterns.
+    AntiJoin(AntiJoinOp),
+
+    /// Bind a variable to an expression.
+    Bind(BindOp),
 }
 
 /// Scan nodes from the graph.
@@ -121,6 +144,88 @@ pub enum ExpandDirection {
     Incoming,
     /// Follow edges in either direction.
     Both,
+}
+
+/// Join two inputs.
+#[derive(Debug, Clone)]
+pub struct JoinOp {
+    /// Left input.
+    pub left: Box<LogicalOperator>,
+    /// Right input.
+    pub right: Box<LogicalOperator>,
+    /// Join type.
+    pub join_type: JoinType,
+    /// Join conditions.
+    pub conditions: Vec<JoinCondition>,
+}
+
+/// Join type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    /// Inner join.
+    Inner,
+    /// Left outer join.
+    Left,
+    /// Right outer join.
+    Right,
+    /// Full outer join.
+    Full,
+    /// Cross join (Cartesian product).
+    Cross,
+    /// Semi join (returns left rows with matching right rows).
+    Semi,
+    /// Anti join (returns left rows without matching right rows).
+    Anti,
+}
+
+/// A join condition.
+#[derive(Debug, Clone)]
+pub struct JoinCondition {
+    /// Left expression.
+    pub left: LogicalExpression,
+    /// Right expression.
+    pub right: LogicalExpression,
+}
+
+/// Aggregate with grouping.
+#[derive(Debug, Clone)]
+pub struct AggregateOp {
+    /// Group by expressions.
+    pub group_by: Vec<LogicalExpression>,
+    /// Aggregate functions.
+    pub aggregates: Vec<AggregateExpr>,
+    /// Input operator.
+    pub input: Box<LogicalOperator>,
+}
+
+/// An aggregate expression.
+#[derive(Debug, Clone)]
+pub struct AggregateExpr {
+    /// Aggregate function.
+    pub function: AggregateFunction,
+    /// Expression to aggregate.
+    pub expression: Option<LogicalExpression>,
+    /// Whether to use DISTINCT.
+    pub distinct: bool,
+    /// Alias for the result.
+    pub alias: Option<String>,
+}
+
+/// Aggregate function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateFunction {
+    /// Count rows.
+    Count,
+    /// Sum values.
+    Sum,
+    /// Average values.
+    Avg,
+    /// Minimum value.
+    Min,
+    /// Maximum value.
+    Max,
+    /// Collect into list.
+    Collect,
 }
 
 /// Filter rows based on a predicate.
@@ -245,6 +350,72 @@ pub struct DeleteNodeOp {
 #[derive(Debug, Clone)]
 pub struct DeleteEdgeOp {
     /// Variable of the edge to delete.
+    pub variable: String,
+    /// Input operator.
+    pub input: Box<LogicalOperator>,
+}
+
+// ==================== RDF/SPARQL Operators ====================
+
+/// Scan RDF triples matching a pattern.
+#[derive(Debug, Clone)]
+pub struct TripleScanOp {
+    /// Subject pattern (variable name or IRI).
+    pub subject: TripleComponent,
+    /// Predicate pattern (variable name or IRI).
+    pub predicate: TripleComponent,
+    /// Object pattern (variable name, IRI, or literal).
+    pub object: TripleComponent,
+    /// Named graph (optional).
+    pub graph: Option<TripleComponent>,
+    /// Input operator (for chained patterns).
+    pub input: Option<Box<LogicalOperator>>,
+}
+
+/// A component of a triple pattern.
+#[derive(Debug, Clone)]
+pub enum TripleComponent {
+    /// A variable to bind.
+    Variable(String),
+    /// A constant IRI.
+    Iri(String),
+    /// A constant literal value.
+    Literal(Value),
+}
+
+/// Union of multiple result sets.
+#[derive(Debug, Clone)]
+pub struct UnionOp {
+    /// Inputs to union together.
+    pub inputs: Vec<LogicalOperator>,
+}
+
+/// Left outer join for OPTIONAL patterns.
+#[derive(Debug, Clone)]
+pub struct LeftJoinOp {
+    /// Left (required) input.
+    pub left: Box<LogicalOperator>,
+    /// Right (optional) input.
+    pub right: Box<LogicalOperator>,
+    /// Optional filter condition.
+    pub condition: Option<LogicalExpression>,
+}
+
+/// Anti-join for MINUS patterns.
+#[derive(Debug, Clone)]
+pub struct AntiJoinOp {
+    /// Left input (results to keep if no match on right).
+    pub left: Box<LogicalOperator>,
+    /// Right input (patterns to exclude).
+    pub right: Box<LogicalOperator>,
+}
+
+/// Bind a variable to an expression.
+#[derive(Debug, Clone)]
+pub struct BindOp {
+    /// Expression to compute.
+    pub expression: LogicalExpression,
+    /// Variable to bind the result to.
     pub variable: String,
     /// Input operator.
     pub input: Box<LogicalOperator>,

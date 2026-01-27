@@ -6,6 +6,7 @@
 use graphos_common::types::{EpochId, TxId};
 
 /// Visibility information for a version.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct VersionInfo {
     /// The epoch this version was created in.
@@ -16,6 +17,7 @@ pub struct VersionInfo {
     pub created_by: TxId,
 }
 
+#[allow(dead_code)]
 impl VersionInfo {
     /// Creates a new version info.
     #[must_use]

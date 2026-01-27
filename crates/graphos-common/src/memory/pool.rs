@@ -3,8 +3,9 @@
 //! Object pools reduce allocation overhead by reusing previously allocated
 //! objects instead of freeing and reallocating them.
 
-use parking_lot::Mutex;
 use std::ops::{Deref, DerefMut};
+
+use parking_lot::Mutex;
 
 /// A thread-safe object pool.
 ///
@@ -65,7 +66,9 @@ impl<T> ObjectPool<T> {
     /// Pre-populates the pool with `count` objects.
     pub fn prefill(&self, count: usize) {
         let mut pool = self.pool.lock();
-        let to_add = count.saturating_sub(pool.len()).min(self.max_size - pool.len());
+        let to_add = count
+            .saturating_sub(pool.len())
+            .min(self.max_size - pool.len());
         for _ in 0..to_add {
             pool.push((self.factory)());
         }
@@ -77,7 +80,10 @@ impl<T> ObjectPool<T> {
     /// when dropped.
     pub fn get(&self) -> Pooled<'_, T> {
         let value = self.pool.lock().pop().unwrap_or_else(|| (self.factory)());
-        Pooled { pool: self, value: Some(value) }
+        Pooled {
+            pool: self,
+            value: Some(value),
+        }
     }
 
     /// Takes an object from the pool without wrapping it.

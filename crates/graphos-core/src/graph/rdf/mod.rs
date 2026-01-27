@@ -33,10 +33,10 @@
 //! }
 //! ```
 
+mod store;
 mod term;
 mod triple;
-mod store;
 
+pub use store::{RdfStore, RdfStoreConfig};
 pub use term::{BlankNode, Iri, Literal, Term};
 pub use triple::Triple;
-pub use store::{RdfStore, RdfStoreConfig};

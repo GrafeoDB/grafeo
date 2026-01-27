@@ -321,7 +321,10 @@ mod tests {
             expected: "INT64".to_string(),
             found: "STRING".to_string(),
         };
-        assert_eq!(err.to_string(), "Type mismatch: expected INT64, found STRING");
+        assert_eq!(
+            err.to_string(),
+            "Type mismatch: expected INT64, found STRING"
+        );
     }
 
     #[test]
@@ -341,7 +344,10 @@ mod tests {
     #[test]
     fn test_transaction_error() {
         let err: Error = TransactionError::Conflict.into();
-        assert!(matches!(err, Error::Transaction(TransactionError::Conflict)));
+        assert!(matches!(
+            err,
+            Error::Transaction(TransactionError::Conflict)
+        ));
     }
 
     #[test]

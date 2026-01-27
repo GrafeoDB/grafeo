@@ -4,7 +4,7 @@
 
 /// Placeholder for catalog implementation.
 pub struct Catalog {
-    // TODO: Add implementation
+    // FIXME(catalog): Implement schema definitions and index metadata
 }
 
 impl Catalog {

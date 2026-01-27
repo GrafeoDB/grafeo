@@ -2,15 +2,23 @@
 
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
-use graphos_common::types::LogicalType;
+use crate::graph::lpg::LpgStore;
+use graphos_common::types::{LogicalType, Value};
+use std::sync::Arc;
 
 /// A projection expression.
 pub enum ProjectExpr {
     /// Reference to an input column.
     Column(usize),
     /// A constant value.
-    Constant(graphos_common::types::Value),
-    // Future: Add more expression types (arithmetic, function calls, etc.)
+    Constant(Value),
+    /// Property access on a node/edge column.
+    PropertyAccess {
+        /// The column containing the node or edge ID.
+        column: usize,
+        /// The property name to access.
+        property: String,
+    },
 }
 
 /// A project operator that selects and transforms columns.
@@ -21,6 +29,8 @@ pub struct ProjectOperator {
     projections: Vec<ProjectExpr>,
     /// Output column types.
     output_types: Vec<LogicalType>,
+    /// Optional store for property access.
+    store: Option<Arc<LpgStore>>,
 }
 
 impl ProjectOperator {
@@ -35,11 +45,32 @@ impl ProjectOperator {
             child,
             projections,
             output_types,
+            store: None,
+        }
+    }
+
+    /// Creates a new project operator with store access for property lookups.
+    pub fn with_store(
+        child: Box<dyn Operator>,
+        projections: Vec<ProjectExpr>,
+        output_types: Vec<LogicalType>,
+        store: Arc<LpgStore>,
+    ) -> Self {
+        assert_eq!(projections.len(), output_types.len());
+        Self {
+            child,
+            projections,
+            output_types,
+            store: Some(store),
         }
     }
 
     /// Creates a project operator that selects specific columns.
-    pub fn select_columns(child: Box<dyn Operator>, columns: Vec<usize>, types: Vec<LogicalType>) -> Self {
+    pub fn select_columns(
+        child: Box<dyn Operator>,
+        columns: Vec<usize>,
+        types: Vec<LogicalType>,
+    ) -> Self {
         let projections = columns.into_iter().map(ProjectExpr::Column).collect();
         Self::new(child, projections, types)
     }
@@ -81,6 +112,39 @@ impl Operator for ProjectOperator {
                         output_col.push_value(value.clone());
                     }
                 }
+                ProjectExpr::PropertyAccess { column, property } => {
+                    // Access property from node/edge in the specified column
+                    let input_col = input.column(*column).ok_or_else(|| {
+                        OperatorError::ColumnNotFound(format!("Column {column}"))
+                    })?;
+
+                    let output_col = output.column_mut(i).unwrap();
+
+                    let store = self.store.as_ref().ok_or_else(|| {
+                        OperatorError::Execution(
+                            "Store required for property access".to_string(),
+                        )
+                    })?;
+
+                    // Extract property for each row
+                    for row in input.selected_indices() {
+                        // Try to get node ID first, then edge ID
+                        let value = if let Some(node_id) = input_col.get_node_id(row) {
+                            store
+                                .get_node(node_id)
+                                .and_then(|node| node.get_property(property).cloned())
+                                .unwrap_or(Value::Null)
+                        } else if let Some(edge_id) = input_col.get_edge_id(row) {
+                            store
+                                .get_edge(edge_id)
+                                .and_then(|edge| edge.get_property(property).cloned())
+                                .unwrap_or(Value::Null)
+                        } else {
+                            Value::Null
+                        };
+                        output_col.push_value(value);
+                    }
+                }
             }
         }
 
@@ -111,10 +175,7 @@ mod tests {
     impl Operator for MockScanOperator {
         fn next(&mut self) -> OperatorResult {
             if self.position < self.chunks.len() {
-                let chunk = std::mem::replace(
-                    &mut self.chunks[self.position],
-                    DataChunk::new(&[]),
-                );
+                let chunk = std::mem::replace(&mut self.chunks[self.position], DataChunk::empty());
                 self.position += 1;
                 Ok(Some(chunk))
             } else {
@@ -134,11 +195,8 @@ mod tests {
     #[test]
     fn test_project_select_columns() {
         // Create input with 3 columns: [int, string, int]
-        let mut builder = DataChunkBuilder::new(&[
-            LogicalType::Int64,
-            LogicalType::String,
-            LogicalType::Int64,
-        ]);
+        let mut builder =
+            DataChunkBuilder::new(&[LogicalType::Int64, LogicalType::String, LogicalType::Int64]);
 
         builder.column_mut(0).unwrap().push_int64(1);
         builder.column_mut(1).unwrap().push_string("hello");

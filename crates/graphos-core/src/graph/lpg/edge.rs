@@ -155,12 +155,7 @@ mod tests {
 
     #[test]
     fn test_edge_creation() {
-        let edge = Edge::new(
-            EdgeId::new(1),
-            NodeId::new(10),
-            NodeId::new(20),
-            "KNOWS",
-        );
+        let edge = Edge::new(EdgeId::new(1), NodeId::new(10), NodeId::new(20), "KNOWS");
 
         assert_eq!(edge.id, EdgeId::new(1));
         assert_eq!(edge.src, NodeId::new(10));
@@ -170,28 +165,24 @@ mod tests {
 
     #[test]
     fn test_edge_properties() {
-        let mut edge = Edge::new(
-            EdgeId::new(1),
-            NodeId::new(10),
-            NodeId::new(20),
-            "KNOWS",
-        );
+        let mut edge = Edge::new(EdgeId::new(1), NodeId::new(10), NodeId::new(20), "KNOWS");
 
         edge.set_property("since", 2020i64);
         edge.set_property("weight", 1.5f64);
 
-        assert_eq!(edge.get_property("since").and_then(|v| v.as_int64()), Some(2020));
-        assert_eq!(edge.get_property("weight").and_then(|v| v.as_float64()), Some(1.5));
+        assert_eq!(
+            edge.get_property("since").and_then(|v| v.as_int64()),
+            Some(2020)
+        );
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_float64()),
+            Some(1.5)
+        );
     }
 
     #[test]
     fn test_edge_other_endpoint() {
-        let edge = Edge::new(
-            EdgeId::new(1),
-            NodeId::new(10),
-            NodeId::new(20),
-            "KNOWS",
-        );
+        let edge = Edge::new(EdgeId::new(1), NodeId::new(10), NodeId::new(20), "KNOWS");
 
         assert_eq!(edge.other_endpoint(NodeId::new(10)), Some(NodeId::new(20)));
         assert_eq!(edge.other_endpoint(NodeId::new(20)), Some(NodeId::new(10)));

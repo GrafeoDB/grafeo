@@ -11,6 +11,9 @@ pub struct Config {
     /// Memory limit in bytes (None for unlimited).
     pub memory_limit: Option<usize>,
 
+    /// Path for spilling data to disk under memory pressure.
+    pub spill_path: Option<PathBuf>,
+
     /// Number of worker threads for query execution.
     pub threads: usize,
 
@@ -32,6 +35,7 @@ impl Default for Config {
         Self {
             path: None,
             memory_limit: None,
+            spill_path: None,
             threads: num_cpus::get(),
             wal_enabled: true,
             wal_flush_interval_ms: 100,
@@ -87,6 +91,22 @@ impl Config {
     #[must_use]
     pub fn with_query_logging(mut self) -> Self {
         self.query_logging = true;
+        self
+    }
+
+    /// Sets the memory budget as a fraction of system RAM.
+    #[must_use]
+    pub fn with_memory_fraction(mut self, fraction: f64) -> Self {
+        use graphos_common::memory::buffer::BufferManagerConfig;
+        let system_memory = BufferManagerConfig::detect_system_memory();
+        self.memory_limit = Some((system_memory as f64 * fraction) as usize);
+        self
+    }
+
+    /// Sets the spill directory for out-of-core processing.
+    #[must_use]
+    pub fn with_spill_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.spill_path = Some(path.into());
         self
     }
 }

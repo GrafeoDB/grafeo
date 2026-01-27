@@ -83,22 +83,26 @@ impl Parameters {
 
     /// Sets an integer parameter.
     pub fn set_int(&mut self, name: impl Into<String>, value: i64) {
-        self.values.insert(name.into(), ParameterValue::Integer(value));
+        self.values
+            .insert(name.into(), ParameterValue::Integer(value));
     }
 
     /// Sets a float parameter.
     pub fn set_float(&mut self, name: impl Into<String>, value: f64) {
-        self.values.insert(name.into(), ParameterValue::Float(value));
+        self.values
+            .insert(name.into(), ParameterValue::Float(value));
     }
 
     /// Sets a string parameter.
     pub fn set_string(&mut self, name: impl Into<String>, value: impl Into<String>) {
-        self.values.insert(name.into(), ParameterValue::String(value.into()));
+        self.values
+            .insert(name.into(), ParameterValue::String(value.into()));
     }
 
     /// Sets a boolean parameter.
     pub fn set_bool(&mut self, name: impl Into<String>, value: bool) {
-        self.values.insert(name.into(), ParameterValue::Boolean(value));
+        self.values
+            .insert(name.into(), ParameterValue::Boolean(value));
     }
 
     /// Gets an integer parameter.

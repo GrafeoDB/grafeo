@@ -5,7 +5,7 @@ use graphos_common::utils::error::Result;
 
 /// Processes queries through the full pipeline.
 pub struct QueryProcessor {
-    // TODO: Add references to catalog, optimizer, etc.
+    // FIXME(query-processor): Add references to catalog, optimizer, etc.
 }
 
 impl QueryProcessor {
@@ -28,7 +28,7 @@ impl QueryProcessor {
     ///
     /// Returns an error if any stage of the pipeline fails.
     pub fn process(&self, _query: &str) -> Result<QueryResult> {
-        // TODO: Implement full pipeline
+        // FIXME(query-processor): Implement full query pipeline
         Ok(QueryResult::new(vec![]))
     }
 }

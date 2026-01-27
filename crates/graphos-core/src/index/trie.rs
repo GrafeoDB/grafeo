@@ -41,6 +41,7 @@ impl TrieNode {
         self.children.get(&key)
     }
 
+    #[allow(dead_code)]
     fn children_keys(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.children.keys().copied()
     }

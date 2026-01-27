@@ -25,14 +25,14 @@ impl NodeId {
     /// Returns the raw u64 value.
     #[inline]
     #[must_use]
-    pub const fn as_u64(self) -> u64 {
+    pub const fn as_u64(&self) -> u64 {
         self.0
     }
 
     /// Checks if this is a valid node ID.
     #[inline]
     #[must_use]
-    pub const fn is_valid(self) -> bool {
+    pub const fn is_valid(&self) -> bool {
         self.0 != u64::MAX
     }
 }
@@ -86,14 +86,14 @@ impl EdgeId {
     /// Returns the raw u64 value.
     #[inline]
     #[must_use]
-    pub const fn as_u64(self) -> u64 {
+    pub const fn as_u64(&self) -> u64 {
         self.0
     }
 
     /// Checks if this is a valid edge ID.
     #[inline]
     #[must_use]
-    pub const fn is_valid(self) -> bool {
+    pub const fn is_valid(&self) -> bool {
         self.0 != u64::MAX
     }
 }
@@ -147,21 +147,21 @@ impl TxId {
     /// Returns the raw u64 value.
     #[inline]
     #[must_use]
-    pub const fn as_u64(self) -> u64 {
+    pub const fn as_u64(&self) -> u64 {
         self.0
     }
 
     /// Returns the next transaction ID.
     #[inline]
     #[must_use]
-    pub const fn next(self) -> Self {
+    pub const fn next(&self) -> Self {
         Self(self.0 + 1)
     }
 
     /// Checks if this is a valid transaction ID.
     #[inline]
     #[must_use]
-    pub const fn is_valid(self) -> bool {
+    pub const fn is_valid(&self) -> bool {
         self.0 != 0
     }
 }
@@ -217,14 +217,14 @@ impl EpochId {
     /// Returns the raw u64 value.
     #[inline]
     #[must_use]
-    pub const fn as_u64(self) -> u64 {
+    pub const fn as_u64(&self) -> u64 {
         self.0
     }
 
     /// Returns the next epoch ID.
     #[inline]
     #[must_use]
-    pub const fn next(self) -> Self {
+    pub const fn next(&self) -> Self {
         Self(self.0 + 1)
     }
 
@@ -233,7 +233,7 @@ impl EpochId {
     /// An epoch is visible if it was created before or at the viewing epoch.
     #[inline]
     #[must_use]
-    pub const fn is_visible_at(self, viewing_epoch: Self) -> bool {
+    pub const fn is_visible_at(&self, viewing_epoch: Self) -> bool {
         self.0 <= viewing_epoch.0
     }
 }

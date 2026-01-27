@@ -13,5 +13,5 @@ mod store;
 
 pub use edge::{Edge, EdgeRecord};
 pub use node::{Node, NodeRecord};
-pub use property::PropertyStorage;
+pub use property::{CompareOp, PropertyStorage};
 pub use store::LpgStore;

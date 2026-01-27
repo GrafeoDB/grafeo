@@ -23,5 +23,19 @@ target
 # Local environment files
 .env
 
-# Claude settings
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
 .claude/*
+*.so
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+
+*.tmp.*

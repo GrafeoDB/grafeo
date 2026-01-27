@@ -124,8 +124,10 @@ mod tests {
             })
             .unwrap();
 
-            wal.log(&WalRecord::TxCommit { tx_id: TxId::new(1) })
-                .unwrap();
+            wal.log(&WalRecord::TxCommit {
+                tx_id: TxId::new(1),
+            })
+            .unwrap();
 
             wal.flush().unwrap();
         }

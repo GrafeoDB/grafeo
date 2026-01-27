@@ -1,8 +1,9 @@
 //! Node types for the LPG model.
 
-use graphos_common::types::{EpochId, NodeId, PropertyKey, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use graphos_common::types::{EpochId, NodeId, PropertyKey, Value};
 
 /// A node in the labeled property graph.
 ///
@@ -224,8 +225,14 @@ mod tests {
         node.set_property("name", "Alice");
         node.set_property("age", 30i64);
 
-        assert_eq!(node.get_property("name").and_then(|v| v.as_str()), Some("Alice"));
-        assert_eq!(node.get_property("age").and_then(|v| v.as_int64()), Some(30));
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+        assert_eq!(
+            node.get_property("age").and_then(|v| v.as_int64()),
+            Some(30)
+        );
         assert!(node.get_property("missing").is_none());
 
         let removed = node.remove_property("name");

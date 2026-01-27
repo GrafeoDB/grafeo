@@ -56,27 +56,27 @@ impl Timestamp {
     /// Returns the timestamp as microseconds since the Unix epoch.
     #[inline]
     #[must_use]
-    pub const fn as_micros(self) -> i64 {
+    pub const fn as_micros(&self) -> i64 {
         self.0
     }
 
     /// Returns the timestamp as milliseconds since the Unix epoch.
     #[inline]
     #[must_use]
-    pub const fn as_millis(self) -> i64 {
+    pub const fn as_millis(&self) -> i64 {
         self.0 / 1000
     }
 
     /// Returns the timestamp as seconds since the Unix epoch.
     #[inline]
     #[must_use]
-    pub const fn as_secs(self) -> i64 {
+    pub const fn as_secs(&self) -> i64 {
         self.0 / 1_000_000
     }
 
     /// Returns the timestamp as a `SystemTime`, if it's within the representable range.
     #[must_use]
-    pub fn as_system_time(self) -> Option<SystemTime> {
+    pub fn as_system_time(&self) -> Option<SystemTime> {
         if self.0 >= 0 {
             Some(UNIX_EPOCH + Duration::from_micros(self.0 as u64))
         } else {

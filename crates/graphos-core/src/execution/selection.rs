@@ -163,6 +163,16 @@ impl SelectionVector {
     pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
         self.indices.iter().map(|&i| i as usize)
     }
+
+    /// Checks if a given index is in the selection.
+    #[must_use]
+    pub fn contains(&self, index: usize) -> bool {
+        if index > u16::MAX as usize {
+            return false;
+        }
+        // Since indices are typically sorted, use binary search
+        self.indices.binary_search(&(index as u16)).is_ok()
+    }
 }
 
 impl Default for SelectionVector {

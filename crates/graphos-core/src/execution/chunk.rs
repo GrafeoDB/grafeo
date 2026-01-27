@@ -25,9 +25,33 @@ pub struct DataChunk {
 }
 
 impl DataChunk {
+    /// Creates an empty data chunk with no columns.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            columns: Vec::new(),
+            selection: None,
+            count: 0,
+            capacity: 0,
+        }
+    }
+
+    /// Creates a new data chunk from existing vectors.
+    #[must_use]
+    pub fn new(columns: Vec<ValueVector>) -> Self {
+        let count = columns.first().map_or(0, ValueVector::len);
+        let capacity = columns.first().map_or(DEFAULT_CHUNK_SIZE, |c| c.len());
+        Self {
+            columns,
+            selection: None,
+            count,
+            capacity,
+        }
+    }
+
     /// Creates a new empty data chunk with the given schema.
     #[must_use]
-    pub fn new(column_types: &[LogicalType]) -> Self {
+    pub fn with_schema(column_types: &[LogicalType]) -> Self {
         Self::with_capacity(column_types, DEFAULT_CHUNK_SIZE)
     }
 
@@ -57,6 +81,18 @@ impl DataChunk {
     #[must_use]
     pub fn row_count(&self) -> usize {
         self.selection.as_ref().map_or(self.count, |s| s.len())
+    }
+
+    /// Alias for row_count().
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.row_count()
+    }
+
+    /// Returns all columns.
+    #[must_use]
+    pub fn columns(&self) -> &[ValueVector] {
+        &self.columns
     }
 
     /// Returns the total number of rows (ignoring selection).
@@ -133,7 +169,7 @@ impl DataChunk {
             return;
         }
 
-        // TODO: Implement actual flattening by copying selected rows
+        // FIXME(chunk-flatten): Implement actual flattening by copying selected rows
         // For now, just clear selection
         self.selection = None;
     }
@@ -143,6 +179,143 @@ impl DataChunk {
         match &self.selection {
             Some(sel) => Box::new(sel.iter()),
             None => Box::new(0..self.count),
+        }
+    }
+
+    /// Concatenates multiple chunks into a single chunk.
+    ///
+    /// All chunks must have the same schema (same number and types of columns).
+    pub fn concat(chunks: &[DataChunk]) -> DataChunk {
+        if chunks.is_empty() {
+            return DataChunk::empty();
+        }
+
+        if chunks.len() == 1 {
+            // Clone the single chunk
+            return DataChunk {
+                columns: chunks[0].columns.clone(),
+                selection: chunks[0].selection.clone(),
+                count: chunks[0].count,
+                capacity: chunks[0].capacity,
+            };
+        }
+
+        let num_columns = chunks[0].column_count();
+        if num_columns == 0 {
+            return DataChunk::empty();
+        }
+
+        let total_rows: usize = chunks.iter().map(|c| c.row_count()).sum();
+
+        // Concatenate each column
+        let mut result_columns = Vec::with_capacity(num_columns);
+
+        for col_idx in 0..num_columns {
+            let mut concat_vector = ValueVector::new();
+
+            for chunk in chunks {
+                if let Some(col) = chunk.column(col_idx) {
+                    // Append all values from this column
+                    for i in chunk.selected_indices() {
+                        if let Some(val) = col.get(i) {
+                            concat_vector.push(val);
+                        }
+                    }
+                }
+            }
+
+            result_columns.push(concat_vector);
+        }
+
+        DataChunk {
+            columns: result_columns,
+            selection: None,
+            count: total_rows,
+            capacity: total_rows,
+        }
+    }
+
+    /// Applies a filter predicate and returns a new chunk with selected rows.
+    pub fn filter(&self, predicate: &SelectionVector) -> DataChunk {
+        // Combine existing selection with predicate
+        let selected: Vec<usize> = predicate
+            .iter()
+            .filter(|&idx| {
+                self.selection
+                    .as_ref()
+                    .map_or(true, |s| s.contains(idx))
+            })
+            .collect();
+
+        let mut result_columns = Vec::with_capacity(self.columns.len());
+
+        for col in &self.columns {
+            let mut new_col = ValueVector::new();
+            for &idx in &selected {
+                if let Some(val) = col.get(idx) {
+                    new_col.push(val);
+                }
+            }
+            result_columns.push(new_col);
+        }
+
+        DataChunk {
+            columns: result_columns,
+            selection: None,
+            count: selected.len(),
+            capacity: selected.len(),
+        }
+    }
+
+    /// Returns a slice of this chunk.
+    ///
+    /// Returns a new DataChunk containing rows [offset, offset + count).
+    #[must_use]
+    pub fn slice(&self, offset: usize, count: usize) -> DataChunk {
+        if offset >= self.len() || count == 0 {
+            return DataChunk::empty();
+        }
+
+        let actual_count = count.min(self.len() - offset);
+        let mut result_columns = Vec::with_capacity(self.columns.len());
+
+        for col in &self.columns {
+            let mut new_col = ValueVector::new();
+            for i in offset..(offset + actual_count) {
+                let actual_idx = if let Some(sel) = &self.selection {
+                    sel.get(i).unwrap_or(i)
+                } else {
+                    i
+                };
+                if let Some(val) = col.get(actual_idx) {
+                    new_col.push(val);
+                }
+            }
+            result_columns.push(new_col);
+        }
+
+        DataChunk {
+            columns: result_columns,
+            selection: None,
+            count: actual_count,
+            capacity: actual_count,
+        }
+    }
+
+    /// Returns the number of columns.
+    #[must_use]
+    pub fn num_columns(&self) -> usize {
+        self.columns.len()
+    }
+}
+
+impl Clone for DataChunk {
+    fn clone(&self) -> Self {
+        Self {
+            columns: self.columns.clone(),
+            selection: self.selection.clone(),
+            count: self.count,
+            capacity: self.capacity,
         }
     }
 }
@@ -155,9 +328,9 @@ pub struct DataChunkBuilder {
 impl DataChunkBuilder {
     /// Creates a new builder with the given schema.
     #[must_use]
-    pub fn new(column_types: &[LogicalType]) -> Self {
+    pub fn with_schema(column_types: &[LogicalType]) -> Self {
         Self {
-            chunk: DataChunk::new(column_types),
+            chunk: DataChunk::with_schema(column_types),
         }
     }
 
@@ -167,6 +340,12 @@ impl DataChunkBuilder {
         Self {
             chunk: DataChunk::with_capacity(column_types, capacity),
         }
+    }
+
+    /// Alias for with_schema for backward compatibility.
+    #[must_use]
+    pub fn new(column_types: &[LogicalType]) -> Self {
+        Self::with_schema(column_types)
     }
 
     /// Returns the current row count.
@@ -210,7 +389,7 @@ mod tests {
     #[test]
     fn test_chunk_creation() {
         let schema = [LogicalType::Int64, LogicalType::String];
-        let chunk = DataChunk::new(&schema);
+        let chunk = DataChunk::with_schema(&schema);
 
         assert_eq!(chunk.column_count(), 2);
         assert_eq!(chunk.row_count(), 0);
@@ -220,7 +399,7 @@ mod tests {
     #[test]
     fn test_chunk_builder() {
         let schema = [LogicalType::Int64, LogicalType::String];
-        let mut builder = DataChunkBuilder::new(&schema);
+        let mut builder = DataChunkBuilder::with_schema(&schema);
 
         // Add first row
         builder.column_mut(0).unwrap().push_int64(1);
@@ -242,7 +421,7 @@ mod tests {
     #[test]
     fn test_chunk_selection() {
         let schema = [LogicalType::Int64];
-        let mut builder = DataChunkBuilder::new(&schema);
+        let mut builder = DataChunkBuilder::with_schema(&schema);
 
         for i in 0..10 {
             builder.column_mut(0).unwrap().push_int64(i);
@@ -263,7 +442,7 @@ mod tests {
     #[test]
     fn test_chunk_reset() {
         let schema = [LogicalType::Int64];
-        let mut builder = DataChunkBuilder::new(&schema);
+        let mut builder = DataChunkBuilder::with_schema(&schema);
 
         builder.column_mut(0).unwrap().push_int64(1);
         builder.advance_row();
@@ -279,7 +458,7 @@ mod tests {
     #[test]
     fn test_selected_indices() {
         let schema = [LogicalType::Int64];
-        let mut chunk = DataChunk::new(&schema);
+        let mut chunk = DataChunk::with_schema(&schema);
         chunk.set_count(5);
 
         // No selection - should iterate 0..5

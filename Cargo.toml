@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/graphos",
     "crates/graphos-common",
     "crates/graphos-core",
     "crates/graphos-adapters",
@@ -23,6 +24,7 @@ graphos-common = { path = "crates/graphos-common", version = "0.0.1" }
 graphos-core = { path = "crates/graphos-core", version = "0.0.1" }
 graphos-adapters = { path = "crates/graphos-adapters", version = "0.0.1" }
 graphos-engine = { path = "crates/graphos-engine", version = "0.0.1" }
+graphos = { path = "crates/graphos", version = "0.0.1" }
 
 # Error handling
 thiserror = "2.0"
@@ -172,6 +174,7 @@ needless_borrows_for_generic_args = "allow"
 needless_borrow = "allow"
 mismatching_type_param_order = "allow"
 only_used_in_recursion = "allow"
+self_only_used_in_recursion = "allow"
 clone_on_copy = "allow"
 unnecessary_literal_bound = "allow"
 zero_sized_map_values = "allow"

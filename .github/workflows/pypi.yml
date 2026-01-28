@@ -136,7 +136,7 @@ jobs:
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     needs: [linux, musllinux, windows, macos, sdist]
     environment: pypi
     permissions:

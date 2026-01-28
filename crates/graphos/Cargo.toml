@@ -1,0 +1,27 @@
+[package]
+name = "graphos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A high-performance, pure-Rust, embeddable graph database"
+keywords = ["graph", "database", "gql", "knowledge-graph", "embedded"]
+categories = ["database-implementations", "data-structures"]
+
+[dependencies]
+graphos-engine = { path = "../graphos-engine" }
+graphos-core = { path = "../graphos-core" }
+graphos-common = { path = "../graphos-common" }
+graphos-adapters = { path = "../graphos-adapters" }
+
+[features]
+default = ["gql"]
+gql = ["graphos-engine/gql"]
+cypher = ["graphos-engine/cypher"]
+sparql = ["graphos-engine/sparql", "graphos-engine/rdf"]
+gremlin = ["graphos-engine/gremlin"]
+graphql = ["graphos-engine/graphql"]
+full = ["gql", "cypher", "sparql", "gremlin", "graphql"]
+
+[lints]
+workspace = true

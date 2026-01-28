@@ -450,6 +450,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphos"
+version = "0.0.1"
+dependencies = [
+ "graphos-adapters",
+ "graphos-common",
+ "graphos-core",
+ "graphos-engine",
+]
+
+[[package]]
 name = "graphos-adapters"
 version = "0.0.1"
 dependencies = [

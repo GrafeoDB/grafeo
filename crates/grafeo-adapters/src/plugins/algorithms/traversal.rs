@@ -394,9 +394,7 @@ impl GraphAlgorithm for BfsAlgorithm {
 
     fn execute(&self, store: &LpgStore, params: &Parameters) -> Result<AlgorithmResult> {
         let start_id = params.get_int("start").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "start parameter required".to_string(),
-            )
+            grafeo_common::utils::error::Error::InvalidValue("start parameter required".to_string())
         })?;
 
         let start = NodeId::new(start_id as u64);
@@ -450,9 +448,7 @@ impl GraphAlgorithm for DfsAlgorithm {
 
     fn execute(&self, store: &LpgStore, params: &Parameters) -> Result<AlgorithmResult> {
         let start_id = params.get_int("start").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "start parameter required".to_string(),
-            )
+            grafeo_common::utils::error::Error::InvalidValue("start parameter required".to_string())
         })?;
 
         let start = NodeId::new(start_id as u64);

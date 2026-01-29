@@ -6,8 +6,8 @@ use crate::query::plan::{
     AddLabelOp, AggregateFunction as LogicalAggregateFunction, AggregateOp, AntiJoinOp, BinaryOp,
     CreateEdgeOp, CreateNodeOp, DeleteEdgeOp, DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp,
     FilterOp, JoinOp, JoinType, LeftJoinOp, LimitOp, LogicalExpression, LogicalOperator,
-    LogicalPlan, MergeOp, NodeScanOp, RemoveLabelOp, ReturnOp, SetPropertyOp, SkipOp, SortOp,
-    SortOrder, UnaryOp, UnionOp, UnwindOp,
+    LogicalPlan, MergeOp, NodeScanOp, RemoveLabelOp, ReturnOp, SetPropertyOp, ShortestPathOp,
+    SkipOp, SortOp, SortOrder, UnaryOp, UnionOp, UnwindOp,
 };
 use grafeo_common::types::LogicalType;
 use grafeo_common::types::{EpochId, TxId};
@@ -17,10 +17,11 @@ use grafeo_core::execution::operators::{
     AggregateFunction as PhysicalAggregateFunction, BinaryFilterOp, CreateEdgeOperator,
     CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator, DistinctOperator, ExpandOperator,
     ExpressionPredicate, FilterExpression, FilterOperator, HashAggregateOperator, HashJoinOperator,
-    JoinType as PhysicalJoinType, LimitOperator, MergeOperator, NullOrder, Operator, ProjectExpr,
-    ProjectOperator, PropertySource, RemoveLabelOperator, ScanOperator, SetPropertyOperator,
-    SimpleAggregateOperator, SkipOperator, SortDirection, SortKey as PhysicalSortKey, SortOperator,
-    UnaryFilterOp, UnionOperator, UnwindOperator,
+    JoinType as PhysicalJoinType, LimitOperator, MergeOperator, NestedLoopJoinOperator, NullOrder,
+    Operator, ProjectExpr, ProjectOperator, PropertySource, RemoveLabelOperator, ScanOperator,
+    SetPropertyOperator, ShortestPathOperator, SimpleAggregateOperator, SkipOperator,
+    SortDirection, SortKey as PhysicalSortKey, SortOperator, UnaryFilterOp, UnionOperator,
+    UnwindOperator, VariableLengthExpandOperator,
 };
 use grafeo_core::graph::{Direction, lpg::LpgStore};
 use std::collections::HashMap;
@@ -118,10 +119,7 @@ impl Planner {
             LogicalOperator::Expand(expand) => self.plan_expand(expand),
             LogicalOperator::Return(ret) => self.plan_return(ret),
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
-            LogicalOperator::Project(project) => {
-                // For now, just plan the input
-                self.plan_operator(&project.input)
-            }
+            LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
             LogicalOperator::Skip(skip) => self.plan_skip(skip),
             LogicalOperator::Sort(sort) => self.plan_sort(sort),
@@ -140,6 +138,7 @@ impl Planner {
             LogicalOperator::AddLabel(add_label) => self.plan_add_label(add_label),
             LogicalOperator::RemoveLabel(remove_label) => self.plan_remove_label(remove_label),
             LogicalOperator::SetProperty(set_prop) => self.plan_set_property(set_prop),
+            LogicalOperator::ShortestPath(sp) => self.plan_shortest_path(sp),
             LogicalOperator::Empty => Err(Error::Internal("Empty plan".to_string())),
             _ => Err(Error::Internal(format!(
                 "Unsupported operator: {:?}",
@@ -157,14 +156,35 @@ impl Planner {
         };
 
         // Apply MVCC context if available
-        let operator: Box<dyn Operator> =
+        let scan_operator: Box<dyn Operator> =
             Box::new(scan_op.with_tx_context(self.viewing_epoch, self.tx_id));
 
-        let columns = vec![scan.variable.clone()];
+        // If there's an input, chain operators with a nested loop join (cross join)
+        if let Some(input) = &scan.input {
+            let (input_op, mut input_columns) = self.plan_operator(input)?;
 
-        // If there's an input, we'd need to chain operators
-        // For now, just return the scan
-        Ok((operator, columns))
+            // Build output schema: input columns + scan column
+            let mut output_schema: Vec<LogicalType> =
+                input_columns.iter().map(|_| LogicalType::Any).collect();
+            output_schema.push(LogicalType::Node);
+
+            // Add scan column to input columns
+            input_columns.push(scan.variable.clone());
+
+            // Use nested loop join to combine input rows with scanned nodes
+            let join_op = Box::new(NestedLoopJoinOperator::new(
+                input_op,
+                scan_operator,
+                None, // No join condition (cross join)
+                PhysicalJoinType::Cross,
+                output_schema,
+            ));
+
+            Ok((join_op, input_columns))
+        } else {
+            let columns = vec![scan.variable.clone()];
+            Ok((scan_operator, columns))
+        }
     }
 
     /// Plans an expand operator.
@@ -190,17 +210,36 @@ impl Planner {
             ExpandDirection::Both => Direction::Both,
         };
 
-        // Create the expand operator with MVCC context
-        let expand_op = ExpandOperator::new(
-            Arc::clone(&self.store),
-            input_op,
-            source_column,
-            direction,
-            expand.edge_type.clone(),
-        )
-        .with_tx_context(self.viewing_epoch, self.tx_id);
+        // Check if this is a variable-length path
+        let is_variable_length =
+            expand.min_hops != 1 || expand.max_hops.is_none() || expand.max_hops != Some(1);
 
-        let operator: Box<dyn Operator> = Box::new(expand_op);
+        let operator: Box<dyn Operator> = if is_variable_length {
+            // Use VariableLengthExpandOperator for multi-hop paths
+            let max_hops = expand.max_hops.unwrap_or(expand.min_hops + 10); // Default max if unlimited
+            let expand_op = VariableLengthExpandOperator::new(
+                Arc::clone(&self.store),
+                input_op,
+                source_column,
+                direction,
+                expand.edge_type.clone(),
+                expand.min_hops,
+                max_hops,
+            )
+            .with_tx_context(self.viewing_epoch, self.tx_id);
+            Box::new(expand_op)
+        } else {
+            // Use simple ExpandOperator for single-hop paths
+            let expand_op = ExpandOperator::new(
+                Arc::clone(&self.store),
+                input_op,
+                source_column,
+                direction,
+                expand.edge_type.clone(),
+            )
+            .with_tx_context(self.viewing_epoch, self.tx_id);
+            Box::new(expand_op)
+        };
 
         // Build output columns: [input_columns..., edge, target]
         // Preserve all input columns and add edge + target to match ExpandOperator output
@@ -272,12 +311,81 @@ impl Planner {
                             column: col_idx,
                             property: property.clone(),
                         });
-                        // Property could be any type - use String as default
-                        output_types.push(LogicalType::String);
+                        // Property could be any type - use Any/Generic to preserve type
+                        output_types.push(LogicalType::Any);
                     }
                     LogicalExpression::Literal(value) => {
                         projections.push(ProjectExpr::Constant(value.clone()));
                         output_types.push(value_to_logical_type(value));
+                    }
+                    LogicalExpression::FunctionCall { name, args } => {
+                        // Handle built-in functions
+                        match name.to_lowercase().as_str() {
+                            "type" => {
+                                // type(r) returns the edge type string
+                                if args.len() != 1 {
+                                    return Err(Error::Internal(
+                                        "type() requires exactly one argument".to_string(),
+                                    ));
+                                }
+                                if let LogicalExpression::Variable(var_name) = &args[0] {
+                                    let col_idx =
+                                        *variable_columns.get(var_name).ok_or_else(|| {
+                                            Error::Internal(format!(
+                                                "Variable '{}' not found in input",
+                                                var_name
+                                            ))
+                                        })?;
+                                    projections.push(ProjectExpr::EdgeType { column: col_idx });
+                                    output_types.push(LogicalType::String);
+                                } else {
+                                    return Err(Error::Internal(
+                                        "type() argument must be a variable".to_string(),
+                                    ));
+                                }
+                            }
+                            "length" => {
+                                // length(p) returns the path length
+                                // For shortestPath results, the path column already contains the length
+                                if args.len() != 1 {
+                                    return Err(Error::Internal(
+                                        "length() requires exactly one argument".to_string(),
+                                    ));
+                                }
+                                if let LogicalExpression::Variable(var_name) = &args[0] {
+                                    let col_idx =
+                                        *variable_columns.get(var_name).ok_or_else(|| {
+                                            Error::Internal(format!(
+                                                "Variable '{}' not found in input",
+                                                var_name
+                                            ))
+                                        })?;
+                                    // Pass through the column value directly
+                                    projections.push(ProjectExpr::Column(col_idx));
+                                    output_types.push(LogicalType::Int64);
+                                } else {
+                                    return Err(Error::Internal(
+                                        "length() argument must be a variable".to_string(),
+                                    ));
+                                }
+                            }
+                            _ => {
+                                return Err(Error::Internal(format!(
+                                    "Unsupported function in RETURN: {}",
+                                    name
+                                )));
+                            }
+                        }
+                    }
+                    LogicalExpression::Case { .. } => {
+                        // Convert CASE expression to FilterExpression for evaluation
+                        let filter_expr = self.convert_expression(&item.expression)?;
+                        projections.push(ProjectExpr::Expression {
+                            expr: filter_expr,
+                            variable_columns: variable_columns.clone(),
+                        });
+                        // CASE can return any type - use Any
+                        output_types.push(LogicalType::Any);
                     }
                     _ => {
                         return Err(Error::Internal(format!(
@@ -326,6 +434,78 @@ impl Planner {
                 Ok((operator, columns))
             }
         }
+    }
+
+    /// Plans a project operator (for WITH clause).
+    fn plan_project(
+        &self,
+        project: &crate::query::plan::ProjectOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Plan the input operator first
+        let (input_op, input_columns) = self.plan_operator(&project.input)?;
+
+        // Build variable to column index mapping
+        let variable_columns: HashMap<String, usize> = input_columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        // Build projections and new column names
+        let mut projections = Vec::with_capacity(project.projections.len());
+        let mut output_types = Vec::with_capacity(project.projections.len());
+        let mut output_columns = Vec::with_capacity(project.projections.len());
+
+        for projection in &project.projections {
+            // Determine the output column name (alias or expression string)
+            let col_name = projection
+                .alias
+                .clone()
+                .unwrap_or_else(|| expression_to_string(&projection.expression));
+            output_columns.push(col_name);
+
+            match &projection.expression {
+                LogicalExpression::Variable(name) => {
+                    let col_idx = *variable_columns.get(name).ok_or_else(|| {
+                        Error::Internal(format!("Variable '{}' not found in input", name))
+                    })?;
+                    projections.push(ProjectExpr::Column(col_idx));
+                    output_types.push(LogicalType::Node);
+                }
+                LogicalExpression::Property { variable, property } => {
+                    let col_idx = *variable_columns.get(variable).ok_or_else(|| {
+                        Error::Internal(format!("Variable '{}' not found in input", variable))
+                    })?;
+                    projections.push(ProjectExpr::PropertyAccess {
+                        column: col_idx,
+                        property: property.clone(),
+                    });
+                    output_types.push(LogicalType::Any);
+                }
+                LogicalExpression::Literal(value) => {
+                    projections.push(ProjectExpr::Constant(value.clone()));
+                    output_types.push(value_to_logical_type(value));
+                }
+                _ => {
+                    // For complex expressions, use full expression evaluation
+                    let filter_expr = self.convert_expression(&projection.expression)?;
+                    projections.push(ProjectExpr::Expression {
+                        expr: filter_expr,
+                        variable_columns: variable_columns.clone(),
+                    });
+                    output_types.push(LogicalType::Any);
+                }
+            }
+        }
+
+        let operator = Box::new(ProjectOperator::with_store(
+            input_op,
+            projections,
+            output_types,
+            Arc::clone(&self.store),
+        ));
+
+        Ok((operator, output_columns))
     }
 
     /// Plans a filter operator.
@@ -407,7 +587,8 @@ impl Planner {
             let mut projections = Vec::new();
             let mut output_types = Vec::new();
 
-            // First, pass through all existing columns
+            // First, pass through all existing columns (use Node type to preserve node IDs
+            // for subsequent property access - nodes need VectorData::NodeId for get_node_id())
             for (i, _) in input_columns.iter().enumerate() {
                 projections.push(ProjectExpr::Column(i));
                 output_types.push(LogicalType::Node);
@@ -442,8 +623,8 @@ impl Planner {
             .keys
             .iter()
             .map(|key| {
-                let col_idx =
-                    self.resolve_sort_expression_with_properties(&key.expression, &variable_columns)?;
+                let col_idx = self
+                    .resolve_sort_expression_with_properties(&key.expression, &variable_columns)?;
                 Ok(PhysicalSortKey {
                     column: col_idx,
                     direction: match key.order {
@@ -467,10 +648,11 @@ impl Planner {
         variable_columns: &HashMap<String, usize>,
     ) -> Result<usize> {
         match expr {
-            LogicalExpression::Variable(name) => variable_columns
-                .get(name)
-                .copied()
-                .ok_or_else(|| Error::Internal(format!("Variable '{}' not found for ORDER BY", name))),
+            LogicalExpression::Variable(name) => {
+                variable_columns.get(name).copied().ok_or_else(|| {
+                    Error::Internal(format!("Variable '{}' not found for ORDER BY", name))
+                })
+            }
             LogicalExpression::Property { variable, property } => {
                 // Look up the projected property column (e.g., "p_age" for p.age)
                 let col_name = format!("{}_{}", variable, property);
@@ -488,9 +670,9 @@ impl Planner {
         }
     }
 
-    /// Derives a schema from column names (assumes Node type as default).
+    /// Derives a schema from column names (uses Any type to handle all value types).
     fn derive_schema_from_columns(&self, columns: &[String]) -> Vec<LogicalType> {
-        columns.iter().map(|_| LogicalType::Node).collect()
+        columns.iter().map(|_| LogicalType::Any).collect()
     }
 
     /// Plans an AGGREGATE operator.
@@ -545,7 +727,8 @@ impl Planner {
             let mut projections = Vec::new();
             let mut output_types = Vec::new();
 
-            // First, pass through all existing columns
+            // First, pass through all existing columns (use Node type to preserve node IDs
+            // for subsequent property access - nodes need VectorData::NodeId for get_node_id())
             for (i, _) in input_columns.iter().enumerate() {
                 projections.push(ProjectExpr::Column(i));
                 output_types.push(LogicalType::Node);
@@ -563,7 +746,7 @@ impl Planner {
                     column: source_col,
                     property: property.clone(),
                 });
-                output_types.push(LogicalType::Int64); // Properties are typically numeric for aggregates
+                output_types.push(LogicalType::Any); // Properties can be any type (string, int, etc.)
             }
 
             input_op = Box::new(ProjectOperator::with_store(
@@ -608,19 +791,17 @@ impl Planner {
         let mut output_columns = Vec::new();
 
         // Add group-by columns
-        for (idx, expr) in agg.group_by.iter().enumerate() {
-            output_schema.push(LogicalType::Node); // Default type
+        for expr in &agg.group_by {
+            output_schema.push(LogicalType::Any); // Group-by values can be any type
             output_columns.push(expression_to_string(expr));
-            // If there's a group column, we need to track it
-            if idx < group_columns.len() {
-                // Group column preserved
-            }
         }
 
         // Add aggregate result columns
         for agg_expr in &agg.aggregates {
             let result_type = match agg_expr.function {
-                LogicalAggregateFunction::Count => LogicalType::Int64,
+                LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => {
+                    LogicalType::Int64
+                }
                 LogicalAggregateFunction::Sum => LogicalType::Int64,
                 LogicalAggregateFunction::Avg => LogicalType::Float64,
                 LogicalAggregateFunction::Min | LogicalAggregateFunction::Max => {
@@ -629,7 +810,7 @@ impl Planner {
                     // is numeric values from property expressions
                     LogicalType::Int64
                 }
-                LogicalAggregateFunction::Collect => LogicalType::String, // List type
+                LogicalAggregateFunction::Collect => LogicalType::Any, // List type (using Any since List is a complex type)
             };
             output_schema.push(result_type);
             output_columns.push(
@@ -1252,7 +1433,33 @@ impl Planner {
     /// Plans an unwind operator.
     fn plan_unwind(&self, unwind: &UnwindOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Plan the input operator first
-        let (input_op, input_columns) = self.plan_operator(&unwind.input)?;
+        // Handle Empty specially - use a single-row operator
+        let (input_op, input_columns): (Box<dyn Operator>, Vec<String>) =
+            if matches!(&*unwind.input, LogicalOperator::Empty) {
+                // For UNWIND without prior MATCH, create a single-row input
+                // We need an operator that produces one row with the list to unwind
+                // For now, use EmptyScan which produces no rows - we'll handle the literal
+                // list in the unwind operator itself
+                let literal_list = self.convert_expression(&unwind.expression)?;
+
+                // Create a project operator that produces a single row with the list
+                let single_row_op: Box<dyn Operator> = Box::new(
+                    grafeo_core::execution::operators::single_row::SingleRowOperator::new(),
+                );
+                let project_op: Box<dyn Operator> = Box::new(ProjectOperator::with_store(
+                    single_row_op,
+                    vec![ProjectExpr::Expression {
+                        expr: literal_list,
+                        variable_columns: HashMap::new(),
+                    }],
+                    vec![LogicalType::Any],
+                    Arc::clone(&self.store),
+                ));
+
+                (project_op, vec!["__list__".to_string()])
+            } else {
+                self.plan_operator(&unwind.input)?
+            };
 
         // The UNWIND expression should be a list - we need to find/evaluate it
         // For now, we handle the case where the expression references an existing column
@@ -1297,8 +1504,13 @@ impl Planner {
 
     /// Plans a MERGE operator.
     fn plan_merge(&self, merge: &MergeOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Plan the input operator first (if any)
-        let (_input_op, mut columns) = self.plan_operator(&merge.input)?;
+        // Plan the input operator if present (skip if Empty)
+        let mut columns = if matches!(merge.input.as_ref(), LogicalOperator::Empty) {
+            Vec::new()
+        } else {
+            let (_input_op, cols) = self.plan_operator(&merge.input)?;
+            cols
+        };
 
         // Convert match properties from LogicalExpression to Value
         let match_properties: Vec<(String, grafeo_common::types::Value)> = merge
@@ -1350,6 +1562,55 @@ impl Planner {
             on_create_properties,
             on_match_properties,
         ));
+
+        Ok((operator, columns))
+    }
+
+    /// Plans a SHORTEST PATH operator.
+    fn plan_shortest_path(&self, sp: &ShortestPathOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Plan the input operator
+        let (input_op, mut columns) = self.plan_operator(&sp.input)?;
+
+        // Find source and target node columns
+        let source_column = columns
+            .iter()
+            .position(|c| c == &sp.source_var)
+            .ok_or_else(|| {
+                Error::Internal(format!(
+                    "Source variable '{}' not found for shortestPath",
+                    sp.source_var
+                ))
+            })?;
+
+        let target_column = columns
+            .iter()
+            .position(|c| c == &sp.target_var)
+            .ok_or_else(|| {
+                Error::Internal(format!(
+                    "Target variable '{}' not found for shortestPath",
+                    sp.target_var
+                ))
+            })?;
+
+        // Convert direction
+        let direction = match sp.direction {
+            ExpandDirection::Outgoing => Direction::Outgoing,
+            ExpandDirection::Incoming => Direction::Incoming,
+            ExpandDirection::Both => Direction::Both,
+        };
+
+        // Create the shortest path operator
+        let operator: Box<dyn Operator> = Box::new(ShortestPathOperator::new(
+            Arc::clone(&self.store),
+            input_op,
+            source_column,
+            target_column,
+            sp.edge_type.clone(),
+            direction,
+        ));
+
+        // Add path alias to output columns
+        columns.push(sp.path_alias.clone());
 
         Ok((operator, columns))
     }
@@ -1534,6 +1795,7 @@ pub fn convert_unary_op(op: UnaryOp) -> Result<UnaryFilterOp> {
 pub fn convert_aggregate_function(func: LogicalAggregateFunction) -> PhysicalAggregateFunction {
     match func {
         LogicalAggregateFunction::Count => PhysicalAggregateFunction::Count,
+        LogicalAggregateFunction::CountNonNull => PhysicalAggregateFunction::CountNonNull,
         LogicalAggregateFunction::Sum => PhysicalAggregateFunction::Sum,
         LogicalAggregateFunction::Avg => PhysicalAggregateFunction::Avg,
         LogicalAggregateFunction::Min => PhysicalAggregateFunction::Min,

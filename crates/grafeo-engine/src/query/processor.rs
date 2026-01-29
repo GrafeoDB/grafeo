@@ -547,6 +547,9 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
         LogicalOperator::RemoveLabel(remove_label) => {
             substitute_in_operator(&mut remove_label.input, params)?;
         }
+        LogicalOperator::ShortestPath(sp) => {
+            substitute_in_operator(&mut sp.input, params)?;
+        }
         LogicalOperator::Empty => {}
     }
     Ok(())

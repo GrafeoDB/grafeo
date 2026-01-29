@@ -84,7 +84,9 @@ impl ExpandOperator {
     /// Loads the next input chunk.
     fn load_next_input(&mut self) -> Result<bool, OperatorError> {
         match self.input.next() {
-            Ok(Some(chunk)) => {
+            Ok(Some(mut chunk)) => {
+                // Flatten the chunk if it has a selection vector so we can use direct indexing
+                chunk.flatten();
                 self.current_input = Some(chunk);
                 self.current_row = 0;
                 self.current_edges.clear();

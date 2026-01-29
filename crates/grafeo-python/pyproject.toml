@@ -3,14 +3,14 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "grafeo"
+name = "Grafeo"
 version = "0.1.1"
 description = "A high-performance, embeddable graph database with Python bindings"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
 authors = [
-    { name = "Grafeo Contributors" }
+    { name = "S.T. Grond" }
 ]
 keywords = ["graph", "database", "gql", "knowledge-graph", "embedded"]
 classifiers = [
@@ -31,8 +31,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://grafeo.tech"
-Documentation = "https://grafeo.tech"
+Homepage = "https://grafeo.dev"
+Documentation = "https://grafeo.dev"
 Repository = "https://github.com/StevenBtw/grafeo"
 Issues = "https://github.com/StevenBtw/grafeo/issues"
 

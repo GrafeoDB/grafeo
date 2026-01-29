@@ -567,7 +567,7 @@ impl GremlinTranslator {
                     variable: var.to_string(),
                     property: key.clone(),
                 };
-                self.translate_predicate(pred, prop)
+                Self::translate_predicate(pred, prop)
             }
             ast::HasStep::LabelKeyValue(label, key, value) => {
                 // has(label, key, value) - check label AND property
@@ -596,7 +596,6 @@ impl GremlinTranslator {
     }
 
     fn translate_predicate(
-        &self,
         pred: &ast::Predicate,
         expr: LogicalExpression,
     ) -> Result<LogicalExpression> {
@@ -683,9 +682,9 @@ impl GremlinTranslator {
                 right: Box::new(LogicalExpression::Literal(Value::String(s.clone().into()))),
             }),
             ast::Predicate::And(preds) => {
-                let mut result = self.translate_predicate(&preds[0], expr.clone())?;
+                let mut result = Self::translate_predicate(&preds[0], expr.clone())?;
                 for pred in &preds[1..] {
-                    let right = self.translate_predicate(pred, expr.clone())?;
+                    let right = Self::translate_predicate(pred, expr.clone())?;
                     result = LogicalExpression::Binary {
                         left: Box::new(result),
                         op: BinaryOp::And,
@@ -695,9 +694,9 @@ impl GremlinTranslator {
                 Ok(result)
             }
             ast::Predicate::Or(preds) => {
-                let mut result = self.translate_predicate(&preds[0], expr.clone())?;
+                let mut result = Self::translate_predicate(&preds[0], expr.clone())?;
                 for pred in &preds[1..] {
-                    let right = self.translate_predicate(pred, expr.clone())?;
+                    let right = Self::translate_predicate(pred, expr.clone())?;
                     result = LogicalExpression::Binary {
                         left: Box::new(result),
                         op: BinaryOp::Or,
@@ -708,7 +707,7 @@ impl GremlinTranslator {
             }
             ast::Predicate::Not(pred) => Ok(LogicalExpression::Unary {
                 op: UnaryOp::Not,
-                operand: Box::new(self.translate_predicate(pred, expr)?),
+                operand: Box::new(Self::translate_predicate(pred, expr)?),
             }),
             _ => Err(Error::Internal("Unsupported predicate".to_string())),
         }
@@ -1123,10 +1122,9 @@ mod tests {
 
     #[test]
     fn test_predicate_gt() {
-        let translator = GremlinTranslator::new();
         let expr = LogicalExpression::Variable("x".to_string());
         let pred = ast::Predicate::Gt(Value::Int64(10));
-        let result = translator.translate_predicate(&pred, expr).unwrap();
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
 
         if let LogicalExpression::Binary { op, .. } = result {
             assert_eq!(op, BinaryOp::Gt);
@@ -1137,10 +1135,9 @@ mod tests {
 
     #[test]
     fn test_predicate_within() {
-        let translator = GremlinTranslator::new();
         let expr = LogicalExpression::Variable("x".to_string());
         let pred = ast::Predicate::Within(vec![Value::Int64(1), Value::Int64(2)]);
-        let result = translator.translate_predicate(&pred, expr).unwrap();
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
 
         if let LogicalExpression::Binary { op, .. } = result {
             assert_eq!(op, BinaryOp::In);
@@ -1151,10 +1148,9 @@ mod tests {
 
     #[test]
     fn test_predicate_containing() {
-        let translator = GremlinTranslator::new();
         let expr = LogicalExpression::Variable("x".to_string());
         let pred = ast::Predicate::Containing("test".to_string());
-        let result = translator.translate_predicate(&pred, expr).unwrap();
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
 
         if let LogicalExpression::Binary { op, .. } = result {
             assert_eq!(op, BinaryOp::Contains);

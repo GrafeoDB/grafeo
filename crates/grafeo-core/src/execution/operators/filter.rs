@@ -284,6 +284,12 @@ impl ExpressionPredicate {
         }
     }
 
+    /// Evaluates the expression for a specific row in a chunk, returning the result value.
+    /// This is useful for evaluating expressions in contexts like RETURN clauses.
+    pub fn eval_at(&self, chunk: &DataChunk, row: usize) -> Option<Value> {
+        self.eval_expr(&self.expression, chunk, row)
+    }
+
     /// Evaluates the expression for a row, returning the result value.
     fn eval(&self, chunk: &DataChunk, row: usize) -> Option<Value> {
         self.eval_expr(&self.expression, chunk, row)
@@ -299,9 +305,19 @@ impl ExpressionPredicate {
             FilterExpression::Property { variable, property } => {
                 let col_idx = *self.variable_columns.get(variable)?;
                 let col = chunk.column(col_idx)?;
-                let node_id = col.get_node_id(row)?;
-                let node = self.store.get_node(node_id)?;
-                node.get_property(property).cloned()
+                // Try as node first
+                if let Some(node_id) = col.get_node_id(row) {
+                    if let Some(node) = self.store.get_node(node_id) {
+                        return node.get_property(property).cloned();
+                    }
+                }
+                // Try as edge if node lookup failed
+                if let Some(edge_id) = col.get_edge_id(row) {
+                    if let Some(edge) = self.store.get_edge(edge_id) {
+                        return edge.get_property(property).cloned();
+                    }
+                }
+                None
             }
             FilterExpression::Binary { left, op, right } => {
                 // For IN operator, right side is a list that we evaluate specially

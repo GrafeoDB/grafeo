@@ -104,6 +104,9 @@ pub enum LogicalOperator {
 
     /// Merge a pattern (match or create).
     Merge(MergeOp),
+
+    /// Find shortest path between nodes.
+    ShortestPath(ShortestPathOp),
 }
 
 /// Scan nodes from the graph.
@@ -228,8 +231,10 @@ pub struct AggregateExpr {
 /// Aggregate function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregateFunction {
-    /// Count rows.
+    /// Count all rows (COUNT(*)).
     Count,
+    /// Count non-null values (COUNT(expr)).
+    CountNonNull,
     /// Sum values.
     Sum,
     /// Average values.
@@ -503,6 +508,28 @@ pub struct MergeOp {
     pub on_match: Vec<(String, LogicalExpression)>,
     /// Input operator.
     pub input: Box<LogicalOperator>,
+}
+
+/// Find shortest path between two nodes.
+///
+/// This operator uses Dijkstra's algorithm to find the shortest path(s)
+/// between a source node and a target node, optionally filtered by edge type.
+#[derive(Debug, Clone)]
+pub struct ShortestPathOp {
+    /// Input operator providing source/target nodes.
+    pub input: Box<LogicalOperator>,
+    /// Variable name for the source node.
+    pub source_var: String,
+    /// Variable name for the target node.
+    pub target_var: String,
+    /// Optional edge type filter.
+    pub edge_type: Option<String>,
+    /// Direction of edge traversal.
+    pub direction: ExpandDirection,
+    /// Variable name to bind the path result.
+    pub path_alias: String,
+    /// Whether to find all shortest paths (vs. just one).
+    pub all_paths: bool,
 }
 
 /// Return results (terminal operator).

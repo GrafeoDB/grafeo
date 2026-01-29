@@ -165,7 +165,7 @@ impl CypherTranslator {
         rel: &ast::RelationshipPattern,
         input: LogicalOperator,
     ) -> Result<LogicalOperator> {
-        let from_variable = self.get_last_variable(&input)?;
+        let from_variable = Self::get_last_variable(&input)?;
         let edge_variable = rel.variable.clone();
         let edge_type = rel.types.first().cloned();
         let to_variable = rel
@@ -1038,12 +1038,12 @@ impl CypherTranslator {
         }
     }
 
-    fn get_last_variable(&self, plan: &LogicalOperator) -> Result<String> {
+    fn get_last_variable(plan: &LogicalOperator) -> Result<String> {
         match plan {
             LogicalOperator::NodeScan(scan) => Ok(scan.variable.clone()),
             LogicalOperator::Expand(expand) => Ok(expand.to_variable.clone()),
-            LogicalOperator::Filter(filter) => self.get_last_variable(&filter.input),
-            LogicalOperator::Project(project) => self.get_last_variable(&project.input),
+            LogicalOperator::Filter(filter) => Self::get_last_variable(&filter.input),
+            LogicalOperator::Project(project) => Self::get_last_variable(&project.input),
             _ => Err(Error::Internal("Cannot get variable from operator".into())),
         }
     }

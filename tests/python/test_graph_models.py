@@ -296,7 +296,7 @@ class TestRDFModel:
         )
 
         result = self.db.execute(
-            "MATCH (p:Resource)-[:` http://xmlns.com/foaf/0.1/address`]->(addr:BlankNode) "
+            "MATCH (p:Resource)-[:`http://xmlns.com/foaf/0.1/address`]->(addr:BlankNode) "
             "RETURN addr.city"
         )
         rows = list(result)

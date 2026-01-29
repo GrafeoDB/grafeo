@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Grafeo! This document provides gu
 
 ### Prerequisites
 
-- Rust 1.91.1 or later
+- Rust 1.91.0+
 - Python 3.12+ (for Python bindings)
 - Git
 
@@ -169,7 +169,7 @@ Use conventional commit format:
 
 - **Repository**: <https://github.com/StevenBtw/grafeo>
 - **Issues**: <https://github.com/StevenBtw/grafeo/issues>
-- **Documentation**: <https://grafeo.tech>
+- **Documentation**: <https://grafeo.dev>
 
 ## Code of Conduct
 

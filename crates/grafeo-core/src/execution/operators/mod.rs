@@ -24,9 +24,12 @@ mod mutation;
 mod project;
 pub mod push;
 mod scan;
+mod shortest_path;
+pub mod single_row;
 mod sort;
 mod union;
 mod unwind;
+mod variable_length_expand;
 
 pub use aggregate::{
     AggregateExpr, AggregateFunction, HashAggregateOperator, SimpleAggregateOperator,
@@ -52,9 +55,11 @@ pub use push::{
     SortPushOperator, SpillableAggregatePushOperator, SpillableSortPushOperator,
 };
 pub use scan::ScanOperator;
+pub use shortest_path::ShortestPathOperator;
 pub use sort::{NullOrder, SortDirection, SortKey, SortOperator};
 pub use union::UnionOperator;
 pub use unwind::UnwindOperator;
+pub use variable_length_expand::VariableLengthExpandOperator;
 
 use thiserror::Error;
 

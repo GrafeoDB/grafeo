@@ -10,7 +10,7 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.91.1-blue)](https://www.rust-lang.org)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 
-A pure-Rust, high-performance, embeddable graph database supporting both **Labeled Property Graph (LPG)** and **RDF** data models.
+A pure-Rust, high-performance, embeddable graph database supporting both **Labeled Property Graph (LPG)** and **Resource Description Framework (RDF)** graph data models.
 
 ## Features
 
@@ -127,7 +127,7 @@ fn main() {
 
 ## Documentation
 
-Full documentation is available at [grafeo.tech](https://grafeo.tech).
+Full documentation is available at [grafeo.dev](https://grafeo.dev).
 
 ## Contributing
 

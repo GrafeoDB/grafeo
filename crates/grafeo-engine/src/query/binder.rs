@@ -132,6 +132,20 @@ impl Binder {
                 self.bind_operator(&project.input)?;
                 for projection in &project.projections {
                     self.validate_expression(&projection.expression)?;
+                    // Add the projection alias to the context (for WITH clause support)
+                    if let Some(ref alias) = projection.alias {
+                        // Determine the type from the expression
+                        let data_type = self.infer_expression_type(&projection.expression);
+                        self.context.add_variable(
+                            alias.clone(),
+                            VariableInfo {
+                                name: alias.clone(),
+                                data_type,
+                                is_node: false,
+                                is_edge: false,
+                            },
+                        );
+                    }
                 }
                 Ok(())
             }
@@ -354,6 +368,34 @@ impl Binder {
                         remove_label.variable
                     )));
                 }
+                Ok(())
+            }
+            LogicalOperator::ShortestPath(sp) => {
+                // First bind the input
+                self.bind_operator(&sp.input)?;
+                // Validate that source and target variables are defined
+                if !self.context.contains(&sp.source_var) {
+                    return Err(binding_error(format!(
+                        "Undefined source variable '{}' in shortestPath",
+                        sp.source_var
+                    )));
+                }
+                if !self.context.contains(&sp.target_var) {
+                    return Err(binding_error(format!(
+                        "Undefined target variable '{}' in shortestPath",
+                        sp.target_var
+                    )));
+                }
+                // Add the path alias variable to the context
+                self.context.add_variable(
+                    sp.path_alias.clone(),
+                    VariableInfo {
+                        name: sp.path_alias.clone(),
+                        data_type: LogicalType::Any, // Path is a complex type
+                        is_node: false,
+                        is_edge: false,
+                    },
+                );
                 Ok(())
             }
         }
@@ -637,6 +679,50 @@ impl Binder {
                 let _ = subquery; // Would need recursive binding
                 Ok(())
             }
+        }
+    }
+
+    /// Infers the type of an expression for use in WITH clause aliasing.
+    fn infer_expression_type(&self, expr: &LogicalExpression) -> LogicalType {
+        match expr {
+            LogicalExpression::Variable(name) => {
+                // Look up the variable type from context
+                self.context
+                    .get(name)
+                    .map(|info| info.data_type.clone())
+                    .unwrap_or(LogicalType::Any)
+            }
+            LogicalExpression::Property { .. } => LogicalType::Any, // Properties can be any type
+            LogicalExpression::Literal(value) => {
+                // Infer type from literal value
+                use grafeo_common::types::Value;
+                match value {
+                    Value::Bool(_) => LogicalType::Bool,
+                    Value::Int64(_) => LogicalType::Int64,
+                    Value::Float64(_) => LogicalType::Float64,
+                    Value::String(_) => LogicalType::String,
+                    Value::List(_) => LogicalType::Any, // Complex type
+                    Value::Map(_) => LogicalType::Any,  // Complex type
+                    Value::Null => LogicalType::Any,
+                    _ => LogicalType::Any,
+                }
+            }
+            LogicalExpression::Binary { .. } => LogicalType::Any, // Could be bool or numeric
+            LogicalExpression::Unary { .. } => LogicalType::Any,
+            LogicalExpression::FunctionCall { name, .. } => {
+                // Infer based on function name
+                match name.to_lowercase().as_str() {
+                    "count" | "sum" | "id" => LogicalType::Int64,
+                    "avg" => LogicalType::Float64,
+                    "type" => LogicalType::String,
+                    // List-returning functions use Any since we don't track element type
+                    "labels" | "collect" => LogicalType::Any,
+                    _ => LogicalType::Any,
+                }
+            }
+            LogicalExpression::List(_) => LogicalType::Any, // Complex type
+            LogicalExpression::Map(_) => LogicalType::Any,  // Complex type
+            _ => LogicalType::Any,
         }
     }
 

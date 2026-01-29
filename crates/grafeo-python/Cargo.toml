@@ -9,6 +9,7 @@ description = "Python bindings for Grafeo graph database"
 [lib]
 name = "grafeo"
 crate-type = ["cdylib"]
+doc = false
 
 [dependencies]
 grafeo-engine = { path = "../grafeo-engine" }

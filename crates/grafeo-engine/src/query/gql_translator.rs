@@ -3,10 +3,10 @@
 //! Translates GQL AST to the common logical plan representation.
 
 use crate::query::plan::{
-    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, DeleteNodeOp, DistinctOp,
+    AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, DeleteNodeOp, DistinctOp,
     ExpandDirection, ExpandOp, FilterOp, JoinOp, JoinType, LeftJoinOp, LimitOp, LogicalExpression,
     LogicalOperator, LogicalPlan, NodeScanOp, ProjectOp, Projection, ReturnItem, ReturnOp,
-    SetPropertyOp, SkipOp, SortKey, SortOp, SortOrder, UnaryOp,
+    SetPropertyOp, SkipOp, SortKey, SortOp, SortOrder, UnaryOp, UnwindOp,
 };
 use grafeo_adapters::query::gql::{self, ast};
 use grafeo_common::types::Value;
@@ -67,6 +67,16 @@ impl GqlTranslator {
             }
         }
 
+        // Handle UNWIND clauses
+        for unwind_clause in &query.unwind_clauses {
+            let expression = self.translate_expression(&unwind_clause.expression)?;
+            plan = LogicalOperator::Unwind(UnwindOp {
+                expression,
+                variable: unwind_clause.alias.clone(),
+                input: Box::new(plan),
+            });
+        }
+
         // Apply WHERE filter
         if let Some(where_clause) = &query.where_clause {
             let predicate = self.translate_expression(&where_clause.expression)?;
@@ -78,12 +88,21 @@ impl GqlTranslator {
 
         // Handle SET clauses
         for set_clause in &query.set_clauses {
+            // Handle property assignments
             for assignment in &set_clause.assignments {
                 let value = self.translate_expression(&assignment.value)?;
                 plan = LogicalOperator::SetProperty(SetPropertyOp {
                     variable: assignment.variable.clone(),
                     properties: vec![(assignment.property.clone(), value)],
                     replace: false,
+                    input: Box::new(plan),
+                });
+            }
+            // Handle label operations (SET n:Label)
+            for label_op in &set_clause.label_operations {
+                plan = LogicalOperator::AddLabel(AddLabelOp {
+                    variable: label_op.variable.clone(),
+                    labels: label_op.labels.clone(),
                     input: Box::new(plan),
                 });
             }
@@ -279,11 +298,57 @@ impl GqlTranslator {
 
         let label = node.labels.first().cloned();
 
-        Ok(LogicalOperator::NodeScan(NodeScanOp {
-            variable,
+        let mut plan = LogicalOperator::NodeScan(NodeScanOp {
+            variable: variable.clone(),
             label,
             input: input.map(Box::new),
-        }))
+        });
+
+        // Add filter for node pattern properties (e.g., {name: 'Alice'})
+        if !node.properties.is_empty() {
+            let predicate = self.build_property_predicate(&variable, &node.properties)?;
+            plan = LogicalOperator::Filter(FilterOp {
+                predicate,
+                input: Box::new(plan),
+            });
+        }
+
+        Ok(plan)
+    }
+
+    /// Builds a predicate expression for property filters like {name: 'Alice', age: 30}.
+    fn build_property_predicate(
+        &self,
+        variable: &str,
+        properties: &[(String, ast::Expression)],
+    ) -> Result<LogicalExpression> {
+        let mut predicates: Vec<LogicalExpression> = Vec::new();
+
+        for (prop_name, prop_value) in properties {
+            let left = LogicalExpression::Property {
+                variable: variable.to_string(),
+                property: prop_name.clone(),
+            };
+            let right = self.translate_expression(prop_value)?;
+
+            predicates.push(LogicalExpression::Binary {
+                left: Box::new(left),
+                op: BinaryOp::Eq,
+                right: Box::new(right),
+            });
+        }
+
+        // Combine all predicates with AND
+        let mut result = predicates.remove(0);
+        for pred in predicates {
+            result = LogicalExpression::Binary {
+                left: Box::new(result),
+                op: BinaryOp::And,
+                right: Box::new(pred),
+            };
+        }
+
+        Ok(result)
     }
 
     fn translate_path_pattern(
@@ -305,6 +370,15 @@ impl GqlTranslator {
             label: source_label,
             input: input.map(Box::new),
         });
+
+        // Add filter for source node properties (e.g., {id: 'a'})
+        if !path.source.properties.is_empty() {
+            let predicate = self.build_property_predicate(&source_var, &path.source.properties)?;
+            plan = LogicalOperator::Filter(FilterOp {
+                predicate,
+                input: Box::new(plan),
+            });
+        }
 
         // Process each edge in the chain
         let mut current_source = source_var;
@@ -331,10 +405,19 @@ impl GqlTranslator {
                 edge_variable: edge_var,
                 direction,
                 edge_type,
-                min_hops: 1,
-                max_hops: Some(1),
+                min_hops: edge.min_hops.unwrap_or(1),
+                max_hops: edge.max_hops.or(Some(1)),
                 input: Box::new(plan),
             });
+
+            // Add filter for target node properties
+            if !edge.target.properties.is_empty() {
+                let predicate = self.build_property_predicate(&target_var, &edge.target.properties)?;
+                plan = LogicalOperator::Filter(FilterOp {
+                    predicate,
+                    input: Box::new(plan),
+                });
+            }
 
             current_source = target_var;
         }

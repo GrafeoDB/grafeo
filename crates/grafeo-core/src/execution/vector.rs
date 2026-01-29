@@ -198,6 +198,10 @@ impl ValueVector {
             (VectorData::Int64(vec), Value::Int64(i)) => vec.push(*i),
             (VectorData::Float64(vec), Value::Float64(f)) => vec.push(*f),
             (VectorData::String(vec), Value::String(s)) => vec.push(s.clone()),
+            // Handle Int64 -> NodeId conversion (from get_value roundtrip)
+            (VectorData::NodeId(vec), Value::Int64(i)) => vec.push(NodeId::new(*i as u64)),
+            // Handle Int64 -> EdgeId conversion (from get_value roundtrip)
+            (VectorData::EdgeId(vec), Value::Int64(i)) => vec.push(EdgeId::new(*i as u64)),
             (VectorData::Generic(vec), _) => vec.push(value),
             _ => {
                 // Type mismatch - push a default value to maintain vector alignment

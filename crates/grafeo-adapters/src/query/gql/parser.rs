@@ -80,6 +80,30 @@ impl<'a> Parser<'a> {
         matches!(
             self.current.kind,
             TokenKind::Identifier | TokenKind::QuotedIdentifier
+        ) || self.is_contextual_keyword()
+    }
+
+    /// Checks if the current token is a keyword that can be used as an identifier in context.
+    /// In GQL/Cypher, many keywords can be used as variable names or labels.
+    fn is_contextual_keyword(&self) -> bool {
+        matches!(
+            self.current.kind,
+            TokenKind::End       // CASE...END
+                | TokenKind::Node    // CREATE NODE TYPE
+                | TokenKind::Edge    // CREATE EDGE TYPE
+                | TokenKind::Type    // type() function
+                | TokenKind::Case    // CASE expression
+                | TokenKind::When    // CASE WHEN
+                | TokenKind::Then    // CASE THEN
+                | TokenKind::Else    // CASE ELSE
+                | TokenKind::In      // IN operator (can be label/variable)
+                | TokenKind::Is      // IS NULL
+                | TokenKind::And     // AND operator
+                | TokenKind::Or      // OR operator
+                | TokenKind::Not     // NOT operator
+                | TokenKind::Null    // NULL literal
+                | TokenKind::True    // TRUE literal
+                | TokenKind::False   // FALSE literal
         )
     }
 
@@ -205,33 +229,53 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Set)?;
 
         let mut assignments = Vec::new();
+        let mut label_operations = Vec::new();
+
         loop {
-            // Parse variable.property = expression
-            if self.current.kind != TokenKind::Identifier {
+            // Parse variable name
+            if !self.is_identifier() {
                 return Err(self.error("Expected variable name in SET"));
             }
             let variable = self.current.text.clone();
             self.advance();
 
-            self.expect(TokenKind::Dot)?;
+            // Check if this is a label operation (n:Label) or property assignment (n.prop = value)
+            if self.current.kind == TokenKind::Colon {
+                // Label operation: SET n:Label1:Label2
+                let mut labels = Vec::new();
+                while self.current.kind == TokenKind::Colon {
+                    self.advance();
+                    if !self.is_label_or_type_name() {
+                        return Err(self.error("Expected label name after colon in SET"));
+                    }
+                    labels.push(self.current.text.clone());
+                    self.advance();
+                }
+                label_operations.push(LabelOperation { variable, labels });
+            } else if self.current.kind == TokenKind::Dot {
+                // Property assignment: SET n.prop = value
+                self.advance();
 
-            if !self.is_label_or_type_name() {
-                return Err(self.error("Expected property name in SET"));
+                if !self.is_label_or_type_name() {
+                    return Err(self.error("Expected property name in SET"));
+                }
+                let property = self.current.text.clone();
+                self.advance();
+
+                self.expect(TokenKind::Eq)?;
+
+                let value = self.parse_expression()?;
+
+                assignments.push(PropertyAssignment {
+                    variable,
+                    property,
+                    value,
+                });
+            } else {
+                return Err(self.error("Expected '.' or ':' after variable in SET"));
             }
-            let property = self.current.text.clone();
-            self.advance();
 
-            self.expect(TokenKind::Eq)?;
-
-            let value = self.parse_expression()?;
-
-            assignments.push(PropertyAssignment {
-                variable,
-                property,
-                value,
-            });
-
-            // Check for more assignments
+            // Check for more assignments/operations
             if self.current.kind != TokenKind::Comma {
                 break;
             }
@@ -240,6 +284,7 @@ impl<'a> Parser<'a> {
 
         Ok(SetClause {
             assignments,
+            label_operations,
             span: Some(SourceSpan::new(span_start, self.current.span.end, 1, 1)),
         })
     }
@@ -632,7 +677,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok((Some(1), Some(max))) // *..max (min defaults to 1)
             } else {
-                return Err(self.error("Expected max hops after .."));
+                Err(self.error("Expected max hops after .."))
             }
         } else {
             Ok((Some(1), None)) // * alone means 1 to unbounded
@@ -917,7 +962,29 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expression::Literal(Literal::String(value)))
             }
-            TokenKind::Identifier | TokenKind::QuotedIdentifier => {
+            // CASE expression - must be checked BEFORE is_identifier() since CASE is a contextual keyword
+            TokenKind::Case => self.parse_case_expression(),
+            // Handle type() function - must be checked BEFORE is_identifier() since TYPE is a contextual keyword
+            TokenKind::Type => {
+                let name = "type".to_string();
+                self.advance();
+                if self.current.kind != TokenKind::LParen {
+                    // If not followed by (, treat as identifier/variable
+                    return Ok(Expression::Variable(name));
+                }
+                self.advance();
+                let mut args = Vec::new();
+                if self.current.kind != TokenKind::RParen {
+                    args.push(self.parse_expression()?);
+                    while self.current.kind == TokenKind::Comma {
+                        self.advance();
+                        args.push(self.parse_expression()?);
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                Ok(Expression::FunctionCall { name, args, distinct: false })
+            }
+            _ if self.is_identifier() => {
                 let name = self.get_identifier_name();
                 self.advance();
 
@@ -991,27 +1058,6 @@ impl<'a> Parser<'a> {
                     query: Box::new(inner_query),
                 })
             }
-            // Handle reserved keywords that can be used as function names
-            TokenKind::Type => {
-                let name = "type".to_string();
-                self.advance();
-                if self.current.kind != TokenKind::LParen {
-                    return Err(self.error("Expected '(' after 'type'"));
-                }
-                self.advance();
-                let mut args = Vec::new();
-                if self.current.kind != TokenKind::RParen {
-                    args.push(self.parse_expression()?);
-                    while self.current.kind == TokenKind::Comma {
-                        self.advance();
-                        args.push(self.parse_expression()?);
-                    }
-                }
-                self.expect(TokenKind::RParen)?;
-                Ok(Expression::FunctionCall { name, args, distinct: false })
-            }
-            // CASE expression
-            TokenKind::Case => self.parse_case_expression(),
             _ => Err(self.error("Expected expression")),
         }
     }
@@ -1532,6 +1578,55 @@ mod tests {
             }
         } else {
             panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_variable_length_path_with_properties() {
+        // Test variable-length path with node properties and labels
+        let query = "MATCH (start:Node {name: 'a'})-[:NEXT*1..3]->(end:Node) RETURN end.name";
+        let mut parser = Parser::new(query);
+        let result = parser.parse();
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+
+        if let Statement::Query(query) = result.unwrap() {
+            if let Pattern::Path(path) = &query.match_clauses[0].patterns[0] {
+                let edge = &path.edges[0];
+                assert_eq!(edge.min_hops, Some(1));
+                assert_eq!(edge.max_hops, Some(3));
+                // Verify source and target patterns
+                assert_eq!(path.source.variable, Some("start".to_string()));
+                assert_eq!(path.source.labels, vec!["Node".to_string()]);
+                assert_eq!(edge.target.variable, Some("end".to_string()));
+                assert_eq!(edge.target.labels, vec!["Node".to_string()]);
+            } else {
+                panic!("Expected path pattern");
+            }
+        } else {
+            panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_reserved_keywords_as_identifiers() {
+        // Test that reserved keywords can be used as variable names
+        let queries = [
+            ("MATCH (end:Node) RETURN end", "end"),
+            ("MATCH (node:Person) RETURN node", "node"),
+            ("MATCH (type:Category) RETURN type", "type"),
+            ("MATCH (case:Test) RETURN case", "case"),
+        ];
+
+        for (query, expected_var) in queries {
+            let mut parser = Parser::new(query);
+            let result = parser.parse();
+            assert!(result.is_ok(), "Parse error for '{}': {:?}", expected_var, result.err());
+
+            if let Statement::Query(q) = result.unwrap() {
+                if let Pattern::Node(node) = &q.match_clauses[0].patterns[0] {
+                    assert_eq!(node.variable, Some(expected_var.to_string()));
+                }
+            }
         }
     }
 

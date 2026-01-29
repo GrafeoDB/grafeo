@@ -39,8 +39,19 @@ pub struct QueryStatement {
 pub struct SetClause {
     /// Property assignments.
     pub assignments: Vec<PropertyAssignment>,
+    /// Label operations (add labels to nodes).
+    pub label_operations: Vec<LabelOperation>,
     /// Source span.
     pub span: Option<SourceSpan>,
+}
+
+/// A label operation for adding/removing labels.
+#[derive(Debug, Clone)]
+pub struct LabelOperation {
+    /// Variable name.
+    pub variable: String,
+    /// Labels to add.
+    pub labels: Vec<String>,
 }
 
 /// A MATCH clause.

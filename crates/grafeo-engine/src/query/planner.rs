@@ -118,10 +118,7 @@ impl Planner {
             LogicalOperator::Expand(expand) => self.plan_expand(expand),
             LogicalOperator::Return(ret) => self.plan_return(ret),
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
-            LogicalOperator::Project(project) => {
-                // For now, just plan the input
-                self.plan_operator(&project.input)
-            }
+            LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
             LogicalOperator::Skip(skip) => self.plan_skip(skip),
             LogicalOperator::Sort(sort) => self.plan_sort(sort),
@@ -272,12 +269,56 @@ impl Planner {
                             column: col_idx,
                             property: property.clone(),
                         });
-                        // Property could be any type - use String as default
-                        output_types.push(LogicalType::String);
+                        // Property could be any type - use Any/Generic to preserve type
+                        output_types.push(LogicalType::Any);
                     }
                     LogicalExpression::Literal(value) => {
                         projections.push(ProjectExpr::Constant(value.clone()));
                         output_types.push(value_to_logical_type(value));
+                    }
+                    LogicalExpression::FunctionCall { name, args } => {
+                        // Handle built-in functions
+                        match name.to_lowercase().as_str() {
+                            "type" => {
+                                // type(r) returns the edge type string
+                                if args.len() != 1 {
+                                    return Err(Error::Internal(
+                                        "type() requires exactly one argument".to_string(),
+                                    ));
+                                }
+                                if let LogicalExpression::Variable(var_name) = &args[0] {
+                                    let col_idx =
+                                        *variable_columns.get(var_name).ok_or_else(|| {
+                                            Error::Internal(format!(
+                                                "Variable '{}' not found in input",
+                                                var_name
+                                            ))
+                                        })?;
+                                    projections.push(ProjectExpr::EdgeType { column: col_idx });
+                                    output_types.push(LogicalType::String);
+                                } else {
+                                    return Err(Error::Internal(
+                                        "type() argument must be a variable".to_string(),
+                                    ));
+                                }
+                            }
+                            _ => {
+                                return Err(Error::Internal(format!(
+                                    "Unsupported function in RETURN: {}",
+                                    name
+                                )));
+                            }
+                        }
+                    }
+                    LogicalExpression::Case { .. } => {
+                        // Convert CASE expression to FilterExpression for evaluation
+                        let filter_expr = self.convert_expression(&item.expression)?;
+                        projections.push(ProjectExpr::Expression {
+                            expr: filter_expr,
+                            variable_columns: variable_columns.clone(),
+                        });
+                        // CASE can return any type - use Any
+                        output_types.push(LogicalType::Any);
                     }
                     _ => {
                         return Err(Error::Internal(format!(
@@ -326,6 +367,77 @@ impl Planner {
                 Ok((operator, columns))
             }
         }
+    }
+
+    /// Plans a project operator (for WITH clause).
+    fn plan_project(
+        &self,
+        project: &crate::query::plan::ProjectOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Plan the input operator first
+        let (input_op, input_columns) = self.plan_operator(&project.input)?;
+
+        // Build variable to column index mapping
+        let variable_columns: HashMap<String, usize> = input_columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        // Build projections and new column names
+        let mut projections = Vec::with_capacity(project.projections.len());
+        let mut output_types = Vec::with_capacity(project.projections.len());
+        let mut output_columns = Vec::with_capacity(project.projections.len());
+
+        for projection in &project.projections {
+            // Determine the output column name (alias or expression string)
+            let col_name = projection.alias.clone().unwrap_or_else(|| {
+                expression_to_string(&projection.expression)
+            });
+            output_columns.push(col_name);
+
+            match &projection.expression {
+                LogicalExpression::Variable(name) => {
+                    let col_idx = *variable_columns.get(name).ok_or_else(|| {
+                        Error::Internal(format!("Variable '{}' not found in input", name))
+                    })?;
+                    projections.push(ProjectExpr::Column(col_idx));
+                    output_types.push(LogicalType::Node);
+                }
+                LogicalExpression::Property { variable, property } => {
+                    let col_idx = *variable_columns.get(variable).ok_or_else(|| {
+                        Error::Internal(format!("Variable '{}' not found in input", variable))
+                    })?;
+                    projections.push(ProjectExpr::PropertyAccess {
+                        column: col_idx,
+                        property: property.clone(),
+                    });
+                    output_types.push(LogicalType::Any);
+                }
+                LogicalExpression::Literal(value) => {
+                    projections.push(ProjectExpr::Constant(value.clone()));
+                    output_types.push(value_to_logical_type(value));
+                }
+                _ => {
+                    // For complex expressions, use full expression evaluation
+                    let filter_expr = self.convert_expression(&projection.expression)?;
+                    projections.push(ProjectExpr::Expression {
+                        expr: filter_expr,
+                        variable_columns: variable_columns.clone(),
+                    });
+                    output_types.push(LogicalType::Any);
+                }
+            }
+        }
+
+        let operator = Box::new(ProjectOperator::with_store(
+            input_op,
+            projections,
+            output_types,
+            Arc::clone(&self.store),
+        ));
+
+        Ok((operator, output_columns))
     }
 
     /// Plans a filter operator.
@@ -563,7 +675,7 @@ impl Planner {
                     column: source_col,
                     property: property.clone(),
                 });
-                output_types.push(LogicalType::Int64); // Properties are typically numeric for aggregates
+                output_types.push(LogicalType::Any); // Properties can be any type (string, int, etc.)
             }
 
             input_op = Box::new(ProjectOperator::with_store(
@@ -629,7 +741,7 @@ impl Planner {
                     // is numeric values from property expressions
                     LogicalType::Int64
                 }
-                LogicalAggregateFunction::Collect => LogicalType::String, // List type
+                LogicalAggregateFunction::Collect => LogicalType::Any, // List type (using Any since List is a complex type)
             };
             output_schema.push(result_type);
             output_columns.push(
@@ -1252,7 +1364,35 @@ impl Planner {
     /// Plans an unwind operator.
     fn plan_unwind(&self, unwind: &UnwindOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Plan the input operator first
-        let (input_op, input_columns) = self.plan_operator(&unwind.input)?;
+        // Handle Empty specially - use a single-row operator
+        let (input_op, input_columns): (Box<dyn Operator>, Vec<String>) =
+            if matches!(&*unwind.input, LogicalOperator::Empty) {
+                // For UNWIND without prior MATCH, create a single-row input
+                // We need an operator that produces one row with the list to unwind
+                // For now, use EmptyScan which produces no rows - we'll handle the literal
+                // list in the unwind operator itself
+                let literal_list = self.convert_expression(&unwind.expression)?;
+
+                // Create a project operator that produces a single row with the list
+                let single_row_op: Box<dyn Operator> = Box::new(
+                    grafeo_core::execution::operators::single_row::SingleRowOperator::new()
+                );
+                let project_op: Box<dyn Operator> = Box::new(
+                    ProjectOperator::with_store(
+                        single_row_op,
+                        vec![ProjectExpr::Expression {
+                            expr: literal_list,
+                            variable_columns: HashMap::new(),
+                        }],
+                        vec![LogicalType::Any],
+                        Arc::clone(&self.store),
+                    )
+                );
+
+                (project_op, vec!["__list__".to_string()])
+            } else {
+                self.plan_operator(&unwind.input)?
+            };
 
         // The UNWIND expression should be a list - we need to find/evaluate it
         // For now, we handle the case where the expression references an existing column

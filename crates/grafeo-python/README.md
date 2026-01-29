@@ -1,17 +1,29 @@
-# pygrafeo
+# grafeo
 
 Python bindings for Grafeo, a pure-Rust, high-performance, embeddable graph database.
 
 ## Installation
 
 ```bash
-pip install pygrafeo
+uv add grafeo
 ```
 
 ## Usage
 
 ```python
-import pygrafeo
+import grafeo
+
+# Create an in-memory database
+db = grafeo.GrafeoDB()
+
+# Create nodes using GQL
+db.execute("INSERT (:Person {name: 'Alice', age: 30})")
+db.execute("INSERT (:Person {name: 'Bob', age: 25})")
+
+# Query the graph
+result = db.execute("MATCH (p:Person) RETURN p.name, p.age")
+for row in result:
+    print(row)
 ```
 
 ## License

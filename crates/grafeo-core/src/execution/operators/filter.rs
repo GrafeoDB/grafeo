@@ -284,6 +284,12 @@ impl ExpressionPredicate {
         }
     }
 
+    /// Evaluates the expression for a specific row in a chunk, returning the result value.
+    /// This is useful for evaluating expressions in contexts like RETURN clauses.
+    pub fn eval_at(&self, chunk: &DataChunk, row: usize) -> Option<Value> {
+        self.eval_expr(&self.expression, chunk, row)
+    }
+
     /// Evaluates the expression for a row, returning the result value.
     fn eval(&self, chunk: &DataChunk, row: usize) -> Option<Value> {
         self.eval_expr(&self.expression, chunk, row)

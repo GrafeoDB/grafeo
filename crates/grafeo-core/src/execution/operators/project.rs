@@ -1,9 +1,11 @@
 //! Project operator for selecting and transforming columns.
 
+use super::filter::{ExpressionPredicate, FilterExpression};
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::graph::lpg::LpgStore;
 use grafeo_common::types::{LogicalType, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A projection expression.
@@ -18,6 +20,18 @@ pub enum ProjectExpr {
         column: usize,
         /// The property name to access.
         property: String,
+    },
+    /// Edge type accessor (for type(r) function).
+    EdgeType {
+        /// The column containing the edge ID.
+        column: usize,
+    },
+    /// Full expression evaluation (for CASE WHEN, etc.).
+    Expression {
+        /// The filter expression to evaluate.
+        expr: FilterExpression,
+        /// Variable name to column index mapping.
+        variable_columns: HashMap<String, usize>,
     },
 }
 
@@ -140,6 +154,54 @@ impl Operator for ProjectOperator {
                         } else {
                             Value::Null
                         };
+                        output_col.push_value(value);
+                    }
+                }
+                ProjectExpr::EdgeType { column } => {
+                    // Get edge type string from an edge column
+                    let input_col = input
+                        .column(*column)
+                        .ok_or_else(|| OperatorError::ColumnNotFound(format!("Column {column}")))?;
+
+                    let output_col = output.column_mut(i).unwrap();
+
+                    let store = self.store.as_ref().ok_or_else(|| {
+                        OperatorError::Execution("Store required for edge type access".to_string())
+                    })?;
+
+                    for row in input.selected_indices() {
+                        let value = if let Some(edge_id) = input_col.get_edge_id(row) {
+                            store
+                                .edge_type(edge_id)
+                                .map(Value::String)
+                                .unwrap_or(Value::Null)
+                        } else {
+                            Value::Null
+                        };
+                        output_col.push_value(value);
+                    }
+                }
+                ProjectExpr::Expression {
+                    expr,
+                    variable_columns,
+                } => {
+                    let output_col = output.column_mut(i).unwrap();
+
+                    let store = self.store.as_ref().ok_or_else(|| {
+                        OperatorError::Execution(
+                            "Store required for expression evaluation".to_string(),
+                        )
+                    })?;
+
+                    // Use the ExpressionPredicate for expression evaluation
+                    let evaluator = ExpressionPredicate::new(
+                        expr.clone(),
+                        variable_columns.clone(),
+                        Arc::clone(store),
+                    );
+
+                    for row in input.selected_indices() {
+                        let value = evaluator.eval_at(&input, row).unwrap_or(Value::Null);
                         output_col.push_value(value);
                     }
                 }

@@ -5,8 +5,8 @@
 
 use super::{Operator, OperatorResult};
 use crate::execution::chunk::DataChunkBuilder;
-use crate::graph::lpg::LpgStore;
 use crate::graph::Direction;
+use crate::graph::lpg::LpgStore;
 use grafeo_common::types::{LogicalType, NodeId, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;

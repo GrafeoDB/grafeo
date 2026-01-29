@@ -105,7 +105,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Not     // NOT operator
                 | TokenKind::Null    // NULL literal
                 | TokenKind::True    // TRUE literal
-                | TokenKind::False   // FALSE literal
+                | TokenKind::False // FALSE literal
         )
     }
 
@@ -719,15 +719,36 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
 
-                (var, edge_types, min_h, max_h, props, EdgeDirection::Incoming)
+                (
+                    var,
+                    edge_types,
+                    min_h,
+                    max_h,
+                    props,
+                    EdgeDirection::Incoming,
+                )
             } else if self.current.kind == TokenKind::Arrow {
                 // Simple ->
                 self.advance();
-                (None, Vec::new(), None, None, Vec::new(), EdgeDirection::Outgoing)
+                (
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    Vec::new(),
+                    EdgeDirection::Outgoing,
+                )
             } else if self.current.kind == TokenKind::DoubleDash {
                 // Simple --
                 self.advance();
-                (None, Vec::new(), None, None, Vec::new(), EdgeDirection::Undirected)
+                (
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    Vec::new(),
+                    EdgeDirection::Undirected,
+                )
             } else {
                 return Err(self.error("Expected edge pattern"));
             };
@@ -1120,7 +1141,11 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(TokenKind::RParen)?;
-                Ok(Expression::FunctionCall { name, args, distinct: false })
+                Ok(Expression::FunctionCall {
+                    name,
+                    args,
+                    distinct: false,
+                })
             }
             _ if self.is_identifier() => {
                 let name = self.get_identifier_name();
@@ -1156,7 +1181,11 @@ impl<'a> Parser<'a> {
                         }
                     }
                     self.expect(TokenKind::RParen)?;
-                    Ok(Expression::FunctionCall { name, args, distinct })
+                    Ok(Expression::FunctionCall {
+                        name,
+                        args,
+                        distinct,
+                    })
                 } else {
                     Ok(Expression::Variable(name))
                 }
@@ -1835,7 +1864,12 @@ mod tests {
         for (query, expected_var) in queries {
             let mut parser = Parser::new(query);
             let result = parser.parse();
-            assert!(result.is_ok(), "Parse error for '{}': {:?}", expected_var, result.err());
+            assert!(
+                result.is_ok(),
+                "Parse error for '{}': {:?}",
+                expected_var,
+                result.err()
+            );
 
             if let Statement::Query(q) = result.unwrap() {
                 if let Pattern::Node(node) = &q.match_clauses[0].patterns[0].pattern {

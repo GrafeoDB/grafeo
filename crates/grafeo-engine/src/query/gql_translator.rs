@@ -83,7 +83,10 @@ impl GqlTranslator {
             // Extract the pattern - we only support simple node patterns for now
             let (variable, labels, match_properties) = match &merge_clause.pattern {
                 ast::Pattern::Node(node) => {
-                    let var = node.variable.clone().unwrap_or_else(|| format!("_anon_{}", rand_id()));
+                    let var = node
+                        .variable
+                        .clone()
+                        .unwrap_or_else(|| format!("_anon_{}", rand_id()));
                     let labels = node.labels.clone();
                     let props: Vec<(String, LogicalExpression)> = node
                         .properties
@@ -716,7 +719,8 @@ impl GqlTranslator {
 
             // Add filter for target node properties
             if !edge.target.properties.is_empty() {
-                let predicate = self.build_property_predicate(&target_var, &edge.target.properties)?;
+                let predicate =
+                    self.build_property_predicate(&target_var, &edge.target.properties)?;
                 plan = LogicalOperator::Filter(FilterOp {
                     predicate,
                     input: Box::new(plan),
@@ -895,7 +899,11 @@ impl GqlTranslator {
                     operand: Box::new(operand),
                 })
             }
-            ast::Expression::FunctionCall { name, args, distinct } => {
+            ast::Expression::FunctionCall {
+                name,
+                args,
+                distinct,
+            } => {
                 let args = args
                     .iter()
                     .map(|a| self.translate_expression(a))
@@ -1056,7 +1064,11 @@ impl GqlTranslator {
         alias: &Option<String>,
     ) -> Result<Option<AggregateExpr>> {
         match expr {
-            ast::Expression::FunctionCall { name, args, distinct } => {
+            ast::Expression::FunctionCall {
+                name,
+                args,
+                distinct,
+            } => {
                 if let Some(func) = to_aggregate_function(name) {
                     let agg_expr = if args.is_empty() {
                         // COUNT(*) case

@@ -357,7 +357,10 @@ impl<'a> Lexer<'a> {
 
     fn peek_char(&self) -> char {
         if self.position + 1 < self.input.len() {
-            self.input[self.position + 1..].chars().next().unwrap_or('\0')
+            self.input[self.position + 1..]
+                .chars()
+                .next()
+                .unwrap_or('\0')
         } else {
             '\0'
         }

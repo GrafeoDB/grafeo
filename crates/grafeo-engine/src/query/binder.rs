@@ -720,8 +720,8 @@ impl Binder {
                     _ => LogicalType::Any,
                 }
             }
-            LogicalExpression::List(_) => LogicalType::Any,  // Complex type
-            LogicalExpression::Map(_) => LogicalType::Any,   // Complex type
+            LogicalExpression::List(_) => LogicalType::Any, // Complex type
+            LogicalExpression::Map(_) => LogicalType::Any,  // Complex type
             _ => LogicalType::Any,
         }
     }

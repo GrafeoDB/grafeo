@@ -19,9 +19,9 @@ use grafeo_core::execution::operators::{
     ExpressionPredicate, FilterExpression, FilterOperator, HashAggregateOperator, HashJoinOperator,
     JoinType as PhysicalJoinType, LimitOperator, MergeOperator, NestedLoopJoinOperator, NullOrder,
     Operator, ProjectExpr, ProjectOperator, PropertySource, RemoveLabelOperator, ScanOperator,
-    SetPropertyOperator, ShortestPathOperator, SimpleAggregateOperator, SkipOperator, SortDirection,
-    SortKey as PhysicalSortKey, SortOperator, UnaryFilterOp, UnionOperator, UnwindOperator,
-    VariableLengthExpandOperator,
+    SetPropertyOperator, ShortestPathOperator, SimpleAggregateOperator, SkipOperator,
+    SortDirection, SortKey as PhysicalSortKey, SortOperator, UnaryFilterOp, UnionOperator,
+    UnwindOperator, VariableLengthExpandOperator,
 };
 use grafeo_core::graph::{Direction, lpg::LpgStore};
 use std::collections::HashMap;
@@ -458,9 +458,10 @@ impl Planner {
 
         for projection in &project.projections {
             // Determine the output column name (alias or expression string)
-            let col_name = projection.alias.clone().unwrap_or_else(|| {
-                expression_to_string(&projection.expression)
-            });
+            let col_name = projection
+                .alias
+                .clone()
+                .unwrap_or_else(|| expression_to_string(&projection.expression));
             output_columns.push(col_name);
 
             match &projection.expression {
@@ -622,8 +623,8 @@ impl Planner {
             .keys
             .iter()
             .map(|key| {
-                let col_idx =
-                    self.resolve_sort_expression_with_properties(&key.expression, &variable_columns)?;
+                let col_idx = self
+                    .resolve_sort_expression_with_properties(&key.expression, &variable_columns)?;
                 Ok(PhysicalSortKey {
                     column: col_idx,
                     direction: match key.order {
@@ -647,10 +648,11 @@ impl Planner {
         variable_columns: &HashMap<String, usize>,
     ) -> Result<usize> {
         match expr {
-            LogicalExpression::Variable(name) => variable_columns
-                .get(name)
-                .copied()
-                .ok_or_else(|| Error::Internal(format!("Variable '{}' not found for ORDER BY", name))),
+            LogicalExpression::Variable(name) => {
+                variable_columns.get(name).copied().ok_or_else(|| {
+                    Error::Internal(format!("Variable '{}' not found for ORDER BY", name))
+                })
+            }
             LogicalExpression::Property { variable, property } => {
                 // Look up the projected property column (e.g., "p_age" for p.age)
                 let col_name = format!("{}_{}", variable, property);
@@ -1442,19 +1444,17 @@ impl Planner {
 
                 // Create a project operator that produces a single row with the list
                 let single_row_op: Box<dyn Operator> = Box::new(
-                    grafeo_core::execution::operators::single_row::SingleRowOperator::new()
+                    grafeo_core::execution::operators::single_row::SingleRowOperator::new(),
                 );
-                let project_op: Box<dyn Operator> = Box::new(
-                    ProjectOperator::with_store(
-                        single_row_op,
-                        vec![ProjectExpr::Expression {
-                            expr: literal_list,
-                            variable_columns: HashMap::new(),
-                        }],
-                        vec![LogicalType::Any],
-                        Arc::clone(&self.store),
-                    )
-                );
+                let project_op: Box<dyn Operator> = Box::new(ProjectOperator::with_store(
+                    single_row_op,
+                    vec![ProjectExpr::Expression {
+                        expr: literal_list,
+                        variable_columns: HashMap::new(),
+                    }],
+                    vec![LogicalType::Any],
+                    Arc::clone(&self.store),
+                ));
 
                 (project_op, vec!["__list__".to_string()])
             } else {
@@ -1567,10 +1567,7 @@ impl Planner {
     }
 
     /// Plans a SHORTEST PATH operator.
-    fn plan_shortest_path(
-        &self,
-        sp: &ShortestPathOp,
-    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+    fn plan_shortest_path(&self, sp: &ShortestPathOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Plan the input operator
         let (input_op, mut columns) = self.plan_operator(&sp.input)?;
 

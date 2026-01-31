@@ -68,6 +68,7 @@ if [[ "$SKIP_RUST" == false ]]; then
     echo -e "${GREEN}PASSED${NC}"
 
     echo -e "\n${YELLOW}[3/4] Docs...${NC}"
+    rm -rf target/doc
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
     echo -e "${GREEN}PASSED${NC}"
 

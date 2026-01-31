@@ -41,7 +41,7 @@ run_check "Format" "cargo fmt --all -- --check"
 run_check "Clippy" "cargo clippy --all-targets --all-features -- -D warnings"
 
 # 3. Documentation
-run_check "Docs" "RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features"
+run_check "Docs" "rm -rf target/doc && RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features"
 
 # 4. Rust tests
 run_check "Rust Tests" "cargo test --all-features --workspace"

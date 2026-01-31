@@ -41,7 +41,9 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Check docs
-        run: cargo doc --no-deps --all-features
+        run: |
+          rm -rf target/doc
+          cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
 

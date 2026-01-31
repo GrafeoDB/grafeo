@@ -48,6 +48,7 @@ if (-not (Run-Check "Clippy" "cargo clippy --all-targets --all-features -- -D wa
 }
 
 # 3. Documentation
+Remove-Item -Recurse -Force target\doc -ErrorAction SilentlyContinue
 $env:RUSTDOCFLAGS = "-D warnings"
 if (-not (Run-Check "Docs" "cargo doc --no-deps --all-features")) {
     $failures += "Docs"

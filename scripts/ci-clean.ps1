@@ -47,6 +47,7 @@ try {
         Write-Host "PASSED" -ForegroundColor Green
 
         Write-Host "`n[3/4] Docs..." -ForegroundColor Yellow
+        Remove-Item -Recurse -Force target\doc -ErrorAction SilentlyContinue
         $env:RUSTDOCFLAGS = "-D warnings"
         cargo doc --no-deps --all-features
         if ($LASTEXITCODE -ne 0) { throw "Doc check failed" }

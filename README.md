@@ -28,7 +28,7 @@ Grafeo is a pure-Rust, high-performance graph database that can be embedded as a
 - **GQL** (ISO/IEC 39075)
 - **Cypher** (openCypher 9.0)
 - **Gremlin** (Apache TinkerPop)
-- **GraphQL**
+- **GraphQL** (September 2025)
 - **SPARQL** (W3C 1.1)
 
 ### Performance Features

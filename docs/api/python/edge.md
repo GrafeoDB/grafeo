@@ -40,15 +40,14 @@ def keys(self) -> List[str]
 ## Example
 
 ```python
-with db.session() as session:
-    result = session.execute("""
-        MATCH (a)-[r:KNOWS]->(b)
-        RETURN r LIMIT 1
-    """)
-    row = next(iter(result))
-    edge = row['r']
+result = db.execute("""
+    MATCH (a)-[r:KNOWS]->(b)
+    RETURN r LIMIT 1
+""")
+row = next(iter(result))
+edge = row['r']
 
-    print(f"Type: {edge.type}")
-    print(f"From: {edge.source} To: {edge.target}")
-    print(f"Since: {edge.get('since')}")
+print(f"Type: {edge.type}")
+print(f"From: {edge.source} To: {edge.target}")
+print(f"Since: {edge.get('since')}")
 ```

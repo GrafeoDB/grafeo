@@ -2,11 +2,6 @@
 
 Tests transaction semantics with SPARQL operations.
 Note: Uses Python API for transaction control with SPARQL queries inside.
-
-IMPORTANT: The RDF store does not yet support versioned transactions like
-the LPG store. SPARQL UPDATE operations are applied immediately to the
-RDF store. Tests that rely on rollback behavior will fail until versioned
-transaction support is added to the RDF store.
 """
 
 import pytest
@@ -89,17 +84,8 @@ class TestSPARQLTransactions(BaseTransactionsTest):
             }}
         """
 
-    # Override rollback test to mark as expected failure
-    @pytest.mark.xfail(
-        reason="RDF store does not yet support versioned transactions - operations apply immediately"
-    )
     def test_transaction_rollback(self, db):
-        """Test that rollback discards changes.
-
-        NOTE: This test is expected to fail because the RDF store does not yet
-        support versioned transactions. SPARQL UPDATE operations are applied
-        immediately to the RDF store.
-        """
+        """Test that rollback discards changes."""
         super().test_transaction_rollback(db)
 
 

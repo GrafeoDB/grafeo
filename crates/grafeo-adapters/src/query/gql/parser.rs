@@ -191,6 +191,12 @@ impl<'a> Parser<'a> {
             set_clauses.push(self.parse_set_clause()?);
         }
 
+        // Parse REMOVE clauses
+        let mut remove_clauses = Vec::new();
+        while self.current.kind == TokenKind::Remove {
+            remove_clauses.push(self.parse_remove_clause()?);
+        }
+
         // Parse CREATE clauses (Cypher-style: MATCH ... CREATE ...)
         while self.current.kind == TokenKind::Create {
             create_clauses.push(self.parse_create_clause_in_query()?);
@@ -223,10 +229,11 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // Parse RETURN clause (optional if we have SET, MERGE, CREATE, or DELETE clauses)
+        // Parse RETURN clause (optional if we have SET, REMOVE, MERGE, CREATE, or DELETE clauses)
         let return_clause = if self.current.kind == TokenKind::Return {
             self.parse_return_clause()?
         } else if !set_clauses.is_empty()
+            || !remove_clauses.is_empty()
             || !merge_clauses.is_empty()
             || !create_clauses.is_empty()
             || !delete_clauses.is_empty()
@@ -255,6 +262,7 @@ impl<'a> Parser<'a> {
             match_clauses,
             where_clause,
             set_clauses,
+            remove_clauses,
             with_clauses,
             unwind_clauses,
             merge_clauses,
@@ -327,6 +335,63 @@ impl<'a> Parser<'a> {
         Ok(SetClause {
             assignments,
             label_operations,
+            span: Some(SourceSpan::new(span_start, self.current.span.end, 1, 1)),
+        })
+    }
+
+    fn parse_remove_clause(&mut self) -> Result<RemoveClause> {
+        let span_start = self.current.span.start;
+        self.expect(TokenKind::Remove)?;
+
+        let mut label_operations = Vec::new();
+        let mut property_removals = Vec::new();
+
+        loop {
+            // Parse variable name
+            if !self.is_identifier() {
+                return Err(self.error("Expected variable name in REMOVE"));
+            }
+            let variable = self.current.text.clone();
+            self.advance();
+
+            // Check if this is a label removal (n:Label) or property removal (n.prop)
+            if self.current.kind == TokenKind::Colon {
+                // Label removal: REMOVE n:Label1:Label2
+                let mut labels = Vec::new();
+                while self.current.kind == TokenKind::Colon {
+                    self.advance();
+                    if !self.is_label_or_type_name() {
+                        return Err(self.error("Expected label name after colon in REMOVE"));
+                    }
+                    labels.push(self.current.text.clone());
+                    self.advance();
+                }
+                label_operations.push(LabelOperation { variable, labels });
+            } else if self.current.kind == TokenKind::Dot {
+                // Property removal: REMOVE n.prop
+                self.advance();
+
+                if !self.is_label_or_type_name() {
+                    return Err(self.error("Expected property name in REMOVE"));
+                }
+                let property = self.current.text.clone();
+                self.advance();
+
+                property_removals.push((variable, property));
+            } else {
+                return Err(self.error("Expected '.' or ':' after variable in REMOVE"));
+            }
+
+            // Check for more removal operations
+            if self.current.kind != TokenKind::Comma {
+                break;
+            }
+            self.advance();
+        }
+
+        Ok(RemoveClause {
+            label_operations,
+            property_removals,
             span: Some(SourceSpan::new(span_start, self.current.span.end, 1, 1)),
         })
     }
@@ -1355,6 +1420,7 @@ impl<'a> Parser<'a> {
             match_clauses,
             where_clause,
             set_clauses: vec![],
+            remove_clauses: vec![],
             with_clauses: vec![],
             unwind_clauses: vec![],
             merge_clauses: vec![],
@@ -1997,6 +2063,59 @@ mod tests {
             let merge = &query.merge_clauses[0];
             assert!(merge.on_create.is_some());
             assert_eq!(merge.on_create.as_ref().unwrap().len(), 1);
+        } else {
+            panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_remove_label() {
+        let mut parser = Parser::new("MATCH (n:Person) REMOVE n:Employee RETURN n");
+        let result = parser.parse();
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+
+        if let Statement::Query(query) = result.unwrap() {
+            assert_eq!(query.remove_clauses.len(), 1);
+            assert_eq!(query.remove_clauses[0].label_operations.len(), 1);
+            assert_eq!(query.remove_clauses[0].label_operations[0].variable, "n");
+            assert_eq!(
+                query.remove_clauses[0].label_operations[0].labels,
+                vec!["Employee"]
+            );
+        } else {
+            panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_remove_property() {
+        let mut parser = Parser::new("MATCH (n:Person) REMOVE n.age RETURN n");
+        let result = parser.parse();
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+
+        if let Statement::Query(query) = result.unwrap() {
+            assert_eq!(query.remove_clauses.len(), 1);
+            assert_eq!(query.remove_clauses[0].property_removals.len(), 1);
+            assert_eq!(query.remove_clauses[0].property_removals[0].0, "n");
+            assert_eq!(query.remove_clauses[0].property_removals[0].1, "age");
+        } else {
+            panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_remove_multiple() {
+        let mut parser =
+            Parser::new("MATCH (n:Person) REMOVE n:Employee, n.age, n:Contractor RETURN n");
+        let result = parser.parse();
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+
+        if let Statement::Query(query) = result.unwrap() {
+            assert_eq!(query.remove_clauses.len(), 1);
+            let remove = &query.remove_clauses[0];
+            // Two label operations (Employee, Contractor) and one property removal (age)
+            assert_eq!(remove.label_operations.len(), 2);
+            assert_eq!(remove.property_removals.len(), 1);
         } else {
             panic!("Expected Query statement");
         }

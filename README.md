@@ -26,10 +26,10 @@ A pure-Rust, high-performance, embeddable graph database supporting both **Label
 ### Query Languages
 
 - **GQL** (ISO/IEC 39075) - enabled by default
-- **Cypher** (openCypher 9.0) - via feature flag
-- **Gremlin** (Apache TinkerPop) - via feature flag
-- **GraphQL** - via feature flag, supports both LPG and RDF
-- **SPARQL** (W3C 1.1) - via feature flag for RDF queries
+- **Cypher** (openCypher 9.0) - enabled by default
+- **Gremlin** (Apache TinkerPop) - enabled by default
+- **GraphQL** - enabled by default, supports both LPG and RDF
+- **SPARQL** (W3C 1.1) - enabled by default for RDF queries
 
 ### Performance Features
 
@@ -47,10 +47,10 @@ A pure-Rust, high-performance, embeddable graph database supporting both **Label
 | Query Language | LPG | RDF | Status |
 |----------------|-----|-----|--------|
 | GQL (ISO/IEC 39075) | ✅ | — | Default |
-| Cypher (openCypher 9.0) | ✅ | — | Feature flag |
-| Gremlin (Apache TinkerPop) | ✅ | — | Feature flag |
-| GraphQL | ✅ | ✅ | Feature flag |
-| SPARQL (W3C 1.1) | — | ✅ | Feature flag |
+| Cypher (openCypher 9.0) | ✅ | — | Default |
+| Gremlin (Apache TinkerPop) | ✅ | — | Default |
+| GraphQL | ✅ | ✅ | Default |
+| SPARQL (W3C 1.1) | — | ✅ | Default |
 
 Grafeo uses a modular translator architecture where query languages are parsed into ASTs, then translated to a unified logical plan that executes against the appropriate storage backend (LPG or RDF).
 
@@ -67,13 +67,10 @@ Grafeo uses a modular translator architecture where query languages are parsed i
 cargo add grafeo
 ```
 
-With additional query languages:
+All query languages (GQL, Cypher, Gremlin, GraphQL, SPARQL) are enabled by default. To disable specific languages:
 
 ```bash
-cargo add grafeo --features cypher   # Add Cypher support
-cargo add grafeo --features gremlin  # Add Gremlin support
-cargo add grafeo --features graphql  # Add GraphQL support
-cargo add grafeo --features full     # All query languages
+cargo add grafeo --no-default-features --features gql,cypher
 ```
 
 ### Python
@@ -123,6 +120,11 @@ for row in result:
 # Or use the direct API
 node = db.create_node(["Person"], {"name": "Carol"})
 print(f"Created node with ID: {node.id}")
+
+# Manage labels
+db.add_node_label(node.id, "Employee")     # Add a label
+db.remove_node_label(node.id, "Contractor") # Remove a label
+labels = db.get_node_labels(node.id)        # Get all labels
 ```
 
 ### Admin APIs (Python)

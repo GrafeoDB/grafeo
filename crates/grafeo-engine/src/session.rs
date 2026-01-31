@@ -431,7 +431,7 @@ impl Session {
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // Convert to physical plan using RDF planner
-        let planner = RdfPlanner::new(Arc::clone(&self.rdf_store));
+        let planner = RdfPlanner::new(Arc::clone(&self.rdf_store)).with_tx_id(self.current_tx);
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         // Execute the plan
@@ -504,6 +504,9 @@ impl Session {
             )
         })?;
 
+        // Commit RDF store pending operations
+        self.rdf_store.commit_tx(tx_id);
+
         self.tx_manager.commit(tx_id).map(|_| ())
     }
 
@@ -536,8 +539,11 @@ impl Session {
             )
         })?;
 
-        // Discard uncommitted versions in the store
+        // Discard uncommitted versions in the LPG store
         self.store.discard_uncommitted_versions(tx_id);
+
+        // Discard pending operations in the RDF store
+        self.rdf_store.rollback_tx(tx_id);
 
         // Mark transaction as aborted in the manager
         self.tx_manager.abort(tx_id)

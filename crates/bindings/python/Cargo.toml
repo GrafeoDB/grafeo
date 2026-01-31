@@ -24,7 +24,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [features]
-default = ["gql"]
+default = ["full"]
 gql = ["grafeo-engine/gql"]
 cypher = ["grafeo-engine/cypher"]
 sparql = ["grafeo-engine/sparql", "grafeo-engine/rdf"]

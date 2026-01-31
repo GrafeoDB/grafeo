@@ -11,7 +11,7 @@ For production use, please use the [Python bindings](https://pypi.org/project/gr
 ## Installation
 
 ```bash
-go get github.com/StevenBtw/grafeo/crates/grafeo-go
+go get github.com/StevenBtw/grafeo/crates/bindings/go
 ```
 
 ## Planned Features

@@ -3,12 +3,7 @@ A pure-Rust, high-performance, embeddable graph database supporting both **Label
 ## Features
 
 - **Dual data model support**: LPG and RDF with optimized storage for each
-- **Multi-language queries**: GQL, Cypher, Gremlin, GraphQL, and SPARQL
-- **GQL** (ISO/IEC 39075) - enabled by default
-- **Cypher** (openCypher 9.0) - via feature flag
-- **Gremlin** (Apache TinkerPop) - via feature flag
-- **GraphQL** - via feature flag, supports both LPG and RDF
-- **SPARQL** (W3C 1.1) - via feature flag for RDF queries
+- **Multi-language queries**: GQL, Cypher, Gremlin, GraphQL, and SPARQL (all enabled by default)
 - Embeddable with zero external dependencies
 - Python bindings via PyO3
 - In-memory and persistent storage modes
@@ -19,10 +14,10 @@ A pure-Rust, high-performance, embeddable graph database supporting both **Label
 | Query Language | LPG | RDF | Status |
 |----------------|-----|-----|--------|
 | GQL (ISO/IEC 39075) | ✅ | — | Default |
-| Cypher (openCypher 9.0) | ✅ | — | Feature flag |
-| Gremlin (Apache TinkerPop) | ✅ | — | Feature flag |
-| GraphQL | ✅ | ✅ | Feature flag |
-| SPARQL (W3C 1.1) | — | ✅ | Feature flag |
+| Cypher (openCypher 9.0) | ✅ | — | Default |
+| Gremlin (Apache TinkerPop) | ✅ | — | Default |
+| GraphQL | ✅ | ✅ | Default |
+| SPARQL (W3C 1.1) | — | ✅ | Default |
 
 Grafeo uses a modular translator architecture where query languages are parsed into ASTs, then translated to a unified logical plan that executes against the appropriate storage backend (LPG or RDF).
 
@@ -33,17 +28,39 @@ Grafeo uses a modular translator architecture where query languages are parsed i
 
 ## Installation
 
-### Rust
-
 ```bash
 cargo add grafeo
 ```
 
-With additional query languages:
+All query languages are enabled by default. For a minimal build with specific languages:
 
 ```bash
-cargo add grafeo --features cypher   # Add Cypher support
-cargo add grafeo --features gremlin  # Add Gremlin support
-cargo add grafeo --features graphql  # Add GraphQL support
-cargo add grafeo --features full     # All query languages
+cargo add grafeo --no-default-features --features gql  # GQL only
 ```
+
+## Quick Start
+
+```rust
+use grafeo::GrafeoDB;
+
+fn main() -> Result<(), grafeo_common::utils::error::Error> {
+    let db = GrafeoDB::new_in_memory();
+    let mut session = db.session();
+
+    // Create nodes
+    session.execute("INSERT (:Person {name: 'Alice', age: 30})")?;
+    session.execute("INSERT (:Person {name: 'Bob', age: 25})")?;
+
+    // Query
+    let result = session.execute("MATCH (p:Person) RETURN p.name, p.age")?;
+    for row in result.rows {
+        println!("{:?}", row);
+    }
+
+    Ok(())
+}
+```
+
+## License
+
+Apache-2.0

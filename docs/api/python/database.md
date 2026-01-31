@@ -13,11 +13,8 @@ The main database class.
 ## Constructor
 
 ```python
-Database(
-    path: Optional[str] = None,
-    memory_limit: Optional[int] = None,
-    threads: Optional[int] = None,
-    read_only: bool = False
+GrafeoDB(
+    path: Optional[str] = None
 )
 ```
 
@@ -26,40 +23,153 @@ Database(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `path` | `str` | `None` | Database file path (None for in-memory) |
-| `memory_limit` | `int` | System RAM | Maximum memory in bytes |
-| `threads` | `int` | CPU cores | Worker thread count |
-| `read_only` | `bool` | `False` | Open in read-only mode |
 
-## Methods
-
-### session()
-
-Create a new session.
+### Examples
 
 ```python
-def session(self) -> Session
+# In-memory database
+db = grafeo.GrafeoDB()
+
+# Persistent database
+db = grafeo.GrafeoDB("my_graph.db")
 ```
 
-### close()
+## Query Methods
 
-Close the database.
+### execute()
+
+Execute a GQL query.
 
 ```python
-def close(self) -> None
+def execute(self, query: str) -> QueryResult
 ```
 
-### checkpoint()
+### execute_cypher()
 
-Force a checkpoint.
+Execute a Cypher query.
 
 ```python
-def checkpoint(self) -> None
+def execute_cypher(self, query: str) -> QueryResult
 ```
 
-## Context Manager
+### execute_gremlin()
+
+Execute a Gremlin query.
 
 ```python
-with grafeo.GrafeoDB(path="db.grafeo") as db:
-    with db.session() as session:
-        session.execute("...")
+def execute_gremlin(self, query: str) -> QueryResult
+```
+
+### execute_graphql()
+
+Execute a GraphQL query.
+
+```python
+def execute_graphql(self, query: str) -> QueryResult
+```
+
+### execute_sparql()
+
+Execute a SPARQL query.
+
+```python
+def execute_sparql(self, query: str) -> QueryResult
+```
+
+## Node Operations
+
+### create_node()
+
+Create a node with labels and properties.
+
+```python
+def create_node(self, labels: List[str], properties: Dict[str, Any]) -> Node
+```
+
+### add_node_label()
+
+Add a label to an existing node.
+
+```python
+def add_node_label(self, node_id: int, label: str) -> None
+```
+
+### remove_node_label()
+
+Remove a label from a node.
+
+```python
+def remove_node_label(self, node_id: int, label: str) -> None
+```
+
+### get_node_labels()
+
+Get all labels for a node.
+
+```python
+def get_node_labels(self, node_id: int) -> List[str]
+```
+
+## Transaction Methods
+
+### begin_transaction()
+
+Start a new transaction.
+
+```python
+def begin_transaction(self) -> Transaction
+```
+
+## Admin Methods
+
+### info()
+
+Get database information.
+
+```python
+def info(self) -> Dict[str, Any]
+```
+
+### detailed_stats()
+
+Get detailed statistics.
+
+```python
+def detailed_stats(self) -> Dict[str, Any]
+```
+
+### schema()
+
+Get schema information.
+
+```python
+def schema(self) -> Dict[str, Any]
+```
+
+### validate()
+
+Validate database integrity.
+
+```python
+def validate(self) -> bool
+```
+
+## Example
+
+```python
+import grafeo
+
+db = grafeo.GrafeoDB()
+
+# Execute queries
+db.execute("INSERT (:Person {name: 'Alice', age: 30})")
+
+result = db.execute("MATCH (p:Person) RETURN p.name")
+for row in result:
+    print(row['p.name'])
+
+# Use transactions
+with db.begin_transaction() as tx:
+    tx.execute("INSERT (:Person {name: 'Bob'})")
+    tx.commit()
 ```

@@ -22,6 +22,8 @@ pub struct QueryStatement {
     pub where_clause: Option<WhereClause>,
     /// SET clauses for property updates.
     pub set_clauses: Vec<SetClause>,
+    /// REMOVE clauses for label/property removal.
+    pub remove_clauses: Vec<RemoveClause>,
     /// WITH clauses for query chaining.
     pub with_clauses: Vec<WithClause>,
     /// UNWIND clauses for list expansion.
@@ -67,6 +69,17 @@ pub struct LabelOperation {
     pub variable: String,
     /// Labels to add.
     pub labels: Vec<String>,
+}
+
+/// A REMOVE clause for removing labels or properties.
+#[derive(Debug, Clone)]
+pub struct RemoveClause {
+    /// Label removal operations.
+    pub label_operations: Vec<LabelOperation>,
+    /// Property removal operations (variable.property pairs).
+    pub property_removals: Vec<(String, String)>,
+    /// Source span.
+    pub span: Option<SourceSpan>,
 }
 
 /// A MATCH clause.

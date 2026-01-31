@@ -56,17 +56,8 @@ class TestRDFGraphQLTransactions:
         """))
         assert len(result) == 1
 
-    @pytest.mark.xfail(
-        reason="RDF store does not yet support versioned transactions - operations apply immediately"
-    )
     def test_sparql_transaction_rollback(self):
-        """Test that rolled back SPARQL changes don't persist.
-
-        NOTE: This test is expected to fail because the RDF store does not yet
-        support versioned transactions like the LPG store. SPARQL UPDATE
-        operations are applied immediately to the RDF store. Full transaction
-        support would require buffering operations until commit/rollback.
-        """
+        """Test that rolled back SPARQL changes don't persist."""
         tx = self.db.begin_transaction()
 
         # Insert data in transaction

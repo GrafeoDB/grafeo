@@ -65,17 +65,25 @@ grafeo = "0.1"
 
 ### Feature Flags
 
-Grafeo supports optional features:
+All query languages are enabled by default. To use a minimal build:
 
 ```toml
 [dependencies]
-grafeo = { version = "0.1", features = ["full"] }
+# Default: all query languages enabled
+grafeo = "0.1"
+
+# Minimal: only specific languages
+grafeo = { version = "0.1", default-features = false, features = ["gql"] }
 ```
 
 | Feature | Description |
 |---------|-------------|
-| `default` | Core functionality |
-| `full` | All features enabled |
+| `default` | All query languages (GQL, Cypher, Gremlin, GraphQL, SPARQL) |
+| `gql` | GQL only |
+| `cypher` | Cypher only |
+| `sparql` | SPARQL and RDF support |
+| `gremlin` | Gremlin only |
+| `graphql` | GraphQL only |
 
 ### Verify Installation
 

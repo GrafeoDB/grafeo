@@ -35,6 +35,8 @@ pub enum TokenKind {
     Delete,
     /// SET keyword.
     Set,
+    /// REMOVE keyword.
+    Remove,
     /// CREATE keyword.
     Create,
     /// NODE keyword.
@@ -491,6 +493,7 @@ impl<'a> Lexer<'a> {
             "INSERT" => TokenKind::Insert,
             "DELETE" => TokenKind::Delete,
             "SET" => TokenKind::Set,
+            "REMOVE" => TokenKind::Remove,
             "CREATE" => TokenKind::Create,
             "NODE" => TokenKind::Node,
             "EDGE" => TokenKind::Edge,

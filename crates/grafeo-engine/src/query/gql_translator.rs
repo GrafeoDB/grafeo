@@ -6,8 +6,8 @@ use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CreateEdgeOp,
     CreateNodeOp, DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, FilterOp, JoinOp, JoinType,
     LeftJoinOp, LimitOp, LogicalExpression, LogicalOperator, LogicalPlan, MergeOp, NodeScanOp,
-    ProjectOp, Projection, ReturnItem, ReturnOp, SetPropertyOp, ShortestPathOp, SkipOp, SortKey,
-    SortOp, SortOrder, UnaryOp, UnwindOp,
+    ProjectOp, Projection, RemoveLabelOp, ReturnItem, ReturnOp, SetPropertyOp, ShortestPathOp,
+    SkipOp, SortKey, SortOp, SortOrder, UnaryOp, UnwindOp,
 };
 use grafeo_adapters::query::gql::{self, ast};
 use grafeo_common::types::Value;
@@ -164,6 +164,27 @@ impl GqlTranslator {
                 plan = LogicalOperator::AddLabel(AddLabelOp {
                     variable: label_op.variable.clone(),
                     labels: label_op.labels.clone(),
+                    input: Box::new(plan),
+                });
+            }
+        }
+
+        // Handle REMOVE clauses
+        for remove_clause in &query.remove_clauses {
+            // Handle label removal (REMOVE n:Label)
+            for label_op in &remove_clause.label_operations {
+                plan = LogicalOperator::RemoveLabel(RemoveLabelOp {
+                    variable: label_op.variable.clone(),
+                    labels: label_op.labels.clone(),
+                    input: Box::new(plan),
+                });
+            }
+            // Handle property removal (REMOVE n.prop) - set to null
+            for (variable, property) in &remove_clause.property_removals {
+                plan = LogicalOperator::SetProperty(SetPropertyOp {
+                    variable: variable.clone(),
+                    properties: vec![(property.clone(), LogicalExpression::Literal(Value::Null))],
+                    replace: false,
                     input: Box::new(plan),
                 });
             }

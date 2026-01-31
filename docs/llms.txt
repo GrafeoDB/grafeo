@@ -51,28 +51,26 @@ import grafeo
 db = grafeo.GrafeoDB()  # in-memory
 db = grafeo.GrafeoDB(path="my_graph.db")  # persistent
 
-# Use sessions for queries
-with db.session() as session:
-    # Insert nodes
-    session.execute("""
-        INSERT (:Person {name: 'Alice', age: 30})
-        INSERT (:Person {name: 'Bob', age: 25})
-    """)
+# Insert nodes
+db.execute("""
+    INSERT (:Person {name: 'Alice', age: 30})
+    INSERT (:Person {name: 'Bob', age: 25})
+""")
 
-    # Insert edges
-    session.execute("""
-        MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
-        INSERT (a)-[:KNOWS {since: 2024}]->(b)
-    """)
+# Insert edges
+db.execute("""
+    MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+    INSERT (a)-[:KNOWS {since: 2024}]->(b)
+""")
 
-    # Query with pattern matching
-    result = session.execute("""
-        MATCH (p:Person)-[:KNOWS]->(friend)
-        RETURN p.name, friend.name
-    """)
+# Query with pattern matching
+result = db.execute("""
+    MATCH (p:Person)-[:KNOWS]->(friend)
+    RETURN p.name, friend.name
+""")
 
-    for row in result:
-        print(row['p.name'], row['friend.name'])
+for row in result:
+    print(row['p.name'], row['friend.name'])
 ```
 
 ## Quick Start (Rust)
@@ -106,25 +104,25 @@ fn main() -> Result<(), grafeo_common::utils::error::Error> {
 
 ```python
 grafeo.GrafeoDB(
-    path: str | None = None,     # None for in-memory
-    memory_limit: int | None = None,
-    threads: int | None = None,
-    read_only: bool = False
+    path: str | None = None     # None for in-memory
 )
 ```
 
 Methods:
-- `session() -> Session`: Create a new session
-- `close()`: Close the database
-- `checkpoint()`: Force a checkpoint
+- `execute(query: str) -> QueryResult`: Execute a query
+- `execute_cypher(query: str) -> QueryResult`: Execute Cypher
+- `execute_gremlin(query: str) -> QueryResult`: Execute Gremlin
+- `execute_graphql(query: str) -> QueryResult`: Execute GraphQL
+- `execute_sparql(query: str) -> QueryResult`: Execute SPARQL
+- `begin_transaction() -> Transaction`: Start a transaction
 
-### Session
+### Transaction
 
 ```python
-with db.session() as session:
-    result = session.execute(query: str) -> QueryResult
-    session.commit()
-    session.rollback()
+with db.begin_transaction() as tx:
+    result = tx.execute(query: str) -> QueryResult
+    tx.commit()
+    tx.rollback()
 ```
 
 ### QueryResult

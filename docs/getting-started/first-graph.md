@@ -24,15 +24,15 @@ A social network with:
     import grafeo
 
     # Create a persistent database
-    db = grafeo.GrafeoDB(path="social_network.db")
+    db = grafeo.GrafeoDB("social_network.db")
     ```
 
 === "Rust"
 
     ```rust
-    use grafeo::Database;
+    use grafeo::GrafeoDB;
 
-    let db = Database::open("social_network.db")?;
+    let db = GrafeoDB::new("social_network.db")?;
     ```
 
 ## Step 2: Add People
@@ -40,35 +40,34 @@ A social network with:
 === "Python"
 
     ```python
-    with db.session() as session:
-        session.execute("""
-            INSERT (:Person {
-                name: 'Alice',
-                age: 30,
-                location: 'New York'
-            })
-            INSERT (:Person {
-                name: 'Bob',
-                age: 25,
-                location: 'San Francisco'
-            })
-            INSERT (:Person {
-                name: 'Carol',
-                age: 35,
-                location: 'New York'
-            })
-            INSERT (:Person {
-                name: 'Dave',
-                age: 28,
-                location: 'Los Angeles'
-            })
-        """)
+    db.execute("""
+        INSERT (:Person {
+            name: 'Alice',
+            age: 30,
+            location: 'New York'
+        })
+        INSERT (:Person {
+            name: 'Bob',
+            age: 25,
+            location: 'San Francisco'
+        })
+        INSERT (:Person {
+            name: 'Carol',
+            age: 35,
+            location: 'New York'
+        })
+        INSERT (:Person {
+            name: 'Dave',
+            age: 28,
+            location: 'Los Angeles'
+        })
+    """)
     ```
 
 === "Rust"
 
     ```rust
-    let session = db.session()?;
+    let mut session = db.session();
 
     session.execute(r#"
         INSERT (:Person {
@@ -99,35 +98,34 @@ A social network with:
 === "Python"
 
     ```python
-    with db.session() as session:
-        # Alice knows Bob and Carol
-        session.execute("""
-            MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
-            INSERT (a)-[:FRIENDS_WITH {since: 2020}]->(b)
-        """)
+    # Alice knows Bob and Carol
+    db.execute("""
+        MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+        INSERT (a)-[:FRIENDS_WITH {since: 2020}]->(b)
+    """)
 
-        session.execute("""
-            MATCH (a:Person {name: 'Alice'}), (c:Person {name: 'Carol'})
-            INSERT (a)-[:FRIENDS_WITH {since: 2019}]->(c)
-        """)
+    db.execute("""
+        MATCH (a:Person {name: 'Alice'}), (c:Person {name: 'Carol'})
+        INSERT (a)-[:FRIENDS_WITH {since: 2019}]->(c)
+    """)
 
-        # Bob knows Dave
-        session.execute("""
-            MATCH (b:Person {name: 'Bob'}), (d:Person {name: 'Dave'})
-            INSERT (b)-[:FRIENDS_WITH {since: 2021}]->(d)
-        """)
+    # Bob knows Dave
+    db.execute("""
+        MATCH (b:Person {name: 'Bob'}), (d:Person {name: 'Dave'})
+        INSERT (b)-[:FRIENDS_WITH {since: 2021}]->(d)
+    """)
 
-        # Carol knows Dave
-        session.execute("""
-            MATCH (c:Person {name: 'Carol'}), (d:Person {name: 'Dave'})
-            INSERT (c)-[:FRIENDS_WITH {since: 2022}]->(d)
-        """)
+    # Carol knows Dave
+    db.execute("""
+        MATCH (c:Person {name: 'Carol'}), (d:Person {name: 'Dave'})
+        INSERT (c)-[:FRIENDS_WITH {since: 2022}]->(d)
+    """)
     ```
 
 === "Rust"
 
     ```rust
-    let session = db.session()?;
+    let mut session = db.session();
 
     session.execute(r#"
         MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
@@ -155,40 +153,39 @@ A social network with:
 === "Python"
 
     ```python
-    with db.session() as session:
-        session.execute("""
-            INSERT (:Post {
-                id: 1,
-                content: 'Hello, world!',
-                created_at: '2024-01-15'
-            })
-            INSERT (:Post {
-                id: 2,
-                content: 'Learning Grafeo is fun!',
-                created_at: '2024-01-16'
-            })
-            INSERT (:Post {
-                id: 3,
-                content: 'Graph databases are amazing.',
-                created_at: '2024-01-17'
-            })
-        """)
+    db.execute("""
+        INSERT (:Post {
+            id: 1,
+            content: 'Hello, world!',
+            created_at: '2024-01-15'
+        })
+        INSERT (:Post {
+            id: 2,
+            content: 'Learning Grafeo is fun!',
+            created_at: '2024-01-16'
+        })
+        INSERT (:Post {
+            id: 3,
+            content: 'Graph databases are amazing.',
+            created_at: '2024-01-17'
+        })
+    """)
 
-        # Connect posts to authors
-        session.execute("""
-            MATCH (a:Person {name: 'Alice'}), (p:Post {id: 1})
-            INSERT (a)-[:POSTED]->(p)
-        """)
+    # Connect posts to authors
+    db.execute("""
+        MATCH (a:Person {name: 'Alice'}), (p:Post {id: 1})
+        INSERT (a)-[:POSTED]->(p)
+    """)
 
-        session.execute("""
-            MATCH (b:Person {name: 'Bob'}), (p:Post {id: 2})
-            INSERT (b)-[:POSTED]->(p)
-        """)
+    db.execute("""
+        MATCH (b:Person {name: 'Bob'}), (p:Post {id: 2})
+        INSERT (b)-[:POSTED]->(p)
+    """)
 
-        session.execute("""
-            MATCH (c:Person {name: 'Carol'}), (p:Post {id: 3})
-            INSERT (c)-[:POSTED]->(p)
-        """)
+    db.execute("""
+        MATCH (c:Person {name: 'Carol'}), (p:Post {id: 3})
+        INSERT (c)-[:POSTED]->(p)
+    """)
     ```
 
 ## Step 5: Add Likes
@@ -196,25 +193,24 @@ A social network with:
 === "Python"
 
     ```python
-    with db.session() as session:
-        # Bob likes Alice's post
-        session.execute("""
-            MATCH (b:Person {name: 'Bob'}), (p:Post {id: 1})
-            INSERT (b)-[:LIKES]->(p)
-        """)
+    # Bob likes Alice's post
+    db.execute("""
+        MATCH (b:Person {name: 'Bob'}), (p:Post {id: 1})
+        INSERT (b)-[:LIKES]->(p)
+    """)
 
-        # Carol likes Alice's and Bob's posts
-        session.execute("""
-            MATCH (c:Person {name: 'Carol'}), (p:Post)
-            WHERE p.id IN [1, 2]
-            INSERT (c)-[:LIKES]->(p)
-        """)
+    # Carol likes Alice's and Bob's posts
+    db.execute("""
+        MATCH (c:Person {name: 'Carol'}), (p:Post)
+        WHERE p.id IN [1, 2]
+        INSERT (c)-[:LIKES]->(p)
+    """)
 
-        # Dave likes all posts
-        session.execute("""
-            MATCH (d:Person {name: 'Dave'}), (p:Post)
-            INSERT (d)-[:LIKES]->(p)
-        """)
+    # Dave likes all posts
+    db.execute("""
+        MATCH (d:Person {name: 'Dave'}), (p:Post)
+        INSERT (d)-[:LIKES]->(p)
+    """)
     ```
 
 ## Step 6: Query the Graph
@@ -226,15 +222,14 @@ Now let's explore the social network:
 === "Python"
 
     ```python
-    with db.session() as session:
-        result = session.execute("""
-            MATCH (a:Person {name: 'Alice'})-[:FRIENDS_WITH]->(friend)
-            RETURN friend.name, friend.location
-        """)
+    result = db.execute("""
+        MATCH (a:Person {name: 'Alice'})-[:FRIENDS_WITH]->(friend)
+        RETURN friend.name, friend.location
+    """)
 
-        print("Alice's friends:")
-        for row in result:
-            print(f"  - {row['friend.name']} from {row['friend.location']}")
+    print("Alice's friends:")
+    for row in result:
+        print(f"  - {row['friend.name']} from {row['friend.location']}")
     ```
 
 ### Find Friends of Friends
@@ -242,16 +237,15 @@ Now let's explore the social network:
 === "Python"
 
     ```python
-    with db.session() as session:
-        result = session.execute("""
-            MATCH (a:Person {name: 'Alice'})-[:FRIENDS_WITH]->()-[:FRIENDS_WITH]->(fof)
-            WHERE fof <> a
-            RETURN DISTINCT fof.name
-        """)
+    result = db.execute("""
+        MATCH (a:Person {name: 'Alice'})-[:FRIENDS_WITH]->()-[:FRIENDS_WITH]->(fof)
+        WHERE fof <> a
+        RETURN DISTINCT fof.name
+    """)
 
-        print("Friends of Alice's friends:")
-        for row in result:
-            print(f"  - {row['fof.name']}")
+    print("Friends of Alice's friends:")
+    for row in result:
+        print(f"  - {row['fof.name']}")
     ```
 
 ### Find People in the Same Location
@@ -259,15 +253,14 @@ Now let's explore the social network:
 === "Python"
 
     ```python
-    with db.session() as session:
-        result = session.execute("""
-            MATCH (p:Person)
-            RETURN p.location AS location, collect(p.name) AS people
-        """)
+    result = db.execute("""
+        MATCH (p:Person)
+        RETURN p.location AS location, collect(p.name) AS people
+    """)
 
-        print("People by location:")
-        for row in result:
-            print(f"  {row['location']}: {row['people']}")
+    print("People by location:")
+    for row in result:
+        print(f"  {row['location']}: {row['people']}")
     ```
 
 ### Find Most Liked Posts
@@ -275,17 +268,16 @@ Now let's explore the social network:
 === "Python"
 
     ```python
-    with db.session() as session:
-        result = session.execute("""
-            MATCH (p:Post)<-[:LIKES]-(person)
-            MATCH (author)-[:POSTED]->(p)
-            RETURN p.content AS post, author.name AS author, count(person) AS likes
-            ORDER BY likes DESC
-        """)
+    result = db.execute("""
+        MATCH (p:Post)<-[:LIKES]-(person)
+        MATCH (author)-[:POSTED]->(p)
+        RETURN p.content AS post, author.name AS author, count(person) AS likes
+        ORDER BY likes DESC
+    """)
 
-        print("Posts by popularity:")
-        for row in result:
-            print(f"  '{row['post']}' by {row['author']} - {row['likes']} likes")
+    print("Posts by popularity:")
+    for row in result:
+        print(f"  '{row['post']}' by {row['author']} - {row['likes']} likes")
     ```
 
 ### Find Mutual Friends
@@ -293,15 +285,14 @@ Now let's explore the social network:
 === "Python"
 
     ```python
-    with db.session() as session:
-        result = session.execute("""
-            MATCH (a:Person {name: 'Alice'})-[:FRIENDS_WITH]->(mutual)<-[:FRIENDS_WITH]-(b:Person {name: 'Bob'})
-            RETURN mutual.name
-        """)
+    result = db.execute("""
+        MATCH (a:Person {name: 'Alice'})-[:FRIENDS_WITH]->(mutual)<-[:FRIENDS_WITH]-(b:Person {name: 'Bob'})
+        RETURN mutual.name
+    """)
 
-        print("Mutual friends of Alice and Bob:")
-        for row in result:
-            print(f"  - {row['mutual.name']}")
+    print("Mutual friends of Alice and Bob:")
+    for row in result:
+        print(f"  - {row['mutual.name']}")
     ```
 
 ## The Complete Graph

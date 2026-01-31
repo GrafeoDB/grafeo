@@ -176,44 +176,44 @@ impl Optimizer {
         match op {
             LogicalOperator::Return(ret) => {
                 for item in &ret.items {
-                    self.collect_from_expression(&item.expression, required);
+                    Self::collect_from_expression(&item.expression, required);
                 }
                 self.collect_required_recursive(&ret.input, required);
             }
             LogicalOperator::Project(proj) => {
                 for p in &proj.projections {
-                    self.collect_from_expression(&p.expression, required);
+                    Self::collect_from_expression(&p.expression, required);
                 }
                 self.collect_required_recursive(&proj.input, required);
             }
             LogicalOperator::Filter(filter) => {
-                self.collect_from_expression(&filter.predicate, required);
+                Self::collect_from_expression(&filter.predicate, required);
                 self.collect_required_recursive(&filter.input, required);
             }
             LogicalOperator::Sort(sort) => {
                 for key in &sort.keys {
-                    self.collect_from_expression(&key.expression, required);
+                    Self::collect_from_expression(&key.expression, required);
                 }
                 self.collect_required_recursive(&sort.input, required);
             }
             LogicalOperator::Aggregate(agg) => {
                 for expr in &agg.group_by {
-                    self.collect_from_expression(expr, required);
+                    Self::collect_from_expression(expr, required);
                 }
                 for agg_expr in &agg.aggregates {
                     if let Some(ref expr) = agg_expr.expression {
-                        self.collect_from_expression(expr, required);
+                        Self::collect_from_expression(expr, required);
                     }
                 }
                 if let Some(ref having) = agg.having {
-                    self.collect_from_expression(having, required);
+                    Self::collect_from_expression(having, required);
                 }
                 self.collect_required_recursive(&agg.input, required);
             }
             LogicalOperator::Join(join) => {
                 for cond in &join.conditions {
-                    self.collect_from_expression(&cond.left, required);
-                    self.collect_from_expression(&cond.right, required);
+                    Self::collect_from_expression(&cond.left, required);
+                    Self::collect_from_expression(&cond.right, required);
                 }
                 self.collect_required_recursive(&join.left, required);
                 self.collect_required_recursive(&join.right, required);
@@ -247,11 +247,7 @@ impl Optimizer {
     }
 
     /// Collects required columns from an expression.
-    fn collect_from_expression(
-        &self,
-        expr: &LogicalExpression,
-        required: &mut HashSet<RequiredColumn>,
-    ) {
+    fn collect_from_expression(expr: &LogicalExpression, required: &mut HashSet<RequiredColumn>) {
         match expr {
             LogicalExpression::Variable(var) => {
                 required.insert(RequiredColumn::Variable(var.clone()));
@@ -261,38 +257,38 @@ impl Optimizer {
                 required.insert(RequiredColumn::Variable(variable.clone()));
             }
             LogicalExpression::Binary { left, right, .. } => {
-                self.collect_from_expression(left, required);
-                self.collect_from_expression(right, required);
+                Self::collect_from_expression(left, required);
+                Self::collect_from_expression(right, required);
             }
             LogicalExpression::Unary { operand, .. } => {
-                self.collect_from_expression(operand, required);
+                Self::collect_from_expression(operand, required);
             }
             LogicalExpression::FunctionCall { args, .. } => {
                 for arg in args {
-                    self.collect_from_expression(arg, required);
+                    Self::collect_from_expression(arg, required);
                 }
             }
             LogicalExpression::List(items) => {
                 for item in items {
-                    self.collect_from_expression(item, required);
+                    Self::collect_from_expression(item, required);
                 }
             }
             LogicalExpression::Map(pairs) => {
                 for (_, value) in pairs {
-                    self.collect_from_expression(value, required);
+                    Self::collect_from_expression(value, required);
                 }
             }
             LogicalExpression::IndexAccess { base, index } => {
-                self.collect_from_expression(base, required);
-                self.collect_from_expression(index, required);
+                Self::collect_from_expression(base, required);
+                Self::collect_from_expression(index, required);
             }
             LogicalExpression::SliceAccess { base, start, end } => {
-                self.collect_from_expression(base, required);
+                Self::collect_from_expression(base, required);
                 if let Some(s) = start {
-                    self.collect_from_expression(s, required);
+                    Self::collect_from_expression(s, required);
                 }
                 if let Some(e) = end {
-                    self.collect_from_expression(e, required);
+                    Self::collect_from_expression(e, required);
                 }
             }
             LogicalExpression::Case {
@@ -301,14 +297,14 @@ impl Optimizer {
                 else_clause,
             } => {
                 if let Some(op) = operand {
-                    self.collect_from_expression(op, required);
+                    Self::collect_from_expression(op, required);
                 }
                 for (cond, result) in when_clauses {
-                    self.collect_from_expression(cond, required);
-                    self.collect_from_expression(result, required);
+                    Self::collect_from_expression(cond, required);
+                    Self::collect_from_expression(result, required);
                 }
                 if let Some(else_expr) = else_clause {
-                    self.collect_from_expression(else_expr, required);
+                    Self::collect_from_expression(else_expr, required);
                 }
             }
             LogicalExpression::Labels(var)
@@ -322,11 +318,11 @@ impl Optimizer {
                 map_expr,
                 ..
             } => {
-                self.collect_from_expression(list_expr, required);
+                Self::collect_from_expression(list_expr, required);
                 if let Some(filter) = filter_expr {
-                    self.collect_from_expression(filter, required);
+                    Self::collect_from_expression(filter, required);
                 }
-                self.collect_from_expression(map_expr, required);
+                Self::collect_from_expression(map_expr, required);
             }
             _ => {}
         }

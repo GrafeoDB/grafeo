@@ -155,14 +155,14 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Publish @grafeo-db/js
-        working-directory: crates/grafeo-js
+        working-directory: crates/bindings/js
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         continue-on-error: true
 
       - name: Publish @grafeo-db/wasm
-        working-directory: crates/grafeo-wasm
+        working-directory: crates/bindings/wasm
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

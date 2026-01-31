@@ -84,25 +84,24 @@ hide:
     db = grafeo.GrafeoDB()
 
     # Create nodes and edges
-    with db.session() as session:
-        session.execute("""
-            INSERT (:Person {name: 'Alice', age: 30})
-            INSERT (:Person {name: 'Bob', age: 25})
-        """)
+    db.execute("""
+        INSERT (:Person {name: 'Alice', age: 30})
+        INSERT (:Person {name: 'Bob', age: 25})
+    """)
 
-        session.execute("""
-            MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
-            INSERT (a)-[:KNOWS {since: 2024}]->(b)
-        """)
+    db.execute("""
+        MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+        INSERT (a)-[:KNOWS {since: 2024}]->(b)
+    """)
 
-        # Query the graph
-        result = session.execute("""
-            MATCH (p:Person)-[:KNOWS]->(friend)
-            RETURN p.name, friend.name
-        """)
+    # Query the graph
+    result = db.execute("""
+        MATCH (p:Person)-[:KNOWS]->(friend)
+        RETURN p.name, friend.name
+    """)
 
-        for row in result:
-            print(f"{row['p.name']} knows {row['friend.name']}")
+    for row in result:
+        print(f"{row['p.name']} knows {row['friend.name']}")
     ```
 
 === "Rust"

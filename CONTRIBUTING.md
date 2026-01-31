@@ -60,10 +60,10 @@ Query String → Parser → AST → Translator → LogicalPlan → Optimizer →
 | Query Language | LPG | RDF | Notes |
 |----------------|-----|-----|-------|
 | GQL | ✅ | — | Primary language, ISO standard |
-| Cypher | ✅ | — | Feature-gated, openCypher compatible |
-| Gremlin | ✅ | — | Feature-gated, Apache TinkerPop traversal language |
-| GraphQL | ✅ | ✅ | Feature-gated, schema-driven, maps to both models |
-| SPARQL | — | ✅ | Feature-gated, W3C standard for RDF queries |
+| Cypher | ✅ | — | openCypher compatible |
+| Gremlin | ✅ | — | Apache TinkerPop traversal language |
+| GraphQL | ✅ | ✅ | Schema-driven, maps to both models |
+| SPARQL | — | ✅ | W3C standard for RDF queries |
 
 ## Coding Standards
 

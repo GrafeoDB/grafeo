@@ -5,9 +5,27 @@
 
 use super::term::Term;
 use super::triple::{Triple, TriplePattern};
+use grafeo_common::types::TxId;
 use grafeo_common::utils::hash::FxHashSet;
+use hashbrown::HashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;
+
+/// A pending operation in a transaction buffer.
+#[derive(Debug, Clone)]
+enum PendingOp {
+    /// Insert a triple.
+    Insert(Triple),
+    /// Delete a triple.
+    Delete(Triple),
+}
+
+/// Transaction buffer for pending operations.
+#[derive(Debug, Default)]
+struct TransactionBuffer {
+    /// Pending operations for each transaction.
+    buffers: HashMap<TxId, Vec<PendingOp>>,
+}
 
 /// Configuration for the RDF store.
 #[derive(Debug, Clone)]
@@ -33,6 +51,10 @@ impl Default for RdfStoreConfig {
 /// - SPO (Subject, Predicate, Object): primary storage
 /// - POS (Predicate, Object, Subject): for predicate-based queries
 /// - OSP (Object, Subject, Predicate): for object-based queries (optional)
+///
+/// The store also supports transactional operations through buffering.
+/// When operations are performed within a transaction context, they are
+/// buffered until commit (applied) or rollback (discarded).
 pub struct RdfStore {
     /// Configuration.
     config: RdfStoreConfig,
@@ -44,6 +66,8 @@ pub struct RdfStore {
     predicate_index: RwLock<hashbrown::HashMap<Term, Vec<Arc<Triple>>, ahash::RandomState>>,
     /// Object index: object -> triples (optional).
     object_index: RwLock<Option<hashbrown::HashMap<Term, Vec<Arc<Triple>>, ahash::RandomState>>>,
+    /// Transaction buffers for pending operations.
+    tx_buffer: RwLock<TransactionBuffer>,
 }
 
 impl RdfStore {
@@ -74,6 +98,7 @@ impl RdfStore {
                 ahash::RandomState::new(),
             )),
             object_index: RwLock::new(object_index),
+            tx_buffer: RwLock::new(TransactionBuffer::default()),
             config,
         }
     }
@@ -344,6 +369,108 @@ impl RdfStore {
                 0
             },
         }
+    }
+
+    // =========================================================================
+    // Transaction support
+    // =========================================================================
+
+    /// Inserts a triple within a transaction context.
+    ///
+    /// The insert is buffered until the transaction is committed.
+    /// If the transaction is rolled back, the insert is discarded.
+    pub fn insert_in_tx(&self, tx_id: TxId, triple: Triple) {
+        let mut buffer = self.tx_buffer.write();
+        buffer
+            .buffers
+            .entry(tx_id)
+            .or_default()
+            .push(PendingOp::Insert(triple));
+    }
+
+    /// Removes a triple within a transaction context.
+    ///
+    /// The removal is buffered until the transaction is committed.
+    /// If the transaction is rolled back, the removal is discarded.
+    pub fn remove_in_tx(&self, tx_id: TxId, triple: Triple) {
+        let mut buffer = self.tx_buffer.write();
+        buffer
+            .buffers
+            .entry(tx_id)
+            .or_default()
+            .push(PendingOp::Delete(triple));
+    }
+
+    /// Commits a transaction, applying all buffered operations.
+    ///
+    /// Returns the number of operations applied.
+    pub fn commit_tx(&self, tx_id: TxId) -> usize {
+        let ops = {
+            let mut buffer = self.tx_buffer.write();
+            buffer.buffers.remove(&tx_id).unwrap_or_default()
+        };
+
+        let count = ops.len();
+        for op in ops {
+            match op {
+                PendingOp::Insert(triple) => {
+                    self.insert(triple);
+                }
+                PendingOp::Delete(triple) => {
+                    self.remove(&triple);
+                }
+            }
+        }
+        count
+    }
+
+    /// Rolls back a transaction, discarding all buffered operations.
+    ///
+    /// Returns the number of operations discarded.
+    pub fn rollback_tx(&self, tx_id: TxId) -> usize {
+        let mut buffer = self.tx_buffer.write();
+        buffer
+            .buffers
+            .remove(&tx_id)
+            .map(|ops| ops.len())
+            .unwrap_or(0)
+    }
+
+    /// Checks if a transaction has pending operations.
+    #[must_use]
+    pub fn has_pending_ops(&self, tx_id: TxId) -> bool {
+        let buffer = self.tx_buffer.read();
+        buffer
+            .buffers
+            .get(&tx_id)
+            .map(|ops| !ops.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Returns triples matching the given pattern, including pending inserts
+    /// from the specified transaction (for read-your-writes within a transaction).
+    pub fn find_with_pending(
+        &self,
+        pattern: &TriplePattern,
+        tx_id: Option<TxId>,
+    ) -> Vec<Arc<Triple>> {
+        let mut results = self.find(pattern);
+
+        // Include pending inserts from the current transaction
+        if let Some(tx) = tx_id {
+            let buffer = self.tx_buffer.read();
+            if let Some(ops) = buffer.buffers.get(&tx) {
+                for op in ops {
+                    if let PendingOp::Insert(triple) = op {
+                        if pattern.matches(triple) {
+                            results.push(Arc::new(triple.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        results
     }
 }
 

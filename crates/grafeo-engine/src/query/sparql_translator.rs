@@ -311,7 +311,7 @@ impl SparqlTranslator {
 
         // For DELETE WHERE, the WHERE pattern is the same as the delete template
         // We extract triples from the pattern and create delete operations
-        let triples = self.extract_triples_from_pattern(pattern);
+        let triples = Self::extract_triples_from_pattern(pattern);
 
         // Build delete operators with the match plan as input
         let mut ops = Vec::new();
@@ -340,12 +340,12 @@ impl SparqlTranslator {
         }
     }
 
-    fn extract_triples_from_pattern(&self, pattern: &ast::GraphPattern) -> Vec<ast::TriplePattern> {
+    fn extract_triples_from_pattern(pattern: &ast::GraphPattern) -> Vec<ast::TriplePattern> {
         match pattern {
             ast::GraphPattern::Basic(triples) => triples.clone(),
             ast::GraphPattern::Group(patterns) => patterns
                 .iter()
-                .flat_map(|p| self.extract_triples_from_pattern(p))
+                .flat_map(Self::extract_triples_from_pattern)
                 .collect(),
             _ => Vec::new(),
         }

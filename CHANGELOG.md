@@ -4,6 +4,32 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-01-30
+
+_Foundation Complete_
+
+### Added
+
+- **REMOVE Clause**: GQL parser now supports `REMOVE n:Label` for label removal and `REMOVE n.property` for property removal
+- **Label APIs**: Python methods for direct label manipulation - `add_node_label()`, `remove_node_label()`, `get_node_labels()`
+- **WAL Support**: Label operations now logged to write-ahead log for durability
+- **RDF Transaction Support**: SPARQL operations now support proper commit/rollback semantics with buffered writes
+
+### Changed
+
+- **Default Features**: All query languages (GQL, Cypher, Gremlin, GraphQL, SPARQL) now enabled by default - no feature flags needed
+- **Better Out-of-Box Experience**: Users get full functionality without any configuration
+
+### Fixed
+
+- RDF store transaction rollback now properly discards uncommitted changes
+- npm publishing paths corrected for @grafeo-db/js and @grafeo-db/wasm packages
+- Go module path corrected to match directory structure
+
+### Documentation
+
+- README updated with new default feature status and label API examples
+
 ## [0.1.3] - 2026-01-30
 
 _Admin Tools & Performance_

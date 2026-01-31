@@ -560,6 +560,50 @@ impl PyGrafeoDB {
         Ok(())
     }
 
+    /// Add a label to an existing node.
+    ///
+    /// Returns True if the label was added, False if the node doesn't exist
+    /// or already has the label.
+    ///
+    /// Example:
+    /// ```python
+    /// alice = db.create_node(["Person"], {"name": "Alice"})
+    /// db.add_node_label(alice.id, "Employee")  # Now has Person and Employee
+    /// ```
+    fn add_node_label(&self, node_id: u64, label: &str) -> PyResult<bool> {
+        let db = self.inner.read();
+        Ok(db.add_node_label(NodeId(node_id), label))
+    }
+
+    /// Remove a label from a node.
+    ///
+    /// Returns True if the label was removed, False if the node doesn't exist
+    /// or doesn't have the label.
+    ///
+    /// Example:
+    /// ```python
+    /// db.remove_node_label(alice.id, "Contractor")  # Remove Contractor label
+    /// ```
+    fn remove_node_label(&self, node_id: u64, label: &str) -> PyResult<bool> {
+        let db = self.inner.read();
+        Ok(db.remove_node_label(NodeId(node_id), label))
+    }
+
+    /// Get all labels for a node.
+    ///
+    /// Returns a list of label names, or None if the node doesn't exist.
+    ///
+    /// Example:
+    /// ```python
+    /// labels = db.get_node_labels(alice.id)
+    /// if labels:
+    ///     print(f"Alice has labels: {labels}")
+    /// ```
+    fn get_node_labels(&self, node_id: u64) -> PyResult<Option<Vec<String>>> {
+        let db = self.inner.read();
+        Ok(db.get_node_labels(NodeId(node_id)))
+    }
+
     /// Set a property on an edge.
     ///
     /// Example:

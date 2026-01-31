@@ -209,6 +209,12 @@ impl GrafeoDB {
                 WalRecord::SetEdgeProperty { id, key, value } => {
                     store.set_edge_property(*id, key, value.clone());
                 }
+                WalRecord::AddNodeLabel { id, label } => {
+                    store.add_label(*id, label);
+                }
+                WalRecord::RemoveNodeLabel { id, label } => {
+                    store.remove_label(*id, label);
+                }
                 WalRecord::TxCommit { .. }
                 | WalRecord::TxAbort { .. }
                 | WalRecord::Checkpoint { .. } => {
@@ -655,6 +661,95 @@ impl GrafeoDB {
         }
 
         self.store.set_node_property(id, key, value);
+    }
+
+    /// Adds a label to an existing node.
+    ///
+    /// Returns `true` if the label was added, `false` if the node doesn't exist
+    /// or already has the label.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let alice = db.create_node(&["Person"]);
+    ///
+    /// // Promote Alice to Employee
+    /// let added = db.add_node_label(alice, "Employee");
+    /// assert!(added);
+    /// ```
+    pub fn add_node_label(&self, id: grafeo_common::types::NodeId, label: &str) -> bool {
+        let result = self.store.add_label(id, label);
+
+        if result {
+            // Log to WAL if enabled
+            if let Err(e) = self.log_wal(&WalRecord::AddNodeLabel {
+                id,
+                label: label.to_string(),
+            }) {
+                tracing::warn!("Failed to log AddNodeLabel to WAL: {}", e);
+            }
+        }
+
+        result
+    }
+
+    /// Removes a label from a node.
+    ///
+    /// Returns `true` if the label was removed, `false` if the node doesn't exist
+    /// or doesn't have the label.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let alice = db.create_node(&["Person", "Employee"]);
+    ///
+    /// // Remove Employee status
+    /// let removed = db.remove_node_label(alice, "Employee");
+    /// assert!(removed);
+    /// ```
+    pub fn remove_node_label(&self, id: grafeo_common::types::NodeId, label: &str) -> bool {
+        let result = self.store.remove_label(id, label);
+
+        if result {
+            // Log to WAL if enabled
+            if let Err(e) = self.log_wal(&WalRecord::RemoveNodeLabel {
+                id,
+                label: label.to_string(),
+            }) {
+                tracing::warn!("Failed to log RemoveNodeLabel to WAL: {}", e);
+            }
+        }
+
+        result
+    }
+
+    /// Gets all labels for a node.
+    ///
+    /// Returns `None` if the node doesn't exist.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let alice = db.create_node(&["Person", "Employee"]);
+    ///
+    /// let labels = db.get_node_labels(alice).unwrap();
+    /// assert!(labels.contains(&"Person".to_string()));
+    /// assert!(labels.contains(&"Employee".to_string()));
+    /// ```
+    #[must_use]
+    pub fn get_node_labels(&self, id: grafeo_common::types::NodeId) -> Option<Vec<String>> {
+        self.store
+            .get_node(id)
+            .map(|node| node.labels.iter().map(|s| s.to_string()).collect())
     }
 
     // === Edge Operations ===

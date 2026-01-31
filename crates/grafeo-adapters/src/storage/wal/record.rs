@@ -58,6 +58,22 @@ pub enum WalRecord {
         value: Value,
     },
 
+    /// Add a label to a node.
+    AddNodeLabel {
+        /// Node ID.
+        id: NodeId,
+        /// Label to add.
+        label: String,
+    },
+
+    /// Remove a label from a node.
+    RemoveNodeLabel {
+        /// Node ID.
+        id: NodeId,
+        /// Label to remove.
+        label: String,
+    },
+
     /// Transaction commit.
     TxCommit {
         /// Transaction ID.

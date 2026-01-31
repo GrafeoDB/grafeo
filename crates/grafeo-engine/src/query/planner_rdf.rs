@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::{LogicalType, TxId, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::JoinType;
@@ -40,6 +40,8 @@ pub struct RdfPlanner {
     store: Arc<RdfStore>,
     /// Chunk size for vectorized execution.
     chunk_size: usize,
+    /// Optional transaction ID for transactional operations.
+    tx_id: Option<TxId>,
 }
 
 impl RdfPlanner {
@@ -49,6 +51,7 @@ impl RdfPlanner {
         Self {
             store,
             chunk_size: DEFAULT_CHUNK_SIZE,
+            tx_id: None,
         }
     }
 
@@ -56,6 +59,13 @@ impl RdfPlanner {
     #[must_use]
     pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
         self.chunk_size = chunk_size;
+        self
+    }
+
+    /// Sets the transaction ID for transactional operations.
+    #[must_use]
+    pub fn with_tx_id(mut self, tx_id: Option<TxId>) -> Self {
+        self.tx_id = tx_id;
         self
     }
 
@@ -623,6 +633,7 @@ impl RdfPlanner {
         let operator = Box::new(RdfInsertTripleOperator::new(
             Arc::clone(&self.store),
             triple,
+            self.tx_id,
         ));
 
         // Insert operations don't output columns
@@ -701,6 +712,7 @@ impl RdfPlanner {
         let operator = Box::new(RdfDeleteTripleOperator::new(
             Arc::clone(&self.store),
             triple,
+            self.tx_id,
         ));
 
         Ok((operator, Vec::new()))
@@ -782,14 +794,16 @@ impl RdfPlanner {
 struct RdfInsertTripleOperator {
     store: Arc<RdfStore>,
     triple: Triple,
+    tx_id: Option<TxId>,
     inserted: bool,
 }
 
 impl RdfInsertTripleOperator {
-    fn new(store: Arc<RdfStore>, triple: Triple) -> Self {
+    fn new(store: Arc<RdfStore>, triple: Triple, tx_id: Option<TxId>) -> Self {
         Self {
             store,
             triple,
+            tx_id,
             inserted: false,
         }
     }
@@ -801,8 +815,12 @@ impl Operator for RdfInsertTripleOperator {
             return Ok(None);
         }
 
-        // Insert the triple
-        self.store.insert(self.triple.clone());
+        // Insert the triple (buffered if in a transaction)
+        if let Some(tx_id) = self.tx_id {
+            self.store.insert_in_tx(tx_id, self.triple.clone());
+        } else {
+            self.store.insert(self.triple.clone());
+        }
         self.inserted = true;
 
         // Return an empty result (INSERT doesn't produce rows)
@@ -972,14 +990,16 @@ impl Operator for RdfInsertPatternOperator {
 struct RdfDeleteTripleOperator {
     store: Arc<RdfStore>,
     triple: Triple,
+    tx_id: Option<TxId>,
     deleted: bool,
 }
 
 impl RdfDeleteTripleOperator {
-    fn new(store: Arc<RdfStore>, triple: Triple) -> Self {
+    fn new(store: Arc<RdfStore>, triple: Triple, tx_id: Option<TxId>) -> Self {
         Self {
             store,
             triple,
+            tx_id,
             deleted: false,
         }
     }
@@ -991,8 +1011,12 @@ impl Operator for RdfDeleteTripleOperator {
             return Ok(None);
         }
 
-        // Delete the triple
-        self.store.remove(&self.triple);
+        // Delete the triple (buffered if in a transaction)
+        if let Some(tx_id) = self.tx_id {
+            self.store.remove_in_tx(tx_id, self.triple.clone());
+        } else {
+            self.store.remove(&self.triple);
+        }
         self.deleted = true;
 
         // Return an empty result (DELETE doesn't produce rows)

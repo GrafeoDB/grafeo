@@ -160,7 +160,7 @@ Edges         | 5,432,100
 Persistent    | true
 Path          | ./production.db
 WAL Enabled   | true
-Version       | 0.1.3
+Version       | 0.1.4
 ```
 
 ### Export to JSON for scripting
@@ -174,7 +174,7 @@ $ grafeo info ./mydb --format json
   "is_persistent": true,
   "path": "./production.db",
   "wal_enabled": true,
-  "version": "0.1.3"
+  "version": "0.1.4"
 }
 ```
 

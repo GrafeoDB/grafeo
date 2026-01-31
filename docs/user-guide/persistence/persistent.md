@@ -64,13 +64,10 @@ db = grafeo.GrafeoDB(
 ```python
 # First session
 db = grafeo.GrafeoDB(path="my_graph.db")
-with db.session() as s:
-    s.execute("INSERT (:Person {name: 'Alice'})")
-db.close()
+db.execute("INSERT (:Person {name: 'Alice'})")
 
 # Later session - data persists
 db = grafeo.GrafeoDB(path="my_graph.db")
-with db.session() as s:
-    result = s.execute("MATCH (p:Person) RETURN p.name")
-    # Returns 'Alice'
+result = db.execute("MATCH (p:Person) RETURN p.name")
+# Returns 'Alice'
 ```

@@ -22,6 +22,9 @@
 mod aggregate;
 mod distinct;
 mod expand;
+mod factorized_aggregate;
+mod factorized_expand;
+mod factorized_filter;
 mod filter;
 mod join;
 mod limit;
@@ -42,6 +45,17 @@ pub use aggregate::{
 };
 pub use distinct::DistinctOperator;
 pub use expand::ExpandOperator;
+pub use factorized_aggregate::{
+    FactorizedAggregate, FactorizedAggregateOperator, FactorizedOperator,
+};
+pub use factorized_expand::{
+    ExpandStep, FactorizedExpandChain, FactorizedExpandOperator, FactorizedResult,
+    LazyFactorizedChainOperator,
+};
+pub use factorized_filter::{
+    AndPredicate, ColumnPredicate, CompareOp as FactorizedCompareOp, FactorizedFilterOperator,
+    FactorizedPredicate, OrPredicate, PropertyPredicate,
+};
 pub use filter::{
     BinaryFilterOp, ExpressionPredicate, FilterExpression, FilterOperator, Predicate, UnaryFilterOp,
 };
@@ -70,9 +84,112 @@ pub use variable_length_expand::VariableLengthExpandOperator;
 use thiserror::Error;
 
 use super::DataChunk;
+use super::chunk_state::ChunkState;
+use super::factorized_chunk::FactorizedChunk;
 
 /// Result of executing an operator.
 pub type OperatorResult = Result<Option<DataChunk>, OperatorError>;
+
+// ============================================================================
+// Factorized Data Traits
+// ============================================================================
+
+/// Trait for data that can be in factorized or flat form.
+///
+/// This provides a common interface for operators that need to handle both
+/// representations without caring which is used. Inspired by LadybugDB's
+/// unified data model.
+///
+/// # Example
+///
+/// ```ignore
+/// fn process_data(data: &dyn FactorizedData) {
+///     if data.is_factorized() {
+///         // Handle factorized path
+///         let chunk = data.as_factorized().unwrap();
+///         // ... use factorized chunk directly
+///     } else {
+///         // Handle flat path
+///         let chunk = data.flatten();
+///         // ... process flat chunk
+///     }
+/// }
+/// ```
+pub trait FactorizedData: Send + Sync {
+    /// Returns the chunk state (factorization status, cached data).
+    fn chunk_state(&self) -> &ChunkState;
+
+    /// Returns the logical row count (considering selection).
+    fn logical_row_count(&self) -> usize;
+
+    /// Returns the physical size (actual stored values).
+    fn physical_size(&self) -> usize;
+
+    /// Returns true if this data is factorized (multi-level).
+    fn is_factorized(&self) -> bool;
+
+    /// Flattens to a DataChunk (materializes if factorized).
+    fn flatten(&self) -> DataChunk;
+
+    /// Returns as FactorizedChunk if factorized, None if flat.
+    fn as_factorized(&self) -> Option<&FactorizedChunk>;
+
+    /// Returns as DataChunk if flat, None if factorized.
+    fn as_flat(&self) -> Option<&DataChunk>;
+}
+
+/// Wrapper to treat a flat DataChunk as FactorizedData.
+///
+/// This enables uniform handling of flat and factorized data in operators.
+pub struct FlatDataWrapper {
+    chunk: DataChunk,
+    state: ChunkState,
+}
+
+impl FlatDataWrapper {
+    /// Creates a new wrapper around a flat DataChunk.
+    #[must_use]
+    pub fn new(chunk: DataChunk) -> Self {
+        let state = ChunkState::flat(chunk.row_count());
+        Self { chunk, state }
+    }
+
+    /// Returns the underlying DataChunk.
+    #[must_use]
+    pub fn into_inner(self) -> DataChunk {
+        self.chunk
+    }
+}
+
+impl FactorizedData for FlatDataWrapper {
+    fn chunk_state(&self) -> &ChunkState {
+        &self.state
+    }
+
+    fn logical_row_count(&self) -> usize {
+        self.chunk.row_count()
+    }
+
+    fn physical_size(&self) -> usize {
+        self.chunk.row_count() * self.chunk.column_count()
+    }
+
+    fn is_factorized(&self) -> bool {
+        false
+    }
+
+    fn flatten(&self) -> DataChunk {
+        self.chunk.clone()
+    }
+
+    fn as_factorized(&self) -> Option<&FactorizedChunk> {
+        None
+    }
+
+    fn as_flat(&self) -> Option<&DataChunk> {
+        Some(&self.chunk)
+    }
+}
 
 /// Error during operator execution.
 #[derive(Error, Debug, Clone)]

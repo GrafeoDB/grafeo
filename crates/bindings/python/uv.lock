@@ -24,8 +24,11 @@ wheels = [
 
 [[package]]
 name = "grafeo"
-version = "0.1.4"
+version = "0.2.0"
 source = { editable = "." }
+dependencies = [
+    { name = "solvor" },
+]
 
 [package.optional-dependencies]
 cli = [
@@ -40,10 +43,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "click", marker = "extra == 'cli'", specifier = ">=8.1.0" },
+    { name = "click", marker = "extra == 'cli'", specifier = ">=8.3.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.2" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.3.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14.14" },
+    { name = "solvor", specifier = ">=0.5.4" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.14" },
 ]
 
@@ -136,6 +140,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2c/aa/9f89c719c467dfaf8ad799b9bae0df494513fb21d31a6059cb5870e57e74/ruff-0.14.14-py3-none-win32.whl", hash = "sha256:b530c191970b143375b6a68e6f743800b2b786bbcf03a7965b06c4bf04568167", size = 10502442 },
     { url = "https://files.pythonhosted.org/packages/87/44/90fa543014c45560cae1fffc63ea059fb3575ee6e1cb654562197e5d16fb/ruff-0.14.14-py3-none-win_amd64.whl", hash = "sha256:3dde1435e6b6fe5b66506c1dff67a421d0b7f6488d466f651c07f4cab3bf20fd", size = 11630486 },
     { url = "https://files.pythonhosted.org/packages/9e/6a/40fee331a52339926a92e17ae748827270b288a35ef4a15c9c8f2ec54715/ruff-0.14.14-py3-none-win_arm64.whl", hash = "sha256:56e6981a98b13a32236a72a8da421d7839221fa308b223b9283312312e5ac76c", size = 10920448 },
+]
+
+[[package]]
+name = "solvor"
+version = "0.5.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d1/65/6ef92344ceae105a6bb1b5767a9635bfa7a6eebfe46b81210c258c4794be/solvor-0.5.4.tar.gz", hash = "sha256:8bef0b83899446480301db3f1fcb9d5eadf90871f5429e8cb75884db77ea053b", size = 386780 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/6c/680dd0ef04bf7d662d66f887d71c005c6488ba50424c1b797dfd40b04ee3/solvor-0.5.4-py3-none-any.whl", hash = "sha256:5328bce05c06476706ed3501e59187fe0901f76d2262ba176f71b17fa67c4126", size = 115958 },
 ]
 
 [[package]]

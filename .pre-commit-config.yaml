@@ -1,8 +1,22 @@
 # Pre-commit hooks for Grafeo
-# Install: uv add --dev pre-commit && pre-commit install
-# Run manually: pre-commit run --all-files
+# Install: cargo install prek && prek install
+# Run manually: prek run --all-files
+# Docs: https://github.com/j178/prek
 
 repos:
+  # Built-in prek hooks (Rust-native, fast, no dependencies)
+  - repo: builtin
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+        exclude: '\.md$'
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+
   # Local Rust hooks
   - repo: local
     hooks:
@@ -19,17 +33,3 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
-
-  # General file checks
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
-    hooks:
-      - id: trailing-whitespace
-        exclude: '\.md$'
-      - id: end-of-file-fixer
-        exclude: '\.md$'
-      - id: check-yaml
-      - id: check-toml
-      - id: check-merge-conflict
-      - id: check-added-large-files
-        args: ['--maxkb=1000']

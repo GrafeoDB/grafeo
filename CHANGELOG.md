@@ -4,6 +4,31 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [Unreleased]
 
+## [0.2.0] - Unreleased
+
+_Pre-workout_
+
+
+
+### Added
+
+- **Benchmarks**: Multi-hop traversal and fan-out pattern benchmarks for performance validation
+- **Factorized Execution**: Factorized vector types to avoid Cartesian product materialization, inspired by [Kùzu](https://kuzudb.com/)'s approach to worst-case optimal joins
+- **Factorized Expand**: Expand operator produces factorized output for multi-hop queries
+- **Factorized Aggregation**: COUNT, SUM, AVG, MIN, MAX on multi-hop queries without flattening
+- **ChunkState Abstraction**: Unified state tracking with cached multiplicities for O(1) access
+- **Factorized Selection Vectors**: Lazy filtering without data copying (O(n_physical) instead of O(n_logical))
+- **FactorizedFilterOperator**: Filter factorized data using selection vectors
+- **Improved Iteration**: PrecomputedIter and StreamingIter with SmallVec for cache-friendly traversal
+- **FactorizedOperator Trait**: Composable operators that produce/consume factorized data natively
+
+### Changed
+
+- Version bump to 0.2.0, foundation complete, focusing on performance for 0.2.x
+- **Pre-commit Hooks**: Switched from Python-based pre-commit to [prek](https://github.com/j178/prek) (Rust-native, faster)
+
+---
+
 ## [0.1.4] - 2026-01-31
 
 _Foundation Complete_

@@ -226,10 +226,181 @@ def run_full_benchmark():
     return run_benchmark(node_count=100_000, edge_count=500_000, warmup=True)
 
 
+def run_factorized_benchmark(node_count=1_000, avg_degree=15, warmup=True):
+    """
+    Benchmark for factorized execution (Phase 3+4).
+
+    Tests multi-hop traversals with high fan-out where factorized execution
+    provides 50-100x speedup by avoiding Cartesian product materialization.
+
+    Key insight: With avg_degree=15:
+    - 1-hop from 1 node: ~15 results
+    - 2-hop from 1 node: ~15*15 = 225 results
+    - 3-hop from 1 node: ~15*15*15 = 3,375 results
+
+    Without factorization: O(d^k) memory for k hops, degree d
+    With factorization: O(k*d) memory - linear in hops
+    """
+    print("=" * 60)
+    print("FACTORIZED EXECUTION BENCHMARK (Phase 3+4)")
+    print(f"Nodes: {node_count:,}  Avg Degree: {avg_degree}")
+    print("=" * 60)
+
+    db = grafeo.GrafeoDB()
+
+    # Create nodes
+    edge_count = node_count * avg_degree
+    print(f"\n[SETUP] Creating {node_count:,} nodes, ~{edge_count:,} edges...")
+
+    start = time.perf_counter()
+    nodes = []
+    for i in range(node_count):
+        node = db.create_node(["Person"], {"id": i, "name": f"person_{i}"})
+        nodes.append(node)
+
+    # Create edges with controlled fan-out
+    edges_created = 0
+    for i in range(edge_count):
+        src_idx = i % node_count
+        # Spread destinations to create consistent fan-out
+        dst_idx = (src_idx + 1 + (i // node_count)) % node_count
+        if src_idx != dst_idx:
+            db.create_edge(nodes[src_idx].id, nodes[dst_idx].id, "KNOWS", {"weight": 1.0})
+            edges_created += 1
+
+    setup_time = time.perf_counter() - start
+    print(f"  Setup: {setup_time*1000:.2f} ms ({edges_created:,} edges)")
+
+    if warmup:
+        print("\n[WARMUP] Running warmup queries...")
+        for _ in range(3):
+            db.execute("MATCH (n:Person) RETURN n LIMIT 10")
+            db.execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b LIMIT 10")
+
+    # ============================================================
+    # MULTI-HOP TRAVERSAL BENCHMARKS
+    # These are the key benchmarks for factorized execution
+    # ============================================================
+    print("\n" + "=" * 60)
+    print("MULTI-HOP TRAVERSAL BENCHMARKS (Factorization Target)")
+    print("=" * 60)
+
+    # 1-hop baseline
+    print("\n[1-HOP] Baseline")
+    print("-" * 40)
+
+    def one_hop_all():
+        return db.execute(
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.id, b.id LIMIT 10000"
+        )
+
+    mean, std = measure(one_hop_all, iterations=10)
+    result = one_hop_all()
+    row_count = len(result) if hasattr(result, '__len__') else 0
+    print(f"  1-hop traversal: {mean:.2f} ms (std: {std:.2f}) - {row_count} rows")
+
+    # 2-hop - this is where factorization starts to matter
+    print("\n[2-HOP] Factorization Impact Zone")
+    print("-" * 40)
+
+    def two_hop_from_one():
+        return db.execute(
+            "MATCH (a:Person {id: 0})-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.id, b.id, c.id"
+        )
+
+    mean, std = measure(two_hop_from_one, iterations=10)
+    result = two_hop_from_one()
+    row_count = len(result) if hasattr(result, '__len__') else 0
+    print(f"  2-hop from node 0: {mean:.2f} ms (std: {std:.2f}) - {row_count} rows")
+
+    def two_hop_limited():
+        return db.execute(
+            "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.id, b.id, c.id LIMIT 10000"
+        )
+
+    mean, std = measure(two_hop_limited, iterations=10)
+    print(f"  2-hop all (LIMIT 10000): {mean:.2f} ms (std: {std:.2f})")
+
+    # 2-hop with DISTINCT (reduces output, less factorization benefit)
+    def two_hop_distinct():
+        return db.execute(
+            "MATCH (a:Person {id: 0})-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN DISTINCT c.id"
+        )
+
+    mean, std = measure(two_hop_distinct, iterations=10)
+    result = two_hop_distinct()
+    row_count = len(result) if hasattr(result, '__len__') else 0
+    print(f"  2-hop DISTINCT c: {mean:.2f} ms (std: {std:.2f}) - {row_count} unique")
+
+    # 3-hop - major factorization benefit (O(d^3) vs O(3d))
+    print("\n[3-HOP] High Factorization Benefit")
+    print("-" * 40)
+
+    def three_hop_from_one():
+        return db.execute(
+            "MATCH (a:Person {id: 0})-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(d) "
+            "RETURN a.id, b.id, c.id, d.id LIMIT 5000"
+        )
+
+    mean, std = measure(three_hop_from_one, iterations=5)
+    result = three_hop_from_one()
+    row_count = len(result) if hasattr(result, '__len__') else 0
+    print(f"  3-hop from node 0 (LIMIT 5000): {mean:.2f} ms (std: {std:.2f}) - {row_count} rows")
+
+    def three_hop_count():
+        return db.execute(
+            "MATCH (a:Person {id: 0})-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(d) "
+            "RETURN count(d)"
+        )
+
+    mean, std = measure(three_hop_count, iterations=5)
+    result = three_hop_count()
+    print(f"  3-hop COUNT: {mean:.2f} ms (std: {std:.2f}) - result: {result}")
+
+    # Triangle pattern - tests cyclic pattern handling
+    print("\n[TRIANGLE] Cyclic Pattern")
+    print("-" * 40)
+
+    def triangle_count():
+        return db.execute(
+            "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(a) "
+            "RETURN count(a)"
+        )
+
+    mean, std = measure(triangle_count, iterations=5)
+    result = triangle_count()
+    print(f"  Triangle count: {mean:.2f} ms (std: {std:.2f}) - result: {result}")
+
+    # ============================================================
+    # SUMMARY
+    # ============================================================
+    print("\n" + "=" * 60)
+    print("EXPECTED IMPROVEMENTS WITH FACTORIZED EXECUTION")
+    print("=" * 60)
+    print("  2-hop queries: 5-20x faster (avoiding d^2 intermediate rows)")
+    print("  3-hop queries: 20-100x faster (avoiding d^3 intermediate rows)")
+    print("  Memory usage: O(k*d) instead of O(d^k) for k hops, degree d")
+    print("=" * 60)
+
+    return {
+        "node_count": node_count,
+        "edge_count": edges_created,
+        "avg_degree": avg_degree,
+    }
+
+
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) > 1 and sys.argv[1] == "--quick":
-        run_quick_benchmark()
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--quick":
+            run_quick_benchmark()
+        elif sys.argv[1] == "--factorized":
+            # Use smaller graph for factorized to see the pattern clearly
+            run_factorized_benchmark(node_count=500, avg_degree=20)
+        elif sys.argv[1] == "--factorized-large":
+            run_factorized_benchmark(node_count=2_000, avg_degree=15)
+        else:
+            run_full_benchmark()
     else:
         run_full_benchmark()

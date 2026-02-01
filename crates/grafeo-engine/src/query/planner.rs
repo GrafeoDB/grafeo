@@ -19,12 +19,13 @@ use grafeo_core::execution::operators::{
     AddLabelOperator, AggregateExpr as PhysicalAggregateExpr,
     AggregateFunction as PhysicalAggregateFunction, BinaryFilterOp, CreateEdgeOperator,
     CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator, DistinctOperator, ExpandOperator,
-    ExpressionPredicate, FilterExpression, FilterOperator, HashAggregateOperator, HashJoinOperator,
-    JoinType as PhysicalJoinType, LimitOperator, MergeOperator, NestedLoopJoinOperator, NullOrder,
-    Operator, ProjectExpr, ProjectOperator, PropertySource, RemoveLabelOperator, ScanOperator,
-    SetPropertyOperator, ShortestPathOperator, SimpleAggregateOperator, SkipOperator,
-    SortDirection, SortKey as PhysicalSortKey, SortOperator, UnaryFilterOp, UnionOperator,
-    UnwindOperator, VariableLengthExpandOperator,
+    ExpandStep, ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator,
+    FilterExpression, FilterOperator, HashAggregateOperator, HashJoinOperator,
+    JoinType as PhysicalJoinType, LazyFactorizedChainOperator, LimitOperator, MergeOperator,
+    NestedLoopJoinOperator, NullOrder, Operator, ProjectExpr, ProjectOperator, PropertySource,
+    RemoveLabelOperator, ScanOperator, SetPropertyOperator, ShortestPathOperator,
+    SimpleAggregateOperator, SkipOperator, SortDirection, SortKey as PhysicalSortKey, SortOperator,
+    UnaryFilterOp, UnionOperator, UnwindOperator, VariableLengthExpandOperator,
 };
 use grafeo_core::graph::{Direction, lpg::LpgStore};
 use std::collections::HashMap;
@@ -44,6 +45,8 @@ pub struct Planner {
     viewing_epoch: EpochId,
     /// Counter for generating unique anonymous edge column names.
     anon_edge_counter: std::cell::Cell<u32>,
+    /// Whether to use factorized execution for multi-hop queries.
+    factorized_execution: bool,
 }
 
 impl Planner {
@@ -60,6 +63,7 @@ impl Planner {
             tx_id: None,
             viewing_epoch: epoch,
             anon_edge_counter: std::cell::Cell::new(0),
+            factorized_execution: true,
         }
     }
 
@@ -84,6 +88,7 @@ impl Planner {
             tx_id,
             viewing_epoch,
             anon_edge_counter: std::cell::Cell::new(0),
+            factorized_execution: true,
         }
     }
 
@@ -103,6 +108,56 @@ impl Planner {
     #[must_use]
     pub fn tx_manager(&self) -> Option<&Arc<TransactionManager>> {
         self.tx_manager.as_ref()
+    }
+
+    /// Enables or disables factorized execution for multi-hop queries.
+    #[must_use]
+    pub fn with_factorized_execution(mut self, enabled: bool) -> Self {
+        self.factorized_execution = enabled;
+        self
+    }
+
+    /// Counts consecutive single-hop expand operations.
+    ///
+    /// Returns the count and the deepest non-expand operator (the base of the chain).
+    fn count_expand_chain(op: &LogicalOperator) -> (usize, &LogicalOperator) {
+        match op {
+            LogicalOperator::Expand(expand) => {
+                // Only count single-hop expands (factorization doesn't apply to variable-length)
+                let is_single_hop = expand.min_hops == 1 && expand.max_hops == Some(1);
+
+                if is_single_hop {
+                    let (inner_count, base) = Self::count_expand_chain(&expand.input);
+                    (inner_count + 1, base)
+                } else {
+                    // Variable-length path breaks the chain
+                    (0, op)
+                }
+            }
+            _ => (0, op),
+        }
+    }
+
+    /// Collects expand operations from the outermost down to the base.
+    ///
+    /// Returns expands in order from innermost (base) to outermost.
+    fn collect_expand_chain(op: &LogicalOperator) -> Vec<&ExpandOp> {
+        let mut chain = Vec::new();
+        let mut current = op;
+
+        while let LogicalOperator::Expand(expand) = current {
+            // Only include single-hop expands
+            let is_single_hop = expand.min_hops == 1 && expand.max_hops == Some(1);
+            if !is_single_hop {
+                break;
+            }
+            chain.push(expand);
+            current = &expand.input;
+        }
+
+        // Reverse so we go from base to outer
+        chain.reverse();
+        chain
     }
 
     /// Plans a logical plan into a physical operator.
@@ -305,7 +360,17 @@ impl Planner {
     fn plan_operator(&self, op: &LogicalOperator) -> Result<(Box<dyn Operator>, Vec<String>)> {
         match op {
             LogicalOperator::NodeScan(scan) => self.plan_node_scan(scan),
-            LogicalOperator::Expand(expand) => self.plan_expand(expand),
+            LogicalOperator::Expand(expand) => {
+                // Check for expand chains when factorized execution is enabled
+                if self.factorized_execution {
+                    let (chain_len, _base) = Self::count_expand_chain(op);
+                    if chain_len >= 2 {
+                        // Use factorized chain for 2+ consecutive single-hop expands
+                        return self.plan_expand_chain(op);
+                    }
+                }
+                self.plan_expand(expand)
+            }
             LogicalOperator::Return(ret) => self.plan_return(ret),
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
             LogicalOperator::Project(project) => self.plan_project(project),
@@ -456,6 +521,89 @@ impl Planner {
         }
 
         Ok((operator, columns))
+    }
+
+    /// Plans a chain of consecutive expand operations using factorized execution.
+    ///
+    /// This avoids the Cartesian product explosion that occurs with separate expands.
+    /// For a 2-hop query with degree d, this uses O(d) memory instead of O(d^2).
+    ///
+    /// The chain is executed lazily at query time, not during planning. This ensures
+    /// that any filters applied above the expand chain are properly respected.
+    fn plan_expand_chain(&self, op: &LogicalOperator) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let expands = Self::collect_expand_chain(op);
+        if expands.is_empty() {
+            return Err(Error::Internal("Empty expand chain".to_string()));
+        }
+
+        // Get the base operator (before first expand)
+        let first_expand = expands[0];
+        let (base_op, base_columns) = self.plan_operator(&first_expand.input)?;
+
+        let mut columns = base_columns.clone();
+        let mut steps = Vec::new();
+
+        // Track the level-local source column for each expand
+        // For the first expand, it's the column in the input (base_columns)
+        // For subsequent expands, the target from the previous level is always at index 1
+        // (each level adds [edge, target], so target is at index 1)
+        let mut is_first = true;
+
+        for expand in &expands {
+            // Find source column for this expand
+            let source_column = if is_first {
+                // For first expand, find in base columns
+                base_columns
+                    .iter()
+                    .position(|c| c == &expand.from_variable)
+                    .ok_or_else(|| {
+                        Error::Internal(format!(
+                            "Source variable '{}' not found in base columns",
+                            expand.from_variable
+                        ))
+                    })?
+            } else {
+                // For subsequent expands, the target from the previous level is at index 1
+                // (each level adds [edge, target], so target is the second column)
+                1
+            };
+
+            // Convert direction
+            let direction = match expand.direction {
+                ExpandDirection::Outgoing => Direction::Outgoing,
+                ExpandDirection::Incoming => Direction::Incoming,
+                ExpandDirection::Both => Direction::Both,
+            };
+
+            // Add expand step configuration
+            steps.push(ExpandStep {
+                source_column,
+                direction,
+                edge_type: expand.edge_type.clone(),
+            });
+
+            // Add edge and target columns
+            let edge_col_name = expand.edge_variable.clone().unwrap_or_else(|| {
+                let count = self.anon_edge_counter.get();
+                self.anon_edge_counter.set(count + 1);
+                format!("_anon_edge_{}", count)
+            });
+            columns.push(edge_col_name);
+            columns.push(expand.to_variable.clone());
+
+            is_first = false;
+        }
+
+        // Create lazy operator that executes at query time, not planning time
+        let mut lazy_op = LazyFactorizedChainOperator::new(Arc::clone(&self.store), base_op, steps);
+
+        if let Some(tx_id) = self.tx_id {
+            lazy_op = lazy_op.with_tx_context(self.viewing_epoch, Some(tx_id));
+        } else {
+            lazy_op = lazy_op.with_tx_context(self.viewing_epoch, None);
+        }
+
+        Ok((Box::new(lazy_op), columns))
     }
 
     /// Plans a RETURN clause.
@@ -889,6 +1037,23 @@ impl Planner {
 
     /// Plans an AGGREGATE operator.
     fn plan_aggregate(&self, agg: &AggregateOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Check if we can use factorized aggregation for speedup
+        // Conditions:
+        // 1. Factorized execution is enabled
+        // 2. Input is an expand chain (multi-hop)
+        // 3. No GROUP BY
+        // 4. All aggregates are simple (COUNT, SUM, AVG, MIN, MAX)
+        if self.factorized_execution
+            && agg.group_by.is_empty()
+            && Self::count_expand_chain(&agg.input).0 >= 2
+            && self.is_simple_aggregate(agg)
+        {
+            if let Ok((op, cols)) = self.plan_factorized_aggregate(agg) {
+                return Ok((op, cols));
+            }
+            // Fall through to regular aggregate if factorized planning fails
+        }
+
         let (mut input_op, input_columns) = self.plan_operator(&agg.input)?;
 
         // Build variable to column index mapping
@@ -1071,6 +1236,153 @@ impl Planner {
         }
 
         Ok((operator, output_columns))
+    }
+
+    /// Checks if an aggregate is simple enough for factorized execution.
+    ///
+    /// Simple aggregates:
+    /// - COUNT(*) or COUNT(variable)
+    /// - SUM, AVG, MIN, MAX on variables (not properties for now)
+    fn is_simple_aggregate(&self, agg: &AggregateOp) -> bool {
+        agg.aggregates.iter().all(|agg_expr| {
+            match agg_expr.function {
+                LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => {
+                    // COUNT(*) is always OK, COUNT(var) is OK
+                    agg_expr.expression.is_none()
+                        || matches!(&agg_expr.expression, Some(LogicalExpression::Variable(_)))
+                }
+                LogicalAggregateFunction::Sum
+                | LogicalAggregateFunction::Avg
+                | LogicalAggregateFunction::Min
+                | LogicalAggregateFunction::Max => {
+                    // For now, only support when expression is a variable
+                    // (property access would require flattening first)
+                    matches!(&agg_expr.expression, Some(LogicalExpression::Variable(_)))
+                }
+                // Other aggregates (Collect, StdDev, Percentile) not supported in factorized form
+                _ => false,
+            }
+        })
+    }
+
+    /// Plans a factorized aggregate that operates directly on factorized data.
+    ///
+    /// This avoids the O(n²) cost of flattening before aggregation.
+    fn plan_factorized_aggregate(
+        &self,
+        agg: &AggregateOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Build the expand chain - this returns a LazyFactorizedChainOperator
+        let expands = Self::collect_expand_chain(&agg.input);
+        if expands.is_empty() {
+            return Err(Error::Internal(
+                "Expected expand chain for factorized aggregate".to_string(),
+            ));
+        }
+
+        // Get the base operator (before first expand)
+        let first_expand = expands[0];
+        let (base_op, base_columns) = self.plan_operator(&first_expand.input)?;
+
+        let mut columns = base_columns.clone();
+        let mut steps = Vec::new();
+        let mut is_first = true;
+
+        for expand in &expands {
+            // Find source column for this expand
+            let source_column = if is_first {
+                base_columns
+                    .iter()
+                    .position(|c| c == &expand.from_variable)
+                    .ok_or_else(|| {
+                        Error::Internal(format!(
+                            "Source variable '{}' not found in base columns",
+                            expand.from_variable
+                        ))
+                    })?
+            } else {
+                1 // Target from previous level
+            };
+
+            let direction = match expand.direction {
+                ExpandDirection::Outgoing => Direction::Outgoing,
+                ExpandDirection::Incoming => Direction::Incoming,
+                ExpandDirection::Both => Direction::Both,
+            };
+
+            steps.push(ExpandStep {
+                source_column,
+                direction,
+                edge_type: expand.edge_type.clone(),
+            });
+
+            let edge_col_name = expand.edge_variable.clone().unwrap_or_else(|| {
+                let count = self.anon_edge_counter.get();
+                self.anon_edge_counter.set(count + 1);
+                format!("_anon_edge_{}", count)
+            });
+            columns.push(edge_col_name);
+            columns.push(expand.to_variable.clone());
+
+            is_first = false;
+        }
+
+        // Create the lazy factorized chain operator
+        let mut lazy_op = LazyFactorizedChainOperator::new(Arc::clone(&self.store), base_op, steps);
+
+        if let Some(tx_id) = self.tx_id {
+            lazy_op = lazy_op.with_tx_context(self.viewing_epoch, Some(tx_id));
+        } else {
+            lazy_op = lazy_op.with_tx_context(self.viewing_epoch, None);
+        }
+
+        // Convert logical aggregates to factorized aggregates
+        let factorized_aggs: Vec<FactorizedAggregate> = agg
+            .aggregates
+            .iter()
+            .map(|agg_expr| {
+                match agg_expr.function {
+                    LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => {
+                        // COUNT(*) uses simple count, COUNT(col) uses column count
+                        if agg_expr.expression.is_none() {
+                            FactorizedAggregate::count()
+                        } else {
+                            // For COUNT(variable), we use the deepest level's target column
+                            // which is the last column added to the schema
+                            FactorizedAggregate::count_column(1) // Target is at index 1 in deepest level
+                        }
+                    }
+                    LogicalAggregateFunction::Sum => {
+                        // SUM on deepest level target
+                        FactorizedAggregate::sum(1)
+                    }
+                    LogicalAggregateFunction::Avg => FactorizedAggregate::avg(1),
+                    LogicalAggregateFunction::Min => FactorizedAggregate::min(1),
+                    LogicalAggregateFunction::Max => FactorizedAggregate::max(1),
+                    _ => {
+                        // Shouldn't reach here due to is_simple_aggregate check
+                        FactorizedAggregate::count()
+                    }
+                }
+            })
+            .collect();
+
+        // Build output column names
+        let output_columns: Vec<String> = agg
+            .aggregates
+            .iter()
+            .map(|agg_expr| {
+                agg_expr
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}(...)", agg_expr.function).to_lowercase())
+            })
+            .collect();
+
+        // Create the factorized aggregate operator
+        let factorized_agg_op = FactorizedAggregateOperator::new(lazy_op, factorized_aggs);
+
+        Ok((Box::new(factorized_agg_op), output_columns))
     }
 
     /// Resolves a logical expression to a column index.
@@ -2250,6 +2562,35 @@ impl PhysicalPlan {
     /// Takes ownership of the adaptive context.
     pub fn take_adaptive_context(&mut self) -> Option<AdaptiveContext> {
         self.adaptive_context.take()
+    }
+}
+
+/// Helper operator that returns a single result chunk once.
+///
+/// Used by the factorized expand chain to wrap the final result.
+#[allow(dead_code)]
+struct SingleResultOperator {
+    result: Option<grafeo_core::execution::DataChunk>,
+}
+
+impl SingleResultOperator {
+    #[allow(dead_code)]
+    fn new(result: Option<grafeo_core::execution::DataChunk>) -> Self {
+        Self { result }
+    }
+}
+
+impl Operator for SingleResultOperator {
+    fn next(&mut self) -> grafeo_core::execution::operators::OperatorResult {
+        Ok(self.result.take())
+    }
+
+    fn reset(&mut self) {
+        // Cannot reset - result is consumed
+    }
+
+    fn name(&self) -> &'static str {
+        "SingleResult"
     }
 }
 

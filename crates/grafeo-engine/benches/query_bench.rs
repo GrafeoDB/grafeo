@@ -28,14 +28,14 @@ fn setup_social_graph(node_count: usize, edge_multiplier: usize) -> GrafeoDB {
         session.execute(&query).unwrap();
     }
 
-    // Create KNOWS edges
+    // Create KNOWS edges using CREATE (not INSERT - INSERT doesn't work after MATCH in GQL)
     let edge_count = node_count * edge_multiplier;
     for i in 0..edge_count {
         let src = i % node_count;
         let dst = (i * 7 + 13) % node_count;
         if src != dst {
             let query = format!(
-                "MATCH (a:Person {{id: {}}}), (b:Person {{id: {}}}) INSERT (a)-[:KNOWS]->(b)",
+                "MATCH (a:Person {{id: {}}}), (b:Person {{id: {}}}) CREATE (a)-[:KNOWS]->(b)",
                 src, dst
             );
             let _ = session.execute(&query);

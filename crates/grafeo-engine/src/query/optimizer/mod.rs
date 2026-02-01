@@ -675,15 +675,28 @@ impl Optimizer {
                 LogicalOperator::Return(ret)
             }
 
-            // Can push through Expand if predicate only uses source variable
+            // Can push through Expand if predicate doesn't use variables introduced by this expand
             LogicalOperator::Expand(mut expand) => {
                 let predicate_vars = self.extract_variables(&predicate);
 
-                // Check if predicate only uses the source variable
-                let uses_only_source = predicate_vars.iter().all(|v| v == &expand.from_variable);
+                // Variables introduced by this expand are:
+                // - The target variable (to_variable)
+                // - The edge variable (if any)
+                // - The path alias (if any)
+                let mut introduced_vars = vec![&expand.to_variable];
+                if let Some(ref edge_var) = expand.edge_variable {
+                    introduced_vars.push(edge_var);
+                }
+                if let Some(ref path_alias) = expand.path_alias {
+                    introduced_vars.push(path_alias);
+                }
 
-                if uses_only_source {
-                    // Push the filter before the expand
+                // Check if predicate uses any variables introduced by this expand
+                let uses_introduced_vars =
+                    predicate_vars.iter().any(|v| introduced_vars.contains(&v));
+
+                if !uses_introduced_vars {
+                    // Predicate doesn't use vars from this expand, so push through
                     expand.input = Box::new(self.try_push_filter_into(predicate, *expand.input));
                     LogicalOperator::Expand(expand)
                 } else {

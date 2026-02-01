@@ -253,6 +253,7 @@ impl GrafeoDB {
                 Arc::clone(&self.rdf_store),
                 Arc::clone(&self.tx_manager),
                 self.config.adaptive.clone(),
+                self.config.factorized_execution,
             )
         }
         #[cfg(not(feature = "rdf"))]
@@ -261,6 +262,7 @@ impl GrafeoDB {
                 Arc::clone(&self.store),
                 Arc::clone(&self.tx_manager),
                 self.config.adaptive.clone(),
+                self.config.factorized_execution,
             )
         }
     }

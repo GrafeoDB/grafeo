@@ -37,6 +37,8 @@ pub struct Session {
     /// Adaptive execution configuration.
     #[allow(dead_code)]
     adaptive_config: AdaptiveConfig,
+    /// Whether to use factorized execution for multi-hop queries.
+    factorized_execution: bool,
 }
 
 impl Session {
@@ -51,6 +53,7 @@ impl Session {
             current_tx: None,
             auto_commit: true,
             adaptive_config: AdaptiveConfig::default(),
+            factorized_execution: true,
         }
     }
 
@@ -60,6 +63,7 @@ impl Session {
         store: Arc<LpgStore>,
         tx_manager: Arc<TransactionManager>,
         adaptive_config: AdaptiveConfig,
+        factorized_execution: bool,
     ) -> Self {
         Self {
             store,
@@ -69,6 +73,7 @@ impl Session {
             current_tx: None,
             auto_commit: true,
             adaptive_config,
+            factorized_execution,
         }
     }
 
@@ -79,6 +84,7 @@ impl Session {
         rdf_store: Arc<RdfStore>,
         tx_manager: Arc<TransactionManager>,
         adaptive_config: AdaptiveConfig,
+        factorized_execution: bool,
     ) -> Self {
         Self {
             store,
@@ -87,6 +93,7 @@ impl Session {
             current_tx: None,
             auto_commit: true,
             adaptive_config,
+            factorized_execution,
         }
     }
 
@@ -139,7 +146,8 @@ impl Session {
             Arc::clone(&self.tx_manager),
             tx_id,
             viewing_epoch,
-        );
+        )
+        .with_factorized_execution(self.factorized_execution);
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         // Execute the plan
@@ -236,7 +244,8 @@ impl Session {
             Arc::clone(&self.tx_manager),
             tx_id,
             viewing_epoch,
-        );
+        )
+        .with_factorized_execution(self.factorized_execution);
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         // Execute the plan
@@ -290,7 +299,8 @@ impl Session {
             Arc::clone(&self.tx_manager),
             tx_id,
             viewing_epoch,
-        );
+        )
+        .with_factorized_execution(self.factorized_execution);
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         // Execute the plan
@@ -374,7 +384,8 @@ impl Session {
             Arc::clone(&self.tx_manager),
             tx_id,
             viewing_epoch,
-        );
+        )
+        .with_factorized_execution(self.factorized_execution);
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         // Execute the plan

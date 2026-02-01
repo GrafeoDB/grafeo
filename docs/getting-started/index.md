@@ -49,12 +49,12 @@ Welcome to Grafeo! This guide will help you get started with the high-performanc
 
 ### For Python Users
 
-- Python 3.9 or later
-- pip or uv package manager
+- Python 3.12 or later
+- uv (or pip) package manager
 
 ### For Rust Users
 
-- Rust 1.80.0 or later
+- Rust 1.85.0 or later
 - Cargo package manager
 
 ## What's Next?

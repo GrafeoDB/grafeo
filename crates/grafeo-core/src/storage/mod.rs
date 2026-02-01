@@ -34,6 +34,8 @@ pub mod bitvec;
 pub mod codec;
 pub mod delta;
 pub mod dictionary;
+#[cfg(feature = "tiered-storage")]
+pub mod epoch_store;
 pub mod runlength;
 
 // Re-export commonly used types
@@ -45,3 +47,10 @@ pub use codec::{
 pub use delta::{DeltaEncoding, zigzag_decode, zigzag_encode};
 pub use dictionary::{DictionaryBuilder, DictionaryEncoding};
 pub use runlength::{Run, RunLengthAnalyzer, RunLengthEncoding, SignedRunLengthEncoding};
+
+// Tiered storage exports (feature-gated)
+#[cfg(feature = "tiered-storage")]
+pub use epoch_store::{
+    CompressedEpochBlock, CompressionType, EpochBlockHeader, EpochStore, EpochStoreStats,
+    IndexEntry, ZoneMap,
+};

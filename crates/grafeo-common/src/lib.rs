@@ -23,3 +23,7 @@ pub mod utils;
 pub use mvcc::{Version, VersionChain, VersionInfo};
 pub use types::{EdgeId, EpochId, LogicalType, NodeId, PropertyKey, Timestamp, TxId, Value};
 pub use utils::error::{Error, Result};
+
+// Tiered storage types (feature-gated)
+#[cfg(feature = "tiered-storage")]
+pub use mvcc::{ColdVersionRef, HotVersionRef, OptionalEpochId, VersionIndex, VersionRef};

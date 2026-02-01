@@ -49,6 +49,13 @@ impl Chunk {
     /// Tries to allocate `size` bytes with the given alignment.
     /// Returns None if there's not enough space.
     fn try_alloc(&self, size: usize, align: usize) -> Option<NonNull<u8>> {
+        self.try_alloc_with_offset(size, align).map(|(_, ptr)| ptr)
+    }
+
+    /// Tries to allocate `size` bytes with the given alignment.
+    /// Returns (offset, ptr) where offset is the aligned offset within this chunk.
+    /// Returns None if there's not enough space.
+    fn try_alloc_with_offset(&self, size: usize, align: usize) -> Option<(u32, NonNull<u8>)> {
         loop {
             let current = self.offset.load(Ordering::Relaxed);
 
@@ -70,7 +77,7 @@ impl Chunk {
                 Ok(_) => {
                     // SAFETY: We've reserved this range exclusively
                     let ptr = unsafe { self.ptr.as_ptr().add(aligned) };
-                    return NonNull::new(ptr);
+                    return Some((aligned as u32, NonNull::new(ptr)?));
                 }
                 Err(_) => continue, // Retry
             }
@@ -190,6 +197,73 @@ impl Arena {
             let typed_ptr = ptr.as_ptr() as *mut T;
             std::ptr::copy_nonoverlapping(values.as_ptr(), typed_ptr, values.len());
             std::slice::from_raw_parts_mut(typed_ptr, values.len())
+        }
+    }
+
+    /// Allocates a value and returns its offset within the primary chunk.
+    ///
+    /// This is used by tiered storage to store values in the arena and track
+    /// their locations via compact u32 offsets in `HotVersionRef`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if allocation would require a new chunk. Ensure chunk size is
+    /// large enough for your use case.
+    #[cfg(feature = "tiered-storage")]
+    pub fn alloc_value_with_offset<T>(&self, value: T) -> (u32, &mut T) {
+        let size = std::mem::size_of::<T>();
+        let align = std::mem::align_of::<T>();
+
+        // Try to allocate in the first chunk to get a stable offset
+        let chunks = self.chunks.read();
+        let chunk = chunks.first().expect("Arena should have at least one chunk");
+
+        let (offset, ptr) = chunk
+            .try_alloc_with_offset(size, align)
+            .expect("Allocation would create new chunk - increase chunk size");
+
+        // SAFETY: We've allocated the correct size and alignment
+        unsafe {
+            let typed_ptr = ptr.as_ptr().cast::<T>();
+            typed_ptr.write(value);
+            (offset, &mut *typed_ptr)
+        }
+    }
+
+    /// Reads a value at the given offset in the primary chunk.
+    ///
+    /// # Safety
+    ///
+    /// - The offset must have been returned by a previous `alloc_value_with_offset` call
+    /// - The type T must match what was stored at that offset
+    /// - The arena must not have been dropped
+    #[cfg(feature = "tiered-storage")]
+    pub unsafe fn read_at<T>(&self, offset: u32) -> &T {
+        let chunks = self.chunks.read();
+        let chunk = chunks.first().expect("Arena should have at least one chunk");
+        // SAFETY: Caller guarantees offset is valid and T matches stored type
+        unsafe {
+            let ptr = chunk.ptr.as_ptr().add(offset as usize).cast::<T>();
+            &*ptr
+        }
+    }
+
+    /// Reads a value mutably at the given offset in the primary chunk.
+    ///
+    /// # Safety
+    ///
+    /// - The offset must have been returned by a previous `alloc_value_with_offset` call
+    /// - The type T must match what was stored at that offset
+    /// - The arena must not have been dropped
+    /// - No other references to this value may exist
+    #[cfg(feature = "tiered-storage")]
+    pub unsafe fn read_at_mut<T>(&self, offset: u32) -> &mut T {
+        let chunks = self.chunks.read();
+        let chunk = chunks.first().expect("Arena should have at least one chunk");
+        // SAFETY: Caller guarantees offset is valid, T matches, and no aliasing
+        unsafe {
+            let ptr = chunk.ptr.as_ptr().add(offset as usize).cast::<T>();
+            &mut *ptr
         }
     }
 
@@ -315,6 +389,37 @@ impl ArenaAllocator {
         parking_lot::RwLockReadGuard::map(self.arenas.read(), |arenas| {
             arenas.get(&epoch).expect("Epoch should exist")
         })
+    }
+
+    /// Ensures an arena exists for the given epoch, creating it if necessary.
+    /// Returns whether a new arena was created.
+    #[cfg(feature = "tiered-storage")]
+    pub fn ensure_epoch(&self, epoch: EpochId) -> bool {
+        // Fast path: check if epoch already exists
+        {
+            let arenas = self.arenas.read();
+            if arenas.contains_key(&epoch) {
+                return false;
+            }
+        }
+
+        // Slow path: create the epoch
+        let mut arenas = self.arenas.write();
+        // Double-check after acquiring write lock
+        if arenas.contains_key(&epoch) {
+            return false;
+        }
+
+        let arena = Arena::with_chunk_size(epoch, self.chunk_size);
+        arenas.insert(epoch, arena);
+        true
+    }
+
+    /// Gets or creates an arena for a specific epoch.
+    #[cfg(feature = "tiered-storage")]
+    pub fn arena_or_create(&self, epoch: EpochId) -> impl std::ops::Deref<Target = Arena> + '_ {
+        self.ensure_epoch(epoch);
+        self.arena(epoch)
     }
 
     /// Allocates in the current epoch.
@@ -464,5 +569,140 @@ mod tests {
         arena.alloc(100, 8);
         let stats = arena.stats();
         assert!(stats.total_used >= 100);
+    }
+}
+
+#[cfg(all(test, feature = "tiered-storage"))]
+mod tiered_storage_tests {
+    use super::*;
+
+    #[test]
+    fn test_alloc_value_with_offset_basic() {
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 4096);
+
+        let (offset1, val1) = arena.alloc_value_with_offset(42u64);
+        let (offset2, val2) = arena.alloc_value_with_offset(100u64);
+
+        // First allocation should be at offset 0 (aligned)
+        assert_eq!(offset1, 0);
+        // Second allocation should be after the first
+        assert!(offset2 > offset1);
+        assert!(offset2 >= std::mem::size_of::<u64>() as u32);
+
+        // Values should be correct
+        assert_eq!(*val1, 42);
+        assert_eq!(*val2, 100);
+
+        // Mutation should work
+        *val1 = 999;
+        assert_eq!(*val1, 999);
+    }
+
+    #[test]
+    fn test_read_at_basic() {
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 4096);
+
+        let (offset, _) = arena.alloc_value_with_offset(12345u64);
+
+        // Read it back
+        let value: &u64 = unsafe { arena.read_at(offset) };
+        assert_eq!(*value, 12345);
+    }
+
+    #[test]
+    fn test_read_at_mut_basic() {
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 4096);
+
+        let (offset, _) = arena.alloc_value_with_offset(42u64);
+
+        // Read and modify
+        let value: &mut u64 = unsafe { arena.read_at_mut(offset) };
+        assert_eq!(*value, 42);
+        *value = 100;
+
+        // Verify modification persisted
+        let value: &u64 = unsafe { arena.read_at(offset) };
+        assert_eq!(*value, 100);
+    }
+
+    #[test]
+    fn test_alloc_value_with_offset_struct() {
+        #[derive(Debug, Clone, PartialEq)]
+        struct TestNode {
+            id: u64,
+            name: [u8; 32],
+            value: i32,
+        }
+
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 4096);
+
+        let node = TestNode {
+            id: 12345,
+            name: [b'A'; 32],
+            value: -999,
+        };
+
+        let (offset, stored) = arena.alloc_value_with_offset(node.clone());
+        assert_eq!(stored.id, 12345);
+        assert_eq!(stored.value, -999);
+
+        // Read it back
+        let read: &TestNode = unsafe { arena.read_at(offset) };
+        assert_eq!(read.id, node.id);
+        assert_eq!(read.name, node.name);
+        assert_eq!(read.value, node.value);
+    }
+
+    #[test]
+    fn test_alloc_value_with_offset_alignment() {
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 4096);
+
+        // Allocate a byte first to potentially misalign
+        let (offset1, _) = arena.alloc_value_with_offset(1u8);
+        assert_eq!(offset1, 0);
+
+        // Now allocate a u64 which requires 8-byte alignment
+        let (offset2, val) = arena.alloc_value_with_offset(42u64);
+
+        // offset2 should be 8-byte aligned
+        assert_eq!(offset2 % 8, 0);
+        assert_eq!(*val, 42);
+    }
+
+    #[test]
+    fn test_alloc_value_with_offset_multiple() {
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 4096);
+
+        let mut offsets = Vec::new();
+        for i in 0..100u64 {
+            let (offset, val) = arena.alloc_value_with_offset(i);
+            offsets.push(offset);
+            assert_eq!(*val, i);
+        }
+
+        // All offsets should be unique and in ascending order
+        for window in offsets.windows(2) {
+            assert!(window[0] < window[1]);
+        }
+
+        // Read all values back
+        for (i, offset) in offsets.iter().enumerate() {
+            let val: &u64 = unsafe { arena.read_at(*offset) };
+            assert_eq!(*val, i as u64);
+        }
+    }
+
+    #[test]
+    fn test_arena_allocator_with_offset() {
+        let allocator = ArenaAllocator::with_chunk_size(4096);
+
+        let epoch = allocator.current_epoch();
+        let arena = allocator.arena(epoch);
+
+        let (offset, val) = arena.alloc_value_with_offset(42u64);
+        assert_eq!(*val, 42);
+
+        let read: &u64 = unsafe { arena.read_at(offset) };
+        assert_eq!(*read, 42);
     }
 }

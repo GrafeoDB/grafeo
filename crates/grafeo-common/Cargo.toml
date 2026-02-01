@@ -32,6 +32,10 @@ parking_lot.workspace = true
 # Async
 tokio.workspace = true
 
+[features]
+default = []
+tiered-storage = []
+
 [dev-dependencies]
 proptest.workspace = true
 criterion.workspace = true

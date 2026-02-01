@@ -15,12 +15,21 @@ use crate::graph::Direction;
 use crate::index::adjacency::ChunkedAdjacency;
 use crate::index::zone_map::ZoneMapEntry;
 use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
+#[cfg(not(feature = "tiered-storage"))]
 use grafeo_common::mvcc::VersionChain;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TxId, Value};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+// Tiered storage imports
+#[cfg(feature = "tiered-storage")]
+use grafeo_common::memory::arena::ArenaAllocator;
+#[cfg(feature = "tiered-storage")]
+use grafeo_common::mvcc::{ColdVersionRef, HotVersionRef, VersionIndex, VersionRef};
+#[cfg(feature = "tiered-storage")]
+use crate::storage::EpochStore;
 
 /// Configuration for the LPG store.
 ///
@@ -81,10 +90,36 @@ pub struct LpgStore {
     config: LpgStoreConfig,
 
     /// Node records indexed by NodeId, with version chains for MVCC.
+    /// Used when `tiered-storage` feature is disabled.
+    #[cfg(not(feature = "tiered-storage"))]
     nodes: RwLock<FxHashMap<NodeId, VersionChain<NodeRecord>>>,
 
     /// Edge records indexed by EdgeId, with version chains for MVCC.
+    /// Used when `tiered-storage` feature is disabled.
+    #[cfg(not(feature = "tiered-storage"))]
     edges: RwLock<FxHashMap<EdgeId, VersionChain<EdgeRecord>>>,
+
+    // === Tiered Storage Fields (feature-gated) ===
+
+    /// Arena allocator for hot data storage.
+    /// Data is stored in per-epoch arenas for fast allocation and bulk deallocation.
+    #[cfg(feature = "tiered-storage")]
+    arena_allocator: Arc<ArenaAllocator>,
+
+    /// Node version indexes - store metadata and arena offsets.
+    /// The actual NodeRecord data is stored in the arena.
+    #[cfg(feature = "tiered-storage")]
+    node_versions: RwLock<FxHashMap<NodeId, VersionIndex>>,
+
+    /// Edge version indexes - store metadata and arena offsets.
+    /// The actual EdgeRecord data is stored in the arena.
+    #[cfg(feature = "tiered-storage")]
+    edge_versions: RwLock<FxHashMap<EdgeId, VersionIndex>>,
+
+    /// Cold storage for frozen epochs.
+    /// Contains compressed epoch blocks for historical data.
+    #[cfg(feature = "tiered-storage")]
+    epoch_store: Arc<EpochStore>,
 
     /// Property storage for nodes.
     node_properties: PropertyStorage<NodeId>,
@@ -148,8 +183,18 @@ impl LpgStore {
         };
 
         Self {
+            #[cfg(not(feature = "tiered-storage"))]
             nodes: RwLock::new(FxHashMap::default()),
+            #[cfg(not(feature = "tiered-storage"))]
             edges: RwLock::new(FxHashMap::default()),
+            #[cfg(feature = "tiered-storage")]
+            arena_allocator: Arc::new(ArenaAllocator::new()),
+            #[cfg(feature = "tiered-storage")]
+            node_versions: RwLock::new(FxHashMap::default()),
+            #[cfg(feature = "tiered-storage")]
+            edge_versions: RwLock::new(FxHashMap::default()),
+            #[cfg(feature = "tiered-storage")]
+            epoch_store: Arc::new(EpochStore::new()),
             node_properties: PropertyStorage::new(),
             edge_properties: PropertyStorage::new(),
             label_to_id: RwLock::new(FxHashMap::default()),
@@ -190,6 +235,7 @@ impl LpgStore {
     }
 
     /// Creates a new node with the given labels within a transaction context.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn create_node_versioned(&self, labels: &[&str], epoch: EpochId, tx_id: TxId) -> NodeId {
         let id = NodeId::new(self.next_node_id.fetch_add(1, Ordering::Relaxed));
 
@@ -219,6 +265,50 @@ impl LpgStore {
         id
     }
 
+    /// Creates a new node with the given labels within a transaction context.
+    /// (Tiered storage version: stores data in arena, metadata in VersionIndex)
+    #[cfg(feature = "tiered-storage")]
+    pub fn create_node_versioned(&self, labels: &[&str], epoch: EpochId, tx_id: TxId) -> NodeId {
+        let id = NodeId::new(self.next_node_id.fetch_add(1, Ordering::Relaxed));
+
+        let mut record = NodeRecord::new(id, epoch);
+        record.set_label_count(labels.len() as u16);
+
+        // Store labels in node_labels map and label_index
+        let mut node_label_set = FxHashSet::default();
+        for label in labels {
+            let label_id = self.get_or_create_label_id(*label);
+            node_label_set.insert(label_id);
+
+            // Update label index
+            let mut index = self.label_index.write();
+            while index.len() <= label_id as usize {
+                index.push(FxHashMap::default());
+            }
+            index[label_id as usize].insert(id, ());
+        }
+
+        // Store node's labels
+        self.node_labels.write().insert(id, node_label_set);
+
+        // Allocate record in arena and get offset (create epoch if needed)
+        let arena = self.arena_allocator.arena_or_create(epoch);
+        let (offset, _stored) = arena.alloc_value_with_offset(record);
+
+        // Create HotVersionRef pointing to arena data
+        let hot_ref = HotVersionRef::new(epoch, offset, tx_id);
+
+        // Create or update version index
+        let mut versions = self.node_versions.write();
+        if let Some(index) = versions.get_mut(&id) {
+            index.add_hot(hot_ref);
+        } else {
+            versions.insert(id, VersionIndex::with_initial(hot_ref));
+        }
+
+        id
+    }
+
     /// Creates a new node with labels and properties.
     pub fn create_node_with_props(
         &self,
@@ -234,6 +324,7 @@ impl LpgStore {
     }
 
     /// Creates a new node with labels and properties within a transaction context.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn create_node_with_props_versioned(
         &self,
         labels: &[&str],
@@ -258,6 +349,28 @@ impl LpgStore {
         id
     }
 
+    /// Creates a new node with labels and properties within a transaction context.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn create_node_with_props_versioned(
+        &self,
+        labels: &[&str],
+        properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
+        epoch: EpochId,
+        tx_id: TxId,
+    ) -> NodeId {
+        let id = self.create_node_versioned(labels, epoch, tx_id);
+
+        for (key, value) in properties {
+            self.node_properties.set(id, key.into(), value.into());
+        }
+
+        // Note: props_count in record is not updated for tiered storage.
+        // The record is immutable once allocated in the arena.
+
+        id
+    }
+
     /// Gets a node by ID (latest visible version).
     #[must_use]
     pub fn get_node(&self, id: NodeId) -> Option<Node> {
@@ -266,6 +379,7 @@ impl LpgStore {
 
     /// Gets a node by ID at a specific epoch.
     #[must_use]
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn get_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> Option<Node> {
         let nodes = self.nodes.read();
         let chain = nodes.get(&id)?;
@@ -294,8 +408,44 @@ impl LpgStore {
         Some(node)
     }
 
+    /// Gets a node by ID at a specific epoch.
+    /// (Tiered storage version: reads from arena via VersionIndex)
+    #[must_use]
+    #[cfg(feature = "tiered-storage")]
+    pub fn get_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> Option<Node> {
+        let versions = self.node_versions.read();
+        let index = versions.get(&id)?;
+        let version_ref = index.visible_at(epoch)?;
+
+        // Read the record from arena
+        let record = self.read_node_record(&version_ref)?;
+
+        if record.is_deleted() {
+            return None;
+        }
+
+        let mut node = Node::new(id);
+
+        // Get labels from node_labels map
+        let id_to_label = self.id_to_label.read();
+        let node_labels = self.node_labels.read();
+        if let Some(label_ids) = node_labels.get(&id) {
+            for &label_id in label_ids {
+                if let Some(label) = id_to_label.get(label_id as usize) {
+                    node.labels.push(label.clone());
+                }
+            }
+        }
+
+        // Get properties
+        node.properties = self.node_properties.get_all(id).into_iter().collect();
+
+        Some(node)
+    }
+
     /// Gets a node visible to a specific transaction.
     #[must_use]
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn get_node_versioned(&self, id: NodeId, epoch: EpochId, tx_id: TxId) -> Option<Node> {
         let nodes = self.nodes.read();
         let chain = nodes.get(&id)?;
@@ -324,12 +474,67 @@ impl LpgStore {
         Some(node)
     }
 
+    /// Gets a node visible to a specific transaction.
+    /// (Tiered storage version: reads from arena via VersionIndex)
+    #[must_use]
+    #[cfg(feature = "tiered-storage")]
+    pub fn get_node_versioned(&self, id: NodeId, epoch: EpochId, tx_id: TxId) -> Option<Node> {
+        let versions = self.node_versions.read();
+        let index = versions.get(&id)?;
+        let version_ref = index.visible_to(epoch, tx_id)?;
+
+        // Read the record from arena
+        let record = self.read_node_record(&version_ref)?;
+
+        if record.is_deleted() {
+            return None;
+        }
+
+        let mut node = Node::new(id);
+
+        // Get labels from node_labels map
+        let id_to_label = self.id_to_label.read();
+        let node_labels = self.node_labels.read();
+        if let Some(label_ids) = node_labels.get(&id) {
+            for &label_id in label_ids {
+                if let Some(label) = id_to_label.get(label_id as usize) {
+                    node.labels.push(label.clone());
+                }
+            }
+        }
+
+        // Get properties
+        node.properties = self.node_properties.get_all(id).into_iter().collect();
+
+        Some(node)
+    }
+
+    /// Reads a NodeRecord from arena (hot) or epoch store (cold) using a VersionRef.
+    #[cfg(feature = "tiered-storage")]
+    #[allow(unsafe_code)]
+    fn read_node_record(&self, version_ref: &VersionRef) -> Option<NodeRecord> {
+        match version_ref {
+            VersionRef::Hot(hot_ref) => {
+                let arena = self.arena_allocator.arena(hot_ref.epoch);
+                // SAFETY: The offset was returned by alloc_value_with_offset for a NodeRecord
+                let record: &NodeRecord = unsafe { arena.read_at(hot_ref.arena_offset) };
+                Some(record.clone())
+            }
+            VersionRef::Cold(cold_ref) => {
+                // Read from compressed epoch store
+                self.epoch_store
+                    .get_node(cold_ref.epoch, cold_ref.block_offset, cold_ref.length)
+            }
+        }
+    }
+
     /// Deletes a node and all its edges (using latest epoch).
     pub fn delete_node(&self, id: NodeId) -> bool {
         self.delete_node_at_epoch(id, self.current_epoch())
     }
 
     /// Deletes a node at a specific epoch.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn delete_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> bool {
         let mut nodes = self.nodes.write();
         if let Some(chain) = nodes.get_mut(&id) {
@@ -371,10 +576,56 @@ impl LpgStore {
         }
     }
 
+    /// Deletes a node at a specific epoch.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn delete_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> bool {
+        let mut versions = self.node_versions.write();
+        if let Some(index) = versions.get_mut(&id) {
+            // Check if visible at this epoch
+            if let Some(version_ref) = index.visible_at(epoch) {
+                if let Some(record) = self.read_node_record(&version_ref) {
+                    if record.is_deleted() {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+
+            // Mark as deleted in version index
+            index.mark_deleted(epoch);
+
+            // Remove from label index using node_labels map
+            let mut label_index = self.label_index.write();
+            let mut node_labels = self.node_labels.write();
+            if let Some(label_ids) = node_labels.remove(&id) {
+                for label_id in label_ids {
+                    if let Some(set) = label_index.get_mut(label_id as usize) {
+                        set.remove(&id);
+                    }
+                }
+            }
+
+            // Remove properties
+            drop(versions);
+            drop(label_index);
+            drop(node_labels);
+            self.node_properties.remove_all(id);
+
+            true
+        } else {
+            false
+        }
+    }
+
     /// Deletes all edges connected to a node (implements DETACH DELETE).
     ///
     /// Call this before `delete_node()` if you want to remove a node that
     /// has edges. Grafeo doesn't auto-delete edges - you have to be explicit.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn delete_node_edges(&self, node_id: NodeId) {
         // Get outgoing edges
         let outgoing: Vec<EdgeId> = self
@@ -415,7 +666,53 @@ impl LpgStore {
         }
     }
 
+    /// Deletes all edges connected to a node (implements DETACH DELETE).
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn delete_node_edges(&self, node_id: NodeId) {
+        // Get outgoing edges
+        let outgoing: Vec<EdgeId> = self
+            .forward_adj
+            .edges_from(node_id)
+            .into_iter()
+            .map(|(_, edge_id)| edge_id)
+            .collect();
+
+        // Get incoming edges
+        let incoming: Vec<EdgeId> = if let Some(ref backward) = self.backward_adj {
+            backward
+                .edges_from(node_id)
+                .into_iter()
+                .map(|(_, edge_id)| edge_id)
+                .collect()
+        } else {
+            // No backward adjacency - scan all edges
+            let epoch = self.current_epoch();
+            let versions = self.edge_versions.read();
+            versions
+                .iter()
+                .filter_map(|(id, index)| {
+                    index.visible_at(epoch).and_then(|vref| {
+                        self.read_edge_record(&vref).and_then(|r| {
+                            if !r.is_deleted() && r.dst == node_id {
+                                Some(*id)
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                })
+                .collect()
+        };
+
+        // Delete all edges
+        for edge_id in outgoing.into_iter().chain(incoming) {
+            self.delete_edge(edge_id);
+        }
+    }
+
     /// Sets a property on a node.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) {
         self.node_properties.set(id, key.into(), value);
 
@@ -428,6 +725,16 @@ impl LpgStore {
         }
     }
 
+    /// Sets a property on a node.
+    /// (Tiered storage version: properties stored separately, record is immutable)
+    #[cfg(feature = "tiered-storage")]
+    pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) {
+        self.node_properties.set(id, key.into(), value);
+        // Note: props_count in record is not updated for tiered storage.
+        // The record is immutable once allocated in the arena.
+        // Property count can be derived from PropertyStorage if needed.
+    }
+
     /// Sets a property on an edge.
     pub fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) {
         self.edge_properties.set(id, key.into(), value);
@@ -436,6 +743,7 @@ impl LpgStore {
     /// Removes a property from a node.
     ///
     /// Returns the previous value if it existed, or None if the property didn't exist.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
         let result = self.node_properties.remove(id, &key.into());
 
@@ -450,6 +758,14 @@ impl LpgStore {
         result
     }
 
+    /// Removes a property from a node.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
+        self.node_properties.remove(id, &key.into())
+        // Note: props_count in record is not updated for tiered storage.
+    }
+
     /// Removes a property from an edge.
     ///
     /// Returns the previous value if it existed, or None if the property didn't exist.
@@ -461,6 +777,7 @@ impl LpgStore {
     ///
     /// Returns true if the label was added, false if the node doesn't exist
     /// or already has the label.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn add_label(&self, node_id: NodeId, label: &str) -> bool {
         let epoch = self.current_epoch();
 
@@ -509,10 +826,65 @@ impl LpgStore {
         true
     }
 
+    /// Adds a label to a node.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn add_label(&self, node_id: NodeId, label: &str) -> bool {
+        let epoch = self.current_epoch();
+
+        // Check if node exists
+        let versions = self.node_versions.read();
+        if let Some(index) = versions.get(&node_id) {
+            if let Some(vref) = index.visible_at(epoch) {
+                if let Some(record) = self.read_node_record(&vref) {
+                    if record.is_deleted() {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        drop(versions);
+
+        // Get or create label ID
+        let label_id = self.get_or_create_label_id(label);
+
+        // Add to node_labels map
+        let mut node_labels = self.node_labels.write();
+        let label_set = node_labels
+            .entry(node_id)
+            .or_insert_with(FxHashSet::default);
+
+        if label_set.contains(&label_id) {
+            return false; // Already has this label
+        }
+
+        label_set.insert(label_id);
+        drop(node_labels);
+
+        // Add to label_index
+        let mut index = self.label_index.write();
+        if (label_id as usize) >= index.len() {
+            index.resize(label_id as usize + 1, FxHashMap::default());
+        }
+        index[label_id as usize].insert(node_id, ());
+
+        // Note: label_count in record is not updated for tiered storage.
+        // The record is immutable once allocated in the arena.
+
+        true
+    }
+
     /// Removes a label from a node.
     ///
     /// Returns true if the label was removed, false if the node doesn't exist
     /// or doesn't have the label.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn remove_label(&self, node_id: NodeId, label: &str) -> bool {
         let epoch = self.current_epoch();
 
@@ -564,8 +936,65 @@ impl LpgStore {
         true
     }
 
+    /// Removes a label from a node.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn remove_label(&self, node_id: NodeId, label: &str) -> bool {
+        let epoch = self.current_epoch();
+
+        // Check if node exists
+        let versions = self.node_versions.read();
+        if let Some(index) = versions.get(&node_id) {
+            if let Some(vref) = index.visible_at(epoch) {
+                if let Some(record) = self.read_node_record(&vref) {
+                    if record.is_deleted() {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        drop(versions);
+
+        // Get label ID
+        let label_id = {
+            let label_ids = self.label_to_id.read();
+            match label_ids.get(label) {
+                Some(&id) => id,
+                None => return false, // Label doesn't exist
+            }
+        };
+
+        // Remove from node_labels map
+        let mut node_labels = self.node_labels.write();
+        if let Some(label_set) = node_labels.get_mut(&node_id) {
+            if !label_set.remove(&label_id) {
+                return false; // Node doesn't have this label
+            }
+        } else {
+            return false;
+        }
+        drop(node_labels);
+
+        // Remove from label_index
+        let mut index = self.label_index.write();
+        if (label_id as usize) < index.len() {
+            index[label_id as usize].remove(&node_id);
+        }
+
+        // Note: label_count in record is not updated for tiered storage.
+
+        true
+    }
+
     /// Returns the number of nodes (non-deleted at current epoch).
     #[must_use]
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn node_count(&self) -> usize {
         let epoch = self.current_epoch();
         self.nodes
@@ -576,12 +1005,31 @@ impl LpgStore {
             .count()
     }
 
+    /// Returns the number of nodes (non-deleted at current epoch).
+    /// (Tiered storage version)
+    #[must_use]
+    #[cfg(feature = "tiered-storage")]
+    pub fn node_count(&self) -> usize {
+        let epoch = self.current_epoch();
+        let versions = self.node_versions.read();
+        versions
+            .iter()
+            .filter(|(_, index)| {
+                index.visible_at(epoch).map_or(false, |vref| {
+                    self.read_node_record(&vref)
+                        .map_or(false, |r| !r.is_deleted())
+                })
+            })
+            .count()
+    }
+
     /// Returns all node IDs in the store.
     ///
     /// This returns a snapshot of current node IDs. The returned vector
     /// excludes deleted nodes. Results are sorted by NodeId for deterministic
     /// iteration order.
     #[must_use]
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn node_ids(&self) -> Vec<NodeId> {
         let epoch = self.current_epoch();
         let mut ids: Vec<NodeId> = self
@@ -598,6 +1046,31 @@ impl LpgStore {
         ids
     }
 
+    /// Returns all node IDs in the store.
+    /// (Tiered storage version)
+    #[must_use]
+    #[cfg(feature = "tiered-storage")]
+    pub fn node_ids(&self) -> Vec<NodeId> {
+        let epoch = self.current_epoch();
+        let versions = self.node_versions.read();
+        let mut ids: Vec<NodeId> = versions
+            .iter()
+            .filter_map(|(id, index)| {
+                index.visible_at(epoch).and_then(|vref| {
+                    self.read_node_record(&vref).and_then(|r| {
+                        if !r.is_deleted() {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    })
+                })
+            })
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
     // === Edge Operations ===
 
     /// Creates a new edge.
@@ -606,6 +1079,7 @@ impl LpgStore {
     }
 
     /// Creates a new edge within a transaction context.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn create_edge_versioned(
         &self,
         src: NodeId,
@@ -620,6 +1094,46 @@ impl LpgStore {
         let record = EdgeRecord::new(id, src, dst, type_id, epoch);
         let chain = VersionChain::with_initial(record, epoch, tx_id);
         self.edges.write().insert(id, chain);
+
+        // Update adjacency
+        self.forward_adj.add_edge(src, dst, id);
+        if let Some(ref backward) = self.backward_adj {
+            backward.add_edge(dst, src, id);
+        }
+
+        id
+    }
+
+    /// Creates a new edge within a transaction context.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn create_edge_versioned(
+        &self,
+        src: NodeId,
+        dst: NodeId,
+        edge_type: &str,
+        epoch: EpochId,
+        tx_id: TxId,
+    ) -> EdgeId {
+        let id = EdgeId::new(self.next_edge_id.fetch_add(1, Ordering::Relaxed));
+        let type_id = self.get_or_create_edge_type_id(edge_type);
+
+        let record = EdgeRecord::new(id, src, dst, type_id, epoch);
+
+        // Allocate record in arena and get offset (create epoch if needed)
+        let arena = self.arena_allocator.arena_or_create(epoch);
+        let (offset, _stored) = arena.alloc_value_with_offset(record);
+
+        // Create HotVersionRef pointing to arena data
+        let hot_ref = HotVersionRef::new(epoch, offset, tx_id);
+
+        // Create or update version index
+        let mut versions = self.edge_versions.write();
+        if let Some(index) = versions.get_mut(&id) {
+            index.add_hot(hot_ref);
+        } else {
+            versions.insert(id, VersionIndex::with_initial(hot_ref));
+        }
 
         // Update adjacency
         self.forward_adj.add_edge(src, dst, id);
@@ -655,6 +1169,7 @@ impl LpgStore {
 
     /// Gets an edge by ID at a specific epoch.
     #[must_use]
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn get_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> Option<Edge> {
         let edges = self.edges.read();
         let chain = edges.get(&id)?;
@@ -677,8 +1192,37 @@ impl LpgStore {
         Some(edge)
     }
 
+    /// Gets an edge by ID at a specific epoch.
+    /// (Tiered storage version)
+    #[must_use]
+    #[cfg(feature = "tiered-storage")]
+    pub fn get_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> Option<Edge> {
+        let versions = self.edge_versions.read();
+        let index = versions.get(&id)?;
+        let version_ref = index.visible_at(epoch)?;
+
+        let record = self.read_edge_record(&version_ref)?;
+
+        if record.is_deleted() {
+            return None;
+        }
+
+        let edge_type = {
+            let id_to_type = self.id_to_edge_type.read();
+            id_to_type.get(record.type_id as usize)?.clone()
+        };
+
+        let mut edge = Edge::new(id, record.src, record.dst, edge_type);
+
+        // Get properties
+        edge.properties = self.edge_properties.get_all(id).into_iter().collect();
+
+        Some(edge)
+    }
+
     /// Gets an edge visible to a specific transaction.
     #[must_use]
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn get_edge_versioned(&self, id: EdgeId, epoch: EpochId, tx_id: TxId) -> Option<Edge> {
         let edges = self.edges.read();
         let chain = edges.get(&id)?;
@@ -701,12 +1245,60 @@ impl LpgStore {
         Some(edge)
     }
 
+    /// Gets an edge visible to a specific transaction.
+    /// (Tiered storage version)
+    #[must_use]
+    #[cfg(feature = "tiered-storage")]
+    pub fn get_edge_versioned(&self, id: EdgeId, epoch: EpochId, tx_id: TxId) -> Option<Edge> {
+        let versions = self.edge_versions.read();
+        let index = versions.get(&id)?;
+        let version_ref = index.visible_to(epoch, tx_id)?;
+
+        let record = self.read_edge_record(&version_ref)?;
+
+        if record.is_deleted() {
+            return None;
+        }
+
+        let edge_type = {
+            let id_to_type = self.id_to_edge_type.read();
+            id_to_type.get(record.type_id as usize)?.clone()
+        };
+
+        let mut edge = Edge::new(id, record.src, record.dst, edge_type);
+
+        // Get properties
+        edge.properties = self.edge_properties.get_all(id).into_iter().collect();
+
+        Some(edge)
+    }
+
+    /// Reads an EdgeRecord from arena using a VersionRef.
+    #[cfg(feature = "tiered-storage")]
+    #[allow(unsafe_code)]
+    fn read_edge_record(&self, version_ref: &VersionRef) -> Option<EdgeRecord> {
+        match version_ref {
+            VersionRef::Hot(hot_ref) => {
+                let arena = self.arena_allocator.arena(hot_ref.epoch);
+                // SAFETY: The offset was returned by alloc_value_with_offset for an EdgeRecord
+                let record: &EdgeRecord = unsafe { arena.read_at(hot_ref.arena_offset) };
+                Some(record.clone())
+            }
+            VersionRef::Cold(cold_ref) => {
+                // Read from compressed epoch store
+                self.epoch_store
+                    .get_edge(cold_ref.epoch, cold_ref.block_offset, cold_ref.length)
+            }
+        }
+    }
+
     /// Deletes an edge (using latest epoch).
     pub fn delete_edge(&self, id: EdgeId) -> bool {
         self.delete_edge_at_epoch(id, self.current_epoch())
     }
 
     /// Deletes an edge at a specific epoch.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn delete_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> bool {
         let mut edges = self.edges.write();
         if let Some(chain) = edges.get_mut(&id) {
@@ -743,8 +1335,52 @@ impl LpgStore {
         }
     }
 
+    /// Deletes an edge at a specific epoch.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn delete_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> bool {
+        let mut versions = self.edge_versions.write();
+        if let Some(index) = versions.get_mut(&id) {
+            // Get the visible record to check if deleted and get src/dst
+            let (src, dst) = {
+                match index.visible_at(epoch) {
+                    Some(version_ref) => {
+                        if let Some(record) = self.read_edge_record(&version_ref) {
+                            if record.is_deleted() {
+                                return false;
+                            }
+                            (record.src, record.dst)
+                        } else {
+                            return false;
+                        }
+                    }
+                    None => return false,
+                }
+            };
+
+            // Mark as deleted in version index
+            index.mark_deleted(epoch);
+
+            drop(versions); // Release lock
+
+            // Mark as deleted in adjacency (soft delete)
+            self.forward_adj.mark_deleted(src, id);
+            if let Some(ref backward) = self.backward_adj {
+                backward.mark_deleted(dst, id);
+            }
+
+            // Remove properties
+            self.edge_properties.remove_all(id);
+
+            true
+        } else {
+            false
+        }
+    }
+
     /// Returns the number of edges (non-deleted at current epoch).
     #[must_use]
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn edge_count(&self) -> usize {
         let epoch = self.current_epoch();
         self.edges
@@ -755,10 +1391,29 @@ impl LpgStore {
             .count()
     }
 
+    /// Returns the number of edges (non-deleted at current epoch).
+    /// (Tiered storage version)
+    #[must_use]
+    #[cfg(feature = "tiered-storage")]
+    pub fn edge_count(&self) -> usize {
+        let epoch = self.current_epoch();
+        let versions = self.edge_versions.read();
+        versions
+            .iter()
+            .filter(|(_, index)| {
+                index.visible_at(epoch).map_or(false, |vref| {
+                    self.read_edge_record(&vref)
+                        .map_or(false, |r| !r.is_deleted())
+                })
+            })
+            .count()
+    }
+
     /// Discards all uncommitted versions created by a transaction.
     ///
     /// This is called during transaction rollback to clean up uncommitted changes.
     /// The method removes version chain entries created by the specified transaction.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn discard_uncommitted_versions(&self, tx_id: TxId) {
         // Remove uncommitted node versions
         {
@@ -779,6 +1434,153 @@ impl LpgStore {
             // Remove completely empty chains (no versions left)
             edges.retain(|_, chain| !chain.is_empty());
         }
+    }
+
+    /// Discards all uncommitted versions created by a transaction.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn discard_uncommitted_versions(&self, tx_id: TxId) {
+        // Remove uncommitted node versions
+        {
+            let mut versions = self.node_versions.write();
+            for index in versions.values_mut() {
+                index.remove_versions_by(tx_id);
+            }
+            // Remove completely empty indexes (no versions left)
+            versions.retain(|_, index| !index.is_empty());
+        }
+
+        // Remove uncommitted edge versions
+        {
+            let mut versions = self.edge_versions.write();
+            for index in versions.values_mut() {
+                index.remove_versions_by(tx_id);
+            }
+            // Remove completely empty indexes (no versions left)
+            versions.retain(|_, index| !index.is_empty());
+        }
+    }
+
+    /// Freezes an epoch from hot (arena) storage to cold (compressed) storage.
+    ///
+    /// This is called by the transaction manager when an epoch becomes eligible
+    /// for freezing (no active transactions can see it). The freeze process:
+    ///
+    /// 1. Collects all hot version refs for the epoch
+    /// 2. Reads the corresponding records from arena
+    /// 3. Compresses them into a `CompressedEpochBlock`
+    /// 4. Updates `VersionIndex` entries to point to cold storage
+    /// 5. The arena can be deallocated after all epochs in it are frozen
+    ///
+    /// # Arguments
+    ///
+    /// * `epoch` - The epoch to freeze
+    ///
+    /// # Returns
+    ///
+    /// The number of records frozen (nodes + edges).
+    #[cfg(feature = "tiered-storage")]
+    #[allow(unsafe_code)]
+    pub fn freeze_epoch(&self, epoch: EpochId) -> usize {
+        // Collect node records to freeze
+        let mut node_records: Vec<(u64, NodeRecord)> = Vec::new();
+        let mut node_hot_refs: Vec<(NodeId, HotVersionRef)> = Vec::new();
+
+        {
+            let versions = self.node_versions.read();
+            for (node_id, index) in versions.iter() {
+                for hot_ref in index.hot_refs_for_epoch(epoch) {
+                    let arena = self.arena_allocator.arena(hot_ref.epoch);
+                    // SAFETY: The offset was returned by alloc_value_with_offset for a NodeRecord
+                    let record: &NodeRecord = unsafe { arena.read_at(hot_ref.arena_offset) };
+                    node_records.push((node_id.as_u64(), record.clone()));
+                    node_hot_refs.push((*node_id, *hot_ref));
+                }
+            }
+        }
+
+        // Collect edge records to freeze
+        let mut edge_records: Vec<(u64, EdgeRecord)> = Vec::new();
+        let mut edge_hot_refs: Vec<(EdgeId, HotVersionRef)> = Vec::new();
+
+        {
+            let versions = self.edge_versions.read();
+            for (edge_id, index) in versions.iter() {
+                for hot_ref in index.hot_refs_for_epoch(epoch) {
+                    let arena = self.arena_allocator.arena(hot_ref.epoch);
+                    // SAFETY: The offset was returned by alloc_value_with_offset for an EdgeRecord
+                    let record: &EdgeRecord = unsafe { arena.read_at(hot_ref.arena_offset) };
+                    edge_records.push((edge_id.as_u64(), record.clone()));
+                    edge_hot_refs.push((*edge_id, *hot_ref));
+                }
+            }
+        }
+
+        let total_frozen = node_records.len() + edge_records.len();
+
+        if total_frozen == 0 {
+            return 0;
+        }
+
+        // Freeze to compressed storage
+        let (node_entries, edge_entries) =
+            self.epoch_store.freeze_epoch(epoch, node_records, edge_records);
+
+        // Build lookup maps for index entries
+        let node_entry_map: FxHashMap<u64, _> = node_entries
+            .iter()
+            .map(|e| (e.entity_id, (e.offset, e.length)))
+            .collect();
+        let edge_entry_map: FxHashMap<u64, _> = edge_entries
+            .iter()
+            .map(|e| (e.entity_id, (e.offset, e.length)))
+            .collect();
+
+        // Update version indexes to use cold refs
+        {
+            let mut versions = self.node_versions.write();
+            for (node_id, hot_ref) in &node_hot_refs {
+                if let Some(index) = versions.get_mut(node_id) {
+                    if let Some(&(offset, length)) = node_entry_map.get(&node_id.as_u64()) {
+                        let cold_ref = ColdVersionRef {
+                            epoch,
+                            block_offset: offset,
+                            length,
+                            created_by: hot_ref.created_by,
+                            deleted_epoch: hot_ref.deleted_epoch,
+                        };
+                        index.freeze_epoch(epoch, std::iter::once(cold_ref));
+                    }
+                }
+            }
+        }
+
+        {
+            let mut versions = self.edge_versions.write();
+            for (edge_id, hot_ref) in &edge_hot_refs {
+                if let Some(index) = versions.get_mut(edge_id) {
+                    if let Some(&(offset, length)) = edge_entry_map.get(&edge_id.as_u64()) {
+                        let cold_ref = ColdVersionRef {
+                            epoch,
+                            block_offset: offset,
+                            length,
+                            created_by: hot_ref.created_by,
+                            deleted_epoch: hot_ref.deleted_epoch,
+                        };
+                        index.freeze_epoch(epoch, std::iter::once(cold_ref));
+                    }
+                }
+            }
+        }
+
+        total_frozen
+    }
+
+    /// Returns the epoch store for cold storage statistics.
+    #[cfg(feature = "tiered-storage")]
+    #[must_use]
+    pub fn epoch_store(&self) -> &EpochStore {
+        &self.epoch_store
     }
 
     /// Returns the number of distinct labels in the store.
@@ -869,11 +1671,26 @@ impl LpgStore {
 
     /// Gets the type of an edge by ID.
     #[must_use]
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn edge_type(&self, id: EdgeId) -> Option<Arc<str>> {
         let edges = self.edges.read();
         let chain = edges.get(&id)?;
         let epoch = self.current_epoch();
         let record = chain.visible_at(epoch)?;
+        let id_to_type = self.id_to_edge_type.read();
+        id_to_type.get(record.type_id as usize).cloned()
+    }
+
+    /// Gets the type of an edge by ID.
+    /// (Tiered storage version)
+    #[must_use]
+    #[cfg(feature = "tiered-storage")]
+    pub fn edge_type(&self, id: EdgeId) -> Option<Arc<str>> {
+        let versions = self.edge_versions.read();
+        let index = versions.get(&id)?;
+        let epoch = self.current_epoch();
+        let vref = index.visible_at(epoch)?;
+        let record = self.read_edge_record(&vref)?;
         let id_to_type = self.id_to_edge_type.read();
         id_to_type.get(record.type_id as usize).cloned()
     }
@@ -902,6 +1719,7 @@ impl LpgStore {
     ///
     /// This creates a snapshot of all visible nodes at the current epoch.
     /// Useful for dump/export operations.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn all_nodes(&self) -> impl Iterator<Item = Node> + '_ {
         let epoch = self.current_epoch();
         let node_ids: Vec<NodeId> = self
@@ -918,10 +1736,19 @@ impl LpgStore {
         node_ids.into_iter().filter_map(move |id| self.get_node(id))
     }
 
+    /// Returns an iterator over all nodes in the database.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn all_nodes(&self) -> impl Iterator<Item = Node> + '_ {
+        let node_ids = self.node_ids();
+        node_ids.into_iter().filter_map(move |id| self.get_node(id))
+    }
+
     /// Returns an iterator over all edges in the database.
     ///
     /// This creates a snapshot of all visible edges at the current epoch.
     /// Useful for dump/export operations.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn all_edges(&self) -> impl Iterator<Item = Edge> + '_ {
         let epoch = self.current_epoch();
         let edge_ids: Vec<EdgeId> = self
@@ -932,6 +1759,30 @@ impl LpgStore {
                 chain
                     .visible_at(epoch)
                     .and_then(|r| if !r.is_deleted() { Some(*id) } else { None })
+            })
+            .collect();
+
+        edge_ids.into_iter().filter_map(move |id| self.get_edge(id))
+    }
+
+    /// Returns an iterator over all edges in the database.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn all_edges(&self) -> impl Iterator<Item = Edge> + '_ {
+        let epoch = self.current_epoch();
+        let versions = self.edge_versions.read();
+        let edge_ids: Vec<EdgeId> = versions
+            .iter()
+            .filter_map(|(id, index)| {
+                index.visible_at(epoch).and_then(|vref| {
+                    self.read_edge_record(&vref).and_then(|r| {
+                        if !r.is_deleted() {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    })
+                })
             })
             .collect();
 
@@ -975,6 +1826,7 @@ impl LpgStore {
     }
 
     /// Returns an iterator over edges with a specific type.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn edges_with_type<'a>(&'a self, edge_type: &str) -> impl Iterator<Item = Edge> + 'a {
         let epoch = self.current_epoch();
         let type_to_id = self.edge_type_to_id.read();
@@ -1000,6 +1852,37 @@ impl LpgStore {
                 as Box<dyn Iterator<Item = Edge> + 'a>
         } else {
             // Return empty iterator
+            Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Edge> + 'a>
+        }
+    }
+
+    /// Returns an iterator over edges with a specific type.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn edges_with_type<'a>(&'a self, edge_type: &str) -> impl Iterator<Item = Edge> + 'a {
+        let epoch = self.current_epoch();
+        let type_to_id = self.edge_type_to_id.read();
+
+        if let Some(&type_id) = type_to_id.get(edge_type) {
+            let versions = self.edge_versions.read();
+            let edge_ids: Vec<EdgeId> = versions
+                .iter()
+                .filter_map(|(id, index)| {
+                    index.visible_at(epoch).and_then(|vref| {
+                        self.read_edge_record(&vref).and_then(|r| {
+                            if !r.is_deleted() && r.type_id == type_id {
+                                Some(*id)
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                })
+                .collect();
+
+            Box::new(edge_ids.into_iter().filter_map(move |id| self.get_edge(id)))
+                as Box<dyn Iterator<Item = Edge> + 'a>
+        } else {
             Box::new(std::iter::empty()) as Box<dyn Iterator<Item = Edge> + 'a>
         }
     }
@@ -1061,6 +1944,7 @@ impl LpgStore {
     ///
     /// Scans all labels and edge types to build cardinality estimates for the
     /// query optimizer. Call this periodically or after bulk data loads.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn compute_statistics(&self) {
         let mut stats = Statistics::new();
 
@@ -1103,6 +1987,72 @@ impl LpgStore {
             if let Some(record) = chain.visible_at(epoch) {
                 if !record.is_deleted() {
                     *edge_type_counts.entry(record.type_id).or_default() += 1;
+                }
+            }
+        }
+
+        for (type_id, count) in edge_type_counts {
+            if let Some(type_name) = id_to_edge_type.get(type_id as usize) {
+                let avg_degree = if stats.total_nodes > 0 {
+                    count as f64 / stats.total_nodes as f64
+                } else {
+                    0.0
+                };
+
+                let edge_stats = EdgeTypeStatistics::new(count, avg_degree, avg_degree);
+                stats.update_edge_type(type_name.as_ref(), edge_stats);
+            }
+        }
+
+        *self.statistics.write() = stats;
+    }
+
+    /// Recomputes statistics from current data.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn compute_statistics(&self) {
+        let mut stats = Statistics::new();
+
+        // Compute total counts
+        stats.total_nodes = self.node_count() as u64;
+        stats.total_edges = self.edge_count() as u64;
+
+        // Compute per-label statistics
+        let id_to_label = self.id_to_label.read();
+        let label_index = self.label_index.read();
+
+        for (label_id, label_name) in id_to_label.iter().enumerate() {
+            let node_count = label_index
+                .get(label_id)
+                .map(|set| set.len() as u64)
+                .unwrap_or(0);
+
+            if node_count > 0 {
+                let avg_out_degree = if stats.total_nodes > 0 {
+                    stats.total_edges as f64 / stats.total_nodes as f64
+                } else {
+                    0.0
+                };
+
+                let label_stats =
+                    LabelStatistics::new(node_count).with_degrees(avg_out_degree, avg_out_degree);
+
+                stats.update_label(label_name.as_ref(), label_stats);
+            }
+        }
+
+        // Compute per-edge-type statistics
+        let id_to_edge_type = self.id_to_edge_type.read();
+        let versions = self.edge_versions.read();
+        let epoch = self.current_epoch();
+
+        let mut edge_type_counts: FxHashMap<u32, u64> = FxHashMap::default();
+        for index in versions.values() {
+            if let Some(vref) = index.visible_at(epoch) {
+                if let Some(record) = self.read_edge_record(&vref) {
+                    if !record.is_deleted() {
+                        *edge_type_counts.entry(record.type_id).or_default() += 1;
+                    }
                 }
             }
         }
@@ -1194,6 +2144,7 @@ impl LpgStore {
     ///
     /// This is used for WAL recovery to restore nodes with their original IDs.
     /// The caller must ensure IDs don't conflict with existing nodes.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn create_node_with_id(&self, id: NodeId, labels: &[&str]) {
         let epoch = self.current_epoch();
         let mut record = NodeRecord::new(id, epoch);
@@ -1233,9 +2184,57 @@ impl LpgStore {
             });
     }
 
+    /// Creates a node with a specific ID during recovery.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn create_node_with_id(&self, id: NodeId, labels: &[&str]) {
+        let epoch = self.current_epoch();
+        let mut record = NodeRecord::new(id, epoch);
+        record.set_label_count(labels.len() as u16);
+
+        // Store labels in node_labels map and label_index
+        let mut node_label_set = FxHashSet::default();
+        for label in labels {
+            let label_id = self.get_or_create_label_id(*label);
+            node_label_set.insert(label_id);
+
+            // Update label index
+            let mut index = self.label_index.write();
+            while index.len() <= label_id as usize {
+                index.push(FxHashMap::default());
+            }
+            index[label_id as usize].insert(id, ());
+        }
+
+        // Store node's labels
+        self.node_labels.write().insert(id, node_label_set);
+
+        // Allocate record in arena and get offset (create epoch if needed)
+        let arena = self.arena_allocator.arena_or_create(epoch);
+        let (offset, _stored) = arena.alloc_value_with_offset(record);
+
+        // Create HotVersionRef (using SYSTEM tx for recovery)
+        let hot_ref = HotVersionRef::new(epoch, offset, TxId::SYSTEM);
+        let mut versions = self.node_versions.write();
+        versions.insert(id, VersionIndex::with_initial(hot_ref));
+
+        // Update next_node_id if necessary to avoid future collisions
+        let id_val = id.as_u64();
+        let _ = self
+            .next_node_id
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                if id_val >= current {
+                    Some(id_val + 1)
+                } else {
+                    None
+                }
+            });
+    }
+
     /// Creates an edge with a specific ID during recovery.
     ///
     /// This is used for WAL recovery to restore edges with their original IDs.
+    #[cfg(not(feature = "tiered-storage"))]
     pub fn create_edge_with_id(&self, id: EdgeId, src: NodeId, dst: NodeId, edge_type: &str) {
         let epoch = self.current_epoch();
         let type_id = self.get_or_create_edge_type_id(edge_type);
@@ -1243,6 +2242,43 @@ impl LpgStore {
         let record = EdgeRecord::new(id, src, dst, type_id, epoch);
         let chain = VersionChain::with_initial(record, epoch, TxId::SYSTEM);
         self.edges.write().insert(id, chain);
+
+        // Update adjacency
+        self.forward_adj.add_edge(src, dst, id);
+        if let Some(ref backward) = self.backward_adj {
+            backward.add_edge(dst, src, id);
+        }
+
+        // Update next_edge_id if necessary
+        let id_val = id.as_u64();
+        let _ = self
+            .next_edge_id
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                if id_val >= current {
+                    Some(id_val + 1)
+                } else {
+                    None
+                }
+            });
+    }
+
+    /// Creates an edge with a specific ID during recovery.
+    /// (Tiered storage version)
+    #[cfg(feature = "tiered-storage")]
+    pub fn create_edge_with_id(&self, id: EdgeId, src: NodeId, dst: NodeId, edge_type: &str) {
+        let epoch = self.current_epoch();
+        let type_id = self.get_or_create_edge_type_id(edge_type);
+
+        let record = EdgeRecord::new(id, src, dst, type_id, epoch);
+
+        // Allocate record in arena and get offset (create epoch if needed)
+        let arena = self.arena_allocator.arena_or_create(epoch);
+        let (offset, _stored) = arena.alloc_value_with_offset(record);
+
+        // Create HotVersionRef (using SYSTEM tx for recovery)
+        let hot_ref = HotVersionRef::new(epoch, offset, TxId::SYSTEM);
+        let mut versions = self.edge_versions.write();
+        versions.insert(id, VersionIndex::with_initial(hot_ref));
 
         // Update adjacency
         self.forward_adj.add_edge(src, dst, id);

@@ -26,6 +26,7 @@ ahash.workspace = true
 serde.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
+bincode = { workspace = true, optional = true }
 
 # Concurrency
 parking_lot.workspace = true
@@ -45,6 +46,7 @@ tempfile.workspace = true
 [features]
 default = []
 rdf = []  # Enable RDF graph model
+tiered-storage = ["grafeo-common/tiered-storage", "bincode"]  # Enable tiered hot/cold storage
 
 [lints]
 workspace = true

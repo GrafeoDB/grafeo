@@ -650,6 +650,7 @@ name = "grafeo-core"
 version = "0.2.0"
 dependencies = [
  "ahash",
+ "bincode",
  "byteorder",
  "bytes",
  "criterion",

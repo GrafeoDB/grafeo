@@ -8,8 +8,6 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 _Pre-workout_
 
-
-
 ### Added
 
 - **Benchmarks**: Multi-hop traversal and fan-out pattern benchmarks for performance validation

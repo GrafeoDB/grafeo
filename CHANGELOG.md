@@ -4,7 +4,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [Unreleased]
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-02-01
 
 _Pre-workout_
 

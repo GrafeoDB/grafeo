@@ -4,6 +4,52 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-02-01
+
+_Performance Tuning_
+
+### Added
+
+- **Bidirectional Edge Indexing**: `edges_to()`, `in_degree()`, `out_degree()` methods for efficient incoming edge queries
+- **NUMA-Aware Scheduling**: Work-stealing scheduler now prefers same-node stealing to minimize cross-node memory access
+- **Leapfrog TrieJoin**: Worst-case optimal join (WCOJ) for cyclic patterns like triangles - O(N^1.5) vs O(N²)
+- **Cyclic Pattern Detection**: Planner detects triangle/clique patterns using DFS coloring
+- **WCOJ Cost Model**: `leapfrog_join_cost()` and `prefer_leapfrog_join()` for optimizer decisions
+- **Factorized Benefit Estimation**: `factorized_benefit()` for compression ratio predictions
+
+### Improved
+
+- **Direction::Incoming queries**: Now use `backward_adj` index for O(1) neighbor lookup
+- **NumaConfig**: Auto-detection heuristic for NUMA topology (2 nodes for >8 cores)
+- **Cost Model**: Extended with memory cost tracking via `Cost::with_memory()`
+
+---
+
+## [0.2.1] - 2026-02-01
+
+_Tiered Storage_
+
+### Added
+
+- **Tiered Version Index**: `VersionIndex` with `HotVersionRef`/`ColdVersionRef` separation using SmallVec (no heap for typical 1-2 versions)
+- **Compressed Epoch Store**: `CompressedEpochBlock` with zone maps for predicate pushdown
+- **Arena Extensions**: `alloc_value_with_offset()`, `read_at()` for tiered access patterns
+- **Epoch Freeze**: `freeze_epoch()` method to compress and archive old epochs
+- **Zone Maps**: Min/max tracking for node/edge IDs enables block skipping
+
+### Improved
+
+- **LpgStore Integration**: All CRUD operations now support hot/cold version reads (feature-gated)
+- **Memory Efficiency**: `OptionalEpochId` saves 4 bytes vs `Option<EpochId>` using u32 sentinel
+- **GC Performance**: Arena-based batch deallocation instead of per-version heap frees
+
+### Internal
+
+- Feature flag `tiered-storage` for opt-in (default off for backwards compatibility)
+- 635 tests pass with feature enabled, all tests pass with feature disabled
+
+---
+
 ## [0.2.0] - 2026-02-01
 
 _Pre-workout_

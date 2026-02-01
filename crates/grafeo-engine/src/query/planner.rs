@@ -21,9 +21,9 @@ use grafeo_core::execution::operators::{
     CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator, DistinctOperator, ExpandOperator,
     ExpandStep, ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator,
     FilterExpression, FilterOperator, HashAggregateOperator, HashJoinOperator,
-    JoinType as PhysicalJoinType, LazyFactorizedChainOperator, LimitOperator, MergeOperator,
-    NestedLoopJoinOperator, NullOrder, Operator, ProjectExpr, ProjectOperator, PropertySource,
-    RemoveLabelOperator, ScanOperator, SetPropertyOperator, ShortestPathOperator,
+    JoinType as PhysicalJoinType, LazyFactorizedChainOperator, LeapfrogJoinOperator, LimitOperator,
+    MergeOperator, NestedLoopJoinOperator, NullOrder, Operator, ProjectExpr, ProjectOperator,
+    PropertySource, RemoveLabelOperator, ScanOperator, SetPropertyOperator, ShortestPathOperator,
     SimpleAggregateOperator, SkipOperator, SortDirection, SortKey as PhysicalSortKey, SortOperator,
     UnaryFilterOp, UnionOperator, UnwindOperator, VariableLengthExpandOperator,
 };
@@ -1679,6 +1679,13 @@ impl Planner {
 
         let output_schema = self.derive_schema_from_columns(&columns);
 
+        // Check if we should use leapfrog join for cyclic patterns
+        // Currently we use hash join by default; leapfrog is available but
+        // requires explicit multi-way join detection which will be added
+        // when we have proper cyclic pattern detection in the optimizer.
+        // For now, LeapfrogJoinOperator is available for direct use.
+        let _ = LeapfrogJoinOperator::new; // Suppress unused warning
+
         let operator: Box<dyn Operator> = Box::new(HashJoinOperator::new(
             left_op,
             right_op,
@@ -1689,6 +1696,171 @@ impl Planner {
         ));
 
         Ok((operator, columns))
+    }
+
+    /// Checks if a join pattern is cyclic (e.g., triangle, clique).
+    ///
+    /// A cyclic pattern occurs when join conditions reference variables
+    /// that create a cycle in the join graph. For example, a triangle
+    /// pattern (a)->(b)->(c)->(a) creates a cycle.
+    ///
+    /// Returns true if the join graph contains at least one cycle with 3+ nodes,
+    /// indicating potential for worst-case optimal join (WCOJ) optimization.
+    #[allow(dead_code)]
+    fn is_cyclic_join_pattern(&self, join: &JoinOp) -> bool {
+        // Build adjacency list for join variables
+        let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+        let mut all_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Collect edges from join conditions
+        Self::collect_join_edges(
+            &LogicalOperator::Join(join.clone()),
+            &mut edges,
+            &mut all_vars,
+        );
+
+        // Need at least 3 variables to form a cycle
+        if all_vars.len() < 3 {
+            return false;
+        }
+
+        // Detect cycle using DFS with coloring
+        Self::has_cycle(&edges, &all_vars)
+    }
+
+    /// Collects edges from join conditions into an adjacency list.
+    fn collect_join_edges(
+        op: &LogicalOperator,
+        edges: &mut HashMap<String, Vec<String>>,
+        vars: &mut std::collections::HashSet<String>,
+    ) {
+        match op {
+            LogicalOperator::Join(join) => {
+                // Process join conditions
+                for cond in &join.conditions {
+                    if let (Some(left_var), Some(right_var)) = (
+                        Self::extract_join_variable(&cond.left),
+                        Self::extract_join_variable(&cond.right),
+                    ) {
+                        if left_var != right_var {
+                            vars.insert(left_var.clone());
+                            vars.insert(right_var.clone());
+
+                            // Add bidirectional edge
+                            edges.entry(left_var.clone()).or_default().push(right_var.clone());
+                            edges.entry(right_var).or_default().push(left_var);
+                        }
+                    }
+                }
+
+                // Recurse into children
+                Self::collect_join_edges(&join.left, edges, vars);
+                Self::collect_join_edges(&join.right, edges, vars);
+            }
+            LogicalOperator::Expand(expand) => {
+                // Expand creates implicit join between from_variable and to_variable
+                vars.insert(expand.from_variable.clone());
+                vars.insert(expand.to_variable.clone());
+
+                edges
+                    .entry(expand.from_variable.clone())
+                    .or_default()
+                    .push(expand.to_variable.clone());
+                edges
+                    .entry(expand.to_variable.clone())
+                    .or_default()
+                    .push(expand.from_variable.clone());
+
+                Self::collect_join_edges(&expand.input, edges, vars);
+            }
+            LogicalOperator::Filter(filter) => {
+                Self::collect_join_edges(&filter.input, edges, vars);
+            }
+            LogicalOperator::NodeScan(scan) => {
+                vars.insert(scan.variable.clone());
+            }
+            _ => {}
+        }
+    }
+
+    /// Extracts the variable name from a join expression.
+    fn extract_join_variable(expr: &LogicalExpression) -> Option<String> {
+        match expr {
+            LogicalExpression::Variable(v) => Some(v.clone()),
+            LogicalExpression::Property { variable, .. } => Some(variable.clone()),
+            LogicalExpression::Id(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+
+    /// Detects if the graph has a cycle using DFS coloring.
+    ///
+    /// Colors: 0 = white (unvisited), 1 = gray (in progress), 2 = black (done)
+    fn has_cycle(
+        edges: &HashMap<String, Vec<String>>,
+        vars: &std::collections::HashSet<String>,
+    ) -> bool {
+        let mut color: HashMap<&String, u8> = HashMap::new();
+
+        for var in vars {
+            color.insert(var, 0);
+        }
+
+        for start in vars {
+            if color[start] == 0 {
+                if Self::dfs_cycle(start, None, edges, &mut color) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// DFS helper for cycle detection.
+    fn dfs_cycle(
+        node: &String,
+        parent: Option<&String>,
+        edges: &HashMap<String, Vec<String>>,
+        color: &mut HashMap<&String, u8>,
+    ) -> bool {
+        *color.get_mut(node).unwrap() = 1; // Gray
+
+        if let Some(neighbors) = edges.get(node) {
+            for neighbor in neighbors {
+                // Skip the edge back to parent (undirected graph)
+                if parent == Some(neighbor) {
+                    continue;
+                }
+
+                if let Some(&c) = color.get(neighbor) {
+                    if c == 1 {
+                        // Found a back edge - cycle detected
+                        return true;
+                    }
+                    if c == 0 && Self::dfs_cycle(neighbor, Some(node), edges, color) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        *color.get_mut(node).unwrap() = 2; // Black
+        false
+    }
+
+    /// Counts the number of base relations in a logical operator tree.
+    #[allow(dead_code)]
+    fn count_relations(&self, op: &LogicalOperator) -> usize {
+        match op {
+            LogicalOperator::NodeScan(_) | LogicalOperator::EdgeScan(_) => 1,
+            LogicalOperator::Expand(e) => self.count_relations(&e.input),
+            LogicalOperator::Filter(f) => self.count_relations(&f.input),
+            LogicalOperator::Join(j) => {
+                self.count_relations(&j.left) + self.count_relations(&j.right)
+            }
+            _ => 0,
+        }
     }
 
     /// Extracts a column index from an expression.

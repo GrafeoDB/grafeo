@@ -76,7 +76,7 @@ pub use pipeline::{
     CloneableOperatorFactory, CollectorSink, OperatorChainFactory, ParallelPipeline,
     ParallelPipelineConfig, ParallelPipelineResult,
 };
-pub use scheduler::{MorselScheduler, WorkerHandle};
+pub use scheduler::{MorselScheduler, NumaConfig, NumaNode, WorkerHandle};
 #[cfg(feature = "rdf")]
 pub use source::ParallelTripleScanSource;
 pub use source::{ParallelChunkSource, ParallelSource, ParallelVectorSource, RangeSource};

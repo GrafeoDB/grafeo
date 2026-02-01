@@ -1669,6 +1669,57 @@ impl LpgStore {
         forward.chain(backward)
     }
 
+    /// Returns edges to a node (where the node is the destination).
+    ///
+    /// Returns (source_node, edge_id) pairs for all edges pointing TO this node.
+    /// Uses the backward adjacency index for O(degree) lookup.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // For edges: A->B, C->B
+    /// let incoming = store.edges_to(B);
+    /// // Returns: [(A, edge1), (C, edge2)]
+    /// ```
+    pub fn edges_to(&self, node: NodeId) -> Vec<(NodeId, EdgeId)> {
+        if let Some(ref backward) = self.backward_adj {
+            backward.edges_from(node)
+        } else {
+            // Fallback: scan all edges (slow but correct)
+            self.all_edges()
+                .filter_map(|edge| {
+                    if edge.dst == node {
+                        Some((edge.src, edge.id))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+    }
+
+    /// Returns the out-degree of a node (number of outgoing edges).
+    ///
+    /// Uses the forward adjacency index for O(1) lookup.
+    #[must_use]
+    pub fn out_degree(&self, node: NodeId) -> usize {
+        self.forward_adj.out_degree(node)
+    }
+
+    /// Returns the in-degree of a node (number of incoming edges).
+    ///
+    /// Uses the backward adjacency index for O(1) lookup if available,
+    /// otherwise falls back to scanning edges.
+    #[must_use]
+    pub fn in_degree(&self, node: NodeId) -> usize {
+        if let Some(ref backward) = self.backward_adj {
+            backward.in_degree(node)
+        } else {
+            // Fallback: count edges (slow)
+            self.all_edges().filter(|edge| edge.dst == node).count()
+        }
+    }
+
     /// Gets the type of an edge by ID.
     #[must_use]
     #[cfg(not(feature = "tiered-storage"))]

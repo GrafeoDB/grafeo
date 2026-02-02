@@ -609,4 +609,321 @@ mod tests {
         assert!(size > 0);
         assert!(size < 100_000, "Size {} seems too large", size);
     }
+
+    #[test]
+    fn test_term_dictionary_with_capacity() {
+        let mut dict = TermDictionary::with_capacity(100);
+        assert!(dict.is_empty());
+        assert_eq!(dict.len(), 0);
+
+        // Add some terms
+        let id1 = dict.get_or_insert(Term::iri("test1"));
+        let id2 = dict.get_or_insert(Term::iri("test2"));
+
+        assert_eq!(id1, 0);
+        assert_eq!(id2, 1);
+        assert_eq!(dict.len(), 2);
+    }
+
+    #[test]
+    fn test_term_dictionary_size_bytes() {
+        let mut dict = TermDictionary::new();
+        let empty_size = dict.size_bytes();
+        assert!(empty_size > 0);
+
+        // Add terms and verify size increases
+        dict.get_or_insert(Term::iri("some_long_term_name"));
+        let size_with_term = dict.size_bytes();
+        assert!(size_with_term > empty_size);
+    }
+
+    #[test]
+    fn test_term_dictionary_get_existing() {
+        let mut dict = TermDictionary::new();
+        let term = Term::iri("test");
+
+        let id1 = dict.get_or_insert(term.clone());
+        let id2 = dict.get_or_insert(term.clone());
+
+        // Should return same ID for duplicate term
+        assert_eq!(id1, id2);
+        assert_eq!(dict.len(), 1);
+    }
+
+    #[test]
+    fn test_term_dictionary_get_term_not_found() {
+        let dict = TermDictionary::new();
+        assert!(dict.get_term(999).is_none());
+    }
+
+    #[test]
+    fn test_term_dictionary_get_id_not_found() {
+        let dict = TermDictionary::new();
+        assert!(dict.get_id(&Term::iri("nonexistent")).is_none());
+    }
+
+    #[test]
+    fn test_get_spo_out_of_bounds() {
+        let triples = vec![make_triple("s", "p", "o")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        assert!(ring.get_spo(0).is_some());
+        assert!(ring.get_spo(1).is_none());
+        assert!(ring.get_spo(100).is_none());
+    }
+
+    #[test]
+    fn test_count_exact_match() {
+        let triples = vec![
+            make_triple("s1", "p1", "o1"),
+            make_triple("s1", "p1", "o2"),
+            make_triple("s2", "p1", "o1"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        // Exact match should return 1
+        let pattern = TriplePattern {
+            subject: Some(Term::iri("s1")),
+            predicate: Some(Term::iri("p1")),
+            object: Some(Term::iri("o1")),
+        };
+        assert_eq!(ring.count(&pattern), 1);
+
+        // Non-existent exact match should return 0
+        let pattern_missing = TriplePattern {
+            subject: Some(Term::iri("s1")),
+            predicate: Some(Term::iri("p1")),
+            object: Some(Term::iri("o3")),
+        };
+        assert_eq!(ring.count(&pattern_missing), 0);
+    }
+
+    #[test]
+    fn test_count_two_components_bound() {
+        let triples = vec![
+            make_triple("s1", "p1", "o1"),
+            make_triple("s1", "p1", "o2"),
+            make_triple("s1", "p2", "o1"),
+            make_triple("s2", "p1", "o1"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        // Subject and predicate bound
+        let pattern_sp = TriplePattern {
+            subject: Some(Term::iri("s1")),
+            predicate: Some(Term::iri("p1")),
+            object: None,
+        };
+        assert_eq!(ring.count(&pattern_sp), 2);
+
+        // Subject and object bound
+        let pattern_so = TriplePattern {
+            subject: Some(Term::iri("s1")),
+            predicate: None,
+            object: Some(Term::iri("o1")),
+        };
+        assert_eq!(ring.count(&pattern_so), 2);
+
+        // Predicate and object bound
+        let pattern_po = TriplePattern {
+            subject: None,
+            predicate: Some(Term::iri("p1")),
+            object: Some(Term::iri("o1")),
+        };
+        assert_eq!(ring.count(&pattern_po), 2);
+    }
+
+    #[test]
+    fn test_count_nonexistent_term() {
+        let triples = vec![make_triple("s1", "p1", "o1")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        assert_eq!(
+            ring.count(&TriplePattern::with_subject(Term::iri("nonexistent"))),
+            0
+        );
+        assert_eq!(
+            ring.count(&TriplePattern::with_predicate(Term::iri("nonexistent"))),
+            0
+        );
+        assert_eq!(
+            ring.count(&TriplePattern::with_object(Term::iri("nonexistent"))),
+            0
+        );
+    }
+
+    #[test]
+    fn test_count_exact_match_nonexistent_subject() {
+        let triples = vec![make_triple("s1", "p1", "o1")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let pattern = TriplePattern {
+            subject: Some(Term::iri("nonexistent")),
+            predicate: Some(Term::iri("p1")),
+            object: Some(Term::iri("o1")),
+        };
+        assert_eq!(ring.count(&pattern), 0);
+    }
+
+    #[test]
+    fn test_count_exact_match_nonexistent_predicate() {
+        let triples = vec![make_triple("s1", "p1", "o1")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let pattern = TriplePattern {
+            subject: Some(Term::iri("s1")),
+            predicate: Some(Term::iri("nonexistent")),
+            object: Some(Term::iri("o1")),
+        };
+        assert_eq!(ring.count(&pattern), 0);
+    }
+
+    #[test]
+    fn test_count_exact_match_nonexistent_object() {
+        let triples = vec![make_triple("s1", "p1", "o1")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let pattern = TriplePattern {
+            subject: Some(Term::iri("s1")),
+            predicate: Some(Term::iri("p1")),
+            object: Some(Term::iri("nonexistent")),
+        };
+        assert_eq!(ring.count(&pattern), 0);
+    }
+
+    #[test]
+    fn test_dictionary_accessor() {
+        let triples = vec![
+            make_triple("alice", "knows", "bob"),
+            make_triple("alice", "likes", "charlie"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let dict = ring.dictionary();
+        assert!(!dict.is_empty());
+        // Should have 5 unique terms: alice, knows, bob, likes, charlie
+        assert_eq!(dict.len(), 5);
+
+        // Verify we can look up terms
+        assert!(dict.get_id(&Term::iri("alice")).is_some());
+        assert!(dict.get_id(&Term::iri("knows")).is_some());
+        assert!(dict.get_id(&Term::iri("bob")).is_some());
+    }
+
+    #[test]
+    fn test_same_term_multiple_positions() {
+        // Same term appears as subject, predicate, and object
+        let triples = vec![
+            make_triple("same", "same", "same"),
+            make_triple("same", "other", "different"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        // Should only have 3 unique terms: same, other, different
+        assert_eq!(ring.num_terms(), 3);
+        assert_eq!(ring.len(), 2);
+
+        // Verify we can find triples with this term
+        let pattern_s = TriplePattern::with_subject(Term::iri("same"));
+        assert_eq!(ring.count(&pattern_s), 2);
+
+        let pattern_p = TriplePattern::with_predicate(Term::iri("same"));
+        assert_eq!(ring.count(&pattern_p), 1);
+
+        let pattern_o = TriplePattern::with_object(Term::iri("same"));
+        assert_eq!(ring.count(&pattern_o), 1);
+    }
+
+    #[test]
+    fn test_find_no_matches() {
+        let triples = vec![make_triple("s1", "p1", "o1")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let pattern = TriplePattern::with_subject(Term::iri("nonexistent"));
+        let results: Vec<Triple> = ring.find(&pattern).collect();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_find_all_triples() {
+        let triples = vec![
+            make_triple("s1", "p1", "o1"),
+            make_triple("s2", "p2", "o2"),
+            make_triple("s3", "p3", "o3"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let pattern = TriplePattern::any();
+        let results: Vec<Triple> = ring.find(&pattern).collect();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_wavelet_tree_accessors() {
+        let triples = vec![make_triple("s", "p", "o")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        // Verify wavelet tree accessors work
+        let subjects_wt = ring.subjects_wt();
+        let predicates_wt = ring.predicates_wt();
+        let objects_wt = ring.objects_wt();
+
+        // Each should have exactly one entry
+        assert_eq!(subjects_wt.len(), 1);
+        assert_eq!(predicates_wt.len(), 1);
+        assert_eq!(objects_wt.len(), 1);
+    }
+
+    #[test]
+    fn test_permutation_out_of_bounds() {
+        let triples = vec![make_triple("s", "p", "o")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        // Index 0 should work
+        assert!(ring.spo_to_pos(0).is_some());
+        assert!(ring.spo_to_osp(0).is_some());
+
+        // Out of bounds should return None
+        assert!(ring.spo_to_pos(100).is_none());
+        assert!(ring.spo_to_osp(100).is_none());
+        assert!(ring.pos_to_spo(100).is_none());
+        assert!(ring.osp_to_spo(100).is_none());
+    }
+
+    #[test]
+    fn test_contains_ids_no_match() {
+        let triples = vec![
+            make_triple("s1", "p1", "o1"),
+            make_triple("s1", "p2", "o2"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        // Exact match that doesn't exist (s1, p1, o2)
+        let pattern = TriplePattern {
+            subject: Some(Term::iri("s1")),
+            predicate: Some(Term::iri("p1")),
+            object: Some(Term::iri("o2")),
+        };
+        assert_eq!(ring.count(&pattern), 0);
+    }
+
+    #[test]
+    fn test_empty_ring_operations() {
+        let ring = TripleRing::from_triples(std::iter::empty());
+
+        assert!(ring.is_empty());
+        assert_eq!(ring.len(), 0);
+        assert!(ring.get_spo(0).is_none());
+        assert_eq!(ring.count(&TriplePattern::any()), 0);
+        assert_eq!(
+            ring.count(&TriplePattern::with_subject(Term::iri("s"))),
+            0
+        );
+        assert!(ring.spo_to_pos(0).is_none());
+        assert!(ring.osp_to_spo(0).is_none());
+
+        // Find on empty ring
+        let results: Vec<Triple> = ring.find(&TriplePattern::any()).collect();
+        assert!(results.is_empty());
+    }
 }

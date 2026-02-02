@@ -1117,4 +1117,451 @@ mod tests {
         let pred_clone = pred.clone();
         assert_eq!(format!("{:?}", pred), format!("{:?}", pred_clone));
     }
+
+    // ==================== PropertyPredicate Tests ====================
+
+    mod property_predicate_tests {
+        use super::*;
+
+        fn create_test_store() -> Arc<LpgStore> {
+            Arc::new(LpgStore::new())
+        }
+
+        fn create_chunk_with_node_ids(store: &Arc<LpgStore>) -> FactorizedChunk {
+            // Create some nodes with properties
+            let node1 = store.create_node(&["Person"]);
+            let node2 = store.create_node(&["Person"]);
+            let node3 = store.create_node(&["Person"]);
+
+            store.set_node_property(node1, "age", Value::Int64(25));
+            store.set_node_property(node2, "age", Value::Int64(35));
+            store.set_node_property(node3, "age", Value::Int64(45));
+
+            store.set_node_property(node1, "name", Value::String("Alice".into()));
+            store.set_node_property(node2, "name", Value::String("Bob".into()));
+            store.set_node_property(node3, "name", Value::String("Carol".into()));
+
+            // Create a chunk with node IDs
+            let mut node_data = ValueVector::with_type(LogicalType::Node);
+            node_data.push_node_id(node1);
+            node_data.push_node_id(node2);
+            node_data.push_node_id(node3);
+
+            let level0 = FactorizationLevel::flat(
+                vec![FactorizedVector::flat(node_data)],
+                vec!["n".to_string()],
+            );
+
+            let mut chunk = FactorizedChunk::empty();
+            chunk.add_factorized_level(level0);
+            chunk
+        }
+
+        #[test]
+        fn test_property_predicate_eq_int() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            // Predicate: age = 35
+            let pred = PropertyPredicate::eq(0, 0, "age", Value::Int64(35), Arc::clone(&store));
+
+            assert!(!pred.evaluate(&chunk, 0, 0)); // Alice age=25
+            assert!(pred.evaluate(&chunk, 0, 1)); // Bob age=35
+            assert!(!pred.evaluate(&chunk, 0, 2)); // Carol age=45
+        }
+
+        #[test]
+        fn test_property_predicate_gt_int() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            // Predicate: age > 30
+            let pred = PropertyPredicate::new(
+                0,
+                0,
+                "age",
+                CompareOp::Gt,
+                Value::Int64(30),
+                Arc::clone(&store),
+            );
+
+            assert!(!pred.evaluate(&chunk, 0, 0)); // 25 > 30 = false
+            assert!(pred.evaluate(&chunk, 0, 1)); // 35 > 30 = true
+            assert!(pred.evaluate(&chunk, 0, 2)); // 45 > 30 = true
+        }
+
+        #[test]
+        fn test_property_predicate_lt_le_ge() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            // age < 35
+            let pred_lt = PropertyPredicate::new(
+                0,
+                0,
+                "age",
+                CompareOp::Lt,
+                Value::Int64(35),
+                Arc::clone(&store),
+            );
+            assert!(pred_lt.evaluate(&chunk, 0, 0)); // 25 < 35
+            assert!(!pred_lt.evaluate(&chunk, 0, 1)); // 35 < 35 = false
+
+            // age <= 35
+            let pred_le = PropertyPredicate::new(
+                0,
+                0,
+                "age",
+                CompareOp::Le,
+                Value::Int64(35),
+                Arc::clone(&store),
+            );
+            assert!(pred_le.evaluate(&chunk, 0, 0)); // 25 <= 35
+            assert!(pred_le.evaluate(&chunk, 0, 1)); // 35 <= 35
+            assert!(!pred_le.evaluate(&chunk, 0, 2)); // 45 <= 35 = false
+
+            // age >= 35
+            let pred_ge = PropertyPredicate::new(
+                0,
+                0,
+                "age",
+                CompareOp::Ge,
+                Value::Int64(35),
+                Arc::clone(&store),
+            );
+            assert!(!pred_ge.evaluate(&chunk, 0, 0)); // 25 >= 35 = false
+            assert!(pred_ge.evaluate(&chunk, 0, 1)); // 35 >= 35
+            assert!(pred_ge.evaluate(&chunk, 0, 2)); // 45 >= 35
+        }
+
+        #[test]
+        fn test_property_predicate_ne() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            let pred = PropertyPredicate::new(
+                0,
+                0,
+                "age",
+                CompareOp::Ne,
+                Value::Int64(35),
+                Arc::clone(&store),
+            );
+
+            assert!(pred.evaluate(&chunk, 0, 0)); // 25 != 35
+            assert!(!pred.evaluate(&chunk, 0, 1)); // 35 != 35 = false
+            assert!(pred.evaluate(&chunk, 0, 2)); // 45 != 35
+        }
+
+        #[test]
+        fn test_property_predicate_string() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            // name = "Bob"
+            let pred =
+                PropertyPredicate::eq(0, 0, "name", Value::String("Bob".into()), Arc::clone(&store));
+
+            assert!(!pred.evaluate(&chunk, 0, 0)); // Alice
+            assert!(pred.evaluate(&chunk, 0, 1)); // Bob
+            assert!(!pred.evaluate(&chunk, 0, 2)); // Carol
+
+            // name < "Bob"
+            let pred_lt = PropertyPredicate::new(
+                0,
+                0,
+                "name",
+                CompareOp::Lt,
+                Value::String("Bob".into()),
+                Arc::clone(&store),
+            );
+            assert!(pred_lt.evaluate(&chunk, 0, 0)); // "Alice" < "Bob"
+            assert!(!pred_lt.evaluate(&chunk, 0, 1)); // "Bob" < "Bob" = false
+
+            // name > "Bob"
+            let pred_gt = PropertyPredicate::new(
+                0,
+                0,
+                "name",
+                CompareOp::Gt,
+                Value::String("Bob".into()),
+                Arc::clone(&store),
+            );
+            assert!(pred_gt.evaluate(&chunk, 0, 2)); // "Carol" > "Bob"
+        }
+
+        #[test]
+        fn test_property_predicate_float() {
+            let store = create_test_store();
+
+            // Add float properties
+            let node1 = store.create_node(&["Thing"]);
+            let node2 = store.create_node(&["Thing"]);
+            store.set_node_property(node1, "score", Value::Float64(1.5));
+            store.set_node_property(node2, "score", Value::Float64(2.5));
+
+            let mut node_data = ValueVector::with_type(LogicalType::Node);
+            node_data.push_node_id(node1);
+            node_data.push_node_id(node2);
+
+            let level0 = FactorizationLevel::flat(
+                vec![FactorizedVector::flat(node_data)],
+                vec!["n".to_string()],
+            );
+            let mut chunk = FactorizedChunk::empty();
+            chunk.add_factorized_level(level0);
+
+            // score = 2.5
+            let pred_eq = PropertyPredicate::new(
+                0,
+                0,
+                "score",
+                CompareOp::Eq,
+                Value::Float64(2.5),
+                Arc::clone(&store),
+            );
+            assert!(!pred_eq.evaluate(&chunk, 0, 0));
+            assert!(pred_eq.evaluate(&chunk, 0, 1));
+
+            // score != 2.5
+            let pred_ne = PropertyPredicate::new(
+                0,
+                0,
+                "score",
+                CompareOp::Ne,
+                Value::Float64(2.5),
+                Arc::clone(&store),
+            );
+            assert!(pred_ne.evaluate(&chunk, 0, 0));
+            assert!(!pred_ne.evaluate(&chunk, 0, 1));
+
+            // score > 2.0
+            let pred_gt = PropertyPredicate::new(
+                0,
+                0,
+                "score",
+                CompareOp::Gt,
+                Value::Float64(2.0),
+                Arc::clone(&store),
+            );
+            assert!(!pred_gt.evaluate(&chunk, 0, 0)); // 1.5 > 2.0 = false
+            assert!(pred_gt.evaluate(&chunk, 0, 1)); // 2.5 > 2.0
+
+            // score < 2.0
+            let pred_lt = PropertyPredicate::new(
+                0,
+                0,
+                "score",
+                CompareOp::Lt,
+                Value::Float64(2.0),
+                Arc::clone(&store),
+            );
+            assert!(pred_lt.evaluate(&chunk, 0, 0)); // 1.5 < 2.0
+
+            // score <= 1.5
+            let pred_le = PropertyPredicate::new(
+                0,
+                0,
+                "score",
+                CompareOp::Le,
+                Value::Float64(1.5),
+                Arc::clone(&store),
+            );
+            assert!(pred_le.evaluate(&chunk, 0, 0)); // 1.5 <= 1.5
+
+            // score >= 2.5
+            let pred_ge = PropertyPredicate::new(
+                0,
+                0,
+                "score",
+                CompareOp::Ge,
+                Value::Float64(2.5),
+                Arc::clone(&store),
+            );
+            assert!(pred_ge.evaluate(&chunk, 0, 1)); // 2.5 >= 2.5
+        }
+
+        #[test]
+        fn test_property_predicate_bool() {
+            let store = create_test_store();
+
+            let node1 = store.create_node(&["Flag"]);
+            let node2 = store.create_node(&["Flag"]);
+            store.set_node_property(node1, "active", Value::Bool(true));
+            store.set_node_property(node2, "active", Value::Bool(false));
+
+            let mut node_data = ValueVector::with_type(LogicalType::Node);
+            node_data.push_node_id(node1);
+            node_data.push_node_id(node2);
+
+            let level0 = FactorizationLevel::flat(
+                vec![FactorizedVector::flat(node_data)],
+                vec!["n".to_string()],
+            );
+            let mut chunk = FactorizedChunk::empty();
+            chunk.add_factorized_level(level0);
+
+            // active = true
+            let pred = PropertyPredicate::eq(0, 0, "active", Value::Bool(true), Arc::clone(&store));
+            assert!(pred.evaluate(&chunk, 0, 0));
+            assert!(!pred.evaluate(&chunk, 0, 1));
+
+            // active != true
+            let pred_ne = PropertyPredicate::new(
+                0,
+                0,
+                "active",
+                CompareOp::Ne,
+                Value::Bool(true),
+                Arc::clone(&store),
+            );
+            assert!(!pred_ne.evaluate(&chunk, 0, 0));
+            assert!(pred_ne.evaluate(&chunk, 0, 1));
+        }
+
+        #[test]
+        fn test_property_predicate_missing_property() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            // Property "nonexistent" doesn't exist
+            let pred = PropertyPredicate::eq(
+                0,
+                0,
+                "nonexistent",
+                Value::Int64(1),
+                Arc::clone(&store),
+            );
+
+            // Should return false for missing property
+            assert!(!pred.evaluate(&chunk, 0, 0));
+            assert!(!pred.evaluate(&chunk, 0, 1));
+        }
+
+        #[test]
+        fn test_property_predicate_wrong_level() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            // Predicate targets level 1, but chunk only has level 0
+            let pred = PropertyPredicate::eq(1, 0, "age", Value::Int64(35), Arc::clone(&store));
+
+            // Should return true when evaluated at wrong level
+            assert!(pred.evaluate(&chunk, 0, 0));
+        }
+
+        #[test]
+        fn test_property_predicate_invalid_column() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            // Column 5 doesn't exist
+            let pred = PropertyPredicate::eq(0, 5, "age", Value::Int64(35), Arc::clone(&store));
+
+            assert!(!pred.evaluate(&chunk, 0, 0));
+        }
+
+        #[test]
+        fn test_property_predicate_target_level() {
+            let store = create_test_store();
+            let pred = PropertyPredicate::eq(2, 0, "age", Value::Int64(35), store);
+            assert_eq!(pred.target_level(), Some(2));
+        }
+
+        #[test]
+        fn test_property_predicate_batch() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            // Predicate: age > 30
+            let pred = PropertyPredicate::new(
+                0,
+                0,
+                "age",
+                CompareOp::Gt,
+                Value::Int64(30),
+                Arc::clone(&store),
+            );
+
+            let selection = pred.evaluate_batch(&chunk, 0);
+
+            // Should select indices 1 and 2 (Bob=35, Carol=45)
+            assert_eq!(selection.selected_count(), 2);
+            assert!(!selection.is_selected(0)); // Alice=25
+            assert!(selection.is_selected(1)); // Bob=35
+            assert!(selection.is_selected(2)); // Carol=45
+        }
+
+        #[test]
+        fn test_property_predicate_batch_wrong_level() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            // Predicate targets level 1
+            let pred = PropertyPredicate::new(
+                1,
+                0,
+                "age",
+                CompareOp::Gt,
+                Value::Int64(30),
+                Arc::clone(&store),
+            );
+
+            // Batch evaluate at level 0 - should return all selected
+            let selection = pred.evaluate_batch(&chunk, 0);
+            assert_eq!(selection.selected_count(), 3);
+        }
+
+        #[test]
+        fn test_property_predicate_batch_invalid_level() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            // Predicate targets level 5 which doesn't exist
+            let pred = PropertyPredicate::new(
+                5,
+                0,
+                "age",
+                CompareOp::Gt,
+                Value::Int64(30),
+                Arc::clone(&store),
+            );
+
+            let selection = pred.evaluate_batch(&chunk, 5);
+            assert_eq!(selection.selected_count(), 0);
+        }
+
+        #[test]
+        fn test_property_predicate_batch_invalid_column() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            // Column 5 doesn't exist
+            let pred =
+                PropertyPredicate::new(0, 5, "age", CompareOp::Gt, Value::Int64(30), Arc::clone(&store));
+
+            let selection = pred.evaluate_batch(&chunk, 0);
+            // Should return all false (no matches)
+            assert_eq!(selection.selected_count(), 0);
+        }
+
+        #[test]
+        fn test_property_predicate_type_mismatch() {
+            let store = create_test_store();
+            let chunk = create_chunk_with_node_ids(&store);
+
+            // age is Int64, but we compare with String
+            let pred = PropertyPredicate::eq(
+                0,
+                0,
+                "age",
+                Value::String("35".into()),
+                Arc::clone(&store),
+            );
+
+            // Type mismatch should return false
+            assert!(!pred.evaluate(&chunk, 0, 1));
+        }
+    }
+
 }

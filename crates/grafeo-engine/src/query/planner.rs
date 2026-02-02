@@ -3762,4 +3762,603 @@ mod tests {
         // Test into_operator
         let _ = physical.into_operator();
     }
+
+    // ==================== Adaptive Planning Tests ====================
+
+    #[test]
+    fn test_plan_adaptive_with_scan() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        // MATCH (n:Person) RETURN n
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: Some("Person".to_string()),
+                input: None,
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert_eq!(physical.columns(), &["n"]);
+        // Should have adaptive context with estimates
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_filter() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        // MATCH (n) WHERE n.age > 30 RETURN n
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Filter(FilterOp {
+                predicate: LogicalExpression::Binary {
+                    left: Box::new(LogicalExpression::Property {
+                        variable: "n".to_string(),
+                        property: "age".to_string(),
+                    }),
+                    op: BinaryOp::Gt,
+                    right: Box::new(LogicalExpression::Literal(Value::Int64(30))),
+                },
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_expand() {
+        let store = create_test_store();
+        let planner = Planner::new(Arc::clone(&store)).with_factorized_execution(false);
+
+        // MATCH (a)-[:KNOWS]->(b) RETURN a, b
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_type: Some("KNOWS".to_string()),
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                path_alias: None,
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_join() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Join(JoinOp {
+                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "b".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                join_type: JoinType::Cross,
+                conditions: vec![],
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_aggregate() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Aggregate(AggregateOp {
+            group_by: vec![],
+            aggregates: vec![LogicalAggregateExpr {
+                function: LogicalAggregateFunction::Count,
+                expression: Some(LogicalExpression::Variable("n".to_string())),
+                distinct: false,
+                alias: Some("cnt".to_string()),
+                percentile: None,
+            }],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+            having: None,
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_distinct() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Distinct(LogicalDistinctOp {
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                columns: None,
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_limit() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Limit(LogicalLimitOp {
+                count: 10,
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_skip() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Skip(LogicalSkipOp {
+                count: 5,
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_sort() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Sort(SortOp {
+                keys: vec![SortKey {
+                    expression: LogicalExpression::Variable("n".to_string()),
+                    order: SortOrder::Ascending,
+                }],
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_union() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Union(UnionOp {
+                inputs: vec![
+                    LogicalOperator::NodeScan(NodeScanOp {
+                        variable: "n".to_string(),
+                        label: Some("Person".to_string()),
+                        input: None,
+                    }),
+                    LogicalOperator::NodeScan(NodeScanOp {
+                        variable: "n".to_string(),
+                        label: Some("Company".to_string()),
+                        input: None,
+                    }),
+                ],
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    // ==================== Variable Length Path Tests ====================
+
+    #[test]
+    fn test_plan_expand_variable_length() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        // MATCH (a)-[:KNOWS*1..3]->(b) RETURN a, b
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_type: Some("KNOWS".to_string()),
+                min_hops: 1,
+                max_hops: Some(3),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                path_alias: None,
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        assert!(physical.columns().contains(&"a".to_string()));
+        assert!(physical.columns().contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_plan_expand_with_path_alias() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        // MATCH p = (a)-[:KNOWS*1..3]->(b) RETURN a, b
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_type: Some("KNOWS".to_string()),
+                min_hops: 1,
+                max_hops: Some(3),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                path_alias: Some("p".to_string()),
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        // Verify plan was created successfully with expected output columns
+        assert!(physical.columns().contains(&"a".to_string()));
+        assert!(physical.columns().contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_plan_expand_incoming() {
+        let store = create_test_store();
+        let planner = Planner::new(Arc::clone(&store)).with_factorized_execution(false);
+
+        // MATCH (a)<-[:KNOWS]-(b) RETURN a, b
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Incoming,
+                edge_type: Some("KNOWS".to_string()),
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                path_alias: None,
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        assert!(physical.columns().contains(&"a".to_string()));
+        assert!(physical.columns().contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_plan_expand_both_directions() {
+        let store = create_test_store();
+        let planner = Planner::new(Arc::clone(&store)).with_factorized_execution(false);
+
+        // MATCH (a)-[:KNOWS]-(b) RETURN a, b
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Both,
+                edge_type: Some("KNOWS".to_string()),
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                path_alias: None,
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        assert!(physical.columns().contains(&"a".to_string()));
+        assert!(physical.columns().contains(&"b".to_string()));
+    }
+
+    // ==================== With Context Tests ====================
+
+    #[test]
+    fn test_planner_with_context() {
+        use crate::transaction::TransactionManager;
+
+        let store = create_test_store();
+        let tx_manager = Arc::new(TransactionManager::new());
+        let tx_id = tx_manager.begin();
+        let epoch = tx_manager.current_epoch();
+
+        let planner =
+            Planner::with_context(Arc::clone(&store), Arc::clone(&tx_manager), Some(tx_id), epoch);
+
+        assert_eq!(planner.tx_id(), Some(tx_id));
+        assert!(planner.tx_manager().is_some());
+        assert_eq!(planner.viewing_epoch(), epoch);
+    }
+
+    #[test]
+    fn test_planner_with_factorized_execution_disabled() {
+        let store = create_test_store();
+        let planner = Planner::new(Arc::clone(&store)).with_factorized_execution(false);
+
+        // Two consecutive expands - should NOT use factorized execution
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("c".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "b".to_string(),
+                to_variable: "c".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_type: None,
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(LogicalOperator::Expand(ExpandOp {
+                    from_variable: "a".to_string(),
+                    to_variable: "b".to_string(),
+                    edge_variable: None,
+                    direction: ExpandDirection::Outgoing,
+                    edge_type: None,
+                    min_hops: 1,
+                    max_hops: Some(1),
+                    input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                        variable: "a".to_string(),
+                        label: None,
+                        input: None,
+                    })),
+                    path_alias: None,
+                })),
+                path_alias: None,
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        assert!(physical.columns().contains(&"a".to_string()));
+        assert!(physical.columns().contains(&"c".to_string()));
+    }
+
+    // ==================== Sort with Property Tests ====================
+
+    #[test]
+    fn test_plan_sort_by_property() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        // MATCH (n) RETURN n ORDER BY n.name ASC
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Sort(SortOp {
+                keys: vec![SortKey {
+                    expression: LogicalExpression::Property {
+                        variable: "n".to_string(),
+                        property: "name".to_string(),
+                    },
+                    order: SortOrder::Ascending,
+                }],
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        // Should have the property column projected
+        assert!(physical.columns().contains(&"n".to_string()));
+    }
+
+    // ==================== Scan with Input Tests ====================
+
+    #[test]
+    fn test_plan_scan_with_input() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        // A scan with another scan as input (for chained patterns)
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "b".to_string(),
+                label: Some("Company".to_string()),
+                input: Some(Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: Some("Person".to_string()),
+                    input: None,
+                }))),
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        assert!(physical.columns().contains(&"a".to_string()));
+        assert!(physical.columns().contains(&"b".to_string()));
+    }
 }

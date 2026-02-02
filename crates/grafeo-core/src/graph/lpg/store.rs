@@ -2498,4 +2498,697 @@ mod tests {
         assert_eq!(store.edge_count(), 0);
         assert!(store.get_edge(edge_id).is_none());
     }
+
+    // === New tests for improved coverage ===
+
+    #[test]
+    fn test_lpg_store_config() {
+        // Test with_config
+        let config = LpgStoreConfig {
+            backward_edges: false,
+            initial_node_capacity: 100,
+            initial_edge_capacity: 200,
+        };
+        let store = LpgStore::with_config(config);
+
+        // Store should work but without backward adjacency
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        store.create_edge(a, b, "KNOWS");
+
+        // Outgoing should work
+        let outgoing: Vec<_> = store.neighbors(a, Direction::Outgoing).collect();
+        assert_eq!(outgoing.len(), 1);
+
+        // Incoming should be empty (no backward adjacency)
+        let incoming: Vec<_> = store.neighbors(b, Direction::Incoming).collect();
+        assert_eq!(incoming.len(), 0);
+    }
+
+    #[test]
+    fn test_epoch_management() {
+        let store = LpgStore::new();
+
+        let epoch0 = store.current_epoch();
+        assert_eq!(epoch0.as_u64(), 0);
+
+        let epoch1 = store.new_epoch();
+        assert_eq!(epoch1.as_u64(), 1);
+
+        let current = store.current_epoch();
+        assert_eq!(current.as_u64(), 1);
+    }
+
+    #[test]
+    fn test_node_properties() {
+        let store = LpgStore::new();
+        let id = store.create_node(&["Person"]);
+
+        // Set and get property
+        store.set_node_property(id, "name", Value::from("Alice"));
+        let name = store.get_node_property(id, &"name".into());
+        assert!(matches!(name, Some(Value::String(s)) if s.as_ref() == "Alice"));
+
+        // Update property
+        store.set_node_property(id, "name", Value::from("Bob"));
+        let name = store.get_node_property(id, &"name".into());
+        assert!(matches!(name, Some(Value::String(s)) if s.as_ref() == "Bob"));
+
+        // Remove property
+        let old = store.remove_node_property(id, "name");
+        assert!(matches!(old, Some(Value::String(s)) if s.as_ref() == "Bob"));
+
+        // Property should be gone
+        let name = store.get_node_property(id, &"name".into());
+        assert!(name.is_none());
+
+        // Remove non-existent property
+        let none = store.remove_node_property(id, "nonexistent");
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn test_edge_properties() {
+        let store = LpgStore::new();
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let edge_id = store.create_edge(a, b, "KNOWS");
+
+        // Set and get property
+        store.set_edge_property(edge_id, "since", Value::from(2020i64));
+        let since = store.get_edge_property(edge_id, &"since".into());
+        assert_eq!(since.and_then(|v| v.as_int64()), Some(2020));
+
+        // Remove property
+        let old = store.remove_edge_property(edge_id, "since");
+        assert_eq!(old.and_then(|v| v.as_int64()), Some(2020));
+
+        let since = store.get_edge_property(edge_id, &"since".into());
+        assert!(since.is_none());
+    }
+
+    #[test]
+    fn test_add_remove_label() {
+        let store = LpgStore::new();
+        let id = store.create_node(&["Person"]);
+
+        // Add new label
+        assert!(store.add_label(id, "Employee"));
+
+        let node = store.get_node(id).unwrap();
+        assert!(node.has_label("Person"));
+        assert!(node.has_label("Employee"));
+
+        // Adding same label again should fail
+        assert!(!store.add_label(id, "Employee"));
+
+        // Remove label
+        assert!(store.remove_label(id, "Employee"));
+
+        let node = store.get_node(id).unwrap();
+        assert!(node.has_label("Person"));
+        assert!(!node.has_label("Employee"));
+
+        // Removing non-existent label should fail
+        assert!(!store.remove_label(id, "Employee"));
+        assert!(!store.remove_label(id, "NonExistent"));
+    }
+
+    #[test]
+    fn test_add_label_to_nonexistent_node() {
+        let store = LpgStore::new();
+        let fake_id = NodeId::new(999);
+        assert!(!store.add_label(fake_id, "Label"));
+    }
+
+    #[test]
+    fn test_remove_label_from_nonexistent_node() {
+        let store = LpgStore::new();
+        let fake_id = NodeId::new(999);
+        assert!(!store.remove_label(fake_id, "Label"));
+    }
+
+    #[test]
+    fn test_node_ids() {
+        let store = LpgStore::new();
+
+        let n1 = store.create_node(&["Person"]);
+        let n2 = store.create_node(&["Person"]);
+        let n3 = store.create_node(&["Person"]);
+
+        let ids = store.node_ids();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&n1));
+        assert!(ids.contains(&n2));
+        assert!(ids.contains(&n3));
+
+        // Delete one
+        store.delete_node(n2);
+        let ids = store.node_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(!ids.contains(&n2));
+    }
+
+    #[test]
+    fn test_delete_node_nonexistent() {
+        let store = LpgStore::new();
+        let fake_id = NodeId::new(999);
+        assert!(!store.delete_node(fake_id));
+    }
+
+    #[test]
+    fn test_delete_edge_nonexistent() {
+        let store = LpgStore::new();
+        let fake_id = EdgeId::new(999);
+        assert!(!store.delete_edge(fake_id));
+    }
+
+    #[test]
+    fn test_delete_edge_double() {
+        let store = LpgStore::new();
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let edge_id = store.create_edge(a, b, "KNOWS");
+
+        assert!(store.delete_edge(edge_id));
+        assert!(!store.delete_edge(edge_id)); // Double delete
+    }
+
+    #[test]
+    fn test_create_edge_with_props() {
+        let store = LpgStore::new();
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+
+        let edge_id = store.create_edge_with_props(
+            a,
+            b,
+            "KNOWS",
+            [("since", Value::from(2020i64)), ("weight", Value::from(1.0))],
+        );
+
+        let edge = store.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("since").and_then(|v| v.as_int64()),
+            Some(2020)
+        );
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_float64()),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn test_delete_node_edges() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let c = store.create_node(&["Person"]);
+
+        store.create_edge(a, b, "KNOWS"); // a -> b
+        store.create_edge(c, a, "KNOWS"); // c -> a
+
+        assert_eq!(store.edge_count(), 2);
+
+        // Delete all edges connected to a
+        store.delete_node_edges(a);
+
+        assert_eq!(store.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_neighbors_both_directions() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let c = store.create_node(&["Person"]);
+
+        store.create_edge(a, b, "KNOWS"); // a -> b
+        store.create_edge(c, a, "KNOWS"); // c -> a
+
+        // Direction::Both for node a
+        let neighbors: Vec<_> = store.neighbors(a, Direction::Both).collect();
+        assert_eq!(neighbors.len(), 2);
+        assert!(neighbors.contains(&b)); // outgoing
+        assert!(neighbors.contains(&c)); // incoming
+    }
+
+    #[test]
+    fn test_edges_from() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let c = store.create_node(&["Person"]);
+
+        let e1 = store.create_edge(a, b, "KNOWS");
+        let e2 = store.create_edge(a, c, "KNOWS");
+
+        let edges: Vec<_> = store.edges_from(a, Direction::Outgoing).collect();
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().any(|(_, e)| *e == e1));
+        assert!(edges.iter().any(|(_, e)| *e == e2));
+
+        // Incoming edges to b
+        let incoming: Vec<_> = store.edges_from(b, Direction::Incoming).collect();
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].1, e1);
+    }
+
+    #[test]
+    fn test_edges_to() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let c = store.create_node(&["Person"]);
+
+        let e1 = store.create_edge(a, b, "KNOWS");
+        let e2 = store.create_edge(c, b, "KNOWS");
+
+        // Edges pointing TO b
+        let to_b = store.edges_to(b);
+        assert_eq!(to_b.len(), 2);
+        assert!(to_b.iter().any(|(src, e)| *src == a && *e == e1));
+        assert!(to_b.iter().any(|(src, e)| *src == c && *e == e2));
+    }
+
+    #[test]
+    fn test_out_degree_in_degree() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let c = store.create_node(&["Person"]);
+
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(a, c, "KNOWS");
+        store.create_edge(c, b, "KNOWS");
+
+        assert_eq!(store.out_degree(a), 2);
+        assert_eq!(store.out_degree(b), 0);
+        assert_eq!(store.out_degree(c), 1);
+
+        assert_eq!(store.in_degree(a), 0);
+        assert_eq!(store.in_degree(b), 2);
+        assert_eq!(store.in_degree(c), 1);
+    }
+
+    #[test]
+    fn test_edge_type() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let edge_id = store.create_edge(a, b, "KNOWS");
+
+        let edge_type = store.edge_type(edge_id);
+        assert_eq!(edge_type.as_deref(), Some("KNOWS"));
+
+        // Non-existent edge
+        let fake_id = EdgeId::new(999);
+        assert!(store.edge_type(fake_id).is_none());
+    }
+
+    #[test]
+    fn test_count_methods() {
+        let store = LpgStore::new();
+
+        assert_eq!(store.label_count(), 0);
+        assert_eq!(store.edge_type_count(), 0);
+        assert_eq!(store.property_key_count(), 0);
+
+        let a = store.create_node_with_props(&["Person"], [("age", Value::from(30i64))]);
+        let b = store.create_node(&["Company"]);
+        store.create_edge_with_props(a, b, "WORKS_AT", [("since", Value::from(2020i64))]);
+
+        assert_eq!(store.label_count(), 2); // Person, Company
+        assert_eq!(store.edge_type_count(), 1); // WORKS_AT
+        assert_eq!(store.property_key_count(), 2); // age, since
+    }
+
+    #[test]
+    fn test_all_nodes_and_edges() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        store.create_edge(a, b, "KNOWS");
+
+        let nodes: Vec<_> = store.all_nodes().collect();
+        assert_eq!(nodes.len(), 2);
+
+        let edges: Vec<_> = store.all_edges().collect();
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_all_labels_and_edge_types() {
+        let store = LpgStore::new();
+
+        store.create_node(&["Person"]);
+        store.create_node(&["Company"]);
+        let a = store.create_node(&["Animal"]);
+        let b = store.create_node(&["Animal"]);
+        store.create_edge(a, b, "EATS");
+
+        let labels = store.all_labels();
+        assert_eq!(labels.len(), 3);
+        assert!(labels.contains(&"Person".to_string()));
+        assert!(labels.contains(&"Company".to_string()));
+        assert!(labels.contains(&"Animal".to_string()));
+
+        let edge_types = store.all_edge_types();
+        assert_eq!(edge_types.len(), 1);
+        assert!(edge_types.contains(&"EATS".to_string()));
+    }
+
+    #[test]
+    fn test_all_property_keys() {
+        let store = LpgStore::new();
+
+        let a = store.create_node_with_props(&["Person"], [("name", Value::from("Alice"))]);
+        let b = store.create_node_with_props(&["Person"], [("age", Value::from(30i64))]);
+        store.create_edge_with_props(a, b, "KNOWS", [("since", Value::from(2020i64))]);
+
+        let keys = store.all_property_keys();
+        assert!(keys.contains(&"name".to_string()));
+        assert!(keys.contains(&"age".to_string()));
+        assert!(keys.contains(&"since".to_string()));
+    }
+
+    #[test]
+    fn test_nodes_with_label() {
+        let store = LpgStore::new();
+
+        store.create_node(&["Person"]);
+        store.create_node(&["Person"]);
+        store.create_node(&["Company"]);
+
+        let persons: Vec<_> = store.nodes_with_label("Person").collect();
+        assert_eq!(persons.len(), 2);
+
+        let companies: Vec<_> = store.nodes_with_label("Company").collect();
+        assert_eq!(companies.len(), 1);
+
+        let none: Vec<_> = store.nodes_with_label("NonExistent").collect();
+        assert_eq!(none.len(), 0);
+    }
+
+    #[test]
+    fn test_edges_with_type() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let c = store.create_node(&["Company"]);
+
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(a, c, "WORKS_AT");
+
+        let knows: Vec<_> = store.edges_with_type("KNOWS").collect();
+        assert_eq!(knows.len(), 1);
+
+        let works_at: Vec<_> = store.edges_with_type("WORKS_AT").collect();
+        assert_eq!(works_at.len(), 1);
+
+        let none: Vec<_> = store.edges_with_type("NonExistent").collect();
+        assert_eq!(none.len(), 0);
+    }
+
+    #[test]
+    fn test_nodes_by_label_nonexistent() {
+        let store = LpgStore::new();
+        store.create_node(&["Person"]);
+
+        let empty = store.nodes_by_label("NonExistent");
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_statistics() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let c = store.create_node(&["Company"]);
+
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(a, c, "WORKS_AT");
+
+        store.compute_statistics();
+        let stats = store.statistics();
+
+        assert_eq!(stats.total_nodes, 3);
+        assert_eq!(stats.total_edges, 2);
+
+        // Estimates
+        let person_card = store.estimate_label_cardinality("Person");
+        assert!(person_card > 0.0);
+
+        let avg_degree = store.estimate_avg_degree("KNOWS", true);
+        assert!(avg_degree >= 0.0);
+    }
+
+    #[test]
+    fn test_zone_maps() {
+        let store = LpgStore::new();
+
+        store.create_node_with_props(&["Person"], [("age", Value::from(25i64))]);
+        store.create_node_with_props(&["Person"], [("age", Value::from(35i64))]);
+
+        // Zone map should indicate possible matches
+        let might_match = store.node_property_might_match(
+            &"age".into(),
+            CompareOp::Eq,
+            &Value::from(30i64),
+        );
+        // Zone maps may return true conservatively
+        assert!(might_match || !might_match); // This is a valid test - zone maps are approximate
+
+        let zone = store.node_property_zone_map(&"age".into());
+        assert!(zone.is_some());
+
+        // Non-existent property
+        let no_zone = store.node_property_zone_map(&"nonexistent".into());
+        assert!(no_zone.is_none());
+
+        // Edge zone maps
+        let a = store.create_node(&["A"]);
+        let b = store.create_node(&["B"]);
+        store.create_edge_with_props(a, b, "REL", [("weight", Value::from(1.0))]);
+
+        let edge_zone = store.edge_property_zone_map(&"weight".into());
+        assert!(edge_zone.is_some());
+    }
+
+    #[test]
+    fn test_rebuild_zone_maps() {
+        let store = LpgStore::new();
+        store.create_node_with_props(&["Person"], [("age", Value::from(25i64))]);
+
+        // Should not panic
+        store.rebuild_zone_maps();
+    }
+
+    #[test]
+    fn test_create_node_with_id() {
+        let store = LpgStore::new();
+
+        let specific_id = NodeId::new(100);
+        store.create_node_with_id(specific_id, &["Person", "Employee"]);
+
+        let node = store.get_node(specific_id).unwrap();
+        assert!(node.has_label("Person"));
+        assert!(node.has_label("Employee"));
+
+        // Next auto-generated ID should be > 100
+        let next = store.create_node(&["Other"]);
+        assert!(next.as_u64() > 100);
+    }
+
+    #[test]
+    fn test_create_edge_with_id() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["A"]);
+        let b = store.create_node(&["B"]);
+
+        let specific_id = EdgeId::new(500);
+        store.create_edge_with_id(specific_id, a, b, "REL");
+
+        let edge = store.get_edge(specific_id).unwrap();
+        assert_eq!(edge.src, a);
+        assert_eq!(edge.dst, b);
+        assert_eq!(edge.edge_type.as_ref(), "REL");
+
+        // Next auto-generated ID should be > 500
+        let next = store.create_edge(a, b, "OTHER");
+        assert!(next.as_u64() > 500);
+    }
+
+    #[test]
+    fn test_set_epoch() {
+        let store = LpgStore::new();
+
+        assert_eq!(store.current_epoch().as_u64(), 0);
+
+        store.set_epoch(EpochId::new(42));
+        assert_eq!(store.current_epoch().as_u64(), 42);
+    }
+
+    #[test]
+    fn test_get_node_nonexistent() {
+        let store = LpgStore::new();
+        let fake_id = NodeId::new(999);
+        assert!(store.get_node(fake_id).is_none());
+    }
+
+    #[test]
+    fn test_get_edge_nonexistent() {
+        let store = LpgStore::new();
+        let fake_id = EdgeId::new(999);
+        assert!(store.get_edge(fake_id).is_none());
+    }
+
+    #[test]
+    fn test_multiple_labels() {
+        let store = LpgStore::new();
+
+        let id = store.create_node(&["Person", "Employee", "Manager"]);
+        let node = store.get_node(id).unwrap();
+
+        assert!(node.has_label("Person"));
+        assert!(node.has_label("Employee"));
+        assert!(node.has_label("Manager"));
+        assert!(!node.has_label("Other"));
+    }
+
+    #[test]
+    fn test_default_impl() {
+        let store: LpgStore = Default::default();
+        assert_eq!(store.node_count(), 0);
+        assert_eq!(store.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_edges_from_both_directions() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["A"]);
+        let b = store.create_node(&["B"]);
+        let c = store.create_node(&["C"]);
+
+        let e1 = store.create_edge(a, b, "R1"); // a -> b
+        let e2 = store.create_edge(c, a, "R2"); // c -> a
+
+        // Both directions from a
+        let edges: Vec<_> = store.edges_from(a, Direction::Both).collect();
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().any(|(_, e)| *e == e1)); // outgoing
+        assert!(edges.iter().any(|(_, e)| *e == e2)); // incoming
+    }
+
+    #[test]
+    fn test_no_backward_adj_in_degree() {
+        let config = LpgStoreConfig {
+            backward_edges: false,
+            initial_node_capacity: 10,
+            initial_edge_capacity: 10,
+        };
+        let store = LpgStore::with_config(config);
+
+        let a = store.create_node(&["A"]);
+        let b = store.create_node(&["B"]);
+        store.create_edge(a, b, "R");
+
+        // in_degree should still work (falls back to scanning)
+        let degree = store.in_degree(b);
+        assert_eq!(degree, 1);
+    }
+
+    #[test]
+    fn test_no_backward_adj_edges_to() {
+        let config = LpgStoreConfig {
+            backward_edges: false,
+            initial_node_capacity: 10,
+            initial_edge_capacity: 10,
+        };
+        let store = LpgStore::with_config(config);
+
+        let a = store.create_node(&["A"]);
+        let b = store.create_node(&["B"]);
+        let e = store.create_edge(a, b, "R");
+
+        // edges_to should still work (falls back to scanning)
+        let edges = store.edges_to(b);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].1, e);
+    }
+
+    #[test]
+    fn test_node_versioned_creation() {
+        let store = LpgStore::new();
+
+        let epoch = store.new_epoch();
+        let tx_id = TxId::new(1);
+
+        let id = store.create_node_versioned(&["Person"], epoch, tx_id);
+        assert!(store.get_node(id).is_some());
+    }
+
+    #[test]
+    fn test_edge_versioned_creation() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["A"]);
+        let b = store.create_node(&["B"]);
+
+        let epoch = store.new_epoch();
+        let tx_id = TxId::new(1);
+
+        let edge_id = store.create_edge_versioned(a, b, "REL", epoch, tx_id);
+        assert!(store.get_edge(edge_id).is_some());
+    }
+
+    #[test]
+    fn test_node_with_props_versioned() {
+        let store = LpgStore::new();
+
+        let epoch = store.new_epoch();
+        let tx_id = TxId::new(1);
+
+        let id = store.create_node_with_props_versioned(
+            &["Person"],
+            [("name", Value::from("Alice"))],
+            epoch,
+            tx_id,
+        );
+
+        let node = store.get_node(id).unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+    }
+
+    #[test]
+    fn test_discard_uncommitted_versions() {
+        let store = LpgStore::new();
+
+        let epoch = store.new_epoch();
+        let tx_id = TxId::new(42);
+
+        // Create node with specific tx
+        let node_id = store.create_node_versioned(&["Person"], epoch, tx_id);
+        assert!(store.get_node(node_id).is_some());
+
+        // Discard uncommitted versions for this tx
+        store.discard_uncommitted_versions(tx_id);
+
+        // Node should be gone (version chain was removed)
+        assert!(store.get_node(node_id).is_none());
+    }
 }

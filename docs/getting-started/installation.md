@@ -60,7 +60,7 @@ Or add it manually to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-grafeo = "0.1"
+grafeo = "0.2"
 ```
 
 ### Feature Flags
@@ -70,7 +70,7 @@ All query languages are enabled by default. To use a minimal build:
 ```toml
 [dependencies]
 # Default: all query languages enabled
-grafeo = "0.1"
+grafeo = "0.2"
 
 # Minimal: only specific languages
 grafeo = { version = "0.1", default-features = false, features = ["gql"] }

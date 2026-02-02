@@ -40,5 +40,7 @@ venv/
 
 *.tmp.*
 
+.benchmarks
+
 # Auto-generated docs (synced from root files)
 docs/changelog.md

@@ -251,7 +251,7 @@ Choose the query language that fits your needs:
 
     ```toml
     [dependencies]
-    grafeo = "0.1"
+    grafeo = "0.2"
     ```
 
 ---

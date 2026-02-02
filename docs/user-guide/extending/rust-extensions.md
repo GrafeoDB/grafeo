@@ -28,8 +28,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-grafeo-core = "0.1"
-grafeo-engine = "0.1"
+grafeo-core = "0.2"
+grafeo-engine = "0.2"
 ```
 
 ### Extension Code

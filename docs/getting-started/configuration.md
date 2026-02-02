@@ -124,9 +124,9 @@ Grafeo can also be configured via environment variables:
 
 | Variable | Description |
 |----------|-------------|
-| `GRAPHOS_MEMORY_LIMIT` | Maximum memory in bytes |
-| `GRAPHOS_THREADS` | Number of worker threads |
-| `GRAPHOS_LOG_LEVEL` | Logging level (error, warn, info, debug, trace) |
+| `GRAFEO_MEMORY_LIMIT` | Maximum memory in bytes |
+| `GRAFEO_THREADS` | Number of worker threads |
+| `GRAFEO_LOG_LEVEL` | Logging level (error, warn, info, debug, trace) |
 
 ## Performance Tuning
 

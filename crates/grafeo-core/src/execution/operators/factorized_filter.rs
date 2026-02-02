@@ -1259,8 +1259,13 @@ mod tests {
             let chunk = create_chunk_with_node_ids(&store);
 
             // name = "Bob"
-            let pred =
-                PropertyPredicate::eq(0, 0, "name", Value::String("Bob".into()), Arc::clone(&store));
+            let pred = PropertyPredicate::eq(
+                0,
+                0,
+                "name",
+                Value::String("Bob".into()),
+                Arc::clone(&store),
+            );
 
             assert!(!pred.evaluate(&chunk, 0, 0)); // Alice
             assert!(pred.evaluate(&chunk, 0, 1)); // Bob
@@ -1425,13 +1430,8 @@ mod tests {
             let chunk = create_chunk_with_node_ids(&store);
 
             // Property "nonexistent" doesn't exist
-            let pred = PropertyPredicate::eq(
-                0,
-                0,
-                "nonexistent",
-                Value::Int64(1),
-                Arc::clone(&store),
-            );
+            let pred =
+                PropertyPredicate::eq(0, 0, "nonexistent", Value::Int64(1), Arc::clone(&store));
 
             // Should return false for missing property
             assert!(!pred.evaluate(&chunk, 0, 0));
@@ -1537,8 +1537,14 @@ mod tests {
             let chunk = create_chunk_with_node_ids(&store);
 
             // Column 5 doesn't exist
-            let pred =
-                PropertyPredicate::new(0, 5, "age", CompareOp::Gt, Value::Int64(30), Arc::clone(&store));
+            let pred = PropertyPredicate::new(
+                0,
+                5,
+                "age",
+                CompareOp::Gt,
+                Value::Int64(30),
+                Arc::clone(&store),
+            );
 
             let selection = pred.evaluate_batch(&chunk, 0);
             // Should return all false (no matches)
@@ -1551,17 +1557,11 @@ mod tests {
             let chunk = create_chunk_with_node_ids(&store);
 
             // age is Int64, but we compare with String
-            let pred = PropertyPredicate::eq(
-                0,
-                0,
-                "age",
-                Value::String("35".into()),
-                Arc::clone(&store),
-            );
+            let pred =
+                PropertyPredicate::eq(0, 0, "age", Value::String("35".into()), Arc::clone(&store));
 
             // Type mismatch should return false
             assert!(!pred.evaluate(&chunk, 0, 1));
         }
     }
-
 }

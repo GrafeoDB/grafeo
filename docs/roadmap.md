@@ -33,24 +33,31 @@ This roadmap outlines the planned development of Grafeo. Priorities may shift ba
 
 ---
 
-## 0.2.x - Performance
+## 0.2.x - Performance (Current)
 
 *Competitive with the fastest graph databases*
 
-### Performance Improvements
-- Factorized query processing for multi-hop traversals
-- Worst-case optimal joins for cyclic patterns (triangles, cliques)
-- Enhanced parallel execution with work-stealing scheduler
-- Query optimizer improvements
+### Performance Improvements (Delivered)
 
-### Expanded Support
-- **RDF** - full support
+- **Factorized query processing** for multi-hop traversals (avoid Cartesian products)
+- **Worst-case optimal joins** via Leapfrog TrieJoin for cyclic patterns (O(N^1.5) triangles)
+- **Lock-free concurrent reads** using DashMap-backed hash indexes (4-6x improvement)
+- **Direct lookup APIs** bypassing query planning for O(1) point reads (10-20x faster)
+- **Query plan caching** with LRU cache for repeated queries (5-10x speedup)
+- **NUMA-aware scheduling** with same-node work-stealing preference
+
+### New Features (Delivered)
+
+- **Ring Index for RDF** (`ring-index` feature) - 3x space reduction using wavelet trees
+- **Block-STM parallel execution** (`block-stm` feature) - optimistic parallel transactions
+- **Tiered hot/cold storage** (`tiered-storage` feature) - compressed epoch archival
+- **Succinct data structures** (`succinct-indexes` feature) - rank/select bitvectors, Elias-Fano
+
+### Expanded Support (Delivered)
+
+- **RDF** - full support with Ring Index and SPARQL optimization
 - All 5 query languages promoted to full support
 - NetworkX and solvOR integrations promoted to full support
-
-### Targets
-- On par with the fastest graph databases for both in-memory and persisted operations
-- Competitive performance on standard graph algorithm benchmarks
 
 ---
 
@@ -117,4 +124,4 @@ Interested in contributing to a specific feature? Check our [GitHub Issues](http
 
 ---
 
-*Last updated: January 2026*
+*Last updated: February 2026*

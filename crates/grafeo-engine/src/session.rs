@@ -1349,8 +1349,8 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            let id =
-                session.create_node_with_props(&["Person"], [("name", Value::String("Alice".into()))]);
+            let id = session
+                .create_node_with_props(&["Person"], [("name", Value::String("Alice".into()))]);
 
             let name = session.get_node_property(id, "name");
             assert_eq!(name, Some(Value::String("Alice".into())));
@@ -1609,9 +1609,11 @@ mod tests {
 
             assert!(session.get_neighbors_outgoing(lonely).is_empty());
             assert!(session.get_neighbors_incoming(lonely).is_empty());
-            assert!(session
-                .get_neighbors_outgoing_by_type(lonely, "KNOWS")
-                .is_empty());
+            assert!(
+                session
+                    .get_neighbors_outgoing_by_type(lonely, "KNOWS")
+                    .is_empty()
+            );
         }
     }
 }

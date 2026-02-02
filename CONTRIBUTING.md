@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Grafeo! This document provides gu
 
 ### Prerequisites
 
-- Rust 1.91.0+
+- Rust 1.91.1+
 - Python 3.12+ (for Python bindings)
 - Git
 
@@ -98,6 +98,12 @@ Query String → Parser → AST → Translator → LogicalPlan → Optimizer →
 # Run all tests
 cargo test --workspace
 
+# Run with all features (matches CI)
+cargo test --all-features --workspace
+
+# Run release mode tests (also run in CI)
+cargo test --all-features --workspace --release
+
 # Run tests for a specific crate
 cargo test -p grafeo-core
 
@@ -110,6 +116,73 @@ cargo test test_name -- --nocapture
 # Run tests with coverage (requires cargo-tarpaulin)
 cargo tarpaulin --workspace --out Html
 ```
+
+### Python Tests
+
+```bash
+# Install test dependencies
+uv pip install numpy scipy networkx solvor
+
+# Run Python tests
+pytest tests/python/ -v --ignore=tests/python/benchmark_grafeo.py
+```
+
+## CI Checks
+
+### Local CI Script (Recommended)
+
+Run all CI checks locally before making a PR:
+
+```bash
+# Linux/macOS
+./scripts/ci-local.sh
+
+# Windows PowerShell
+.\scripts\ci-local.ps1
+
+# Quick mode (skip release tests)
+./scripts/ci-local.sh --quick
+.\scripts\ci-local.ps1 -Quick
+```
+
+This runs: format check, clippy, docs, Rust tests, and Python tests.
+
+### Clean CI Test
+
+For catching dependency issues, use the clean CI script which creates an isolated environment:
+
+```bash
+# Linux/macOS - test all Python versions (3.12, 3.13, 3.14)
+./scripts/ci-clean.sh
+
+# Windows PowerShell
+.\scripts\ci-clean.ps1
+
+# Skip Rust checks (Python only)
+./scripts/ci-clean.sh --skip-rust
+.\scripts\ci-clean.ps1 -SkipRust
+
+# Test specific Python version only
+./scripts/ci-clean.sh --python 3.12
+.\scripts\ci-clean.ps1 -Python 3.12
+```
+
+### Automated Pre-commit Hooks
+
+Install prek hooks to automatically check formatting and linting:
+
+```bash
+# Install prek (Rust-native pre-commit alternative)
+cargo install prek
+
+# Install git hooks
+prek install
+
+# Run manually on all files
+prek run --all-files
+```
+
+This runs `cargo fmt`, `cargo clippy`, and file checks automatically before each commit.
 
 ## Running Benchmarks
 
@@ -137,11 +210,17 @@ maturin build --release
 
 1. Fork the repository and create a feature branch
 2. Write tests for new functionality
-3. Ensure all tests pass: `cargo test --workspace`
-4. Run clippy: `cargo clippy --workspace -- -D warnings`
-5. Format code: `cargo fmt --all`
-6. Update documentation if needed
-7. Submit PR with clear description of changes
+3. Run local CI checks: `./scripts/ci-local.sh` (or `.\scripts\ci-local.ps1` on Windows)
+4. Update documentation if needed
+5. Submit PR with clear description of changes
+
+Or run individual checks manually:
+
+```bash
+cargo fmt --all              # Format code
+cargo clippy --workspace -- -D warnings  # Lint
+cargo test --all-features --workspace    # Test
+```
 
 ### Commit Messages
 

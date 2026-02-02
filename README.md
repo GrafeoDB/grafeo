@@ -204,7 +204,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 ## Acknowledgments
 
-Grafeo's executiong engine draws inspiration from:
+Grafeo's execution engine draws inspiration from:
 
 - [DuckDB](https://duckdb.org/), vectorized push-based execution, morsel-driven parallelism
 - [LadybugDB](https://github.com/LadybugDB/ladybug), CSR-based adjacency indexing, factorized query processing

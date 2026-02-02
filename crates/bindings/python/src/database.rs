@@ -529,6 +529,88 @@ impl PyGrafeoDB {
         }
     }
 
+    /// Get all nodes with a specific label and their properties.
+    ///
+    /// This is more efficient than calling `get_node()` in a loop because it
+    /// batches the property lookups.
+    ///
+    /// Example:
+    /// ```python
+    /// # Get all Person nodes with properties
+    /// people = db.get_nodes_by_label("Person", limit=100)
+    /// for node_id, props in people:
+    ///     print(f"Node {node_id}: {props}")
+    /// ```
+    ///
+    /// Args:
+    ///     label: The label to filter by
+    ///     limit: Maximum number of nodes to return (None for all)
+    ///
+    /// Returns:
+    ///     List of (node_id, properties_dict) tuples
+    #[pyo3(signature = (label, limit=None))]
+    fn get_nodes_by_label(
+        &self,
+        py: Python<'_>,
+        label: &str,
+        limit: Option<usize>,
+    ) -> PyResult<Vec<(u64, Py<pyo3::types::PyDict>)>> {
+        let db = self.inner.read();
+
+        // Get node IDs by label
+        let node_ids = db.store().nodes_by_label(label);
+        let node_ids = match limit {
+            Some(n) => &node_ids[..n.min(node_ids.len())],
+            None => &node_ids,
+        };
+
+        // Batch get all properties
+        let props_batch = db.store().get_nodes_properties_batch(node_ids);
+
+        // Convert to Python
+        let mut results = Vec::with_capacity(node_ids.len());
+        for (node_id, props) in node_ids.iter().zip(props_batch.into_iter()) {
+            let py_dict = pyo3::types::PyDict::new(py);
+            for (key, value) in props {
+                py_dict.set_item(key.as_str(), PyValue::to_py(&value, py))?;
+            }
+            results.push((node_id.0, py_dict.into()));
+        }
+
+        Ok(results)
+    }
+
+    /// Get a specific property for multiple nodes at once.
+    ///
+    /// More efficient than calling `get_node()` in a loop when you only need
+    /// one property.
+    ///
+    /// Example:
+    /// ```python
+    /// # Get ages for a list of node IDs
+    /// node_ids = [1, 2, 3, 4, 5]
+    /// ages = db.get_property_batch(node_ids, "age")
+    /// for node_id, age in zip(node_ids, ages):
+    ///     if age is not None:
+    ///         print(f"Node {node_id} is {age} years old")
+    /// ```
+    fn get_property_batch(
+        &self,
+        py: Python<'_>,
+        node_ids: Vec<u64>,
+        property: &str,
+    ) -> PyResult<Vec<Option<Py<pyo3::prelude::PyAny>>>> {
+        let db = self.inner.read();
+        let ids: Vec<NodeId> = node_ids.into_iter().map(NodeId).collect();
+        let key = grafeo_common::types::PropertyKey::new(property);
+        let values = db.store().get_node_property_batch(&ids, &key);
+
+        Ok(values
+            .into_iter()
+            .map(|opt| opt.map(|v| PyValue::to_py(&v, py)))
+            .collect())
+    }
+
     /// Delete a node by ID.
     fn delete_node(&self, id: u64) -> PyResult<bool> {
         let db = self.inner.read();
@@ -649,6 +731,85 @@ impl PyGrafeoDB {
     fn remove_edge_property(&self, edge_id: u64, key: &str) -> PyResult<bool> {
         let db = self.inner.read();
         Ok(db.remove_edge_property(EdgeId(edge_id), key))
+    }
+
+    // =========================================================================
+    // PROPERTY INDEX API
+    // =========================================================================
+
+    /// Create an index on a node property for O(1) lookups.
+    ///
+    /// After creating an index, queries that filter by this property will be
+    /// significantly faster. The index is automatically maintained when
+    /// properties are set or removed.
+    ///
+    /// Example:
+    /// ```python
+    /// # Create index on 'email' property
+    /// db.create_property_index("email")
+    ///
+    /// # Now lookups by email are O(1) instead of O(n)
+    /// nodes = db.find_nodes_by_property("email", "alice@example.com")
+    /// ```
+    fn create_property_index(&self, property: &str) -> PyResult<()> {
+        let db = self.inner.read();
+        db.create_property_index(property);
+        Ok(())
+    }
+
+    /// Remove an index on a node property.
+    ///
+    /// Returns True if the index existed and was removed.
+    ///
+    /// Example:
+    /// ```python
+    /// if db.drop_property_index("deprecated_field"):
+    ///     print("Index removed")
+    /// ```
+    fn drop_property_index(&self, property: &str) -> PyResult<bool> {
+        let db = self.inner.read();
+        Ok(db.drop_property_index(property))
+    }
+
+    /// Check if a property has an index.
+    ///
+    /// Example:
+    /// ```python
+    /// if not db.has_property_index("email"):
+    ///     db.create_property_index("email")
+    /// ```
+    fn has_property_index(&self, property: &str) -> PyResult<bool> {
+        let db = self.inner.read();
+        Ok(db.has_property_index(property))
+    }
+
+    /// Find all nodes with a specific property value.
+    ///
+    /// If the property is indexed (via create_property_index), this is O(1).
+    /// Otherwise it scans all nodes, which is O(n).
+    ///
+    /// Returns a list of node IDs.
+    ///
+    /// Example:
+    /// ```python
+    /// # Create index for fast lookups (optional but recommended)
+    /// db.create_property_index("email")
+    ///
+    /// # Find nodes by property value
+    /// alice_ids = db.find_nodes_by_property("email", "alice@example.com")
+    /// for node_id in alice_ids:
+    ///     node = db.get_node(node_id)
+    ///     print(f"Found: {node}")
+    /// ```
+    fn find_nodes_by_property(
+        &self,
+        property: &str,
+        value: &Bound<'_, pyo3::prelude::PyAny>,
+    ) -> PyResult<Vec<u64>> {
+        let db = self.inner.read();
+        let val = PyValue::from_py(value).map_err(PyGrafeoError::from)?;
+        let nodes = db.find_nodes_by_property(property, &val);
+        Ok(nodes.into_iter().map(|n| n.0).collect())
     }
 
     /// Begin a transaction.

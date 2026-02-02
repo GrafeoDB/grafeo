@@ -33,6 +33,9 @@ tokio.workspace = true
 # Serialization
 serde.workspace = true
 
+# Regex for SPARQL FILTER
+regex = "1"
+
 # Tracing
 tracing.workspace = true
 

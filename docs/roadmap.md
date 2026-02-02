@@ -87,6 +87,7 @@ This roadmap outlines the planned development of Grafeo. Priorities may shift ba
 
 ### Stability
 - Continued bug fixes
+- Stricter linting rules
 - Performance tuning based on real-world usage
 
 ---
@@ -97,8 +98,8 @@ This roadmap outlines the planned development of Grafeo. Priorities may shift ba
 
 ### Focus Areas
 - Performance optimizations across all components
-- Comprehensive bug fixes
-- Documentation improvements and examples
+- Lots of bug hunting and fixing
+- Documentation improvements, user guides and examples
 - API stabilization
 
 ### Goal

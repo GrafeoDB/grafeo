@@ -78,6 +78,7 @@ pub use push::{
 };
 pub use scan::ScanOperator;
 pub use shortest_path::ShortestPathOperator;
+pub use single_row::{EmptyOperator, NodeListOperator, SingleRowOperator};
 pub use sort::{NullOrder, SortDirection, SortKey, SortOperator};
 pub use union::UnionOperator;
 pub use unwind::UnwindOperator;

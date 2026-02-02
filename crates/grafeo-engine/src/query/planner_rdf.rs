@@ -15,8 +15,8 @@ use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::JoinType;
 use grafeo_core::execution::operators::{
     BinaryFilterOp, FilterExpression, FilterOperator, HashAggregateOperator, JoinCondition,
-    LimitOperator, NestedLoopJoinOperator, Operator, OperatorError, Predicate, ProjectOperator,
-    SimpleAggregateOperator, SkipOperator, SortOperator, UnaryFilterOp,
+    LimitOperator, NestedLoopJoinOperator, Operator, OperatorError, Predicate, ProjectExpr,
+    ProjectOperator, SimpleAggregateOperator, SkipOperator, SortOperator, UnaryFilterOp,
 };
 use grafeo_core::graph::rdf::{Literal, RdfStore, Term, Triple, TriplePattern};
 
@@ -184,7 +184,14 @@ impl RdfPlanner {
     }
 
     /// Plans a filter operator.
+    ///
+    /// Handles EXISTS/NOT EXISTS patterns by transforming them into semi-joins/anti-joins.
     fn plan_filter(&self, filter: &FilterOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Check for EXISTS/NOT EXISTS patterns and transform to semi/anti joins
+        if let Some((subquery, is_negated)) = self.extract_exists_pattern(&filter.predicate) {
+            return self.plan_exists_as_join(&filter.input, subquery, is_negated);
+        }
+
         let (input_op, columns) = self.plan_operator(&filter.input)?;
 
         // Build variable to column index mapping
@@ -202,6 +209,96 @@ impl RdfPlanner {
 
         let operator = Box::new(FilterOperator::new(input_op, Box::new(predicate)));
         Ok((operator, columns))
+    }
+
+    /// Extracts an EXISTS or NOT EXISTS pattern from a filter predicate.
+    /// Returns the subquery operator and whether it's negated (NOT EXISTS).
+    fn extract_exists_pattern<'a>(
+        &self,
+        predicate: &'a LogicalExpression,
+    ) -> Option<(&'a LogicalOperator, bool)> {
+        use crate::query::plan::UnaryOp;
+
+        match predicate {
+            // EXISTS { pattern }
+            LogicalExpression::ExistsSubquery(subquery) => Some((subquery.as_ref(), false)),
+            // NOT EXISTS { pattern }
+            LogicalExpression::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => {
+                if let LogicalExpression::ExistsSubquery(subquery) = operand.as_ref() {
+                    Some((subquery.as_ref(), true))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Plans an EXISTS/NOT EXISTS pattern as a semi-join or anti-join.
+    fn plan_exists_as_join(
+        &self,
+        input: &LogicalOperator,
+        subquery: &LogicalOperator,
+        is_negated: bool,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let (left_op, left_columns) = self.plan_operator(input)?;
+        let (right_op, right_columns) = self.plan_operator(subquery)?;
+
+        let left_col_count = left_columns.len();
+
+        // Find shared variables for equi-join (correlation between outer and inner query)
+        let mut shared_vars: Vec<(usize, usize)> = Vec::new();
+        for (left_idx, left_col) in left_columns.iter().enumerate() {
+            for (right_idx, right_col) in right_columns.iter().enumerate() {
+                if left_col == right_col {
+                    shared_vars.push((left_idx, right_idx));
+                }
+            }
+        }
+
+        // Build full schema for the join (left + right columns)
+        let mut full_columns: Vec<String> = left_columns.clone();
+        full_columns.extend(right_columns.clone());
+        let full_schema = derive_rdf_schema(&full_columns);
+
+        // For semi/anti joins, we only output the left columns
+        let output_schema = derive_rdf_schema(&left_columns);
+
+        // Create join condition if there are shared variables
+        let join_condition: Option<Box<dyn JoinCondition>> = if shared_vars.is_empty() {
+            None
+        } else {
+            Some(Box::new(RdfJoinCondition::new(shared_vars.clone())))
+        };
+
+        // Use Semi for EXISTS, Anti for NOT EXISTS
+        let join_type = if is_negated {
+            JoinType::Anti
+        } else {
+            JoinType::Semi
+        };
+
+        let join_op = Box::new(NestedLoopJoinOperator::new(
+            left_op,
+            right_op,
+            join_condition,
+            join_type,
+            full_schema,
+        ));
+
+        // Project to only output left columns (the original input columns)
+        let projection_exprs: Vec<ProjectExpr> =
+            (0..left_col_count).map(ProjectExpr::Column).collect();
+        let project_op = Box::new(ProjectOperator::new(
+            join_op,
+            projection_exprs,
+            output_schema,
+        ));
+
+        Ok((project_op, left_columns))
     }
 
     /// Plans a LIMIT operator.
@@ -1641,9 +1738,11 @@ impl RdfExpressionPredicate {
                 let col_idx = *self.variable_columns.get(var)?;
                 chunk.column(col_idx)?.get_value(row)
             }
+            FilterExpression::FunctionCall { name, args } => {
+                self.eval_function_call(name, args, chunk, row)
+            }
             // These expression types are not commonly used in RDF FILTER clauses
-            FilterExpression::FunctionCall { .. }
-            | FilterExpression::List(_)
+            FilterExpression::List(_)
             | FilterExpression::Case { .. }
             | FilterExpression::Map(_)
             | FilterExpression::IndexAccess { .. }
@@ -1781,9 +1880,17 @@ impl RdfExpressionPredicate {
                 None
             }
             BinaryFilterOp::Regex => {
-                // Regex matching - not yet implemented for RDF
-                // Would need regex crate for full support
-                None
+                // SPARQL REGEX(string, pattern) - returns true if string matches pattern
+                match (left, right) {
+                    (Value::String(text), Value::String(pattern)) => {
+                        // Compile the regex pattern
+                        match regex::Regex::new(pattern) {
+                            Ok(re) => Some(Value::Bool(re.is_match(text))),
+                            Err(_) => None, // Invalid regex pattern
+                        }
+                    }
+                    _ => None,
+                }
             }
             BinaryFilterOp::Pow => {
                 // Power operation
@@ -1816,6 +1923,400 @@ impl RdfExpressionPredicate {
                 Value::Float64(v) => Some(Value::Float64(-v)),
                 _ => None,
             },
+        }
+    }
+
+    /// Evaluates SPARQL function calls.
+    fn eval_function_call(
+        &self,
+        name: &str,
+        args: &[FilterExpression],
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<Value> {
+        // Normalize function name to uppercase for case-insensitive matching
+        let func_name = name.to_uppercase();
+
+        match func_name.as_str() {
+            // CONCAT - concatenate multiple strings
+            "CONCAT" => {
+                let mut result = String::new();
+                for arg in args {
+                    if let Some(Value::String(s)) = self.eval_expr(arg, chunk, row) {
+                        result.push_str(&s);
+                    } else if let Some(val) = self.eval_expr(arg, chunk, row) {
+                        // Convert non-string values to string
+                        result.push_str(&value_to_string(&val));
+                    }
+                }
+                Some(Value::String(result.into()))
+            }
+
+            // REPLACE - replace occurrences of pattern with replacement
+            "REPLACE" => {
+                if args.len() < 3 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let pattern = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let replacement = match self.eval_expr(&args[2], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+
+                // Check if the pattern should be treated as regex (4th argument with 'r' flag)
+                if args.len() >= 4 {
+                    if let Some(Value::String(flags)) = self.eval_expr(&args[3], chunk, row) {
+                        if flags.contains('r') || flags.contains('i') {
+                            // Regex-based replace
+                            let regex_pattern = if flags.contains('i') {
+                                format!("(?i){}", &pattern)
+                            } else {
+                                pattern.clone()
+                            };
+                            if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                                return Some(Value::String(
+                                    re.replace_all(&text, &replacement).into(),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Simple string replace
+                Some(Value::String(text.replace(&pattern, &replacement).into()))
+            }
+
+            // STRLEN - string length
+            "STRLEN" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                Some(Value::Int64(text.chars().count() as i64))
+            }
+
+            // UCASE - uppercase
+            "UCASE" | "UPPER" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                Some(Value::String(text.to_uppercase().into()))
+            }
+
+            // LCASE - lowercase
+            "LCASE" | "LOWER" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                Some(Value::String(text.to_lowercase().into()))
+            }
+
+            // SUBSTR - substring extraction
+            "SUBSTR" | "SUBSTRING" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let start = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::Int64(i) => (i.max(1) - 1) as usize, // SPARQL uses 1-based indexing
+                    _ => return None,
+                };
+                let len = if args.len() >= 3 {
+                    match self.eval_expr(&args[2], chunk, row)? {
+                        Value::Int64(i) => Some(i.max(0) as usize),
+                        _ => return None,
+                    }
+                } else {
+                    None
+                };
+
+                let chars: Vec<char> = text.chars().collect();
+                let substr: String = if let Some(len) = len {
+                    chars.iter().skip(start).take(len).collect()
+                } else {
+                    chars.iter().skip(start).collect()
+                };
+                Some(Value::String(substr.into()))
+            }
+
+            // STRSTARTS - check if string starts with prefix
+            "STRSTARTS" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let prefix = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                Some(Value::Bool(text.starts_with(&prefix)))
+            }
+
+            // STRENDS - check if string ends with suffix
+            "STRENDS" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let suffix = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                Some(Value::Bool(text.ends_with(&suffix)))
+            }
+
+            // CONTAINS - check if string contains substring
+            "CONTAINS" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let pattern = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                Some(Value::Bool(text.contains(&pattern)))
+            }
+
+            // STRBEFORE - substring before pattern
+            "STRBEFORE" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let pattern = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                if let Some(pos) = text.find(&pattern) {
+                    Some(Value::String(text[..pos].to_string().into()))
+                } else {
+                    Some(Value::String("".into()))
+                }
+            }
+
+            // STRAFTER - substring after pattern
+            "STRAFTER" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let pattern = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                if let Some(pos) = text.find(&pattern) {
+                    Some(Value::String(
+                        text[pos + pattern.len()..].to_string().into(),
+                    ))
+                } else {
+                    Some(Value::String("".into()))
+                }
+            }
+
+            // ENCODE_FOR_URI - URL encode
+            "ENCODE_FOR_URI" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                // Simple URL encoding for common characters
+                let encoded: String = text
+                    .chars()
+                    .map(|c| match c {
+                        'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+                        _ => format!("%{:02X}", c as u32),
+                    })
+                    .collect();
+                Some(Value::String(encoded.into()))
+            }
+
+            // COALESCE - return first non-null value
+            "COALESCE" => {
+                for arg in args {
+                    if let Some(val) = self.eval_expr(arg, chunk, row) {
+                        if !matches!(val, Value::Null) {
+                            return Some(val);
+                        }
+                    }
+                }
+                None
+            }
+
+            // IF - conditional expression
+            "IF" => {
+                if args.len() < 3 {
+                    return None;
+                }
+                let condition = self.eval_expr(&args[0], chunk, row)?;
+                if condition.as_bool()? {
+                    self.eval_expr(&args[1], chunk, row)
+                } else {
+                    self.eval_expr(&args[2], chunk, row)
+                }
+            }
+
+            // BOUND - check if variable is bound
+            "BOUND" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let is_bound = self.eval_expr(&args[0], chunk, row).is_some();
+                Some(Value::Bool(is_bound))
+            }
+
+            // STR - convert to string
+            "STR" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
+                Some(Value::String(value_to_string(&val).into()))
+            }
+
+            // ISIRI / ISURI - check if value is an IRI
+            "ISIRI" | "ISURI" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
+                if let Value::String(s) = val {
+                    // Check if it looks like an IRI (starts with a scheme)
+                    let is_iri = s.contains("://") || s.starts_with("urn:");
+                    Some(Value::Bool(is_iri))
+                } else {
+                    Some(Value::Bool(false))
+                }
+            }
+
+            // ISBLANK - check if value is a blank node
+            "ISBLANK" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
+                if let Value::String(s) = val {
+                    Some(Value::Bool(s.starts_with("_:")))
+                } else {
+                    Some(Value::Bool(false))
+                }
+            }
+
+            // ISLITERAL - check if value is a literal
+            "ISLITERAL" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
+                // In our model, non-IRI strings and other values are literals
+                match &val {
+                    Value::String(s) => {
+                        Some(Value::Bool(!s.contains("://") && !s.starts_with("_:")))
+                    }
+                    _ => Some(Value::Bool(true)),
+                }
+            }
+
+            // ISNUMERIC - check if value is numeric
+            "ISNUMERIC" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
+                let is_numeric = matches!(val, Value::Int64(_) | Value::Float64(_))
+                    || matches!(&val, Value::String(s) if s.parse::<f64>().is_ok());
+                Some(Value::Bool(is_numeric))
+            }
+
+            // ABS - absolute value
+            "ABS" => {
+                if args.is_empty() {
+                    return None;
+                }
+                match self.eval_expr(&args[0], chunk, row)? {
+                    Value::Int64(v) => Some(Value::Int64(v.abs())),
+                    Value::Float64(v) => Some(Value::Float64(v.abs())),
+                    _ => None,
+                }
+            }
+
+            // CEIL - ceiling
+            "CEIL" => {
+                if args.is_empty() {
+                    return None;
+                }
+                match self.eval_expr(&args[0], chunk, row)? {
+                    Value::Int64(v) => Some(Value::Int64(v)),
+                    Value::Float64(v) => Some(Value::Float64(v.ceil())),
+                    _ => None,
+                }
+            }
+
+            // FLOOR - floor
+            "FLOOR" => {
+                if args.is_empty() {
+                    return None;
+                }
+                match self.eval_expr(&args[0], chunk, row)? {
+                    Value::Int64(v) => Some(Value::Int64(v)),
+                    Value::Float64(v) => Some(Value::Float64(v.floor())),
+                    _ => None,
+                }
+            }
+
+            // ROUND - round to nearest integer
+            "ROUND" => {
+                if args.is_empty() {
+                    return None;
+                }
+                match self.eval_expr(&args[0], chunk, row)? {
+                    Value::Int64(v) => Some(Value::Int64(v)),
+                    Value::Float64(v) => Some(Value::Float64(v.round())),
+                    _ => None,
+                }
+            }
+
+            // Unknown function
+            _ => None,
         }
     }
 }
@@ -1951,6 +2452,30 @@ fn expression_to_string(expr: &LogicalExpression) -> String {
         LogicalExpression::Property { variable, property } => format!("{variable}.{property}"),
         LogicalExpression::Literal(value) => format!("{value:?}"),
         _ => "expr".to_string(),
+    }
+}
+
+/// Converts a value to its string representation.
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Bool(b) => b.to_string(),
+        Value::Int64(i) => i.to_string(),
+        Value::Float64(f) => f.to_string(),
+        Value::String(s) => s.to_string(),
+        Value::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        Value::Timestamp(t) => t.to_string(),
+        Value::List(items) => {
+            let parts: Vec<String> = items.iter().map(value_to_string).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        Value::Map(entries) => {
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, value_to_string(v)))
+                .collect();
+            format!("{{{}}}", parts.join(", "))
+        }
     }
 }
 

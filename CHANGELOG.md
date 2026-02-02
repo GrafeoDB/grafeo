@@ -2,6 +2,46 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.2.5] - 2026-02-03
+
+_SPARQL Completeness & Performance Optimizations_
+
+### Added
+
+- **SPARQL String Functions**: CONCAT, REPLACE, STRLEN, UCASE/UPPER, LCASE/LOWER, SUBSTR, STRSTARTS, STRENDS, CONTAINS, STRBEFORE, STRAFTER, ENCODE_FOR_URI
+- **SPARQL Type Functions**: COALESCE, IF, BOUND, STR, ISIRI/ISURI, ISBLANK, ISLITERAL, ISNUMERIC
+- **SPARQL Math Functions**: ABS, CEIL, FLOOR, ROUND
+- **SPARQL REGEX**: Pattern matching using the `regex` crate
+- **EXISTS/NOT EXISTS**: Proper subquery support with semi-joins (EXISTS) and anti-joins (NOT EXISTS)
+- **Platform Allocators**: Optional jemalloc (Linux/macOS) and mimalloc (Windows) for 10-20% faster allocations
+  - Enable via `jemalloc` or `mimalloc-allocator` feature flags
+- **Collection Type Aliases**: `GrafeoMap`, `GrafeoSet`, `GrafeoConcurrentMap` for consistent FxHash usage
+- **Batch Property APIs**: `get_node_property_batch()`, `get_nodes_properties_batch()` for efficient bulk reads
+- **Compound Predicate Optimization**: Filter pushdown now handles `n.a = 1 AND n.b = 2` compound predicates
+- **Range Query Support**: `find_nodes_in_range()` with zone map pruning for range predicates
+- **Python Batch APIs**: `get_nodes_by_label(label, limit)` and `get_property_batch(ids, prop)` for efficient bulk access
+
+### Improved
+
+- **Community Detection**: Label propagation algorithm now O(E) instead of O(V²E) using backward adjacency
+  - Expected 100-500x improvement for large graphs
+- **Zone Map Integration**: Filter planning now uses zone maps for predicate pushdown
+  - Scans short-circuit with `EmptyOperator` when zone maps prove no matches possible
+- **Filter Equality**: Property index optimization extended to compound AND predicates
+- **Filter Range**: Zone map checks for range predicates (`<`, `>`, `<=`, `>=`)
+- **Pre-commit Hooks**: Added typos checker, cargo-deny (security/license), and ruff (Python linting)
+- **Profiling Profile**: Added `cargo build --profile profiling` for flamegraph analysis
+
+### Changed
+
+- Updated CONTRIBUTING.md with CI scripts and expanded testing documentation
+
+---
+
+## [0.2.4b] - 2026-02-02
+
+Fixed release workflow `--exclude` flag (requires `--workspace`)
+
 ## [0.2.4] - 2026-02-02
 
 _Benchmark-Driven Performance Optimizations_

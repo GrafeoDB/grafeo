@@ -919,6 +919,65 @@ impl GrafeoDB {
     }
 
     // =========================================================================
+    // PROPERTY INDEX API
+    // =========================================================================
+
+    /// Creates an index on a node property for O(1) lookups by value.
+    ///
+    /// After creating an index, calls to [`Self::find_nodes_by_property`] will be
+    /// O(1) instead of O(n) for this property. The index is automatically
+    /// maintained when properties are set or removed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Create an index on the 'email' property
+    /// db.create_property_index("email");
+    ///
+    /// // Now lookups by email are O(1)
+    /// let nodes = db.find_nodes_by_property("email", &Value::from("alice@example.com"));
+    /// ```
+    pub fn create_property_index(&self, property: &str) {
+        self.store.create_property_index(property);
+    }
+
+    /// Drops an index on a node property.
+    ///
+    /// Returns `true` if the index existed and was removed.
+    pub fn drop_property_index(&self, property: &str) -> bool {
+        self.store.drop_property_index(property)
+    }
+
+    /// Returns `true` if the property has an index.
+    #[must_use]
+    pub fn has_property_index(&self, property: &str) -> bool {
+        self.store.has_property_index(property)
+    }
+
+    /// Finds all nodes that have a specific property value.
+    ///
+    /// If the property is indexed, this is O(1). Otherwise, it scans all nodes
+    /// which is O(n). Use [`Self::create_property_index`] for frequently queried properties.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Create index for fast lookups (optional but recommended)
+    /// db.create_property_index("city");
+    ///
+    /// // Find all nodes where city = "NYC"
+    /// let nyc_nodes = db.find_nodes_by_property("city", &Value::from("NYC"));
+    /// ```
+    #[must_use]
+    pub fn find_nodes_by_property(
+        &self,
+        property: &str,
+        value: &grafeo_common::types::Value,
+    ) -> Vec<grafeo_common::types::NodeId> {
+        self.store.find_nodes_by_property(property, value)
+    }
+
+    // =========================================================================
     // ADMIN API: Introspection
     // =========================================================================
 

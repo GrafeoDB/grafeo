@@ -17,6 +17,12 @@ repos:
       - id: check-added-large-files
         args: ['--maxkb=1000']
 
+  # Typo checker (Rust-native, very fast)
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.29.4
+    hooks:
+      - id: typos
+
   # Local Rust hooks
   - repo: local
     hooks:
@@ -33,3 +39,25 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+
+      - id: cargo-deny
+        name: cargo deny
+        entry: cargo deny check
+        language: system
+        files: ^Cargo\.(toml|lock)$
+        pass_filenames: false
+
+  # Python hooks
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: ruff check --fix
+        language: system
+        types: [python]
+
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format
+        language: system
+        types: [python]

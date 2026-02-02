@@ -365,4 +365,258 @@ mod tests {
         assert_eq!(triples.len(), 1);
         assert_eq!(triples[0].subject(), &Term::iri("alice"));
     }
+
+    #[test]
+    fn test_ring_iterator_with_object() {
+        let triples = vec![
+            make_triple("alice", "knows", "bob"),
+            make_triple("carol", "knows", "bob"),
+            make_triple("dave", "likes", "eve"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let iter = RingIterator::with_object(&ring, &Term::iri("bob"));
+        let results: Vec<Triple> = iter.collect();
+        assert_eq!(results.len(), 2);
+
+        // Verify all results have bob as object
+        for triple in &results {
+            assert_eq!(triple.object(), &Term::iri("bob"));
+        }
+    }
+
+    #[test]
+    fn test_ring_iterator_with_object_not_found() {
+        let triples = vec![make_triple("s1", "p1", "o1")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let iter = RingIterator::with_object(&ring, &Term::iri("nonexistent"));
+        let results: Vec<Triple> = iter.collect();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_ring_iterator_position() {
+        let triples = vec![
+            make_triple("s1", "p1", "o1"),
+            make_triple("s2", "p2", "o2"),
+            make_triple("s3", "p3", "o3"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let mut iter = RingIterator::all(&ring);
+        assert_eq!(iter.position(), 0);
+
+        iter.next();
+        assert_eq!(iter.position(), 1);
+
+        iter.next();
+        assert_eq!(iter.position(), 2);
+    }
+
+    #[test]
+    fn test_ring_iterator_seek_iterate_all() {
+        let triples = vec![
+            make_triple("s1", "p1", "o1"),
+            make_triple("s2", "p2", "o2"),
+            make_triple("s3", "p3", "o3"),
+            make_triple("s4", "p4", "o4"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let mut iter = RingIterator::all(&ring);
+        assert_eq!(iter.position(), 0);
+
+        // Seek to position 2
+        iter.seek(2);
+        assert_eq!(iter.position(), 2);
+        assert!(iter.has_next());
+
+        // Continue iteration from position 2
+        let remaining: Vec<Triple> = iter.collect();
+        assert_eq!(remaining.len(), 2);
+    }
+
+    #[test]
+    fn test_ring_iterator_seek_past_end() {
+        let triples = vec![make_triple("s1", "p1", "o1")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let mut iter = RingIterator::all(&ring);
+        iter.seek(100);
+
+        // Should be clamped to end
+        assert!(!iter.has_next());
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_ring_iterator_seek_bound() {
+        let triples = vec![
+            make_triple("alice", "knows", "bob"),
+            make_triple("carol", "knows", "dave"),
+            make_triple("alice", "likes", "eve"),
+            make_triple("frank", "knows", "alice"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let mut iter = RingIterator::with_subject(&ring, &Term::iri("alice"));
+
+        // Verify initial state
+        assert!(iter.has_next());
+
+        // Seek should find next occurrence >= target
+        iter.seek(1);
+
+        // The iterator should still be usable
+        let results: Vec<Triple> = iter.collect();
+        // All remaining results should have alice as subject
+        for triple in &results {
+            assert_eq!(triple.subject(), &Term::iri("alice"));
+        }
+    }
+
+    #[test]
+    fn test_ring_iterator_seek_not_found_term() {
+        let triples = vec![make_triple("s1", "p1", "o1")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let mut iter = RingIterator::with_subject(&ring, &Term::iri("nonexistent"));
+
+        // Seek on a term that doesn't exist should do nothing
+        iter.seek(0);
+        assert!(!iter.has_next());
+    }
+
+    #[test]
+    fn test_ring_iterator_has_next_empty() {
+        let ring = TripleRing::from_triples(std::iter::empty());
+
+        let iter = RingIterator::all(&ring);
+        assert!(!iter.has_next());
+    }
+
+    #[test]
+    fn test_leapfrog_patterns_accessor() {
+        let triples = vec![
+            make_triple("alice", "knows", "bob"),
+            make_triple("bob", "knows", "carol"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let pattern1 = TriplePattern::with_subject(Term::iri("alice"));
+        let pattern2 = TriplePattern::with_predicate(Term::iri("knows"));
+        let lf = LeapfrogRing::new(&ring, vec![pattern1.clone(), pattern2.clone()]);
+
+        let patterns = lf.patterns();
+        assert_eq!(patterns.len(), 2);
+    }
+
+    #[test]
+    fn test_leapfrog_multi_pattern() {
+        let triples = vec![
+            make_triple("alice", "knows", "bob"),
+            make_triple("bob", "knows", "carol"),
+            make_triple("carol", "likes", "alice"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        // Create patterns that should both match
+        let pattern1 = TriplePattern::with_subject(Term::iri("alice"));
+        let pattern2 = TriplePattern::with_predicate(Term::iri("knows"));
+        let mut lf = LeapfrogRing::new(&ring, vec![pattern1, pattern2]);
+
+        let result = lf.next();
+        assert!(result.is_some());
+        let matched = result.unwrap();
+        // Should have matched both patterns
+        assert_eq!(matched.len(), 2);
+    }
+
+    #[test]
+    fn test_leapfrog_no_match() {
+        let triples = vec![
+            make_triple("alice", "knows", "bob"),
+            make_triple("bob", "knows", "carol"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        // Pattern that doesn't match any triple
+        let pattern = TriplePattern::with_subject(Term::iri("nonexistent"));
+        let mut lf = LeapfrogRing::new(&ring, vec![pattern]);
+
+        let result = lf.next();
+        assert!(result.is_none());
+        assert!(lf.is_exhausted());
+    }
+
+    #[test]
+    fn test_leapfrog_exhausted_after_iteration() {
+        let triples = vec![make_triple("alice", "knows", "bob")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let pattern = TriplePattern::with_subject(Term::iri("alice"));
+        let mut lf = LeapfrogRing::new(&ring, vec![pattern]);
+
+        assert!(!lf.is_exhausted());
+        let _result = lf.next();
+        assert!(lf.is_exhausted());
+
+        // Second call should return None
+        let second_result = lf.next();
+        assert!(second_result.is_none());
+    }
+
+    #[test]
+    fn test_leapfrog_empty_ring_with_patterns() {
+        let ring = TripleRing::from_triples(std::iter::empty());
+        let pattern = TriplePattern::with_subject(Term::iri("alice"));
+        let lf = LeapfrogRing::new(&ring, vec![pattern]);
+
+        // Should be exhausted immediately when ring is empty
+        assert!(lf.is_exhausted());
+    }
+
+    #[test]
+    fn test_ring_iterator_predicate_not_found() {
+        let triples = vec![make_triple("s1", "p1", "o1")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let mut iter = RingIterator::with_predicate(&ring, &Term::iri("nonexistent"));
+        assert!(!iter.has_next());
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_ring_iterator_all_single_triple() {
+        let triples = vec![make_triple("s", "p", "o")];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let mut iter = RingIterator::all(&ring);
+        assert!(iter.has_next());
+
+        let triple = iter.next().unwrap();
+        assert_eq!(triple.subject(), &Term::iri("s"));
+        assert_eq!(triple.predicate(), &Term::iri("p"));
+        assert_eq!(triple.object(), &Term::iri("o"));
+
+        assert!(!iter.has_next());
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_ring_iterator_seek_to_zero() {
+        let triples = vec![
+            make_triple("s1", "p1", "o1"),
+            make_triple("s2", "p2", "o2"),
+        ];
+        let ring = TripleRing::from_triples(triples.into_iter());
+
+        let mut iter = RingIterator::all(&ring);
+        iter.seek(0);
+        assert_eq!(iter.position(), 0);
+
+        let results: Vec<Triple> = iter.collect();
+        assert_eq!(results.len(), 2);
+    }
 }

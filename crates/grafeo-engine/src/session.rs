@@ -1312,4 +1312,306 @@ mod tests {
             assert!(result.is_err());
         }
     }
+
+    // ==================== Direct Lookup API Tests ====================
+
+    mod direct_lookup_tests {
+        use super::*;
+        use grafeo_common::types::Value;
+
+        #[test]
+        fn test_get_node() {
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            let id = session.create_node(&["Person"]);
+            let node = session.get_node(id);
+
+            assert!(node.is_some());
+            let node = node.unwrap();
+            assert_eq!(node.id, id);
+        }
+
+        #[test]
+        fn test_get_node_not_found() {
+            use grafeo_common::types::NodeId;
+
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            // Try to get a non-existent node
+            let node = session.get_node(NodeId::new(9999));
+            assert!(node.is_none());
+        }
+
+        #[test]
+        fn test_get_node_property() {
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            let id =
+                session.create_node_with_props(&["Person"], [("name", Value::String("Alice".into()))]);
+
+            let name = session.get_node_property(id, "name");
+            assert_eq!(name, Some(Value::String("Alice".into())));
+
+            // Non-existent property
+            let missing = session.get_node_property(id, "missing");
+            assert!(missing.is_none());
+        }
+
+        #[test]
+        fn test_get_edge() {
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            let alice = session.create_node(&["Person"]);
+            let bob = session.create_node(&["Person"]);
+            let edge_id = session.create_edge(alice, bob, "KNOWS");
+
+            let edge = session.get_edge(edge_id);
+            assert!(edge.is_some());
+            let edge = edge.unwrap();
+            assert_eq!(edge.id, edge_id);
+            assert_eq!(edge.src, alice);
+            assert_eq!(edge.dst, bob);
+        }
+
+        #[test]
+        fn test_get_edge_not_found() {
+            use grafeo_common::types::EdgeId;
+
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            let edge = session.get_edge(EdgeId::new(9999));
+            assert!(edge.is_none());
+        }
+
+        #[test]
+        fn test_get_neighbors_outgoing() {
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            let alice = session.create_node(&["Person"]);
+            let bob = session.create_node(&["Person"]);
+            let carol = session.create_node(&["Person"]);
+
+            session.create_edge(alice, bob, "KNOWS");
+            session.create_edge(alice, carol, "KNOWS");
+
+            let neighbors = session.get_neighbors_outgoing(alice);
+            assert_eq!(neighbors.len(), 2);
+
+            let neighbor_ids: Vec<_> = neighbors.iter().map(|(node_id, _)| *node_id).collect();
+            assert!(neighbor_ids.contains(&bob));
+            assert!(neighbor_ids.contains(&carol));
+        }
+
+        #[test]
+        fn test_get_neighbors_incoming() {
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            let alice = session.create_node(&["Person"]);
+            let bob = session.create_node(&["Person"]);
+            let carol = session.create_node(&["Person"]);
+
+            session.create_edge(bob, alice, "KNOWS");
+            session.create_edge(carol, alice, "KNOWS");
+
+            let neighbors = session.get_neighbors_incoming(alice);
+            assert_eq!(neighbors.len(), 2);
+
+            let neighbor_ids: Vec<_> = neighbors.iter().map(|(node_id, _)| *node_id).collect();
+            assert!(neighbor_ids.contains(&bob));
+            assert!(neighbor_ids.contains(&carol));
+        }
+
+        #[test]
+        fn test_get_neighbors_outgoing_by_type() {
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            let alice = session.create_node(&["Person"]);
+            let bob = session.create_node(&["Person"]);
+            let company = session.create_node(&["Company"]);
+
+            session.create_edge(alice, bob, "KNOWS");
+            session.create_edge(alice, company, "WORKS_AT");
+
+            let knows_neighbors = session.get_neighbors_outgoing_by_type(alice, "KNOWS");
+            assert_eq!(knows_neighbors.len(), 1);
+            assert_eq!(knows_neighbors[0].0, bob);
+
+            let works_neighbors = session.get_neighbors_outgoing_by_type(alice, "WORKS_AT");
+            assert_eq!(works_neighbors.len(), 1);
+            assert_eq!(works_neighbors[0].0, company);
+
+            // No edges of this type
+            let no_neighbors = session.get_neighbors_outgoing_by_type(alice, "LIKES");
+            assert!(no_neighbors.is_empty());
+        }
+
+        #[test]
+        fn test_node_exists() {
+            use grafeo_common::types::NodeId;
+
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            let id = session.create_node(&["Person"]);
+
+            assert!(session.node_exists(id));
+            assert!(!session.node_exists(NodeId::new(9999)));
+        }
+
+        #[test]
+        fn test_edge_exists() {
+            use grafeo_common::types::EdgeId;
+
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            let alice = session.create_node(&["Person"]);
+            let bob = session.create_node(&["Person"]);
+            let edge_id = session.create_edge(alice, bob, "KNOWS");
+
+            assert!(session.edge_exists(edge_id));
+            assert!(!session.edge_exists(EdgeId::new(9999)));
+        }
+
+        #[test]
+        fn test_get_degree() {
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            let alice = session.create_node(&["Person"]);
+            let bob = session.create_node(&["Person"]);
+            let carol = session.create_node(&["Person"]);
+
+            // Alice knows Bob and Carol (2 outgoing)
+            session.create_edge(alice, bob, "KNOWS");
+            session.create_edge(alice, carol, "KNOWS");
+            // Bob knows Alice (1 incoming for Alice)
+            session.create_edge(bob, alice, "KNOWS");
+
+            let (out_degree, in_degree) = session.get_degree(alice);
+            assert_eq!(out_degree, 2);
+            assert_eq!(in_degree, 1);
+
+            // Node with no edges
+            let lonely = session.create_node(&["Person"]);
+            let (out, in_deg) = session.get_degree(lonely);
+            assert_eq!(out, 0);
+            assert_eq!(in_deg, 0);
+        }
+
+        #[test]
+        fn test_get_nodes_batch() {
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            let alice = session.create_node(&["Person"]);
+            let bob = session.create_node(&["Person"]);
+            let carol = session.create_node(&["Person"]);
+
+            let nodes = session.get_nodes_batch(&[alice, bob, carol]);
+            assert_eq!(nodes.len(), 3);
+            assert!(nodes[0].is_some());
+            assert!(nodes[1].is_some());
+            assert!(nodes[2].is_some());
+
+            // With non-existent node
+            use grafeo_common::types::NodeId;
+            let nodes_with_missing = session.get_nodes_batch(&[alice, NodeId::new(9999), carol]);
+            assert_eq!(nodes_with_missing.len(), 3);
+            assert!(nodes_with_missing[0].is_some());
+            assert!(nodes_with_missing[1].is_none()); // Missing node
+            assert!(nodes_with_missing[2].is_some());
+        }
+
+        #[test]
+        fn test_auto_commit_setting() {
+            let db = GrafeoDB::new_in_memory();
+            let mut session = db.session();
+
+            // Default is auto-commit enabled
+            assert!(session.auto_commit());
+
+            session.set_auto_commit(false);
+            assert!(!session.auto_commit());
+
+            session.set_auto_commit(true);
+            assert!(session.auto_commit());
+        }
+
+        #[test]
+        fn test_transaction_double_begin_error() {
+            let db = GrafeoDB::new_in_memory();
+            let mut session = db.session();
+
+            session.begin_tx().unwrap();
+            let result = session.begin_tx();
+
+            assert!(result.is_err());
+            // Clean up
+            session.rollback().unwrap();
+        }
+
+        #[test]
+        fn test_commit_without_transaction_error() {
+            let db = GrafeoDB::new_in_memory();
+            let mut session = db.session();
+
+            let result = session.commit();
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_rollback_without_transaction_error() {
+            let db = GrafeoDB::new_in_memory();
+            let mut session = db.session();
+
+            let result = session.rollback();
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_create_edge_in_transaction() {
+            let db = GrafeoDB::new_in_memory();
+            let mut session = db.session();
+
+            // Create nodes outside transaction
+            let alice = session.create_node(&["Person"]);
+            let bob = session.create_node(&["Person"]);
+
+            // Create edge in transaction
+            session.begin_tx().unwrap();
+            let edge_id = session.create_edge(alice, bob, "KNOWS");
+
+            // Edge should be visible in the transaction
+            assert!(session.edge_exists(edge_id));
+
+            // Commit
+            session.commit().unwrap();
+
+            // Edge should still be visible
+            assert!(session.edge_exists(edge_id));
+        }
+
+        #[test]
+        fn test_neighbors_empty_node() {
+            let db = GrafeoDB::new_in_memory();
+            let session = db.session();
+
+            let lonely = session.create_node(&["Person"]);
+
+            assert!(session.get_neighbors_outgoing(lonely).is_empty());
+            assert!(session.get_neighbors_incoming(lonely).is_empty());
+            assert!(session
+                .get_neighbors_outgoing_by_type(lonely, "KNOWS")
+                .is_empty());
+        }
+    }
 }

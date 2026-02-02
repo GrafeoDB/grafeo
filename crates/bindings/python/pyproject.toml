@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "grafeo"
-version = "0.2.0"
+version = "0.2.4"
 description = "A high-performance, embeddable graph database with Python bindings"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -30,7 +30,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "solvor>=0.5.5",
+    "solvor>=0.6.1"
 ]
 
 [project.urls]

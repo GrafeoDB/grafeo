@@ -10,7 +10,7 @@ Targeted improvements based on comparative benchmarks against LadybugDB, DuckDB,
 
 ### Improved
 
-- **Single Read Performance** (was 893ms, now competitive with 33ms leaders):
+- **Single Read Performance**:
   - **Lock-Free Concurrent Reads**: Hash indexes now use DashMap for lock-free reads
     - 4-6x improvement under concurrent read workloads
     - Sharded design eliminates global lock contention
@@ -24,7 +24,7 @@ Targeted improvements based on comparative benchmarks against LadybugDB, DuckDB,
   - **Adjacency Delta Buffer**: Increased inline SmallVec from 8 to 16 entries
     - Better cache locality for common node degrees
 
-- **Filter Performance** (was 258ms equality / 164ms range, targeting ~5ms):
+- **Filter Performance**:
   - **Direct Property Access**: `LpgStore::get_node_property()` and `get_edge_property()`
     - O(1) single-property lookup instead of loading all properties
   - **PropertyPredicate Optimization**: Uses direct access instead of `get_node().get_property()`
@@ -34,7 +34,7 @@ Targeted improvements based on comparative benchmarks against LadybugDB, DuckDB,
 
 ---
 
-## [0.2.3]
+## [0.2.3] - Unreleased
 
 ### Added
 
@@ -61,7 +61,7 @@ Targeted improvements based on comparative benchmarks against LadybugDB, DuckDB,
 
 ---
 
-## [0.2.2] - 2026-02-01
+## [0.2.2] - Unreleased
 
 _Performance Tuning_
 
@@ -82,7 +82,7 @@ _Performance Tuning_
 
 ---
 
-## [0.2.1] - 2026-02-01
+## [0.2.1] - Unreleased
 
 _Tiered Storage_
 

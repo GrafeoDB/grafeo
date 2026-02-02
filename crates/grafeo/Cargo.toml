@@ -14,6 +14,13 @@ grafeo-core = { path = "../grafeo-core", version = "0.2.0" }
 grafeo-common = { path = "../grafeo-common", version = "0.2.0" }
 grafeo-adapters = { path = "../grafeo-adapters", version = "0.2.0" }
 
+# Platform-optimized allocators (optional)
+[target.'cfg(all(not(target_os = "windows"), not(target_os = "openbsd"), not(target_env = "musl"), any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+tikv-jemallocator = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+mimalloc = { workspace = true, optional = true }
+
 [features]
 default = ["full"]
 gql = ["grafeo-engine/gql"]
@@ -22,6 +29,10 @@ sparql = ["grafeo-engine/sparql", "grafeo-engine/rdf"]
 gremlin = ["grafeo-engine/gremlin"]
 graphql = ["grafeo-engine/graphql"]
 full = ["gql", "cypher", "sparql", "gremlin", "graphql"]
+
+# Enable platform-optimized memory allocator (10-20% faster allocations)
+jemalloc = ["tikv-jemallocator"]
+mimalloc-allocator = ["mimalloc"]
 
 [lints]
 workspace = true

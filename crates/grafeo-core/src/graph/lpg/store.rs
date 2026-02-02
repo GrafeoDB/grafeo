@@ -15,13 +15,57 @@ use crate::graph::Direction;
 use crate::index::adjacency::ChunkedAdjacency;
 use crate::index::zone_map::ZoneMapEntry;
 use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
+use dashmap::DashMap;
 #[cfg(not(feature = "tiered-storage"))]
 use grafeo_common::mvcc::VersionChain;
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TxId, Value};
+use grafeo_common::types::{EdgeId, EpochId, HashableValue, NodeId, PropertyKey, TxId, Value};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use parking_lot::RwLock;
+use std::cmp::Ordering as CmpOrdering;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Compares two values for ordering (used for range checks).
+fn compare_values_for_range(a: &Value, b: &Value) -> Option<CmpOrdering> {
+    match (a, b) {
+        (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
+        (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
+        (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
+        (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
+        _ => None,
+    }
+}
+
+/// Checks if a value is within a range.
+fn value_in_range(
+    value: &Value,
+    min: Option<&Value>,
+    max: Option<&Value>,
+    min_inclusive: bool,
+    max_inclusive: bool,
+) -> bool {
+    // Check lower bound
+    if let Some(min_val) = min {
+        match compare_values_for_range(value, min_val) {
+            Some(CmpOrdering::Less) => return false,
+            Some(CmpOrdering::Equal) if !min_inclusive => return false,
+            None => return false, // Can't compare
+            _ => {}
+        }
+    }
+
+    // Check upper bound
+    if let Some(max_val) = max {
+        match compare_values_for_range(value, max_val) {
+            Some(CmpOrdering::Greater) => return false,
+            Some(CmpOrdering::Equal) if !max_inclusive => return false,
+            None => return false,
+            _ => {}
+        }
+    }
+
+    true
+}
 
 // Tiered storage imports
 #[cfg(feature = "tiered-storage")]
@@ -152,6 +196,12 @@ pub struct LpgStore {
     /// Reverse mapping to efficiently get labels for a node.
     node_labels: RwLock<FxHashMap<NodeId, FxHashSet<u32>>>,
 
+    /// Property indexes: property_key -> (value -> set of node IDs).
+    ///
+    /// When a property is indexed, lookups by value are O(1) instead of O(n).
+    /// Use [`create_property_index`] to enable indexing for a property.
+    property_indexes: RwLock<FxHashMap<PropertyKey, DashMap<HashableValue, FxHashSet<NodeId>>>>,
+
     /// Next node ID.
     next_node_id: AtomicU64,
 
@@ -204,6 +254,7 @@ impl LpgStore {
             backward_adj,
             label_index: RwLock::new(Vec::new()),
             node_labels: RwLock::new(FxHashMap::default()),
+            property_indexes: RwLock::new(FxHashMap::default()),
             next_node_id: AtomicU64::new(0),
             next_edge_id: AtomicU64::new(0),
             current_epoch: AtomicU64::new(0),
@@ -713,7 +764,12 @@ impl LpgStore {
     /// Sets a property on a node.
     #[cfg(not(feature = "tiered-storage"))]
     pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) {
-        self.node_properties.set(id, key.into(), value);
+        let prop_key: PropertyKey = key.into();
+
+        // Update property index before setting the property (needs to read old value)
+        self.update_property_index_on_set(id, &prop_key, &value);
+
+        self.node_properties.set(id, prop_key, value);
 
         // Update props_count in record
         let count = self.node_properties.get_all(id).len() as u16;
@@ -728,7 +784,12 @@ impl LpgStore {
     /// (Tiered storage version: properties stored separately, record is immutable)
     #[cfg(feature = "tiered-storage")]
     pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) {
-        self.node_properties.set(id, key.into(), value);
+        let prop_key: PropertyKey = key.into();
+
+        // Update property index before setting the property (needs to read old value)
+        self.update_property_index_on_set(id, &prop_key, &value);
+
+        self.node_properties.set(id, prop_key, value);
         // Note: props_count in record is not updated for tiered storage.
         // The record is immutable once allocated in the arena.
         // Property count can be derived from PropertyStorage if needed.
@@ -744,7 +805,12 @@ impl LpgStore {
     /// Returns the previous value if it existed, or None if the property didn't exist.
     #[cfg(not(feature = "tiered-storage"))]
     pub fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
-        let result = self.node_properties.remove(id, &key.into());
+        let prop_key: PropertyKey = key.into();
+
+        // Update property index before removing (needs to read old value)
+        self.update_property_index_on_remove(id, &prop_key);
+
+        let result = self.node_properties.remove(id, &prop_key);
 
         // Update props_count in record
         let count = self.node_properties.get_all(id).len() as u16;
@@ -761,7 +827,12 @@ impl LpgStore {
     /// (Tiered storage version)
     #[cfg(feature = "tiered-storage")]
     pub fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
-        self.node_properties.remove(id, &key.into())
+        let prop_key: PropertyKey = key.into();
+
+        // Update property index before removing (needs to read old value)
+        self.update_property_index_on_remove(id, &prop_key);
+
+        self.node_properties.remove(id, &prop_key)
         // Note: props_count in record is not updated for tiered storage.
     }
 
@@ -797,6 +868,359 @@ impl LpgStore {
     #[must_use]
     pub fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
         self.edge_properties.get(id, key)
+    }
+
+    // === Batch Property Operations ===
+
+    /// Gets a property for multiple nodes in a single batch operation.
+    ///
+    /// More efficient than calling [`Self::get_node_property`] in a loop because it
+    /// reduces lock overhead and enables better cache utilization.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use grafeo_core::graph::lpg::LpgStore;
+    /// use grafeo_common::types::{NodeId, PropertyKey, Value};
+    ///
+    /// let store = LpgStore::new();
+    /// let n1 = store.create_node(&["Person"]);
+    /// let n2 = store.create_node(&["Person"]);
+    /// store.set_node_property(n1, "age", Value::from(25i64));
+    /// store.set_node_property(n2, "age", Value::from(30i64));
+    ///
+    /// let ages = store.get_node_property_batch(&[n1, n2], &PropertyKey::new("age"));
+    /// assert_eq!(ages, vec![Some(Value::from(25i64)), Some(Value::from(30i64))]);
+    /// ```
+    #[must_use]
+    pub fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
+        ids.iter()
+            .map(|&id| self.node_properties.get(id, key))
+            .collect()
+    }
+
+    /// Gets all properties for multiple nodes in a single batch operation.
+    ///
+    /// Returns a vector of property maps, one per node ID (empty map if no properties).
+    /// More efficient than calling [`Self::get_node`] in a loop.
+    #[must_use]
+    pub fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
+        ids.iter()
+            .map(|&id| self.node_properties.get_all(id))
+            .collect()
+    }
+
+    /// Finds nodes where a property value is in a range.
+    ///
+    /// This is useful for queries like `n.age > 30` or `n.price BETWEEN 10 AND 100`.
+    /// Uses zone maps to skip scanning when the range definitely doesn't match.
+    ///
+    /// # Arguments
+    ///
+    /// * `property` - The property to check
+    /// * `min` - Optional lower bound (None for unbounded)
+    /// * `max` - Optional upper bound (None for unbounded)
+    /// * `min_inclusive` - Whether lower bound is inclusive (>= vs >)
+    /// * `max_inclusive` - Whether upper bound is inclusive (<= vs <)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use grafeo_core::graph::lpg::LpgStore;
+    /// use grafeo_common::types::Value;
+    ///
+    /// let store = LpgStore::new();
+    /// let n1 = store.create_node(&["Person"]);
+    /// let n2 = store.create_node(&["Person"]);
+    /// store.set_node_property(n1, "age", Value::from(25i64));
+    /// store.set_node_property(n2, "age", Value::from(35i64));
+    ///
+    /// // Find nodes where age > 30
+    /// let result = store.find_nodes_in_range(
+    ///     "age",
+    ///     Some(&Value::from(30i64)),
+    ///     None,
+    ///     false, // exclusive lower bound
+    ///     true,  // inclusive upper bound (doesn't matter since None)
+    /// );
+    /// assert_eq!(result.len(), 1); // Only n2 matches
+    /// ```
+    #[must_use]
+    pub fn find_nodes_in_range(
+        &self,
+        property: &str,
+        min: Option<&Value>,
+        max: Option<&Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+    ) -> Vec<NodeId> {
+        let key = PropertyKey::new(property);
+
+        // Check zone map first - if no values could match, return empty
+        if !self
+            .node_properties
+            .might_match_range(&key, min, max, min_inclusive, max_inclusive)
+        {
+            return Vec::new();
+        }
+
+        // Scan all nodes and filter by range
+        self.node_ids()
+            .into_iter()
+            .filter(|&node_id| {
+                self.node_properties
+                    .get(node_id, &key)
+                    .is_some_and(|v| value_in_range(&v, min, max, min_inclusive, max_inclusive))
+            })
+            .collect()
+    }
+
+    /// Finds nodes matching multiple property equality conditions.
+    ///
+    /// This is more efficient than intersecting multiple single-property lookups
+    /// because it can use indexes when available and short-circuits on the first
+    /// miss.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use grafeo_core::graph::lpg::LpgStore;
+    /// use grafeo_common::types::Value;
+    ///
+    /// let store = LpgStore::new();
+    /// let alice = store.create_node(&["Person"]);
+    /// store.set_node_property(alice, "name", Value::from("Alice"));
+    /// store.set_node_property(alice, "city", Value::from("NYC"));
+    ///
+    /// // Find nodes where name = "Alice" AND city = "NYC"
+    /// let matches = store.find_nodes_by_properties(&[
+    ///     ("name", Value::from("Alice")),
+    ///     ("city", Value::from("NYC")),
+    /// ]);
+    /// assert!(matches.contains(&alice));
+    /// ```
+    #[must_use]
+    pub fn find_nodes_by_properties(&self, conditions: &[(&str, Value)]) -> Vec<NodeId> {
+        if conditions.is_empty() {
+            return self.node_ids();
+        }
+
+        // Find the most selective condition (smallest result set) to start
+        // If any condition has an index, use that first
+        let mut best_start: Option<(usize, Vec<NodeId>)> = None;
+        let indexes = self.property_indexes.read();
+
+        for (i, (prop, value)) in conditions.iter().enumerate() {
+            let key = PropertyKey::new(*prop);
+            let hv = HashableValue::new(value.clone());
+
+            if let Some(index) = indexes.get(&key) {
+                let matches: Vec<NodeId> = index
+                    .get(&hv)
+                    .map(|nodes| nodes.iter().copied().collect())
+                    .unwrap_or_default();
+
+                // Short-circuit if any indexed condition has no matches
+                if matches.is_empty() {
+                    return Vec::new();
+                }
+
+                // Use smallest indexed result as starting point
+                if best_start
+                    .as_ref()
+                    .is_none_or(|(_, best)| matches.len() < best.len())
+                {
+                    best_start = Some((i, matches));
+                }
+            }
+        }
+        drop(indexes);
+
+        // Start from best indexed result or fall back to full node scan
+        let (start_idx, mut candidates) = best_start.unwrap_or_else(|| {
+            // No indexes available, start with first condition via full scan
+            let (prop, value) = &conditions[0];
+            (0, self.find_nodes_by_property(prop, value))
+        });
+
+        // Filter candidates through remaining conditions
+        for (i, (prop, value)) in conditions.iter().enumerate() {
+            if i == start_idx {
+                continue;
+            }
+
+            let key = PropertyKey::new(*prop);
+            candidates.retain(|&node_id| {
+                self.node_properties
+                    .get(node_id, &key)
+                    .is_some_and(|v| v == *value)
+            });
+
+            // Short-circuit if no candidates remain
+            if candidates.is_empty() {
+                return Vec::new();
+            }
+        }
+
+        candidates
+    }
+
+    // === Property Index Operations ===
+
+    /// Creates an index on a node property for O(1) lookups by value.
+    ///
+    /// After creating an index, calls to [`Self::find_nodes_by_property`] will be
+    /// O(1) instead of O(n) for this property. The index is automatically
+    /// maintained when properties are set or removed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use grafeo_core::graph::lpg::LpgStore;
+    /// use grafeo_common::types::Value;
+    ///
+    /// let store = LpgStore::new();
+    ///
+    /// // Create nodes with an 'id' property
+    /// let alice = store.create_node(&["Person"]);
+    /// store.set_node_property(alice, "id", Value::from("alice_123"));
+    ///
+    /// // Create an index on the 'id' property
+    /// store.create_property_index("id");
+    ///
+    /// // Now lookups by 'id' are O(1)
+    /// let found = store.find_nodes_by_property("id", &Value::from("alice_123"));
+    /// assert!(found.contains(&alice));
+    /// ```
+    pub fn create_property_index(&self, property: &str) {
+        let key = PropertyKey::new(property);
+
+        let mut indexes = self.property_indexes.write();
+        if indexes.contains_key(&key) {
+            return; // Already indexed
+        }
+
+        // Create the index and populate it with existing data
+        let index: DashMap<HashableValue, FxHashSet<NodeId>> = DashMap::new();
+
+        // Scan all nodes to build the index
+        for node_id in self.node_ids() {
+            if let Some(value) = self.node_properties.get(node_id, &key) {
+                let hv = HashableValue::new(value);
+                index
+                    .entry(hv)
+                    .or_insert_with(FxHashSet::default)
+                    .insert(node_id);
+            }
+        }
+
+        indexes.insert(key, index);
+    }
+
+    /// Drops an index on a node property.
+    ///
+    /// Returns `true` if the index existed and was removed.
+    pub fn drop_property_index(&self, property: &str) -> bool {
+        let key = PropertyKey::new(property);
+        self.property_indexes.write().remove(&key).is_some()
+    }
+
+    /// Returns `true` if the property has an index.
+    #[must_use]
+    pub fn has_property_index(&self, property: &str) -> bool {
+        let key = PropertyKey::new(property);
+        self.property_indexes.read().contains_key(&key)
+    }
+
+    /// Finds all nodes that have a specific property value.
+    ///
+    /// If the property is indexed, this is O(1). Otherwise, it scans all nodes
+    /// which is O(n). Use [`Self::create_property_index`] for frequently queried properties.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use grafeo_core::graph::lpg::LpgStore;
+    /// use grafeo_common::types::Value;
+    ///
+    /// let store = LpgStore::new();
+    /// store.create_property_index("city"); // Optional but makes lookups fast
+    ///
+    /// let alice = store.create_node(&["Person"]);
+    /// let bob = store.create_node(&["Person"]);
+    /// store.set_node_property(alice, "city", Value::from("NYC"));
+    /// store.set_node_property(bob, "city", Value::from("NYC"));
+    ///
+    /// let nyc_people = store.find_nodes_by_property("city", &Value::from("NYC"));
+    /// assert_eq!(nyc_people.len(), 2);
+    /// ```
+    #[must_use]
+    pub fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
+        let key = PropertyKey::new(property);
+        let hv = HashableValue::new(value.clone());
+
+        // Try indexed lookup first
+        let indexes = self.property_indexes.read();
+        if let Some(index) = indexes.get(&key) {
+            if let Some(nodes) = index.get(&hv) {
+                return nodes.iter().copied().collect();
+            }
+            return Vec::new();
+        }
+        drop(indexes);
+
+        // Fall back to full scan
+        self.node_ids()
+            .into_iter()
+            .filter(|&node_id| {
+                self.node_properties
+                    .get(node_id, &key)
+                    .is_some_and(|v| v == *value)
+            })
+            .collect()
+    }
+
+    /// Updates property indexes when a property is set.
+    fn update_property_index_on_set(&self, node_id: NodeId, key: &PropertyKey, new_value: &Value) {
+        let indexes = self.property_indexes.read();
+        if let Some(index) = indexes.get(key) {
+            // Get old value to remove from index
+            if let Some(old_value) = self.node_properties.get(node_id, key) {
+                let old_hv = HashableValue::new(old_value);
+                if let Some(mut nodes) = index.get_mut(&old_hv) {
+                    nodes.remove(&node_id);
+                    if nodes.is_empty() {
+                        drop(nodes);
+                        index.remove(&old_hv);
+                    }
+                }
+            }
+
+            // Add new value to index
+            let new_hv = HashableValue::new(new_value.clone());
+            index
+                .entry(new_hv)
+                .or_insert_with(FxHashSet::default)
+                .insert(node_id);
+        }
+    }
+
+    /// Updates property indexes when a property is removed.
+    fn update_property_index_on_remove(&self, node_id: NodeId, key: &PropertyKey) {
+        let indexes = self.property_indexes.read();
+        if let Some(index) = indexes.get(key) {
+            // Get old value to remove from index
+            if let Some(old_value) = self.node_properties.get(node_id, key) {
+                let old_hv = HashableValue::new(old_value);
+                if let Some(mut nodes) = index.get_mut(&old_hv) {
+                    nodes.remove(&node_id);
+                    if nodes.is_empty() {
+                        drop(nodes);
+                        index.remove(&old_hv);
+                    }
+                }
+            }
+        }
     }
 
     /// Adds a label to a node.
@@ -3190,5 +3614,152 @@ mod tests {
 
         // Node should be gone (version chain was removed)
         assert!(store.get_node(node_id).is_none());
+    }
+
+    // === Property Index Tests ===
+
+    #[test]
+    fn test_property_index_create_and_lookup() {
+        let store = LpgStore::new();
+
+        // Create nodes with properties
+        let alice = store.create_node(&["Person"]);
+        let bob = store.create_node(&["Person"]);
+        let charlie = store.create_node(&["Person"]);
+
+        store.set_node_property(alice, "city", Value::from("NYC"));
+        store.set_node_property(bob, "city", Value::from("NYC"));
+        store.set_node_property(charlie, "city", Value::from("LA"));
+
+        // Before indexing, lookup still works (via scan)
+        let nyc_people = store.find_nodes_by_property("city", &Value::from("NYC"));
+        assert_eq!(nyc_people.len(), 2);
+
+        // Create index
+        store.create_property_index("city");
+        assert!(store.has_property_index("city"));
+
+        // Indexed lookup should return same results
+        let nyc_people = store.find_nodes_by_property("city", &Value::from("NYC"));
+        assert_eq!(nyc_people.len(), 2);
+        assert!(nyc_people.contains(&alice));
+        assert!(nyc_people.contains(&bob));
+
+        let la_people = store.find_nodes_by_property("city", &Value::from("LA"));
+        assert_eq!(la_people.len(), 1);
+        assert!(la_people.contains(&charlie));
+    }
+
+    #[test]
+    fn test_property_index_maintained_on_update() {
+        let store = LpgStore::new();
+
+        // Create index first
+        store.create_property_index("status");
+
+        let node = store.create_node(&["Task"]);
+        store.set_node_property(node, "status", Value::from("pending"));
+
+        // Should find by initial value
+        let pending = store.find_nodes_by_property("status", &Value::from("pending"));
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains(&node));
+
+        // Update the property
+        store.set_node_property(node, "status", Value::from("done"));
+
+        // Old value should not find it
+        let pending = store.find_nodes_by_property("status", &Value::from("pending"));
+        assert!(pending.is_empty());
+
+        // New value should find it
+        let done = store.find_nodes_by_property("status", &Value::from("done"));
+        assert_eq!(done.len(), 1);
+        assert!(done.contains(&node));
+    }
+
+    #[test]
+    fn test_property_index_maintained_on_remove() {
+        let store = LpgStore::new();
+
+        store.create_property_index("tag");
+
+        let node = store.create_node(&["Item"]);
+        store.set_node_property(node, "tag", Value::from("important"));
+
+        // Should find it
+        let found = store.find_nodes_by_property("tag", &Value::from("important"));
+        assert_eq!(found.len(), 1);
+
+        // Remove the property
+        store.remove_node_property(node, "tag");
+
+        // Should no longer find it
+        let found = store.find_nodes_by_property("tag", &Value::from("important"));
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn test_property_index_drop() {
+        let store = LpgStore::new();
+
+        store.create_property_index("key");
+        assert!(store.has_property_index("key"));
+
+        assert!(store.drop_property_index("key"));
+        assert!(!store.has_property_index("key"));
+
+        // Dropping non-existent index returns false
+        assert!(!store.drop_property_index("key"));
+    }
+
+    #[test]
+    fn test_property_index_multiple_values() {
+        let store = LpgStore::new();
+
+        store.create_property_index("age");
+
+        // Create multiple nodes with same and different ages
+        let n1 = store.create_node(&["Person"]);
+        let n2 = store.create_node(&["Person"]);
+        let n3 = store.create_node(&["Person"]);
+        let n4 = store.create_node(&["Person"]);
+
+        store.set_node_property(n1, "age", Value::from(25i64));
+        store.set_node_property(n2, "age", Value::from(25i64));
+        store.set_node_property(n3, "age", Value::from(30i64));
+        store.set_node_property(n4, "age", Value::from(25i64));
+
+        let age_25 = store.find_nodes_by_property("age", &Value::from(25i64));
+        assert_eq!(age_25.len(), 3);
+
+        let age_30 = store.find_nodes_by_property("age", &Value::from(30i64));
+        assert_eq!(age_30.len(), 1);
+
+        let age_40 = store.find_nodes_by_property("age", &Value::from(40i64));
+        assert!(age_40.is_empty());
+    }
+
+    #[test]
+    fn test_property_index_builds_from_existing_data() {
+        let store = LpgStore::new();
+
+        // Create nodes first
+        let n1 = store.create_node(&["Person"]);
+        let n2 = store.create_node(&["Person"]);
+        store.set_node_property(n1, "email", Value::from("alice@example.com"));
+        store.set_node_property(n2, "email", Value::from("bob@example.com"));
+
+        // Create index after data exists
+        store.create_property_index("email");
+
+        // Index should include existing data
+        let alice = store.find_nodes_by_property("email", &Value::from("alice@example.com"));
+        assert_eq!(alice.len(), 1);
+        assert!(alice.contains(&n1));
+
+        let bob = store.find_nodes_by_property("email", &Value::from("bob@example.com"));
+        assert_eq!(bob.len(), 1);
+        assert!(bob.contains(&n2));
     }
 }

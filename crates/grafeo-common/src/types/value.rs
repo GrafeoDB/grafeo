@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use super::Timestamp;
@@ -365,6 +366,117 @@ impl<T: Into<Value>> From<Option<T>> for Value {
     }
 }
 
+/// A hashable wrapper around [`Value`] for use in hash-based indexes.
+///
+/// `Value` itself cannot implement `Hash` because it contains `f64` (which has
+/// NaN issues). This wrapper converts floats to their bit representation for
+/// hashing, allowing values to be used as keys in hash maps and sets.
+///
+/// # Note on Float Equality
+///
+/// Two `HashableValue`s containing `f64` are considered equal if they have
+/// identical bit representations. This means `NaN == NaN` (same bits) and
+/// positive/negative zero are considered different.
+#[derive(Clone, Debug)]
+pub struct HashableValue(pub Value);
+
+impl HashableValue {
+    /// Creates a new hashable value from a value.
+    #[must_use]
+    pub fn new(value: Value) -> Self {
+        Self(value)
+    }
+
+    /// Returns a reference to the inner value.
+    #[must_use]
+    pub fn inner(&self) -> &Value {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the inner value.
+    #[must_use]
+    pub fn into_inner(self) -> Value {
+        self.0
+    }
+}
+
+impl Hash for HashableValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Hash the discriminant first
+        std::mem::discriminant(&self.0).hash(state);
+
+        match &self.0 {
+            Value::Null => {}
+            Value::Bool(b) => b.hash(state),
+            Value::Int64(i) => i.hash(state),
+            Value::Float64(f) => {
+                // Use bit representation for hashing floats
+                f.to_bits().hash(state);
+            }
+            Value::String(s) => s.hash(state),
+            Value::Bytes(b) => b.hash(state),
+            Value::Timestamp(t) => t.hash(state),
+            Value::List(l) => {
+                l.len().hash(state);
+                for v in l.iter() {
+                    HashableValue(v.clone()).hash(state);
+                }
+            }
+            Value::Map(m) => {
+                m.len().hash(state);
+                for (k, v) in m.iter() {
+                    k.hash(state);
+                    HashableValue(v.clone()).hash(state);
+                }
+            }
+        }
+    }
+}
+
+impl PartialEq for HashableValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Value::Float64(a), Value::Float64(b)) => {
+                // Compare by bits for consistent hash/eq behavior
+                a.to_bits() == b.to_bits()
+            }
+            (Value::List(a), Value::List(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| HashableValue(x.clone()) == HashableValue(y.clone()))
+            }
+            (Value::Map(a), Value::Map(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                a.iter().all(|(k, v)| {
+                    b.get(k)
+                        .is_some_and(|bv| HashableValue(v.clone()) == HashableValue(bv.clone()))
+                })
+            }
+            // For other types, use normal Value equality
+            _ => self.0 == other.0,
+        }
+    }
+}
+
+impl Eq for HashableValue {}
+
+impl From<Value> for HashableValue {
+    fn from(value: Value) -> Self {
+        Self(value)
+    }
+}
+
+impl From<HashableValue> for Value {
+    fn from(hv: HashableValue) -> Self {
+        hv.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,5 +556,79 @@ mod tests {
         assert_eq!(Value::Bytes(vec![].into()).type_name(), "BYTES");
         assert_eq!(Value::List(vec![].into()).type_name(), "LIST");
         assert_eq!(Value::Map(BTreeMap::new().into()).type_name(), "MAP");
+    }
+
+    #[test]
+    fn test_hashable_value_basic() {
+        use std::collections::HashMap;
+
+        let mut map: HashMap<HashableValue, i32> = HashMap::new();
+
+        // Test various value types as keys
+        map.insert(HashableValue::new(Value::Int64(42)), 1);
+        map.insert(HashableValue::new(Value::String("test".into())), 2);
+        map.insert(HashableValue::new(Value::Bool(true)), 3);
+        map.insert(HashableValue::new(Value::Float64(3.14)), 4);
+
+        assert_eq!(map.get(&HashableValue::new(Value::Int64(42))), Some(&1));
+        assert_eq!(
+            map.get(&HashableValue::new(Value::String("test".into()))),
+            Some(&2)
+        );
+        assert_eq!(map.get(&HashableValue::new(Value::Bool(true))), Some(&3));
+        assert_eq!(map.get(&HashableValue::new(Value::Float64(3.14))), Some(&4));
+    }
+
+    #[test]
+    fn test_hashable_value_float_edge_cases() {
+        use std::collections::HashMap;
+
+        let mut map: HashMap<HashableValue, i32> = HashMap::new();
+
+        // NaN should be hashable and equal to itself (same bits)
+        let nan = f64::NAN;
+        map.insert(HashableValue::new(Value::Float64(nan)), 1);
+        assert_eq!(map.get(&HashableValue::new(Value::Float64(nan))), Some(&1));
+
+        // Positive and negative zero have different bits
+        let pos_zero = 0.0f64;
+        let neg_zero = -0.0f64;
+        map.insert(HashableValue::new(Value::Float64(pos_zero)), 2);
+        map.insert(HashableValue::new(Value::Float64(neg_zero)), 3);
+        assert_eq!(
+            map.get(&HashableValue::new(Value::Float64(pos_zero))),
+            Some(&2)
+        );
+        assert_eq!(
+            map.get(&HashableValue::new(Value::Float64(neg_zero))),
+            Some(&3)
+        );
+    }
+
+    #[test]
+    fn test_hashable_value_equality() {
+        let v1 = HashableValue::new(Value::Int64(42));
+        let v2 = HashableValue::new(Value::Int64(42));
+        let v3 = HashableValue::new(Value::Int64(43));
+
+        assert_eq!(v1, v2);
+        assert_ne!(v1, v3);
+    }
+
+    #[test]
+    fn test_hashable_value_inner() {
+        let hv = HashableValue::new(Value::String("hello".into()));
+        assert_eq!(hv.inner().as_str(), Some("hello"));
+
+        let v = hv.into_inner();
+        assert_eq!(v.as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn test_hashable_value_conversions() {
+        let v = Value::Int64(42);
+        let hv: HashableValue = v.clone().into();
+        let v2: Value = hv.into();
+        assert_eq!(v, v2);
     }
 }

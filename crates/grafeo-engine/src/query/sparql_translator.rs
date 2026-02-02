@@ -844,21 +844,18 @@ impl SparqlTranslator {
                 })
             }
 
-            ast::Expression::Exists(_pattern) => {
+            ast::Expression::Exists(pattern) => {
                 // EXISTS { pattern } - check if pattern has any matches
-                Ok(LogicalExpression::FunctionCall {
-                    name: "EXISTS".to_string(),
-                    args: vec![],
-                    distinct: false,
-                })
+                let subquery = self.translate_graph_pattern(pattern)?;
+                Ok(LogicalExpression::ExistsSubquery(Box::new(subquery)))
             }
 
-            ast::Expression::NotExists(_pattern) => {
-                // NOT EXISTS { pattern }
-                Ok(LogicalExpression::FunctionCall {
-                    name: "NOT_EXISTS".to_string(),
-                    args: vec![],
-                    distinct: false,
+            ast::Expression::NotExists(pattern) => {
+                // NOT EXISTS { pattern } - negate the EXISTS check
+                let subquery = self.translate_graph_pattern(pattern)?;
+                Ok(LogicalExpression::Unary {
+                    op: UnaryOp::Not,
+                    operand: Box::new(LogicalExpression::ExistsSubquery(Box::new(subquery))),
                 })
             }
 

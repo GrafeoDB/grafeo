@@ -276,6 +276,29 @@ impl<Id: EntityId> PropertyStorage<Id> {
         columns.get(key).map(|col| col.zone_map().clone())
     }
 
+    /// Checks if a range predicate might match any values (using zone maps).
+    ///
+    /// Returns `false` only when we're *certain* no values match the range.
+    /// Returns `true` if the property doesn't exist (conservative - might match).
+    #[must_use]
+    pub fn might_match_range(
+        &self,
+        key: &PropertyKey,
+        min: Option<&Value>,
+        max: Option<&Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+    ) -> bool {
+        let columns = self.columns.read();
+        columns
+            .get(key)
+            .map(|col| {
+                col.zone_map()
+                    .might_contain_range(min, max, min_inclusive, max_inclusive)
+            })
+            .unwrap_or(true) // No column = assume might match (conservative)
+    }
+
     /// Rebuilds zone maps for all columns (call after bulk removes).
     pub fn rebuild_zone_maps(&self) {
         let mut columns = self.columns.write();

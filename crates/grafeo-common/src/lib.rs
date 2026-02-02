@@ -10,10 +10,12 @@
 //! ## Modules
 //!
 //! - [`types`] - Core types: [`NodeId`], [`EdgeId`], [`Value`], [`PropertyKey`]
+//! - [`collections`] - Type aliases for hash maps/sets with consistent hashing
 //! - [`memory`] - Allocators for performance-critical paths (arenas, pools)
 //! - [`mvcc`] - Version chains for snapshot isolation
 //! - [`utils`] - Hashing, error types, and other helpers
 
+pub mod collections;
 pub mod memory;
 pub mod mvcc;
 pub mod types;

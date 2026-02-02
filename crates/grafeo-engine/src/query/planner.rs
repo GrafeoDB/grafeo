@@ -11,21 +11,22 @@ use crate::query::plan::{
     LogicalPlan, MergeOp, NodeScanOp, RemoveLabelOp, ReturnOp, SetPropertyOp, ShortestPathOp,
     SkipOp, SortOp, SortOrder, UnaryOp, UnionOp, UnwindOp,
 };
-use grafeo_common::types::LogicalType;
 use grafeo_common::types::{EpochId, TxId};
+use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::AdaptiveContext;
 use grafeo_core::execution::operators::{
     AddLabelOperator, AggregateExpr as PhysicalAggregateExpr,
     AggregateFunction as PhysicalAggregateFunction, BinaryFilterOp, CreateEdgeOperator,
-    CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator, DistinctOperator, ExpandOperator,
-    ExpandStep, ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator,
-    FilterExpression, FilterOperator, HashAggregateOperator, HashJoinOperator,
-    JoinType as PhysicalJoinType, LazyFactorizedChainOperator, LeapfrogJoinOperator, LimitOperator,
-    MergeOperator, NestedLoopJoinOperator, NullOrder, Operator, ProjectExpr, ProjectOperator,
-    PropertySource, RemoveLabelOperator, ScanOperator, SetPropertyOperator, ShortestPathOperator,
-    SimpleAggregateOperator, SkipOperator, SortDirection, SortKey as PhysicalSortKey, SortOperator,
-    UnaryFilterOp, UnionOperator, UnwindOperator, VariableLengthExpandOperator,
+    CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator, DistinctOperator, EmptyOperator,
+    ExpandOperator, ExpandStep, ExpressionPredicate, FactorizedAggregate,
+    FactorizedAggregateOperator, FilterExpression, FilterOperator, HashAggregateOperator,
+    HashJoinOperator, JoinType as PhysicalJoinType, LazyFactorizedChainOperator,
+    LeapfrogJoinOperator, LimitOperator, MergeOperator, NestedLoopJoinOperator, NodeListOperator,
+    NullOrder, Operator, ProjectExpr, ProjectOperator, PropertySource, RemoveLabelOperator,
+    ScanOperator, SetPropertyOperator, ShortestPathOperator, SimpleAggregateOperator, SkipOperator,
+    SortDirection, SortKey as PhysicalSortKey, SortOperator, UnaryFilterOp, UnionOperator,
+    UnwindOperator, VariableLengthExpandOperator,
 };
 use grafeo_core::graph::{Direction, lpg::LpgStore};
 use std::collections::HashMap;
@@ -869,7 +870,26 @@ impl Planner {
     }
 
     /// Plans a filter operator.
+    ///
+    /// Uses zone map pre-filtering to potentially skip scans when predicates
+    /// definitely won't match any data. Also uses property indexes when available
+    /// for O(1) lookups instead of full scans.
     fn plan_filter(&self, filter: &FilterOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Check zone maps for simple property predicates before scanning
+        // If zone map says "definitely no matches", we can short-circuit
+        if let Some(false) = self.check_zone_map_for_predicate(&filter.predicate) {
+            // Zone map says no matches possible - return empty result
+            let (_, columns) = self.plan_operator(&filter.input)?;
+            let schema = self.derive_schema_from_columns(&columns);
+            let empty_op = Box::new(EmptyOperator::new(schema));
+            return Ok((empty_op, columns));
+        }
+
+        // Try to use property index for equality predicates on indexed properties
+        if let Some(result) = self.try_plan_filter_with_property_index(filter)? {
+            return Ok(result);
+        }
+
         // Plan the input operator first
         let (input_op, columns) = self.plan_operator(&filter.input)?;
 
@@ -891,6 +911,223 @@ impl Planner {
         let operator = Box::new(FilterOperator::new(input_op, Box::new(predicate)));
 
         Ok((operator, columns))
+    }
+
+    /// Checks zone maps for a predicate to see if we can skip the scan entirely.
+    ///
+    /// Returns:
+    /// - `Some(false)` if zone map proves no matches possible (can skip)
+    /// - `Some(true)` if zone map says matches might exist
+    /// - `None` if zone map check not applicable
+    fn check_zone_map_for_predicate(&self, predicate: &LogicalExpression) -> Option<bool> {
+        use grafeo_core::graph::lpg::CompareOp;
+
+        match predicate {
+            LogicalExpression::Binary { left, op, right } => {
+                // Check for AND/OR first (compound conditions)
+                match op {
+                    BinaryOp::And => {
+                        let left_result = self.check_zone_map_for_predicate(left);
+                        let right_result = self.check_zone_map_for_predicate(right);
+
+                        return match (left_result, right_result) {
+                            // If either side definitely won't match, the AND won't match
+                            (Some(false), _) | (_, Some(false)) => Some(false),
+                            // If both might match, might match overall
+                            (Some(true), Some(true)) => Some(true),
+                            // Otherwise, can't determine
+                            _ => None,
+                        };
+                    }
+                    BinaryOp::Or => {
+                        let left_result = self.check_zone_map_for_predicate(left);
+                        let right_result = self.check_zone_map_for_predicate(right);
+
+                        return match (left_result, right_result) {
+                            // Both sides definitely won't match
+                            (Some(false), Some(false)) => Some(false),
+                            // At least one side might match
+                            (Some(true), _) | (_, Some(true)) => Some(true),
+                            // Otherwise, can't determine
+                            _ => None,
+                        };
+                    }
+                    _ => {}
+                }
+
+                // Simple property comparison: n.property op value
+                let (property, compare_op, value) = match (left.as_ref(), right.as_ref()) {
+                    (
+                        LogicalExpression::Property { property, .. },
+                        LogicalExpression::Literal(val),
+                    ) => {
+                        let cmp = match op {
+                            BinaryOp::Eq => CompareOp::Eq,
+                            BinaryOp::Ne => CompareOp::Ne,
+                            BinaryOp::Lt => CompareOp::Lt,
+                            BinaryOp::Le => CompareOp::Le,
+                            BinaryOp::Gt => CompareOp::Gt,
+                            BinaryOp::Ge => CompareOp::Ge,
+                            _ => return None,
+                        };
+                        (property.clone(), cmp, val.clone())
+                    }
+                    (
+                        LogicalExpression::Literal(val),
+                        LogicalExpression::Property { property, .. },
+                    ) => {
+                        // Flip comparison for reversed operands
+                        let cmp = match op {
+                            BinaryOp::Eq => CompareOp::Eq,
+                            BinaryOp::Ne => CompareOp::Ne,
+                            BinaryOp::Lt => CompareOp::Gt, // val < prop means prop > val
+                            BinaryOp::Le => CompareOp::Ge,
+                            BinaryOp::Gt => CompareOp::Lt,
+                            BinaryOp::Ge => CompareOp::Le,
+                            _ => return None,
+                        };
+                        (property.clone(), cmp, val.clone())
+                    }
+                    _ => return None,
+                };
+
+                // Check zone map for node properties
+                let might_match =
+                    self.store
+                        .node_property_might_match(&property.into(), compare_op, &value);
+
+                Some(might_match)
+            }
+
+            _ => None,
+        }
+    }
+
+    /// Tries to use a property index for filter optimization.
+    ///
+    /// When a filter predicate is an equality check on an indexed property,
+    /// and the input is a simple NodeScan, we can use the index to look up
+    /// matching nodes directly instead of scanning all nodes.
+    ///
+    /// Returns `Ok(Some((operator, columns)))` if optimization was applied,
+    /// `Ok(None)` if not applicable, or `Err` on error.
+    fn try_plan_filter_with_property_index(
+        &self,
+        filter: &FilterOp,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        // Only optimize if input is a simple NodeScan (not nested)
+        let (scan_variable, scan_label) = match filter.input.as_ref() {
+            LogicalOperator::NodeScan(scan) if scan.input.is_none() => {
+                (scan.variable.clone(), scan.label.clone())
+            }
+            _ => return Ok(None),
+        };
+
+        // Extract property equality conditions from the predicate
+        // Handles both simple (n.prop = val) and compound (n.a = 1 AND n.b = 2)
+        let conditions = self.extract_equality_conditions(&filter.predicate, &scan_variable);
+
+        if conditions.is_empty() {
+            return Ok(None);
+        }
+
+        // Check if at least one condition has an index (otherwise full scan is needed anyway)
+        let has_indexed_condition = conditions
+            .iter()
+            .any(|(prop, _)| self.store.has_property_index(prop));
+
+        if !has_indexed_condition {
+            return Ok(None);
+        }
+
+        // Use the optimized batch lookup for multiple conditions
+        let conditions_ref: Vec<(&str, Value)> = conditions
+            .iter()
+            .map(|(p, v)| (p.as_str(), v.clone()))
+            .collect();
+        let mut matching_nodes = self.store.find_nodes_by_properties(&conditions_ref);
+
+        // If there's a label filter, also filter by label
+        if let Some(label) = &scan_label {
+            let label_nodes: std::collections::HashSet<_> =
+                self.store.nodes_by_label(label).into_iter().collect();
+            matching_nodes.retain(|n| label_nodes.contains(n));
+        }
+
+        // Create a NodeListOperator with the matching nodes
+        let node_list_op = Box::new(NodeListOperator::new(matching_nodes, 2048));
+        let columns = vec![scan_variable];
+
+        Ok(Some((node_list_op, columns)))
+    }
+
+    /// Extracts equality conditions (property = literal) from a predicate.
+    ///
+    /// Handles both simple predicates and AND chains:
+    /// - `n.name = "Alice"` → `[("name", "Alice")]`
+    /// - `n.name = "Alice" AND n.age = 30` → `[("name", "Alice"), ("age", 30)]`
+    fn extract_equality_conditions(
+        &self,
+        predicate: &LogicalExpression,
+        target_variable: &str,
+    ) -> Vec<(String, Value)> {
+        let mut conditions = Vec::new();
+        self.collect_equality_conditions(predicate, target_variable, &mut conditions);
+        conditions
+    }
+
+    /// Recursively collects equality conditions from AND expressions.
+    fn collect_equality_conditions(
+        &self,
+        expr: &LogicalExpression,
+        target_variable: &str,
+        conditions: &mut Vec<(String, Value)>,
+    ) {
+        match expr {
+            // Handle AND: recurse into both sides
+            LogicalExpression::Binary {
+                left,
+                op: BinaryOp::And,
+                right,
+            } => {
+                self.collect_equality_conditions(left, target_variable, conditions);
+                self.collect_equality_conditions(right, target_variable, conditions);
+            }
+
+            // Handle equality: extract property and value
+            LogicalExpression::Binary {
+                left,
+                op: BinaryOp::Eq,
+                right,
+            } => {
+                if let Some((var, prop, val)) = self.extract_property_equality(left, right) {
+                    if var == target_variable {
+                        conditions.push((prop, val));
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    /// Extracts (variable, property, value) from a property equality expression.
+    fn extract_property_equality(
+        &self,
+        left: &LogicalExpression,
+        right: &LogicalExpression,
+    ) -> Option<(String, String, Value)> {
+        match (left, right) {
+            (
+                LogicalExpression::Property { variable, property },
+                LogicalExpression::Literal(val),
+            ) => Some((variable.clone(), property.clone(), val.clone())),
+            (
+                LogicalExpression::Literal(val),
+                LogicalExpression::Property { variable, property },
+            ) => Some((variable.clone(), property.clone(), val.clone())),
+            _ => None,
+        }
     }
 
     /// Plans a LIMIT operator.

@@ -34,6 +34,30 @@
 //! let result = session.execute("MATCH (p:Person) RETURN p.name")?;
 //! # Ok::<(), grafeo_common::utils::error::Error>(())
 //! ```
+//!
+//! ## Performance Features
+//!
+//! Enable platform-optimized memory allocators for 10-20% faster allocations:
+//!
+//! - `jemalloc` - Linux/macOS (x86_64, aarch64)
+//! - `mimalloc-allocator` - Windows
+
+// Platform-optimized memory allocators (enabled via features)
+// jemalloc: Linux/macOS x86_64/aarch64 - better multi-threaded performance
+// mimalloc: Windows - optimized for Windows, better than MSVC allocator
+#[cfg(all(
+    feature = "jemalloc",
+    not(target_os = "windows"),
+    not(target_os = "openbsd"),
+    not(target_env = "musl"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(feature = "mimalloc-allocator", target_os = "windows"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 // Re-export the main database API
 pub use grafeo_engine::{

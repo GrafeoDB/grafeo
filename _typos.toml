@@ -1,0 +1,14 @@
+# typos configuration
+# https://github.com/crate-ci/typos
+
+[files]
+extend-exclude = [
+    ".venv/",
+    "target/",
+    "*.lock",
+    ".benchmarks/",
+]
+
+[default.extend-words]
+# Add false positives here as they're discovered
+# Example: "crate" = "crate"

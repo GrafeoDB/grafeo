@@ -65,20 +65,18 @@ pub fn label_propagation(store: &LpgStore, max_iterations: usize) -> FxHashMap<N
             let mut label_counts: FxHashMap<u64, usize> = FxHashMap::default();
 
             // Consider both outgoing and incoming edges (undirected community detection)
+            // Outgoing edges: node -> neighbor
             for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
                 if let Some(&label) = labels.get(&neighbor) {
                     *label_counts.entry(label).or_insert(0) += 1;
                 }
             }
 
-            // For undirected behavior, also consider incoming edges
-            for &other_node in &nodes {
-                for (neighbor, _) in store.edges_from(other_node, Direction::Outgoing) {
-                    if neighbor == node {
-                        if let Some(&label) = labels.get(&other_node) {
-                            *label_counts.entry(label).or_insert(0) += 1;
-                        }
-                    }
+            // Incoming edges: neighbor -> node
+            // Uses backward adjacency index for O(degree) instead of O(V*E)
+            for (incoming_neighbor, _) in store.edges_from(node, Direction::Incoming) {
+                if let Some(&label) = labels.get(&incoming_neighbor) {
+                    *label_counts.entry(label).or_insert(0) += 1;
                 }
             }
 

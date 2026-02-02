@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -21,11 +21,11 @@ description = "A pure-Rust, high-performance, embeddable graph database"
 
 [workspace.dependencies]
 # Internal crates
-grafeo-common = { path = "crates/grafeo-common", version = "0.2.4" }
-grafeo-core = { path = "crates/grafeo-core", version = "0.2.4" }
-grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.2.4" }
-grafeo-engine = { path = "crates/grafeo-engine", version = "0.2.4" }
-grafeo = { path = "crates/grafeo", version = "0.2.4" }
+grafeo-common = { path = "crates/grafeo-common", version = "0.2.5" }
+grafeo-core = { path = "crates/grafeo-core", version = "0.2.5" }
+grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.2.5" }
+grafeo-engine = { path = "crates/grafeo-engine", version = "0.2.5" }
+grafeo = { path = "crates/grafeo", version = "0.2.5" }
 
 # Error handling
 thiserror = "2.0"
@@ -49,7 +49,7 @@ bytes = "1.9"
 byteorder = "1.5"
 
 # Checksums & hashing
-crc32fast = "1.4"
+crc32fast = "1.5"
 ahash = "0.8"
 
 # Serialization
@@ -61,7 +61,7 @@ arrow = "57.2.0"
 polars = "0.52.0"
 
 # Python bindings
-pyo3 = "0.27.2"
+pyo3 = "0.27"
 pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
 
 # Async runtime
@@ -72,12 +72,19 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # Regex
-regex = "1.10"
+regex = "1.12"
 
 # Testing
 proptest = "1.6"
-criterion = "0.8.1"
-tempfile = "3.15"
+criterion = "0.8"
+tempfile = "3.22"
+
+# Allocators (platform-optimized)
+tikv-jemallocator = "0.6"
+mimalloc = "0.1"
+
+# Fast hashing
+rustc-hash = "2.1"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
@@ -191,3 +198,19 @@ opt-level = 1
 [profile.bench]
 lto = "thin"
 codegen-units = 1
+
+# Profiling: release performance with debug symbols for flamegraphs
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = "full"
+lto = false
+
+# Minimal size for WASM or embedded
+[profile.minimal-size]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

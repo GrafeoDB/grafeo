@@ -1854,13 +1854,13 @@ impl Planner {
 
     /// Counts the number of base relations in a logical operator tree.
     #[allow(dead_code)]
-    fn count_relations(&self, op: &LogicalOperator) -> usize {
+    fn count_relations(op: &LogicalOperator) -> usize {
         match op {
             LogicalOperator::NodeScan(_) | LogicalOperator::EdgeScan(_) => 1,
-            LogicalOperator::Expand(e) => self.count_relations(&e.input),
-            LogicalOperator::Filter(f) => self.count_relations(&f.input),
+            LogicalOperator::Expand(e) => Self::count_relations(&e.input),
+            LogicalOperator::Filter(f) => Self::count_relations(&f.input),
             LogicalOperator::Join(j) => {
-                self.count_relations(&j.left) + self.count_relations(&j.right)
+                Self::count_relations(&j.left) + Self::count_relations(&j.right)
             }
             _ => 0,
         }

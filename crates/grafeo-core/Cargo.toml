@@ -18,6 +18,7 @@ thiserror.workspace = true
 smallvec.workspace = true
 hashbrown.workspace = true
 indexmap.workspace = true
+dashmap.workspace = true
 
 # Hashing
 ahash.workspace = true
@@ -26,6 +27,7 @@ ahash.workspace = true
 serde.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
+bincode = { workspace = true, optional = true }
 
 # Concurrency
 parking_lot.workspace = true
@@ -45,6 +47,9 @@ tempfile.workspace = true
 [features]
 default = []
 rdf = []  # Enable RDF graph model
+tiered-storage = ["grafeo-common/tiered-storage", "bincode"]  # Enable tiered hot/cold storage
+succinct-indexes = []  # Enable succinct data structures (rank/select bitvectors, Elias-Fano, wavelet trees)
+ring-index = ["succinct-indexes", "rdf"]  # Ring Index for RDF (3x space reduction, requires succinct-indexes and rdf)
 
 [lints]
 workspace = true

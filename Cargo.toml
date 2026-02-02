@@ -41,6 +41,7 @@ hashbrown = "0.16.1"
 smallvec = "1.13"
 bumpalo = "3.16"
 indexmap = "2.7"
+dashmap = "6.1"
 
 # Memory & I/O
 memmap2 = "0.9"

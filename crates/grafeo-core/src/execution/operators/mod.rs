@@ -27,6 +27,7 @@ mod factorized_expand;
 mod factorized_filter;
 mod filter;
 mod join;
+mod leapfrog_join;
 mod limit;
 mod merge;
 mod mutation;
@@ -62,6 +63,7 @@ pub use filter::{
 pub use join::{
     EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType, NestedLoopJoinOperator,
 };
+pub use leapfrog_join::LeapfrogJoinOperator;
 pub use limit::{LimitOperator, LimitSkipOperator, SkipOperator};
 pub use merge::MergeOperator;
 pub use mutation::{

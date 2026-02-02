@@ -178,7 +178,10 @@ struct AdjacencyList {
     /// Cold chunks (immutable, compressed) - for older data.
     cold_chunks: Vec<CompressedAdjacencyChunk>,
     /// Delta buffer for recent insertions.
-    delta_inserts: SmallVec<[(NodeId, EdgeId); 8]>,
+    /// Uses SmallVec with 16 inline entries for cache-friendly access.
+    /// Most nodes have <16 recent insertions before compaction, so this
+    /// avoids heap allocation in the common case.
+    delta_inserts: SmallVec<[(NodeId, EdgeId); 16]>,
     /// Set of deleted edge IDs.
     deleted: FxHashSet<EdgeId>,
 }
@@ -450,10 +453,23 @@ impl ChunkedAdjacency {
             .unwrap_or_default()
     }
 
-    /// Returns the out-degree of a node.
+    /// Returns the out-degree of a node (number of outgoing edges).
+    ///
+    /// For forward adjacency, this counts edges where `src` is the source.
     pub fn out_degree(&self, src: NodeId) -> usize {
         let lists = self.lists.read();
         lists.get(&src).map_or(0, |list| list.degree())
+    }
+
+    /// Returns the in-degree of a node (number of incoming edges).
+    ///
+    /// This is semantically equivalent to `out_degree` but named differently
+    /// for use with backward adjacency where edges are stored in reverse.
+    /// When called on `backward_adj`, this returns the count of edges
+    /// where `node` is the destination.
+    pub fn in_degree(&self, node: NodeId) -> usize {
+        let lists = self.lists.read();
+        lists.get(&node).map_or(0, |list| list.degree())
     }
 
     /// Compacts all adjacency lists.
@@ -922,5 +938,96 @@ mod tests {
         for i in 0..50 {
             assert!(edge_ids.contains(&EdgeId::new(i)));
         }
+    }
+
+    #[test]
+    fn test_in_degree() {
+        let adj = ChunkedAdjacency::new();
+
+        // Simulate backward adjacency: edges stored as (dst, src)
+        // Edge 1->2: backward stores (2, 1)
+        // Edge 3->2: backward stores (2, 3)
+        adj.add_edge(NodeId::new(2), NodeId::new(1), EdgeId::new(0)); // 1->2 in backward
+        adj.add_edge(NodeId::new(2), NodeId::new(3), EdgeId::new(1)); // 3->2 in backward
+
+        // In-degree of node 2 is 2 (two edges point to it)
+        assert_eq!(adj.in_degree(NodeId::new(2)), 2);
+
+        // Node 1 has no incoming edges
+        assert_eq!(adj.in_degree(NodeId::new(1)), 0);
+    }
+
+    #[test]
+    fn test_bidirectional_edges() {
+        let forward = ChunkedAdjacency::new();
+        let backward = ChunkedAdjacency::new();
+
+        // Add edge: 1 -> 2
+        let edge_id = EdgeId::new(100);
+        forward.add_edge(NodeId::new(1), NodeId::new(2), edge_id);
+        backward.add_edge(NodeId::new(2), NodeId::new(1), edge_id); // Reverse for backward!
+
+        // Forward: edges from node 1 → returns (dst=2, edge_id)
+        let forward_edges = forward.edges_from(NodeId::new(1));
+        assert_eq!(forward_edges.len(), 1);
+        assert_eq!(forward_edges[0], (NodeId::new(2), edge_id));
+
+        // Forward: node 2 has no outgoing edges
+        assert_eq!(forward.edges_from(NodeId::new(2)).len(), 0);
+
+        // Backward: edges to node 2 → stored as edges_from(2) → returns (src=1, edge_id)
+        let backward_edges = backward.edges_from(NodeId::new(2));
+        assert_eq!(backward_edges.len(), 1);
+        assert_eq!(backward_edges[0], (NodeId::new(1), edge_id));
+
+        // Backward: node 1 has no incoming edges
+        assert_eq!(backward.edges_from(NodeId::new(1)).len(), 0);
+    }
+
+    #[test]
+    fn test_bidirectional_chain() {
+        // Test chain: A -> B -> C
+        let forward = ChunkedAdjacency::new();
+        let backward = ChunkedAdjacency::new();
+
+        let a = NodeId::new(1);
+        let b = NodeId::new(2);
+        let c = NodeId::new(3);
+
+        // Edge A -> B
+        let edge_ab = EdgeId::new(10);
+        forward.add_edge(a, b, edge_ab);
+        backward.add_edge(b, a, edge_ab);
+
+        // Edge B -> C
+        let edge_bc = EdgeId::new(20);
+        forward.add_edge(b, c, edge_bc);
+        backward.add_edge(c, b, edge_bc);
+
+        // Forward traversal from A: should reach B
+        let from_a = forward.edges_from(a);
+        assert_eq!(from_a.len(), 1);
+        assert_eq!(from_a[0].0, b);
+
+        // Forward traversal from B: should reach C
+        let from_b = forward.edges_from(b);
+        assert_eq!(from_b.len(), 1);
+        assert_eq!(from_b[0].0, c);
+
+        // Backward traversal to C: should find B
+        let to_c = backward.edges_from(c);
+        assert_eq!(to_c.len(), 1);
+        assert_eq!(to_c[0].0, b);
+
+        // Backward traversal to B: should find A
+        let to_b = backward.edges_from(b);
+        assert_eq!(to_b.len(), 1);
+        assert_eq!(to_b[0].0, a);
+
+        // Node A has no incoming edges
+        assert_eq!(backward.edges_from(a).len(), 0);
+
+        // Node C has no outgoing edges
+        assert_eq!(forward.edges_from(c).len(), 0);
     }
 }

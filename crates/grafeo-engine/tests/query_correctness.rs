@@ -873,6 +873,179 @@ mod graphql_tests {
 }
 
 // ============================================================================
+// Direction Tests (Bidirectional Edge Indexing)
+// ============================================================================
+
+/// Tests that verify incoming/outgoing edge direction handling works correctly.
+#[cfg(feature = "gql")]
+mod gql_direction_tests {
+    use super::*;
+
+    /// Creates a simple directed graph for direction testing:
+    /// A -[:FOLLOWS]-> B -[:FOLLOWS]-> C
+    /// D -[:FOLLOWS]-> B (B has 2 incoming, 1 outgoing)
+    fn create_directed_graph() -> GrafeoDB {
+        let db = GrafeoDB::new_in_memory();
+        let session = db.session();
+
+        let a = session.create_node_with_props(&["User"], [("name", Value::String("A".into()))]);
+        let b = session.create_node_with_props(&["User"], [("name", Value::String("B".into()))]);
+        let c = session.create_node_with_props(&["User"], [("name", Value::String("C".into()))]);
+        let d = session.create_node_with_props(&["User"], [("name", Value::String("D".into()))]);
+
+        session.create_edge(a, b, "FOLLOWS"); // A -> B
+        session.create_edge(b, c, "FOLLOWS"); // B -> C
+        session.create_edge(d, b, "FOLLOWS"); // D -> B
+
+        db
+    }
+
+    #[test]
+    fn test_outgoing_edges() {
+        let db = create_directed_graph();
+        let session = db.session();
+
+        // A follows 1 person (B)
+        let result = session
+            .execute("MATCH (a:User {name: \"A\"})-[:FOLLOWS]->(b) RETURN b.name")
+            .unwrap();
+        assert_eq!(result.row_count(), 1, "A should follow 1 person");
+        assert_eq!(result.rows[0][0], Value::String("B".into()));
+
+        // B follows 1 person (C)
+        let result = session
+            .execute("MATCH (b:User {name: \"B\"})-[:FOLLOWS]->(c) RETURN c.name")
+            .unwrap();
+        assert_eq!(result.row_count(), 1, "B should follow 1 person");
+        assert_eq!(result.rows[0][0], Value::String("C".into()));
+
+        // D follows 1 person (B)
+        let result = session
+            .execute("MATCH (d:User {name: \"D\"})-[:FOLLOWS]->(x) RETURN x.name")
+            .unwrap();
+        assert_eq!(result.row_count(), 1, "D should follow 1 person");
+
+        // C follows nobody
+        let result = session
+            .execute("MATCH (c:User {name: \"C\"})-[:FOLLOWS]->(x) RETURN x")
+            .unwrap();
+        assert_eq!(result.row_count(), 0, "C should follow nobody");
+    }
+
+    #[test]
+    fn test_incoming_edges() {
+        let db = create_directed_graph();
+        let session = db.session();
+
+        // B is followed by 2 people (A and D)
+        let result = session
+            .execute("MATCH (b:User {name: \"B\"})<-[:FOLLOWS]-(x) RETURN x.name")
+            .unwrap();
+        assert_eq!(result.row_count(), 2, "B should be followed by 2 people");
+
+        let names: std::collections::HashSet<_> = result
+            .rows
+            .iter()
+            .filter_map(|r| {
+                if let Value::String(s) = &r[0] {
+                    Some(s.as_ref())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(names.contains("A"), "A should follow B");
+        assert!(names.contains("D"), "D should follow B");
+
+        // C is followed by 1 person (B)
+        let result = session
+            .execute("MATCH (c:User {name: \"C\"})<-[:FOLLOWS]-(x) RETURN x.name")
+            .unwrap();
+        assert_eq!(result.row_count(), 1, "C should be followed by 1 person");
+        assert_eq!(result.rows[0][0], Value::String("B".into()));
+
+        // A has no followers
+        let result = session
+            .execute("MATCH (a:User {name: \"A\"})<-[:FOLLOWS]-(x) RETURN x")
+            .unwrap();
+        assert_eq!(result.row_count(), 0, "A should have no followers");
+    }
+
+    #[test]
+    fn test_bidirectional_edges() {
+        let db = create_directed_graph();
+        let session = db.session();
+
+        // B has 3 connections total (2 incoming + 1 outgoing)
+        let result = session
+            .execute("MATCH (b:User {name: \"B\"})-[:FOLLOWS]-(x) RETURN x.name")
+            .unwrap();
+        assert_eq!(
+            result.row_count(),
+            3,
+            "B should have 3 total FOLLOWS connections"
+        );
+    }
+
+    #[test]
+    fn test_chain_traversal_incoming() {
+        let db = create_chain();
+        let session = db.session();
+
+        // Traverse backward from D
+        let result = session
+            .execute("MATCH (d:Node {id: \"D\"})<-[:NEXT]-(c) RETURN c.id")
+            .unwrap();
+        assert_eq!(result.row_count(), 1, "D has 1 predecessor");
+        assert_eq!(result.rows[0][0], Value::String("C".into()));
+
+        // A has no predecessors
+        let result = session
+            .execute("MATCH (a:Node {id: \"A\"})<-[:NEXT]-(x) RETURN x")
+            .unwrap();
+        assert_eq!(result.row_count(), 0, "A has no predecessors");
+    }
+
+    #[test]
+    fn test_tree_parent_child() {
+        let db = create_tree();
+        let session = db.session();
+
+        // Find children of root (outgoing)
+        let result = session
+            .execute("MATCH (r:TreeNode {name: \"root\"})-[:HAS_CHILD]->(c) RETURN c.name")
+            .unwrap();
+        assert_eq!(result.row_count(), 2, "root should have 2 children");
+
+        // Find parent of leaf1 (incoming)
+        let result = session
+            .execute("MATCH (l:TreeNode {name: \"leaf1\"})<-[:HAS_CHILD]-(p) RETURN p.name")
+            .unwrap();
+        assert_eq!(result.row_count(), 1, "leaf1 should have 1 parent");
+        assert_eq!(result.rows[0][0], Value::String("child1".into()));
+    }
+
+    #[test]
+    fn test_social_network_followers() {
+        let db = create_social_network();
+        let session = db.session();
+
+        // Carol is known by both Alice and Bob (incoming KNOWS)
+        let result = session
+            .execute("MATCH (c:Person {name: \"Carol\"})<-[:KNOWS]-(x) RETURN x.name")
+            .unwrap();
+        assert_eq!(result.row_count(), 2, "Carol should be known by 2 people");
+
+        // Bob is known by Alice (incoming KNOWS)
+        let result = session
+            .execute("MATCH (b:Person {name: \"Bob\"})<-[:KNOWS]-(x) RETURN x.name")
+            .unwrap();
+        assert_eq!(result.row_count(), 1, "Bob should be known by 1 person");
+        assert_eq!(result.rows[0][0], Value::String("Alice".into()));
+    }
+}
+
+// ============================================================================
 // Cross-Language Consistency Tests (GQL and Cypher only)
 // ============================================================================
 

@@ -70,6 +70,11 @@
 
 mod manager;
 mod mvcc;
+#[cfg(feature = "block-stm")]
+pub mod parallel;
 
 pub use manager::{EntityId, TransactionManager, TxInfo, TxState};
 pub use mvcc::{Version, VersionChain, VersionInfo};
+
+#[cfg(feature = "block-stm")]
+pub use parallel::{BatchRequest, BatchResult, ExecutionStatus, ParallelExecutor};

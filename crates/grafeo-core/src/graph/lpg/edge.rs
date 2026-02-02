@@ -4,6 +4,7 @@
 //! [`EdgeRecord`] is the compact storage format.
 
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -91,7 +92,7 @@ impl Edge {
 /// Like [`NodeRecord`](super::NodeRecord), this is what the store keeps in memory.
 /// Properties are stored separately in columnar format.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct EdgeRecord {
     /// Unique edge identifier.
     pub id: EdgeId,
@@ -150,7 +151,7 @@ impl EdgeRecord {
 
 /// Bit flags packed into an edge record.
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct EdgeFlags(pub u16);
 
 impl EdgeFlags {

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use grafeo_common::types::{EpochId, NodeId, PropertyKey, Value};
+use serde::{Deserialize, Serialize};
 
 /// A node with its labels and properties fully loaded.
 ///
@@ -106,7 +107,7 @@ impl Node {
 ///
 /// Fields are ordered to minimize padding: u64s first, then u32, then u16s.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NodeRecord {
     /// Unique node identifier.
     pub id: NodeId,
@@ -178,7 +179,7 @@ impl NodeRecord {
 ///
 /// Check flags with [`contains()`](Self::contains), set with [`set()`](Self::set).
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct NodeFlags(pub u16);
 
 impl NodeFlags {

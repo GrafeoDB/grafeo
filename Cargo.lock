@@ -415,6 +415,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -597,7 +611,7 @@ dependencies = [
  "crossbeam",
  "grafeo-common",
  "grafeo-core",
- "hashbrown",
+ "hashbrown 0.16.1",
  "memmap2",
  "parking_lot",
  "proptest",
@@ -636,7 +650,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "criterion",
- "hashbrown",
+ "hashbrown 0.16.1",
  "parking_lot",
  "proptest",
  "serde",
@@ -650,12 +664,14 @@ name = "grafeo-core"
 version = "0.2.0"
 dependencies = [
  "ahash",
+ "bincode",
  "byteorder",
  "bytes",
  "criterion",
  "crossbeam",
+ "dashmap",
  "grafeo-common",
- "hashbrown",
+ "hashbrown 0.16.1",
  "indexmap",
  "parking_lot",
  "proptest",
@@ -677,7 +693,7 @@ dependencies = [
  "grafeo-adapters",
  "grafeo-common",
  "grafeo-core",
- "hashbrown",
+ "hashbrown 0.16.1",
  "indexmap",
  "parking_lot",
  "rayon",
@@ -717,6 +733,12 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+
+[[package]]
+name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
@@ -739,7 +761,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7714e70437a7dc3ac8eb7e6f8df75fd8eb422675fc7678aff7364301092b1017"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]

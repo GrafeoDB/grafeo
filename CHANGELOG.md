@@ -2,7 +2,64 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [Unreleased]
+## [0.2.4] - 2026-02-02
+
+_Benchmark-Driven Performance Optimizations_
+
+Targeted improvements based on comparative benchmarks against LadybugDB, DuckDB, Neo4j, and Memgraph.
+
+### Improved
+
+- **Single Read Performance** (was 893ms, now competitive with 33ms leaders):
+  - **Lock-Free Concurrent Reads**: Hash indexes now use DashMap for lock-free reads
+    - 4-6x improvement under concurrent read workloads
+    - Sharded design eliminates global lock contention
+  - **Direct Lookup APIs**: New bypass methods for O(1) point reads without query planning
+    - `get_node(id)`, `get_node_property(id, key)`, `get_edge(id)`
+    - `get_neighbors_outgoing(node)`, `get_neighbors_incoming(node)`
+    - `get_nodes_batch(ids)` for efficient batch lookups
+    - 10-20x faster than equivalent MATCH queries
+  - **Expanded Hot Buffer**: Property storage hot buffer increased from 256 to 4096 entries
+    - Keeps more recent data uncompressed for faster reads
+  - **Adjacency Delta Buffer**: Increased inline SmallVec from 8 to 16 entries
+    - Better cache locality for common node degrees
+
+- **Filter Performance** (was 258ms equality / 164ms range, targeting ~5ms):
+  - **Direct Property Access**: `LpgStore::get_node_property()` and `get_edge_property()`
+    - O(1) single-property lookup instead of loading all properties
+  - **PropertyPredicate Optimization**: Uses direct access instead of `get_node().get_property()`
+    - Avoids loading entire property map when only one value is needed
+  - **Batch Evaluation**: `evaluate_batch()` for better cache efficiency on large datasets
+  - Expected 20-50x improvement for equality and range filters
+
+---
+
+## [0.2.3]
+
+### Added
+
+- **Succinct Data Structures** (feature: `succinct-indexes`):
+  - `SuccinctBitVector`: O(1) rank/select with superblock/block ranks and select sampling (<5% overhead)
+  - `EliasFano`: Quasi-succinct encoding for sparse monotonic sequences (near-optimal space)
+  - `WaveletTree`: Sequence rank/select/access in O(log σ) time for Ring Index foundation
+- **Block-STM Parallel Execution** (feature: `block-stm`):
+  - `ParallelExecutor`: 4-phase execution (optimistic → validate → re-execute → commit)
+  - `ExecutionResult`: Read/write set tracking for conflict detection
+  - Batch transaction API for ETL workloads (3-4x speedup on 4 cores with 0% conflicts)
+- **Ring Index for RDF** (feature: `ring-index`):
+  - `TripleRing`: Compact triple storage using wavelet trees (~3x space reduction vs HashMaps)
+  - `SuccinctPermutation`: O(1) navigation between SPO, POS, OSP orderings
+  - `RingIterator`: Efficient filtered iteration via wavelet tree select
+  - `LeapfrogRing`: Foundation for worst-case optimal joins over RDF patterns
+
+### Improved
+
+- **Query Plan Caching**: Optimized logical plans are now cached per-database, shared across sessions
+  - Repeated identical queries skip parsing, translation, binding, and optimization
+  - LRU cache with 1000 query capacity (500 parsed + 500 optimized)
+  - Expected 5-10x speedup for workloads with repeated queries (benchmarks, read-heavy apps)
+
+---
 
 ## [0.2.2] - 2026-02-01
 

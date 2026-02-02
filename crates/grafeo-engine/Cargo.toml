@@ -49,6 +49,7 @@ gremlin = ["grafeo-adapters/gremlin"]
 graphql = ["grafeo-adapters/graphql"]
 rdf = ["grafeo-core/rdf", "grafeo-adapters/rdf"]  # RDF graph model and planner
 full = ["gql", "cypher", "sparql", "gremlin", "graphql", "rdf"]
+block-stm = []  # Block-STM parallel transaction execution
 
 [lints]
 workspace = true

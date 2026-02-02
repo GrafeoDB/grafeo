@@ -309,7 +309,7 @@ impl CostModel {
         }
 
         let total_input: f64 = cardinalities.iter().sum();
-        let min_card = cardinalities.iter().cloned().fold(f64::INFINITY, f64::min);
+        let min_card = cardinalities.iter().copied().fold(f64::INFINITY, f64::min);
 
         // Materialization phase: build trie indexes for each input
         let materialize_cost = total_input * self.cpu_tuple_cost * 2.0; // Sorting + trie building

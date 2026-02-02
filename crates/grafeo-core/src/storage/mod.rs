@@ -37,6 +37,8 @@ pub mod dictionary;
 #[cfg(feature = "tiered-storage")]
 pub mod epoch_store;
 pub mod runlength;
+#[cfg(feature = "succinct-indexes")]
+pub mod succinct;
 
 // Re-export commonly used types
 pub use bitpack::{BitPackedInts, DeltaBitPacked};
@@ -54,3 +56,7 @@ pub use epoch_store::{
     CompressedEpochBlock, CompressionType, EpochBlockHeader, EpochStore, EpochStoreStats,
     IndexEntry, ZoneMap,
 };
+
+// Succinct data structure exports (feature-gated)
+#[cfg(feature = "succinct-indexes")]
+pub use succinct::{EliasFano, SuccinctBitVector, WaveletTree};

@@ -15,6 +15,7 @@ use grafeo_core::graph::lpg::LpgStore;
 use grafeo_core::graph::rdf::RdfStore;
 
 use crate::config::Config;
+use crate::query::cache::QueryCache;
 use crate::session::Session;
 use crate::transaction::TransactionManager;
 
@@ -54,6 +55,8 @@ pub struct GrafeoDB {
     buffer_manager: Arc<BufferManager>,
     /// Write-ahead log manager (if durability is enabled).
     wal: Option<Arc<WalManager>>,
+    /// Query cache for parsed and optimized plans.
+    query_cache: Arc<QueryCache>,
     /// Whether the database is open.
     is_open: RwLock<bool>,
 }
@@ -169,6 +172,9 @@ impl GrafeoDB {
             None
         };
 
+        // Create query cache with default capacity (1000 queries)
+        let query_cache = Arc::new(QueryCache::default());
+
         Ok(Self {
             config,
             store,
@@ -177,6 +183,7 @@ impl GrafeoDB {
             tx_manager,
             buffer_manager,
             wal,
+            query_cache,
             is_open: RwLock::new(true),
         })
     }
@@ -252,6 +259,7 @@ impl GrafeoDB {
                 Arc::clone(&self.store),
                 Arc::clone(&self.rdf_store),
                 Arc::clone(&self.tx_manager),
+                Arc::clone(&self.query_cache),
                 self.config.adaptive.clone(),
                 self.config.factorized_execution,
             )
@@ -261,6 +269,7 @@ impl GrafeoDB {
             Session::with_adaptive(
                 Arc::clone(&self.store),
                 Arc::clone(&self.tx_manager),
+                Arc::clone(&self.query_cache),
                 self.config.adaptive.clone(),
                 self.config.factorized_execution,
             )

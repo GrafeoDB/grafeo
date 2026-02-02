@@ -178,7 +178,10 @@ struct AdjacencyList {
     /// Cold chunks (immutable, compressed) - for older data.
     cold_chunks: Vec<CompressedAdjacencyChunk>,
     /// Delta buffer for recent insertions.
-    delta_inserts: SmallVec<[(NodeId, EdgeId); 8]>,
+    /// Uses SmallVec with 16 inline entries for cache-friendly access.
+    /// Most nodes have <16 recent insertions before compaction, so this
+    /// avoids heap allocation in the common case.
+    delta_inserts: SmallVec<[(NodeId, EdgeId); 16]>,
     /// Set of deleted edge IDs.
     deleted: FxHashSet<EdgeId>,
 }

@@ -773,6 +773,33 @@ impl LpgStore {
         self.edge_properties.remove(id, &key.into())
     }
 
+    /// Gets a single property from a node without loading all properties.
+    ///
+    /// This is O(1) vs O(properties) for `get_node().get_property()`.
+    /// Use this for filter predicates where you only need one property value.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Fast: Direct single-property lookup
+    /// let age = store.get_node_property(node_id, "age");
+    ///
+    /// // Slow: Loads all properties, then extracts one
+    /// let age = store.get_node(node_id).and_then(|n| n.get_property("age").cloned());
+    /// ```
+    #[must_use]
+    pub fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
+        self.node_properties.get(id, key)
+    }
+
+    /// Gets a single property from an edge without loading all properties.
+    ///
+    /// This is O(1) vs O(properties) for `get_edge().get_property()`.
+    #[must_use]
+    pub fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
+        self.edge_properties.get(id, key)
+    }
+
     /// Adds a label to a node.
     ///
     /// Returns true if the label was added, false if the node doesn't exist

@@ -18,7 +18,7 @@ use super::{FactorizedOperator, FactorizedResult, LazyFactorizedChainOperator, O
 use crate::execution::chunk_state::{FactorizedSelection, LevelSelection};
 use crate::execution::factorized_chunk::FactorizedChunk;
 use crate::graph::lpg::LpgStore;
-use grafeo_common::types::Value;
+use grafeo_common::types::{PropertyKey, Value};
 use std::collections::HashMap;
 
 /// A predicate that can be evaluated on factorized data at a specific level.
@@ -206,13 +206,19 @@ impl FactorizedPredicate for ColumnPredicate {
 /// A property-based predicate for factorized data.
 ///
 /// Evaluates a condition on an entity's property (node or edge).
+///
+/// # Performance
+///
+/// Uses direct property lookup via `LpgStore::get_node_property()` which is
+/// O(1) per entity. This avoids the O(properties) overhead of loading all
+/// properties when only one is needed.
 pub struct PropertyPredicate {
     /// The level containing the entity.
     level: usize,
     /// The column index of the entity (NodeId or EdgeId).
     column: usize,
-    /// The property name to access.
-    property: String,
+    /// The property key to access.
+    property: PropertyKey,
     /// The comparison operator.
     op: CompareOp,
     /// The value to compare against.
@@ -226,7 +232,7 @@ impl PropertyPredicate {
     pub fn new(
         level: usize,
         column: usize,
-        property: String,
+        property: impl Into<PropertyKey>,
         op: CompareOp,
         value: Value,
         store: Arc<LpgStore>,
@@ -234,7 +240,7 @@ impl PropertyPredicate {
         Self {
             level,
             column,
-            property,
+            property: property.into(),
             op,
             value,
             store,
@@ -245,7 +251,7 @@ impl PropertyPredicate {
     pub fn eq(
         level: usize,
         column: usize,
-        property: String,
+        property: impl Into<PropertyKey>,
         value: Value,
         store: Arc<LpgStore>,
     ) -> Self {
@@ -304,25 +310,62 @@ impl FactorizedPredicate for PropertyPredicate {
             None => return false,
         };
 
-        // Try as node first
+        // Try as node first - use direct property lookup (O(1) vs O(properties))
         if let Some(node_id) = column.get_node_id_physical(physical_idx) {
-            if let Some(node) = self.store.get_node(node_id) {
-                if let Some(prop_val) = node.get_property(&self.property) {
-                    return self.compare_values(prop_val);
-                }
+            if let Some(prop_val) = self.store.get_node_property(node_id, &self.property) {
+                return self.compare_values(&prop_val);
             }
         }
 
-        // Try as edge
+        // Try as edge - use direct property lookup
         if let Some(edge_id) = column.get_edge_id_physical(physical_idx) {
-            if let Some(edge) = self.store.get_edge(edge_id) {
-                if let Some(prop_val) = edge.get_property(&self.property) {
-                    return self.compare_values(prop_val);
-                }
+            if let Some(prop_val) = self.store.get_edge_property(edge_id, &self.property) {
+                return self.compare_values(&prop_val);
             }
         }
 
         false
+    }
+
+    /// Batch evaluates the predicate for all physical indices at a level.
+    ///
+    /// This is more cache-friendly than individual evaluations for large batches.
+    fn evaluate_batch(&self, chunk: &FactorizedChunk, level: usize) -> LevelSelection {
+        // If this predicate doesn't target this level, all rows pass
+        if level != self.level {
+            let count = chunk.level(level).map_or(0, |l| l.physical_value_count());
+            return LevelSelection::all(count);
+        }
+
+        let level_data = match chunk.level(level) {
+            Some(l) => l,
+            None => return LevelSelection::all(0),
+        };
+
+        let column = match level_data.column(self.column) {
+            Some(c) => c,
+            // No column found means no matches - return empty selection
+            None => return LevelSelection::from_predicate(level_data.physical_value_count(), |_| false),
+        };
+
+        let count = level_data.physical_value_count();
+
+        // Evaluate all at once using direct property lookups
+        LevelSelection::from_predicate(count, |idx| {
+            // Try as node first
+            if let Some(node_id) = column.get_node_id_physical(idx) {
+                if let Some(val) = self.store.get_node_property(node_id, &self.property) {
+                    return self.compare_values(&val);
+                }
+            }
+            // Try as edge
+            if let Some(edge_id) = column.get_edge_id_physical(idx) {
+                if let Some(val) = self.store.get_edge_property(edge_id, &self.property) {
+                    return self.compare_values(&val);
+                }
+            }
+            false
+        })
     }
 
     fn target_level(&self) -> Option<usize> {

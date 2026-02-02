@@ -892,10 +892,7 @@ mod tests {
 
     #[test]
     fn test_contains_ids_no_match() {
-        let triples = vec![
-            make_triple("s1", "p1", "o1"),
-            make_triple("s1", "p2", "o2"),
-        ];
+        let triples = vec![make_triple("s1", "p1", "o1"), make_triple("s1", "p2", "o2")];
         let ring = TripleRing::from_triples(triples.into_iter());
 
         // Exact match that doesn't exist (s1, p1, o2)
@@ -915,10 +912,7 @@ mod tests {
         assert_eq!(ring.len(), 0);
         assert!(ring.get_spo(0).is_none());
         assert_eq!(ring.count(&TriplePattern::any()), 0);
-        assert_eq!(
-            ring.count(&TriplePattern::with_subject(Term::iri("s"))),
-            0
-        );
+        assert_eq!(ring.count(&TriplePattern::with_subject(Term::iri("s"))), 0);
         assert!(ring.spo_to_pos(0).is_none());
         assert!(ring.osp_to_spo(0).is_none());
 

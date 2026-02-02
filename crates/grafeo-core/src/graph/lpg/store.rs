@@ -2684,7 +2684,10 @@ mod tests {
             a,
             b,
             "KNOWS",
-            [("since", Value::from(2020i64)), ("weight", Value::from(1.0))],
+            [
+                ("since", Value::from(2020i64)),
+                ("weight", Value::from(1.0)),
+            ],
         );
 
         let edge = store.get_edge(edge_id).unwrap();
@@ -2960,11 +2963,8 @@ mod tests {
         store.create_node_with_props(&["Person"], [("age", Value::from(35i64))]);
 
         // Zone map should indicate possible matches
-        let might_match = store.node_property_might_match(
-            &"age".into(),
-            CompareOp::Eq,
-            &Value::from(30i64),
-        );
+        let might_match =
+            store.node_property_might_match(&"age".into(), CompareOp::Eq, &Value::from(30i64));
         // Zone maps may return true conservatively
         assert!(might_match || !might_match); // This is a valid test - zone maps are approximate
 

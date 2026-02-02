@@ -4233,8 +4233,12 @@ mod tests {
         let tx_id = tx_manager.begin();
         let epoch = tx_manager.current_epoch();
 
-        let planner =
-            Planner::with_context(Arc::clone(&store), Arc::clone(&tx_manager), Some(tx_id), epoch);
+        let planner = Planner::with_context(
+            Arc::clone(&store),
+            Arc::clone(&tx_manager),
+            Some(tx_id),
+            epoch,
+        );
 
         assert_eq!(planner.tx_id(), Some(tx_id));
         assert!(planner.tx_manager().is_some());

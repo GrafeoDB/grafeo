@@ -295,10 +295,7 @@ mod tests {
 
     #[test]
     fn test_ring_iterator_all() {
-        let triples = vec![
-            make_triple("s1", "p1", "o1"),
-            make_triple("s2", "p2", "o2"),
-        ];
+        let triples = vec![make_triple("s1", "p1", "o1"), make_triple("s2", "p2", "o2")];
         let ring = TripleRing::from_triples(triples.into_iter());
 
         let iter = RingIterator::all(&ring);

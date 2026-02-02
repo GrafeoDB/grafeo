@@ -45,8 +45,8 @@
 //! ```
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grafeo_common::types::EpochId;
 use grafeo_common::utils::hash::FxHashMap;
@@ -327,11 +327,8 @@ impl ParallelExecutor {
             let mut result = result_mutex.lock();
 
             // Collect entities to check (to avoid borrow issues)
-            let read_entities: Vec<EntityId> = result
-                .read_set
-                .iter()
-                .map(|(entity, _)| *entity)
-                .collect();
+            let read_entities: Vec<EntityId> =
+                result.read_set.iter().map(|(entity, _)| *entity).collect();
 
             // Check if any of our reads were invalidated by an earlier write
             for entity in read_entities {
@@ -379,11 +376,8 @@ impl ParallelExecutor {
                         total_reexecutions.fetch_add(1, Ordering::Relaxed);
 
                         // Collect entities for re-validation
-                        let read_entities: Vec<EntityId> = result
-                            .read_set
-                            .iter()
-                            .map(|(entity, _)| *entity)
-                            .collect();
+                        let read_entities: Vec<EntityId> =
+                            result.read_set.iter().map(|(entity, _)| *entity).collect();
 
                         // Re-validate
                         for entity in read_entities {
@@ -413,10 +407,8 @@ impl ParallelExecutor {
         }
 
         // Phase 4: Collect results
-        let mut final_results: Vec<ExecutionResult> = results
-            .into_iter()
-            .map(|m| m.into_inner())
-            .collect();
+        let mut final_results: Vec<ExecutionResult> =
+            results.into_iter().map(|m| m.into_inner()).collect();
 
         // Sort by batch index to maintain order
         final_results.sort_by_key(|r| r.batch_index);
@@ -583,9 +575,7 @@ mod tests {
     #[test]
     fn test_execution_order_preserved() {
         let executor = ParallelExecutor::new(4);
-        let batch = BatchRequest::new(vec![
-            "op0", "op1", "op2", "op3", "op4", "op5", "op6", "op7",
-        ]);
+        let batch = BatchRequest::new(vec!["op0", "op1", "op2", "op3", "op4", "op5", "op6", "op7"]);
 
         let result = executor.execute_batch(batch, |idx, _, result| {
             result.record_write(EntityId::Node(NodeId::new(idx as u64)));
@@ -593,16 +583,18 @@ mod tests {
 
         // Verify results are in order
         for (i, r) in result.results.iter().enumerate() {
-            assert_eq!(r.batch_index, i, "Result at position {} has wrong batch_index", i);
+            assert_eq!(
+                r.batch_index, i,
+                "Result at position {} has wrong batch_index",
+                i
+            );
         }
     }
 
     #[test]
     fn test_failure_handling() {
         let executor = ParallelExecutor::new(4);
-        let batch = BatchRequest::new(vec![
-            "success1", "fail", "success2", "success3", "success4",
-        ]);
+        let batch = BatchRequest::new(vec!["success1", "fail", "success2", "success3", "success4"]);
 
         let result = executor.execute_batch(batch, |idx, op, result| {
             if op == "fail" {

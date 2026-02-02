@@ -345,7 +345,11 @@ impl FactorizedPredicate for PropertyPredicate {
         let column = match level_data.column(self.column) {
             Some(c) => c,
             // No column found means no matches - return empty selection
-            None => return LevelSelection::from_predicate(level_data.physical_value_count(), |_| false),
+            None => {
+                return LevelSelection::from_predicate(level_data.physical_value_count(), |_| {
+                    false
+                });
+            }
         };
 
         let count = level_data.physical_value_count();

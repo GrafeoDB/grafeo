@@ -541,7 +541,11 @@ mod tests {
         for k in 0..ones_count {
             let pos = sbv.select1(k).expect("select1 should succeed");
             assert_eq!(sbv.rank1(pos), k, "rank1(select1({})) != {}", k, k);
-            assert!(sbv.get(pos) == Some(true), "bit at select1({}) should be 1", k);
+            assert!(
+                sbv.get(pos) == Some(true),
+                "bit at select1({}) should be 1",
+                k
+            );
         }
 
         let zeros_count = sbv.count_zeros();

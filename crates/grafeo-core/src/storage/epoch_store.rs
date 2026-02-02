@@ -413,8 +413,8 @@ impl CompressedEpochBlock {
         if compressed == 0 {
             return 1.0;
         }
-        let uncompressed = (self.header.node_uncompressed_size
-            + self.header.edge_uncompressed_size) as usize;
+        let uncompressed =
+            (self.header.node_uncompressed_size + self.header.edge_uncompressed_size) as usize;
         uncompressed as f64 / compressed as f64
     }
 
@@ -737,10 +737,7 @@ mod tests {
 
     #[test]
     fn test_compressed_block_read_by_offset() {
-        let nodes = vec![
-            (1, make_node_record(1, 1)),
-            (2, make_node_record(2, 1)),
-        ];
+        let nodes = vec![(1, make_node_record(1, 1)), (2, make_node_record(2, 1))];
         let edges = vec![(10, make_edge_record(10, 1, 2, 1))];
 
         let (block, node_index, edge_index) =
@@ -787,26 +784,26 @@ mod tests {
     fn test_epoch_store_freeze_and_read() {
         let store = EpochStore::new();
 
-        let nodes = vec![
-            (1, make_node_record(1, 1)),
-            (2, make_node_record(2, 1)),
-        ];
+        let nodes = vec![(1, make_node_record(1, 1)), (2, make_node_record(2, 1))];
         let edges = vec![(10, make_edge_record(10, 1, 2, 1))];
 
-        let (node_entries, edge_entries) =
-            store.freeze_epoch(EpochId::new(1), nodes, edges);
+        let (node_entries, edge_entries) = store.freeze_epoch(EpochId::new(1), nodes, edges);
 
         assert_eq!(store.epoch_count(), 1);
         assert!(store.total_size() > 0);
 
         // Read node via cold ref
         let entry = &node_entries[0];
-        let node = store.get_node(EpochId::new(1), entry.offset, entry.length).unwrap();
+        let node = store
+            .get_node(EpochId::new(1), entry.offset, entry.length)
+            .unwrap();
         assert_eq!(node.id.as_u64(), 1);
 
         // Read edge via cold ref
         let entry = &edge_entries[0];
-        let edge = store.get_edge(EpochId::new(1), entry.offset, entry.length).unwrap();
+        let edge = store
+            .get_edge(EpochId::new(1), entry.offset, entry.length)
+            .unwrap();
         assert_eq!(edge.id.as_u64(), 10);
     }
 
@@ -861,8 +858,7 @@ mod tests {
         let store = EpochStore::new();
 
         // Freeze empty epoch
-        let (node_entries, edge_entries) =
-            store.freeze_epoch(EpochId::new(1), vec![], vec![]);
+        let (node_entries, edge_entries) = store.freeze_epoch(EpochId::new(1), vec![], vec![]);
 
         assert!(node_entries.is_empty());
         assert!(edge_entries.is_empty());

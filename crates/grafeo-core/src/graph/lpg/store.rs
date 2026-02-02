@@ -25,11 +25,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 // Tiered storage imports
 #[cfg(feature = "tiered-storage")]
+use crate::storage::EpochStore;
+#[cfg(feature = "tiered-storage")]
 use grafeo_common::memory::arena::ArenaAllocator;
 #[cfg(feature = "tiered-storage")]
 use grafeo_common::mvcc::{ColdVersionRef, HotVersionRef, VersionIndex, VersionRef};
-#[cfg(feature = "tiered-storage")]
-use crate::storage::EpochStore;
 
 /// Configuration for the LPG store.
 ///
@@ -100,7 +100,6 @@ pub struct LpgStore {
     edges: RwLock<FxHashMap<EdgeId, VersionChain<EdgeRecord>>>,
 
     // === Tiered Storage Fields (feature-gated) ===
-
     /// Arena allocator for hot data storage.
     /// Data is stored in per-epoch arenas for fast allocation and bulk deallocation.
     #[cfg(feature = "tiered-storage")]
@@ -1084,13 +1083,8 @@ impl LpgStore {
             .iter()
             .filter_map(|(id, index)| {
                 index.visible_at(epoch).and_then(|vref| {
-                    self.read_node_record(&vref).and_then(|r| {
-                        if !r.is_deleted() {
-                            Some(*id)
-                        } else {
-                            None
-                        }
-                    })
+                    self.read_node_record(&vref)
+                        .and_then(|r| if !r.is_deleted() { Some(*id) } else { None })
                 })
             })
             .collect();
@@ -1551,7 +1545,8 @@ impl LpgStore {
 
         // Freeze to compressed storage
         let (node_entries, edge_entries) =
-            self.epoch_store.freeze_epoch(epoch, node_records, edge_records);
+            self.epoch_store
+                .freeze_epoch(epoch, node_records, edge_records);
 
         // Build lookup maps for index entries
         let node_entry_map: FxHashMap<u64, _> = node_entries
@@ -1853,13 +1848,8 @@ impl LpgStore {
             .iter()
             .filter_map(|(id, index)| {
                 index.visible_at(epoch).and_then(|vref| {
-                    self.read_edge_record(&vref).and_then(|r| {
-                        if !r.is_deleted() {
-                            Some(*id)
-                        } else {
-                            None
-                        }
-                    })
+                    self.read_edge_record(&vref)
+                        .and_then(|r| if !r.is_deleted() { Some(*id) } else { None })
                 })
             })
             .collect();

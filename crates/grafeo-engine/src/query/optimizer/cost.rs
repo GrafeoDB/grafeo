@@ -345,7 +345,8 @@ impl CostModel {
             return false;
         }
 
-        let leapfrog_cost = self.leapfrog_join_cost(num_relations, cardinalities, output_cardinality);
+        let leapfrog_cost =
+            self.leapfrog_join_cost(num_relations, cardinalities, output_cardinality);
 
         // Estimate cascade of binary hash joins
         // For N relations, we need N-1 joins
@@ -827,7 +828,10 @@ mod tests {
 
         // Single hop: no factorization benefit
         let benefit = model.factorized_benefit(10.0, 1);
-        assert!((benefit - 1.0).abs() < 0.001, "Single hop should have no benefit");
+        assert!(
+            (benefit - 1.0).abs() < 0.001,
+            "Single hop should have no benefit"
+        );
     }
 
     #[test]
@@ -850,6 +854,9 @@ mod tests {
 
         // Low fanout: minimal benefit
         let benefit = model.factorized_benefit(1.5, 2);
-        assert!(benefit <= 1.0, "Low fanout still benefits from factorization");
+        assert!(
+            benefit <= 1.0,
+            "Low fanout still benefits from factorization"
+        );
     }
 }

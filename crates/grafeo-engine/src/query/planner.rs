@@ -1747,7 +1747,10 @@ impl Planner {
                             vars.insert(right_var.clone());
 
                             // Add bidirectional edge
-                            edges.entry(left_var.clone()).or_default().push(right_var.clone());
+                            edges
+                                .entry(left_var.clone())
+                                .or_default()
+                                .push(right_var.clone());
                             edges.entry(right_var).or_default().push(left_var);
                         }
                     }

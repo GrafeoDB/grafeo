@@ -33,8 +33,8 @@
 //! assert_eq!(wt.select(1, 1), Some(4));  // Second 1 at position 4
 //! ```
 
-use super::rank_select::SuccinctBitVector;
 use super::super::BitVector;
+use super::rank_select::SuccinctBitVector;
 
 /// Wavelet tree for sequence rank/select/access operations.
 ///
@@ -85,7 +85,11 @@ impl WaveletTree {
         symbols.dedup();
 
         let sigma = symbols.len() as u64;
-        let height = if sigma <= 1 { 1 } else { 64 - (sigma - 1).leading_zeros() as usize };
+        let height = if sigma <= 1 {
+            1
+        } else {
+            64 - (sigma - 1).leading_zeros() as usize
+        };
 
         let mut symbol_to_code = hashbrown::HashMap::with_capacity(symbols.len());
         for (code, &sym) in symbols.iter().enumerate() {
@@ -118,8 +122,12 @@ impl WaveletTree {
         }
 
         let mut levels = Vec::with_capacity(height);
-        let mut current_sequence: Vec<(u64, usize)> =
-            codes.iter().copied().enumerate().map(|(i, c)| (c, i)).collect();
+        let mut current_sequence: Vec<(u64, usize)> = codes
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(i, c)| (c, i))
+            .collect();
 
         for level in 0..height {
             let bit_pos = height - 1 - level;
@@ -412,7 +420,13 @@ mod tests {
             let count = wt.count(sym);
             for k in 0..count {
                 let pos = wt.select(sym, k).expect("select should succeed");
-                assert_eq!(wt.rank(sym, pos), k, "rank(select({})) mismatch for symbol {}", k, sym);
+                assert_eq!(
+                    wt.rank(sym, pos),
+                    k,
+                    "rank(select({})) mismatch for symbol {}",
+                    k,
+                    sym
+                );
                 assert_eq!(wt.access(pos), sym, "access mismatch at position {}", pos);
             }
         }

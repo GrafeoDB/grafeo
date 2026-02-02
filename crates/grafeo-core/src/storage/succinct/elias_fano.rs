@@ -34,8 +34,8 @@
 //! assert!(!ef.contains(999));
 //! ```
 
-use super::rank_select::SuccinctBitVector;
 use super::super::BitVector;
+use super::rank_select::SuccinctBitVector;
 
 /// Elias-Fano encoding for monotonically increasing u64 sequences.
 ///
@@ -166,7 +166,12 @@ impl EliasFano {
     /// Panics if index >= len().
     #[must_use]
     pub fn get(&self, index: usize) -> u64 {
-        assert!(index < self.n, "Index {} out of bounds (len={})", index, self.n);
+        assert!(
+            index < self.n,
+            "Index {} out of bounds (len={})",
+            index,
+            self.n
+        );
 
         // Find position in upper: select1(index) gives position of (index+1)-th 1-bit
         let upper_pos = self.upper.select1(index).expect("index within bounds");
@@ -273,11 +278,7 @@ impl EliasFano {
             }
         }
 
-        if lo < self.n {
-            Some(lo)
-        } else {
-            None
-        }
+        if lo < self.n { Some(lo) } else { None }
     }
 
     /// Returns an iterator over all values.

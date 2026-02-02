@@ -52,7 +52,11 @@ impl SuccinctPermutation {
             inverse[target] = i as u32;
         }
 
-        Self { n, forward, inverse }
+        Self {
+            n,
+            forward,
+            inverse,
+        }
     }
 
     /// Returns the number of elements in the permutation.

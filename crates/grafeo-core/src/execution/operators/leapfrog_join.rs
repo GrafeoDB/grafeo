@@ -9,8 +9,8 @@
 use grafeo_common::types::{EdgeId, LogicalType, NodeId, Value};
 
 use super::{Operator, OperatorError, OperatorResult};
-use crate::execution::chunk::DataChunkBuilder;
 use crate::execution::DataChunk;
+use crate::execution::chunk::DataChunkBuilder;
 use crate::index::trie::{LeapfrogJoin, TrieIndex};
 
 /// Row identifier for reconstructing output: (input_index, chunk_index, row_index).
@@ -194,13 +194,21 @@ impl LeapfrogJoinOperator {
                 for (input_idx, _child_iter) in child_iters.into_iter().enumerate() {
                     // The child iterator points to the second level of the trie
                     // We need to collect the edge IDs (our encoded row IDs) at this position
-                    self.collect_row_ids_at_key(&self.tries[input_idx], key, input_idx, &mut row_ids_per_input[input_idx]);
+                    self.collect_row_ids_at_key(
+                        &self.tries[input_idx],
+                        key,
+                        input_idx,
+                        &mut row_ids_per_input[input_idx],
+                    );
                 }
             }
 
             // Only add result if all inputs have matching rows
             if row_ids_per_input.iter().all(|ids| !ids.is_empty()) {
-                self.results.push(JoinResult { key, row_ids: row_ids_per_input });
+                self.results.push(JoinResult {
+                    key,
+                    row_ids: row_ids_per_input,
+                });
             }
 
             if !join.next() {

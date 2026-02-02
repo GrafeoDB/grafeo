@@ -216,7 +216,9 @@ impl Arena {
 
         // Try to allocate in the first chunk to get a stable offset
         let chunks = self.chunks.read();
-        let chunk = chunks.first().expect("Arena should have at least one chunk");
+        let chunk = chunks
+            .first()
+            .expect("Arena should have at least one chunk");
 
         let (offset, ptr) = chunk
             .try_alloc_with_offset(size, align)
@@ -240,7 +242,9 @@ impl Arena {
     #[cfg(feature = "tiered-storage")]
     pub unsafe fn read_at<T>(&self, offset: u32) -> &T {
         let chunks = self.chunks.read();
-        let chunk = chunks.first().expect("Arena should have at least one chunk");
+        let chunk = chunks
+            .first()
+            .expect("Arena should have at least one chunk");
         // SAFETY: Caller guarantees offset is valid and T matches stored type
         unsafe {
             let ptr = chunk.ptr.as_ptr().add(offset as usize).cast::<T>();
@@ -259,7 +263,9 @@ impl Arena {
     #[cfg(feature = "tiered-storage")]
     pub unsafe fn read_at_mut<T>(&self, offset: u32) -> &mut T {
         let chunks = self.chunks.read();
-        let chunk = chunks.first().expect("Arena should have at least one chunk");
+        let chunk = chunks
+            .first()
+            .expect("Arena should have at least one chunk");
         // SAFETY: Caller guarantees offset is valid, T matches, and no aliasing
         unsafe {
             let ptr = chunk.ptr.as_ptr().add(offset as usize).cast::<T>();

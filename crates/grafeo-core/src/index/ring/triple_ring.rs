@@ -551,14 +551,8 @@ mod tests {
         let ring = TripleRing::from_triples(triples.into_iter());
 
         // Count by subject
-        assert_eq!(
-            ring.count(&TriplePattern::with_subject(Term::iri("s1"))),
-            2
-        );
-        assert_eq!(
-            ring.count(&TriplePattern::with_subject(Term::iri("s2"))),
-            2
-        );
+        assert_eq!(ring.count(&TriplePattern::with_subject(Term::iri("s1"))), 2);
+        assert_eq!(ring.count(&TriplePattern::with_subject(Term::iri("s2"))), 2);
 
         // Count by predicate
         assert_eq!(
@@ -571,10 +565,7 @@ mod tests {
         );
 
         // Count by object
-        assert_eq!(
-            ring.count(&TriplePattern::with_object(Term::iri("o1"))),
-            2
-        );
+        assert_eq!(ring.count(&TriplePattern::with_object(Term::iri("o1"))), 2);
 
         // Count all
         assert_eq!(ring.count(&TriplePattern::any()), 4);

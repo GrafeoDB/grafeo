@@ -4,9 +4,9 @@
 //! when used directly for multi-way joins and cyclic patterns.
 
 use grafeo_common::types::LogicalType;
+use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{LeapfrogJoinOperator, Operator};
 use grafeo_core::execution::vector::ValueVector;
-use grafeo_core::execution::DataChunk;
 use grafeo_engine::GrafeoDB;
 
 /// Creates a chunk with a single Int64 column.

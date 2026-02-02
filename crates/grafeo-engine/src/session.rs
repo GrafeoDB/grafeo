@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use grafeo_common::types::{EdgeId, EpochId, NodeId, TxId, Value};
 use grafeo_common::utils::error::Result;
-use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
 use grafeo_core::graph::Direction;
+use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
 #[cfg(feature = "rdf")]
 use grafeo_core::graph::rdf::RdfStore;
 

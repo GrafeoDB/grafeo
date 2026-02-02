@@ -25,12 +25,12 @@ pub struct SuccinctPermutation {
 }
 
 impl SuccinctPermutation {
-    /// Creates a permutation from an array where perm[i] = j means
+    /// Creates a permutation from an array where `perm[i] = j` means
     /// position i maps to position j.
     ///
     /// # Arguments
     ///
-    /// * `permutation` - Array where permutation[i] gives the target of position i
+    /// * `permutation` - Array where `permutation[i]` gives the target of position i
     #[must_use]
     pub fn new(permutation: &[usize]) -> Self {
         let n = permutation.len();

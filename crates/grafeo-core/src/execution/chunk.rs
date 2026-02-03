@@ -5,10 +5,29 @@
 
 use super::selection::SelectionVector;
 use super::vector::ValueVector;
+use crate::index::ZoneMapEntry;
 use grafeo_common::types::LogicalType;
+use grafeo_common::utils::hash::FxHashMap;
 
 /// Default chunk size (number of tuples).
 pub const DEFAULT_CHUNK_SIZE: usize = 2048;
+
+/// Zone map hints for chunk-level predicate pruning.
+///
+/// When a scan operator loads a chunk, it can attach zone map statistics
+/// (min/max values) for each column. The filter operator can then skip
+/// the entire chunk without evaluating rows when the zone map proves
+/// no rows can match the predicate.
+///
+/// # Example
+///
+/// If filtering `age > 100` and the chunk's max age is 80, the entire
+/// chunk can be skipped because no row can possibly match.
+#[derive(Debug, Clone, Default)]
+pub struct ChunkZoneHints {
+    /// Zone map entries keyed by column index.
+    pub column_hints: FxHashMap<usize, ZoneMapEntry>,
+}
 
 /// A batch of rows stored column-wise for vectorized processing.
 ///
@@ -44,6 +63,8 @@ pub struct DataChunk {
     count: usize,
     /// Capacity of this chunk.
     capacity: usize,
+    /// Zone map hints for chunk-level filtering (optional).
+    zone_hints: Option<ChunkZoneHints>,
 }
 
 impl DataChunk {
@@ -55,6 +76,7 @@ impl DataChunk {
             selection: None,
             count: 0,
             capacity: 0,
+            zone_hints: None,
         }
     }
 
@@ -68,6 +90,7 @@ impl DataChunk {
             selection: None,
             count,
             capacity,
+            zone_hints: None,
         }
     }
 
@@ -90,6 +113,7 @@ impl DataChunk {
             selection: None,
             count: 0,
             capacity,
+            zone_hints: None,
         }
     }
 
@@ -168,6 +192,27 @@ impl DataChunk {
         self.selection = None;
     }
 
+    /// Sets zone map hints for this chunk.
+    ///
+    /// Zone map hints enable the filter operator to skip entire chunks
+    /// when predicates can't possibly match based on min/max statistics.
+    pub fn set_zone_hints(&mut self, hints: ChunkZoneHints) {
+        self.zone_hints = Some(hints);
+    }
+
+    /// Returns zone map hints if available.
+    ///
+    /// Used by the filter operator for chunk-level predicate pruning.
+    #[must_use]
+    pub fn zone_hints(&self) -> Option<&ChunkZoneHints> {
+        self.zone_hints.as_ref()
+    }
+
+    /// Clears zone map hints.
+    pub fn clear_zone_hints(&mut self) {
+        self.zone_hints = None;
+    }
+
     /// Sets the row count.
     pub fn set_count(&mut self, count: usize) {
         self.count = count;
@@ -179,6 +224,7 @@ impl DataChunk {
             col.clear();
         }
         self.selection = None;
+        self.zone_hints = None;
         self.count = 0;
     }
 
@@ -236,6 +282,7 @@ impl DataChunk {
                 selection: chunks[0].selection.clone(),
                 count: chunks[0].count,
                 capacity: chunks[0].capacity,
+                zone_hints: chunks[0].zone_hints.clone(),
             };
         }
 
@@ -271,6 +318,7 @@ impl DataChunk {
             selection: None,
             count: total_rows,
             capacity: total_rows,
+            zone_hints: None,
         }
     }
 
@@ -299,6 +347,7 @@ impl DataChunk {
             selection: None,
             count: selected.len(),
             capacity: selected.len(),
+            zone_hints: None,
         }
     }
 
@@ -334,6 +383,7 @@ impl DataChunk {
             selection: None,
             count: actual_count,
             capacity: actual_count,
+            zone_hints: None,
         }
     }
 
@@ -351,6 +401,7 @@ impl Clone for DataChunk {
             selection: self.selection.clone(),
             count: self.count,
             capacity: self.capacity,
+            zone_hints: self.zone_hints.clone(),
         }
     }
 }
@@ -564,5 +615,93 @@ mod tests {
 
         assert_eq!(chunk.row_count(), original_count);
         assert_eq!(chunk.column(0).unwrap().get_int64(0), Some(42));
+    }
+
+    #[test]
+    fn test_chunk_zone_hints_default() {
+        let hints = ChunkZoneHints::default();
+        assert!(hints.column_hints.is_empty());
+    }
+
+    #[test]
+    fn test_chunk_zone_hints_set_and_get() {
+        let schema = [LogicalType::Int64];
+        let mut chunk = DataChunk::with_schema(&schema);
+
+        // Initially no zone hints
+        assert!(chunk.zone_hints().is_none());
+
+        // Set zone hints
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(
+                grafeo_common::types::Value::Int64(10),
+                grafeo_common::types::Value::Int64(100),
+                0,
+                10,
+            ),
+        );
+        chunk.set_zone_hints(hints);
+
+        // Zone hints should now be present
+        assert!(chunk.zone_hints().is_some());
+        let retrieved = chunk.zone_hints().unwrap();
+        assert_eq!(retrieved.column_hints.len(), 1);
+        assert!(retrieved.column_hints.contains_key(&0));
+    }
+
+    #[test]
+    fn test_chunk_zone_hints_clear() {
+        let schema = [LogicalType::Int64];
+        let mut chunk = DataChunk::with_schema(&schema);
+
+        // Set zone hints
+        let hints = ChunkZoneHints::default();
+        chunk.set_zone_hints(hints);
+        assert!(chunk.zone_hints().is_some());
+
+        // Clear zone hints
+        chunk.clear_zone_hints();
+        assert!(chunk.zone_hints().is_none());
+    }
+
+    #[test]
+    fn test_chunk_zone_hints_preserved_on_clone() {
+        let schema = [LogicalType::Int64];
+        let mut chunk = DataChunk::with_schema(&schema);
+
+        // Set zone hints
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(
+                grafeo_common::types::Value::Int64(1),
+                grafeo_common::types::Value::Int64(10),
+                0,
+                10,
+            ),
+        );
+        chunk.set_zone_hints(hints);
+
+        // Clone and verify zone hints are preserved
+        let cloned = chunk.clone();
+        assert!(cloned.zone_hints().is_some());
+        assert_eq!(cloned.zone_hints().unwrap().column_hints.len(), 1);
+    }
+
+    #[test]
+    fn test_chunk_reset_clears_zone_hints() {
+        let schema = [LogicalType::Int64];
+        let mut chunk = DataChunk::with_schema(&schema);
+
+        // Set zone hints
+        let hints = ChunkZoneHints::default();
+        chunk.set_zone_hints(hints);
+        assert!(chunk.zone_hints().is_some());
+
+        // Reset should clear zone hints
+        chunk.reset();
+        assert!(chunk.zone_hints().is_none());
     }
 }

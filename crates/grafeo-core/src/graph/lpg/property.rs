@@ -228,6 +228,66 @@ impl<Id: EntityId> PropertyStorage<Id> {
         result
     }
 
+    /// Gets property values for multiple entities in a single lock acquisition.
+    ///
+    /// More efficient than calling [`Self::get`] in a loop because it acquires
+    /// the read lock only once.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use grafeo_core::graph::lpg::PropertyStorage;
+    /// use grafeo_common::types::{PropertyKey, Value};
+    /// use grafeo_common::NodeId;
+    ///
+    /// let storage: PropertyStorage<NodeId> = PropertyStorage::new();
+    /// let key = PropertyKey::new("age");
+    /// let ids = vec![NodeId(1), NodeId(2), NodeId(3)];
+    /// let values = storage.get_batch(&ids, &key);
+    /// // values[i] is the property value for ids[i], or None if not set
+    /// ```
+    #[must_use]
+    pub fn get_batch(&self, ids: &[Id], key: &PropertyKey) -> Vec<Option<Value>> {
+        let columns = self.columns.read();
+        match columns.get(key) {
+            Some(col) => ids.iter().map(|&id| col.get(id)).collect(),
+            None => vec![None; ids.len()],
+        }
+    }
+
+    /// Gets all properties for multiple entities efficiently.
+    ///
+    /// More efficient than calling [`Self::get_all`] in a loop because it
+    /// acquires the read lock only once.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use grafeo_core::graph::lpg::PropertyStorage;
+    /// use grafeo_common::types::{PropertyKey, Value};
+    /// use grafeo_common::NodeId;
+    ///
+    /// let storage: PropertyStorage<NodeId> = PropertyStorage::new();
+    /// let ids = vec![NodeId(1), NodeId(2)];
+    /// let all_props = storage.get_all_batch(&ids);
+    /// // all_props[i] is a HashMap of all properties for ids[i]
+    /// ```
+    #[must_use]
+    pub fn get_all_batch(&self, ids: &[Id]) -> Vec<FxHashMap<PropertyKey, Value>> {
+        let columns = self.columns.read();
+        ids.iter()
+            .map(|&id| {
+                let mut result = FxHashMap::default();
+                for (key, col) in columns.iter() {
+                    if let Some(value) = col.get(id) {
+                        result.insert(key.clone(), value);
+                    }
+                }
+                result
+            })
+            .collect()
+    }
+
     /// Returns the number of property columns.
     #[must_use]
     pub fn column_count(&self) -> usize {
@@ -1214,5 +1274,91 @@ mod tests {
 
         let usage = storage.memory_usage();
         assert!(usage > 0);
+    }
+
+    #[test]
+    fn test_get_batch_single_property() {
+        let storage: PropertyStorage<NodeId> = PropertyStorage::new();
+
+        let node1 = NodeId::new(1);
+        let node2 = NodeId::new(2);
+        let node3 = NodeId::new(3);
+        let age_key = PropertyKey::new("age");
+
+        storage.set(node1, age_key.clone(), 25i64.into());
+        storage.set(node2, age_key.clone(), 30i64.into());
+        // node3 has no age property
+
+        let ids = vec![node1, node2, node3];
+        let values = storage.get_batch(&ids, &age_key);
+
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0], Some(Value::Int64(25)));
+        assert_eq!(values[1], Some(Value::Int64(30)));
+        assert_eq!(values[2], None);
+    }
+
+    #[test]
+    fn test_get_batch_missing_column() {
+        let storage: PropertyStorage<NodeId> = PropertyStorage::new();
+
+        let node1 = NodeId::new(1);
+        let node2 = NodeId::new(2);
+        let missing_key = PropertyKey::new("nonexistent");
+
+        let ids = vec![node1, node2];
+        let values = storage.get_batch(&ids, &missing_key);
+
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0], None);
+        assert_eq!(values[1], None);
+    }
+
+    #[test]
+    fn test_get_batch_empty_ids() {
+        let storage: PropertyStorage<NodeId> = PropertyStorage::new();
+        let key = PropertyKey::new("any");
+
+        let values = storage.get_batch(&[], &key);
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn test_get_all_batch() {
+        let storage: PropertyStorage<NodeId> = PropertyStorage::new();
+
+        let node1 = NodeId::new(1);
+        let node2 = NodeId::new(2);
+        let node3 = NodeId::new(3);
+
+        storage.set(node1, PropertyKey::new("name"), "Alice".into());
+        storage.set(node1, PropertyKey::new("age"), 25i64.into());
+        storage.set(node2, PropertyKey::new("name"), "Bob".into());
+        // node3 has no properties
+
+        let ids = vec![node1, node2, node3];
+        let all_props = storage.get_all_batch(&ids);
+
+        assert_eq!(all_props.len(), 3);
+        assert_eq!(all_props[0].len(), 2); // name and age
+        assert_eq!(all_props[1].len(), 1); // name only
+        assert_eq!(all_props[2].len(), 0); // no properties
+
+        assert_eq!(
+            all_props[0].get(&PropertyKey::new("name")),
+            Some(&Value::String("Alice".into()))
+        );
+        assert_eq!(
+            all_props[1].get(&PropertyKey::new("name")),
+            Some(&Value::String("Bob".into()))
+        );
+    }
+
+    #[test]
+    fn test_get_all_batch_empty_ids() {
+        let storage: PropertyStorage<NodeId> = PropertyStorage::new();
+
+        let all_props = storage.get_all_batch(&[]);
+        assert!(all_props.is_empty());
     }
 }

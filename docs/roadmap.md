@@ -81,8 +81,9 @@ This roadmap outlines the planned development of Grafeo. Priorities may shift ba
 *Reach more developers*
 
 ### New Bindings (Experimental)
-- **Node.js / TypeScript** - native bindings with full type definitions
-- **WebAssembly (WASM)** - browser and edge runtime support
+- **Node.js / TypeScript** (`@grafeo-db/js`) - native bindings with full type definitions
+- **WebAssembly** (`@grafeo-db/wasm`) - raw WASM binary for edge runtimes
+- **Browser** (`@grafeo-db/web`) - IndexedDB persistence, Web Workers, React/Vue/Svelte integrations
 - **Go** - CGO bindings for cloud-native applications
 
 ### Stability

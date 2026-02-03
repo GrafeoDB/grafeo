@@ -307,6 +307,12 @@ nav:
       - grafeo-adapters: api/rust/adapters.md
       - grafeo-engine: api/rust/engine.md
 
+  - Ecosystem:
+    - ecosystem/index.md
+    - graph-bench: ecosystem/graph-bench.md
+    - anywidget-vector: ecosystem/anywidget-vector.md
+    - anywidget-graph: ecosystem/anywidget-graph.md
+
   - Comparisons:
     - comparisons/index.md
     - Cypher vs GQL: comparisons/cypher-vs-gql.md

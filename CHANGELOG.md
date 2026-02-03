@@ -2,6 +2,33 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.2.6] - 2026-02-04
+
+_Filter Performance & Batch Read Optimizations_
+
+### Added
+
+- **Chunk-Level Zone Map Filtering**: `ChunkZoneHints` struct for attaching zone map metadata to `DataChunk`
+  - Enables filter operators to skip entire chunks when predicates can't match
+  - `might_match_chunk()` method on `Predicate` trait for chunk-level pruning
+- **ComparisonPredicate Zone Map Support**: Implements `might_match_chunk()` for equality and range operators
+  - Uses `might_contain_equal()`, `might_contain_less_than()`, `might_contain_greater_than()`
+
+### Improved
+
+- **Batch Property Retrieval**: `PropertyStorage::get_batch()` and `get_all_batch()` now acquire lock once
+  - Previously acquired lock per-entity, now single lock for entire batch
+  - Reduces lock contention for bulk property reads
+- **FilterOperator**: Changed recursive `next()` call to loop (prevents stack overflow on many empty chunks)
+  - Added zone map check before row-by-row predicate evaluation
+
+### Documentation
+
+- **Added CONTRIBUTORS.md**: Feel free to join me and contribute to Grafeo's future!
+- Updated docs with references to other GrafeoDB projects
+
+---
+
 ## [0.2.5] - 2026-02-03
 
 _SPARQL Completeness & more performance Optimizations_

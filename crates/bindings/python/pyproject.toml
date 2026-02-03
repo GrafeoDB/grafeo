@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "grafeo"
-version = "0.2.5"
+version = "0.2.6"
 description = "A high-performance, embeddable graph database with Python bindings"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -47,7 +47,7 @@ dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "ty>=0.0.14",
-    "ruff>=0.14.14",
+    "ruff>=0.15.0",
 ]
 
 [project.scripts]

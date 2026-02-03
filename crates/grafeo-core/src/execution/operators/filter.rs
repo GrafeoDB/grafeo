@@ -1,7 +1,7 @@
 //! Filter operator for applying predicates.
 
 use super::{Operator, OperatorResult};
-use crate::execution::{DataChunk, SelectionVector};
+use crate::execution::{ChunkZoneHints, DataChunk, SelectionVector};
 use crate::graph::Direction;
 use crate::graph::lpg::LpgStore;
 use grafeo_common::types::{PropertyKey, Value};
@@ -11,8 +11,21 @@ use std::sync::Arc;
 
 /// A predicate for filtering rows.
 pub trait Predicate: Send + Sync {
-    /// Evaluates the predicate for a row.
+    /// Evaluates the predicate for a single row.
     fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool;
+
+    /// Returns `false` if zone map proves no rows in this chunk can match.
+    ///
+    /// This method enables chunk-level filtering optimization. When a chunk
+    /// has zone map hints attached, the filter operator calls this method
+    /// first. If it returns `false`, the entire chunk is skipped without
+    /// evaluating any rows.
+    ///
+    /// The default implementation is conservative and returns `true` (might match).
+    /// Predicates that support zone map checking should override this.
+    fn might_match_chunk(&self, _hints: &ChunkZoneHints) -> bool {
+        true
+    }
 }
 
 /// A comparison operator.
@@ -95,6 +108,21 @@ impl Predicate for ComparisonPredicate {
                 _ => false, // Ordering on booleans doesn't make sense
             },
             _ => false, // Type mismatch
+        }
+    }
+
+    fn might_match_chunk(&self, hints: &ChunkZoneHints) -> bool {
+        let Some(zone_map) = hints.column_hints.get(&self.column) else {
+            return true; // No zone map for this column = conservative
+        };
+
+        match self.op {
+            CompareOp::Eq => zone_map.might_contain_equal(&self.value),
+            CompareOp::Ne => true, // Ne is always conservative (might have non-matching values)
+            CompareOp::Lt => zone_map.might_contain_less_than(&self.value, false),
+            CompareOp::Le => zone_map.might_contain_less_than(&self.value, true),
+            CompareOp::Gt => zone_map.might_contain_greater_than(&self.value, false),
+            CompareOp::Ge => zone_map.might_contain_greater_than(&self.value, true),
         }
     }
 }
@@ -1077,24 +1105,33 @@ impl FilterOperator {
 
 impl Operator for FilterOperator {
     fn next(&mut self) -> OperatorResult {
-        // Get next chunk from child
-        let mut chunk = match self.child.next()? {
-            Some(c) => c,
-            None => return Ok(None),
-        };
+        loop {
+            // Get next chunk from child
+            let mut chunk = match self.child.next()? {
+                Some(c) => c,
+                None => return Ok(None),
+            };
 
-        // Apply predicate to create selection vector
-        let count = chunk.total_row_count();
-        let selection =
-            SelectionVector::from_predicate(count, |row| self.predicate.evaluate(&chunk, row));
+            // Zone map check: skip entire chunk if no rows can match
+            if let Some(hints) = chunk.zone_hints() {
+                if !self.predicate.might_match_chunk(hints) {
+                    continue; // Skip entire chunk - zone map proves no matches
+                }
+            }
 
-        // If nothing passes, skip to next chunk
-        if selection.is_empty() {
-            return self.next();
+            // Apply predicate to create selection vector
+            let count = chunk.total_row_count();
+            let selection =
+                SelectionVector::from_predicate(count, |row| self.predicate.evaluate(&chunk, row));
+
+            // If nothing passes, skip to next chunk
+            if selection.is_empty() {
+                continue;
+            }
+
+            chunk.set_selection(selection);
+            return Ok(Some(chunk));
         }
-
-        chunk.set_selection(selection);
-        Ok(Some(chunk))
     }
 
     fn reset(&mut self) {
@@ -1383,5 +1420,112 @@ mod tests {
         } else {
             panic!("Expected List value");
         }
+    }
+
+    #[test]
+    fn test_might_match_chunk_no_hints() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Eq, Value::Int64(50));
+        let hints = ChunkZoneHints::default();
+
+        // With no zone map for the column, should return true (conservative)
+        assert!(predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_equality_match() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Eq, Value::Int64(50));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(100), 0, 10),
+        );
+
+        // 50 is within [10, 100], should return true
+        assert!(predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_equality_no_match() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Eq, Value::Int64(200));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(100), 0, 10),
+        );
+
+        // 200 is outside [10, 100], should return false
+        assert!(!predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_greater_than_match() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Gt, Value::Int64(50));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(100), 0, 10),
+        );
+
+        // max=100 > 50, so some values might be > 50
+        assert!(predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_greater_than_no_match() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Gt, Value::Int64(200));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(100), 0, 10),
+        );
+
+        // max=100 < 200, so no values can be > 200
+        assert!(!predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_less_than_match() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Lt, Value::Int64(50));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(100), 0, 10),
+        );
+
+        // min=10 < 50, so some values might be < 50
+        assert!(predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_less_than_no_match() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Lt, Value::Int64(5));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(100), 0, 10),
+        );
+
+        // min=10 > 5, so no values can be < 5
+        assert!(!predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_not_equal_always_conservative() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Ne, Value::Int64(50));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(50), Value::Int64(50), 0, 10),
+        );
+
+        // Even if min=max=50, Ne is conservative and returns true
+        assert!(predicate.might_match_chunk(&hints));
     }
 }

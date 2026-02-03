@@ -894,9 +894,7 @@ impl LpgStore {
     /// ```
     #[must_use]
     pub fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
-        ids.iter()
-            .map(|&id| self.node_properties.get(id, key))
-            .collect()
+        self.node_properties.get_batch(ids, key)
     }
 
     /// Gets all properties for multiple nodes in a single batch operation.
@@ -905,9 +903,7 @@ impl LpgStore {
     /// More efficient than calling [`Self::get_node`] in a loop.
     #[must_use]
     pub fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
-        ids.iter()
-            .map(|&id| self.node_properties.get_all(id))
-            .collect()
+        self.node_properties.get_all_batch(ids)
     }
 
     /// Finds nodes where a property value is in a range.
@@ -3761,5 +3757,73 @@ mod tests {
         let bob = store.find_nodes_by_property("email", &Value::from("bob@example.com"));
         assert_eq!(bob.len(), 1);
         assert!(bob.contains(&n2));
+    }
+
+    #[test]
+    fn test_get_node_property_batch() {
+        let store = LpgStore::new();
+
+        let n1 = store.create_node(&["Person"]);
+        let n2 = store.create_node(&["Person"]);
+        let n3 = store.create_node(&["Person"]);
+
+        store.set_node_property(n1, "age", Value::from(25i64));
+        store.set_node_property(n2, "age", Value::from(30i64));
+        // n3 has no age property
+
+        let age_key = PropertyKey::new("age");
+        let values = store.get_node_property_batch(&[n1, n2, n3], &age_key);
+
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0], Some(Value::from(25i64)));
+        assert_eq!(values[1], Some(Value::from(30i64)));
+        assert_eq!(values[2], None);
+    }
+
+    #[test]
+    fn test_get_node_property_batch_empty() {
+        let store = LpgStore::new();
+        let key = PropertyKey::new("any");
+
+        let values = store.get_node_property_batch(&[], &key);
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn test_get_nodes_properties_batch() {
+        let store = LpgStore::new();
+
+        let n1 = store.create_node(&["Person"]);
+        let n2 = store.create_node(&["Person"]);
+        let n3 = store.create_node(&["Person"]);
+
+        store.set_node_property(n1, "name", Value::from("Alice"));
+        store.set_node_property(n1, "age", Value::from(25i64));
+        store.set_node_property(n2, "name", Value::from("Bob"));
+        // n3 has no properties
+
+        let all_props = store.get_nodes_properties_batch(&[n1, n2, n3]);
+
+        assert_eq!(all_props.len(), 3);
+        assert_eq!(all_props[0].len(), 2); // name and age
+        assert_eq!(all_props[1].len(), 1); // name only
+        assert_eq!(all_props[2].len(), 0); // no properties
+
+        assert_eq!(
+            all_props[0].get(&PropertyKey::new("name")),
+            Some(&Value::from("Alice"))
+        );
+        assert_eq!(
+            all_props[1].get(&PropertyKey::new("name")),
+            Some(&Value::from("Bob"))
+        );
+    }
+
+    #[test]
+    fn test_get_nodes_properties_batch_empty() {
+        let store = LpgStore::new();
+
+        let all_props = store.get_nodes_properties_batch(&[]);
+        assert!(all_props.is_empty());
     }
 }

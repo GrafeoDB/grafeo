@@ -4,7 +4,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.2.5] - 2026-02-03
 
-_SPARQL Completeness & Performance Optimizations_
+_SPARQL Completeness & more performance Optimizations_
 
 ### Added
 

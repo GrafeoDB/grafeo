@@ -11,12 +11,12 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
 repository = "https://github.com/GrafeoDB/grafeo"
-authors = ["Grafeo Contributors"]
+authors = ["S.T. Grond"]
 description = "A pure-Rust, high-performance, embeddable graph database"
 
 [workspace.dependencies]
@@ -45,7 +45,7 @@ dashmap = "6.1"
 
 # Memory & I/O
 memmap2 = "0.9"
-bytes = "1.9"
+bytes = "1.11.1"
 byteorder = "1.5"
 
 # Checksums & hashing
@@ -72,7 +72,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # Regex
-regex = "1.12"
+regex = "1.12.3"
 
 # Testing
 proptest = "1.6"

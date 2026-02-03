@@ -894,9 +894,7 @@ impl LpgStore {
     /// ```
     #[must_use]
     pub fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
-        ids.iter()
-            .map(|&id| self.node_properties.get(id, key))
-            .collect()
+        self.node_properties.get_batch(ids, key)
     }
 
     /// Gets all properties for multiple nodes in a single batch operation.
@@ -905,9 +903,7 @@ impl LpgStore {
     /// More efficient than calling [`Self::get_node`] in a loop.
     #[must_use]
     pub fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
-        ids.iter()
-            .map(|&id| self.node_properties.get_all(id))
-            .collect()
+        self.node_properties.get_all_batch(ids)
     }
 
     /// Finds nodes where a property value is in a range.

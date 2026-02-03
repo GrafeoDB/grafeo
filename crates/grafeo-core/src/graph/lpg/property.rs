@@ -228,6 +228,66 @@ impl<Id: EntityId> PropertyStorage<Id> {
         result
     }
 
+    /// Gets property values for multiple entities in a single lock acquisition.
+    ///
+    /// More efficient than calling [`Self::get`] in a loop because it acquires
+    /// the read lock only once.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use grafeo_core::graph::lpg::PropertyStorage;
+    /// use grafeo_common::types::{PropertyKey, Value};
+    /// use grafeo_common::NodeId;
+    ///
+    /// let storage: PropertyStorage<NodeId> = PropertyStorage::new();
+    /// let key = PropertyKey::new("age");
+    /// let ids = vec![NodeId(1), NodeId(2), NodeId(3)];
+    /// let values = storage.get_batch(&ids, &key);
+    /// // values[i] is the property value for ids[i], or None if not set
+    /// ```
+    #[must_use]
+    pub fn get_batch(&self, ids: &[Id], key: &PropertyKey) -> Vec<Option<Value>> {
+        let columns = self.columns.read();
+        match columns.get(key) {
+            Some(col) => ids.iter().map(|&id| col.get(id)).collect(),
+            None => vec![None; ids.len()],
+        }
+    }
+
+    /// Gets all properties for multiple entities efficiently.
+    ///
+    /// More efficient than calling [`Self::get_all`] in a loop because it
+    /// acquires the read lock only once.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use grafeo_core::graph::lpg::PropertyStorage;
+    /// use grafeo_common::types::{PropertyKey, Value};
+    /// use grafeo_common::NodeId;
+    ///
+    /// let storage: PropertyStorage<NodeId> = PropertyStorage::new();
+    /// let ids = vec![NodeId(1), NodeId(2)];
+    /// let all_props = storage.get_all_batch(&ids);
+    /// // all_props[i] is a HashMap of all properties for ids[i]
+    /// ```
+    #[must_use]
+    pub fn get_all_batch(&self, ids: &[Id]) -> Vec<FxHashMap<PropertyKey, Value>> {
+        let columns = self.columns.read();
+        ids.iter()
+            .map(|&id| {
+                let mut result = FxHashMap::default();
+                for (key, col) in columns.iter() {
+                    if let Some(value) = col.get(id) {
+                        result.insert(key.clone(), value);
+                    }
+                }
+                result
+            })
+            .collect()
+    }
+
     /// Returns the number of property columns.
     #[must_use]
     pub fn column_count(&self) -> usize {

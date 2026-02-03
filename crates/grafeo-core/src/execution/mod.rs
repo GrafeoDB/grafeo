@@ -42,7 +42,7 @@ pub use adaptive::{
     CardinalityTrackingOperator, CardinalityTrackingSink, CardinalityTrackingWrapper,
     ReoptimizationDecision, SharedAdaptiveContext, evaluate_reoptimization, execute_adaptive,
 };
-pub use chunk::DataChunk;
+pub use chunk::{ChunkZoneHints, DataChunk};
 pub use memory::{ExecutionMemoryContext, ExecutionMemoryContextBuilder};
 pub use parallel::{
     CloneableOperatorFactory, MorselScheduler, ParallelPipeline, ParallelPipelineConfig,

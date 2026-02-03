@@ -37,4 +37,4 @@ comment:
 ignore:
   - "**/tests/**"
   - "**/benches/**"
-  - "crates/bindings/python/**"  # Python bindings are integration-tested separately
+  - "crates/bindings/python/**"

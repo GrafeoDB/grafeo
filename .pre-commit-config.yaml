@@ -4,12 +4,12 @@
 # Docs: https://github.com/j178/prek
 
 repos:
-  # Built-in prek hooks (Rust-native, fast, no dependencies)
+  # Built-in prek hooks
   - repo: builtin
     hooks:
       - id: trailing-whitespace
         exclude: '\.md$'
-      - id: end-of-file-fixer
+      - id: end-of-file-fixers
         exclude: '\.md$'
       - id: check-yaml
       - id: check-toml
@@ -17,7 +17,7 @@ repos:
       - id: check-added-large-files
         args: ['--maxkb=1000']
 
-  # Typo checker (Rust-native, very fast)
+  # Typo checker
   - repo: https://github.com/crate-ci/typos
     rev: v1.29.4
     hooks:

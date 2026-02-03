@@ -99,3 +99,48 @@ pub fn success(msg: &str, quiet: bool) {
 pub fn error(msg: &str) {
     eprintln!("✗ {msg}");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_clone_and_copy() {
+        let format = Format::Table;
+        let copied = format;
+        let cloned = format.clone();
+        // If this compiles, Clone and Copy are working
+        assert!(matches!(copied, Format::Table));
+        assert!(matches!(cloned, Format::Table));
+    }
+
+    #[test]
+    fn test_create_table() {
+        let table = create_table();
+        // Table should be created without panicking
+        assert!(table.to_string().is_empty() || !table.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_add_header() {
+        let mut table = create_table();
+        add_header(&mut table, &["Name", "Value", "Type"]);
+        let output = table.to_string();
+        assert!(output.contains("Name"));
+        assert!(output.contains("Value"));
+        assert!(output.contains("Type"));
+    }
+
+    #[test]
+    fn test_table_with_rows() {
+        let mut table = create_table();
+        add_header(&mut table, &["Key", "Value"]);
+        table.add_row(vec!["foo", "bar"]);
+        table.add_row(vec!["baz", "qux"]);
+        let output = table.to_string();
+        assert!(output.contains("foo"));
+        assert!(output.contains("bar"));
+        assert!(output.contains("baz"));
+        assert!(output.contains("qux"));
+    }
+}

@@ -2,7 +2,7 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [Unreleased]
+## [0.2.6] - 2026-02-04
 
 _Filter Performance & Batch Read Optimizations_
 
@@ -13,7 +13,6 @@ _Filter Performance & Batch Read Optimizations_
   - `might_match_chunk()` method on `Predicate` trait for chunk-level pruning
 - **ComparisonPredicate Zone Map Support**: Implements `might_match_chunk()` for equality and range operators
   - Uses `might_contain_equal()`, `might_contain_less_than()`, `might_contain_greater_than()`
-- **Added CONTRIBUTORS.md**: Feel free to join me and contribute to Grafeo's future
 
 ### Improved
 
@@ -25,6 +24,7 @@ _Filter Performance & Batch Read Optimizations_
 
 ### Documentation
 
+- **Added CONTRIBUTORS.md**: Feel free to join me and contribute to Grafeo's future!
 - Updated docs with references to other GrafeoDB projects
 
 ---

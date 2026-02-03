@@ -616,4 +616,92 @@ mod tests {
         assert_eq!(chunk.row_count(), original_count);
         assert_eq!(chunk.column(0).unwrap().get_int64(0), Some(42));
     }
+
+    #[test]
+    fn test_chunk_zone_hints_default() {
+        let hints = ChunkZoneHints::default();
+        assert!(hints.column_hints.is_empty());
+    }
+
+    #[test]
+    fn test_chunk_zone_hints_set_and_get() {
+        let schema = [LogicalType::Int64];
+        let mut chunk = DataChunk::with_schema(&schema);
+
+        // Initially no zone hints
+        assert!(chunk.zone_hints().is_none());
+
+        // Set zone hints
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(
+                grafeo_common::types::Value::Int64(10),
+                grafeo_common::types::Value::Int64(100),
+                0,
+                10,
+            ),
+        );
+        chunk.set_zone_hints(hints);
+
+        // Zone hints should now be present
+        assert!(chunk.zone_hints().is_some());
+        let retrieved = chunk.zone_hints().unwrap();
+        assert_eq!(retrieved.column_hints.len(), 1);
+        assert!(retrieved.column_hints.contains_key(&0));
+    }
+
+    #[test]
+    fn test_chunk_zone_hints_clear() {
+        let schema = [LogicalType::Int64];
+        let mut chunk = DataChunk::with_schema(&schema);
+
+        // Set zone hints
+        let hints = ChunkZoneHints::default();
+        chunk.set_zone_hints(hints);
+        assert!(chunk.zone_hints().is_some());
+
+        // Clear zone hints
+        chunk.clear_zone_hints();
+        assert!(chunk.zone_hints().is_none());
+    }
+
+    #[test]
+    fn test_chunk_zone_hints_preserved_on_clone() {
+        let schema = [LogicalType::Int64];
+        let mut chunk = DataChunk::with_schema(&schema);
+
+        // Set zone hints
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(
+                grafeo_common::types::Value::Int64(1),
+                grafeo_common::types::Value::Int64(10),
+                0,
+                10,
+            ),
+        );
+        chunk.set_zone_hints(hints);
+
+        // Clone and verify zone hints are preserved
+        let cloned = chunk.clone();
+        assert!(cloned.zone_hints().is_some());
+        assert_eq!(cloned.zone_hints().unwrap().column_hints.len(), 1);
+    }
+
+    #[test]
+    fn test_chunk_reset_clears_zone_hints() {
+        let schema = [LogicalType::Int64];
+        let mut chunk = DataChunk::with_schema(&schema);
+
+        // Set zone hints
+        let hints = ChunkZoneHints::default();
+        chunk.set_zone_hints(hints);
+        assert!(chunk.zone_hints().is_some());
+
+        // Reset should clear zone hints
+        chunk.reset();
+        assert!(chunk.zone_hints().is_none());
+    }
 }

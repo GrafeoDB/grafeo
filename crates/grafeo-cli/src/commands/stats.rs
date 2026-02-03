@@ -85,3 +85,41 @@ pub fn run(path: &Path, format: OutputFormat, quiet: bool) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_bytes_bytes() {
+        assert_eq!(format_bytes(0), "0 bytes");
+        assert_eq!(format_bytes(1), "1 bytes");
+        assert_eq!(format_bytes(512), "512 bytes");
+        assert_eq!(format_bytes(1023), "1023 bytes");
+    }
+
+    #[test]
+    fn test_format_bytes_kilobytes() {
+        assert_eq!(format_bytes(1024), "1.00 KB");
+        assert_eq!(format_bytes(1536), "1.50 KB");
+        assert_eq!(format_bytes(10240), "10.00 KB");
+        assert_eq!(format_bytes(1024 * 1024 - 1), "1024.00 KB");
+    }
+
+    #[test]
+    fn test_format_bytes_megabytes() {
+        assert_eq!(format_bytes(1024 * 1024), "1.00 MB");
+        assert_eq!(format_bytes(1024 * 1024 * 5), "5.00 MB");
+        assert_eq!(format_bytes(1024 * 1024 * 100), "100.00 MB");
+    }
+
+    #[test]
+    fn test_format_bytes_gigabytes() {
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.00 GB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024 * 2), "2.00 GB");
+        assert_eq!(
+            format_bytes(1024 * 1024 * 1024 + 512 * 1024 * 1024),
+            "1.50 GB"
+        );
+    }
+}

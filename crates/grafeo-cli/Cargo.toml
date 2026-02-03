@@ -41,5 +41,8 @@ gql = ["grafeo-engine/gql"]
 rdf = ["grafeo-engine/rdf"]
 full = ["gql", "rdf"]
 
+[dev-dependencies]
+tempfile = "3.24"
+
 [lints]
 workspace = true

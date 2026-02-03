@@ -1421,4 +1421,111 @@ mod tests {
             panic!("Expected List value");
         }
     }
+
+    #[test]
+    fn test_might_match_chunk_no_hints() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Eq, Value::Int64(50));
+        let hints = ChunkZoneHints::default();
+
+        // With no zone map for the column, should return true (conservative)
+        assert!(predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_equality_match() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Eq, Value::Int64(50));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(100), 0, 10),
+        );
+
+        // 50 is within [10, 100], should return true
+        assert!(predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_equality_no_match() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Eq, Value::Int64(200));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(100), 0, 10),
+        );
+
+        // 200 is outside [10, 100], should return false
+        assert!(!predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_greater_than_match() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Gt, Value::Int64(50));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(100), 0, 10),
+        );
+
+        // max=100 > 50, so some values might be > 50
+        assert!(predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_greater_than_no_match() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Gt, Value::Int64(200));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(100), 0, 10),
+        );
+
+        // max=100 < 200, so no values can be > 200
+        assert!(!predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_less_than_match() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Lt, Value::Int64(50));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(100), 0, 10),
+        );
+
+        // min=10 < 50, so some values might be < 50
+        assert!(predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_less_than_no_match() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Lt, Value::Int64(5));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(100), 0, 10),
+        );
+
+        // min=10 > 5, so no values can be < 5
+        assert!(!predicate.might_match_chunk(&hints));
+    }
+
+    #[test]
+    fn test_might_match_chunk_not_equal_always_conservative() {
+        let predicate = ComparisonPredicate::new(0, CompareOp::Ne, Value::Int64(50));
+
+        let mut hints = ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(50), Value::Int64(50), 0, 10),
+        );
+
+        // Even if min=max=50, Ne is conservative and returns true
+        assert!(predicate.might_match_chunk(&hints));
+    }
 }

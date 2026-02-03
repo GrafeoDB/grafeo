@@ -31,7 +31,7 @@ _Filter Performance & Batch Read Optimizations_
 
 ## [0.2.5] - 2026-02-03
 
-_SPARQL Completeness & Performance Optimizations_
+_SPARQL Completeness & more performance Optimizations_
 
 ### Added
 

@@ -827,4 +827,229 @@ mod tests {
         let cc = closeness_centrality(&store, false);
         assert_eq!(cc.len(), 1);
     }
+
+    // ========================================================================
+    // Algorithm Wrapper Tests (for coverage of GraphAlgorithm trait impls)
+    // ========================================================================
+
+    #[test]
+    fn test_pagerank_algorithm_wrapper() {
+        let store = create_pagerank_graph();
+        let algo = PageRankAlgorithm;
+
+        // Test trait methods
+        assert_eq!(algo.name(), "pagerank");
+        assert!(!algo.description().is_empty());
+        assert_eq!(algo.parameters().len(), 3);
+
+        // Test execute with default params
+        let params = Parameters::new();
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 2); // node_id, pagerank
+        assert_eq!(result.row_count(), 3);
+
+        // Test execute with custom params
+        let mut params = Parameters::new();
+        params.set_float("damping", 0.9);
+        params.set_int("max_iterations", 50);
+        params.set_float("tolerance", 1e-4);
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.row_count(), 3);
+    }
+
+    #[test]
+    fn test_betweenness_algorithm_wrapper() {
+        let store = create_test_graph();
+        let algo = BetweennessCentralityAlgorithm;
+
+        // Test trait methods
+        assert_eq!(algo.name(), "betweenness_centrality");
+        assert!(!algo.description().is_empty());
+        assert_eq!(algo.parameters().len(), 1);
+
+        // Test execute with default params (normalized=true)
+        let params = Parameters::new();
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 2); // node_id, betweenness
+        assert_eq!(result.row_count(), 5);
+
+        // Test execute with normalized=false
+        let mut params = Parameters::new();
+        params.set_bool("normalized", false);
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.row_count(), 5);
+    }
+
+    #[test]
+    fn test_closeness_algorithm_wrapper() {
+        let store = create_test_graph();
+        let algo = ClosenessCentralityAlgorithm;
+
+        // Test trait methods
+        assert_eq!(algo.name(), "closeness_centrality");
+        assert!(!algo.description().is_empty());
+        assert_eq!(algo.parameters().len(), 1);
+
+        // Test execute with default params (wf_improved=false)
+        let params = Parameters::new();
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 2); // node_id, closeness
+        assert_eq!(result.row_count(), 5);
+
+        // Test execute with wf_improved=true
+        let mut params = Parameters::new();
+        params.set_bool("wf_improved", true);
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.row_count(), 5);
+    }
+
+    #[test]
+    fn test_degree_algorithm_wrapper() {
+        let store = create_test_graph();
+        let algo = DegreeCentralityAlgorithm;
+
+        // Test trait methods
+        assert_eq!(algo.name(), "degree_centrality");
+        assert!(!algo.description().is_empty());
+        assert_eq!(algo.parameters().len(), 1);
+
+        // Test execute with default params (normalized=false) - returns 4 columns
+        let params = Parameters::new();
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 4); // node_id, in_degree, out_degree, total_degree
+        assert_eq!(result.row_count(), 5);
+
+        // Test execute with normalized=true - returns 2 columns
+        let mut params = Parameters::new();
+        params.set_bool("normalized", true);
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 2); // node_id, degree_centrality
+        assert_eq!(result.row_count(), 5);
+    }
+
+    #[test]
+    fn test_betweenness_small_graph() {
+        // Test n <= 2 edge case
+        let store = LpgStore::new();
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        store.create_edge(a, b, "EDGE");
+
+        let scores = betweenness_centrality(&store, false);
+        assert_eq!(scores.len(), 2);
+        // With only 2 nodes, betweenness is 0 for both
+        assert_eq!(*scores.get(&a).unwrap(), 0.0);
+        assert_eq!(*scores.get(&b).unwrap(), 0.0);
+
+        let scores_norm = betweenness_centrality(&store, true);
+        assert_eq!(scores_norm.len(), 2);
+    }
+
+    #[test]
+    fn test_closeness_empty_graph() {
+        let store = LpgStore::new();
+        let scores = closeness_centrality(&store, false);
+        assert!(scores.is_empty());
+
+        let scores_wf = closeness_centrality(&store, true);
+        assert!(scores_wf.is_empty());
+    }
+
+    #[test]
+    fn test_closeness_single_node() {
+        let store = LpgStore::new();
+        let a = store.create_node(&["Node"]);
+
+        let scores = closeness_centrality(&store, false);
+        assert_eq!(scores.len(), 1);
+        assert_eq!(*scores.get(&a).unwrap(), 0.0);
+
+        let scores_wf = closeness_centrality(&store, true);
+        assert_eq!(scores_wf.len(), 1);
+        assert_eq!(*scores_wf.get(&a).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_degree_empty_graph() {
+        let store = LpgStore::new();
+        let result = degree_centrality(&store);
+        assert!(result.total_degree.is_empty());
+
+        let normalized = degree_centrality_normalized(&store);
+        assert!(normalized.is_empty());
+    }
+
+    #[test]
+    fn test_pagerank_convergence() {
+        // Test that PageRank converges with tight tolerance
+        let store = create_pagerank_graph();
+        let scores_tight = pagerank(&store, 0.85, 1000, 1e-10);
+        let scores_loose = pagerank(&store, 0.85, 1000, 1e-2);
+
+        // Both should produce valid results
+        assert_eq!(scores_tight.len(), 3);
+        assert_eq!(scores_loose.len(), 3);
+
+        // Tight tolerance should sum closer to 1.0
+        let sum_tight: f64 = scores_tight.values().sum();
+        let sum_loose: f64 = scores_loose.values().sum();
+        assert!((sum_tight - 1.0).abs() <= (sum_loose - 1.0).abs() + 0.001);
+    }
+
+    #[test]
+    fn test_pagerank_low_damping() {
+        // Test with low damping (more teleportation)
+        let store = create_pagerank_graph();
+        let scores_low = pagerank(&store, 0.5, 100, 1e-6);
+        let scores_high = pagerank(&store, 0.99, 100, 1e-6);
+
+        // Both should be valid
+        assert_eq!(scores_low.len(), 3);
+        assert_eq!(scores_high.len(), 3);
+
+        // Low damping should give more uniform distribution
+        let variance_low: f64 = {
+            let mean = scores_low.values().sum::<f64>() / 3.0;
+            scores_low
+                .values()
+                .map(|&v| (v - mean).powi(2))
+                .sum::<f64>()
+                / 3.0
+        };
+        let variance_high: f64 = {
+            let mean = scores_high.values().sum::<f64>() / 3.0;
+            scores_high
+                .values()
+                .map(|&v| (v - mean).powi(2))
+                .sum::<f64>()
+                / 3.0
+        };
+        assert!(variance_low <= variance_high + 0.01);
+    }
+
+    #[test]
+    fn test_betweenness_linear_graph() {
+        // Linear graph: A -> B -> C -> D
+        // B and C should have highest betweenness
+        let store = LpgStore::new();
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
+        let d = store.create_node(&["Node"]);
+
+        store.create_edge(a, b, "EDGE");
+        store.create_edge(b, c, "EDGE");
+        store.create_edge(c, d, "EDGE");
+
+        let scores = betweenness_centrality(&store, false);
+
+        // Middle nodes should have higher betweenness than endpoints
+        let bc_b = *scores.get(&b).unwrap();
+        let bc_c = *scores.get(&c).unwrap();
+        let bc_a = *scores.get(&a).unwrap();
+        let bc_d = *scores.get(&d).unwrap();
+
+        assert!(bc_b >= bc_a);
+        assert!(bc_c >= bc_d);
+    }
 }

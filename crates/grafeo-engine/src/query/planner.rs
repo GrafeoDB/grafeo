@@ -890,6 +890,11 @@ impl Planner {
             return Ok(result);
         }
 
+        // Try to use range optimization for range predicates (>, <, >=, <=)
+        if let Some(result) = self.try_plan_filter_with_range_index(filter)? {
+            return Ok(result);
+        }
+
         // Plan the input operator first
         let (input_op, columns) = self.plan_operator(&filter.input)?;
 
@@ -1128,6 +1133,210 @@ impl Planner {
             ) => Some((variable.clone(), property.clone(), val.clone())),
             _ => None,
         }
+    }
+
+    /// Tries to optimize a filter using range queries on properties.
+    ///
+    /// This optimization is applied when:
+    /// - The input is a simple NodeScan (no nested operations)
+    /// - The predicate contains range comparisons (>, <, >=, <=)
+    /// - The same variable and property are being filtered
+    ///
+    /// Handles both simple range predicates (`n.age > 30`) and BETWEEN patterns
+    /// (`n.age >= 30 AND n.age <= 50`).
+    ///
+    /// Returns `Ok(Some((operator, columns)))` if optimization was applied,
+    /// `Ok(None)` if not applicable, or `Err` on error.
+    fn try_plan_filter_with_range_index(
+        &self,
+        filter: &FilterOp,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        // Only optimize if input is a simple NodeScan (not nested)
+        let (scan_variable, scan_label) = match filter.input.as_ref() {
+            LogicalOperator::NodeScan(scan) if scan.input.is_none() => {
+                (scan.variable.clone(), scan.label.clone())
+            }
+            _ => return Ok(None),
+        };
+
+        // Try to extract BETWEEN pattern first (more efficient)
+        if let Some((variable, property, min, max, min_inc, max_inc)) =
+            self.extract_between_predicate(&filter.predicate)
+        {
+            if variable == scan_variable {
+                return self.plan_range_filter(
+                    &scan_variable,
+                    &scan_label,
+                    &property,
+                    Some(&min),
+                    Some(&max),
+                    min_inc,
+                    max_inc,
+                );
+            }
+        }
+
+        // Try to extract simple range predicate
+        if let Some((variable, property, op, value)) =
+            self.extract_range_predicate(&filter.predicate)
+        {
+            if variable == scan_variable {
+                let (min, max, min_inc, max_inc) = match op {
+                    BinaryOp::Lt => (None, Some(value), false, false),
+                    BinaryOp::Le => (None, Some(value), false, true),
+                    BinaryOp::Gt => (Some(value), None, false, false),
+                    BinaryOp::Ge => (Some(value), None, true, false),
+                    _ => return Ok(None),
+                };
+                return self.plan_range_filter(
+                    &scan_variable,
+                    &scan_label,
+                    &property,
+                    min.as_ref(),
+                    max.as_ref(),
+                    min_inc,
+                    max_inc,
+                );
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Plans a range filter using `find_nodes_in_range`.
+    fn plan_range_filter(
+        &self,
+        scan_variable: &str,
+        scan_label: &Option<String>,
+        property: &str,
+        min: Option<&Value>,
+        max: Option<&Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        // Use the store's range query method
+        let mut matching_nodes =
+            self.store
+                .find_nodes_in_range(property, min, max, min_inclusive, max_inclusive);
+
+        // If there's a label filter, also filter by label
+        if let Some(label) = scan_label {
+            let label_nodes: std::collections::HashSet<_> =
+                self.store.nodes_by_label(label).into_iter().collect();
+            matching_nodes.retain(|n| label_nodes.contains(n));
+        }
+
+        // Create a NodeListOperator with the matching nodes
+        let node_list_op = Box::new(NodeListOperator::new(matching_nodes, 2048));
+        let columns = vec![scan_variable.to_string()];
+
+        Ok(Some((node_list_op, columns)))
+    }
+
+    /// Extracts a simple range predicate (>, <, >=, <=) from an expression.
+    ///
+    /// Returns `(variable, property, operator, value)` if found.
+    fn extract_range_predicate(
+        &self,
+        predicate: &LogicalExpression,
+    ) -> Option<(String, String, BinaryOp, Value)> {
+        match predicate {
+            LogicalExpression::Binary { left, op, right } => {
+                match op {
+                    BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+                        // Try property on left: n.age > 30
+                        if let (
+                            LogicalExpression::Property { variable, property },
+                            LogicalExpression::Literal(val),
+                        ) = (left.as_ref(), right.as_ref())
+                        {
+                            return Some((variable.clone(), property.clone(), *op, val.clone()));
+                        }
+
+                        // Try property on right: 30 < n.age (flip operator)
+                        if let (
+                            LogicalExpression::Literal(val),
+                            LogicalExpression::Property { variable, property },
+                        ) = (left.as_ref(), right.as_ref())
+                        {
+                            let flipped_op = match op {
+                                BinaryOp::Lt => BinaryOp::Gt,
+                                BinaryOp::Le => BinaryOp::Ge,
+                                BinaryOp::Gt => BinaryOp::Lt,
+                                BinaryOp::Ge => BinaryOp::Le,
+                                _ => return None,
+                            };
+                            return Some((
+                                variable.clone(),
+                                property.clone(),
+                                flipped_op,
+                                val.clone(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Extracts a BETWEEN pattern from compound predicates.
+    ///
+    /// Recognizes patterns like:
+    /// - `n.age >= 30 AND n.age <= 50`
+    /// - `n.age > 30 AND n.age < 50`
+    ///
+    /// Returns `(variable, property, min_value, max_value, min_inclusive, max_inclusive)`.
+    fn extract_between_predicate(
+        &self,
+        predicate: &LogicalExpression,
+    ) -> Option<(String, String, Value, Value, bool, bool)> {
+        // Must be an AND expression
+        let (left, right) = match predicate {
+            LogicalExpression::Binary {
+                left,
+                op: BinaryOp::And,
+                right,
+            } => (left.as_ref(), right.as_ref()),
+            _ => return None,
+        };
+
+        // Extract range predicates from both sides
+        let left_range = self.extract_range_predicate(left);
+        let right_range = self.extract_range_predicate(right);
+
+        let (left_var, left_prop, left_op, left_val) = left_range?;
+        let (right_var, right_prop, right_op, right_val) = right_range?;
+
+        // Must be same variable and property
+        if left_var != right_var || left_prop != right_prop {
+            return None;
+        }
+
+        // Determine which is lower bound and which is upper bound
+        let (min_val, max_val, min_inc, max_inc) = match (left_op, right_op) {
+            // n.x >= min AND n.x <= max
+            (BinaryOp::Ge, BinaryOp::Le) => (left_val, right_val, true, true),
+            // n.x >= min AND n.x < max
+            (BinaryOp::Ge, BinaryOp::Lt) => (left_val, right_val, true, false),
+            // n.x > min AND n.x <= max
+            (BinaryOp::Gt, BinaryOp::Le) => (left_val, right_val, false, true),
+            // n.x > min AND n.x < max
+            (BinaryOp::Gt, BinaryOp::Lt) => (left_val, right_val, false, false),
+            // Reversed order: n.x <= max AND n.x >= min
+            (BinaryOp::Le, BinaryOp::Ge) => (right_val, left_val, true, true),
+            // n.x < max AND n.x >= min
+            (BinaryOp::Lt, BinaryOp::Ge) => (right_val, left_val, true, false),
+            // n.x <= max AND n.x > min
+            (BinaryOp::Le, BinaryOp::Gt) => (right_val, left_val, false, true),
+            // n.x < max AND n.x > min
+            (BinaryOp::Lt, BinaryOp::Gt) => (right_val, left_val, false, false),
+            _ => return None,
+        };
+
+        Some((left_var, left_prop, min_val, max_val, min_inc, max_inc))
     }
 
     /// Plans a LIMIT operator.

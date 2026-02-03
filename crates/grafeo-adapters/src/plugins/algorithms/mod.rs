@@ -33,6 +33,7 @@
 //! ```
 
 mod centrality;
+mod clustering;
 mod community;
 mod components;
 mod flow;
@@ -68,6 +69,12 @@ pub use centrality::{
     degree_centrality_normalized, pagerank,
 };
 
+// Clustering algorithms
+pub use clustering::{
+    ClusteringCoefficientResult, clustering_coefficient, clustering_coefficient_parallel,
+    global_clustering_coefficient, local_clustering_coefficient, total_triangles, triangle_count,
+};
+
 // Community detection algorithms
 pub use community::{LouvainResult, community_count, label_propagation, louvain};
 
@@ -85,6 +92,7 @@ pub use centrality::{
     BetweennessCentralityAlgorithm, ClosenessCentralityAlgorithm, DegreeCentralityAlgorithm,
     PageRankAlgorithm,
 };
+pub use clustering::ClusteringCoefficientAlgorithm;
 pub use community::{LabelPropagationAlgorithm, LouvainAlgorithm};
 pub use components::{
     ConnectedComponentsAlgorithm, StronglyConnectedComponentsAlgorithm, TopologicalSortAlgorithm,

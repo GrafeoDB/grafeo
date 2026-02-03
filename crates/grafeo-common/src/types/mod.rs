@@ -16,4 +16,4 @@ mod value;
 pub use id::{EdgeId, EdgeTypeId, EpochId, IndexId, LabelId, NodeId, PropertyKeyId, TxId};
 pub use logical_type::LogicalType;
 pub use timestamp::Timestamp;
-pub use value::{HashableValue, PropertyKey, Value};
+pub use value::{HashableValue, OrderableValue, OrderedFloat64, PropertyKey, Value};

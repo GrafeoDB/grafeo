@@ -112,10 +112,47 @@ cargo test -- --nocapture
 
 # Run a specific test
 cargo test test_name -- --nocapture
-
-# Run tests with coverage (requires cargo-tarpaulin)
-cargo tarpaulin --workspace --out Html
 ```
+
+## Code Coverage
+
+We use [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) for code coverage.
+
+### Installation
+
+```bash
+cargo install cargo-llvm-cov
+```
+
+### Running Coverage
+
+```bash
+# Full workspace coverage with summary
+cargo llvm-cov --all-features --workspace
+
+# Coverage for a specific crate
+cargo llvm-cov -p grafeo-core --all-features
+
+# Generate HTML report
+cargo llvm-cov --all-features --workspace --html
+# Open target/llvm-cov/html/index.html
+
+# Generate LCOV report (for CI/Codecov)
+cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+
+# Show only uncovered lines
+cargo llvm-cov --all-features --workspace --show-missing-lines
+```
+
+### Coverage Targets
+
+| Crate           | Target |
+| --------------- | ------ |
+| grafeo-common   | 80%    |
+| grafeo-core     | 75%    |
+| grafeo-adapters | 80%    |
+| grafeo-engine   | 75%    |
+| Overall         | 75%    |
 
 ### Python Tests
 
@@ -180,9 +217,12 @@ prek install
 
 # Run manually on all files
 prek run --all-files
+
+# Run coverage check (manual hook, not run on every commit)
+prek run cargo-llvm-cov
 ```
 
-This runs `cargo fmt`, `cargo clippy`, and file checks automatically before each commit.
+This runs `cargo fmt`, `cargo clippy`, `cargo deny`, and file checks automatically before each commit. The coverage check is a manual hook since it's slow.
 
 ## Running Benchmarks
 

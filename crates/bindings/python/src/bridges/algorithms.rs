@@ -612,6 +612,96 @@ impl PyAlgorithms {
     }
 
     // ==========================================================================
+    // Clustering Algorithms
+    // ==========================================================================
+
+    /// Compute local and global clustering coefficients.
+    ///
+    /// The clustering coefficient measures how close a node's neighbors are
+    /// to being a complete graph (clique).
+    ///
+    /// Args:
+    ///     parallel: Enable parallel computation (default: True)
+    ///
+    /// Returns:
+    ///     Dict with 'coefficients', 'triangle_counts', 'total_triangles',
+    ///     and 'global_coefficient' keys
+    #[pyo3(signature = (parallel=true))]
+    fn clustering_coefficient(&self, parallel: bool, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let db = self.db.read();
+        let store = db.store();
+
+        let result = if parallel {
+            algorithms::clustering_coefficient_parallel(store, 50)
+        } else {
+            algorithms::clustering_coefficient(store)
+        };
+
+        let coefficients: HashMap<u64, f64> = result
+            .coefficients
+            .into_iter()
+            .map(|(n, c)| (n.0, c))
+            .collect();
+        let triangle_counts: HashMap<u64, u64> = result
+            .triangle_counts
+            .into_iter()
+            .map(|(n, t)| (n.0, t))
+            .collect();
+
+        let dict = PyDict::new(py);
+        dict.set_item("coefficients", coefficients.into_pyobject(py)?)?;
+        dict.set_item("triangle_counts", triangle_counts.into_pyobject(py)?)?;
+        dict.set_item("total_triangles", result.total_triangles)?;
+        dict.set_item("global_coefficient", result.global_coefficient)?;
+
+        Ok(dict.into_any().unbind())
+    }
+
+    /// Count the number of triangles containing each node.
+    ///
+    /// Returns:
+    ///     Dict mapping node ID to triangle count
+    fn triangle_count(&self) -> PyResult<HashMap<u64, u64>> {
+        let db = self.db.read();
+        let store = db.store();
+        let result = algorithms::triangle_count(store);
+        Ok(result.into_iter().map(|(n, t)| (n.0, t)).collect())
+    }
+
+    /// Get the total number of unique triangles in the graph.
+    ///
+    /// Each triangle is counted exactly once.
+    ///
+    /// Returns:
+    ///     Total unique triangle count
+    fn total_triangles(&self) -> PyResult<u64> {
+        let db = self.db.read();
+        let store = db.store();
+        Ok(algorithms::total_triangles(store))
+    }
+
+    /// Compute the global (average) clustering coefficient.
+    ///
+    /// Returns:
+    ///     Average clustering coefficient across all nodes (0.0 to 1.0)
+    fn global_clustering_coefficient(&self) -> PyResult<f64> {
+        let db = self.db.read();
+        let store = db.store();
+        Ok(algorithms::global_clustering_coefficient(store))
+    }
+
+    /// Compute local clustering coefficients for each node.
+    ///
+    /// Returns:
+    ///     Dict mapping node ID to local clustering coefficient (0.0 to 1.0)
+    fn local_clustering_coefficient(&self) -> PyResult<HashMap<u64, f64>> {
+        let db = self.db.read();
+        let store = db.store();
+        let result = algorithms::local_clustering_coefficient(store);
+        Ok(result.into_iter().map(|(n, c)| (n.0, c)).collect())
+    }
+
+    // ==========================================================================
     // Structure Analysis
     // ==========================================================================
 

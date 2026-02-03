@@ -8,6 +8,7 @@ _Filter Performance & Batch Read Optimizations_
 
 ### Added
 
+- **Local Clustering Coefficient Algorithm**: Triangle counting and clustering coefficients with parallel rayon execution
 - **Chunk-Level Zone Map Filtering**: `ChunkZoneHints` struct for attaching zone map metadata to `DataChunk`
   - Enables filter operators to skip entire chunks when predicates can't match
   - `might_match_chunk()` method on `Predicate` trait for chunk-level pruning

@@ -47,6 +47,16 @@ repos:
         files: ^Cargo\.(toml|lock)$
         pass_filenames: false
 
+      # Coverage check - manual only (too slow for every commit)
+      # Run with: prek run cargo-llvm-cov
+      - id: cargo-llvm-cov
+        name: cargo llvm-cov
+        entry: cargo llvm-cov --all-features --workspace --fail-under-lines 70
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [manual]
+
   # Python hooks
   - repo: local
     hooks:

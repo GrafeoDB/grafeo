@@ -1250,12 +1250,7 @@ impl Planner {
                             LogicalExpression::Literal(val),
                         ) = (left.as_ref(), right.as_ref())
                         {
-                            return Some((
-                                variable.clone(),
-                                property.clone(),
-                                *op,
-                                val.clone(),
-                            ));
+                            return Some((variable.clone(), property.clone(), *op, val.clone()));
                         }
 
                         // Try property on right: 30 < n.age (flip operator)

@@ -474,7 +474,9 @@ impl Ord for OrderedFloat64 {
             (false, true) => std::cmp::Ordering::Less,
             (false, false) => {
                 // Normal comparison for non-NaN values
-                self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+                self.0
+                    .partial_cmp(&other.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }
         }
     }

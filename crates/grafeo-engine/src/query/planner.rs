@@ -34,6 +34,14 @@ use std::sync::Arc;
 
 use crate::transaction::TransactionManager;
 
+/// Range bounds for property-based range queries.
+struct RangeBounds<'a> {
+    min: Option<&'a Value>,
+    max: Option<&'a Value>,
+    min_inclusive: bool,
+    max_inclusive: bool,
+}
+
 /// Converts a logical plan to a physical operator tree.
 pub struct Planner {
     /// The graph store to scan from.
@@ -1168,10 +1176,12 @@ impl Planner {
                     &scan_variable,
                     &scan_label,
                     &property,
-                    Some(&min),
-                    Some(&max),
-                    min_inc,
-                    max_inc,
+                    RangeBounds {
+                        min: Some(&min),
+                        max: Some(&max),
+                        min_inclusive: min_inc,
+                        max_inclusive: max_inc,
+                    },
                 );
             }
         }
@@ -1192,10 +1202,12 @@ impl Planner {
                     &scan_variable,
                     &scan_label,
                     &property,
-                    min.as_ref(),
-                    max.as_ref(),
-                    min_inc,
-                    max_inc,
+                    RangeBounds {
+                        min: min.as_ref(),
+                        max: max.as_ref(),
+                        min_inclusive: min_inc,
+                        max_inclusive: max_inc,
+                    },
                 );
             }
         }
@@ -1209,15 +1221,16 @@ impl Planner {
         scan_variable: &str,
         scan_label: &Option<String>,
         property: &str,
-        min: Option<&Value>,
-        max: Option<&Value>,
-        min_inclusive: bool,
-        max_inclusive: bool,
+        bounds: RangeBounds<'_>,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
         // Use the store's range query method
-        let mut matching_nodes =
-            self.store
-                .find_nodes_in_range(property, min, max, min_inclusive, max_inclusive);
+        let mut matching_nodes = self.store.find_nodes_in_range(
+            property,
+            bounds.min,
+            bounds.max,
+            bounds.min_inclusive,
+            bounds.max_inclusive,
+        );
 
         // If there's a label filter, also filter by label
         if let Some(label) = scan_label {

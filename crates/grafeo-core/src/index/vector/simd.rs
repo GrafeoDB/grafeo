@@ -46,6 +46,7 @@ pub fn has_sse() -> bool {
 /// Returns true if NEON instructions are available (always true on aarch64).
 #[cfg(target_arch = "aarch64")]
 #[inline]
+#[allow(dead_code)]
 pub fn has_neon() -> bool {
     true // NEON is mandatory on aarch64
 }
@@ -71,6 +72,7 @@ pub fn has_neon() -> bool {
 
 /// Returns the best available SIMD instruction set name.
 #[must_use]
+#[allow(unreachable_code)]
 pub fn simd_support() -> &'static str {
     #[cfg(target_arch = "x86_64")]
     {
@@ -107,6 +109,7 @@ pub fn compute_distance_simd(a: &[f32], b: &[f32], metric: DistanceMetric) -> f3
 
 /// SIMD-accelerated dot product.
 #[inline]
+#[allow(unreachable_code)]
 pub fn dot_product_simd(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -132,6 +135,7 @@ pub fn dot_product_simd(a: &[f32], b: &[f32]) -> f32 {
 
 /// SIMD-accelerated squared Euclidean distance.
 #[inline]
+#[allow(unreachable_code)]
 pub fn euclidean_distance_squared_simd(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -159,6 +163,7 @@ pub fn euclidean_distance_simd(a: &[f32], b: &[f32]) -> f32 {
 
 /// SIMD-accelerated cosine distance.
 #[inline]
+#[allow(unreachable_code)]
 pub fn cosine_distance_simd(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -180,6 +185,7 @@ pub fn cosine_distance_simd(a: &[f32], b: &[f32]) -> f32 {
 
 /// SIMD-accelerated Manhattan distance.
 #[inline]
+#[allow(unreachable_code)]
 pub fn manhattan_distance_simd(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {

@@ -56,6 +56,7 @@
 //! println!("Processed {} rows", result.rows_processed);
 //! ```
 
+pub mod fold;
 mod merge;
 mod morsel;
 mod pipeline;
@@ -63,6 +64,10 @@ mod scheduler;
 mod source;
 
 // Re-export main types
+pub use fold::{
+    Mergeable, fold_reduce, fold_reduce_with, parallel_count, parallel_max, parallel_min,
+    parallel_partition, parallel_stats, parallel_sum, parallel_sum_i64, parallel_try_collect,
+};
 pub use merge::{
     MergeableAccumulator, MergeableOperator, SortKey, concat_parallel_results,
     merge_distinct_results, merge_sorted_chunks, merge_sorted_runs, rows_to_chunks,

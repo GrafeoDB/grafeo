@@ -33,7 +33,7 @@ This roadmap outlines the planned development of Grafeo. Priorities may shift ba
 
 ---
 
-## 0.2.x - Performance (Current)
+## 0.2.x - Performance (Complete)
 
 *Competitive with the fastest graph databases*
 
@@ -76,17 +76,23 @@ This roadmap outlines the planned development of Grafeo. Priorities may shift ba
 
 ---
 
-## 0.4.x - Language Bindings
+## 0.4.x - Developer Accessibility
 
 *Reach more developers*
 
 ### New Bindings (Experimental)
+
 - **Node.js / TypeScript** (`@grafeo-db/js`) - native bindings with full type definitions
 - **WebAssembly** (`@grafeo-db/wasm`) - raw WASM binary for edge runtimes
 - **Browser** (`@grafeo-db/web`) - IndexedDB persistence, Web Workers, React/Vue/Svelte integrations
 - **Go** - CGO bindings for cloud-native applications
 
-### Stability
+### Query Languages
+
+- **SQL/PGQ** (SQL:2023) - GRAPH_TABLE function for SQL-native graph queries
+
+### Quality
+
 - Continued bug fixes
 - Stricter linting rules
 - Performance tuning based on real-world usage

@@ -15,6 +15,7 @@ use crate::graph::Direction;
 use crate::index::adjacency::ChunkedAdjacency;
 use crate::index::zone_map::ZoneMapEntry;
 use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
+use arcstr::ArcStr;
 use dashmap::DashMap;
 #[cfg(not(feature = "tiered-storage"))]
 use grafeo_common::mvcc::VersionChain;
@@ -22,6 +23,7 @@ use grafeo_common::types::{EdgeId, EpochId, HashableValue, NodeId, PropertyKey, 
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use parking_lot::RwLock;
 use std::cmp::Ordering as CmpOrdering;
+#[cfg(feature = "tiered-storage")]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -128,6 +130,37 @@ impl Default for LpgStoreConfig {
 ///     println!("Alice knows node {:?}", neighbor);
 /// }
 /// ```
+///
+/// # Lock Ordering
+///
+/// `LpgStore` contains multiple `RwLock` fields that must be acquired in a
+/// consistent order to prevent deadlocks. Always acquire locks in this order:
+///
+/// ## Level 1 - Entity Storage (mutually exclusive via feature flag)
+/// 1. `nodes` / `node_versions`
+/// 2. `edges` / `edge_versions`
+///
+/// ## Level 2 - Catalogs (acquire as pairs when writing)
+/// 3. `label_to_id` + `id_to_label`
+/// 4. `edge_type_to_id` + `id_to_edge_type`
+///
+/// ## Level 3 - Indexes
+/// 5. `label_index`
+/// 6. `node_labels`
+/// 7. `property_indexes`
+///
+/// ## Level 4 - Statistics
+/// 8. `statistics`
+///
+/// ## Level 5 - Nested Locks (internal to other structs)
+/// 9. `PropertyStorage::columns` (via `node_properties`/`edge_properties`)
+/// 10. `ChunkedAdjacency::lists` (via `forward_adj`/`backward_adj`)
+///
+/// ## Rules
+/// - Catalog pairs must be acquired together when writing.
+/// - Never hold entity locks while acquiring catalog locks in a different scope.
+/// - Statistics lock is always last.
+/// - Read locks are generally safe, but avoid read-to-write upgrades.
 pub struct LpgStore {
     /// Configuration.
     #[allow(dead_code)]
@@ -135,11 +168,13 @@ pub struct LpgStore {
 
     /// Node records indexed by NodeId, with version chains for MVCC.
     /// Used when `tiered-storage` feature is disabled.
+    /// Lock order: 1
     #[cfg(not(feature = "tiered-storage"))]
     nodes: RwLock<FxHashMap<NodeId, VersionChain<NodeRecord>>>,
 
     /// Edge records indexed by EdgeId, with version chains for MVCC.
     /// Used when `tiered-storage` feature is disabled.
+    /// Lock order: 2
     #[cfg(not(feature = "tiered-storage"))]
     edges: RwLock<FxHashMap<EdgeId, VersionChain<EdgeRecord>>>,
 
@@ -151,11 +186,13 @@ pub struct LpgStore {
 
     /// Node version indexes - store metadata and arena offsets.
     /// The actual NodeRecord data is stored in the arena.
+    /// Lock order: 1
     #[cfg(feature = "tiered-storage")]
     node_versions: RwLock<FxHashMap<NodeId, VersionIndex>>,
 
     /// Edge version indexes - store metadata and arena offsets.
     /// The actual EdgeRecord data is stored in the arena.
+    /// Lock order: 2
     #[cfg(feature = "tiered-storage")]
     edge_versions: RwLock<FxHashMap<EdgeId, VersionIndex>>,
 
@@ -171,16 +208,20 @@ pub struct LpgStore {
     edge_properties: PropertyStorage<EdgeId>,
 
     /// Label name to ID mapping.
-    label_to_id: RwLock<FxHashMap<Arc<str>, u32>>,
+    /// Lock order: 3 (acquire with id_to_label)
+    label_to_id: RwLock<FxHashMap<ArcStr, u32>>,
 
     /// Label ID to name mapping.
-    id_to_label: RwLock<Vec<Arc<str>>>,
+    /// Lock order: 3 (acquire with label_to_id)
+    id_to_label: RwLock<Vec<ArcStr>>,
 
     /// Edge type name to ID mapping.
-    edge_type_to_id: RwLock<FxHashMap<Arc<str>, u32>>,
+    /// Lock order: 4 (acquire with id_to_edge_type)
+    edge_type_to_id: RwLock<FxHashMap<ArcStr, u32>>,
 
     /// Edge type ID to name mapping.
-    id_to_edge_type: RwLock<Vec<Arc<str>>>,
+    /// Lock order: 4 (acquire with edge_type_to_id)
+    id_to_edge_type: RwLock<Vec<ArcStr>>,
 
     /// Forward adjacency lists (outgoing edges).
     forward_adj: ChunkedAdjacency,
@@ -190,16 +231,19 @@ pub struct LpgStore {
     backward_adj: Option<ChunkedAdjacency>,
 
     /// Label index: label_id -> set of node IDs.
+    /// Lock order: 5
     label_index: RwLock<Vec<FxHashMap<NodeId, ()>>>,
 
     /// Node labels: node_id -> set of label IDs.
     /// Reverse mapping to efficiently get labels for a node.
+    /// Lock order: 6
     node_labels: RwLock<FxHashMap<NodeId, FxHashSet<u32>>>,
 
     /// Property indexes: property_key -> (value -> set of node IDs).
     ///
     /// When a property is indexed, lookups by value are O(1) instead of O(n).
     /// Use [`create_property_index`] to enable indexing for a property.
+    /// Lock order: 7
     property_indexes: RwLock<FxHashMap<PropertyKey, DashMap<HashableValue, FxHashSet<NodeId>>>>,
 
     /// Next node ID.
@@ -212,6 +256,7 @@ pub struct LpgStore {
     current_epoch: AtomicU64,
 
     /// Statistics for cost-based optimization.
+    /// Lock order: 8 (always last)
     statistics: RwLock<Statistics>,
 }
 
@@ -2165,7 +2210,7 @@ impl LpgStore {
     /// Gets the type of an edge by ID.
     #[must_use]
     #[cfg(not(feature = "tiered-storage"))]
-    pub fn edge_type(&self, id: EdgeId) -> Option<Arc<str>> {
+    pub fn edge_type(&self, id: EdgeId) -> Option<ArcStr> {
         let edges = self.edges.read();
         let chain = edges.get(&id)?;
         let epoch = self.current_epoch();
@@ -2178,7 +2223,7 @@ impl LpgStore {
     /// (Tiered storage version)
     #[must_use]
     #[cfg(feature = "tiered-storage")]
-    pub fn edge_type(&self, id: EdgeId) -> Option<Arc<str>> {
+    pub fn edge_type(&self, id: EdgeId) -> Option<ArcStr> {
         let versions = self.edge_versions.read();
         let index = versions.get(&id)?;
         let epoch = self.current_epoch();
@@ -2595,7 +2640,7 @@ impl LpgStore {
 
         let id = id_to_label.len() as u32;
 
-        let label: Arc<str> = label.into();
+        let label: ArcStr = label.into();
         label_to_id.insert(label.clone(), id);
         id_to_label.push(label);
 
@@ -2619,7 +2664,7 @@ impl LpgStore {
         }
 
         let id = id_to_type.len() as u32;
-        let edge_type: Arc<str> = edge_type.into();
+        let edge_type: ArcStr = edge_type.into();
         type_to_id.insert(edge_type.clone(), id);
         id_to_type.push(edge_type);
 
@@ -2863,7 +2908,7 @@ mod tests {
         let edge = store.get_edge(edge_id).unwrap();
         assert_eq!(edge.src, alice);
         assert_eq!(edge.dst, bob);
-        assert_eq!(edge.edge_type.as_ref(), "KNOWS");
+        assert_eq!(edge.edge_type.as_str(), "KNOWS");
     }
 
     #[test]
@@ -2967,16 +3012,16 @@ mod tests {
         // Set and get property
         store.set_node_property(id, "name", Value::from("Alice"));
         let name = store.get_node_property(id, &"name".into());
-        assert!(matches!(name, Some(Value::String(s)) if s.as_ref() == "Alice"));
+        assert!(matches!(name, Some(Value::String(s)) if s.as_str() == "Alice"));
 
         // Update property
         store.set_node_property(id, "name", Value::from("Bob"));
         let name = store.get_node_property(id, &"name".into());
-        assert!(matches!(name, Some(Value::String(s)) if s.as_ref() == "Bob"));
+        assert!(matches!(name, Some(Value::String(s)) if s.as_str() == "Bob"));
 
         // Remove property
         let old = store.remove_node_property(id, "name");
-        assert!(matches!(old, Some(Value::String(s)) if s.as_ref() == "Bob"));
+        assert!(matches!(old, Some(Value::String(s)) if s.as_str() == "Bob"));
 
         // Property should be gone
         let name = store.get_node_property(id, &"name".into());
@@ -3442,7 +3487,7 @@ mod tests {
         let edge = store.get_edge(specific_id).unwrap();
         assert_eq!(edge.src, a);
         assert_eq!(edge.dst, b);
-        assert_eq!(edge.edge_type.as_ref(), "REL");
+        assert_eq!(edge.edge_type.as_str(), "REL");
 
         // Next auto-generated ID should be > 500
         let next = store.create_edge(a, b, "OTHER");

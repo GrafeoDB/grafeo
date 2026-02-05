@@ -3,10 +3,10 @@
 //! Like nodes, edges have two forms: [`Edge`] is the user-friendly version,
 //! [`EdgeRecord`] is the compact storage format.
 
+use arcstr::ArcStr;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 /// A relationship between two nodes, with a type and optional properties.
 ///
@@ -37,7 +37,7 @@ pub struct Edge {
     /// Destination node ID.
     pub dst: NodeId,
     /// Edge type/label.
-    pub edge_type: Arc<str>,
+    pub edge_type: ArcStr,
     /// Properties stored on this edge.
     pub properties: BTreeMap<PropertyKey, Value>,
 }
@@ -45,7 +45,7 @@ pub struct Edge {
 impl Edge {
     /// Creates a new edge.
     #[must_use]
-    pub fn new(id: EdgeId, src: NodeId, dst: NodeId, edge_type: impl Into<Arc<str>>) -> Self {
+    pub fn new(id: EdgeId, src: NodeId, dst: NodeId, edge_type: impl Into<ArcStr>) -> Self {
         Self {
             id,
             src,
@@ -183,7 +183,7 @@ mod tests {
         assert_eq!(edge.id, EdgeId::new(1));
         assert_eq!(edge.src, NodeId::new(10));
         assert_eq!(edge.dst, NodeId::new(20));
-        assert_eq!(edge.edge_type.as_ref(), "KNOWS");
+        assert_eq!(edge.edge_type.as_str(), "KNOWS");
     }
 
     #[test]

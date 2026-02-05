@@ -9,10 +9,10 @@ keywords = ["graph", "database", "gql", "knowledge-graph", "embedded"]
 categories = ["database-implementations", "data-structures"]
 
 [dependencies]
-grafeo-engine = { path = "../grafeo-engine", version = "0.2.0" }
-grafeo-core = { path = "../grafeo-core", version = "0.2.0" }
-grafeo-common = { path = "../grafeo-common", version = "0.2.0" }
-grafeo-adapters = { path = "../grafeo-adapters", version = "0.2.0" }
+grafeo-engine.workspace = true
+grafeo-core.workspace = true
+grafeo-common.workspace = true
+grafeo-adapters.workspace = true
 
 # Platform-optimized allocators (optional)
 [target.'cfg(all(not(target_os = "windows"), not(target_os = "openbsd"), not(target_env = "musl"), any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]

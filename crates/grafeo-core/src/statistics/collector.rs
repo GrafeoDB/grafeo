@@ -350,7 +350,7 @@ fn estimate_linear_range(min: &Value, max: &Value, lower: &Value, upper: &Value)
 ///
 /// Call [`add()`](Self::add) for each value, then [`build()`](Self::build)
 /// to get the final [`ColumnStatistics`] with histogram and most common values.
-#[allow(dead_code)]
+#[allow(dead_code)] // Used in tests and future cardinality estimation
 pub struct StatisticsCollector {
     /// Values collected for histogram building.
     values: Vec<Value>,
@@ -368,7 +368,7 @@ pub struct StatisticsCollector {
     frequencies: HashMap<String, u64>,
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // Used in tests and future cardinality estimation
 impl StatisticsCollector {
     /// Creates a new statistics collector.
     pub fn new() -> Self {
@@ -507,7 +507,7 @@ impl Default for StatisticsCollector {
 }
 
 /// Converts a value to f64.
-#[allow(dead_code)]
+#[allow(dead_code)] // Used by StatisticsCollector
 fn value_to_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Int64(i) => Some(*i as f64),
@@ -517,7 +517,7 @@ fn value_to_f64(value: &Value) -> Option<f64> {
 }
 
 /// Compares two values.
-#[allow(dead_code)]
+#[allow(dead_code)] // Used by StatisticsCollector
 fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),

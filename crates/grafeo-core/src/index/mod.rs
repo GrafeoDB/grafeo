@@ -10,12 +10,14 @@
 //! | [`trie`] | Multi-way joins | Worst-case optimal |
 //! | [`zone_map`] | Skipping chunks during scans | O(1) per chunk |
 //! | [`ring`] | RDF triples (3x space reduction) | O(log σ) |
+//! | [`fingerprint`] | Fast miss detection in buckets | O(1) per entry |
 //!
 //! Most queries use `adjacency` for traversals and `hash` or `btree` for filtering.
 //! For RDF workloads, the `ring` index provides significant space savings.
 
 pub mod adjacency;
 pub mod btree;
+pub mod fingerprint;
 pub mod hash;
 #[cfg(feature = "ring-index")]
 pub mod ring;
@@ -24,6 +26,7 @@ pub mod zone_map;
 
 pub use adjacency::ChunkedAdjacency;
 pub use btree::BTreeIndex;
+pub use fingerprint::{FingerprintBucket, FingerprintEntry, FingerprintStats};
 pub use hash::HashIndex;
 #[cfg(feature = "ring-index")]
 pub use ring::{LeapfrogRing, RingIterator, SuccinctPermutation, TripleRing};

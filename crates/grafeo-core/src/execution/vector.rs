@@ -1,6 +1,6 @@
 //! ValueVector for columnar data storage.
 
-use std::sync::Arc;
+use arcstr::ArcStr;
 
 use grafeo_common::types::{EdgeId, LogicalType, NodeId, Value};
 
@@ -32,8 +32,8 @@ enum VectorData {
     Int64(Vec<i64>),
     /// 64-bit floats.
     Float64(Vec<f64>),
-    /// Strings (stored as Arc for cheap cloning).
-    String(Vec<Arc<str>>),
+    /// Strings (stored as ArcStr for cheap cloning).
+    String(Vec<ArcStr>),
     /// Node IDs.
     NodeId(Vec<NodeId>),
     /// Edge IDs.
@@ -152,7 +152,7 @@ impl ValueVector {
     }
 
     /// Pushes a string value.
-    pub fn push_string(&mut self, value: impl Into<Arc<str>>) {
+    pub fn push_string(&mut self, value: impl Into<ArcStr>) {
         if let VectorData::String(vec) = &mut self.data {
             vec.push(value.into());
             self.len += 1;

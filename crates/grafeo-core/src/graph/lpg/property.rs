@@ -24,13 +24,13 @@ use crate::index::zone_map::ZoneMapEntry;
 use crate::storage::{
     CompressedData, CompressionCodec, DictionaryBuilder, DictionaryEncoding, TypeSpecificCompressor,
 };
+use arcstr::ArcStr;
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use parking_lot::RwLock;
 use std::cmp::Ordering;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 /// Compression mode for property columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -106,6 +106,7 @@ impl EntityId for EdgeId {}
 /// ```
 pub struct PropertyStorage<Id: EntityId = NodeId> {
     /// Map from property key to column.
+    /// Lock order: 9 (nested, acquired via LpgStore::node_properties/edge_properties)
     columns: RwLock<FxHashMap<PropertyKey, PropertyColumn<Id>>>,
     /// Default compression mode for new columns.
     default_compression: CompressionMode,
@@ -777,14 +778,14 @@ impl<Id: EntityId> PropertyColumn<Id> {
     /// Compresses string values using dictionary encoding.
     #[allow(unsafe_code)]
     fn compress_as_strings(&mut self) {
-        let mut values: Vec<(u64, Arc<str>)> = Vec::new();
+        let mut values: Vec<(u64, ArcStr)> = Vec::new();
         let mut non_str_values: FxHashMap<Id, Value> = FxHashMap::default();
 
         for (&id, value) in &self.values {
             match value {
                 Value::String(s) => {
                     let id_u64 = unsafe { std::mem::transmute_copy::<Id, u64>(&id) };
-                    values.push((id_u64, Arc::clone(s)));
+                    values.push((id_u64, s.clone()));
                 }
                 _ => {
                     non_str_values.insert(id, value.clone());
@@ -896,7 +897,7 @@ impl<Id: EntityId> PropertyColumn<Id> {
                 for (i, id_u64) in index_to_id.iter().enumerate() {
                     if let Some(s) = encoding.get(i) {
                         let id: Id = unsafe { std::mem::transmute_copy(id_u64) };
-                        self.values.insert(id, Value::String(Arc::from(s)));
+                        self.values.insert(id, Value::String(ArcStr::from(s)));
                     }
                 }
             }
@@ -1031,6 +1032,7 @@ pub struct PropertyColumnRef<'a, Id: EntityId = NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arcstr::ArcStr;
 
     #[test]
     fn test_property_storage_basic() {
@@ -1178,7 +1180,7 @@ mod tests {
         let categories = ["Person", "Company", "Product", "Location"];
         for i in 0..2000 {
             let cat = categories[i % 4];
-            col.set(NodeId::new(i as u64), Value::String(Arc::from(cat)));
+            col.set(NodeId::new(i as u64), Value::String(ArcStr::from(cat)));
         }
 
         // Total count should be correct
@@ -1250,7 +1252,7 @@ mod tests {
             storage.set(
                 NodeId::new(i),
                 PropertyKey::new("name"),
-                Value::String(Arc::from("Alice")),
+                Value::String(ArcStr::from("Alice")),
             );
         }
 

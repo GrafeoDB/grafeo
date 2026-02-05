@@ -4,10 +4,11 @@
 //! [`NodeRecord`] is the compact 32-byte struct for storage.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
+use arcstr::ArcStr;
 use grafeo_common::types::{EpochId, NodeId, PropertyKey, Value};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 /// A node with its labels and properties fully loaded.
 ///
@@ -31,8 +32,8 @@ use serde::{Deserialize, Serialize};
 pub struct Node {
     /// Unique identifier.
     pub id: NodeId,
-    /// Labels attached to this node.
-    pub labels: Vec<Arc<str>>,
+    /// Labels attached to this node (inline storage for 1-2 labels).
+    pub labels: SmallVec<[ArcStr; 2]>,
     /// Properties stored on this node.
     pub properties: BTreeMap<PropertyKey, Value>,
 }
@@ -43,14 +44,14 @@ impl Node {
     pub fn new(id: NodeId) -> Self {
         Self {
             id,
-            labels: Vec::new(),
+            labels: SmallVec::new(),
             properties: BTreeMap::new(),
         }
     }
 
     /// Creates a new node with labels.
     #[must_use]
-    pub fn with_labels(id: NodeId, labels: impl IntoIterator<Item = impl Into<Arc<str>>>) -> Self {
+    pub fn with_labels(id: NodeId, labels: impl IntoIterator<Item = impl Into<ArcStr>>) -> Self {
         Self {
             id,
             labels: labels.into_iter().map(Into::into).collect(),
@@ -59,16 +60,16 @@ impl Node {
     }
 
     /// Adds a label to this node.
-    pub fn add_label(&mut self, label: impl Into<Arc<str>>) {
+    pub fn add_label(&mut self, label: impl Into<ArcStr>) {
         let label = label.into();
-        if !self.labels.iter().any(|l| l.as_ref() == label.as_ref()) {
+        if !self.labels.iter().any(|l| l.as_str() == label.as_str()) {
             self.labels.push(label);
         }
     }
 
     /// Removes a label from this node.
     pub fn remove_label(&mut self, label: &str) -> bool {
-        if let Some(pos) = self.labels.iter().position(|l| l.as_ref() == label) {
+        if let Some(pos) = self.labels.iter().position(|l| l.as_str() == label) {
             self.labels.remove(pos);
             true
         } else {
@@ -79,7 +80,7 @@ impl Node {
     /// Checks if this node has the given label.
     #[must_use]
     pub fn has_label(&self, label: &str) -> bool {
-        self.labels.iter().any(|l| l.as_ref() == label)
+        self.labels.iter().any(|l| l.as_str() == label)
     }
 
     /// Sets a property on this node.

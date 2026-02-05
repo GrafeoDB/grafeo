@@ -102,6 +102,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
+name = "arcstr"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -592,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",
@@ -604,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "bincode",
  "byteorder",
@@ -628,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-cli"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -646,9 +655,10 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "ahash",
+ "arcstr",
  "bincode",
  "bumpalo",
  "byteorder",
@@ -668,9 +678,10 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "ahash",
+ "arcstr",
  "bincode",
  "byteorder",
  "bytes",
@@ -682,6 +693,7 @@ dependencies = [
  "indexmap",
  "parking_lot",
  "proptest",
+ "rayon",
  "regex",
  "serde",
  "smallvec",
@@ -692,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "criterion",
@@ -715,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-python"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",

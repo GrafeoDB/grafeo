@@ -379,6 +379,7 @@ impl AdjacencyList {
 /// ```
 pub struct ChunkedAdjacency {
     /// Adjacency lists indexed by source node.
+    /// Lock order: 10 (nested, acquired via LpgStore::forward_adj/backward_adj)
     lists: RwLock<FxHashMap<NodeId, AdjacencyList>>,
     /// Chunk capacity for new chunks.
     chunk_capacity: usize,

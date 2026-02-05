@@ -2414,7 +2414,7 @@ fn component_to_term(component: &TripleComponent) -> Option<Term> {
         TripleComponent::Variable(_) => None,
         TripleComponent::Iri(iri) => Some(Term::iri(iri.clone())),
         TripleComponent::Literal(value) => match value {
-            Value::String(s) => Some(Term::literal(Arc::clone(s))),
+            Value::String(s) => Some(Term::literal(s.clone())),
             Value::Int64(i) => Some(Term::typed_literal(i.to_string(), Literal::XSD_INTEGER)),
             Value::Float64(f) => Some(Term::typed_literal(f.to_string(), Literal::XSD_DOUBLE)),
             Value::Bool(b) => Some(Term::typed_literal(b.to_string(), Literal::XSD_BOOLEAN)),

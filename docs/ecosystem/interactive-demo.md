@@ -16,6 +16,12 @@ These demos run **entirely in your browser** using [marimo](https://marimo.io) a
     The first time you visit this page, the Python runtime (Pyodide) will be downloaded and
     initialized in the background. This may take a few seconds. Subsequent interactions are instant.
 
+```python {marimo display_code=false}
+import marimo as mo
+import micropip
+await micropip.install(["anywidget-graph", "anywidget-vector"])
+```
+
 ---
 
 ## Graph Widget
@@ -29,7 +35,6 @@ Drag to pan, scroll to zoom, click a node to select it.
 ```python {marimo}
 from anywidget_graph import Graph
 
-# Social network: people and companies from Grafeo's example dataset
 nodes = [
     {"id": "alice", "label": "Alice", "color": "#6366f1", "size": 8},
     {"id": "bob", "label": "Bob", "color": "#6366f1", "size": 10},
@@ -41,14 +46,12 @@ nodes = [
 ]
 
 edges = [
-    # KNOWS relationships
     {"source": "alice", "target": "bob", "label": "KNOWS"},
     {"source": "alice", "target": "carol", "label": "KNOWS"},
     {"source": "bob", "target": "carol", "label": "KNOWS"},
     {"source": "bob", "target": "dave", "label": "KNOWS"},
     {"source": "carol", "target": "eve", "label": "KNOWS"},
     {"source": "dave", "target": "eve", "label": "KNOWS"},
-    # WORKS_AT relationships
     {"source": "alice", "target": "acme", "label": "WORKS_AT"},
     {"source": "bob", "target": "acme", "label": "WORKS_AT"},
     {"source": "carol", "target": "globex", "label": "WORKS_AT"},
@@ -56,15 +59,17 @@ edges = [
     {"source": "eve", "target": "acme", "label": "WORKS_AT"},
 ]
 
-graph = Graph(
-    nodes=nodes,
-    edges=edges,
-    height=500,
-    dark_mode=True,
-    show_toolbar=True,
-    show_edge_labels=True,
+graph_widget = mo.ui.anywidget(
+    Graph(
+        nodes=nodes,
+        edges=edges,
+        height=500,
+        dark_mode=True,
+        show_toolbar=True,
+        show_edge_labels=True,
+    )
 )
-graph
+graph_widget
 ```
 
 ??? example "Equivalent Grafeo code"
@@ -108,55 +113,26 @@ Click and drag to orbit, scroll to zoom, right-click to pan.
 import math
 from anywidget_vector import VectorSpace
 
-# Generate three clusters of points to simulate embedding groups
-points = []
-
-# Cluster 1: "Documents" -- centered around (0.5, 0.8, 0.3)
+_points = []
 for i in range(15):
-    angle = i * 0.42
-    points.append({
-        "id": f"doc_{i}",
-        "label": f"Document {i}",
-        "x": 0.5 + 0.15 * math.cos(angle),
-        "y": 0.8 + 0.15 * math.sin(angle),
-        "z": 0.3 + 0.1 * math.sin(angle * 1.5),
-        "color": "#6366f1",
-        "group": "documents",
-    })
-
-# Cluster 2: "Images" -- centered around (-0.6, -0.2, 0.7)
+    _a = i * 0.42
+    _points.append({"id": f"doc_{i}", "label": f"Document {i}", "x": 0.5 + 0.15 * math.cos(_a), "y": 0.8 + 0.15 * math.sin(_a), "z": 0.3 + 0.1 * math.sin(_a * 1.5), "color": "#6366f1"})
 for i in range(12):
-    angle = i * 0.52
-    points.append({
-        "id": f"img_{i}",
-        "label": f"Image {i}",
-        "x": -0.6 + 0.2 * math.cos(angle),
-        "y": -0.2 + 0.12 * math.sin(angle),
-        "z": 0.7 + 0.15 * math.cos(angle * 0.8),
-        "color": "#f59e0b",
-        "group": "images",
-    })
-
-# Cluster 3: "Queries" -- centered around (0.0, -0.5, -0.6)
+    _a = i * 0.52
+    _points.append({"id": f"img_{i}", "label": f"Image {i}", "x": -0.6 + 0.2 * math.cos(_a), "y": -0.2 + 0.12 * math.sin(_a), "z": 0.7 + 0.15 * math.cos(_a * 0.8), "color": "#f59e0b"})
 for i in range(10):
-    angle = i * 0.63
-    points.append({
-        "id": f"query_{i}",
-        "label": f"Query {i}",
-        "x": 0.0 + 0.18 * math.sin(angle),
-        "y": -0.5 + 0.18 * math.cos(angle),
-        "z": -0.6 + 0.12 * math.sin(angle * 1.2),
-        "color": "#22c55e",
-        "group": "queries",
-    })
+    _a = i * 0.63
+    _points.append({"id": f"query_{i}", "label": f"Query {i}", "x": 0.0 + 0.18 * math.sin(_a), "y": -0.5 + 0.18 * math.cos(_a), "z": -0.6 + 0.12 * math.sin(_a * 1.2), "color": "#22c55e"})
 
-vector_widget = VectorSpace(
-    points=points,
-    height=500,
-    background="#1a1a2e",
-    show_axes=True,
-    show_grid=True,
-    axis_labels={"x": "Dim 1", "y": "Dim 2", "z": "Dim 3"},
+vector_widget = mo.ui.anywidget(
+    VectorSpace(
+        points=_points,
+        height=500,
+        background="#1a1a2e",
+        show_axes=True,
+        show_grid=True,
+        axis_labels={"x": "Dim 1", "y": "Dim 2", "z": "Dim 3"},
+    )
 )
 vector_widget
 ```

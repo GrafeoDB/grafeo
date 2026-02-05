@@ -28,7 +28,8 @@
 
 /* ===== Unified Header Band ===== */
 
-.md-header {
+.md-header,
+.md-header[data-md-state="shadow"] {
   background-color: #1c2128;
   box-shadow: none;
 }

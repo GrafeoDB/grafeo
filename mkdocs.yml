@@ -20,7 +20,7 @@ theme:
   name: material
   custom_dir: docs/overrides
   favicon: assets/favicon.ico
-  logo: assets/logo.svg
+  logo: assets/logo-full.png
 
   features:
     # Navigation

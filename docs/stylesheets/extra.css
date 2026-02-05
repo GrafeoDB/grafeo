@@ -11,16 +11,48 @@
   --md-primary-bg-color--light: #ffffffb3;
 }
 
-/* Dark mode - darker background towards black */
+/* Dark mode - darker background, header matches logo */
 [data-md-color-scheme="slate"] {
   --md-default-bg-color: #0d1117;
   --md-default-bg-color--light: #151b23;
   --md-default-bg-color--lighter: #1c2128;
   --md-default-bg-color--lightest: #21262d;
-  --md-primary-fg-color: #3d4752;
-  --md-primary-fg-color--light: #4a5661;
-  --md-primary-fg-color--dark: #2d353c;
+  --md-primary-fg-color: #2d333b;
+  --md-primary-fg-color--light: #343b44;
+  --md-primary-fg-color--dark: #22272e;
   --md-code-bg-color: #161b22;
+}
+
+/* Header styling - match logo background exactly */
+.md-header {
+  background-color: #1e2227;
+  padding: 0.5rem 0;
+}
+
+/* Align search and GitHub to the right */
+.md-header__inner {
+  justify-content: space-between;
+}
+
+.md-header__source {
+  margin-left: auto;
+}
+
+/* Navigation tabs - match header */
+.md-tabs {
+  background-color: #1e2227;
+}
+
+/* Bigger logo (3x original) */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 4.5rem;
+  width: auto;
+}
+
+/* Hide site name (already in logo) */
+.md-header__title {
+  display: none;
 }
 
 /* Hero section on landing page */
@@ -63,12 +95,7 @@
   justify-content: center;
 }
 
-/* Logo adjustments */
-.md-header__button.md-logo img,
-.md-header__button.md-logo svg {
-  height: 1.5rem;
-  width: auto;
-}
+/* Logo adjustments handled in color scheme section above */
 
 /* Navigation tabs styling */
 .md-tabs__link {

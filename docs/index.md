@@ -35,6 +35,24 @@ hide:
 
     Built from the ground up in Rust for maximum performance with vectorized execution, adaptive chunking, and SIMD-optimized operations.
 
+-   :material-database-search:{ .lg .middle } **Multi-Language Queries**
+
+    ---
+
+    GQL, Cypher, Gremlin, GraphQL, and SPARQL. Choose the query language that fits your needs and expertise.
+
+-   :material-graph:{ .lg .middle } **LPG & RDF Support**
+
+    ---
+
+    Dual data model support for both Labeled Property Graphs and RDF triples. Choose the model that fits your domain.
+
+-   :material-vector-line:{ .lg .middle } **Vector Search**
+
+    ---
+
+    HNSW-based similarity search with quantization (Scalar, Binary, Product). Combine graph traversal with semantic similarity.
+
 -   :material-memory:{ .lg .middle } **Embeddable**
 
     ---
@@ -47,29 +65,23 @@ hide:
 
     Written entirely in safe Rust with no C dependencies. Memory-safe by design with fearless concurrency.
 
--   :fontawesome-brands-python:{ .lg .middle } **Python Bindings**
-
-    ---
-
-    First-class Python support via PyO3. Use Grafeo from Python with a Pythonic API that feels natural.
-
--   :material-database-search:{ .lg .middle } **Multi-Language Queries**
-
-    ---
-
-    GQL, Cypher, Gremlin, GraphQL, and SPARQL. Choose the query language that fits your needs and expertise.
-
 -   :material-shield-check:{ .lg .middle } **ACID Transactions**
 
     ---
 
     Full ACID compliance with MVCC-based snapshot isolation. Reliable transactions for production workloads.
 
--   :material-vector-line:{ .lg .middle } **Vector Search**
+-   :fontawesome-brands-python:{ .lg .middle } **Python Bindings**
 
     ---
 
-    HNSW-based similarity search with quantization (Scalar, Binary, Product). Combine graph traversal with semantic similarity.
+    First-class Python support via PyO3. Use Grafeo from Python with a Pythonic API that feels natural.
+
+-   :material-notebook:{ .lg .middle } **Notebook Widgets**
+
+    ---
+
+    Interactive graph and vector visualizations for Marimo, Jupyter, and other notebooks. Explore your data visually.
 
 </div>
 

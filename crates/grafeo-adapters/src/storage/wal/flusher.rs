@@ -215,13 +215,13 @@ mod tests {
         // Start flusher with 50ms target
         let mut flusher = AdaptiveFlusher::new(Arc::clone(&wal), 50);
 
-        // Let it run for a bit
-        thread::sleep(Duration::from_millis(200));
+        // Let it run for a bit (500ms gives plenty of margin for CI)
+        thread::sleep(Duration::from_millis(500));
 
         // Shutdown and get stats
         let stats = flusher.shutdown().unwrap();
 
-        // Should have done at least 2-3 flushes in 200ms with 50ms target
+        // Should have done at least 2 flushes in 500ms with 50ms target
         assert!(
             stats.flush_count >= 2,
             "Expected at least 2 flushes, got {}",

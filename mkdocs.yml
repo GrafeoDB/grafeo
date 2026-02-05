@@ -20,18 +20,21 @@ theme:
   name: material
   custom_dir: docs/overrides
   favicon: assets/favicon.ico
-  logo: assets/logo-full.png
+  logo: assets/logo-small.png
 
   features:
     # Navigation
     - navigation.tabs
     - navigation.tabs.sticky
     - navigation.sections
-    - navigation.expand
     - navigation.path
     - navigation.top
     - navigation.footer
     - navigation.indexes
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.prune
 
     # Table of contents
     - toc.follow
@@ -81,12 +84,16 @@ hooks:
 plugins:
   - search:
       separator: '[\s\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  - marimo:
+      enabled: true
+      display_code: true
+      display_output: true
+      is_reactive: true
   - minify:
       minify_html: true
   - git-revision-date-localized:
       enable_creation_date: true
       type: timeago
-  - tags
 
 # Extensions
 markdown_extensions:
@@ -253,22 +260,12 @@ nav:
       - Storage Backends: user-guide/extending/storage-backends.md
       - Custom Functions: user-guide/extending/custom-functions.md
       - Rust Extensions: user-guide/extending/rust-extensions.md
-
-  - Tutorials:
-    - tutorials/index.md
-    - Social Network Graph: tutorials/social-network.md
-    - Knowledge Graph: tutorials/knowledge-graph.md
-    - Recommendation Engine: tutorials/recommendations.md
-    - Fraud Detection: tutorials/fraud-detection.md
-
-  - Algorithms:
-    - algorithms/index.md
-    - Path Finding: algorithms/path-finding.md
-    - Centrality: algorithms/centrality.md
-    - Community Detection: algorithms/community.md
-    - Link Prediction: algorithms/link-prediction.md
-    - Similarity: algorithms/similarity.md
-    - Graph Metrics: algorithms/metrics.md
+    - Tutorials:
+      - tutorials/index.md
+      - Social Network Graph: tutorials/social-network.md
+      - Knowledge Graph: tutorials/knowledge-graph.md
+      - Recommendation Engine: tutorials/recommendations.md
+      - Fraud Detection: tutorials/fraud-detection.md
 
   - Architecture:
     - architecture/index.md
@@ -300,42 +297,47 @@ nav:
       - MVCC: architecture/transactions/mvcc.md
       - Isolation Levels: architecture/transactions/isolation.md
 
-  - API Reference:
+  - Reference:
     - api/index.md
-    - Python:
+    - Python API:
       - api/python/index.md
       - grafeo.Database: api/python/database.md
       - grafeo.Node: api/python/node.md
       - grafeo.Edge: api/python/edge.md
       - grafeo.QueryResult: api/python/result.md
       - grafeo.Transaction: api/python/transaction.md
-    - Rust:
+    - Rust API:
       - api/rust/index.md
       - grafeo-common: api/rust/common.md
       - grafeo-core: api/rust/core.md
       - grafeo-adapters: api/rust/adapters.md
       - grafeo-engine: api/rust/engine.md
+    - Algorithms:
+      - algorithms/index.md
+      - Path Finding: algorithms/path-finding.md
+      - Centrality: algorithms/centrality.md
+      - Community Detection: algorithms/community.md
+      - Link Prediction: algorithms/link-prediction.md
+      - Similarity: algorithms/similarity.md
+      - Graph Metrics: algorithms/metrics.md
+    - Language Comparisons:
+      - comparisons/index.md
+      - Cypher vs GQL: comparisons/cypher-vs-gql.md
+      - Gremlin vs GQL: comparisons/gremlin-vs-gql.md
+      - GraphQL vs GQL: comparisons/graphql-vs-gql.md
+      - SPARQL vs GQL: comparisons/sparql-vs-gql.md
 
-  - Ecosystem:
-    - ecosystem/index.md
-    - Performance Baselines: ecosystem/performance.md
-    - graph-bench: ecosystem/graph-bench.md
-    - anywidget-vector: ecosystem/anywidget-vector.md
-    - anywidget-graph: ecosystem/anywidget-graph.md
-
-  - Comparisons:
-    - comparisons/index.md
-    - Cypher vs GQL: comparisons/cypher-vs-gql.md
-    - Gremlin vs GQL: comparisons/gremlin-vs-gql.md
-    - GraphQL vs GQL: comparisons/graphql-vs-gql.md
-    - SPARQL vs GQL: comparisons/sparql-vs-gql.md
-
-  - Contributing:
+  - Community:
     - contributing/index.md
     - Development Setup: contributing/setup.md
     - Code Style: contributing/code-style.md
     - Testing: contributing/testing.md
     - Pull Requests: contributing/pull-requests.md
-
-  - Roadmap: roadmap.md
-  - Tags: tags.md
+    - Ecosystem:
+      - ecosystem/index.md
+      - Interactive Demo: ecosystem/interactive-demo.md
+      - Performance Baselines: ecosystem/performance.md
+      - graph-bench: ecosystem/graph-bench.md
+      - anywidget-vector: ecosystem/anywidget-vector.md
+      - anywidget-graph: ecosystem/anywidget-graph.md
+    - Roadmap: roadmap.md

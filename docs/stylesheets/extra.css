@@ -29,13 +29,9 @@
   padding: 0.35rem 0;
 }
 
-/* Align search and GitHub to the right */
-.md-header__inner {
-  justify-content: space-between;
-}
-
-.md-header__source {
-  margin-left: auto;
+/* Hide site name but keep it occupying flex space to push items right */
+.md-header__title {
+  flex-grow: 1;
 }
 
 /* Navigation tabs - match header */
@@ -43,16 +39,17 @@
   background-color: #1e2227;
 }
 
-/* Bigger logo (3x original) */
+/* Logo sizing */
 .md-header__button.md-logo img,
 .md-header__button.md-logo svg {
-  height: 4.5rem;
+  height: 2.5rem;
   width: auto;
 }
 
-/* Hide site name (already in logo) */
-.md-header__title {
-  display: none;
+/* Hide site name text (already in logo) but keep element for flex spacing */
+.md-header__title .md-header__topic,
+.md-header__title .md-header__title--active {
+  visibility: hidden;
 }
 
 /* Hero section on landing page */

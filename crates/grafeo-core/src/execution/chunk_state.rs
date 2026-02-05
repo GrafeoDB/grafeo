@@ -150,12 +150,20 @@ impl LevelSelection {
     }
 
     /// Returns an iterator over selected indices.
-    #[allow(clippy::iter_without_into_iter)]
     pub fn iter(&self) -> Box<dyn Iterator<Item = usize> + '_> {
         match self {
             Self::All { count } => Box::new(0..*count),
             Self::Sparse(sel) => Box::new(sel.iter()),
         }
+    }
+}
+
+impl<'a> IntoIterator for &'a LevelSelection {
+    type Item = usize;
+    type IntoIter = Box<dyn Iterator<Item = usize> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 

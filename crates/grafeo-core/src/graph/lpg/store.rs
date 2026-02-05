@@ -951,6 +951,54 @@ impl LpgStore {
         self.node_properties.get_all_batch(ids)
     }
 
+    /// Gets selected properties for multiple nodes (projection pushdown).
+    ///
+    /// This is more efficient than [`Self::get_nodes_properties_batch`] when you only
+    /// need a subset of properties. It only iterates the requested columns instead of
+    /// all columns.
+    ///
+    /// **Use this for**: Queries with explicit projections like `RETURN n.name, n.age`
+    /// instead of `RETURN n` (which requires all properties).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use grafeo_core::graph::lpg::LpgStore;
+    /// use grafeo_common::types::{PropertyKey, Value};
+    ///
+    /// let store = LpgStore::new();
+    /// let n1 = store.create_node(&["Person"]);
+    /// store.set_node_property(n1, "name", Value::from("Alice"));
+    /// store.set_node_property(n1, "age", Value::from(30i64));
+    /// store.set_node_property(n1, "email", Value::from("alice@example.com"));
+    ///
+    /// // Only fetch name and age (faster than get_nodes_properties_batch)
+    /// let keys = vec![PropertyKey::new("name"), PropertyKey::new("age")];
+    /// let props = store.get_nodes_properties_selective_batch(&[n1], &keys);
+    ///
+    /// assert_eq!(props[0].len(), 2); // Only name and age, not email
+    /// ```
+    #[must_use]
+    pub fn get_nodes_properties_selective_batch(
+        &self,
+        ids: &[NodeId],
+        keys: &[PropertyKey],
+    ) -> Vec<FxHashMap<PropertyKey, Value>> {
+        self.node_properties.get_selective_batch(ids, keys)
+    }
+
+    /// Gets selected properties for multiple edges (projection pushdown).
+    ///
+    /// Edge-property version of [`Self::get_nodes_properties_selective_batch`].
+    #[must_use]
+    pub fn get_edges_properties_selective_batch(
+        &self,
+        ids: &[EdgeId],
+        keys: &[PropertyKey],
+    ) -> Vec<FxHashMap<PropertyKey, Value>> {
+        self.edge_properties.get_selective_batch(ids, keys)
+    }
+
     /// Finds nodes where a property value is in a range.
     ///
     /// This is useful for queries like `n.age > 30` or `n.price BETWEEN 10 AND 100`.
@@ -3870,5 +3918,69 @@ mod tests {
 
         let all_props = store.get_nodes_properties_batch(&[]);
         assert!(all_props.is_empty());
+    }
+
+    #[test]
+    fn test_get_nodes_properties_selective_batch() {
+        let store = LpgStore::new();
+
+        let n1 = store.create_node(&["Person"]);
+        let n2 = store.create_node(&["Person"]);
+
+        // Set multiple properties
+        store.set_node_property(n1, "name", Value::from("Alice"));
+        store.set_node_property(n1, "age", Value::from(25i64));
+        store.set_node_property(n1, "email", Value::from("alice@example.com"));
+        store.set_node_property(n2, "name", Value::from("Bob"));
+        store.set_node_property(n2, "age", Value::from(30i64));
+        store.set_node_property(n2, "city", Value::from("NYC"));
+
+        // Request only name and age (not email or city)
+        let keys = vec![PropertyKey::new("name"), PropertyKey::new("age")];
+        let props = store.get_nodes_properties_selective_batch(&[n1, n2], &keys);
+
+        assert_eq!(props.len(), 2);
+
+        // n1: should have name and age, but NOT email
+        assert_eq!(props[0].len(), 2);
+        assert_eq!(props[0].get(&PropertyKey::new("name")), Some(&Value::from("Alice")));
+        assert_eq!(props[0].get(&PropertyKey::new("age")), Some(&Value::from(25i64)));
+        assert_eq!(props[0].get(&PropertyKey::new("email")), None);
+
+        // n2: should have name and age, but NOT city
+        assert_eq!(props[1].len(), 2);
+        assert_eq!(props[1].get(&PropertyKey::new("name")), Some(&Value::from("Bob")));
+        assert_eq!(props[1].get(&PropertyKey::new("age")), Some(&Value::from(30i64)));
+        assert_eq!(props[1].get(&PropertyKey::new("city")), None);
+    }
+
+    #[test]
+    fn test_get_nodes_properties_selective_batch_empty_keys() {
+        let store = LpgStore::new();
+
+        let n1 = store.create_node(&["Person"]);
+        store.set_node_property(n1, "name", Value::from("Alice"));
+
+        // Request no properties
+        let props = store.get_nodes_properties_selective_batch(&[n1], &[]);
+
+        assert_eq!(props.len(), 1);
+        assert!(props[0].is_empty()); // Empty map when no keys requested
+    }
+
+    #[test]
+    fn test_get_nodes_properties_selective_batch_missing_keys() {
+        let store = LpgStore::new();
+
+        let n1 = store.create_node(&["Person"]);
+        store.set_node_property(n1, "name", Value::from("Alice"));
+
+        // Request a property that doesn't exist
+        let keys = vec![PropertyKey::new("nonexistent"), PropertyKey::new("name")];
+        let props = store.get_nodes_properties_selective_batch(&[n1], &keys);
+
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].len(), 1); // Only name exists
+        assert_eq!(props[0].get(&PropertyKey::new("name")), Some(&Value::from("Alice")));
     }
 }

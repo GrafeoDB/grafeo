@@ -41,6 +41,7 @@ mod bridges;
 mod database;
 mod error;
 mod graph;
+mod quantization;
 mod query;
 mod types;
 
@@ -49,6 +50,20 @@ use database::{AsyncQueryResult, AsyncQueryResultIter, PyGrafeoDB};
 use graph::{PyEdge, PyNode};
 use query::PyQueryResult;
 use types::PyValue;
+
+/// Returns the active SIMD instruction set for vector operations.
+///
+/// Useful for debugging and verifying that SIMD acceleration is being used.
+///
+/// Returns one of: "avx2", "sse", "neon", or "scalar"
+///
+/// Example:
+///     import grafeo
+///     print(f"SIMD support: {grafeo.simd_support()}")  # e.g., "avx2"
+#[pyfunction]
+fn simd_support() -> &'static str {
+    grafeo_core::index::vector::simd_support()
+}
 
 /// Grafeo Python module.
 #[pymodule]
@@ -63,6 +78,12 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAlgorithms>()?;
     m.add_class::<PyNetworkXAdapter>()?;
     m.add_class::<PySolvORAdapter>()?;
+
+    // Register quantization types
+    quantization::register(m)?;
+
+    // Add module-level functions
+    m.add_function(wrap_pyfunction!(simd_support, m)?)?;
 
     // Add version info
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

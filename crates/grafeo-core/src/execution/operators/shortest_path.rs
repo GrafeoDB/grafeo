@@ -298,22 +298,422 @@ impl Operator for ShortestPathOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution::operators::ScanOperator;
+
+    /// A mock operator that returns a single chunk with source/target node pairs.
+    struct MockPairOperator {
+        pairs: Vec<(NodeId, NodeId)>,
+        exhausted: bool,
+    }
+
+    impl MockPairOperator {
+        fn new(pairs: Vec<(NodeId, NodeId)>) -> Self {
+            Self {
+                pairs,
+                exhausted: false,
+            }
+        }
+    }
+
+    impl Operator for MockPairOperator {
+        fn next(&mut self) -> OperatorResult {
+            if self.exhausted || self.pairs.is_empty() {
+                return Ok(None);
+            }
+            self.exhausted = true;
+
+            let schema = vec![LogicalType::Node, LogicalType::Node];
+            let mut builder = DataChunkBuilder::with_capacity(&schema, self.pairs.len());
+
+            for (source, target) in &self.pairs {
+                builder.column_mut(0).unwrap().push_node_id(*source);
+                builder.column_mut(1).unwrap().push_node_id(*target);
+                builder.advance_row();
+            }
+
+            Ok(Some(builder.finish()))
+        }
+
+        fn reset(&mut self) {
+            self.exhausted = false;
+        }
+
+        fn name(&self) -> &'static str {
+            "MockPair"
+        }
+    }
 
     #[test]
-    fn test_shortest_path_direct() {
+    fn test_find_shortest_path_direct() {
         let store = Arc::new(LpgStore::new());
 
-        // Create a -> d directly (1 hop)
+        // a -> b (1 hop)
         let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        store.create_edge(a, b, "KNOWS");
+
+        let input = Box::new(MockPairOperator::new(vec![(a, b)]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0, // source column
+            1, // target column
+            None,
+            Direction::Outgoing,
+        );
+
+        let chunk = op.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 1);
+
+        // Path length should be 1
+        let path_col = chunk.column(2).unwrap();
+        let path_len = path_col.get_value(0).unwrap();
+        assert_eq!(path_len, Value::Int64(1));
+    }
+
+    #[test]
+    fn test_find_shortest_path_same_node() {
+        let store = Arc::new(LpgStore::new());
+        let a = store.create_node(&["Node"]);
+
+        let input = Box::new(MockPairOperator::new(vec![(a, a)]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            None,
+            Direction::Outgoing,
+        );
+
+        let chunk = op.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 1);
+
+        // Path length should be 0 (same node)
+        let path_col = chunk.column(2).unwrap();
+        let path_len = path_col.get_value(0).unwrap();
+        assert_eq!(path_len, Value::Int64(0));
+    }
+
+    #[test]
+    fn test_find_shortest_path_two_hops() {
+        let store = Arc::new(LpgStore::new());
+
+        // a -> b -> c (2 hops from a to c)
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(b, c, "KNOWS");
+
+        let input = Box::new(MockPairOperator::new(vec![(a, c)]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            None,
+            Direction::Outgoing,
+        );
+
+        let chunk = op.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 1);
+
+        let path_col = chunk.column(2).unwrap();
+        let path_len = path_col.get_value(0).unwrap();
+        assert_eq!(path_len, Value::Int64(2));
+    }
+
+    #[test]
+    fn test_find_shortest_path_no_path() {
+        let store = Arc::new(LpgStore::new());
+
+        // a and b are disconnected
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+
+        let input = Box::new(MockPairOperator::new(vec![(a, b)]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            None,
+            Direction::Outgoing,
+        );
+
+        let chunk = op.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 1);
+
+        // Path length should be null (no path)
+        let path_col = chunk.column(2).unwrap();
+        let path_len = path_col.get_value(0).unwrap();
+        assert_eq!(path_len, Value::Null);
+    }
+
+    #[test]
+    fn test_find_shortest_path_prefers_shorter() {
+        let store = Arc::new(LpgStore::new());
+
+        // Create two paths: a -> d (1 hop) and a -> b -> c -> d (3 hops)
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
         let d = store.create_node(&["Node"]);
-        store.create_edge(a, d, "DIRECT");
 
-        // Create scan for node a
-        let _scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Node"));
+        // Long path
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(b, c, "KNOWS");
+        store.create_edge(c, d, "KNOWS");
 
-        // For this test, we need a way to filter to just (a, d) pairs
-        // The ShortestPathOperator expects source and target columns
-        // This is a simplified test that doesn't fully exercise the operator
+        // Short path (direct)
+        store.create_edge(a, d, "KNOWS");
+
+        let input = Box::new(MockPairOperator::new(vec![(a, d)]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            None,
+            Direction::Outgoing,
+        );
+
+        let chunk = op.next().unwrap().unwrap();
+        let path_col = chunk.column(2).unwrap();
+        let path_len = path_col.get_value(0).unwrap();
+        assert_eq!(path_len, Value::Int64(1)); // Should find direct path
+    }
+
+    #[test]
+    fn test_find_shortest_path_with_edge_type_filter() {
+        let store = Arc::new(LpgStore::new());
+
+        // a -KNOWS-> b -LIKES-> c
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(b, c, "LIKES");
+
+        // Path with KNOWS filter should only reach b, not c
+        let input = Box::new(MockPairOperator::new(vec![(a, c)]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            Some("KNOWS".to_string()),
+            Direction::Outgoing,
+        );
+
+        let chunk = op.next().unwrap().unwrap();
+        let path_col = chunk.column(2).unwrap();
+        let path_len = path_col.get_value(0).unwrap();
+        assert_eq!(path_len, Value::Null); // Can't reach c via KNOWS only
+    }
+
+    #[test]
+    fn test_all_shortest_paths_single_path() {
+        let store = Arc::new(LpgStore::new());
+
+        // a -> b (single path)
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        store.create_edge(a, b, "KNOWS");
+
+        let input = Box::new(MockPairOperator::new(vec![(a, b)]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            None,
+            Direction::Outgoing,
+        )
+        .with_all_paths(true);
+
+        let chunk = op.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 1); // Only one path exists
+    }
+
+    #[test]
+    fn test_all_shortest_paths_multiple_paths() {
+        let store = Arc::new(LpgStore::new());
+
+        // Create diamond: a -> b -> d and a -> c -> d (two paths of length 2)
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
+        let d = store.create_node(&["Node"]);
+
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(a, c, "KNOWS");
+        store.create_edge(b, d, "KNOWS");
+        store.create_edge(c, d, "KNOWS");
+
+        let input = Box::new(MockPairOperator::new(vec![(a, d)]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            None,
+            Direction::Outgoing,
+        )
+        .with_all_paths(true);
+
+        let chunk = op.next().unwrap().unwrap();
+        // Should return 2 rows (two paths of length 2)
+        assert_eq!(chunk.row_count(), 2);
+
+        // Both should have length 2
+        let path_col = chunk.column(2).unwrap();
+        assert_eq!(path_col.get_value(0).unwrap(), Value::Int64(2));
+        assert_eq!(path_col.get_value(1).unwrap(), Value::Int64(2));
+    }
+
+    #[test]
+    fn test_multiple_pairs_in_chunk() {
+        let store = Arc::new(LpgStore::new());
+
+        // Create: a -> b, c -> d
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
+        let d = store.create_node(&["Node"]);
+
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(c, d, "KNOWS");
+
+        // Test multiple pairs at once
+        let input = Box::new(MockPairOperator::new(vec![(a, b), (c, d), (a, d)]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            None,
+            Direction::Outgoing,
+        );
+
+        let chunk = op.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 3);
+
+        let path_col = chunk.column(2).unwrap();
+        assert_eq!(path_col.get_value(0).unwrap(), Value::Int64(1)); // a->b = 1
+        assert_eq!(path_col.get_value(1).unwrap(), Value::Int64(1)); // c->d = 1
+        assert_eq!(path_col.get_value(2).unwrap(), Value::Null); // a->d = no path
+    }
+
+    #[test]
+    fn test_operator_reset() {
+        let store = Arc::new(LpgStore::new());
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        store.create_edge(a, b, "KNOWS");
+
+        let input = Box::new(MockPairOperator::new(vec![(a, b)]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            None,
+            Direction::Outgoing,
+        );
+
+        // First iteration
+        let chunk = op.next().unwrap();
+        assert!(chunk.is_some());
+        let chunk = op.next().unwrap();
+        assert!(chunk.is_none());
+
+        // After reset
+        op.reset();
+        let chunk = op.next().unwrap();
+        assert!(chunk.is_some());
+    }
+
+    #[test]
+    fn test_operator_name() {
+        let store = Arc::new(LpgStore::new());
+        let input = Box::new(MockPairOperator::new(vec![]));
+        let op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            None,
+            Direction::Outgoing,
+        );
+
+        assert_eq!(op.name(), "ShortestPath");
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let store = Arc::new(LpgStore::new());
+        let input = Box::new(MockPairOperator::new(vec![]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            None,
+            Direction::Outgoing,
+        );
+
+        // Empty input should return None
+        let chunk = op.next().unwrap();
+        assert!(chunk.is_none());
+    }
+
+    #[test]
+    fn test_all_shortest_paths_no_path() {
+        let store = Arc::new(LpgStore::new());
+
+        // Disconnected nodes
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+
+        let input = Box::new(MockPairOperator::new(vec![(a, b)]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            None,
+            Direction::Outgoing,
+        )
+        .with_all_paths(true);
+
+        let chunk = op.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 1); // Still returns one row with null
+
+        let path_col = chunk.column(2).unwrap();
+        assert_eq!(path_col.get_value(0).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn test_all_shortest_paths_same_node() {
+        let store = Arc::new(LpgStore::new());
+        let a = store.create_node(&["Node"]);
+
+        let input = Box::new(MockPairOperator::new(vec![(a, a)]));
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(&store),
+            input,
+            0,
+            1,
+            None,
+            Direction::Outgoing,
+        )
+        .with_all_paths(true);
+
+        let chunk = op.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 1);
+
+        let path_col = chunk.column(2).unwrap();
+        assert_eq!(path_col.get_value(0).unwrap(), Value::Int64(0));
     }
 }

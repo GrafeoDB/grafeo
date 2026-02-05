@@ -756,6 +756,18 @@ pub enum BuiltInFunction {
     // Comparison
     /// sameTerm(expr1, expr2).
     SameTerm,
+
+    // Vector functions (extension for AI/ML workloads)
+    /// COSINE_SIMILARITY(vec1, vec2).
+    CosineSimilarity,
+    /// EUCLIDEAN_DISTANCE(vec1, vec2).
+    EuclideanDistance,
+    /// DOT_PRODUCT(vec1, vec2).
+    DotProduct,
+    /// MANHATTAN_DISTANCE(vec1, vec2).
+    ManhattanDistance,
+    /// VECTOR([f1, f2, ...]) - creates a vector literal.
+    Vector,
 }
 
 /// Aggregate expression.

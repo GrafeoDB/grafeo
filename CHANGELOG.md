@@ -2,6 +2,231 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.3.4] - 2026-02-05
+
+_Quality of Life Improvements_
+
+### Added
+
+- **Query Performance Metrics**: Query results now include execution timing and row counts
+  - `QueryResult.execution_time_ms` - execution time in milliseconds
+  - `QueryResult.rows_scanned` - number of rows scanned during execution
+  - Python: `result.execution_time_ms` and `result.rows_scanned` properties
+
+- **Error Message Suggestions**: Fuzzy matching for helpful "Did you mean X?" hints
+  - Levenshtein distance-based matching for undefined variables and labels
+  - Case-insensitive comparison with configurable edit distance thresholds
+  - `find_similar()`, `format_suggestion()`, `format_suggestions()` utilities
+
+- **Python Pagination**: `get_nodes_by_label()` now supports `offset` parameter
+  - Enables efficient pagination: `db.get_nodes_by_label("Person", limit=10, offset=20)`
+
+### Documentation
+
+- **Troubleshooting Guide**: Common errors, debugging tips, and solutions
+- **Glossary**: Terminology reference for graph database concepts
+- **Migration Guide**: Moving from Neo4j, NetworkX, and other databases
+- **Security Guide**: Authentication patterns and secure deployment
+- **Performance Baselines**: Benchmark results and optimization guidance
+- **Example Notebooks**: Interactive anywidget visualizations for graphs and vectors
+
+## [0.3.3] - Unreleased
+
+_Hybrid Query Support & Vector Optimization_
+
+### Added
+
+- **VectorJoin Operator**: Combines graph patterns with vector similarity search
+  - `VectorJoinOp` logical operator in query plans
+  - `VectorJoinOperator` physical operator with two modes:
+    - `with_static_query()` for constant query vectors
+    - `entity_to_entity()` for comparing embeddings between nodes
+  - Supports HNSW index and brute-force search
+  - Configurable k, similarity thresholds, and label filtering
+
+- **Vector Zone Maps**: Block-level pruning for vector search
+  - `VectorZoneMap` tracks magnitude bounds, centroid, and bounding box
+  - Centroid-based pruning with max_radius for block skipping
+  - Per-dimension min/max for hyperrectangle pruning
+  - `might_contain_within_distance()` for Euclidean and Cosine metrics
+
+- **Vector Cost & Cardinality Estimation**:
+  - `vector_scan_cost()` in optimizer with HNSW O(ef * log N) and brute-force O(N) models
+  - `vector_join_cost()` for hybrid query planning
+  - `estimate_vector_scan()` and `estimate_vector_join()` cardinality estimators
+  - Accounts for k parameter and similarity threshold selectivity
+
+- **Product Quantization (PQ)**: High-compression vector quantization
+  - `ProductQuantizer`: Splits vectors into M subvectors, quantizes each to K centroids
+  - K-means training with configurable iterations
+  - Asymmetric distance computation (ADC) using precomputed tables
+  - 8-32x compression with ~90% recall retention
+  - `QuantizationType::Product { num_subvectors }` variant
+  - Integrated with `QuantizedHnswIndex` for memory-efficient search
+
+- **Memory-Mapped Vector Storage**: Disk-backed storage for large datasets
+  - `VectorStorage` trait for storage backend abstraction
+  - `RamStorage`: In-memory HashMap storage (fastest access)
+  - `MmapStorage`: Memory-mapped file storage (low memory footprint)
+  - LRU cache for frequently accessed vectors
+  - Automatic persistence with custom file format
+
+- **Python Quantization API**: Vector quantization accessible from Python
+  - `grafeo.QuantizationType`: None, Scalar, Binary, Product variants
+  - `grafeo.ScalarQuantizer`: Train, quantize, dequantize, distance methods
+  - `grafeo.ProductQuantizer`: Train, quantize, reconstruct, asymmetric distance
+  - `grafeo.BinaryQuantizer`: Static quantize and hamming distance methods
+
+## [0.3.2] - Unreleased
+
+_Batch Read Optimizations & Code Quality_
+
+### Added
+
+- **Selective Property Loading** (Projection Pushdown):
+  - `PropertyStorage::get_selective_batch()` - O(N×K) vs O(N×C) for subset of properties
+  - `LpgStore::get_nodes_properties_selective_batch()` wrapper method
+  - `LpgStore::get_edges_properties_selective_batch()` wrapper method
+  - Significant speedup when queries only need a few properties from many-column nodes
+
+- **Parallel Node Scan Source**:
+  - `ParallelNodeScanSource` for morsel-driven parallel execution
+  - Implements `ParallelSource` trait with partitioning support
+  - `with_label()` for filtered scans, `from_node_ids()` for pre-computed lists
+  - Enables 3-8x speedup on large scans (10K+ nodes) by saturating CPU cores
+
+### Changed
+
+- **MVCC Hot Path Optimizations**:
+  - Added `#[inline]` to `VersionChain::visible_at`, `visible_to`
+  - Added `#[inline]` to `ColdVersionRef::is_visible_at`, `is_visible_to`
+  - Added `#[inline]` to `VersionIndex::visible_at`, `visible_to`
+  - Reduces function call overhead during full table scans
+
+- **Delta Encoding Safety**:
+  - Added `debug_assert!` to verify input is sorted in `DeltaEncoding::encode()`
+  - Improved documentation clarifying sorted input requirement
+  - Prevents silent data corruption from unsorted input in debug builds
+
+- **Batch Property Reading**:
+  - Pre-allocated result vectors in `PropertyStorage::get_all_batch()`
+  - HashMap capacity hints based on column count (NebulaGraph MultiGet pattern)
+  - Reduces allocation overhead for bulk property retrieval
+
+## [0.3.1] - 2026-02-05
+
+_Vector Optimization & Cache Improvements_
+
+### Added
+
+- **Vector Quantization**: Memory-efficient vector storage for large-scale similarity search
+  - `ScalarQuantizer`: f32 → u8 compression
+    - `train()` learns min/max per dimension from sample vectors
+    - Asymmetric distance computation
+  - `BinaryQuantizer`: f32 → 1-bit compression
+    - Sign-bit extraction with packed u64 storage
+    - SIMD-accelerated hamming distance (popcnt instruction)
+  - `QuantizationType` enum for configuration (None, Scalar, Binary)
+
+- **QuantizedHnswIndex**: HNSW with quantization and rescoring
+  - Two-phase search: approximate quantized → exact rescore
+  - Configurable rescore factor (default 2x candidates)
+  - Automatic quantizer training from insertion samples
+
+- **SIMD Vector Acceleration**: 4-8x faster distance computations
+  - AVX2 + FMA for modern x86_64 CPUs
+  - SSE fallback for older x86_64
+  - NEON support for ARM (aarch64)
+  - `simd_support()` function for runtime CPU detection
+  - Python `grafeo.simd_support()` diagnostic function
+
+- **Vector Batch Operations**:
+  - `batch_insert()` for HNSW index bulk loading
+  - `batch_search()` / `batch_search_with_ef()` for parallel multi-query search (rayon)
+  - `batch_search_slices()` for slice-based query batches
+
+- **VectorScan Operators**: Query execution for vector similarity search
+  - `VectorScanOp` logical operator in query plans
+  - `VectorScanOperator` physical operator (HNSW or brute-force)
+  - Distance/similarity threshold filtering
+  - Label-filtered brute-force search fallback
+
+- **Adaptive WAL Flusher**: `AdaptiveFlusher` with self-tuning timing based on actual flush duration
+  - Background thread adjusts wait time: `timeout = target_interval - last_flush_duration`
+  - Maintains consistent flush cadence regardless of disk speed
+  - `FlusherStats` for observability (flush count, avg/max times, exceeded target count)
+  - Graceful shutdown with final flush guarantee
+
+- **DurabilityMode::Adaptive**: New WAL durability mode for variable disk latency workloads
+  - Unlike `Batch` which checks thresholds inline, `Adaptive` uses dedicated flusher thread
+  - Prevents thundering herd problems when disk is slow
+
+- **FingerprintedHashIndex**: Sharded hash index with fingerprint-based fast rejection
+  - 64-shard concurrent access (similar to DashMap)
+  - 48-bit fingerprints for ~99.99% rejection rate without full key comparison
+  - `AtomicFingerprintStats` for thread-safe observability (lookups, rejections, comparisons)
+  - Useful for expensive key comparisons (strings) or future disk-backed indices
+
+## [0.3.0] - Unreleased
+
+_AI Compatibility Release_
+
+Major release introducing **Vector as a first-class type** for AI/ML workloads. Graph + vector hybrid queries are the unique differentiator - no pure vector database can efficiently combine graph traversal with vector similarity.
+
+### Added
+
+- **Vector Type Foundation**:
+  - `Value::Vector(Arc<[f32]>)` - First-class vector type with 4x compression vs f64
+  - `LogicalType::Vector(dim)` - Dimension-aware vector type for schema validation
+  - `as_vector()`, `is_vector()`, `vector_dimensions()` accessor methods
+  - `HashableValue` support for vectors (bit-level equality and hashing)
+  - Serialization support via serde
+
+- **Vector Distance Functions** (`grafeo-core/index/vector`):
+  - `cosine_distance()` / `cosine_similarity()` - For normalized embeddings
+  - `euclidean_distance()` / `euclidean_distance_squared()` - L2 distance
+  - `dot_product()` - Maximum inner product search
+  - `manhattan_distance()` - L1 distance, outlier-resistant
+  - `DistanceMetric` enum with `FromStr` for runtime configuration
+  - `normalize()` and `l2_norm()` utilities
+
+- **Brute-Force k-NN Search**:
+  - `brute_force_knn()` - O(n) exact nearest neighbor search
+  - `brute_force_knn_filtered()` - k-NN with predicate filtering
+  - `batch_distances()` - Efficient batch distance computation
+  - `VectorConfig` for dimensions and metric configuration
+
+- **HNSW Index** (feature: `vector-index`):
+  - `HnswIndex` - O(log n) approximate nearest neighbor search
+  - `HnswConfig` with tunable parameters (M, ef_construction, ef)
+  - Presets: `high_recall()`, `fast()` for common use cases
+  - Thread-safe concurrent reads with exclusive writes
+  - `insert()`, `search()`, `search_with_ef()`, `remove()` operations
+  - Seeded RNG option for reproducible benchmarks
+
+- **GQL Vector Syntax**:
+  - `VECTOR` keyword and `vector([...])` literal function
+  - `cosine_similarity()`, `euclidean_distance()`, `dot_product()`, `manhattan_distance()` functions
+  - `CREATE VECTOR INDEX name ON :Label(property) WITH (dimensions: N, metric: 'cosine')` statement
+  - `CreateVectorIndexStatement` AST node
+
+- **SPARQL Vector Functions**:
+  - `VECTOR(...)`, `COSINE_SIMILARITY(vec1, vec2)`, `EUCLIDEAN_DISTANCE(vec1, vec2)`
+  - `DOT_PRODUCT(vec1, vec2)`, `MANHATTAN_DISTANCE(vec1, vec2)`
+  - Enables hybrid queries: `SELECT ?doc WHERE { ?doc :embedding ?vec FILTER(COSINE_SIMILARITY(?vec, ?query) > 0.8) }`
+
+- **Serializable Snapshot Isolation (SSI)**:
+  - `IsolationLevel` enum: `ReadCommitted`, `SnapshotIsolation` (default), `Serializable`
+  - `begin_with_isolation()` for explicit isolation level selection
+  - SSI validation detects read-write conflicts to prevent write skew anomaly
+  - `TransactionError::SerializationFailure` for SSI violations
+
+### Fixed
+
+- **RDF Pending Delete Filtering**: `find_with_pending()` now correctly excludes pending deletes from query results within a transaction
+
+---
+
 ## [0.2.7] - 2026-02-05
 
 _Parallel Execution & Cache Patterns_

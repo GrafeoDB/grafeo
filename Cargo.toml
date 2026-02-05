@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.7"
+version = "0.3.4"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -21,11 +21,11 @@ description = "A pure-Rust, high-performance, embeddable graph database"
 
 [workspace.dependencies]
 # Internal crates
-grafeo-common = { path = "crates/grafeo-common", version = "0.2.7" }
-grafeo-core = { path = "crates/grafeo-core", version = "0.2.7" }
-grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.2.7" }
-grafeo-engine = { path = "crates/grafeo-engine", version = "0.2.7" }
-grafeo = { path = "crates/grafeo", version = "0.2.7" }
+grafeo-common = { path = "crates/grafeo-common", version = "0.3.4" }
+grafeo-core = { path = "crates/grafeo-core", version = "0.3.4" }
+grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.3.4" }
+grafeo-engine = { path = "crates/grafeo-engine", version = "0.3.4" }
+grafeo = { path = "crates/grafeo", version = "0.3.4" }
 
 # Error handling
 thiserror = "2.0"
@@ -76,8 +76,8 @@ tracing-subscriber = "0.3"
 regex = "1.12.3"
 
 # Testing
-proptest = "1.6"
-criterion = "0.8"
+proptest = "1.10.0"
+criterion = "0.8.2"
 tempfile = "3.22"
 
 # Allocators (platform-optimized)
@@ -87,9 +87,15 @@ mimalloc = "0.1"
 # Fast hashing
 rustc-hash = "2.1"
 
+# Vector index support
+ordered-float = "5.0"
+rand = "0.9"
+
 [workspace.lints.rust]
 unsafe_code = "warn"
-# TODO: Enable missing_docs = "warn" once all public items are documented
+# TODO(0.4.x): Enable missing_docs = "warn" once all public items are documented
+# This requires adding documentation to all public types, functions, and modules.
+# Track progress by running: cargo doc --all-features 2>&1 | grep "missing documentation"
 # missing_docs = "warn"
 
 [workspace.lints.clippy]

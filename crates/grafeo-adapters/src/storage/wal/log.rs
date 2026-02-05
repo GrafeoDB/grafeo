@@ -44,6 +44,19 @@ pub enum DurabilityMode {
         /// Maximum records between syncs.
         max_records: u64,
     },
+    /// Adaptive sync - background thread adjusts timing based on flush duration.
+    ///
+    /// Unlike `Batch` which checks thresholds inline, `Adaptive` spawns a
+    /// dedicated flusher thread that maintains consistent flush cadence
+    /// regardless of disk speed. Use [`AdaptiveFlusher`](super::AdaptiveFlusher)
+    /// to manage the background thread.
+    ///
+    /// The WAL itself only buffers writes; the flusher thread handles syncing.
+    Adaptive {
+        /// Target interval between flushes in milliseconds.
+        /// The flusher adjusts wait times to maintain this cadence.
+        target_interval_ms: u64,
+    },
     /// No sync - rely on OS buffer flushing.
     /// Fastest but may lose recent data on crash.
     NoSync,
@@ -227,6 +240,11 @@ impl WalManager {
                     self.records_since_sync.store(0, Ordering::Relaxed);
                     *self.last_sync.lock() = Instant::now();
                 }
+            }
+            DurabilityMode::Adaptive { .. } => {
+                // Adaptive mode: just flush buffer, background thread handles sync
+                // The AdaptiveFlusher calls sync() periodically with self-tuning timing
+                log_file.writer.flush()?;
             }
             DurabilityMode::NoSync => {
                 // Just flush buffer, no sync
@@ -658,6 +676,24 @@ mod tests {
             })
             .unwrap();
         }
+
+        // Test Adaptive mode (just buffer flush, no inline sync)
+        let config = WalConfig {
+            durability: DurabilityMode::Adaptive {
+                target_interval_ms: 100,
+            },
+            ..Default::default()
+        };
+        let wal = WalManager::with_config(dir.path().join("adaptive"), config).unwrap();
+        for i in 0..10 {
+            wal.log(&WalRecord::CreateNode {
+                id: NodeId::new(i),
+                labels: vec![],
+            })
+            .unwrap();
+        }
+        // Manually sync since no flusher thread in this test
+        wal.sync().unwrap();
     }
 
     #[test]

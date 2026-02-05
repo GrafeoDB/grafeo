@@ -111,6 +111,12 @@ pub enum Value {
 
     /// Key-value map (uses BTreeMap for deterministic ordering)
     Map(Arc<BTreeMap<PropertyKey, Value>>),
+
+    /// Fixed-size vector of 32-bit floats for embeddings.
+    ///
+    /// Uses f32 for 4x compression vs f64. Arc for cheap cloning.
+    /// Dimension is implicit from length. Common dimensions: 384, 768, 1536.
+    Vector(Arc<[f32]>),
 }
 
 impl Value {
@@ -201,6 +207,33 @@ impl Value {
         }
     }
 
+    /// Returns the vector if this is a Vector, otherwise None.
+    #[inline]
+    #[must_use]
+    pub fn as_vector(&self) -> Option<&[f32]> {
+        match self {
+            Value::Vector(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this is a vector type.
+    #[inline]
+    #[must_use]
+    pub const fn is_vector(&self) -> bool {
+        matches!(self, Value::Vector(_))
+    }
+
+    /// Returns the vector dimensions if this is a Vector.
+    #[inline]
+    #[must_use]
+    pub fn vector_dimensions(&self) -> Option<usize> {
+        match self {
+            Value::Vector(v) => Some(v.len()),
+            _ => None,
+        }
+    }
+
     /// Returns the type name of this value.
     #[must_use]
     pub const fn type_name(&self) -> &'static str {
@@ -214,6 +247,7 @@ impl Value {
             Value::Timestamp(_) => "TIMESTAMP",
             Value::List(_) => "LIST",
             Value::Map(_) => "MAP",
+            Value::Vector(_) => "VECTOR",
         }
     }
 
@@ -247,6 +281,12 @@ impl fmt::Debug for Value {
             Value::Timestamp(t) => write!(f, "Timestamp({t:?})"),
             Value::List(l) => write!(f, "List({l:?})"),
             Value::Map(m) => write!(f, "Map({m:?})"),
+            Value::Vector(v) => write!(
+                f,
+                "Vector([{}; {} dims])",
+                v.first().unwrap_or(&0.0),
+                v.len()
+            ),
         }
     }
 }
@@ -280,6 +320,20 @@ impl fmt::Display for Value {
                     write!(f, "{k}: {v}")?;
                 }
                 write!(f, "}}")
+            }
+            Value::Vector(v) => {
+                write!(f, "vector([")?;
+                let show_count = v.len().min(3);
+                for (i, val) in v.iter().take(show_count).enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{val}")?;
+                }
+                if v.len() > 3 {
+                    write!(f, ", ... ({} dims)", v.len())?;
+                }
+                write!(f, "])")
             }
         }
     }
@@ -355,6 +409,18 @@ impl From<Timestamp> for Value {
 impl<T: Into<Value>> From<Vec<T>> for Value {
     fn from(v: Vec<T>) -> Self {
         Value::List(v.into_iter().map(Into::into).collect())
+    }
+}
+
+impl From<&[f32]> for Value {
+    fn from(v: &[f32]) -> Self {
+        Value::Vector(v.into())
+    }
+}
+
+impl From<Arc<[f32]>> for Value {
+    fn from(v: Arc<[f32]>) -> Self {
+        Value::Vector(v)
     }
 }
 
@@ -508,7 +574,9 @@ impl OrderableValue {
             Value::String(s) => Some(Self::String(s.clone())),
             Value::Bool(b) => Some(Self::Bool(*b)),
             Value::Timestamp(t) => Some(Self::Timestamp(*t)),
-            Value::Null | Value::Bytes(_) | Value::List(_) | Value::Map(_) => None,
+            Value::Null | Value::Bytes(_) | Value::List(_) | Value::Map(_) | Value::Vector(_) => {
+                None
+            }
         }
     }
 
@@ -669,6 +737,12 @@ impl Hash for HashableValue {
                     HashableValue(v.clone()).hash(state);
                 }
             }
+            Value::Vector(v) => {
+                v.len().hash(state);
+                for &f in v.iter() {
+                    f.to_bits().hash(state);
+                }
+            }
         }
     }
 }
@@ -696,6 +770,15 @@ impl PartialEq for HashableValue {
                     b.get(k)
                         .is_some_and(|bv| HashableValue(v.clone()) == HashableValue(bv.clone()))
                 })
+            }
+            (Value::Vector(a), Value::Vector(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                // Compare by bits for consistent hash/eq behavior
+                a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| x.to_bits() == y.to_bits())
             }
             // For other types, use normal Value equality
             _ => self.0 == other.0,
@@ -796,6 +879,63 @@ mod tests {
         assert_eq!(Value::Bytes(vec![].into()).type_name(), "BYTES");
         assert_eq!(Value::List(vec![].into()).type_name(), "LIST");
         assert_eq!(Value::Map(BTreeMap::new().into()).type_name(), "MAP");
+        assert_eq!(Value::Vector(vec![].into()).type_name(), "VECTOR");
+    }
+
+    #[test]
+    fn test_value_vector() {
+        // Create vector directly (Vec<f32>.into() would create List due to generic impl)
+        let v = Value::Vector(vec![0.1f32, 0.2, 0.3].into());
+        assert!(v.is_vector());
+        assert_eq!(v.vector_dimensions(), Some(3));
+        assert_eq!(v.as_vector(), Some(&[0.1f32, 0.2, 0.3][..]));
+
+        // From slice
+        let slice: &[f32] = &[1.0, 2.0, 3.0, 4.0];
+        let v2: Value = slice.into();
+        assert!(v2.is_vector());
+        assert_eq!(v2.vector_dimensions(), Some(4));
+
+        // From Arc<[f32]>
+        let arc: Arc<[f32]> = vec![5.0f32, 6.0].into();
+        let v3: Value = arc.into();
+        assert!(v3.is_vector());
+        assert_eq!(v3.vector_dimensions(), Some(2));
+
+        // Non-vector returns None
+        assert!(!Value::Int64(42).is_vector());
+        assert_eq!(Value::Int64(42).as_vector(), None);
+        assert_eq!(Value::Int64(42).vector_dimensions(), None);
+    }
+
+    #[test]
+    fn test_hashable_value_vector() {
+        use std::collections::HashMap;
+
+        let mut map: HashMap<HashableValue, i32> = HashMap::new();
+
+        let v1 = HashableValue::new(Value::Vector(vec![0.1f32, 0.2, 0.3].into()));
+        let v2 = HashableValue::new(Value::Vector(vec![0.1f32, 0.2, 0.3].into()));
+        let v3 = HashableValue::new(Value::Vector(vec![0.4f32, 0.5, 0.6].into()));
+
+        map.insert(v1.clone(), 1);
+
+        // Same vector should hash to same bucket
+        assert_eq!(map.get(&v2), Some(&1));
+
+        // Different vector should not match
+        assert_eq!(map.get(&v3), None);
+
+        // v1 and v2 should be equal
+        assert_eq!(v1, v2);
+        assert_ne!(v1, v3);
+    }
+
+    #[test]
+    fn test_orderable_value_vector_unsupported() {
+        // Vectors don't have a natural ordering, so try_from should return None
+        let v = Value::Vector(vec![0.1f32, 0.2, 0.3].into());
+        assert!(OrderableValue::try_from(&v).is_none());
     }
 
     #[test]

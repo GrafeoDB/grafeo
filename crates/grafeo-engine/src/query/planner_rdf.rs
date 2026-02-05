@@ -2476,6 +2476,10 @@ fn value_to_string(value: &Value) -> String {
                 .collect();
             format!("{{{}}}", parts.join(", "))
         }
+        Value::Vector(v) => {
+            let parts: Vec<String> = v.iter().map(|f| f.to_string()).collect();
+            format!("vector([{}])", parts.join(", "))
+        }
     }
 }
 

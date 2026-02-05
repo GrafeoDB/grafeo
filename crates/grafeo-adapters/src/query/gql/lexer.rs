@@ -109,6 +109,14 @@ pub enum TokenKind {
     Ends,
     /// CONTAINS keyword.
     Contains,
+    /// VECTOR keyword (for vector index and type).
+    Vector,
+    /// INDEX keyword (for CREATE INDEX).
+    Index,
+    /// DIMENSION keyword (for vector dimensions).
+    Dimension,
+    /// METRIC keyword (for distance metric).
+    Metric,
 
     // Literals
     /// Integer literal.
@@ -530,6 +538,10 @@ impl<'a> Lexer<'a> {
             "STARTS" => TokenKind::Starts,
             "ENDS" => TokenKind::Ends,
             "CONTAINS" => TokenKind::Contains,
+            "VECTOR" => TokenKind::Vector,
+            "INDEX" => TokenKind::Index,
+            "DIMENSION" => TokenKind::Dimension,
+            "METRIC" => TokenKind::Metric,
             _ => TokenKind::Identifier,
         }
     }

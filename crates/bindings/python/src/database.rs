@@ -149,6 +149,9 @@ impl PyGrafeoDB {
     ///
     /// Use params for parameterized queries to avoid injection:
     ///     result = db.execute("MATCH (p:Person {name: $name}) RETURN p", {"name": "Alice"})
+    ///
+    /// Query performance metrics are available via `result.execution_time_ms`
+    /// and `result.rows_scanned` properties.
     #[pyo3(signature = (query, params=None))]
     fn execute(
         &self,
@@ -175,11 +178,13 @@ impl PyGrafeoDB {
         // Extract nodes and edges based on column types
         let (nodes, edges) = extract_entities(&result, &db);
 
-        Ok(PyQueryResult::new(
+        Ok(PyQueryResult::with_metrics(
             result.columns,
             result.rows,
             nodes,
             edges,
+            result.execution_time_ms,
+            result.rows_scanned,
         ))
     }
 
@@ -216,11 +221,13 @@ impl PyGrafeoDB {
         // Extract nodes and edges based on column types
         let (nodes, edges) = extract_entities(&result, &db);
 
-        Ok(PyQueryResult::new(
+        Ok(PyQueryResult::with_metrics(
             result.columns,
             result.rows,
             nodes,
             edges,
+            result.execution_time_ms,
+            result.rows_scanned,
         ))
     }
 
@@ -314,11 +321,13 @@ impl PyGrafeoDB {
         // Extract nodes and edges based on column types
         let (nodes, edges) = extract_entities(&result, &db);
 
-        Ok(PyQueryResult::new(
+        Ok(PyQueryResult::with_metrics(
             result.columns,
             result.rows,
             nodes,
             edges,
+            result.execution_time_ms,
+            result.rows_scanned,
         ))
     }
 
@@ -350,11 +359,13 @@ impl PyGrafeoDB {
         // Extract nodes and edges based on column types
         let (nodes, edges) = extract_entities(&result, &db);
 
-        Ok(PyQueryResult::new(
+        Ok(PyQueryResult::with_metrics(
             result.columns,
             result.rows,
             nodes,
             edges,
+            result.execution_time_ms,
+            result.rows_scanned,
         ))
     }
 
@@ -388,11 +399,13 @@ impl PyGrafeoDB {
         let result = db.execute_sparql(query).map_err(PyGrafeoError::from)?;
 
         // SPARQL results don't have LPG nodes/edges, so pass empty vectors
-        Ok(PyQueryResult::new(
+        Ok(PyQueryResult::with_metrics(
             result.columns,
             result.rows,
             Vec::new(),
             Vec::new(),
+            result.execution_time_ms,
+            result.rows_scanned,
         ))
     }
 
@@ -540,28 +553,46 @@ impl PyGrafeoDB {
     /// people = db.get_nodes_by_label("Person", limit=100)
     /// for node_id, props in people:
     ///     print(f"Node {node_id}: {props}")
+    ///
+    /// # Pagination example
+    /// page_size = 100
+    /// for page in range(10):
+    ///     nodes = db.get_nodes_by_label("Person", limit=page_size, offset=page * page_size)
+    ///     for node_id, props in nodes:
+    ///         process(node_id, props)
     /// ```
     ///
     /// Args:
     ///     label: The label to filter by
     ///     limit: Maximum number of nodes to return (None for all)
+    ///     offset: Number of nodes to skip before returning results (default 0)
     ///
     /// Returns:
     ///     List of (node_id, properties_dict) tuples
-    #[pyo3(signature = (label, limit=None))]
+    #[pyo3(signature = (label, limit=None, offset=0))]
     fn get_nodes_by_label(
         &self,
         py: Python<'_>,
         label: &str,
         limit: Option<usize>,
+        offset: usize,
     ) -> PyResult<Vec<(u64, Py<pyo3::types::PyDict>)>> {
         let db = self.inner.read();
 
         // Get node IDs by label
-        let node_ids = db.store().nodes_by_label(label);
+        let all_node_ids = db.store().nodes_by_label(label);
+
+        // Apply offset
+        let node_ids = if offset >= all_node_ids.len() {
+            &[][..]
+        } else {
+            &all_node_ids[offset..]
+        };
+
+        // Apply limit
         let node_ids = match limit {
             Some(n) => &node_ids[..n.min(node_ids.len())],
-            None => &node_ids,
+            None => node_ids,
         };
 
         // Batch get all properties
@@ -1290,11 +1321,13 @@ impl PyTransaction {
         // Extract nodes and edges based on column types
         let (nodes, edges) = extract_entities(&result, &db);
 
-        Ok(PyQueryResult::new(
+        Ok(PyQueryResult::with_metrics(
             result.columns,
             result.rows,
             nodes,
             edges,
+            result.execution_time_ms,
+            result.rows_scanned,
         ))
     }
 
@@ -1342,11 +1375,13 @@ impl PyTransaction {
         // Extract nodes and edges based on column types
         let (nodes, edges) = extract_entities(&result, &db);
 
-        Ok(PyQueryResult::new(
+        Ok(PyQueryResult::with_metrics(
             result.columns,
             result.rows,
             nodes,
             edges,
+            result.execution_time_ms,
+            result.rows_scanned,
         ))
     }
 
@@ -1394,11 +1429,13 @@ impl PyTransaction {
         // Extract nodes and edges based on column types
         let (nodes, edges) = extract_entities(&result, &db);
 
-        Ok(PyQueryResult::new(
+        Ok(PyQueryResult::with_metrics(
             result.columns,
             result.rows,
             nodes,
             edges,
+            result.execution_time_ms,
+            result.rows_scanned,
         ))
     }
 
@@ -1449,11 +1486,13 @@ impl PyTransaction {
         };
 
         // SPARQL results don't have LPG nodes/edges, so pass empty vectors
-        Ok(PyQueryResult::new(
+        Ok(PyQueryResult::with_metrics(
             result.columns,
             result.rows,
             Vec::new(),
             Vec::new(),
+            result.execution_time_ms,
+            result.rows_scanned,
         ))
     }
 

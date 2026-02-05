@@ -101,6 +101,12 @@ pub enum TransactionError {
     /// Write-write conflict with another transaction.
     WriteConflict(String),
 
+    /// Serialization failure (SSI violation).
+    ///
+    /// Occurs when running at Serializable isolation level and a read-write
+    /// conflict is detected (we read data that another committed transaction wrote).
+    SerializationFailure(String),
+
     /// Deadlock detected.
     Deadlock,
 
@@ -120,6 +126,9 @@ impl fmt::Display for TransactionError {
             TransactionError::Aborted => write!(f, "Transaction aborted"),
             TransactionError::Conflict => write!(f, "Transaction conflict"),
             TransactionError::WriteConflict(msg) => write!(f, "Write conflict: {msg}"),
+            TransactionError::SerializationFailure(msg) => {
+                write!(f, "Serialization failure (SSI): {msg}")
+            }
             TransactionError::Deadlock => write!(f, "Deadlock detected"),
             TransactionError::Timeout => write!(f, "Transaction timeout"),
             TransactionError::ReadOnly => write!(f, "Cannot write in read-only transaction"),

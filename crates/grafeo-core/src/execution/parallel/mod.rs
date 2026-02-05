@@ -84,4 +84,6 @@ pub use pipeline::{
 pub use scheduler::{MorselScheduler, NumaConfig, NumaNode, WorkerHandle};
 #[cfg(feature = "rdf")]
 pub use source::ParallelTripleScanSource;
-pub use source::{ParallelChunkSource, ParallelSource, ParallelVectorSource, RangeSource};
+pub use source::{
+    ParallelChunkSource, ParallelNodeScanSource, ParallelSource, ParallelVectorSource, RangeSource,
+};

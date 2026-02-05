@@ -798,7 +798,7 @@ impl ProductQuantizer {
 
     /// Builds asymmetric distance table for a query vector.
     ///
-    /// Returns a table of shape [M][K] containing the squared distance
+    /// Returns a table of shape \[M\]\[K\] containing the squared distance
     /// from each query subvector to each centroid. This allows O(M) distance
     /// computation for quantized vectors via table lookups.
     #[must_use]

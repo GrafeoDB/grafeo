@@ -801,6 +801,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "Vector dimension mismatch")]
     fn test_mmap_storage_dimension_mismatch() {
         let temp_dir = std::env::temp_dir();

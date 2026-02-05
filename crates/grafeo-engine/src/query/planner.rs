@@ -403,6 +403,12 @@ impl Planner {
             LogicalOperator::SetProperty(set_prop) => self.plan_set_property(set_prop),
             LogicalOperator::ShortestPath(sp) => self.plan_shortest_path(sp),
             LogicalOperator::Empty => Err(Error::Internal("Empty plan".to_string())),
+            LogicalOperator::VectorScan(_) => Err(Error::Internal(
+                "VectorScan requires vector-index feature".to_string(),
+            )),
+            LogicalOperator::VectorJoin(_) => Err(Error::Internal(
+                "VectorJoin requires vector-index feature".to_string(),
+            )),
             _ => Err(Error::Internal(format!(
                 "Unsupported operator: {:?}",
                 std::mem::discriminant(op)

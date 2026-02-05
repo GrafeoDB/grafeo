@@ -452,6 +452,35 @@ impl Binder {
                 self.validate_expression(&scan.query_vector)?;
                 Ok(())
             }
+            LogicalOperator::VectorJoin(join) => {
+                // VectorJoin takes input from left side and produces right-side matches
+                self.bind_operator(&join.input)?;
+                // Add right variable for matched nodes
+                self.context.add_variable(
+                    join.right_variable.clone(),
+                    VariableInfo {
+                        name: join.right_variable.clone(),
+                        data_type: LogicalType::Node,
+                        is_node: true,
+                        is_edge: false,
+                    },
+                );
+                // Optionally add score variable
+                if let Some(ref score_var) = join.score_variable {
+                    self.context.add_variable(
+                        score_var.clone(),
+                        VariableInfo {
+                            name: score_var.clone(),
+                            data_type: LogicalType::Float64,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
+                }
+                // Validate the query vector expression
+                self.validate_expression(&join.query_vector)?;
+                Ok(())
+            }
         }
     }
 

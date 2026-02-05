@@ -41,6 +41,7 @@ mod sort;
 mod union;
 mod unwind;
 mod variable_length_expand;
+mod vector_join;
 
 pub use aggregate::{
     AggregateExpr, AggregateFunction, HashAggregateOperator, SimpleAggregateOperator,
@@ -80,6 +81,7 @@ pub use push::{
 pub use scan::ScanOperator;
 pub use scan_vector::VectorScanOperator;
 pub use shortest_path::ShortestPathOperator;
+pub use vector_join::VectorJoinOperator;
 pub use single_row::{EmptyOperator, NodeListOperator, SingleRowOperator};
 pub use sort::{NullOrder, SortDirection, SortKey, SortOperator};
 pub use union::UnionOperator;

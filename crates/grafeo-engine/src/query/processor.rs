@@ -578,6 +578,10 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
                 substitute_in_operator(input, params)?;
             }
         }
+        LogicalOperator::VectorJoin(join) => {
+            substitute_in_expression(&mut join.query_vector, params)?;
+            substitute_in_operator(&mut join.input, params)?;
+        }
     }
     Ok(())
 }

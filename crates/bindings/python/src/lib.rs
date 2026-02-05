@@ -41,6 +41,7 @@ mod bridges;
 mod database;
 mod error;
 mod graph;
+mod quantization;
 mod query;
 mod types;
 
@@ -77,6 +78,9 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAlgorithms>()?;
     m.add_class::<PyNetworkXAdapter>()?;
     m.add_class::<PySolvORAdapter>()?;
+
+    // Register quantization types
+    quantization::register(m)?;
 
     // Add module-level functions
     m.add_function(wrap_pyfunction!(simd_support, m)?)?;

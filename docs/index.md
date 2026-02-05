@@ -65,6 +65,12 @@ hide:
 
     Full ACID compliance with MVCC-based snapshot isolation. Reliable transactions for production workloads.
 
+-   :material-vector-line:{ .lg .middle } **Vector Search**
+
+    ---
+
+    HNSW-based similarity search with quantization (Scalar, Binary, Product). Combine graph traversal with semantic similarity.
+
 </div>
 
 ---

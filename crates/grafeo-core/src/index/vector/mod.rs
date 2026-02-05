@@ -69,6 +69,8 @@
 mod distance;
 pub mod quantization;
 mod simd;
+pub mod storage;
+pub mod zone_map;
 
 #[cfg(feature = "vector-index")]
 mod config;
@@ -82,7 +84,9 @@ pub use distance::{
     euclidean_distance, euclidean_distance_squared, l2_norm, manhattan_distance, normalize,
     simd_support,
 };
-pub use quantization::{BinaryQuantizer, QuantizationType, ScalarQuantizer};
+pub use quantization::{BinaryQuantizer, ProductQuantizer, QuantizationType, ScalarQuantizer};
+pub use storage::{MmapStorage, RamStorage, StorageBackend, VectorStorage};
+pub use zone_map::VectorZoneMap;
 
 #[cfg(feature = "vector-index")]
 pub use config::HnswConfig;

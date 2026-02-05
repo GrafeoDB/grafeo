@@ -220,6 +220,12 @@ nav:
       - Aggregations: user-guide/sparql/aggregations.md
       - Property Paths: user-guide/sparql/paths.md
       - Built-in Functions: user-guide/sparql/functions.md
+    - Vector Search:
+      - user-guide/vector-search/index.md
+      - Getting Started: user-guide/vector-search/basics.md
+      - HNSW Index: user-guide/vector-search/hnsw-index.md
+      - Quantization: user-guide/vector-search/quantization.md
+      - Python API: user-guide/vector-search/python-api.md
     - Python API:
       - user-guide/python/index.md
       - Database Operations: user-guide/python/database.md

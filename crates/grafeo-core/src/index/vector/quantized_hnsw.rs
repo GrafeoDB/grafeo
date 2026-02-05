@@ -33,7 +33,7 @@
 //! let results = index.search(&query, 10);
 //! ```
 
-use super::quantization::{BinaryQuantizer, QuantizationType, ScalarQuantizer};
+use super::quantization::{BinaryQuantizer, ProductQuantizer, QuantizationType, ScalarQuantizer};
 use super::{compute_distance, HnswConfig, HnswIndex};
 use grafeo_common::types::NodeId;
 use ordered_float::OrderedFloat;
@@ -58,10 +58,14 @@ pub struct QuantizedHnswIndex {
     quantization_type: QuantizationType,
     /// Scalar quantizer (if using scalar quantization).
     scalar_quantizer: RwLock<Option<ScalarQuantizer>>,
+    /// Product quantizer (if using product quantization).
+    product_quantizer: RwLock<Option<ProductQuantizer>>,
     /// Quantized scalar vectors: NodeId -> quantized u8 vector.
     scalar_vectors: RwLock<HashMap<NodeId, Vec<u8>>>,
     /// Quantized binary vectors: NodeId -> binary bits.
     binary_vectors: RwLock<HashMap<NodeId, Vec<u64>>>,
+    /// Product quantization codes: NodeId -> M u8 codes.
+    product_codes: RwLock<HashMap<NodeId, Vec<u8>>>,
     /// Whether to rescore with full precision vectors.
     rescore: bool,
     /// Rescore factor: search for this many candidates before rescoring.
@@ -81,15 +85,17 @@ impl QuantizedHnswIndex {
     /// # Arguments
     ///
     /// * `config` - HNSW configuration
-    /// * `quantization` - Quantization type (None, Scalar, or Binary)
+    /// * `quantization` - Quantization type (None, Scalar, Binary, or Product)
     #[must_use]
     pub fn new(config: HnswConfig, quantization: QuantizationType) -> Self {
         Self {
             hnsw: HnswIndex::new(config),
             quantization_type: quantization,
             scalar_quantizer: RwLock::new(None),
+            product_quantizer: RwLock::new(None),
             scalar_vectors: RwLock::new(HashMap::new()),
             binary_vectors: RwLock::new(HashMap::new()),
+            product_codes: RwLock::new(HashMap::new()),
             rescore: true,
             rescore_factor: 2,
             training_threshold: 1000,
@@ -105,8 +111,10 @@ impl QuantizedHnswIndex {
             hnsw: HnswIndex::with_seed(config, seed),
             quantization_type: quantization,
             scalar_quantizer: RwLock::new(None),
+            product_quantizer: RwLock::new(None),
             scalar_vectors: RwLock::new(HashMap::new()),
             binary_vectors: RwLock::new(HashMap::new()),
+            product_codes: RwLock::new(HashMap::new()),
             rescore: true,
             rescore_factor: 2,
             training_threshold: 1000,
@@ -181,6 +189,7 @@ impl QuantizedHnswIndex {
             QuantizationType::None => 0,
             QuantizationType::Scalar => self.hnsw.len() * self.config().dimensions, // u8 vectors
             QuantizationType::Binary => self.hnsw.len() * BinaryQuantizer::bytes_needed(self.config().dimensions),
+            QuantizationType::Product { num_subvectors } => self.hnsw.len() * num_subvectors, // M u8 codes
         };
         base + quantized
     }
@@ -193,12 +202,13 @@ impl QuantizedHnswIndex {
     /// - None: 1.0 (no compression)
     /// - Scalar: 4.0 (f32 -> u8)
     /// - Binary: 32.0 (f32 -> 1 bit)
+    /// - Product(M): (dimensions * 4) / M
     ///
     /// Note: With rescoring enabled (default), actual memory usage is higher
     /// because both full and quantized vectors are stored.
     #[must_use]
     pub fn theoretical_compression_ratio(&self) -> f32 {
-        self.quantization_type.compression_ratio() as f32
+        self.quantization_type.compression_ratio(self.config().dimensions) as f32
     }
 
     /// Returns the actual memory ratio compared to storing only full vectors.
@@ -232,6 +242,9 @@ impl QuantizedHnswIndex {
             QuantizationType::None => {}
             QuantizationType::Scalar => self.insert_scalar_quantized(id, vector),
             QuantizationType::Binary => self.insert_binary_quantized(id, vector),
+            QuantizationType::Product { num_subvectors } => {
+                self.insert_product_quantized(id, vector, num_subvectors);
+            }
         }
     }
 
@@ -276,6 +289,41 @@ impl QuantizedHnswIndex {
         self.binary_vectors.write().insert(id, bits);
     }
 
+    /// Inserts with product quantization.
+    fn insert_product_quantized(&self, id: NodeId, vector: &[f32], num_subvectors: usize) {
+        let trained = *self.quantizer_trained.read();
+
+        if trained {
+            // Quantizer is ready, quantize and store
+            if let Some(ref quantizer) = *self.product_quantizer.read() {
+                let codes = quantizer.quantize(vector);
+                self.product_codes.write().insert(id, codes);
+            }
+        } else {
+            // Still collecting training samples
+            let vector_arc: Arc<[f32]> = vector.into();
+            let mut samples = self.training_samples.write();
+            samples.push(vector_arc);
+
+            if samples.len() >= self.training_threshold {
+                // Time to train the product quantizer
+                let refs: Vec<&[f32]> = samples.iter().map(|v| v.as_ref()).collect();
+                let quantizer = ProductQuantizer::train(&refs, num_subvectors, 256, 10);
+
+                // Quantize all collected samples
+                let mut codes = self.product_codes.write();
+                for (old_id, old_vec) in self.hnsw.iter() {
+                    codes.insert(old_id, quantizer.quantize(&old_vec));
+                }
+
+                // Store the quantizer and mark as trained
+                *self.product_quantizer.write() = Some(quantizer);
+                *self.quantizer_trained.write() = true;
+                samples.clear();
+            }
+        }
+    }
+
     /// Searches for the k nearest neighbors.
     ///
     /// If rescoring is enabled (default), the search:
@@ -304,6 +352,9 @@ impl QuantizedHnswIndex {
             }
             QuantizationType::Binary => {
                 self.search_binary_quantized(query, k, ef)
+            }
+            QuantizationType::Product { .. } => {
+                self.search_product_quantized(query, k, ef)
             }
         }
     }
@@ -379,6 +430,62 @@ impl QuantizedHnswIndex {
         self.rescore_candidates(query, scored, k)
     }
 
+    /// Search with product quantization.
+    fn search_product_quantized(&self, query: &[f32], k: usize, ef: usize) -> Vec<(NodeId, f32)> {
+        let trained = *self.quantizer_trained.read();
+
+        if !trained {
+            // Quantizer not ready, fall back to exact search
+            return self.hnsw.search_with_ef(query, k, ef);
+        }
+
+        // Get candidates using HNSW
+        let num_candidates = if self.rescore {
+            k * self.rescore_factor
+        } else {
+            k
+        };
+
+        let candidates = self.hnsw.search_with_ef(query, num_candidates, ef);
+
+        if !self.rescore {
+            return candidates.into_iter().take(k).collect();
+        }
+
+        // Rescore with asymmetric PQ distances (faster than full precision)
+        // or fall back to full precision rescoring
+        let pq_guard = self.product_quantizer.read();
+        let codes_guard = self.product_codes.read();
+
+        if let Some(ref pq) = *pq_guard {
+            // Build distance table for this query
+            let table = pq.build_distance_table(query);
+
+            let mut scored: Vec<(NodeId, f32)> = candidates
+                .into_iter()
+                .filter_map(|(id, _)| {
+                    codes_guard.get(&id).map(|codes| {
+                        let dist = pq.distance_with_table(&table, codes);
+                        (id, dist.sqrt()) // Convert squared distance to distance
+                    })
+                })
+                .collect();
+
+            scored.sort_by_key(|(_, d)| OrderedFloat(*d));
+            scored.truncate(k);
+
+            // Optionally rescore top results with full precision
+            if self.rescore {
+                return self.rescore_candidates(query, scored, k);
+            }
+
+            scored
+        } else {
+            // Fall back to exact search
+            candidates.into_iter().take(k).collect()
+        }
+    }
+
     /// Rescores candidates with exact full-precision distances.
     fn rescore_candidates(
         &self,
@@ -424,6 +531,9 @@ impl QuantizedHnswIndex {
             }
             QuantizationType::Binary => {
                 self.binary_vectors.write().remove(&id);
+            }
+            QuantizationType::Product { .. } => {
+                self.product_codes.write().remove(&id);
             }
         }
         self.hnsw.remove(id)
@@ -595,9 +705,12 @@ mod tests {
 
     #[test]
     fn test_quantization_type_enum() {
-        assert_eq!(QuantizationType::None.compression_ratio(), 1);
-        assert_eq!(QuantizationType::Scalar.compression_ratio(), 4);
-        assert_eq!(QuantizationType::Binary.compression_ratio(), 32);
+        let dims = 384;
+        assert_eq!(QuantizationType::None.compression_ratio(dims), 1);
+        assert_eq!(QuantizationType::Scalar.compression_ratio(dims), 4);
+        assert_eq!(QuantizationType::Binary.compression_ratio(dims), 32);
+        // Product: (384 * 4) / 8 = 192
+        assert_eq!(QuantizationType::Product { num_subvectors: 8 }.compression_ratio(dims), 192);
     }
 
     #[test]
@@ -611,5 +724,53 @@ mod tests {
         // After inserting, memory should be tracked
         index.insert(NodeId::new(1), &vec![0.1f32; 384]);
         assert!(index.memory_usage() > 0);
+    }
+
+    #[test]
+    fn test_quantized_hnsw_product_quantization() {
+        // 32 dimensions divisible by 8 subvectors
+        let config = HnswConfig::new(32, DistanceMetric::Euclidean);
+        let index = QuantizedHnswIndex::with_seed(
+            config,
+            QuantizationType::Product { num_subvectors: 8 },
+            42,
+        )
+        .with_training_threshold(20); // Lower threshold for test
+
+        let vectors = create_test_vectors(50, 32);
+        for (i, vec) in vectors.iter().enumerate() {
+            index.insert(NodeId::new(i as u64 + 1), vec);
+        }
+
+        assert_eq!(index.len(), 50);
+        // Product quantization: (32 * 4) / 8 = 16x compression
+        assert_eq!(index.theoretical_compression_ratio(), 16.0);
+
+        let results = index.search(&vectors[25], 5);
+        assert_eq!(results.len(), 5);
+        // With rescoring, should find the correct vector
+        assert_eq!(results[0].0, NodeId::new(26));
+    }
+
+    #[test]
+    fn test_quantized_hnsw_product_before_training() {
+        // Test behavior before quantizer is trained
+        let config = HnswConfig::new(16, DistanceMetric::Euclidean);
+        let index = QuantizedHnswIndex::with_seed(
+            config,
+            QuantizationType::Product { num_subvectors: 4 },
+            42,
+        )
+        .with_training_threshold(100); // High threshold so it won't train
+
+        let vectors = create_test_vectors(10, 16);
+        for (i, vec) in vectors.iter().enumerate() {
+            index.insert(NodeId::new(i as u64 + 1), vec);
+        }
+
+        // Should still work (falls back to exact search before training)
+        let results = index.search(&vectors[5], 3);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, NodeId::new(6));
     }
 }

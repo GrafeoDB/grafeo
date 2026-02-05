@@ -2,7 +2,56 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.3.4] - Unreleased
+
+_Quality & Stability (reserved for areas of concern)_
+
 ## [0.3.3] - Unreleased
+
+_Hybrid Query Support & Vector Optimization_
+
+### Added
+
+- **VectorJoin Operator**: Combines graph patterns with vector similarity search
+  - `VectorJoinOp` logical operator in query plans
+  - `VectorJoinOperator` physical operator with two modes:
+    - `with_static_query()` for constant query vectors
+    - `entity_to_entity()` for comparing embeddings between nodes
+  - Supports HNSW index and brute-force search
+  - Configurable k, similarity thresholds, and label filtering
+
+- **Vector Zone Maps**: Block-level pruning for vector search
+  - `VectorZoneMap` tracks magnitude bounds, centroid, and bounding box
+  - Centroid-based pruning with max_radius for block skipping
+  - Per-dimension min/max for hyperrectangle pruning
+  - `might_contain_within_distance()` for Euclidean and Cosine metrics
+
+- **Vector Cost & Cardinality Estimation**:
+  - `vector_scan_cost()` in optimizer with HNSW O(ef * log N) and brute-force O(N) models
+  - `vector_join_cost()` for hybrid query planning
+  - `estimate_vector_scan()` and `estimate_vector_join()` cardinality estimators
+  - Accounts for k parameter and similarity threshold selectivity
+
+- **Product Quantization (PQ)**: High-compression vector quantization
+  - `ProductQuantizer`: Splits vectors into M subvectors, quantizes each to K centroids
+  - K-means training with configurable iterations
+  - Asymmetric distance computation (ADC) using precomputed tables
+  - 8-32x compression with ~90% recall retention
+  - `QuantizationType::Product { num_subvectors }` variant
+  - Integrated with `QuantizedHnswIndex` for memory-efficient search
+
+- **Memory-Mapped Vector Storage**: Disk-backed storage for large datasets
+  - `VectorStorage` trait for storage backend abstraction
+  - `RamStorage`: In-memory HashMap storage (fastest access)
+  - `MmapStorage`: Memory-mapped file storage (low memory footprint)
+  - LRU cache for frequently accessed vectors
+  - Automatic persistence with custom file format
+
+- **Python Quantization API**: Vector quantization accessible from Python
+  - `grafeo.QuantizationType`: None, Scalar, Binary, Product variants
+  - `grafeo.ScalarQuantizer`: Train, quantize, dequantize, distance methods
+  - `grafeo.ProductQuantizer`: Train, quantize, reconstruct, asymmetric distance
+  - `grafeo.BinaryQuantizer`: Static quantize and hamming distance methods
 
 ## [0.3.2] - Unreleased
 

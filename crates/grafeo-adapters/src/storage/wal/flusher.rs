@@ -252,11 +252,12 @@ mod tests {
 
     #[test]
     fn test_flusher_stats() {
-        let mut stats = FlusherStats::default();
-
-        stats.flush_count = 10;
-        stats.total_flush_time_us = 5000; // 5ms total
-        stats.max_flush_time_us = 1000; // 1ms max
+        let stats = FlusherStats {
+            flush_count: 10,
+            total_flush_time_us: 5000, // 5ms total
+            max_flush_time_us: 1000,   // 1ms max
+            ..Default::default()
+        };
 
         assert_eq!(stats.avg_flush_time_us(), 500); // 0.5ms average
     }

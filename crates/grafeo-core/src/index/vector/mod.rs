@@ -67,6 +67,7 @@
 //! ```
 
 mod distance;
+mod simd;
 
 #[cfg(feature = "vector-index")]
 mod config;
@@ -76,6 +77,7 @@ mod hnsw;
 pub use distance::{
     DistanceMetric, compute_distance, cosine_distance, cosine_similarity, dot_product,
     euclidean_distance, euclidean_distance_squared, l2_norm, manhattan_distance, normalize,
+    simd_support,
 };
 
 #[cfg(feature = "vector-index")]

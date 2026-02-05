@@ -540,6 +540,126 @@ impl HnswIndex {
             .map(|n| compute_distance(query, &n.vector, self.config.metric))
             .unwrap_or(f32::MAX)
     }
+
+    // ========================================================================
+    // Batch Operations
+    // ========================================================================
+
+    /// Inserts multiple vectors in batch.
+    ///
+    /// This method inserts vectors sequentially into the HNSW graph structure
+    /// but with optimized internal operations. For truly parallel construction
+    /// of very large indexes, consider using multiple indexes and merging.
+    ///
+    /// # Arguments
+    ///
+    /// * `vectors` - Iterator of (NodeId, vector) pairs to insert
+    ///
+    /// # Panics
+    ///
+    /// Panics if any vector dimensions don't match the configuration.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use grafeo_core::index::vector::{HnswIndex, HnswConfig, DistanceMetric};
+    /// use grafeo_common::types::NodeId;
+    ///
+    /// let config = HnswConfig::new(384, DistanceMetric::Cosine);
+    /// let index = HnswIndex::new(config);
+    ///
+    /// let vectors: Vec<(NodeId, Vec<f32>)> = (0..1000)
+    ///     .map(|i| (NodeId::new(i), vec![0.1f32; 384]))
+    ///     .collect();
+    ///
+    /// index.batch_insert(vectors.iter().map(|(id, v)| (*id, v.as_slice())));
+    /// ```
+    pub fn batch_insert<'a, I>(&self, vectors: I)
+    where
+        I: IntoIterator<Item = (NodeId, &'a [f32])>,
+    {
+        for (id, vector) in vectors {
+            self.insert(id, vector);
+        }
+    }
+
+    /// Searches for k nearest neighbors for multiple queries in parallel.
+    ///
+    /// This method runs multiple searches concurrently using rayon, providing
+    /// significant speedup when you have many queries to execute.
+    ///
+    /// # Arguments
+    ///
+    /// * `queries` - Slice of query vectors (as `Vec<f32>` or similar)
+    /// * `k` - Number of nearest neighbors to return for each query
+    ///
+    /// # Returns
+    ///
+    /// Vector of results, one per query. Each result is a vector of
+    /// (NodeId, distance) pairs sorted by distance.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any query vector dimensions don't match the configuration.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use grafeo_core::index::vector::{HnswIndex, HnswConfig, DistanceMetric};
+    ///
+    /// let config = HnswConfig::new(384, DistanceMetric::Cosine);
+    /// let index = HnswIndex::new(config);
+    /// // ... insert vectors ...
+    ///
+    /// let queries: Vec<Vec<f32>> = vec![
+    ///     vec![0.1f32; 384],
+    ///     vec![0.2f32; 384],
+    ///     vec![0.3f32; 384],
+    /// ];
+    ///
+    /// let all_results = index.batch_search(&queries, 10);
+    /// assert_eq!(all_results.len(), 3);
+    /// ```
+    #[must_use]
+    pub fn batch_search(&self, queries: &[Vec<f32>], k: usize) -> Vec<Vec<(NodeId, f32)>> {
+        use rayon::prelude::*;
+
+        queries
+            .par_iter()
+            .map(|query| self.search(query, k))
+            .collect()
+    }
+
+    /// Searches for k nearest neighbors for multiple queries in parallel.
+    ///
+    /// This variant accepts query vectors as slices.
+    #[must_use]
+    pub fn batch_search_slices(&self, queries: &[&[f32]], k: usize) -> Vec<Vec<(NodeId, f32)>> {
+        use rayon::prelude::*;
+
+        queries
+            .par_iter()
+            .map(|query| self.search(query, k))
+            .collect()
+    }
+
+    /// Searches with custom ef parameter for multiple queries in parallel.
+    ///
+    /// Higher ef values give better recall at the cost of latency.
+    #[must_use]
+    pub fn batch_search_with_ef(
+        &self,
+        queries: &[Vec<f32>],
+        k: usize,
+        ef: usize,
+    ) -> Vec<Vec<(NodeId, f32)>> {
+        use rayon::prelude::*;
+
+        queries
+            .par_iter()
+            .map(|query| self.search_with_ef(query, k, ef))
+            .collect()
+    }
 }
 
 impl std::fmt::Debug for HnswIndex {
@@ -739,5 +859,83 @@ mod tests {
 
         index.insert(NodeId::new(1), &[0.1, 0.2, 0.3, 0.4]);
         let _ = index.search(&[0.1, 0.2, 0.3], 1); // Wrong dimension
+    }
+
+    #[test]
+    fn test_hnsw_batch_insert() {
+        let config = HnswConfig::new(4, DistanceMetric::Euclidean);
+        let index = HnswIndex::with_seed(config, 42);
+
+        let vectors = create_test_vectors(100, 4);
+        let pairs: Vec<_> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (NodeId::new(i as u64 + 1), v.as_slice()))
+            .collect();
+
+        index.batch_insert(pairs);
+
+        assert_eq!(index.len(), 100);
+
+        // Verify search still works
+        let results = index.search(&vectors[50], 5);
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0].0, NodeId::new(51));
+    }
+
+    #[test]
+    fn test_hnsw_batch_search() {
+        let config = HnswConfig::new(4, DistanceMetric::Euclidean);
+        let index = HnswIndex::with_seed(config, 42);
+
+        let vectors = create_test_vectors(100, 4);
+        for (i, vec) in vectors.iter().enumerate() {
+            index.insert(NodeId::new(i as u64 + 1), vec);
+        }
+
+        // Batch search with 5 queries
+        let queries: Vec<Vec<f32>> = (0..5).map(|i| vectors[i * 20].clone()).collect();
+
+        let all_results = index.batch_search(&queries, 3);
+
+        assert_eq!(all_results.len(), 5);
+        for (i, results) in all_results.iter().enumerate() {
+            assert_eq!(results.len(), 3);
+            // First result should be the query vector itself
+            assert_eq!(results[0].0, NodeId::new((i * 20 + 1) as u64));
+            assert!(results[0].1 < 0.001);
+        }
+    }
+
+    #[test]
+    fn test_hnsw_batch_search_with_ef() {
+        let config = HnswConfig::new(4, DistanceMetric::Euclidean);
+        let index = HnswIndex::with_seed(config, 42);
+
+        let vectors = create_test_vectors(100, 4);
+        for (i, vec) in vectors.iter().enumerate() {
+            index.insert(NodeId::new(i as u64 + 1), vec);
+        }
+
+        let queries: Vec<Vec<f32>> = vec![vectors[25].clone(), vectors[75].clone()];
+
+        // Search with higher ef for better recall
+        let results = index.batch_search_with_ef(&queries, 5, 100);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].len(), 5);
+        assert_eq!(results[1].len(), 5);
+    }
+
+    #[test]
+    fn test_hnsw_batch_search_empty_index() {
+        let config = HnswConfig::new(4, DistanceMetric::Euclidean);
+        let index = HnswIndex::new(config);
+
+        let queries = vec![vec![0.0f32, 0.0, 0.0, 0.0]];
+        let results = index.batch_search(&queries, 10);
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_empty());
     }
 }

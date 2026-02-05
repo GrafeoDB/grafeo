@@ -41,6 +41,10 @@ tokio.workspace = true
 # Regex
 regex.workspace = true
 
+# Vector index (optional)
+ordered-float = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+
 [dev-dependencies]
 proptest.workspace = true
 criterion.workspace = true
@@ -52,6 +56,7 @@ rdf = []  # Enable RDF graph model
 tiered-storage = ["grafeo-common/tiered-storage", "bincode"]  # Enable tiered hot/cold storage
 succinct-indexes = []  # Enable succinct data structures (rank/select bitvectors, Elias-Fano, wavelet trees)
 ring-index = ["succinct-indexes", "rdf"]  # Ring Index for RDF (3x space reduction, requires succinct-indexes and rdf)
+vector-index = ["ordered-float", "rand"]  # HNSW vector index for approximate nearest neighbor search
 
 [lints]
 workspace = true

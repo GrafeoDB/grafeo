@@ -3145,6 +3145,7 @@ fn value_to_logical_type(value: &grafeo_common::types::Value) -> LogicalType {
         Value::Timestamp(_) => LogicalType::Timestamp,
         Value::List(_) => LogicalType::String, // Lists not yet supported as logical type
         Value::Map(_) => LogicalType::String,  // Maps not yet supported as logical type
+        Value::Vector(v) => LogicalType::Vector(v.len()),
     }
 }
 

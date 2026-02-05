@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo"
-version = "0.2.7"
+version = "0.3.0"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.2.7"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "byteorder",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-cli"
-version = "0.2.7"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -655,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.2.7"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "arcstr",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.2.7"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "arcstr",
@@ -691,8 +691,10 @@ dependencies = [
  "grafeo-common",
  "hashbrown 0.16.1",
  "indexmap",
+ "ordered-float",
  "parking_lot",
  "proptest",
+ "rand",
  "rayon",
  "regex",
  "serde",
@@ -704,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.2.7"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -727,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-python"
-version = "0.2.7"
+version = "0.3.0"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",
@@ -965,6 +967,15 @@ name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
+
+[[package]]
+name = "ordered-float"
+version = "5.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f4779c6901a562440c3786d08192c6fbda7c1c2060edd10006b05ee35d10f2d"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "page_size"

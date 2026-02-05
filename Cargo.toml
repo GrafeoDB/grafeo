@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.7"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -21,11 +21,11 @@ description = "A pure-Rust, high-performance, embeddable graph database"
 
 [workspace.dependencies]
 # Internal crates
-grafeo-common = { path = "crates/grafeo-common", version = "0.2.7" }
-grafeo-core = { path = "crates/grafeo-core", version = "0.2.7" }
-grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.2.7" }
-grafeo-engine = { path = "crates/grafeo-engine", version = "0.2.7" }
-grafeo = { path = "crates/grafeo", version = "0.2.7" }
+grafeo-common = { path = "crates/grafeo-common", version = "0.3.0" }
+grafeo-core = { path = "crates/grafeo-core", version = "0.3.0" }
+grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.3.0" }
+grafeo-engine = { path = "crates/grafeo-engine", version = "0.3.0" }
+grafeo = { path = "crates/grafeo", version = "0.3.0" }
 
 # Error handling
 thiserror = "2.0"
@@ -86,6 +86,10 @@ mimalloc = "0.1"
 
 # Fast hashing
 rustc-hash = "2.1"
+
+# Vector index support
+ordered-float = "5.0"
+rand = "0.9"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

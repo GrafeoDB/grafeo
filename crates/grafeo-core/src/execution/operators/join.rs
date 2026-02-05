@@ -79,6 +79,14 @@ impl HashKey {
                 keys.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
                 HashKey::Composite(keys)
             }
+            Value::Vector(v) => {
+                // Hash vectors by converting each f32 to its bit representation
+                HashKey::Composite(
+                    v.iter()
+                        .map(|f| HashKey::Int64(f.to_bits() as i64))
+                        .collect(),
+                )
+            }
         }
     }
 

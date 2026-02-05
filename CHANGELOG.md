@@ -2,6 +2,66 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.3.0] - Unreleased
+
+_AI Compatibility Release_
+
+Major release introducing **Vector as a first-class type** for AI/ML workloads. Graph + vector hybrid queries are the unique differentiator - no pure vector database can efficiently combine graph traversal with vector similarity.
+
+### Added
+
+- **Vector Type Foundation**:
+  - `Value::Vector(Arc<[f32]>)` - First-class vector type with 4x compression vs f64
+  - `LogicalType::Vector(dim)` - Dimension-aware vector type for schema validation
+  - `as_vector()`, `is_vector()`, `vector_dimensions()` accessor methods
+  - `HashableValue` support for vectors (bit-level equality and hashing)
+  - Serialization support via serde
+
+- **Vector Distance Functions** (`grafeo-core/index/vector`):
+  - `cosine_distance()` / `cosine_similarity()` - For normalized embeddings
+  - `euclidean_distance()` / `euclidean_distance_squared()` - L2 distance
+  - `dot_product()` - Maximum inner product search
+  - `manhattan_distance()` - L1 distance, outlier-resistant
+  - `DistanceMetric` enum with `FromStr` for runtime configuration
+  - `normalize()` and `l2_norm()` utilities
+
+- **Brute-Force k-NN Search**:
+  - `brute_force_knn()` - O(n) exact nearest neighbor search
+  - `brute_force_knn_filtered()` - k-NN with predicate filtering
+  - `batch_distances()` - Efficient batch distance computation
+  - `VectorConfig` for dimensions and metric configuration
+
+- **HNSW Index** (feature: `vector-index`):
+  - `HnswIndex` - O(log n) approximate nearest neighbor search
+  - `HnswConfig` with tunable parameters (M, ef_construction, ef)
+  - Presets: `high_recall()`, `fast()` for common use cases
+  - Thread-safe concurrent reads with exclusive writes
+  - `insert()`, `search()`, `search_with_ef()`, `remove()` operations
+  - Seeded RNG option for reproducible benchmarks
+
+- **GQL Vector Syntax**:
+  - `VECTOR` keyword and `vector([...])` literal function
+  - `cosine_similarity()`, `euclidean_distance()`, `dot_product()`, `manhattan_distance()` functions
+  - `CREATE VECTOR INDEX name ON :Label(property) WITH (dimensions: N, metric: 'cosine')` statement
+  - `CreateVectorIndexStatement` AST node
+
+- **SPARQL Vector Functions**:
+  - `VECTOR(...)`, `COSINE_SIMILARITY(vec1, vec2)`, `EUCLIDEAN_DISTANCE(vec1, vec2)`
+  - `DOT_PRODUCT(vec1, vec2)`, `MANHATTAN_DISTANCE(vec1, vec2)`
+  - Enables hybrid queries: `SELECT ?doc WHERE { ?doc :embedding ?vec FILTER(COSINE_SIMILARITY(?vec, ?query) > 0.8) }`
+
+- **Serializable Snapshot Isolation (SSI)**:
+  - `IsolationLevel` enum: `ReadCommitted`, `SnapshotIsolation` (default), `Serializable`
+  - `begin_with_isolation()` for explicit isolation level selection
+  - SSI validation detects read-write conflicts to prevent write skew anomaly
+  - `TransactionError::SerializationFailure` for SSI violations
+
+### Fixed
+
+- **RDF Pending Delete Filtering**: `find_with_pending()` now correctly excludes pending deletes from query results within a transaction
+
+---
+
 ## [0.2.7] - 2026-02-05
 
 _Parallel Execution & Cache Patterns_

@@ -158,6 +158,18 @@ pub enum TokenKind {
     /// UNDEF keyword.
     Undef,
 
+    // Vector keywords (extension for AI/ML workloads)
+    /// VECTOR keyword.
+    Vector,
+    /// COSINE_SIMILARITY function.
+    CosineSimilarity,
+    /// EUCLIDEAN_DISTANCE function.
+    EuclideanDistance,
+    /// DOT_PRODUCT function.
+    DotProduct,
+    /// MANHATTAN_DISTANCE function.
+    ManhattanDistance,
+
     // Literals
     /// Integer literal (value stored in text).
     Integer,
@@ -782,6 +794,12 @@ impl<'a> Lexer<'a> {
             // Special: 'a' is shorthand for rdf:type
             // Note: This gets uppercased to "A" by keyword_or_identifier
             "A" => TokenKind::A,
+            // Vector functions (extension for AI/ML workloads)
+            "VECTOR" => TokenKind::Vector,
+            "COSINE_SIMILARITY" => TokenKind::CosineSimilarity,
+            "EUCLIDEAN_DISTANCE" => TokenKind::EuclideanDistance,
+            "DOT_PRODUCT" => TokenKind::DotProduct,
+            "MANHATTAN_DISTANCE" => TokenKind::ManhattanDistance,
             _ => TokenKind::PrefixedName, // Treat as prefixed name without colon (just prefix part)
         }
     }

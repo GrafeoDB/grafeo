@@ -22,6 +22,7 @@ const TAG_BYTES: u8 = 5;
 const TAG_TIMESTAMP: u8 = 6;
 const TAG_LIST: u8 = 7;
 const TAG_MAP: u8 = 8;
+const TAG_VECTOR: u8 = 9;
 
 /// Serializes a Value to bytes.
 ///
@@ -93,6 +94,14 @@ pub fn serialize_value<W: Write + ?Sized>(value: &Value, w: &mut W) -> std::io::
                 total += serialize_value(val, w)?;
             }
             Ok(total)
+        }
+        Value::Vector(v) => {
+            w.write_all(&[TAG_VECTOR])?;
+            w.write_all(&(v.len() as u64).to_le_bytes())?;
+            for &f in v.iter() {
+                w.write_all(&f.to_le_bytes())?;
+            }
+            Ok(1 + 8 + v.len() * 4)
         }
     }
 }
@@ -179,6 +188,18 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
                 map.insert(grafeo_common::types::PropertyKey::new(key_str), val);
             }
             Ok(Value::Map(Arc::new(map)))
+        }
+        TAG_VECTOR => {
+            let mut len_buf = [0u8; 8];
+            r.read_exact(&mut len_buf)?;
+            let len = u64::from_le_bytes(len_buf) as usize;
+            let mut floats = Vec::with_capacity(len);
+            let mut buf = [0u8; 4];
+            for _ in 0..len {
+                r.read_exact(&mut buf)?;
+                floats.push(f32::from_le_bytes(buf));
+            }
+            Ok(Value::Vector(Arc::from(floats)))
         }
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,

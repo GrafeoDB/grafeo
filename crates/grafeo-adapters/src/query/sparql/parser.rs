@@ -1607,6 +1607,19 @@ impl<'a> Parser<'a> {
                 | "REGEX"
                 | "SUBSTR"
                 | "REPLACE"
+                // Vector functions (extension for AI/ML workloads)
+                | "VECTOR"
+                | "COSINE_SIMILARITY"
+                | "EUCLIDEAN_DISTANCE"
+                | "DOT_PRODUCT"
+                | "MANHATTAN_DISTANCE"
+        ) || matches!(
+            self.current.kind,
+            TokenKind::Vector
+                | TokenKind::CosineSimilarity
+                | TokenKind::EuclideanDistance
+                | TokenKind::DotProduct
+                | TokenKind::ManhattanDistance
         )
     }
 
@@ -1692,6 +1705,12 @@ impl<'a> Parser<'a> {
             "REGEX" => BuiltInFunction::Regex,
             "SUBSTR" => BuiltInFunction::Substr,
             "REPLACE" => BuiltInFunction::Replace,
+            // Vector functions (extension for AI/ML workloads)
+            "VECTOR" => BuiltInFunction::Vector,
+            "COSINE_SIMILARITY" => BuiltInFunction::CosineSimilarity,
+            "EUCLIDEAN_DISTANCE" => BuiltInFunction::EuclideanDistance,
+            "DOT_PRODUCT" => BuiltInFunction::DotProduct,
+            "MANHATTAN_DISTANCE" => BuiltInFunction::ManhattanDistance,
             _ => return Err(self.error(&format!("unknown function: {}", func_name))),
         };
 
@@ -2197,6 +2216,54 @@ mod tests {
     #[test]
     fn test_literal_with_language() {
         let query = parse(r#"SELECT ?x WHERE { ?x ?y "hello"@en }"#).unwrap();
+        assert!(matches!(query.query_form, QueryForm::Select(_)));
+    }
+
+    #[test]
+    fn test_vector_cosine_similarity() {
+        let query = parse(
+            r#"SELECT ?doc WHERE { ?doc ?embed ?vec FILTER(COSINE_SIMILARITY(?vec, ?query) > 0.8) }"#,
+        )
+        .unwrap();
+        assert!(matches!(query.query_form, QueryForm::Select(_)));
+    }
+
+    #[test]
+    fn test_vector_euclidean_distance() {
+        let query = parse(
+            r#"SELECT ?doc WHERE { ?doc ?embed ?vec FILTER(EUCLIDEAN_DISTANCE(?vec, ?query) < 1.5) }"#,
+        )
+        .unwrap();
+        assert!(matches!(query.query_form, QueryForm::Select(_)));
+    }
+
+    #[test]
+    fn test_vector_function_order_by() {
+        let query = parse(
+            r#"SELECT ?doc (COSINE_SIMILARITY(?vec, ?query) AS ?score)
+               WHERE { ?doc ?embed ?vec }
+               ORDER BY DESC(?score)
+               LIMIT 10"#,
+        )
+        .unwrap();
+        if let QueryForm::Select(select) = query.query_form {
+            assert!(select.solution_modifiers.order_by.is_some());
+            assert_eq!(select.solution_modifiers.limit, Some(10));
+        } else {
+            panic!("expected SELECT query");
+        }
+    }
+
+    #[test]
+    fn test_vector_literal_function() {
+        // Test VECTOR() function call with list syntax
+        let query = parse(
+            r#"SELECT ?doc WHERE {
+                ?doc ?embed ?vec
+                BIND(VECTOR(?v1, ?v2, ?v3) AS ?query_vec)
+            }"#,
+        )
+        .unwrap();
         assert!(matches!(query.query_form, QueryForm::Select(_)));
     }
 }

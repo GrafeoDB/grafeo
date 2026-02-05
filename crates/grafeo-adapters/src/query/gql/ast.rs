@@ -337,6 +337,8 @@ pub enum SchemaStatement {
     CreateNodeType(CreateNodeTypeStatement),
     /// CREATE EDGE TYPE.
     CreateEdgeType(CreateEdgeTypeStatement),
+    /// CREATE VECTOR INDEX.
+    CreateVectorIndex(CreateVectorIndexStatement),
 }
 
 /// A CREATE NODE TYPE statement.
@@ -357,6 +359,41 @@ pub struct CreateEdgeTypeStatement {
     pub name: String,
     /// Property definitions.
     pub properties: Vec<PropertyDefinition>,
+    /// Source span.
+    pub span: Option<SourceSpan>,
+}
+
+/// A CREATE VECTOR INDEX statement.
+///
+/// Creates an index for vector similarity search on a node property.
+///
+/// # Syntax
+///
+/// ```text
+/// CREATE VECTOR INDEX index_name ON :Label(property)
+///   [DIMENSION dim]
+///   [METRIC metric_name]
+/// ```
+///
+/// # Example
+///
+/// ```text
+/// CREATE VECTOR INDEX movie_embeddings ON :Movie(embedding)
+///   DIMENSION 384
+///   METRIC 'cosine'
+/// ```
+#[derive(Debug, Clone)]
+pub struct CreateVectorIndexStatement {
+    /// Index name.
+    pub name: String,
+    /// Node label to index.
+    pub node_label: String,
+    /// Property containing the vector.
+    pub property: String,
+    /// Vector dimensions (optional, can be inferred).
+    pub dimensions: Option<usize>,
+    /// Distance metric (default: cosine).
+    pub metric: Option<String>,
     /// Source span.
     pub span: Option<SourceSpan>,
 }

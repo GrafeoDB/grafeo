@@ -34,6 +34,7 @@ mod mutation;
 mod project;
 pub mod push;
 mod scan;
+mod scan_vector;
 mod shortest_path;
 pub mod single_row;
 mod sort;
@@ -77,6 +78,7 @@ pub use push::{
     SortPushOperator, SpillableAggregatePushOperator, SpillableSortPushOperator,
 };
 pub use scan::ScanOperator;
+pub use scan_vector::VectorScanOperator;
 pub use shortest_path::ShortestPathOperator;
 pub use single_row::{EmptyOperator, NodeListOperator, SingleRowOperator};
 pub use sort::{NullOrder, SortDirection, SortKey, SortOperator};

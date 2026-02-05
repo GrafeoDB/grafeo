@@ -572,6 +572,12 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
         | LogicalOperator::MoveGraph(_)
         | LogicalOperator::AddGraph(_) => {}
         LogicalOperator::Empty => {}
+        LogicalOperator::VectorScan(scan) => {
+            substitute_in_expression(&mut scan.query_vector, params)?;
+            if let Some(ref mut input) = scan.input {
+                substitute_in_operator(input, params)?;
+            }
+        }
     }
     Ok(())
 }

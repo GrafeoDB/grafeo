@@ -139,6 +139,10 @@ pub enum LogicalOperator {
 
     /// Add (merge) triples from one graph to another.
     AddGraph(AddGraphOp),
+
+    // ==================== Vector Search Operators ====================
+    /// Scan using vector similarity search.
+    VectorScan(VectorScanOp),
 }
 
 /// Scan nodes from the graph.
@@ -718,6 +722,58 @@ pub struct AddGraphOp {
     pub destination: Option<String>,
     /// Whether to silently ignore errors.
     pub silent: bool,
+}
+
+// ==================== Vector Search Operators ====================
+
+/// Vector similarity scan operation.
+///
+/// Performs approximate nearest neighbor search using a vector index (HNSW)
+/// or brute-force search for small datasets. Returns nodes/edges whose
+/// embeddings are similar to the query vector.
+///
+/// # Example GQL
+///
+/// ```gql
+/// MATCH (m:Movie)
+/// WHERE vector_similarity(m.embedding, $query_vector) > 0.8
+/// RETURN m.title
+/// ```
+#[derive(Debug, Clone)]
+pub struct VectorScanOp {
+    /// Variable name to bind matching entities to.
+    pub variable: String,
+    /// Name of the vector index to use (None = brute-force).
+    pub index_name: Option<String>,
+    /// Property containing the vector embedding.
+    pub property: String,
+    /// Optional label filter (scan only nodes with this label).
+    pub label: Option<String>,
+    /// The query vector expression.
+    pub query_vector: LogicalExpression,
+    /// Number of nearest neighbors to return.
+    pub k: usize,
+    /// Distance metric (None = use index default, typically cosine).
+    pub metric: Option<VectorMetric>,
+    /// Minimum similarity threshold (filters results below this).
+    pub min_similarity: Option<f32>,
+    /// Maximum distance threshold (filters results above this).
+    pub max_distance: Option<f32>,
+    /// Input operator (for hybrid queries combining graph + vector).
+    pub input: Option<Box<LogicalOperator>>,
+}
+
+/// Vector distance/similarity metric for vector scan operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorMetric {
+    /// Cosine similarity (1 - cosine_distance). Best for normalized embeddings.
+    Cosine,
+    /// Euclidean (L2) distance. Best when magnitude matters.
+    Euclidean,
+    /// Dot product. Best for maximum inner product search.
+    DotProduct,
+    /// Manhattan (L1) distance. Less sensitive to outliers.
+    Manhattan,
 }
 
 /// Return results (terminal operator).

@@ -434,6 +434,24 @@ impl Binder {
             | LogicalOperator::CopyGraph(_)
             | LogicalOperator::MoveGraph(_)
             | LogicalOperator::AddGraph(_) => Ok(()),
+            LogicalOperator::VectorScan(scan) => {
+                // VectorScan introduces a variable for matched nodes
+                if let Some(ref input) = scan.input {
+                    self.bind_operator(input)?;
+                }
+                self.context.add_variable(
+                    scan.variable.clone(),
+                    VariableInfo {
+                        name: scan.variable.clone(),
+                        data_type: LogicalType::Node,
+                        is_node: true,
+                        is_edge: false,
+                    },
+                );
+                // Validate the query vector expression
+                self.validate_expression(&scan.query_vector)?;
+                Ok(())
+            }
         }
     }
 

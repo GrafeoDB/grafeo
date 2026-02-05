@@ -24,16 +24,7 @@ The [anywidget-graph](anywidget-graph.md) widget renders interactive graph visua
 
 The example below builds a small social network with people and companies, connected by `KNOWS` and `WORKS_AT` relationships -- the same dataset used in Grafeo's [graph visualization example](https://github.com/GrafeoDB/grafeo/blob/main/examples/graph_visualization.py).
 
-```python {marimo}
-import marimo as mo
-mo.md(
-    """
-    ### Social Network Graph
-
-    Drag to pan, scroll to zoom, click a node to select it.
-    """
-)
-```
+Drag to pan, scroll to zoom, click a node to select it.
 
 ```python {marimo}
 from anywidget_graph import Graph
@@ -111,16 +102,7 @@ The [anywidget-vector](anywidget-vector.md) widget provides interactive **3D poi
 
 The example below shows clustered vectors that you might get from a vector similarity search, with three distinct groups colored by category.
 
-```python {marimo}
-import marimo as mo
-mo.md(
-    """
-    ### 3D Vector Space
-
-    Click and drag to orbit, scroll to zoom, right-click to pan.
-    """
-)
-```
+Click and drag to orbit, scroll to zoom, right-click to pan.
 
 ```python {marimo}
 import math

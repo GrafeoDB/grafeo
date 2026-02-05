@@ -6,6 +6,29 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.3.2] - Unreleased
 
+_Batch Read Optimizations & Code Quality_
+
+### Added
+
+- **Selective Property Loading** (Projection Pushdown):
+  - `PropertyStorage::get_selective_batch()` - O(N×K) vs O(N×C) for subset of properties
+  - `LpgStore::get_nodes_properties_selective_batch()` wrapper method
+  - `LpgStore::get_edges_properties_selective_batch()` wrapper method
+  - Significant speedup when queries only need a few properties from many-column nodes
+
+### Changed
+
+- **MVCC Hot Path Optimizations**:
+  - Added `#[inline]` to `VersionChain::visible_at`, `visible_to`
+  - Added `#[inline]` to `ColdVersionRef::is_visible_at`, `is_visible_to`
+  - Added `#[inline]` to `VersionIndex::visible_at`, `visible_to`
+  - Reduces function call overhead during full table scans
+
+- **Delta Encoding Safety**:
+  - Added `debug_assert!` to verify input is sorted in `DeltaEncoding::encode()`
+  - Improved documentation clarifying sorted input requirement
+  - Prevents silent data corruption from unsorted input in debug builds
+
 ## [0.3.1] - 2026-02-05
 
 _Vector Optimization & Cache Improvements_
@@ -13,10 +36,10 @@ _Vector Optimization & Cache Improvements_
 ### Added
 
 - **Vector Quantization**: Memory-efficient vector storage for large-scale similarity search
-  - `ScalarQuantizer`: f32 → u8 compression (4x smaller, ~97% recall retention)
+  - `ScalarQuantizer`: f32 → u8 compression
     - `train()` learns min/max per dimension from sample vectors
-    - Asymmetric distance computation (f32 query vs u8 stored)
-  - `BinaryQuantizer`: f32 → 1-bit compression (32x smaller, ~80% recall)
+    - Asymmetric distance computation
+  - `BinaryQuantizer`: f32 → 1-bit compression
     - Sign-bit extraction with packed u64 storage
     - SIMD-accelerated hamming distance (popcnt instruction)
   - `QuantizationType` enum for configuration (None, Scalar, Binary)

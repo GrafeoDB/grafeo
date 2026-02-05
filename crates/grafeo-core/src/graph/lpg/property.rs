@@ -289,6 +289,67 @@ impl<Id: EntityId> PropertyStorage<Id> {
             .collect()
     }
 
+    /// Gets selected properties for multiple entities efficiently (projection pushdown).
+    ///
+    /// This is more efficient than [`Self::get_all_batch`] when you only need a subset
+    /// of properties - it only iterates the requested columns instead of all columns.
+    ///
+    /// **Performance**: O(N × K) where N = ids.len() and K = keys.len(),
+    /// compared to O(N × C) for `get_all_batch` where C = total column count.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use grafeo_core::graph::lpg::PropertyStorage;
+    /// use grafeo_common::types::{PropertyKey, Value};
+    /// use grafeo_common::NodeId;
+    ///
+    /// let storage: PropertyStorage<NodeId> = PropertyStorage::new();
+    /// let ids = vec![NodeId::new(1), NodeId::new(2)];
+    /// let keys = vec![PropertyKey::new("name"), PropertyKey::new("age")];
+    ///
+    /// // Only fetches "name" and "age" columns, ignoring other properties
+    /// let props = storage.get_selective_batch(&ids, &keys);
+    /// ```
+    #[must_use]
+    pub fn get_selective_batch(
+        &self,
+        ids: &[Id],
+        keys: &[PropertyKey],
+    ) -> Vec<FxHashMap<PropertyKey, Value>> {
+        if keys.is_empty() {
+            // No properties requested - return empty maps
+            return vec![FxHashMap::default(); ids.len()];
+        }
+
+        let columns = self.columns.read();
+
+        // Pre-collect only the columns we need (avoids re-lookup per id)
+        let requested_columns: Vec<_> = keys
+            .iter()
+            .filter_map(|key| columns.get(key).map(|col| (key, col)))
+            .collect();
+
+        // Pre-allocate result with exact capacity
+        let mut results = Vec::with_capacity(ids.len());
+
+        for &id in ids {
+            let mut result = FxHashMap::with_capacity_and_hasher(
+                requested_columns.len(),
+                Default::default(),
+            );
+            // Only iterate requested columns, not all columns
+            for (key, col) in &requested_columns {
+                if let Some(value) = col.get(id) {
+                    result.insert((*key).clone(), value);
+                }
+            }
+            results.push(result);
+        }
+
+        results
+    }
+
     /// Returns the number of property columns.
     #[must_use]
     pub fn column_count(&self) -> usize {

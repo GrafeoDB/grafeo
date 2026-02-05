@@ -202,14 +202,69 @@ mod tests {
     }
 
     #[test]
-    fn test_hnsw_config_presets() {
-        let high_recall = HnswConfig::high_recall(384, DistanceMetric::Cosine);
-        assert_eq!(high_recall.m, 32);
-        assert_eq!(high_recall.ef_construction, 256);
+    fn test_hnsw_config_high_recall_preset() {
+        let config = HnswConfig::high_recall(384, DistanceMetric::Cosine);
 
+        assert_eq!(config.dimensions, 384);
+        assert_eq!(config.metric, DistanceMetric::Cosine);
+        assert_eq!(config.m, 32);
+        assert_eq!(config.m_max, 64); // 2 * m
+        assert_eq!(config.ef_construction, 256);
+        assert_eq!(config.ef, 100);
+        // Verify ml is computed correctly
+        assert!((config.ml - 1.0 / (32.0_f64).ln()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_hnsw_config_fast_preset() {
+        let config = HnswConfig::fast(384, DistanceMetric::Euclidean);
+
+        assert_eq!(config.dimensions, 384);
+        assert_eq!(config.metric, DistanceMetric::Euclidean);
+        assert_eq!(config.m, 12);
+        assert_eq!(config.m_max, 24); // 2 * m
+        assert_eq!(config.ef_construction, 100);
+        assert_eq!(config.ef, 32);
+        // Verify ml is computed correctly
+        assert!((config.ml - 1.0 / (12.0_f64).ln()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_preset_ordering() {
+        // High recall should have higher values than default
+        let default = HnswConfig::default();
+        let high_recall = HnswConfig::high_recall(384, DistanceMetric::Cosine);
+
+        assert!(high_recall.m > default.m);
+        assert!(high_recall.ef_construction > default.ef_construction);
+        assert!(high_recall.ef > default.ef);
+
+        // Fast should have lower values than default
         let fast = HnswConfig::fast(384, DistanceMetric::Cosine);
-        assert_eq!(fast.m, 12);
-        assert_eq!(fast.ef_construction, 100);
+
+        assert!(fast.m < default.m);
+        assert!(fast.ef_construction < default.ef_construction);
+        assert!(fast.ef < default.ef);
+    }
+
+    #[test]
+    fn test_with_m_updates_derived_fields() {
+        let config = HnswConfig::new(384, DistanceMetric::Cosine).with_m(24);
+
+        assert_eq!(config.m, 24);
+        assert_eq!(config.m_max, 48); // Auto-updated to 2*m
+        assert!((config.ml - 1.0 / (24.0_f64).ln()).abs() < 1e-10); // ml updated
+    }
+
+    #[test]
+    fn test_with_m_max_override() {
+        // Can override m_max independently
+        let config = HnswConfig::new(384, DistanceMetric::Cosine)
+            .with_m(16)
+            .with_m_max(64);
+
+        assert_eq!(config.m, 16);
+        assert_eq!(config.m_max, 64); // Overridden, not 2*m
     }
 
     #[test]

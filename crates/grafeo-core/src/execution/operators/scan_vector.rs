@@ -461,4 +461,163 @@ mod tests {
         );
         assert_eq!(brute_scan.name(), "VectorScan(BruteForce)");
     }
+
+    #[test]
+    fn test_vector_scan_with_min_similarity() {
+        let store = Arc::new(LpgStore::new());
+
+        let n1 = store.create_node(&["Doc"]);
+        let n2 = store.create_node(&["Doc"]);
+
+        // Normalized vectors for cosine similarity
+        // n1: [1, 0] - orthogonal to query
+        // n2: [0.707, 0.707] - similar to query [0, 1]
+        store.set_node_property(n1, "vec", Value::Vector(vec![1.0, 0.0].into()));
+        store.set_node_property(n2, "vec", Value::Vector(vec![0.707, 0.707].into()));
+
+        let mut scan = VectorScanOperator::brute_force(
+            Arc::clone(&store),
+            "vec",
+            vec![0.0, 1.0], // Query: [0, 1]
+            10,
+            DistanceMetric::Cosine,
+        )
+        .with_min_similarity(0.5); // Filters out n1 (similarity ~0)
+
+        let chunk = scan.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 1);
+
+        let node_id = chunk.column(0).unwrap().get_node_id(0);
+        assert_eq!(node_id, Some(n2));
+    }
+
+    #[test]
+    fn test_vector_scan_with_ef() {
+        let store = Arc::new(LpgStore::new());
+
+        let n1 = store.create_node(&["Doc"]);
+        store.set_node_property(n1, "vec", Value::Vector(vec![0.1, 0.2].into()));
+
+        let mut scan = VectorScanOperator::brute_force(
+            Arc::clone(&store),
+            "vec",
+            vec![0.1, 0.2],
+            10,
+            DistanceMetric::Cosine,
+        )
+        .with_ef(128); // Higher ef (doesn't affect brute-force, but tests API)
+
+        let chunk = scan.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 1);
+    }
+
+    #[test]
+    fn test_vector_scan_with_chunk_capacity() {
+        let store = Arc::new(LpgStore::new());
+
+        // Create many nodes
+        for i in 0..10 {
+            let node = store.create_node(&["Doc"]);
+            store.set_node_property(
+                node,
+                "vec",
+                Value::Vector(vec![i as f32, 0.0].into()),
+            );
+        }
+
+        let mut scan = VectorScanOperator::brute_force(
+            Arc::clone(&store),
+            "vec",
+            vec![0.0, 0.0],
+            10,
+            DistanceMetric::Euclidean,
+        )
+        .with_chunk_capacity(3); // Small chunks
+
+        // Should return multiple chunks
+        let chunk1 = scan.next().unwrap().unwrap();
+        assert_eq!(chunk1.row_count(), 3);
+
+        let chunk2 = scan.next().unwrap().unwrap();
+        assert_eq!(chunk2.row_count(), 3);
+
+        let chunk3 = scan.next().unwrap().unwrap();
+        assert_eq!(chunk3.row_count(), 3);
+
+        let chunk4 = scan.next().unwrap().unwrap();
+        assert_eq!(chunk4.row_count(), 1);
+
+        assert!(scan.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_vector_scan_no_label_filter() {
+        let store = Arc::new(LpgStore::new());
+
+        // Create nodes with different labels
+        let n1 = store.create_node(&["TypeA"]);
+        let n2 = store.create_node(&["TypeB"]);
+
+        store.set_node_property(n1, "vec", Value::Vector(vec![0.1, 0.2].into()));
+        store.set_node_property(n2, "vec", Value::Vector(vec![0.3, 0.4].into()));
+
+        // Without label filter - should find both
+        let mut scan = VectorScanOperator::brute_force(
+            Arc::clone(&store),
+            "vec",
+            vec![0.0, 0.0],
+            10,
+            DistanceMetric::Euclidean,
+        );
+
+        let chunk = scan.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 2);
+    }
+
+    #[cfg(feature = "vector-index")]
+    #[test]
+    fn test_vector_scan_with_hnsw_index() {
+        use crate::index::vector::{HnswConfig, HnswIndex};
+
+        let store = Arc::new(LpgStore::new());
+
+        // Create HNSW index
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean);
+        let index = Arc::new(HnswIndex::new(config));
+
+        // Create nodes and add to index
+        let n1 = store.create_node(&["Doc"]);
+        let n2 = store.create_node(&["Doc"]);
+        let n3 = store.create_node(&["Doc"]);
+
+        let v1 = vec![0.1f32, 0.2, 0.3];
+        let v2 = vec![0.5, 0.6, 0.7];
+        let v3 = vec![0.9, 0.8, 0.7];
+
+        index.insert(n1, &v1);
+        index.insert(n2, &v2);
+        index.insert(n3, &v3);
+
+        store.set_node_property(n1, "vec", Value::Vector(v1.into()));
+        store.set_node_property(n2, "vec", Value::Vector(v2.into()));
+        store.set_node_property(n3, "vec", Value::Vector(v3.into()));
+
+        // Search using index
+        let query = vec![0.1f32, 0.2, 0.35];
+        let mut scan = VectorScanOperator::with_index(
+            Arc::clone(&store),
+            Arc::clone(&index),
+            query,
+            2,
+        );
+
+        assert_eq!(scan.name(), "VectorScan(HNSW)");
+
+        let chunk = scan.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 2);
+
+        // First result should be n1 (closest)
+        let first_node = chunk.column(0).unwrap().get_node_id(0);
+        assert_eq!(first_node, Some(n1));
+    }
 }

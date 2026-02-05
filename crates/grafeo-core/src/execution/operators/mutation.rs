@@ -212,16 +212,18 @@ pub struct CreateEdgeOperator {
 
 impl CreateEdgeOperator {
     /// Creates a new edge creation operator.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// Use builder methods to set additional options:
+    /// - [`with_properties`](Self::with_properties) - set edge properties
+    /// - [`with_output_column`](Self::with_output_column) - output the created edge ID
+    /// - [`with_tx_context`](Self::with_tx_context) - set transaction context
     pub fn new(
         store: Arc<LpgStore>,
         input: Box<dyn Operator>,
         from_column: usize,
         to_column: usize,
         edge_type: String,
-        properties: Vec<(String, PropertySource)>,
         output_schema: Vec<LogicalType>,
-        output_column: Option<usize>,
     ) -> Self {
         Self {
             store,
@@ -229,12 +231,24 @@ impl CreateEdgeOperator {
             from_column,
             to_column,
             edge_type,
-            properties,
+            properties: Vec::new(),
             output_schema,
-            output_column,
+            output_column: None,
             viewing_epoch: None,
             tx_id: None,
         }
+    }
+
+    /// Sets the properties to assign to created edges.
+    pub fn with_properties(mut self, properties: Vec<(String, PropertySource)>) -> Self {
+        self.properties = properties;
+        self
+    }
+
+    /// Sets the output column for the created edge ID.
+    pub fn with_output_column(mut self, column: usize) -> Self {
+        self.output_column = Some(column);
+        self
     }
 
     /// Sets the transaction context for MVCC versioning.
@@ -935,9 +949,7 @@ mod tests {
             0, // from column
             1, // to column
             "KNOWS".to_string(),
-            vec![],
             vec![LogicalType::Int64, LogicalType::Int64],
-            None,
         );
 
         // Execute

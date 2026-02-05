@@ -2468,19 +2468,22 @@ impl Planner {
 
         let output_schema = self.derive_schema_from_columns(&columns);
 
-        let operator = Box::new(
-            CreateEdgeOperator::new(
-                Arc::clone(&self.store),
-                input_op,
-                from_column,
-                to_column,
-                create.edge_type.clone(),
-                properties,
-                output_schema,
-                output_column,
-            )
-            .with_tx_context(self.viewing_epoch, self.tx_id),
-        );
+        let mut operator = CreateEdgeOperator::new(
+            Arc::clone(&self.store),
+            input_op,
+            from_column,
+            to_column,
+            create.edge_type.clone(),
+            output_schema,
+        )
+        .with_properties(properties)
+        .with_tx_context(self.viewing_epoch, self.tx_id);
+
+        if let Some(col) = output_column {
+            operator = operator.with_output_column(col);
+        }
+
+        let operator = Box::new(operator);
 
         Ok((operator, columns))
     }

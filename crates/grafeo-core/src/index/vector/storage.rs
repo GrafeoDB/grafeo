@@ -689,4 +689,107 @@ mod tests {
         storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
         assert!(!storage.is_empty());
     }
+
+    #[test]
+    fn test_ram_storage_with_capacity() {
+        let storage = RamStorage::with_capacity(4, 100);
+
+        assert_eq!(storage.dimensions(), 4);
+        assert!(storage.is_empty());
+
+        // Should be able to insert without reallocation up to capacity
+        for i in 0..100 {
+            storage
+                .insert(NodeId::new(i), &[i as f32, 0.0, 0.0, 0.0])
+                .unwrap();
+        }
+
+        assert_eq!(storage.len(), 100);
+    }
+
+    #[test]
+    fn test_ram_storage_iter() {
+        let storage = RamStorage::new(2);
+
+        storage.insert(NodeId::new(1), &[1.0, 2.0]).unwrap();
+        storage.insert(NodeId::new(2), &[3.0, 4.0]).unwrap();
+        storage.insert(NodeId::new(3), &[5.0, 6.0]).unwrap();
+
+        let items: Vec<_> = storage.iter().collect();
+        assert_eq!(items.len(), 3);
+
+        // Verify all IDs are present (order not guaranteed)
+        let ids: Vec<_> = items.iter().map(|(id, _)| id.0).collect();
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
+        assert!(ids.contains(&3));
+
+        // Verify vector content
+        for (id, vec) in items {
+            match id.0 {
+                1 => assert_eq!(&*vec, &[1.0, 2.0]),
+                2 => assert_eq!(&*vec, &[3.0, 4.0]),
+                3 => assert_eq!(&*vec, &[5.0, 6.0]),
+                _ => panic!("Unexpected ID: {}", id.0),
+            }
+        }
+    }
+
+    #[test]
+    fn test_ram_storage_flush() {
+        let storage = RamStorage::new(4);
+        storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+
+        // Flush should succeed (no-op for RAM storage)
+        assert!(storage.flush().is_ok());
+    }
+
+    #[test]
+    fn test_mmap_storage_is_empty() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_mmap_is_empty.bin");
+        let _ = std::fs::remove_file(&path);
+
+        let storage = MmapStorage::create(&path, 4).unwrap();
+        assert!(storage.is_empty());
+
+        storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        assert!(!storage.is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_mmap_storage_memory_usage() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_mmap_memory.bin");
+        let _ = std::fs::remove_file(&path);
+
+        let storage = MmapStorage::create(&path, 4).unwrap();
+        let initial_usage = storage.memory_usage();
+
+        // Insert and read to populate cache
+        storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let _ = storage.get(NodeId::new(1));
+
+        let after_usage = storage.memory_usage();
+        assert!(after_usage >= initial_usage);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    #[should_panic(expected = "Vector dimension mismatch")]
+    fn test_mmap_storage_dimension_mismatch() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_mmap_dim_mismatch.bin");
+        let _ = std::fs::remove_file(&path);
+
+        let storage = MmapStorage::create(&path, 4).unwrap();
+
+        // Inserting wrong dimensions triggers debug assertion panic
+        let _ = storage.insert(NodeId::new(1), &[1.0, 2.0]); // Only 2 dims
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

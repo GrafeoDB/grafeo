@@ -961,4 +961,89 @@ mod tests {
             "Expected serialization failure error for write skew prevention"
         );
     }
+
+    #[test]
+    fn test_read_committed_allows_non_repeatable_reads() {
+        let mgr = TransactionManager::new();
+
+        // tx1 starts with ReadCommitted isolation
+        let tx1 = mgr.begin_with_isolation(IsolationLevel::ReadCommitted);
+        let entity = NodeId::new(42);
+
+        // tx1 reads entity
+        mgr.record_read(tx1, entity).unwrap();
+
+        // tx2 writes and commits
+        let tx2 = mgr.begin();
+        mgr.record_write(tx2, entity).unwrap();
+        mgr.commit(tx2).unwrap();
+
+        // tx1 can still commit (ReadCommitted allows non-repeatable reads)
+        let result = mgr.commit(tx1);
+        assert!(
+            result.is_ok(),
+            "ReadCommitted should allow non-repeatable reads"
+        );
+    }
+
+    #[test]
+    fn test_isolation_level_debug() {
+        assert_eq!(
+            format!("{:?}", IsolationLevel::ReadCommitted),
+            "ReadCommitted"
+        );
+        assert_eq!(
+            format!("{:?}", IsolationLevel::SnapshotIsolation),
+            "SnapshotIsolation"
+        );
+        assert_eq!(
+            format!("{:?}", IsolationLevel::Serializable),
+            "Serializable"
+        );
+    }
+
+    #[test]
+    fn test_isolation_level_default_trait() {
+        let default: IsolationLevel = Default::default();
+        assert_eq!(default, IsolationLevel::SnapshotIsolation);
+    }
+
+    #[test]
+    fn test_ssi_concurrent_reads_no_conflict() {
+        let mgr = TransactionManager::new();
+
+        let entity = NodeId::new(42);
+
+        // Both transactions read the same entity
+        let tx1 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+        let tx2 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+
+        mgr.record_read(tx1, entity).unwrap();
+        mgr.record_read(tx2, entity).unwrap();
+
+        // Both should commit successfully (read-read is not a conflict)
+        assert!(mgr.commit(tx1).is_ok());
+        assert!(mgr.commit(tx2).is_ok());
+    }
+
+    #[test]
+    fn test_ssi_write_write_conflict() {
+        let mgr = TransactionManager::new();
+
+        let entity = NodeId::new(42);
+
+        // Both transactions write the same entity
+        let tx1 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+        let tx2 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+
+        mgr.record_write(tx1, entity).unwrap();
+        mgr.record_write(tx2, entity).unwrap();
+
+        // First commit succeeds
+        assert!(mgr.commit(tx1).is_ok());
+
+        // Second commit fails (write-write conflict)
+        let result = mgr.commit(tx2);
+        assert!(result.is_err());
+    }
 }

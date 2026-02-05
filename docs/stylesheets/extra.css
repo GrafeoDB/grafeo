@@ -1,5 +1,28 @@
 /* Custom styles for Grafeo documentation */
 
+/* ===== Custom Color Scheme ===== */
+
+/* Light mode - dark grey primary instead of purple */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #37474f;
+  --md-primary-fg-color--light: #546e7a;
+  --md-primary-fg-color--dark: #263238;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: #ffffffb3;
+}
+
+/* Dark mode - darker background towards black */
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #0d1117;
+  --md-default-bg-color--light: #151b23;
+  --md-default-bg-color--lighter: #1c2128;
+  --md-default-bg-color--lightest: #21262d;
+  --md-primary-fg-color: #3d4752;
+  --md-primary-fg-color--light: #4a5661;
+  --md-primary-fg-color--dark: #2d353c;
+  --md-code-bg-color: #161b22;
+}
+
 /* Hero section on landing page */
 .hero {
   text-align: center;
@@ -93,7 +116,7 @@
 
 /* Announcement bar */
 .md-banner {
-  background-color: var(--md-accent-fg-color);
+  background-color: var(--md-primary-fg-color);
 }
 
 /* Version selector */

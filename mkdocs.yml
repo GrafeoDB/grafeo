@@ -49,14 +49,13 @@ theme:
 
     # Header
     - header.autohide
-    - announce.dismiss
 
   palette:
     # Light mode
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: deep purple
-      accent: amber
+      primary: blue-grey
+      accent: teal
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
@@ -64,8 +63,8 @@ theme:
     # Dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: deep purple
-      accent: amber
+      primary: blue-grey
+      accent: teal
       toggle:
         icon: material/brightness-4
         name: Switch to light mode

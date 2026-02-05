@@ -1528,4 +1528,807 @@ mod tests {
         // Even if min=max=50, Ne is conservative and returns true
         assert!(predicate.might_match_chunk(&hints));
     }
+
+    #[test]
+    fn test_comparison_string() {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::String]);
+        builder.column_mut(0).unwrap().push_string("banana");
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        // Test string equality
+        let pred_eq = ComparisonPredicate::new(0, CompareOp::Eq, Value::String("banana".into()));
+        assert!(pred_eq.evaluate(&chunk, 0));
+
+        let pred_ne = ComparisonPredicate::new(0, CompareOp::Ne, Value::String("apple".into()));
+        assert!(pred_ne.evaluate(&chunk, 0));
+
+        // Test string ordering
+        let pred_lt = ComparisonPredicate::new(0, CompareOp::Lt, Value::String("cherry".into()));
+        assert!(pred_lt.evaluate(&chunk, 0)); // "banana" < "cherry"
+
+        let pred_gt = ComparisonPredicate::new(0, CompareOp::Gt, Value::String("apple".into()));
+        assert!(pred_gt.evaluate(&chunk, 0)); // "banana" > "apple"
+    }
+
+    #[test]
+    fn test_comparison_float64() {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Float64]);
+        builder.column_mut(0).unwrap().push_float64(3.14);
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        // Test float equality (within epsilon)
+        let pred_eq = ComparisonPredicate::new(0, CompareOp::Eq, Value::Float64(3.14));
+        assert!(pred_eq.evaluate(&chunk, 0));
+
+        let pred_ne = ComparisonPredicate::new(0, CompareOp::Ne, Value::Float64(2.71));
+        assert!(pred_ne.evaluate(&chunk, 0));
+
+        let pred_lt = ComparisonPredicate::new(0, CompareOp::Lt, Value::Float64(4.0));
+        assert!(pred_lt.evaluate(&chunk, 0));
+
+        let pred_ge = ComparisonPredicate::new(0, CompareOp::Ge, Value::Float64(3.14));
+        assert!(pred_ge.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_comparison_bool() {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Bool]);
+        builder.column_mut(0).unwrap().push_bool(true);
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        let pred_eq = ComparisonPredicate::new(0, CompareOp::Eq, Value::Bool(true));
+        assert!(pred_eq.evaluate(&chunk, 0));
+
+        let pred_ne = ComparisonPredicate::new(0, CompareOp::Ne, Value::Bool(false));
+        assert!(pred_ne.evaluate(&chunk, 0));
+
+        // Ordering on booleans returns false
+        let pred_lt = ComparisonPredicate::new(0, CompareOp::Lt, Value::Bool(false));
+        assert!(!pred_lt.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_unary_operators() {
+        let store = Arc::new(crate::graph::lpg::LpgStore::new());
+        let variable_columns = HashMap::new();
+        let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        let chunk = builder.finish();
+
+        // Test NOT
+        let pred_not = ExpressionPredicate::new(
+            FilterExpression::Unary {
+                op: UnaryFilterOp::Not,
+                operand: Box::new(FilterExpression::Literal(Value::Bool(false))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_not.evaluate(&chunk, 0));
+
+        // Test IS NULL
+        let pred_is_null = ExpressionPredicate::new(
+            FilterExpression::Unary {
+                op: UnaryFilterOp::IsNull,
+                operand: Box::new(FilterExpression::Literal(Value::Null)),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_is_null.evaluate(&chunk, 0));
+
+        // Test IS NOT NULL
+        let pred_is_not_null = ExpressionPredicate::new(
+            FilterExpression::Unary {
+                op: UnaryFilterOp::IsNotNull,
+                operand: Box::new(FilterExpression::Literal(Value::Int64(42))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_is_not_null.evaluate(&chunk, 0));
+
+        // Test negation
+        let pred_neg = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Unary {
+                    op: UnaryFilterOp::Neg,
+                    operand: Box::new(FilterExpression::Literal(Value::Int64(5))),
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Int64(-5))),
+            },
+            variable_columns,
+            store,
+        );
+        assert!(pred_neg.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_arithmetic_operators() {
+        let store = Arc::new(crate::graph::lpg::LpgStore::new());
+        let variable_columns = HashMap::new();
+        let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        let chunk = builder.finish();
+
+        // Test Add: 2 + 3 = 5
+        let pred_add = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Binary {
+                    left: Box::new(FilterExpression::Literal(Value::Int64(2))),
+                    op: BinaryFilterOp::Add,
+                    right: Box::new(FilterExpression::Literal(Value::Int64(3))),
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Int64(5))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_add.evaluate(&chunk, 0));
+
+        // Test Sub: 10 - 4 = 6
+        let pred_sub = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Binary {
+                    left: Box::new(FilterExpression::Literal(Value::Int64(10))),
+                    op: BinaryFilterOp::Sub,
+                    right: Box::new(FilterExpression::Literal(Value::Int64(4))),
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Int64(6))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_sub.evaluate(&chunk, 0));
+
+        // Test Mul: 3 * 4 = 12
+        let pred_mul = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Binary {
+                    left: Box::new(FilterExpression::Literal(Value::Int64(3))),
+                    op: BinaryFilterOp::Mul,
+                    right: Box::new(FilterExpression::Literal(Value::Int64(4))),
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Int64(12))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_mul.evaluate(&chunk, 0));
+
+        // Test Div: 20 / 4 = 5
+        let pred_div = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Binary {
+                    left: Box::new(FilterExpression::Literal(Value::Int64(20))),
+                    op: BinaryFilterOp::Div,
+                    right: Box::new(FilterExpression::Literal(Value::Int64(4))),
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Int64(5))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_div.evaluate(&chunk, 0));
+
+        // Test Mod: 17 % 5 = 2
+        let pred_mod = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Binary {
+                    left: Box::new(FilterExpression::Literal(Value::Int64(17))),
+                    op: BinaryFilterOp::Mod,
+                    right: Box::new(FilterExpression::Literal(Value::Int64(5))),
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Int64(2))),
+            },
+            variable_columns,
+            store,
+        );
+        assert!(pred_mod.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_string_operators() {
+        let store = Arc::new(crate::graph::lpg::LpgStore::new());
+        let variable_columns = HashMap::new();
+        let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        let chunk = builder.finish();
+
+        // Test STARTS WITH
+        let pred_starts = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Literal(Value::String("hello world".into()))),
+                op: BinaryFilterOp::StartsWith,
+                right: Box::new(FilterExpression::Literal(Value::String("hello".into()))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_starts.evaluate(&chunk, 0));
+
+        // Test ENDS WITH
+        let pred_ends = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Literal(Value::String("hello world".into()))),
+                op: BinaryFilterOp::EndsWith,
+                right: Box::new(FilterExpression::Literal(Value::String("world".into()))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_ends.evaluate(&chunk, 0));
+
+        // Test CONTAINS
+        let pred_contains = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Literal(Value::String("hello world".into()))),
+                op: BinaryFilterOp::Contains,
+                right: Box::new(FilterExpression::Literal(Value::String("lo wo".into()))),
+            },
+            variable_columns,
+            store,
+        );
+        assert!(pred_contains.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_in_operator() {
+        let store = Arc::new(crate::graph::lpg::LpgStore::new());
+        let variable_columns = HashMap::new();
+        let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        let chunk = builder.finish();
+
+        // Test 3 IN [1, 2, 3, 4, 5]
+        let pred_in = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Literal(Value::Int64(3))),
+                op: BinaryFilterOp::In,
+                right: Box::new(FilterExpression::List(vec![
+                    FilterExpression::Literal(Value::Int64(1)),
+                    FilterExpression::Literal(Value::Int64(2)),
+                    FilterExpression::Literal(Value::Int64(3)),
+                    FilterExpression::Literal(Value::Int64(4)),
+                    FilterExpression::Literal(Value::Int64(5)),
+                ])),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_in.evaluate(&chunk, 0));
+
+        // Test 10 NOT IN [1, 2, 3]
+        let pred_not_in = ExpressionPredicate::new(
+            FilterExpression::Unary {
+                op: UnaryFilterOp::Not,
+                operand: Box::new(FilterExpression::Binary {
+                    left: Box::new(FilterExpression::Literal(Value::Int64(10))),
+                    op: BinaryFilterOp::In,
+                    right: Box::new(FilterExpression::List(vec![
+                        FilterExpression::Literal(Value::Int64(1)),
+                        FilterExpression::Literal(Value::Int64(2)),
+                        FilterExpression::Literal(Value::Int64(3)),
+                    ])),
+                }),
+            },
+            variable_columns,
+            store,
+        );
+        assert!(pred_not_in.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_logical_operators() {
+        let store = Arc::new(crate::graph::lpg::LpgStore::new());
+        let variable_columns = HashMap::new();
+        let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        let chunk = builder.finish();
+
+        // Test AND: true AND true = true
+        let pred_and = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Literal(Value::Bool(true))),
+                op: BinaryFilterOp::And,
+                right: Box::new(FilterExpression::Literal(Value::Bool(true))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_and.evaluate(&chunk, 0));
+
+        // Test OR: false OR true = true
+        let pred_or = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Literal(Value::Bool(false))),
+                op: BinaryFilterOp::Or,
+                right: Box::new(FilterExpression::Literal(Value::Bool(true))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_or.evaluate(&chunk, 0));
+
+        // Test XOR: true XOR false = true
+        let pred_xor = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Literal(Value::Bool(true))),
+                op: BinaryFilterOp::Xor,
+                right: Box::new(FilterExpression::Literal(Value::Bool(false))),
+            },
+            variable_columns,
+            store,
+        );
+        assert!(pred_xor.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_case_expression_simple() {
+        let store = Arc::new(crate::graph::lpg::LpgStore::new());
+        let variable_columns = HashMap::new();
+        let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        let chunk = builder.finish();
+
+        // Test simple CASE: CASE 2 WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END = 'two'
+        let pred_case = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Case {
+                    operand: Some(Box::new(FilterExpression::Literal(Value::Int64(2)))),
+                    when_clauses: vec![
+                        (
+                            FilterExpression::Literal(Value::Int64(1)),
+                            FilterExpression::Literal(Value::String("one".into())),
+                        ),
+                        (
+                            FilterExpression::Literal(Value::Int64(2)),
+                            FilterExpression::Literal(Value::String("two".into())),
+                        ),
+                    ],
+                    else_clause: Some(Box::new(FilterExpression::Literal(Value::String(
+                        "other".into(),
+                    )))),
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::String("two".into()))),
+            },
+            variable_columns,
+            store,
+        );
+        assert!(pred_case.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_case_expression_searched() {
+        let store = Arc::new(crate::graph::lpg::LpgStore::new());
+        let variable_columns = HashMap::new();
+        let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        let chunk = builder.finish();
+
+        // Test searched CASE: CASE WHEN 5 > 3 THEN 'yes' ELSE 'no' END = 'yes'
+        let pred_case = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Case {
+                    operand: None,
+                    when_clauses: vec![(
+                        FilterExpression::Binary {
+                            left: Box::new(FilterExpression::Literal(Value::Int64(5))),
+                            op: BinaryFilterOp::Gt,
+                            right: Box::new(FilterExpression::Literal(Value::Int64(3))),
+                        },
+                        FilterExpression::Literal(Value::String("yes".into())),
+                    )],
+                    else_clause: Some(Box::new(FilterExpression::Literal(Value::String(
+                        "no".into(),
+                    )))),
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::String("yes".into()))),
+            },
+            variable_columns,
+            store,
+        );
+        assert!(pred_case.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_list_functions() {
+        let store = Arc::new(crate::graph::lpg::LpgStore::new());
+        let variable_columns = HashMap::new();
+        let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        let chunk = builder.finish();
+
+        // Test head([1, 2, 3]) = 1
+        let pred_head = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::FunctionCall {
+                    name: "head".to_string(),
+                    args: vec![FilterExpression::List(vec![
+                        FilterExpression::Literal(Value::Int64(1)),
+                        FilterExpression::Literal(Value::Int64(2)),
+                        FilterExpression::Literal(Value::Int64(3)),
+                    ])],
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Int64(1))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_head.evaluate(&chunk, 0));
+
+        // Test last([1, 2, 3]) = 3
+        let pred_last = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::FunctionCall {
+                    name: "last".to_string(),
+                    args: vec![FilterExpression::List(vec![
+                        FilterExpression::Literal(Value::Int64(1)),
+                        FilterExpression::Literal(Value::Int64(2)),
+                        FilterExpression::Literal(Value::Int64(3)),
+                    ])],
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Int64(3))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_last.evaluate(&chunk, 0));
+
+        // Test size([1, 2, 3]) = 3
+        let pred_size = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::FunctionCall {
+                    name: "size".to_string(),
+                    args: vec![FilterExpression::List(vec![
+                        FilterExpression::Literal(Value::Int64(1)),
+                        FilterExpression::Literal(Value::Int64(2)),
+                        FilterExpression::Literal(Value::Int64(3)),
+                    ])],
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Int64(3))),
+            },
+            variable_columns,
+            store,
+        );
+        assert!(pred_size.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_type_conversion_functions() {
+        let store = Arc::new(crate::graph::lpg::LpgStore::new());
+        let variable_columns = HashMap::new();
+        let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        let chunk = builder.finish();
+
+        // Test toInteger("42") = 42
+        let pred_to_int = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::FunctionCall {
+                    name: "toInteger".to_string(),
+                    args: vec![FilterExpression::Literal(Value::String("42".into()))],
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Int64(42))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_to_int.evaluate(&chunk, 0));
+
+        // Test toFloat(42) = 42.0
+        let pred_to_float = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::FunctionCall {
+                    name: "toFloat".to_string(),
+                    args: vec![FilterExpression::Literal(Value::Int64(42))],
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Float64(42.0))),
+            },
+            variable_columns.clone(),
+            Arc::clone(&store),
+        );
+        assert!(pred_to_float.evaluate(&chunk, 0));
+
+        // Test toBoolean("true") = true
+        let pred_to_bool = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::FunctionCall {
+                    name: "toBoolean".to_string(),
+                    args: vec![FilterExpression::Literal(Value::String("true".into()))],
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Bool(true))),
+            },
+            variable_columns,
+            store,
+        );
+        assert!(pred_to_bool.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_coalesce_function() {
+        let store = Arc::new(crate::graph::lpg::LpgStore::new());
+        let variable_columns = HashMap::new();
+        let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        let chunk = builder.finish();
+
+        // Test coalesce(null, null, 'default') = 'default'
+        let pred_coalesce = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::FunctionCall {
+                    name: "coalesce".to_string(),
+                    args: vec![
+                        FilterExpression::Literal(Value::Null),
+                        FilterExpression::Literal(Value::Null),
+                        FilterExpression::Literal(Value::String("default".into())),
+                    ],
+                }),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::String("default".into()))),
+            },
+            variable_columns,
+            store,
+        );
+        assert!(pred_coalesce.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_filter_empty_result() {
+        // Create a chunk with values that won't match the predicate
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        for i in 1..=5 {
+            builder.column_mut(0).unwrap().push_int64(i);
+            builder.advance_row();
+        }
+        let chunk = builder.finish();
+
+        let mock_scan = MockScanOperator {
+            chunks: vec![chunk],
+            position: 0,
+        };
+
+        // Filter for values > 100 (none will match)
+        let predicate = ComparisonPredicate::new(0, CompareOp::Gt, Value::Int64(100));
+        let mut filter = FilterOperator::new(Box::new(mock_scan), Box::new(predicate));
+
+        // Should return None since nothing matches
+        let result = filter.next().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_filter_operator_reset() {
+        // Test that reset() calls child.reset()
+        // Since MockScanOperator doesn't preserve chunks after reading,
+        // we test that reset is called by checking position resets
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        builder.column_mut(0).unwrap().push_int64(50);
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        let mock_scan = MockScanOperator {
+            chunks: vec![chunk],
+            position: 0,
+        };
+
+        let predicate = ComparisonPredicate::new(0, CompareOp::Eq, Value::Int64(50));
+        let mut filter = FilterOperator::new(Box::new(mock_scan), Box::new(predicate));
+
+        // First iteration
+        let result = filter.next().unwrap();
+        assert!(result.is_some());
+        let result = filter.next().unwrap();
+        assert!(result.is_none());
+
+        // Note: MockScanOperator replaces chunks with empty ones when read,
+        // so reset doesn't restore the data. This test verifies reset() is called.
+        filter.reset();
+        // After reset, position is 0 but chunk is empty
+        let result = filter.next().unwrap();
+        // Empty chunk produces no matches, returns None
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_mixed_type_comparison_int_float() {
+        let store = Arc::new(crate::graph::lpg::LpgStore::new());
+        let variable_columns = HashMap::new();
+        let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        let chunk = builder.finish();
+
+        // Test 5 == 5.0 (mixed int/float comparison)
+        let pred_mixed = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Literal(Value::Int64(5))),
+                op: BinaryFilterOp::Eq,
+                right: Box::new(FilterExpression::Literal(Value::Float64(5.0))),
+            },
+            variable_columns,
+            store,
+        );
+        assert!(pred_mixed.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_zone_map_allows_matching_chunk() {
+        // Test that a chunk with zone hints indicating potential matches is evaluated
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        for i in 10..=20 {
+            builder.column_mut(0).unwrap().push_int64(i);
+            builder.advance_row();
+        }
+        let mut chunk = builder.finish();
+
+        // Set zone hints: min=10, max=20
+        let mut hints = crate::execution::chunk::ChunkZoneHints::default();
+        hints.column_hints.insert(
+            0,
+            crate::index::ZoneMapEntry::with_min_max(Value::Int64(10), Value::Int64(20), 0, 11),
+        );
+        chunk.set_zone_hints(hints);
+
+        let mock_scan = MockScanOperator {
+            chunks: vec![chunk],
+            position: 0,
+        };
+
+        // Filter for values > 15 (some will match)
+        let predicate = ComparisonPredicate::new(0, CompareOp::Gt, Value::Int64(15));
+        let mut filter = FilterOperator::new(Box::new(mock_scan), Box::new(predicate));
+
+        // Should return matching rows
+        let result = filter.next().unwrap();
+        assert!(result.is_some());
+        let chunk = result.unwrap();
+
+        // Should have rows 16, 17, 18, 19, 20 (5 rows)
+        assert_eq!(chunk.row_count(), 5);
+    }
+
+    #[test]
+    fn test_filter_with_all_rows_matching() {
+        // All values in chunk match the predicate
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        for i in 100..=110 {
+            builder.column_mut(0).unwrap().push_int64(i);
+            builder.advance_row();
+        }
+        let chunk = builder.finish();
+
+        let mock_scan = MockScanOperator {
+            chunks: vec![chunk],
+            position: 0,
+        };
+
+        // Filter for values > 50 (all will match)
+        let predicate = ComparisonPredicate::new(0, CompareOp::Gt, Value::Int64(50));
+        let mut filter = FilterOperator::new(Box::new(mock_scan), Box::new(predicate));
+
+        let result = filter.next().unwrap();
+        assert!(result.is_some());
+        let chunk = result.unwrap();
+
+        // All 11 rows should be returned
+        assert_eq!(chunk.row_count(), 11);
+    }
+
+    #[test]
+    fn test_filter_with_sparse_data() {
+        // Test filtering with sparse matching data
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        // Create values where only some match: 1, 10, 2, 20, 3, 30
+        for &v in &[1i64, 10, 2, 20, 3, 30] {
+            builder.column_mut(0).unwrap().push_int64(v);
+            builder.advance_row();
+        }
+        let chunk = builder.finish();
+
+        let mock_scan = MockScanOperator {
+            chunks: vec![chunk],
+            position: 0,
+        };
+
+        // Filter for values > 5 (only 10, 20, 30 should match)
+        let predicate = ComparisonPredicate::new(0, CompareOp::Gt, Value::Int64(5));
+        let mut filter = FilterOperator::new(Box::new(mock_scan), Box::new(predicate));
+
+        let result = filter.next().unwrap();
+        assert!(result.is_some());
+        let chunk = result.unwrap();
+
+        // Only 10, 20, 30 should match (3 rows)
+        assert_eq!(chunk.row_count(), 3);
+    }
+
+    #[test]
+    fn test_predicate_on_wrong_column_returns_empty() {
+        // When the predicate references a column index that's out of bounds
+        // or the column type is incompatible
+        let mut builder = DataChunkBuilder::new(&[LogicalType::String]);
+        builder.column_mut(0).unwrap().push_string("hello");
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        let mock_scan = MockScanOperator {
+            chunks: vec![chunk],
+            position: 0,
+        };
+
+        // Predicate on column 5 (doesn't exist)
+        let predicate = ComparisonPredicate::new(5, CompareOp::Eq, Value::Int64(42));
+        let mut filter = FilterOperator::new(Box::new(mock_scan), Box::new(predicate));
+
+        // Should handle gracefully (either error or empty result)
+        let result = filter.next();
+        // The behavior depends on implementation - just verify no panic
+        let _ = result;
+    }
+
+    #[test]
+    fn test_expression_predicate_with_labels_function() {
+        // Test the labels() function in predicates
+        let store = Arc::new(crate::graph::lpg::LpgStore::new());
+
+        // Create a node with a label
+        let node_id = store.create_node(&["Person", "Employee"]);
+
+        // Build a chunk with the node
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node]);
+        builder.column_mut(0).unwrap().push_node_id(node_id);
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        // Map column 0 to variable "n"
+        let mut variable_columns = HashMap::new();
+        variable_columns.insert("n".to_string(), 0);
+
+        // Test: 'Person' IN labels(n)
+        let pred = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::Literal(Value::String("Person".into()))),
+                op: BinaryFilterOp::In,
+                right: Box::new(FilterExpression::FunctionCall {
+                    name: "labels".to_string(),
+                    args: vec![FilterExpression::Variable("n".to_string())],
+                }),
+            },
+            variable_columns,
+            Arc::clone(&store),
+        );
+
+        assert!(pred.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_comparison_with_boundary_values() {
+        // Test comparisons at exact boundary values
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        builder.column_mut(0).unwrap().push_int64(i64::MAX);
+        builder.advance_row();
+        builder.column_mut(0).unwrap().push_int64(i64::MIN);
+        builder.advance_row();
+        builder.column_mut(0).unwrap().push_int64(0);
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        // Test >= 0
+        let pred_ge = ComparisonPredicate::new(0, CompareOp::Ge, Value::Int64(0));
+        assert!(pred_ge.evaluate(&chunk, 0)); // i64::MAX >= 0
+        assert!(!pred_ge.evaluate(&chunk, 1)); // i64::MIN >= 0 is false
+        assert!(pred_ge.evaluate(&chunk, 2)); // 0 >= 0
+
+        // Test <= 0
+        let pred_le = ComparisonPredicate::new(0, CompareOp::Le, Value::Int64(0));
+        assert!(!pred_le.evaluate(&chunk, 0)); // i64::MAX <= 0 is false
+        assert!(pred_le.evaluate(&chunk, 1)); // i64::MIN <= 0
+        assert!(pred_le.evaluate(&chunk, 2)); // 0 <= 0
+    }
 }

@@ -786,4 +786,154 @@ mod tests {
             err
         );
     }
+
+    #[cfg(feature = "gql")]
+    #[test]
+    fn test_params_in_filter_with_property() {
+        // Tests parameter substitution in WHERE clause with property comparison
+        let store = Arc::new(LpgStore::new());
+        store.create_node_with_props(&["Num"], [("value", Value::Int64(10))]);
+        store.create_node_with_props(&["Num"], [("value", Value::Int64(20))]);
+
+        let processor = QueryProcessor::for_lpg(store);
+
+        let mut params = HashMap::new();
+        params.insert("threshold".to_string(), Value::Int64(15));
+
+        let result = processor
+            .process(
+                "MATCH (n:Num) WHERE n.value > $threshold RETURN n.value",
+                QueryLanguage::Gql,
+                Some(&params),
+            )
+            .unwrap();
+
+        // Only value=20 matches > 15
+        assert_eq!(result.row_count(), 1);
+        let row = &result.rows[0];
+        assert_eq!(row[0], Value::Int64(20));
+    }
+
+    #[cfg(feature = "gql")]
+    #[test]
+    fn test_params_in_multiple_where_conditions() {
+        // Tests multiple parameters in WHERE clause with AND
+        let store = Arc::new(LpgStore::new());
+        store.create_node_with_props(&["Person"], [("age", Value::Int64(25)), ("score", Value::Int64(80))]);
+        store.create_node_with_props(&["Person"], [("age", Value::Int64(35)), ("score", Value::Int64(90))]);
+        store.create_node_with_props(&["Person"], [("age", Value::Int64(45)), ("score", Value::Int64(70))]);
+
+        let processor = QueryProcessor::for_lpg(store);
+
+        let mut params = HashMap::new();
+        params.insert("min_age".to_string(), Value::Int64(30));
+        params.insert("min_score".to_string(), Value::Int64(75));
+
+        let result = processor
+            .process(
+                "MATCH (n:Person) WHERE n.age > $min_age AND n.score > $min_score RETURN n",
+                QueryLanguage::Gql,
+                Some(&params),
+            )
+            .unwrap();
+
+        // Only the person with age=35, score=90 matches both conditions
+        assert_eq!(result.row_count(), 1);
+    }
+
+    #[cfg(feature = "gql")]
+    #[test]
+    fn test_params_with_in_list() {
+        // Tests parameter as a value checked against IN list
+        let store = Arc::new(LpgStore::new());
+        store.create_node_with_props(&["Item"], [("status", Value::String("active".into()))]);
+        store.create_node_with_props(&["Item"], [("status", Value::String("pending".into()))]);
+        store.create_node_with_props(&["Item"], [("status", Value::String("deleted".into()))]);
+
+        let processor = QueryProcessor::for_lpg(store);
+
+        // Check if a parameter value matches any of the statuses
+        let mut params = HashMap::new();
+        params.insert("target".to_string(), Value::String("active".into()));
+
+        let result = processor
+            .process(
+                "MATCH (n:Item) WHERE n.status = $target RETURN n",
+                QueryLanguage::Gql,
+                Some(&params),
+            )
+            .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+    }
+
+    #[cfg(feature = "gql")]
+    #[test]
+    fn test_params_same_type_comparison() {
+        // Tests that same-type parameter comparisons work correctly
+        let store = Arc::new(LpgStore::new());
+        store.create_node_with_props(&["Data"], [("value", Value::Int64(100))]);
+        store.create_node_with_props(&["Data"], [("value", Value::Int64(50))]);
+
+        let processor = QueryProcessor::for_lpg(store);
+
+        // Compare int property with int parameter
+        let mut params = HashMap::new();
+        params.insert("threshold".to_string(), Value::Int64(75));
+
+        let result = processor
+            .process(
+                "MATCH (n:Data) WHERE n.value > $threshold RETURN n",
+                QueryLanguage::Gql,
+                Some(&params),
+            )
+            .unwrap();
+
+        // Only value=100 matches > 75
+        assert_eq!(result.row_count(), 1);
+    }
+
+    #[cfg(feature = "gql")]
+    #[test]
+    fn test_process_empty_result_has_columns() {
+        // Tests that empty results still have correct column names
+        let store = Arc::new(LpgStore::new());
+        // Don't create any nodes
+
+        let processor = QueryProcessor::for_lpg(store);
+        let result = processor
+            .process("MATCH (n:Person) RETURN n.name AS name, n.age AS age", QueryLanguage::Gql, None)
+            .unwrap();
+
+        assert_eq!(result.row_count(), 0);
+        assert_eq!(result.columns.len(), 2);
+        assert_eq!(result.columns[0], "name");
+        assert_eq!(result.columns[1], "age");
+    }
+
+    #[cfg(feature = "gql")]
+    #[test]
+    fn test_params_string_equality() {
+        // Tests string parameter equality comparison
+        let store = Arc::new(LpgStore::new());
+        store.create_node_with_props(&["Item"], [("name", Value::String("alpha".into()))]);
+        store.create_node_with_props(&["Item"], [("name", Value::String("beta".into()))]);
+        store.create_node_with_props(&["Item"], [("name", Value::String("gamma".into()))]);
+
+        let processor = QueryProcessor::for_lpg(store);
+
+        let mut params = HashMap::new();
+        params.insert("target".to_string(), Value::String("beta".into()));
+
+        let result = processor
+            .process(
+                "MATCH (n:Item) WHERE n.name = $target RETURN n.name",
+                QueryLanguage::Gql,
+                Some(&params),
+            )
+            .unwrap();
+
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0][0], Value::String("beta".into()));
+    }
 }

@@ -2,6 +2,64 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.3.3] - Unreleased
+
+## [0.3.2] - Unreleased
+
+## [0.3.1] - 2026-02-05
+
+_Vector Optimization & Cache Improvements_
+
+### Added
+
+- **Vector Quantization**: Memory-efficient vector storage for large-scale similarity search
+  - `ScalarQuantizer`: f32 → u8 compression (4x smaller, ~97% recall retention)
+    - `train()` learns min/max per dimension from sample vectors
+    - Asymmetric distance computation (f32 query vs u8 stored)
+  - `BinaryQuantizer`: f32 → 1-bit compression (32x smaller, ~80% recall)
+    - Sign-bit extraction with packed u64 storage
+    - SIMD-accelerated hamming distance (popcnt instruction)
+  - `QuantizationType` enum for configuration (None, Scalar, Binary)
+
+- **QuantizedHnswIndex**: HNSW with quantization and rescoring
+  - Two-phase search: approximate quantized → exact rescore
+  - Configurable rescore factor (default 2x candidates)
+  - Automatic quantizer training from insertion samples
+
+- **SIMD Vector Acceleration**: 4-8x faster distance computations
+  - AVX2 + FMA for modern x86_64 CPUs
+  - SSE fallback for older x86_64
+  - NEON support for ARM (aarch64)
+  - `simd_support()` function for runtime CPU detection
+  - Python `grafeo.simd_support()` diagnostic function
+
+- **Vector Batch Operations**:
+  - `batch_insert()` for HNSW index bulk loading
+  - `batch_search()` / `batch_search_with_ef()` for parallel multi-query search (rayon)
+  - `batch_search_slices()` for slice-based query batches
+
+- **VectorScan Operators**: Query execution for vector similarity search
+  - `VectorScanOp` logical operator in query plans
+  - `VectorScanOperator` physical operator (HNSW or brute-force)
+  - Distance/similarity threshold filtering
+  - Label-filtered brute-force search fallback
+
+- **Adaptive WAL Flusher**: `AdaptiveFlusher` with self-tuning timing based on actual flush duration
+  - Background thread adjusts wait time: `timeout = target_interval - last_flush_duration`
+  - Maintains consistent flush cadence regardless of disk speed
+  - `FlusherStats` for observability (flush count, avg/max times, exceeded target count)
+  - Graceful shutdown with final flush guarantee
+
+- **DurabilityMode::Adaptive**: New WAL durability mode for variable disk latency workloads
+  - Unlike `Batch` which checks thresholds inline, `Adaptive` uses dedicated flusher thread
+  - Prevents thundering herd problems when disk is slow
+
+- **FingerprintedHashIndex**: Sharded hash index with fingerprint-based fast rejection
+  - 64-shard concurrent access (similar to DashMap)
+  - 48-bit fingerprints for ~99.99% rejection rate without full key comparison
+  - `AtomicFingerprintStats` for thread-safe observability (lookups, rejections, comparisons)
+  - Useful for expensive key comparisons (strings) or future disk-backed indices
+
 ## [0.3.0] - Unreleased
 
 _AI Compatibility Release_

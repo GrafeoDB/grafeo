@@ -20,6 +20,7 @@
 pub mod adjacency;
 pub mod btree;
 pub mod fingerprint;
+pub mod fingerprinted_hash;
 pub mod hash;
 #[cfg(feature = "ring-index")]
 pub mod ring;
@@ -30,6 +31,7 @@ pub mod zone_map;
 pub use adjacency::ChunkedAdjacency;
 pub use btree::BTreeIndex;
 pub use fingerprint::{FingerprintBucket, FingerprintEntry, FingerprintStats};
+pub use fingerprinted_hash::{AtomicFingerprintStats, FingerprintedHashIndex};
 pub use hash::HashIndex;
 #[cfg(feature = "ring-index")]
 pub use ring::{LeapfrogRing, RingIterator, SuccinctPermutation, TripleRing};

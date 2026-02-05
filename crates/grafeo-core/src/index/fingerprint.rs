@@ -198,9 +198,16 @@ impl<K: Eq, V> FingerprintBucket<K, V> {
         self.entries.is_empty()
     }
 
-    /// Iterates over all entries in the bucket.
+    /// Iterates over all entries in the bucket (key and value only).
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.entries.iter().map(|(k, e)| (k, &e.value))
+    }
+
+    /// Iterates over all entries with their fingerprint metadata.
+    ///
+    /// Use this when you need access to the fingerprint for statistics tracking.
+    pub fn iter_entries(&self) -> impl Iterator<Item = (&K, &FingerprintEntry<V>)> {
+        self.entries.iter().map(|(k, e)| (k, e))
     }
 }
 

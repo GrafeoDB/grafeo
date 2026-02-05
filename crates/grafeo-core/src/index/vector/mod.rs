@@ -67,23 +67,29 @@
 //! ```
 
 mod distance;
+pub mod quantization;
 mod simd;
 
 #[cfg(feature = "vector-index")]
 mod config;
 #[cfg(feature = "vector-index")]
 mod hnsw;
+#[cfg(feature = "vector-index")]
+mod quantized_hnsw;
 
 pub use distance::{
     DistanceMetric, compute_distance, cosine_distance, cosine_similarity, dot_product,
     euclidean_distance, euclidean_distance_squared, l2_norm, manhattan_distance, normalize,
     simd_support,
 };
+pub use quantization::{BinaryQuantizer, QuantizationType, ScalarQuantizer};
 
 #[cfg(feature = "vector-index")]
 pub use config::HnswConfig;
 #[cfg(feature = "vector-index")]
 pub use hnsw::HnswIndex;
+#[cfg(feature = "vector-index")]
+pub use quantized_hnsw::QuantizedHnswIndex;
 
 use grafeo_common::types::NodeId;
 

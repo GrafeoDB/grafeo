@@ -1,7 +1,6 @@
 //! Output formatting for CLI commands.
 
 use comfy_table::{Cell, Color, ContentArrangement, Table};
-use serde::Serialize;
 
 /// Output format selection.
 #[derive(Clone, Copy)]
@@ -17,26 +16,6 @@ impl From<crate::OutputFormat> for Format {
             crate::OutputFormat::Json => Format::Json,
         }
     }
-}
-
-/// Print data as a table or JSON based on format selection.
-#[allow(dead_code)]
-pub fn print_output<T: Serialize>(data: &T, format: Format, quiet: bool) -> anyhow::Result<()> {
-    if quiet {
-        return Ok(());
-    }
-
-    match format {
-        Format::Json => {
-            println!("{}", serde_json::to_string_pretty(data)?);
-        }
-        Format::Table => {
-            // For table format, we'll let individual commands handle formatting
-            // since each has different structure
-            println!("{}", serde_json::to_string_pretty(data)?);
-        }
-    }
-    Ok(())
 }
 
 /// Create a styled table with consistent formatting.
@@ -92,12 +71,6 @@ pub fn success(msg: &str, quiet: bool) {
     if !quiet {
         println!("✓ {msg}");
     }
-}
-
-/// Print an error message.
-#[allow(dead_code)]
-pub fn error(msg: &str) {
-    eprintln!("✗ {msg}");
 }
 
 #[cfg(test)]

@@ -171,7 +171,7 @@ impl ShortestPathOperator {
                 // Filter by edge type if specified
                 if let Some(ref filter_type) = self.edge_type {
                     if let Some(edge_type) = self.store.edge_type(*edge_id) {
-                        edge_type.as_ref() == filter_type.as_str()
+                        edge_type.as_str() == filter_type.as_str()
                     } else {
                         false
                     }

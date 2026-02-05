@@ -340,7 +340,7 @@ impl FactorizedChunk {
 
         for level_idx in 1..self.levels.len() {
             let level = &self.levels[level_idx];
-            let mut new_counts = Vec::new();
+            let mut new_counts = Vec::with_capacity(counts.len() * 2); // ~2x expansion
 
             for (parent_idx, &parent_count) in counts.iter().enumerate() {
                 // This parent expands to level.multiplicities[parent_idx] children
@@ -867,7 +867,7 @@ impl FactorizedChunk {
             (Value::Float64(x), Value::Int64(y)) => *x < (*y as f64),
 
             // String comparison
-            (Value::String(x), Value::String(y)) => x.as_ref() < y.as_ref(),
+            (Value::String(x), Value::String(y)) => x.as_str() < y.as_str(),
 
             // Bool comparison (false < true)
             (Value::Bool(x), Value::Bool(y)) => !x && *y,

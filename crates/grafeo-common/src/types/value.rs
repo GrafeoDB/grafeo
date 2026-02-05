@@ -4,6 +4,7 @@
 //! numbers, lists, maps, etc. [`PropertyKey`] is an interned string for
 //! efficient property lookups.
 
+use arcstr::ArcStr;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -15,14 +16,14 @@ use super::Timestamp;
 /// An interned property name - cheap to clone and compare.
 ///
 /// Property names like "name", "age", "created_at" get used repeatedly, so
-/// we intern them with `Arc<str>`. You can create these from strings directly.
+/// we intern them with `ArcStr`. You can create these from strings directly.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct PropertyKey(Arc<str>);
+pub struct PropertyKey(ArcStr);
 
 impl PropertyKey {
     /// Creates a new property key from a string.
     #[must_use]
-    pub fn new(s: impl Into<Arc<str>>) -> Self {
+    pub fn new(s: impl Into<ArcStr>) -> Self {
         Self(s.into())
     }
 
@@ -96,8 +97,8 @@ pub enum Value {
     /// 64-bit floating point
     Float64(f64),
 
-    /// UTF-8 string (uses Arc for cheap cloning)
-    String(Arc<str>),
+    /// UTF-8 string (uses ArcStr for cheap cloning)
+    String(ArcStr),
 
     /// Binary data
     Bytes(Arc<[u8]>),
@@ -327,8 +328,8 @@ impl From<String> for Value {
     }
 }
 
-impl From<Arc<str>> for Value {
-    fn from(s: Arc<str>) -> Self {
+impl From<ArcStr> for Value {
+    fn from(s: ArcStr) -> Self {
         Value::String(s)
     }
 }
@@ -418,7 +419,7 @@ pub enum OrderableValue {
     /// 64-bit floating point with total ordering (NaN > everything)
     Float64(OrderedFloat64),
     /// UTF-8 string
-    String(Arc<str>),
+    String(ArcStr),
     /// Boolean value (false < true)
     Bool(bool),
     /// Timestamp (microseconds since epoch)

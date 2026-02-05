@@ -2,6 +2,24 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.2.7] - 2026-02-05
+
+_Parallel Execution & Cache Patterns_
+
+### Added
+
+- **Second-Chance LRU Cache**: `SecondChanceLru<K, V>` with lock-free access marking via atomic bools
+- **Hash Fingerprinting**: `FingerprintBucket` for fast miss detection using upper hash bits
+- **Parallel Fold-Reduce Utilities**: `parallel_count`, `parallel_sum`, `parallel_stats`, `parallel_partition`
+- **Generic Collector Trait**: `Collector` and `PartitionCollector` for composable parallel aggregation
+  - Built-in collectors: `CountCollector`, `MaterializeCollector`, `LimitCollector`, `StatsCollector`
+
+### Improved
+
+- **Code Cleanup**: Removed unused CLI output functions, fixed incorrect dead_code allows
+
+---
+
 ## [0.2.6] - 2026-02-04
 
 _Filter Performance & Batch Read Optimizations_

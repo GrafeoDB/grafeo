@@ -19,6 +19,7 @@ smallvec.workspace = true
 hashbrown.workspace = true
 indexmap.workspace = true
 dashmap.workspace = true
+arcstr.workspace = true
 
 # Hashing
 ahash.workspace = true
@@ -32,6 +33,7 @@ bincode = { workspace = true, optional = true }
 # Concurrency
 parking_lot.workspace = true
 crossbeam.workspace = true
+rayon.workspace = true
 
 # Async
 tokio.workspace = true

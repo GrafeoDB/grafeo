@@ -815,7 +815,7 @@ impl Session {
             .edges_from(node, Direction::Outgoing)
             .filter(|(_, edge_id)| {
                 self.get_edge(*edge_id)
-                    .is_some_and(|e| e.edge_type.as_ref() == edge_type)
+                    .is_some_and(|e| e.edge_type.as_str() == edge_type)
             })
             .collect()
     }

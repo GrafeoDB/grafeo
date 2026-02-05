@@ -1107,7 +1107,7 @@ impl CypherTranslator {
             ast::Expression::Binary { left, op, right } => {
                 let left_expr = self.translate_expression(left)?;
                 let right_expr = self.translate_expression(right)?;
-                let binary_op = self.translate_binary_op(op)?;
+                let binary_op = self.translate_binary_op(*op)?;
 
                 Ok(LogicalExpression::Binary {
                     left: Box::new(left_expr),
@@ -1117,7 +1117,7 @@ impl CypherTranslator {
             }
             ast::Expression::Unary { op, operand } => {
                 let operand_expr = self.translate_expression(operand)?;
-                let unary_op = self.translate_unary_op(op)?;
+                let unary_op = self.translate_unary_op(*op)?;
 
                 Ok(LogicalExpression::Unary {
                     op: unary_op,
@@ -1245,7 +1245,7 @@ impl CypherTranslator {
         Ok(LogicalExpression::Literal(value))
     }
 
-    fn translate_binary_op(&self, op: &ast::BinaryOp) -> Result<BinaryOp> {
+    fn translate_binary_op(&self, op: ast::BinaryOp) -> Result<BinaryOp> {
         Ok(match op {
             ast::BinaryOp::Eq => BinaryOp::Eq,
             ast::BinaryOp::Ne => BinaryOp::Ne,
@@ -1273,7 +1273,7 @@ impl CypherTranslator {
         })
     }
 
-    fn translate_unary_op(&self, op: &ast::UnaryOp) -> Result<UnaryOp> {
+    fn translate_unary_op(&self, op: ast::UnaryOp) -> Result<UnaryOp> {
         Ok(match op {
             ast::UnaryOp::Not => UnaryOp::Not,
             ast::UnaryOp::Neg => UnaryOp::Neg,
@@ -1882,59 +1882,59 @@ mod tests {
 
         // Test all supported binary ops
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Eq).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Eq).unwrap(),
             BinaryOp::Eq
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Ne).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Ne).unwrap(),
             BinaryOp::Ne
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Lt).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Lt).unwrap(),
             BinaryOp::Lt
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Le).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Le).unwrap(),
             BinaryOp::Le
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Gt).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Gt).unwrap(),
             BinaryOp::Gt
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Ge).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Ge).unwrap(),
             BinaryOp::Ge
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::And).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::And).unwrap(),
             BinaryOp::And
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Or).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Or).unwrap(),
             BinaryOp::Or
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Xor).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Xor).unwrap(),
             BinaryOp::Xor
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Add).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Add).unwrap(),
             BinaryOp::Add
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Sub).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Sub).unwrap(),
             BinaryOp::Sub
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Mul).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Mul).unwrap(),
             BinaryOp::Mul
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Div).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Div).unwrap(),
             BinaryOp::Div
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Mod).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Mod).unwrap(),
             BinaryOp::Mod
         );
     }
@@ -1944,22 +1944,20 @@ mod tests {
         let translator = CypherTranslator::new();
 
         assert_eq!(
-            translator.translate_unary_op(&ast::UnaryOp::Not).unwrap(),
+            translator.translate_unary_op(ast::UnaryOp::Not).unwrap(),
             UnaryOp::Not
         );
         assert_eq!(
-            translator.translate_unary_op(&ast::UnaryOp::Neg).unwrap(),
+            translator.translate_unary_op(ast::UnaryOp::Neg).unwrap(),
             UnaryOp::Neg
         );
         assert_eq!(
-            translator
-                .translate_unary_op(&ast::UnaryOp::IsNull)
-                .unwrap(),
+            translator.translate_unary_op(ast::UnaryOp::IsNull).unwrap(),
             UnaryOp::IsNull
         );
         assert_eq!(
             translator
-                .translate_unary_op(&ast::UnaryOp::IsNotNull)
+                .translate_unary_op(ast::UnaryOp::IsNotNull)
                 .unwrap(),
             UnaryOp::IsNotNull
         );

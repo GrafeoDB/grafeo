@@ -30,7 +30,7 @@ pub struct AsyncQueryResult {
     #[pyo3(get)]
     columns: Vec<String>,
     rows: Vec<Vec<Value>>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Stored for future typed access; currently only raw rows exposed
     column_types: Vec<LogicalType>,
 }
 

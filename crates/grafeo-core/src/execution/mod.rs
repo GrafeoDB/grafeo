@@ -15,6 +15,7 @@
 //! | [`parallel`] | Morsel-driven parallelism |
 //! | [`spill`] | Disk spilling when memory is tight |
 //! | [`adaptive`] | Adaptive execution with runtime cardinality feedback |
+//! | [`collector`] | Generic collector pattern for parallel aggregation |
 //!
 //! The execution model is push-based: sources push data through a pipeline of
 //! operators until it reaches a sink.
@@ -22,6 +23,7 @@
 pub mod adaptive;
 pub mod chunk;
 pub mod chunk_state;
+pub mod collector;
 pub mod factorized_chunk;
 pub mod factorized_iter;
 pub mod factorized_vector;
@@ -43,6 +45,10 @@ pub use adaptive::{
     ReoptimizationDecision, SharedAdaptiveContext, evaluate_reoptimization, execute_adaptive,
 };
 pub use chunk::{ChunkZoneHints, DataChunk};
+pub use collector::{
+    Collector, CollectorStats, CountCollector, LimitCollector, MaterializeCollector,
+    PartitionCollector, StatsCollector,
+};
 pub use memory::{ExecutionMemoryContext, ExecutionMemoryContextBuilder};
 pub use parallel::{
     CloneableOperatorFactory, MorselScheduler, ParallelPipeline, ParallelPipelineConfig,

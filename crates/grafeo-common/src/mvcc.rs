@@ -40,6 +40,7 @@ impl VersionInfo {
     }
 
     /// Checks if this version is visible at the given epoch.
+    #[inline]
     #[must_use]
     pub fn is_visible_at(&self, epoch: EpochId) -> bool {
         // Visible if created before or at the viewing epoch
@@ -62,6 +63,7 @@ impl VersionInfo {
     /// 1. It was created by the same transaction, OR
     /// 2. It was created in an epoch before the transaction's start epoch
     ///    and not deleted before that epoch
+    #[inline]
     #[must_use]
     pub fn is_visible_to(&self, viewing_epoch: EpochId, viewing_tx: TxId) -> bool {
         // Own modifications are always visible
@@ -308,6 +310,7 @@ impl OptionalEpochId {
     }
 
     /// Returns the contained epoch, or `None` if this is `NONE`.
+    #[inline]
     #[must_use]
     pub fn get(self) -> Option<EpochId> {
         if self.0 == u32::MAX {
@@ -324,6 +327,7 @@ impl OptionalEpochId {
     }
 
     /// Returns `true` if this is `NONE`.
+    #[inline]
     #[must_use]
     pub fn is_none(self) -> bool {
         self.0 == u32::MAX
@@ -368,6 +372,7 @@ impl HotVersionRef {
     }
 
     /// Checks if this version is visible at the given epoch.
+    #[inline]
     #[must_use]
     pub fn is_visible_at(&self, viewing_epoch: EpochId) -> bool {
         // Must be created at or before the viewing epoch
@@ -382,6 +387,7 @@ impl HotVersionRef {
     }
 
     /// Checks if this version is visible to a specific transaction.
+    #[inline]
     #[must_use]
     pub fn is_visible_to(&self, viewing_epoch: EpochId, viewing_tx: TxId) -> bool {
         // Own modifications are always visible (if not deleted by self)

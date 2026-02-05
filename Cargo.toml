@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -21,11 +21,11 @@ description = "A pure-Rust, high-performance, embeddable graph database"
 
 [workspace.dependencies]
 # Internal crates
-grafeo-common = { path = "crates/grafeo-common", version = "0.2.5" }
-grafeo-core = { path = "crates/grafeo-core", version = "0.2.5" }
-grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.2.5" }
-grafeo-engine = { path = "crates/grafeo-engine", version = "0.2.5" }
-grafeo = { path = "crates/grafeo", version = "0.2.5" }
+grafeo-common = { path = "crates/grafeo-common", version = "0.2.7" }
+grafeo-core = { path = "crates/grafeo-core", version = "0.2.7" }
+grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.2.7" }
+grafeo-engine = { path = "crates/grafeo-engine", version = "0.2.7" }
+grafeo = { path = "crates/grafeo", version = "0.2.7" }
 
 # Error handling
 thiserror = "2.0"
@@ -42,6 +42,7 @@ smallvec = "1.13"
 bumpalo = "3.16"
 indexmap = "2.7"
 dashmap = "6.1"
+arcstr = { version = "1.2", features = ["serde"] }
 
 # Memory & I/O
 memmap2 = "0.9"
@@ -113,7 +114,6 @@ similar_names = "allow"
 too_many_lines = "allow"
 type_complexity = "allow"
 needless_pass_by_value = "allow"
-trivially_copy_pass_by_ref = "allow"
 items_after_statements = "allow"
 unreadable_literal = "allow"
 struct_field_names = "allow"

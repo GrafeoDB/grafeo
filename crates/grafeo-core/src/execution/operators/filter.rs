@@ -407,7 +407,7 @@ impl ExpressionPredicate {
                             .map(|c| Value::String(c.to_string().into()))
                     }
                     (Value::Map(m), Value::String(key)) => {
-                        let prop_key = PropertyKey::new(key.as_ref());
+                        let prop_key = PropertyKey::new(key.as_str());
                         m.get(&prop_key).cloned()
                     }
                     _ => None,
@@ -573,7 +573,7 @@ impl ExpressionPredicate {
                             // Check edge type if specified
                             if let Some(required_type) = edge_type {
                                 if let Some(actual_type) = self.store.edge_type(edge_id) {
-                                    actual_type.as_ref() == required_type.as_str()
+                                    actual_type.as_str() == required_type.as_str()
                                 } else {
                                     false
                                 }
@@ -909,7 +909,7 @@ impl ExpressionPredicate {
                 };
                 // Check if the node has this label
                 let node = self.store.get_node(node_id)?;
-                let has_label = node.labels.iter().any(|l| l.as_ref() == label.as_ref());
+                let has_label = node.labels.iter().any(|l| l.as_str() == label.as_str());
                 Some(Value::Bool(has_label))
             }
             "head" => {

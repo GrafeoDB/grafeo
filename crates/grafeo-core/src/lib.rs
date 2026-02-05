@@ -9,12 +9,14 @@
 //!
 //! ## Modules
 //!
+//! - [`cache`] - Caching utilities: second-chance LRU
 //! - [`graph`] - Graph storage: LPG (labeled property graph) and RDF triple stores
 //! - [`index`] - Fast lookups: hash, B-tree, adjacency lists, tries
 //! - [`execution`] - Query execution: data chunks, vectors, operators
 //! - [`statistics`] - Cardinality estimates for the query optimizer
 //! - [`storage`] - Compression: dictionary encoding, bit-packing, delta encoding
 
+pub mod cache;
 pub mod execution;
 pub mod graph;
 pub mod index;

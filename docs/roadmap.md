@@ -65,14 +65,56 @@ This roadmap outlines the planned development of Grafeo. Priorities may shift ba
 
 *Ready for modern AI/ML workloads*
 
-### New Features
-- Vector search index (HNSW) for similarity queries
-- Hybrid graph + vector queries
-- Embedding storage and retrieval
+### Core Vector Features (0.3.0)
 
-### Stability
-- Bug fixes based on community feedback
-- Stability improvements from production usage
+- **Vector Type** - First-class `Vector` type with f32 storage (4x compression vs f64)
+- **Distance Functions** - Cosine, Euclidean, Dot Product, Manhattan metrics
+- **HNSW Index** (`vector-index` feature) - O(log n) approximate nearest neighbor search
+- **Hybrid Queries** - Combine graph traversal with vector similarity in GQL/Cypher/SPARQL
+- **Serializable Isolation** - SSI for write skew prevention and strong consistency
+
+### Vector Quantization (0.3.1)
+
+- **Scalar Quantization** - f32 → u8, 4x compression with ~97% recall
+- **Binary Quantization** - f32 → 1 bit, 32x compression for fast filtering
+- **QuantizedHnswIndex** - Two-phase search with rescoring support
+
+### Advanced Quantization & Storage (0.3.3)
+
+- **Product Quantization (PQ)** - Codebook-based compression achieving 8-32x reduction
+  - K-means training with configurable iterations
+  - Asymmetric Distance Computation (ADC) via precomputed tables
+  - 4.5ns distance computation (6x faster than raw vectors)
+- **Memory-Mapped Vector Storage** - Disk-backed storage for large datasets
+  - `VectorStorage` trait for backend abstraction
+  - `RamStorage` for in-memory (fastest access)
+  - `MmapStorage` for memory-mapped files (low memory footprint)
+  - LRU cache for frequently accessed vectors
+- **Python Quantization API** - Full quantization support from Python
+  - `grafeo.QuantizationType` - None, Scalar, Binary, Product variants
+  - `grafeo.ScalarQuantizer` - Train, quantize, dequantize, distance methods
+  - `grafeo.ProductQuantizer` - Train, quantize, reconstruct, ADC methods
+  - `grafeo.BinaryQuantizer` - Quantize and hamming distance methods
+- **Vector Zone Maps** - Intelligent block skipping for large datasets
+  - Centroid-based pruning
+  - Bounding box pruning for Euclidean search
+
+### Syntax Support
+
+```gql
+-- Vector literals and similarity functions
+MATCH (m:Movie)
+WHERE cosine_similarity(m.embedding, $query) > 0.8
+RETURN m.title
+
+-- Create vector index
+CREATE VECTOR INDEX movie_embeddings ON :Movie(embedding)
+  WITH (dimensions: 384, metric: 'cosine')
+```
+
+### Bug Fixes
+
+- RDF `find_with_pending()` now correctly filters pending deletes within transactions
 
 ---
 
@@ -119,7 +161,6 @@ This roadmap outlines the planned development of Grafeo. Priorities may shift ba
 
 These features are under consideration for future releases:
 
-- Serializable transaction isolation
 - Additional language bindings (Java/Kotlin, Swift)
 - Distributed/clustered deployment
 - Cloud-native integrations

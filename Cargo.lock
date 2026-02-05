@@ -305,9 +305,9 @@ dependencies = [
 
 [[package]]
 name = "criterion"
-version = "0.8.1"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d883447757bb0ee46f233e9dc22eb84d93a9508c9b868687b274fc431d886bf"
+checksum = "950046b2aa2492f9a536f5f4f9a3de7b9e2476e575e05bd6c333371add4d98f3"
 dependencies = [
  "alloca",
  "anes",
@@ -330,9 +330,9 @@ dependencies = [
 
 [[package]]
 name = "criterion-plot"
-version = "0.8.1"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed943f81ea2faa8dcecbbfa50164acf95d555afec96a27871663b300e387b2e4"
+checksum = "d8d80a2f4f5b554395e47b5d8305bc3d27813bacb73493eb1001e8f76dae29ea"
 dependencies = [
  "cast",
  "itertools",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo"
-version = "0.2.7"
+version = "0.3.4"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.2.7"
+version = "0.3.4"
 dependencies = [
  "bincode",
  "byteorder",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-cli"
-version = "0.2.7"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -655,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.2.7"
+version = "0.3.4"
 dependencies = [
  "ahash",
  "arcstr",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.2.7"
+version = "0.3.4"
 dependencies = [
  "ahash",
  "arcstr",
@@ -691,8 +691,10 @@ dependencies = [
  "grafeo-common",
  "hashbrown 0.16.1",
  "indexmap",
+ "ordered-float",
  "parking_lot",
  "proptest",
+ "rand",
  "rayon",
  "regex",
  "serde",
@@ -704,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.2.7"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "criterion",
@@ -727,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-python"
-version = "0.2.7"
+version = "0.3.4"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",
@@ -967,6 +969,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
+name = "ordered-float"
+version = "5.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f4779c6901a562440c3786d08192c6fbda7c1c2060edd10006b05ee35d10f2d"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "page_size"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1065,9 +1076,9 @@ dependencies = [
 
 [[package]]
 name = "proptest"
-version = "1.9.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bee689443a2bd0a16ab0348b52ee43e3b2d1b1f931c8aa5c9f8de4c86fbe8c40"
+checksum = "37566cb3fdacef14c0737f9546df7cfeadbfbc9fef10991038bf5015d0c80532"
 dependencies = [
  "bit-set",
  "bit-vec",

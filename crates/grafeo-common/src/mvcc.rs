@@ -136,6 +136,7 @@ impl<T> VersionChain<T> {
     ///
     /// Returns a reference to the visible version's data, or `None` if no version
     /// is visible at that epoch.
+    #[inline]
     #[must_use]
     pub fn visible_at(&self, epoch: EpochId) -> Option<&T> {
         self.versions
@@ -147,6 +148,7 @@ impl<T> VersionChain<T> {
     /// Finds the version visible to a specific transaction.
     ///
     /// This considers both the transaction's epoch and its own uncommitted changes.
+    #[inline]
     #[must_use]
     pub fn visible_to(&self, epoch: EpochId, tx: TxId) -> Option<&T> {
         self.versions
@@ -429,6 +431,7 @@ pub struct ColdVersionRef {
 #[cfg(feature = "tiered-storage")]
 impl ColdVersionRef {
     /// Checks if this version is visible at the given epoch.
+    #[inline]
     #[must_use]
     pub fn is_visible_at(&self, viewing_epoch: EpochId) -> bool {
         if !self.epoch.is_visible_at(viewing_epoch) {
@@ -441,6 +444,7 @@ impl ColdVersionRef {
     }
 
     /// Checks if this version is visible to a specific transaction.
+    #[inline]
     #[must_use]
     pub fn is_visible_to(&self, viewing_epoch: EpochId, viewing_tx: TxId) -> bool {
         if self.created_by == viewing_tx {
@@ -577,6 +581,7 @@ impl VersionIndex {
     }
 
     /// Finds the version visible at the given epoch.
+    #[inline]
     #[must_use]
     pub fn visible_at(&self, epoch: EpochId) -> Option<VersionRef> {
         // Check hot versions first (most recent first, likely case)
@@ -595,6 +600,7 @@ impl VersionIndex {
     }
 
     /// Finds the version visible to a specific transaction.
+    #[inline]
     #[must_use]
     pub fn visible_to(&self, epoch: EpochId, tx: TxId) -> Option<VersionRef> {
         // Check hot versions first

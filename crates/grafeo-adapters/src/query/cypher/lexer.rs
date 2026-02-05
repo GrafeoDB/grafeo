@@ -627,4 +627,273 @@ mod tests {
         assert_eq!(lexer.next_token().kind, TokenKind::Match);
         assert_eq!(lexer.next_token().kind, TokenKind::Return);
     }
+
+    #[test]
+    fn test_block_comments() {
+        let mut lexer = Lexer::new("MATCH /* block\ncomment */ RETURN");
+        assert_eq!(lexer.next_token().kind, TokenKind::Match);
+        assert_eq!(lexer.next_token().kind, TokenKind::Return);
+    }
+
+    #[test]
+    fn test_quoted_identifier() {
+        let mut lexer = Lexer::new("`my column`");
+        let token = lexer.next_token();
+        assert_eq!(token.kind, TokenKind::QuotedIdentifier);
+        assert_eq!(token.text, "`my column`");
+    }
+
+    #[test]
+    fn test_string_with_escape() {
+        let mut lexer = Lexer::new(r#"'hello\'world'"#);
+        let token = lexer.next_token();
+        assert_eq!(token.kind, TokenKind::String);
+    }
+
+    #[test]
+    fn test_dot_vs_dotdot() {
+        let mut lexer = Lexer::new(". .. .");
+        assert_eq!(lexer.next_token().kind, TokenKind::Dot);
+        assert_eq!(lexer.next_token().kind, TokenKind::DotDot);
+        assert_eq!(lexer.next_token().kind, TokenKind::Dot);
+    }
+
+    #[test]
+    fn test_plus_eq() {
+        let mut lexer = Lexer::new("+ += +");
+        assert_eq!(lexer.next_token().kind, TokenKind::Plus);
+        assert_eq!(lexer.next_token().kind, TokenKind::PlusEq);
+        assert_eq!(lexer.next_token().kind, TokenKind::Plus);
+    }
+
+    #[test]
+    fn test_regex_match() {
+        let mut lexer = Lexer::new("= =~ =");
+        assert_eq!(lexer.next_token().kind, TokenKind::Eq);
+        assert_eq!(lexer.next_token().kind, TokenKind::RegexMatch);
+        assert_eq!(lexer.next_token().kind, TokenKind::Eq);
+    }
+
+    #[test]
+    fn test_all_logical_keywords() {
+        let mut lexer = Lexer::new("AND OR XOR NOT IN IS");
+        assert_eq!(lexer.next_token().kind, TokenKind::And);
+        assert_eq!(lexer.next_token().kind, TokenKind::Or);
+        assert_eq!(lexer.next_token().kind, TokenKind::Xor);
+        assert_eq!(lexer.next_token().kind, TokenKind::Not);
+        assert_eq!(lexer.next_token().kind, TokenKind::In);
+        assert_eq!(lexer.next_token().kind, TokenKind::Is);
+    }
+
+    #[test]
+    fn test_case_keywords() {
+        let mut lexer = Lexer::new("CASE WHEN THEN ELSE END");
+        assert_eq!(lexer.next_token().kind, TokenKind::Case);
+        assert_eq!(lexer.next_token().kind, TokenKind::When);
+        assert_eq!(lexer.next_token().kind, TokenKind::Then);
+        assert_eq!(lexer.next_token().kind, TokenKind::Else);
+        assert_eq!(lexer.next_token().kind, TokenKind::End);
+    }
+
+    #[test]
+    fn test_string_keywords() {
+        let mut lexer = Lexer::new("STARTS ENDS CONTAINS");
+        assert_eq!(lexer.next_token().kind, TokenKind::Starts);
+        assert_eq!(lexer.next_token().kind, TokenKind::Ends);
+        assert_eq!(lexer.next_token().kind, TokenKind::Contains);
+    }
+
+    #[test]
+    fn test_data_modification_keywords() {
+        let mut lexer = Lexer::new("CREATE MERGE DELETE DETACH SET REMOVE");
+        assert_eq!(lexer.next_token().kind, TokenKind::Create);
+        assert_eq!(lexer.next_token().kind, TokenKind::Merge);
+        assert_eq!(lexer.next_token().kind, TokenKind::Delete);
+        assert_eq!(lexer.next_token().kind, TokenKind::Detach);
+        assert_eq!(lexer.next_token().kind, TokenKind::Set);
+        assert_eq!(lexer.next_token().kind, TokenKind::Remove);
+    }
+
+    #[test]
+    fn test_ordering_keywords() {
+        let mut lexer = Lexer::new("ORDER BY ASC ASCENDING DESC DESCENDING SKIP LIMIT");
+        assert_eq!(lexer.next_token().kind, TokenKind::Order);
+        assert_eq!(lexer.next_token().kind, TokenKind::By);
+        assert_eq!(lexer.next_token().kind, TokenKind::Asc);
+        assert_eq!(lexer.next_token().kind, TokenKind::Ascending);
+        assert_eq!(lexer.next_token().kind, TokenKind::Desc);
+        assert_eq!(lexer.next_token().kind, TokenKind::Descending);
+        assert_eq!(lexer.next_token().kind, TokenKind::Skip);
+        assert_eq!(lexer.next_token().kind, TokenKind::Limit);
+    }
+
+    #[test]
+    fn test_misc_keywords() {
+        let mut lexer =
+            Lexer::new("OPTIONAL WITH UNWIND AS DISTINCT EXISTS COUNT CALL YIELD UNION ALL ON");
+        assert_eq!(lexer.next_token().kind, TokenKind::Optional);
+        assert_eq!(lexer.next_token().kind, TokenKind::With);
+        assert_eq!(lexer.next_token().kind, TokenKind::Unwind);
+        assert_eq!(lexer.next_token().kind, TokenKind::As);
+        assert_eq!(lexer.next_token().kind, TokenKind::Distinct);
+        assert_eq!(lexer.next_token().kind, TokenKind::Exists);
+        assert_eq!(lexer.next_token().kind, TokenKind::Count);
+        assert_eq!(lexer.next_token().kind, TokenKind::Call);
+        assert_eq!(lexer.next_token().kind, TokenKind::Yield);
+        assert_eq!(lexer.next_token().kind, TokenKind::Union);
+        assert_eq!(lexer.next_token().kind, TokenKind::All);
+        assert_eq!(lexer.next_token().kind, TokenKind::On);
+    }
+
+    #[test]
+    fn test_literal_keywords() {
+        let mut lexer = Lexer::new("NULL TRUE FALSE");
+        assert_eq!(lexer.next_token().kind, TokenKind::Null);
+        assert_eq!(lexer.next_token().kind, TokenKind::True);
+        assert_eq!(lexer.next_token().kind, TokenKind::False);
+    }
+
+    #[test]
+    fn test_identifier() {
+        let mut lexer = Lexer::new("foo bar_baz x123");
+        let t1 = lexer.next_token();
+        assert_eq!(t1.kind, TokenKind::Identifier);
+        assert_eq!(t1.text, "foo");
+
+        let t2 = lexer.next_token();
+        assert_eq!(t2.kind, TokenKind::Identifier);
+        assert_eq!(t2.text, "bar_baz");
+
+        let t3 = lexer.next_token();
+        assert_eq!(t3.kind, TokenKind::Identifier);
+        assert_eq!(t3.text, "x123");
+    }
+
+    #[test]
+    fn test_integer_values() {
+        let mut lexer = Lexer::new("0 123 999999");
+        let t1 = lexer.next_token();
+        assert_eq!(t1.kind, TokenKind::Integer);
+        assert_eq!(t1.text, "0");
+
+        let t2 = lexer.next_token();
+        assert_eq!(t2.kind, TokenKind::Integer);
+        assert_eq!(t2.text, "123");
+
+        let t3 = lexer.next_token();
+        assert_eq!(t3.kind, TokenKind::Integer);
+        assert_eq!(t3.text, "999999");
+    }
+
+    #[test]
+    fn test_float_values() {
+        let mut lexer = Lexer::new("3.14 0.5 1e10 2e-5 3.14e+2");
+        let t1 = lexer.next_token();
+        assert_eq!(t1.kind, TokenKind::Float);
+        assert_eq!(t1.text, "3.14");
+
+        let t2 = lexer.next_token();
+        assert_eq!(t2.kind, TokenKind::Float);
+        assert_eq!(t2.text, "0.5");
+
+        let t3 = lexer.next_token();
+        assert_eq!(t3.kind, TokenKind::Float);
+        assert_eq!(t3.text, "1e10");
+
+        let t4 = lexer.next_token();
+        assert_eq!(t4.kind, TokenKind::Float);
+        assert_eq!(t4.text, "2e-5");
+
+        let t5 = lexer.next_token();
+        assert_eq!(t5.kind, TokenKind::Float);
+        assert_eq!(t5.text, "3.14e+2");
+    }
+
+    #[test]
+    fn test_whitespace_handling() {
+        let mut lexer = Lexer::new("  MATCH\t\t(n)\n\nRETURN  ");
+        assert_eq!(lexer.next_token().kind, TokenKind::Match);
+        assert_eq!(lexer.next_token().kind, TokenKind::LParen);
+        assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+        assert_eq!(lexer.next_token().kind, TokenKind::RParen);
+        assert_eq!(lexer.next_token().kind, TokenKind::Return);
+        assert_eq!(lexer.next_token().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn test_complex_query() {
+        let mut lexer =
+            Lexer::new("MATCH (n:Person)-[:KNOWS*1..3]->(m) WHERE n.age > 30 RETURN n.name");
+        assert_eq!(lexer.next_token().kind, TokenKind::Match);
+        assert_eq!(lexer.next_token().kind, TokenKind::LParen);
+        assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+        assert_eq!(lexer.next_token().kind, TokenKind::Colon);
+        assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+        assert_eq!(lexer.next_token().kind, TokenKind::RParen);
+        assert_eq!(lexer.next_token().kind, TokenKind::Minus);
+        assert_eq!(lexer.next_token().kind, TokenKind::LBracket);
+        assert_eq!(lexer.next_token().kind, TokenKind::Colon);
+        assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+        assert_eq!(lexer.next_token().kind, TokenKind::Star);
+        assert_eq!(lexer.next_token().kind, TokenKind::Integer);
+        assert_eq!(lexer.next_token().kind, TokenKind::DotDot);
+        assert_eq!(lexer.next_token().kind, TokenKind::Integer);
+        assert_eq!(lexer.next_token().kind, TokenKind::RBracket);
+        assert_eq!(lexer.next_token().kind, TokenKind::Arrow);
+        assert_eq!(lexer.next_token().kind, TokenKind::LParen);
+        assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+        assert_eq!(lexer.next_token().kind, TokenKind::RParen);
+        assert_eq!(lexer.next_token().kind, TokenKind::Where);
+        assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+        assert_eq!(lexer.next_token().kind, TokenKind::Dot);
+        assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+        assert_eq!(lexer.next_token().kind, TokenKind::Gt);
+        assert_eq!(lexer.next_token().kind, TokenKind::Integer);
+        assert_eq!(lexer.next_token().kind, TokenKind::Return);
+        assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+        assert_eq!(lexer.next_token().kind, TokenKind::Dot);
+        assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+        assert_eq!(lexer.next_token().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn test_error_invalid_char() {
+        let mut lexer = Lexer::new("@");
+        assert_eq!(lexer.next_token().kind, TokenKind::Error);
+    }
+
+    #[test]
+    fn test_unterminated_string() {
+        let mut lexer = Lexer::new("'hello");
+        assert_eq!(lexer.next_token().kind, TokenKind::Error);
+    }
+
+    #[test]
+    fn test_unterminated_quoted_identifier() {
+        let mut lexer = Lexer::new("`column");
+        assert_eq!(lexer.next_token().kind, TokenKind::Error);
+    }
+
+    #[test]
+    fn test_span_tracking() {
+        let mut lexer = Lexer::new("MATCH (n)");
+        let t1 = lexer.next_token();
+        assert_eq!(t1.kind, TokenKind::Match);
+        assert_eq!(t1.span.line, 1);
+        assert_eq!(t1.span.column, 1);
+
+        let t2 = lexer.next_token();
+        assert_eq!(t2.kind, TokenKind::LParen);
+        // Just verify the span was created (line/column should advance)
+        assert!(t2.span.column > t1.span.column);
+    }
+
+    #[test]
+    fn test_multiline_span() {
+        let mut lexer = Lexer::new("MATCH\n(n)");
+        let _ = lexer.next_token(); // MATCH
+        let t2 = lexer.next_token(); // (
+        assert_eq!(t2.span.line, 2);
+        assert_eq!(t2.span.column, 1);
+    }
 }

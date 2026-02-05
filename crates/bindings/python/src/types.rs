@@ -256,6 +256,14 @@ impl PyValue {
                     .map(|dt| dt.unbind().into_any())
                     .unwrap_or_else(|_| py.None())
             }
+            Value::Vector(v) => {
+                // Convert vector to Python list of floats
+                let py_floats: Vec<f32> = v.iter().copied().collect();
+                PyList::new(py, py_floats)
+                    .expect("PyList creation only fails on memory exhaustion")
+                    .unbind()
+                    .into_any()
+            }
         }
     }
 }

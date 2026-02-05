@@ -34,12 +34,14 @@ mod mutation;
 mod project;
 pub mod push;
 mod scan;
+mod scan_vector;
 mod shortest_path;
 pub mod single_row;
 mod sort;
 mod union;
 mod unwind;
 mod variable_length_expand;
+mod vector_join;
 
 pub use aggregate::{
     AggregateExpr, AggregateFunction, HashAggregateOperator, SimpleAggregateOperator,
@@ -77,7 +79,9 @@ pub use push::{
     SortPushOperator, SpillableAggregatePushOperator, SpillableSortPushOperator,
 };
 pub use scan::ScanOperator;
+pub use scan_vector::VectorScanOperator;
 pub use shortest_path::ShortestPathOperator;
+pub use vector_join::VectorJoinOperator;
 pub use single_row::{EmptyOperator, NodeListOperator, SingleRowOperator};
 pub use sort::{NullOrder, SortDirection, SortKey, SortOperator};
 pub use union::UnionOperator;

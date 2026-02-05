@@ -1411,6 +1411,10 @@ pub struct QueryResult {
     pub column_types: Vec<grafeo_common::types::LogicalType>,
     /// The actual result rows.
     pub rows: Vec<Vec<grafeo_common::types::Value>>,
+    /// Query execution time in milliseconds (if timing was enabled).
+    pub execution_time_ms: Option<f64>,
+    /// Number of rows scanned during query execution (estimate).
+    pub rows_scanned: Option<u64>,
 }
 
 impl QueryResult {
@@ -1422,6 +1426,8 @@ impl QueryResult {
             columns,
             column_types: vec![grafeo_common::types::LogicalType::Any; len],
             rows: Vec::new(),
+            execution_time_ms: None,
+            rows_scanned: None,
         }
     }
 
@@ -1435,7 +1441,28 @@ impl QueryResult {
             columns,
             column_types,
             rows: Vec::new(),
+            execution_time_ms: None,
+            rows_scanned: None,
         }
+    }
+
+    /// Sets the execution metrics on this result.
+    pub fn with_metrics(mut self, execution_time_ms: f64, rows_scanned: u64) -> Self {
+        self.execution_time_ms = Some(execution_time_ms);
+        self.rows_scanned = Some(rows_scanned);
+        self
+    }
+
+    /// Returns the execution time in milliseconds, if available.
+    #[must_use]
+    pub fn execution_time_ms(&self) -> Option<f64> {
+        self.execution_time_ms
+    }
+
+    /// Returns the number of rows scanned, if available.
+    #[must_use]
+    pub fn rows_scanned(&self) -> Option<u64> {
+        self.rows_scanned
     }
 
     /// Returns the number of rows.
@@ -1618,5 +1645,150 @@ mod tests {
         }
 
         db.close().unwrap();
+    }
+
+    #[test]
+    fn test_wal_recovery_multiple_sessions() {
+        // Tests that WAL recovery works correctly across multiple open/close cycles
+        use grafeo_common::types::Value;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("multi_session_db");
+
+        // Session 1: Create initial data
+        {
+            let db = GrafeoDB::open(&db_path).unwrap();
+            let alice = db.create_node(&["Person"]);
+            db.set_node_property(alice, "name", Value::from("Alice"));
+            db.close().unwrap();
+        }
+
+        // Session 2: Add more data
+        {
+            let db = GrafeoDB::open(&db_path).unwrap();
+            assert_eq!(db.node_count(), 1); // Previous data recovered
+            let bob = db.create_node(&["Person"]);
+            db.set_node_property(bob, "name", Value::from("Bob"));
+            db.close().unwrap();
+        }
+
+        // Session 3: Verify all data
+        {
+            let db = GrafeoDB::open(&db_path).unwrap();
+            assert_eq!(db.node_count(), 2);
+
+            // Verify properties were recovered correctly
+            let node0 = db.get_node(grafeo_common::types::NodeId::new(0)).unwrap();
+            assert!(node0.labels.iter().any(|l| l.as_str() == "Person"));
+
+            let node1 = db.get_node(grafeo_common::types::NodeId::new(1)).unwrap();
+            assert!(node1.labels.iter().any(|l| l.as_str() == "Person"));
+        }
+    }
+
+    #[test]
+    fn test_database_consistency_after_mutations() {
+        // Tests that database remains consistent after a series of create/delete operations
+        use grafeo_common::types::Value;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("consistency_db");
+
+        {
+            let db = GrafeoDB::open(&db_path).unwrap();
+
+            // Create nodes
+            let a = db.create_node(&["Node"]);
+            let b = db.create_node(&["Node"]);
+            let c = db.create_node(&["Node"]);
+
+            // Create edges
+            let e1 = db.create_edge(a, b, "LINKS");
+            let _e2 = db.create_edge(b, c, "LINKS");
+
+            // Delete middle node and its edge
+            db.delete_edge(e1);
+            db.delete_node(b);
+
+            // Set properties on remaining nodes
+            db.set_node_property(a, "value", Value::Int64(1));
+            db.set_node_property(c, "value", Value::Int64(3));
+
+            db.close().unwrap();
+        }
+
+        // Reopen and verify consistency
+        {
+            let db = GrafeoDB::open(&db_path).unwrap();
+
+            // Should have 2 nodes (a and c), b was deleted
+            // Note: node_count includes deleted nodes in some implementations
+            // What matters is that the non-deleted nodes are accessible
+            let node_a = db.get_node(grafeo_common::types::NodeId::new(0));
+            assert!(node_a.is_some());
+
+            let node_c = db.get_node(grafeo_common::types::NodeId::new(2));
+            assert!(node_c.is_some());
+
+            // Middle node should be deleted
+            let node_b = db.get_node(grafeo_common::types::NodeId::new(1));
+            assert!(node_b.is_none());
+        }
+    }
+
+    #[test]
+    fn test_close_is_idempotent() {
+        // Calling close() multiple times should not cause errors
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("close_test_db");
+
+        let db = GrafeoDB::open(&db_path).unwrap();
+        db.create_node(&["Test"]);
+
+        // First close should succeed
+        assert!(db.close().is_ok());
+
+        // Second close should also succeed (idempotent)
+        assert!(db.close().is_ok());
+    }
+
+    #[test]
+    fn test_query_result_has_metrics() {
+        // Verifies that query results include execution metrics
+        let db = GrafeoDB::new_in_memory();
+        db.create_node(&["Person"]);
+        db.create_node(&["Person"]);
+
+        #[cfg(feature = "gql")]
+        {
+            let result = db.execute("MATCH (n:Person) RETURN n").unwrap();
+
+            // Metrics should be populated
+            assert!(result.execution_time_ms.is_some());
+            assert!(result.rows_scanned.is_some());
+            assert!(result.execution_time_ms.unwrap() >= 0.0);
+            assert_eq!(result.rows_scanned.unwrap(), 2);
+        }
+    }
+
+    #[test]
+    fn test_empty_query_result_metrics() {
+        // Verifies metrics are correct for queries returning no results
+        let db = GrafeoDB::new_in_memory();
+        db.create_node(&["Person"]);
+
+        #[cfg(feature = "gql")]
+        {
+            // Query that matches nothing
+            let result = db.execute("MATCH (n:NonExistent) RETURN n").unwrap();
+
+            assert!(result.execution_time_ms.is_some());
+            assert!(result.rows_scanned.is_some());
+            assert_eq!(result.rows_scanned.unwrap(), 0);
+        }
     }
 }

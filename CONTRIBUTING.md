@@ -148,11 +148,11 @@ cargo llvm-cov --all-features --workspace --show-missing-lines
 
 | Crate           | Target |
 | --------------- | ------ |
-| grafeo-common   | 80%    |
-| grafeo-core     | 75%    |
-| grafeo-adapters | 80%    |
-| grafeo-engine   | 75%    |
-| Overall         | 75%    |
+| grafeo-common   | 85%    |
+| grafeo-core     | 80%    |
+| grafeo-adapters | 85%    |
+| grafeo-engine   | 80%    |
+| Overall         | 80%    |
 
 ### Python Tests
 

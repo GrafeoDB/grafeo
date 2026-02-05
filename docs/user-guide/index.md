@@ -29,6 +29,14 @@ Grafeo supports both **Labeled Property Graph (LPG)** and **RDF** data models, w
 
     [:octicons-arrow-right-24: GQL Guide](gql/index.md)
 
+-   :material-vector-line:{ .lg .middle } **Vector Search**
+
+    ---
+
+    Semantic similarity search with HNSW indexes and quantization.
+
+    [:octicons-arrow-right-24: Vector Search](vector-search/index.md)
+
 -   :material-graph-outline:{ .lg .middle } **Cypher Query Language**
 
     ---

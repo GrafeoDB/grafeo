@@ -35,7 +35,13 @@ pub struct DeltaEncoding {
 impl DeltaEncoding {
     /// Encodes a slice of u64 values using delta encoding.
     ///
-    /// For best compression, values should be sorted in ascending order.
+    /// # Requirements
+    ///
+    /// Values **must** be sorted in ascending order. Unsorted input will produce
+    /// incorrect results due to `saturating_sub` mapping negative deltas to zero.
+    /// A debug assertion checks this in debug builds.
+    ///
+    /// For signed or unsorted data, use [`encode_signed`](Self::encode_signed) instead.
     #[must_use]
     pub fn encode(values: &[u64]) -> Self {
         if values.is_empty() {
@@ -45,6 +51,12 @@ impl DeltaEncoding {
                 count: 0,
             };
         }
+
+        // Values must be sorted for unsigned delta encoding to work correctly
+        debug_assert!(
+            values.windows(2).all(|w| w[0] <= w[1]),
+            "DeltaEncoding::encode requires sorted input; use encode_signed for unsorted data"
+        );
 
         let base = values[0];
         let deltas: Vec<u64> = values

@@ -615,6 +615,178 @@ impl Source for PartitionedTripleScanSource {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Parallel Node Scan Source (LPG)
+// ---------------------------------------------------------------------------
+
+use crate::graph::lpg::LpgStore;
+use grafeo_common::types::NodeId;
+
+/// Parallel source for scanning nodes from the LPG store.
+///
+/// Enables morsel-driven parallel execution of node scans by label.
+/// Each partition independently scans a range of node IDs, enabling
+/// linear scaling on multi-core systems for large datasets.
+///
+/// # Example
+///
+/// ```ignore
+/// use grafeo_core::execution::parallel::{ParallelNodeScanSource, ParallelPipeline};
+/// use std::sync::Arc;
+///
+/// let store = Arc::new(LpgStore::new());
+/// // ... populate store ...
+///
+/// // Scan all Person nodes in parallel
+/// let source = ParallelNodeScanSource::with_label(store, "Person");
+/// let morsels = source.generate_morsels(4096, 0);
+/// ```
+pub struct ParallelNodeScanSource {
+    /// The store to scan from.
+    store: Arc<LpgStore>,
+    /// Cached node IDs for the scan.
+    node_ids: Arc<Vec<NodeId>>,
+    /// Current read position.
+    position: usize,
+}
+
+impl ParallelNodeScanSource {
+    /// Creates a parallel source for all nodes in the store.
+    #[must_use]
+    pub fn new(store: Arc<LpgStore>) -> Self {
+        let node_ids = Arc::new(store.node_ids());
+        Self {
+            store,
+            node_ids,
+            position: 0,
+        }
+    }
+
+    /// Creates a parallel source for nodes with a specific label.
+    #[must_use]
+    pub fn with_label(store: Arc<LpgStore>, label: &str) -> Self {
+        let node_ids = Arc::new(store.nodes_by_label(label));
+        Self {
+            store,
+            node_ids,
+            position: 0,
+        }
+    }
+
+    /// Creates from pre-computed node IDs.
+    ///
+    /// Useful when node IDs are already available from a previous operation.
+    #[must_use]
+    pub fn from_node_ids(store: Arc<LpgStore>, node_ids: Vec<NodeId>) -> Self {
+        Self {
+            store,
+            node_ids: Arc::new(node_ids),
+            position: 0,
+        }
+    }
+
+    /// Returns the underlying store reference.
+    #[must_use]
+    pub fn store(&self) -> &Arc<LpgStore> {
+        &self.store
+    }
+}
+
+impl Source for ParallelNodeScanSource {
+    fn next_chunk(&mut self, chunk_size: usize) -> Result<Option<DataChunk>, OperatorError> {
+        if self.position >= self.node_ids.len() {
+            return Ok(None);
+        }
+
+        let end = (self.position + chunk_size).min(self.node_ids.len());
+        let slice = &self.node_ids[self.position..end];
+
+        // Create a NodeId vector
+        let mut vector = ValueVector::with_type(grafeo_common::types::LogicalType::Node);
+        for &id in slice {
+            vector.push_node_id(id);
+        }
+
+        self.position = end;
+        Ok(Some(DataChunk::new(vec![vector])))
+    }
+
+    fn reset(&mut self) {
+        self.position = 0;
+    }
+
+    fn name(&self) -> &'static str {
+        "ParallelNodeScanSource"
+    }
+}
+
+impl ParallelSource for ParallelNodeScanSource {
+    fn total_rows(&self) -> Option<usize> {
+        Some(self.node_ids.len())
+    }
+
+    fn create_partition(&self, morsel: &Morsel) -> Box<dyn Source> {
+        Box::new(PartitionedNodeScanSource::new(
+            Arc::clone(&self.node_ids),
+            morsel.start_row,
+            morsel.end_row,
+        ))
+    }
+
+    fn num_columns(&self) -> usize {
+        1 // Node ID column
+    }
+}
+
+/// A partitioned view into a node scan source.
+struct PartitionedNodeScanSource {
+    node_ids: Arc<Vec<NodeId>>,
+    start_row: usize,
+    end_row: usize,
+    position: usize,
+}
+
+impl PartitionedNodeScanSource {
+    fn new(node_ids: Arc<Vec<NodeId>>, start_row: usize, end_row: usize) -> Self {
+        Self {
+            node_ids,
+            start_row,
+            end_row,
+            position: start_row,
+        }
+    }
+}
+
+impl Source for PartitionedNodeScanSource {
+    fn next_chunk(&mut self, chunk_size: usize) -> Result<Option<DataChunk>, OperatorError> {
+        if self.position >= self.end_row || self.position >= self.node_ids.len() {
+            return Ok(None);
+        }
+
+        let end = (self.position + chunk_size)
+            .min(self.end_row)
+            .min(self.node_ids.len());
+        let slice = &self.node_ids[self.position..end];
+
+        // Create a NodeId vector
+        let mut vector = ValueVector::with_type(grafeo_common::types::LogicalType::Node);
+        for &id in slice {
+            vector.push_node_id(id);
+        }
+
+        self.position = end;
+        Ok(Some(DataChunk::new(vec![vector])))
+    }
+
+    fn reset(&mut self) {
+        self.position = self.start_row;
+    }
+
+    fn name(&self) -> &'static str {
+        "PartitionedNodeScanSource"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -794,5 +966,78 @@ mod tests {
             total += chunk.len();
         }
         assert_eq!(total, 30);
+    }
+
+    #[test]
+    fn test_parallel_node_scan_source() {
+        let store = Arc::new(LpgStore::new());
+
+        // Add some nodes with labels
+        for i in 0..100 {
+            if i % 2 == 0 {
+                store.create_node(&["Person", "Employee"]);
+            } else {
+                store.create_node(&["Person"]);
+            }
+        }
+
+        // Test scan all nodes
+        let source = ParallelNodeScanSource::new(Arc::clone(&store));
+        assert_eq!(source.total_rows(), Some(100));
+        assert!(source.is_partitionable());
+        assert_eq!(source.num_columns(), 1);
+
+        // Test scan by label
+        let source_person = ParallelNodeScanSource::with_label(Arc::clone(&store), "Person");
+        assert_eq!(source_person.total_rows(), Some(100));
+
+        let source_employee = ParallelNodeScanSource::with_label(Arc::clone(&store), "Employee");
+        assert_eq!(source_employee.total_rows(), Some(50));
+    }
+
+    #[test]
+    fn test_parallel_node_scan_partition() {
+        let store = Arc::new(LpgStore::new());
+
+        // Add 100 nodes
+        for _ in 0..100 {
+            store.create_node(&[]);
+        }
+
+        let source = ParallelNodeScanSource::new(Arc::clone(&store));
+
+        // Create partition for rows 20-50
+        let morsel = Morsel::new(0, 0, 20, 50);
+        let mut partition = source.create_partition(&morsel);
+
+        // Should produce 30 rows total
+        let mut total = 0;
+        while let Ok(Some(chunk)) = partition.next_chunk(10) {
+            total += chunk.len();
+        }
+        assert_eq!(total, 30);
+    }
+
+    #[test]
+    fn test_parallel_node_scan_morsels() {
+        let store = Arc::new(LpgStore::new());
+
+        // Add 1000 nodes
+        for _ in 0..1000 {
+            store.create_node(&[]);
+        }
+
+        let source = ParallelNodeScanSource::new(Arc::clone(&store));
+
+        // Generate morsels with size 256
+        let morsels = source.generate_morsels(256, 0);
+        assert_eq!(morsels.len(), 4); // 1000 / 256 = 3 full + 1 partial
+
+        // Verify morsels cover all rows
+        let mut total_rows = 0;
+        for morsel in &morsels {
+            total_rows += morsel.end_row - morsel.start_row;
+        }
+        assert_eq!(total_rows, 1000);
     }
 }

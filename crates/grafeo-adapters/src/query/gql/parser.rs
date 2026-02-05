@@ -108,7 +108,11 @@ impl<'a> Parser<'a> {
                 | TokenKind::Not     // NOT operator
                 | TokenKind::Null    // NULL literal
                 | TokenKind::True    // TRUE literal
-                | TokenKind::False // FALSE literal
+                | TokenKind::False   // FALSE literal
+                | TokenKind::Vector  // vector() function
+                | TokenKind::Index   // index-related usage
+                | TokenKind::Dimension // dimension option
+                | TokenKind::Metric // metric option
         )
     }
 
@@ -1637,7 +1641,87 @@ impl<'a> Parser<'a> {
                     span: None,
                 }))
             }
-            _ => Err(self.error("Expected NODE or EDGE")),
+            TokenKind::Vector => {
+                self.advance();
+                self.expect(TokenKind::Index)?;
+
+                // Parse index name
+                if !self.is_identifier() {
+                    return Err(self.error("Expected index name"));
+                }
+                let name = self.get_identifier_name();
+                self.advance();
+
+                // Expect ON
+                self.expect(TokenKind::On)?;
+
+                // Parse :Label(property)
+                self.expect(TokenKind::Colon)?;
+
+                if !self.is_identifier() && !self.is_label_or_type_name() {
+                    return Err(self.error("Expected node label"));
+                }
+                let node_label = self.get_identifier_name();
+                self.advance();
+
+                self.expect(TokenKind::LParen)?;
+
+                if !self.is_identifier() {
+                    return Err(self.error("Expected property name"));
+                }
+                let property = self.get_identifier_name();
+                self.advance();
+
+                self.expect(TokenKind::RParen)?;
+
+                // Parse optional DIMENSION
+                let dimensions = if self.current.kind == TokenKind::Dimension {
+                    self.advance();
+                    if self.current.kind != TokenKind::Integer {
+                        return Err(self.error("Expected integer dimension"));
+                    }
+                    let dim: usize = self
+                        .current
+                        .text
+                        .parse()
+                        .map_err(|_| self.error("Invalid dimension value"))?;
+                    self.advance();
+                    Some(dim)
+                } else {
+                    None
+                };
+
+                // Parse optional METRIC
+                let metric = if self.current.kind == TokenKind::Metric {
+                    self.advance();
+                    if self.current.kind != TokenKind::String {
+                        return Err(self.error("Expected metric name as string"));
+                    }
+                    // Remove quotes from string literal
+                    let metric_str = self
+                        .current
+                        .text
+                        .trim_matches('\'')
+                        .trim_matches('"')
+                        .to_string();
+                    self.advance();
+                    Some(metric_str)
+                } else {
+                    None
+                };
+
+                Ok(SchemaStatement::CreateVectorIndex(
+                    CreateVectorIndexStatement {
+                        name,
+                        node_label,
+                        property,
+                        dimensions,
+                        metric,
+                        span: None,
+                    },
+                ))
+            }
+            _ => Err(self.error("Expected NODE, EDGE, or VECTOR")),
         }
     }
 
@@ -2118,6 +2202,115 @@ mod tests {
             assert_eq!(remove.property_removals.len(), 1);
         } else {
             panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_vector_function_call() {
+        let mut parser = Parser::new("MATCH (n) RETURN vector([0.1, 0.2, 0.3])");
+        let result = parser.parse();
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+
+        if let Statement::Query(query) = result.unwrap() {
+            assert_eq!(query.return_clause.items.len(), 1);
+            if let Expression::FunctionCall { name, args, .. } =
+                &query.return_clause.items[0].expression
+            {
+                assert_eq!(name, "vector");
+                assert_eq!(args.len(), 1);
+                // The argument should be a list
+                if let Expression::List(elements) = &args[0] {
+                    assert_eq!(elements.len(), 3);
+                } else {
+                    panic!("Expected list argument, got {:?}", args[0]);
+                }
+            } else {
+                panic!("Expected function call");
+            }
+        } else {
+            panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_cosine_similarity() {
+        let mut parser =
+            Parser::new("MATCH (n) WHERE cosine_similarity(n.embedding, $query) > 0.8 RETURN n");
+        let result = parser.parse();
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+
+        if let Statement::Query(query) = result.unwrap() {
+            let where_clause = query.where_clause.as_ref().expect("Expected WHERE clause");
+            if let Expression::Binary { left, .. } = &where_clause.expression {
+                if let Expression::FunctionCall { name, args, .. } = left.as_ref() {
+                    assert_eq!(name, "cosine_similarity");
+                    assert_eq!(args.len(), 2);
+                } else {
+                    panic!("Expected function call, got {:?}", left);
+                }
+            } else {
+                panic!("Expected binary expression");
+            }
+        } else {
+            panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_euclidean_distance() {
+        let mut parser =
+            Parser::new("MATCH (n) RETURN euclidean_distance(n.embedding, [1.0, 2.0]) AS dist");
+        let result = parser.parse();
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+
+        if let Statement::Query(query) = result.unwrap() {
+            assert_eq!(query.return_clause.items.len(), 1);
+            if let Expression::FunctionCall { name, args, .. } =
+                &query.return_clause.items[0].expression
+            {
+                assert_eq!(name, "euclidean_distance");
+                assert_eq!(args.len(), 2);
+            } else {
+                panic!("Expected function call");
+            }
+        } else {
+            panic!("Expected Query statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_vector_index() {
+        let mut parser = Parser::new("CREATE VECTOR INDEX movie_embeddings ON :Movie(embedding)");
+        let result = parser.parse();
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+
+        if let Statement::Schema(SchemaStatement::CreateVectorIndex(stmt)) = result.unwrap() {
+            assert_eq!(stmt.name, "movie_embeddings");
+            assert_eq!(stmt.node_label, "Movie");
+            assert_eq!(stmt.property, "embedding");
+            assert!(stmt.dimensions.is_none());
+            assert!(stmt.metric.is_none());
+        } else {
+            panic!("Expected CreateVectorIndex statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_vector_index_with_options() {
+        let mut parser = Parser::new(
+            "CREATE VECTOR INDEX embeddings ON :Document(vec) DIMENSION 384 METRIC 'cosine'",
+        );
+        let result = parser.parse();
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+
+        if let Statement::Schema(SchemaStatement::CreateVectorIndex(stmt)) = result.unwrap() {
+            assert_eq!(stmt.name, "embeddings");
+            assert_eq!(stmt.node_label, "Document");
+            assert_eq!(stmt.property, "vec");
+            assert_eq!(stmt.dimensions, Some(384));
+            assert_eq!(stmt.metric, Some("cosine".to_string()));
+        } else {
+            panic!("Expected CreateVectorIndex statement");
         }
     }
 }

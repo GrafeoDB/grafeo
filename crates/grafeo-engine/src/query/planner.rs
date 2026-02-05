@@ -403,6 +403,12 @@ impl Planner {
             LogicalOperator::SetProperty(set_prop) => self.plan_set_property(set_prop),
             LogicalOperator::ShortestPath(sp) => self.plan_shortest_path(sp),
             LogicalOperator::Empty => Err(Error::Internal("Empty plan".to_string())),
+            LogicalOperator::VectorScan(_) => Err(Error::Internal(
+                "VectorScan requires vector-index feature".to_string(),
+            )),
+            LogicalOperator::VectorJoin(_) => Err(Error::Internal(
+                "VectorJoin requires vector-index feature".to_string(),
+            )),
             _ => Err(Error::Internal(format!(
                 "Unsupported operator: {:?}",
                 std::mem::discriminant(op)
@@ -2462,19 +2468,22 @@ impl Planner {
 
         let output_schema = self.derive_schema_from_columns(&columns);
 
-        let operator = Box::new(
-            CreateEdgeOperator::new(
-                Arc::clone(&self.store),
-                input_op,
-                from_column,
-                to_column,
-                create.edge_type.clone(),
-                properties,
-                output_schema,
-                output_column,
-            )
-            .with_tx_context(self.viewing_epoch, self.tx_id),
-        );
+        let mut operator = CreateEdgeOperator::new(
+            Arc::clone(&self.store),
+            input_op,
+            from_column,
+            to_column,
+            create.edge_type.clone(),
+            output_schema,
+        )
+        .with_properties(properties)
+        .with_tx_context(self.viewing_epoch, self.tx_id);
+
+        if let Some(col) = output_column {
+            operator = operator.with_output_column(col);
+        }
+
+        let operator = Box::new(operator);
 
         Ok((operator, columns))
     }
@@ -3145,6 +3154,7 @@ fn value_to_logical_type(value: &grafeo_common::types::Value) -> LogicalType {
         Value::Timestamp(_) => LogicalType::Timestamp,
         Value::List(_) => LogicalType::String, // Lists not yet supported as logical type
         Value::Map(_) => LogicalType::String,  // Maps not yet supported as logical type
+        Value::Vector(v) => LogicalType::Vector(v.len()),
     }
 }
 

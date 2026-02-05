@@ -1411,6 +1411,10 @@ pub struct QueryResult {
     pub column_types: Vec<grafeo_common::types::LogicalType>,
     /// The actual result rows.
     pub rows: Vec<Vec<grafeo_common::types::Value>>,
+    /// Query execution time in milliseconds (if timing was enabled).
+    pub execution_time_ms: Option<f64>,
+    /// Number of rows scanned during query execution (estimate).
+    pub rows_scanned: Option<u64>,
 }
 
 impl QueryResult {
@@ -1422,6 +1426,8 @@ impl QueryResult {
             columns,
             column_types: vec![grafeo_common::types::LogicalType::Any; len],
             rows: Vec::new(),
+            execution_time_ms: None,
+            rows_scanned: None,
         }
     }
 
@@ -1435,7 +1441,28 @@ impl QueryResult {
             columns,
             column_types,
             rows: Vec::new(),
+            execution_time_ms: None,
+            rows_scanned: None,
         }
+    }
+
+    /// Sets the execution metrics on this result.
+    pub fn with_metrics(mut self, execution_time_ms: f64, rows_scanned: u64) -> Self {
+        self.execution_time_ms = Some(execution_time_ms);
+        self.rows_scanned = Some(rows_scanned);
+        self
+    }
+
+    /// Returns the execution time in milliseconds, if available.
+    #[must_use]
+    pub fn execution_time_ms(&self) -> Option<f64> {
+        self.execution_time_ms
+    }
+
+    /// Returns the number of rows scanned, if available.
+    #[must_use]
+    pub fn rows_scanned(&self) -> Option<u64> {
+        self.rows_scanned
     }
 
     /// Returns the number of rows.

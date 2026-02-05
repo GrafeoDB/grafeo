@@ -13,11 +13,34 @@ use crate::query::plan::{
 };
 use grafeo_common::types::LogicalType;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
+use grafeo_common::utils::strings::{find_similar, format_suggestion};
 use std::collections::HashMap;
 
 /// Creates a semantic binding error.
 fn binding_error(message: impl Into<String>) -> Error {
     Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
+}
+
+/// Creates a semantic binding error with a hint.
+fn binding_error_with_hint(message: impl Into<String>, hint: impl Into<String>) -> Error {
+    Error::Query(
+        QueryError::new(QueryErrorKind::Semantic, message).with_hint(hint),
+    )
+}
+
+/// Creates an "undefined variable" error with a suggestion if a similar variable exists.
+fn undefined_variable_error(variable: &str, context: &BindingContext, suffix: &str) -> Error {
+    let candidates: Vec<String> = context.variable_names().to_vec();
+    let candidates_ref: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+
+    if let Some(suggestion) = find_similar(variable, &candidates_ref) {
+        binding_error_with_hint(
+            format!("Undefined variable '{variable}'{suffix}"),
+            format_suggestion(suggestion),
+        )
+    } else {
+        binding_error(format!("Undefined variable '{variable}'{suffix}"))
+    }
 }
 
 /// Information about a bound variable.
@@ -201,16 +224,18 @@ impl Binder {
                 self.bind_operator(&create.input)?;
                 // Validate that source and target variables are defined
                 if !self.context.contains(&create.from_variable) {
-                    return Err(binding_error(format!(
-                        "Undefined source variable '{}' in CREATE EDGE",
-                        create.from_variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &create.from_variable,
+                        &self.context,
+                        " (source in CREATE EDGE)",
+                    ));
                 }
                 if !self.context.contains(&create.to_variable) {
-                    return Err(binding_error(format!(
-                        "Undefined target variable '{}' in CREATE EDGE",
-                        create.to_variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &create.to_variable,
+                        &self.context,
+                        " (target in CREATE EDGE)",
+                    ));
                 }
                 // Add edge variable if present
                 if let Some(ref var) = create.variable {
@@ -234,10 +259,11 @@ impl Binder {
                 self.bind_operator(&delete.input)?;
                 // Validate that the variable to delete is defined
                 if !self.context.contains(&delete.variable) {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{}' in DELETE",
-                        delete.variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &delete.variable,
+                        &self.context,
+                        " in DELETE",
+                    ));
                 }
                 Ok(())
             }
@@ -245,10 +271,11 @@ impl Binder {
                 self.bind_operator(&delete.input)?;
                 // Validate that the variable to delete is defined
                 if !self.context.contains(&delete.variable) {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{}' in DELETE",
-                        delete.variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &delete.variable,
+                        &self.context,
+                        " in DELETE",
+                    ));
                 }
                 Ok(())
             }
@@ -256,10 +283,11 @@ impl Binder {
                 self.bind_operator(&set.input)?;
                 // Validate that the variable to update is defined
                 if !self.context.contains(&set.variable) {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{}' in SET",
-                        set.variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &set.variable,
+                        &self.context,
+                        " in SET",
+                    ));
                 }
                 // Validate property value expressions
                 for (_, expr) in &set.properties {
@@ -353,10 +381,11 @@ impl Binder {
                 self.bind_operator(&add_label.input)?;
                 // Validate that the variable exists
                 if !self.context.contains(&add_label.variable) {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{}' in SET labels",
-                        add_label.variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &add_label.variable,
+                        &self.context,
+                        " in SET labels",
+                    ));
                 }
                 Ok(())
             }
@@ -364,10 +393,11 @@ impl Binder {
                 self.bind_operator(&remove_label.input)?;
                 // Validate that the variable exists
                 if !self.context.contains(&remove_label.variable) {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{}' in REMOVE labels",
-                        remove_label.variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &remove_label.variable,
+                        &self.context,
+                        " in REMOVE labels",
+                    ));
                 }
                 Ok(())
             }
@@ -376,16 +406,18 @@ impl Binder {
                 self.bind_operator(&sp.input)?;
                 // Validate that source and target variables are defined
                 if !self.context.contains(&sp.source_var) {
-                    return Err(binding_error(format!(
-                        "Undefined source variable '{}' in shortestPath",
-                        sp.source_var
-                    )));
+                    return Err(undefined_variable_error(
+                        &sp.source_var,
+                        &self.context,
+                        " (source in shortestPath)",
+                    ));
                 }
                 if !self.context.contains(&sp.target_var) {
-                    return Err(binding_error(format!(
-                        "Undefined target variable '{}' in shortestPath",
-                        sp.target_var
-                    )));
+                    return Err(undefined_variable_error(
+                        &sp.target_var,
+                        &self.context,
+                        " (target in shortestPath)",
+                    ));
                 }
                 // Add the path alias variable to the context
                 self.context.add_variable(
@@ -581,10 +613,11 @@ impl Binder {
 
         // Validate that the source variable is defined
         if !self.context.contains(&expand.from_variable) {
-            return Err(binding_error(format!(
-                "Undefined variable '{}' in EXPAND",
-                expand.from_variable
-            )));
+            return Err(undefined_variable_error(
+                &expand.from_variable,
+                &self.context,
+                " in EXPAND",
+            ));
         }
 
         // Validate that the source is a node
@@ -672,15 +705,17 @@ impl Binder {
         match expr {
             LogicalExpression::Variable(name) => {
                 if !self.context.contains(name) && !name.starts_with("_anon_") {
-                    return Err(binding_error(format!("Undefined variable '{name}'")));
+                    return Err(undefined_variable_error(name, &self.context, ""));
                 }
                 Ok(())
             }
             LogicalExpression::Property { variable, .. } => {
                 if !self.context.contains(variable) && !variable.starts_with("_anon_") {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{variable}' in property access"
-                    )));
+                    return Err(undefined_variable_error(
+                        variable,
+                        &self.context,
+                        " in property access",
+                    ));
                 }
                 Ok(())
             }
@@ -746,9 +781,7 @@ impl Binder {
             | LogicalExpression::Type(var)
             | LogicalExpression::Id(var) => {
                 if !self.context.contains(var) && !var.starts_with("_anon_") {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{var}' in function"
-                    )));
+                    return Err(undefined_variable_error(var, &self.context, " in function"));
                 }
                 Ok(())
             }

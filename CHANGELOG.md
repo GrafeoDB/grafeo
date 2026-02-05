@@ -2,9 +2,33 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.3.4] - Unreleased
+## [0.3.4] - 2026-02-05
 
-_Quality & Stability (reserved for areas of concern)_
+_Quality of Life Improvements_
+
+### Added
+
+- **Query Performance Metrics**: Query results now include execution timing and row counts
+  - `QueryResult.execution_time_ms` - execution time in milliseconds
+  - `QueryResult.rows_scanned` - number of rows scanned during execution
+  - Python: `result.execution_time_ms` and `result.rows_scanned` properties
+
+- **Error Message Suggestions**: Fuzzy matching for helpful "Did you mean X?" hints
+  - Levenshtein distance-based matching for undefined variables and labels
+  - Case-insensitive comparison with configurable edit distance thresholds
+  - `find_similar()`, `format_suggestion()`, `format_suggestions()` utilities
+
+- **Python Pagination**: `get_nodes_by_label()` now supports `offset` parameter
+  - Enables efficient pagination: `db.get_nodes_by_label("Person", limit=10, offset=20)`
+
+### Documentation
+
+- **Troubleshooting Guide**: Common errors, debugging tips, and solutions
+- **Glossary**: Terminology reference for graph database concepts
+- **Migration Guide**: Moving from Neo4j, NetworkX, and other databases
+- **Security Guide**: Authentication patterns and secure deployment
+- **Performance Baselines**: Benchmark results and optimization guidance
+- **Example Notebooks**: Interactive anywidget visualizations for graphs and vectors
 
 ## [0.3.3] - Unreleased
 

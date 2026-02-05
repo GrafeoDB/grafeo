@@ -14,6 +14,9 @@ use crate::types::PyValue;
 /// Iterate with `for row in result:` where each row is a dict. Or use
 /// `result.nodes()` and `result.edges()` to get graph elements. For single
 /// values, `result.scalar()` grabs the first column of the first row.
+///
+/// Query performance metrics are available via `execution_time_ms` and
+/// `rows_scanned` properties when timing is enabled.
 #[pyclass(name = "QueryResult")]
 pub struct PyQueryResult {
     pub(crate) columns: Vec<String>,
@@ -21,6 +24,10 @@ pub struct PyQueryResult {
     pub(crate) nodes: Vec<PyNode>,
     pub(crate) edges: Vec<PyEdge>,
     current_row: usize,
+    /// Query execution time in milliseconds.
+    pub(crate) execution_time_ms: Option<f64>,
+    /// Number of rows scanned during execution.
+    pub(crate) rows_scanned: Option<u64>,
 }
 
 #[pymethods]
@@ -124,11 +131,42 @@ impl PyQueryResult {
         Ok(PyValue::to_py(&self.rows[0][0], py))
     }
 
+    /// Query execution time in milliseconds (if available).
+    ///
+    /// Example:
+    /// ```python
+    /// result = db.execute("MATCH (n:Person) RETURN n")
+    /// if result.execution_time_ms:
+    ///     print(f"Query took {result.execution_time_ms:.2f}ms")
+    /// ```
+    #[getter]
+    fn execution_time_ms(&self) -> Option<f64> {
+        self.execution_time_ms
+    }
+
+    /// Number of rows scanned during query execution (if available).
+    ///
+    /// Example:
+    /// ```python
+    /// result = db.execute("MATCH (n:Person) RETURN n")
+    /// if result.rows_scanned:
+    ///     print(f"Scanned {result.rows_scanned} rows")
+    /// ```
+    #[getter]
+    fn rows_scanned(&self) -> Option<u64> {
+        self.rows_scanned
+    }
+
     fn __repr__(&self) -> String {
+        let time_str = self
+            .execution_time_ms
+            .map(|t| format!(", time={:.2}ms", t))
+            .unwrap_or_default();
         format!(
-            "QueryResult(columns={:?}, rows={})",
+            "QueryResult(columns={:?}, rows={}{})",
             self.columns,
-            self.rows.len()
+            self.rows.len(),
+            time_str
         )
     }
 }
@@ -147,6 +185,28 @@ impl PyQueryResult {
             nodes,
             edges,
             current_row: 0,
+            execution_time_ms: None,
+            rows_scanned: None,
+        }
+    }
+
+    /// Creates a new query result with execution metrics (used internally).
+    pub fn with_metrics(
+        columns: Vec<String>,
+        rows: Vec<Vec<Value>>,
+        nodes: Vec<PyNode>,
+        edges: Vec<PyEdge>,
+        execution_time_ms: Option<f64>,
+        rows_scanned: Option<u64>,
+    ) -> Self {
+        Self {
+            columns,
+            rows,
+            nodes,
+            edges,
+            current_row: 0,
+            execution_time_ms,
+            rows_scanned,
         }
     }
 
@@ -158,6 +218,8 @@ impl PyQueryResult {
             nodes: Vec::new(),
             edges: Vec::new(),
             current_row: 0,
+            execution_time_ms: None,
+            rows_scanned: None,
         }
     }
 }

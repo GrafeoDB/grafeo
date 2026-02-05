@@ -215,6 +215,8 @@ impl QueryProcessor {
         language: QueryLanguage,
         params: Option<&QueryParams>,
     ) -> Result<QueryResult> {
+        let start_time = std::time::Instant::now();
+
         // 1. Parse and translate to logical plan
         let mut logical_plan = self.translate_lpg(query, language)?;
 
@@ -250,7 +252,15 @@ impl QueryProcessor {
 
         // 6. Execute and collect results
         let executor = Executor::with_columns(physical_plan.columns.clone());
-        executor.execute(physical_plan.operator.as_mut())
+        let mut result = executor.execute(physical_plan.operator.as_mut())?;
+
+        // Add execution metrics
+        let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+        let rows_scanned = result.rows.len() as u64; // Approximate: rows returned
+        result.execution_time_ms = Some(elapsed_ms);
+        result.rows_scanned = Some(rows_scanned);
+
+        Ok(result)
     }
 
     /// Translates an LPG query to a logical plan.

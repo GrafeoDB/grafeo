@@ -2,7 +2,7 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.3.4] - 2026-02-05
+## [0.3.4] - 2026-02-06
 
 _Quality of Life Improvements_
 
@@ -113,7 +113,7 @@ _Batch Read Optimizations & Code Quality_
   - HashMap capacity hints based on column count (NebulaGraph MultiGet pattern)
   - Reduces allocation overhead for bulk property retrieval
 
-## [0.3.1] - 2026-02-05
+## [0.3.1] - Unreleased
 
 _Vector Optimization & Cache Improvements_
 

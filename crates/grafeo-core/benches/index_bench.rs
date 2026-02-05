@@ -8,8 +8,8 @@ use grafeo_common::types::{EdgeId, NodeId};
 use grafeo_core::index::adjacency::ChunkedAdjacency;
 use grafeo_core::index::hash::HashIndex;
 use grafeo_core::index::vector::{
-    DistanceMetric, HnswConfig, HnswIndex, ProductQuantizer, ScalarQuantizer,
-    brute_force_knn, compute_distance,
+    DistanceMetric, HnswConfig, HnswIndex, ProductQuantizer, ScalarQuantizer, brute_force_knn,
+    compute_distance,
 };
 
 fn bench_adjacency_insert(c: &mut Criterion) {
@@ -123,20 +123,16 @@ fn bench_brute_force_knn(c: &mut Criterion) {
             .map(|(i, v)| (NodeId::new(i as u64), v.as_slice()))
             .collect();
 
-        group.bench_with_input(
-            BenchmarkId::new("k10", count),
-            &indexed,
-            |b, indexed| {
-                b.iter(|| {
-                    black_box(brute_force_knn(
-                        indexed.iter().map(|(id, v)| (*id, *v)),
-                        &query,
-                        10,
-                        DistanceMetric::Cosine,
-                    ))
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("k10", count), &indexed, |b, indexed| {
+            b.iter(|| {
+                black_box(brute_force_knn(
+                    indexed.iter().map(|(id, v)| (*id, *v)),
+                    &query,
+                    10,
+                    DistanceMetric::Cosine,
+                ))
+            });
+        });
     }
 
     group.finish();
@@ -150,16 +146,20 @@ fn bench_hnsw_insert(c: &mut Criterion) {
     for &count in &[100, 500, 1000] {
         let vectors = generate_random_vectors(count, dims, 42);
 
-        group.bench_with_input(BenchmarkId::new("vectors", count), &vectors, |b, vectors| {
-            b.iter(|| {
-                let config = HnswConfig::new(dims, DistanceMetric::Cosine);
-                let index = HnswIndex::with_seed(config, 12345);
-                for (i, vec) in vectors.iter().enumerate() {
-                    index.insert(NodeId::new(i as u64), vec);
-                }
-                black_box(index)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("vectors", count),
+            &vectors,
+            |b, vectors| {
+                b.iter(|| {
+                    let config = HnswConfig::new(dims, DistanceMetric::Cosine);
+                    let index = HnswIndex::with_seed(config, 12345);
+                    for (i, vec) in vectors.iter().enumerate() {
+                        index.insert(NodeId::new(i as u64), vec);
+                    }
+                    black_box(index)
+                });
+            },
+        );
     }
 
     group.finish();

@@ -19,7 +19,7 @@
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::graph::lpg::LpgStore;
-use crate::index::vector::{brute_force_knn, DistanceMetric};
+use crate::index::vector::{DistanceMetric, brute_force_knn};
 use grafeo_common::types::{LogicalType, NodeId, PropertyKey, Value};
 use std::sync::Arc;
 
@@ -242,8 +242,9 @@ impl VectorJoinOperator {
         ) {
             if let Some(col) = chunk.column(col_idx) {
                 if let Some(node_id) = col.get_node_id(self.current_left_row) {
-                    if let Some(Value::Vector(vec)) =
-                        self.store.get_node_property(node_id, &PropertyKey::new(prop))
+                    if let Some(Value::Vector(vec)) = self
+                        .store
+                        .get_node_property(node_id, &PropertyKey::new(prop))
                     {
                         return Some(vec.to_vec());
                     }
@@ -326,7 +327,13 @@ impl VectorJoinOperator {
     fn advance_left(&mut self) -> Result<bool, OperatorError> {
         loop {
             // Need a new left chunk?
-            if self.current_left_chunk.is_none() || self.current_left_row >= self.current_left_chunk.as_ref().map_or(0, DataChunk::row_count) {
+            if self.current_left_chunk.is_none()
+                || self.current_left_row
+                    >= self
+                        .current_left_chunk
+                        .as_ref()
+                        .map_or(0, DataChunk::row_count)
+            {
                 match self.left.next()? {
                     Some(chunk) => {
                         self.current_left_chunk = Some(chunk);
@@ -372,9 +379,10 @@ impl Operator for VectorJoinOperator {
         }
 
         // Get left chunk schema for output (now guaranteed to have a chunk)
-        let left_chunk = self.current_left_chunk.as_ref().ok_or_else(|| {
-            OperatorError::Execution("No left chunk available".into())
-        })?;
+        let left_chunk = self
+            .current_left_chunk
+            .as_ref()
+            .ok_or_else(|| OperatorError::Execution("No left chunk available".into()))?;
 
         let left_schema: Vec<LogicalType> = (0..left_chunk.column_count())
             .filter_map(|i| left_chunk.column(i).map(|col| col.data_type().clone()))
@@ -398,9 +406,10 @@ impl Operator for VectorJoinOperator {
             }
 
             // Get current left row values
-            let left_chunk = self.current_left_chunk.as_ref().ok_or_else(|| {
-                OperatorError::Execution("No left chunk available".into())
-            })?;
+            let left_chunk = self
+                .current_left_chunk
+                .as_ref()
+                .ok_or_else(|| OperatorError::Execution("No left chunk available".into()))?;
 
             // Copy left columns
             for (col_idx, _) in left_schema.iter().enumerate() {

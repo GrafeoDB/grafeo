@@ -518,11 +518,7 @@ mod tests {
         // Create many nodes
         for i in 0..10 {
             let node = store.create_node(&["Doc"]);
-            store.set_node_property(
-                node,
-                "vec",
-                Value::Vector(vec![i as f32, 0.0].into()),
-            );
+            store.set_node_property(node, "vec", Value::Vector(vec![i as f32, 0.0].into()));
         }
 
         let mut scan = VectorScanOperator::brute_force(
@@ -604,12 +600,8 @@ mod tests {
 
         // Search using index
         let query = vec![0.1f32, 0.2, 0.35];
-        let mut scan = VectorScanOperator::with_index(
-            Arc::clone(&store),
-            Arc::clone(&index),
-            query,
-            2,
-        );
+        let mut scan =
+            VectorScanOperator::with_index(Arc::clone(&store), Arc::clone(&index), query, 2);
 
         assert_eq!(scan.name(), "VectorScan(HNSW)");
 

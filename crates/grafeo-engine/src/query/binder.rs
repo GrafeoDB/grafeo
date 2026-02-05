@@ -23,9 +23,7 @@ fn binding_error(message: impl Into<String>) -> Error {
 
 /// Creates a semantic binding error with a hint.
 fn binding_error_with_hint(message: impl Into<String>, hint: impl Into<String>) -> Error {
-    Error::Query(
-        QueryError::new(QueryErrorKind::Semantic, message).with_hint(hint),
-    )
+    Error::Query(QueryError::new(QueryErrorKind::Semantic, message).with_hint(hint))
 }
 
 /// Creates an "undefined variable" error with a suggestion if a similar variable exists.
@@ -1204,7 +1202,12 @@ mod tests {
         let result = binder.bind(&plan);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Undefined variable 'm'"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Undefined variable 'm'")
+        );
     }
 
     #[test]

@@ -376,14 +376,8 @@ mod tests {
         let a = store.create_node(&["Node"]);
 
         let input = Box::new(MockPairOperator::new(vec![(a, a)]));
-        let mut op = ShortestPathOperator::new(
-            Arc::clone(&store),
-            input,
-            0,
-            1,
-            None,
-            Direction::Outgoing,
-        );
+        let mut op =
+            ShortestPathOperator::new(Arc::clone(&store), input, 0, 1, None, Direction::Outgoing);
 
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 1);
@@ -406,14 +400,8 @@ mod tests {
         store.create_edge(b, c, "KNOWS");
 
         let input = Box::new(MockPairOperator::new(vec![(a, c)]));
-        let mut op = ShortestPathOperator::new(
-            Arc::clone(&store),
-            input,
-            0,
-            1,
-            None,
-            Direction::Outgoing,
-        );
+        let mut op =
+            ShortestPathOperator::new(Arc::clone(&store), input, 0, 1, None, Direction::Outgoing);
 
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 1);
@@ -432,14 +420,8 @@ mod tests {
         let b = store.create_node(&["Node"]);
 
         let input = Box::new(MockPairOperator::new(vec![(a, b)]));
-        let mut op = ShortestPathOperator::new(
-            Arc::clone(&store),
-            input,
-            0,
-            1,
-            None,
-            Direction::Outgoing,
-        );
+        let mut op =
+            ShortestPathOperator::new(Arc::clone(&store), input, 0, 1, None, Direction::Outgoing);
 
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 1);
@@ -469,14 +451,8 @@ mod tests {
         store.create_edge(a, d, "KNOWS");
 
         let input = Box::new(MockPairOperator::new(vec![(a, d)]));
-        let mut op = ShortestPathOperator::new(
-            Arc::clone(&store),
-            input,
-            0,
-            1,
-            None,
-            Direction::Outgoing,
-        );
+        let mut op =
+            ShortestPathOperator::new(Arc::clone(&store), input, 0, 1, None, Direction::Outgoing);
 
         let chunk = op.next().unwrap().unwrap();
         let path_col = chunk.column(2).unwrap();
@@ -522,15 +498,9 @@ mod tests {
         store.create_edge(a, b, "KNOWS");
 
         let input = Box::new(MockPairOperator::new(vec![(a, b)]));
-        let mut op = ShortestPathOperator::new(
-            Arc::clone(&store),
-            input,
-            0,
-            1,
-            None,
-            Direction::Outgoing,
-        )
-        .with_all_paths(true);
+        let mut op =
+            ShortestPathOperator::new(Arc::clone(&store), input, 0, 1, None, Direction::Outgoing)
+                .with_all_paths(true);
 
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 1); // Only one path exists
@@ -552,15 +522,9 @@ mod tests {
         store.create_edge(c, d, "KNOWS");
 
         let input = Box::new(MockPairOperator::new(vec![(a, d)]));
-        let mut op = ShortestPathOperator::new(
-            Arc::clone(&store),
-            input,
-            0,
-            1,
-            None,
-            Direction::Outgoing,
-        )
-        .with_all_paths(true);
+        let mut op =
+            ShortestPathOperator::new(Arc::clone(&store), input, 0, 1, None, Direction::Outgoing)
+                .with_all_paths(true);
 
         let chunk = op.next().unwrap().unwrap();
         // Should return 2 rows (two paths of length 2)
@@ -587,14 +551,8 @@ mod tests {
 
         // Test multiple pairs at once
         let input = Box::new(MockPairOperator::new(vec![(a, b), (c, d), (a, d)]));
-        let mut op = ShortestPathOperator::new(
-            Arc::clone(&store),
-            input,
-            0,
-            1,
-            None,
-            Direction::Outgoing,
-        );
+        let mut op =
+            ShortestPathOperator::new(Arc::clone(&store), input, 0, 1, None, Direction::Outgoing);
 
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 3);
@@ -613,14 +571,8 @@ mod tests {
         store.create_edge(a, b, "KNOWS");
 
         let input = Box::new(MockPairOperator::new(vec![(a, b)]));
-        let mut op = ShortestPathOperator::new(
-            Arc::clone(&store),
-            input,
-            0,
-            1,
-            None,
-            Direction::Outgoing,
-        );
+        let mut op =
+            ShortestPathOperator::new(Arc::clone(&store), input, 0, 1, None, Direction::Outgoing);
 
         // First iteration
         let chunk = op.next().unwrap();
@@ -638,14 +590,8 @@ mod tests {
     fn test_operator_name() {
         let store = Arc::new(LpgStore::new());
         let input = Box::new(MockPairOperator::new(vec![]));
-        let op = ShortestPathOperator::new(
-            Arc::clone(&store),
-            input,
-            0,
-            1,
-            None,
-            Direction::Outgoing,
-        );
+        let op =
+            ShortestPathOperator::new(Arc::clone(&store), input, 0, 1, None, Direction::Outgoing);
 
         assert_eq!(op.name(), "ShortestPath");
     }
@@ -654,14 +600,8 @@ mod tests {
     fn test_empty_input() {
         let store = Arc::new(LpgStore::new());
         let input = Box::new(MockPairOperator::new(vec![]));
-        let mut op = ShortestPathOperator::new(
-            Arc::clone(&store),
-            input,
-            0,
-            1,
-            None,
-            Direction::Outgoing,
-        );
+        let mut op =
+            ShortestPathOperator::new(Arc::clone(&store), input, 0, 1, None, Direction::Outgoing);
 
         // Empty input should return None
         let chunk = op.next().unwrap();
@@ -677,15 +617,9 @@ mod tests {
         let b = store.create_node(&["Node"]);
 
         let input = Box::new(MockPairOperator::new(vec![(a, b)]));
-        let mut op = ShortestPathOperator::new(
-            Arc::clone(&store),
-            input,
-            0,
-            1,
-            None,
-            Direction::Outgoing,
-        )
-        .with_all_paths(true);
+        let mut op =
+            ShortestPathOperator::new(Arc::clone(&store), input, 0, 1, None, Direction::Outgoing)
+                .with_all_paths(true);
 
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 1); // Still returns one row with null
@@ -700,15 +634,9 @@ mod tests {
         let a = store.create_node(&["Node"]);
 
         let input = Box::new(MockPairOperator::new(vec![(a, a)]));
-        let mut op = ShortestPathOperator::new(
-            Arc::clone(&store),
-            input,
-            0,
-            1,
-            None,
-            Direction::Outgoing,
-        )
-        .with_all_paths(true);
+        let mut op =
+            ShortestPathOperator::new(Arc::clone(&store), input, 0, 1, None, Direction::Outgoing)
+                .with_all_paths(true);
 
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 1);

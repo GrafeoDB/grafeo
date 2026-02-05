@@ -467,8 +467,12 @@ mod tests {
     fn test_ram_storage_basic() {
         let storage = RamStorage::new(4);
 
-        storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
-        storage.insert(NodeId::new(2), &[5.0, 6.0, 7.0, 8.0]).unwrap();
+        storage
+            .insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0])
+            .unwrap();
+        storage
+            .insert(NodeId::new(2), &[5.0, 6.0, 7.0, 8.0])
+            .unwrap();
 
         assert_eq!(storage.len(), 2);
         assert!(storage.contains(NodeId::new(1)));
@@ -498,9 +502,7 @@ mod tests {
         assert_eq!(storage.memory_usage(), 0);
 
         for i in 0..10 {
-            storage
-                .insert(NodeId::new(i + 1), &vec![0.1; 384])
-                .unwrap();
+            storage.insert(NodeId::new(i + 1), &vec![0.1; 384]).unwrap();
         }
 
         // Should have significant memory usage
@@ -518,8 +520,12 @@ mod tests {
         // Create new storage
         {
             let storage = MmapStorage::create(&path, 4).unwrap();
-            storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
-            storage.insert(NodeId::new(2), &[5.0, 6.0, 7.0, 8.0]).unwrap();
+            storage
+                .insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0])
+                .unwrap();
+            storage
+                .insert(NodeId::new(2), &[5.0, 6.0, 7.0, 8.0])
+                .unwrap();
             storage.flush().unwrap();
 
             assert_eq!(storage.len(), 2);
@@ -548,19 +554,23 @@ mod tests {
         let path = temp_dir.join("test_mmap_cache.bin");
         let _ = std::fs::remove_file(&path);
 
-        let storage = MmapStorage::create(&path, 4)
-            .unwrap()
-            .with_cache_limit(2);
+        let storage = MmapStorage::create(&path, 4).unwrap().with_cache_limit(2);
 
-        storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
-        storage.insert(NodeId::new(2), &[5.0, 6.0, 7.0, 8.0]).unwrap();
+        storage
+            .insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0])
+            .unwrap();
+        storage
+            .insert(NodeId::new(2), &[5.0, 6.0, 7.0, 8.0])
+            .unwrap();
 
         // Both should be in cache
         assert!(storage.cache.read().contains_key(&NodeId::new(1)));
         assert!(storage.cache.read().contains_key(&NodeId::new(2)));
 
         // Insert more, triggering eviction
-        storage.insert(NodeId::new(3), &[9.0, 10.0, 11.0, 12.0]).unwrap();
+        storage
+            .insert(NodeId::new(3), &[9.0, 10.0, 11.0, 12.0])
+            .unwrap();
 
         // Cache should have been cleared partially
         assert!(storage.cache.read().len() <= 2);
@@ -621,7 +631,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let storage = MmapStorage::create(&path, 4).unwrap();
-        storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        storage
+            .insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0])
+            .unwrap();
 
         assert!(storage.cache.read().contains_key(&NodeId::new(1)));
 
@@ -645,7 +657,9 @@ mod tests {
         let initial_size = storage.file_size().unwrap();
         assert_eq!(initial_size, MMAP_HEADER_SIZE as u64);
 
-        storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        storage
+            .insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0])
+            .unwrap();
         storage.flush().unwrap();
 
         let after_insert = storage.file_size().unwrap();
@@ -686,7 +700,9 @@ mod tests {
         let storage = RamStorage::new(4);
         assert!(storage.is_empty());
 
-        storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        storage
+            .insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0])
+            .unwrap();
         assert!(!storage.is_empty());
     }
 
@@ -738,7 +754,9 @@ mod tests {
     #[test]
     fn test_ram_storage_flush() {
         let storage = RamStorage::new(4);
-        storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        storage
+            .insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0])
+            .unwrap();
 
         // Flush should succeed (no-op for RAM storage)
         assert!(storage.flush().is_ok());
@@ -753,7 +771,9 @@ mod tests {
         let storage = MmapStorage::create(&path, 4).unwrap();
         assert!(storage.is_empty());
 
-        storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        storage
+            .insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0])
+            .unwrap();
         assert!(!storage.is_empty());
 
         let _ = std::fs::remove_file(&path);
@@ -769,7 +789,9 @@ mod tests {
         let initial_usage = storage.memory_usage();
 
         // Insert and read to populate cache
-        storage.insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        storage
+            .insert(NodeId::new(1), &[1.0, 2.0, 3.0, 4.0])
+            .unwrap();
         let _ = storage.get(NodeId::new(1));
 
         let after_usage = storage.memory_usage();

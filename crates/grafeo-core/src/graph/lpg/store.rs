@@ -3943,14 +3943,26 @@ mod tests {
 
         // n1: should have name and age, but NOT email
         assert_eq!(props[0].len(), 2);
-        assert_eq!(props[0].get(&PropertyKey::new("name")), Some(&Value::from("Alice")));
-        assert_eq!(props[0].get(&PropertyKey::new("age")), Some(&Value::from(25i64)));
+        assert_eq!(
+            props[0].get(&PropertyKey::new("name")),
+            Some(&Value::from("Alice"))
+        );
+        assert_eq!(
+            props[0].get(&PropertyKey::new("age")),
+            Some(&Value::from(25i64))
+        );
         assert_eq!(props[0].get(&PropertyKey::new("email")), None);
 
         // n2: should have name and age, but NOT city
         assert_eq!(props[1].len(), 2);
-        assert_eq!(props[1].get(&PropertyKey::new("name")), Some(&Value::from("Bob")));
-        assert_eq!(props[1].get(&PropertyKey::new("age")), Some(&Value::from(30i64)));
+        assert_eq!(
+            props[1].get(&PropertyKey::new("name")),
+            Some(&Value::from("Bob"))
+        );
+        assert_eq!(
+            props[1].get(&PropertyKey::new("age")),
+            Some(&Value::from(30i64))
+        );
         assert_eq!(props[1].get(&PropertyKey::new("city")), None);
     }
 
@@ -3981,6 +3993,9 @@ mod tests {
 
         assert_eq!(props.len(), 1);
         assert_eq!(props[0].len(), 1); // Only name exists
-        assert_eq!(props[0].get(&PropertyKey::new("name")), Some(&Value::from("Alice")));
+        assert_eq!(
+            props[0].get(&PropertyKey::new("name")),
+            Some(&Value::from("Alice"))
+        );
     }
 }

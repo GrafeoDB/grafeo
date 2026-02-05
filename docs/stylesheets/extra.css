@@ -26,7 +26,7 @@
 /* Header styling - match logo background exactly */
 .md-header {
   background-color: #1e2227;
-  padding: 0.5rem 0;
+  padding: 0.35rem 0;
 }
 
 /* Align search and GitHub to the right */
@@ -99,7 +99,24 @@
 
 /* Navigation tabs styling */
 .md-tabs__link {
+  font-size: 0.72rem;
   font-weight: 500;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+  opacity: 0.7;
+  transition: opacity 200ms, border-color 200ms;
+  border-bottom: 2px solid transparent;
+  padding-bottom: 0.4rem;
+}
+
+.md-tabs__link:hover {
+  opacity: 1;
+}
+
+.md-tabs__link--active,
+.md-tabs__item--active .md-tabs__link {
+  opacity: 1;
+  border-bottom-color: var(--md-accent-fg-color);
 }
 
 /* Button styling */

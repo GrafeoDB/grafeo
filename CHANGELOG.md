@@ -16,6 +16,12 @@ _Batch Read Optimizations & Code Quality_
   - `LpgStore::get_edges_properties_selective_batch()` wrapper method
   - Significant speedup when queries only need a few properties from many-column nodes
 
+- **Parallel Node Scan Source**:
+  - `ParallelNodeScanSource` for morsel-driven parallel execution
+  - Implements `ParallelSource` trait with partitioning support
+  - `with_label()` for filtered scans, `from_node_ids()` for pre-computed lists
+  - Enables 3-8x speedup on large scans (10K+ nodes) by saturating CPU cores
+
 ### Changed
 
 - **MVCC Hot Path Optimizations**:
@@ -28,6 +34,11 @@ _Batch Read Optimizations & Code Quality_
   - Added `debug_assert!` to verify input is sorted in `DeltaEncoding::encode()`
   - Improved documentation clarifying sorted input requirement
   - Prevents silent data corruption from unsorted input in debug builds
+
+- **Batch Property Reading**:
+  - Pre-allocated result vectors in `PropertyStorage::get_all_batch()`
+  - HashMap capacity hints based on column count (NebulaGraph MultiGet pattern)
+  - Reduces allocation overhead for bulk property retrieval
 
 ## [0.3.1] - 2026-02-05
 

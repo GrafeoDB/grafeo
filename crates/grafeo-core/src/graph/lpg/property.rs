@@ -276,17 +276,24 @@ impl<Id: EntityId> PropertyStorage<Id> {
     #[must_use]
     pub fn get_all_batch(&self, ids: &[Id]) -> Vec<FxHashMap<PropertyKey, Value>> {
         let columns = self.columns.read();
-        ids.iter()
-            .map(|&id| {
-                let mut result = FxHashMap::default();
-                for (key, col) in columns.iter() {
-                    if let Some(value) = col.get(id) {
-                        result.insert(key.clone(), value);
-                    }
+        let column_count = columns.len();
+
+        // Pre-allocate result vector with exact capacity (NebulaGraph pattern)
+        let mut results = Vec::with_capacity(ids.len());
+
+        for &id in ids {
+            // Pre-allocate HashMap with expected column count
+            let mut result =
+                FxHashMap::with_capacity_and_hasher(column_count, Default::default());
+            for (key, col) in columns.iter() {
+                if let Some(value) = col.get(id) {
+                    result.insert(key.clone(), value);
                 }
-                result
-            })
-            .collect()
+            }
+            results.push(result);
+        }
+
+        results
     }
 
     /// Gets selected properties for multiple entities efficiently (projection pushdown).

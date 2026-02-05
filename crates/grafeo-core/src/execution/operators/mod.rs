@@ -81,12 +81,12 @@ pub use push::{
 pub use scan::ScanOperator;
 pub use scan_vector::VectorScanOperator;
 pub use shortest_path::ShortestPathOperator;
-pub use vector_join::VectorJoinOperator;
 pub use single_row::{EmptyOperator, NodeListOperator, SingleRowOperator};
 pub use sort::{NullOrder, SortDirection, SortKey, SortOperator};
 pub use union::UnionOperator;
 pub use unwind::UnwindOperator;
 pub use variable_length_expand::VariableLengthExpandOperator;
+pub use vector_join::VectorJoinOperator;
 
 use thiserror::Error;
 

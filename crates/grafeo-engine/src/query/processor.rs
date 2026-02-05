@@ -819,9 +819,18 @@ mod tests {
     fn test_params_in_multiple_where_conditions() {
         // Tests multiple parameters in WHERE clause with AND
         let store = Arc::new(LpgStore::new());
-        store.create_node_with_props(&["Person"], [("age", Value::Int64(25)), ("score", Value::Int64(80))]);
-        store.create_node_with_props(&["Person"], [("age", Value::Int64(35)), ("score", Value::Int64(90))]);
-        store.create_node_with_props(&["Person"], [("age", Value::Int64(45)), ("score", Value::Int64(70))]);
+        store.create_node_with_props(
+            &["Person"],
+            [("age", Value::Int64(25)), ("score", Value::Int64(80))],
+        );
+        store.create_node_with_props(
+            &["Person"],
+            [("age", Value::Int64(35)), ("score", Value::Int64(90))],
+        );
+        store.create_node_with_props(
+            &["Person"],
+            [("age", Value::Int64(45)), ("score", Value::Int64(70))],
+        );
 
         let processor = QueryProcessor::for_lpg(store);
 
@@ -902,7 +911,11 @@ mod tests {
 
         let processor = QueryProcessor::for_lpg(store);
         let result = processor
-            .process("MATCH (n:Person) RETURN n.name AS name, n.age AS age", QueryLanguage::Gql, None)
+            .process(
+                "MATCH (n:Person) RETURN n.name AS name, n.age AS age",
+                QueryLanguage::Gql,
+                None,
+            )
             .unwrap();
 
         assert_eq!(result.row_count(), 0);

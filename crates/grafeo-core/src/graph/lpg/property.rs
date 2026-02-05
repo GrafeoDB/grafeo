@@ -283,8 +283,7 @@ impl<Id: EntityId> PropertyStorage<Id> {
 
         for &id in ids {
             // Pre-allocate HashMap with expected column count
-            let mut result =
-                FxHashMap::with_capacity_and_hasher(column_count, Default::default());
+            let mut result = FxHashMap::with_capacity_and_hasher(column_count, Default::default());
             for (key, col) in columns.iter() {
                 if let Some(value) = col.get(id) {
                     result.insert(key.clone(), value);
@@ -341,10 +340,8 @@ impl<Id: EntityId> PropertyStorage<Id> {
         let mut results = Vec::with_capacity(ids.len());
 
         for &id in ids {
-            let mut result = FxHashMap::with_capacity_and_hasher(
-                requested_columns.len(),
-                Default::default(),
-            );
+            let mut result =
+                FxHashMap::with_capacity_and_hasher(requested_columns.len(), Default::default());
             // Only iterate requested columns, not all columns
             for (key, col) in &requested_columns {
                 if let Some(value) = col.get(id) {

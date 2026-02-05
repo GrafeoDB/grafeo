@@ -14,8 +14,8 @@
 //! This ensures the average interval stays close to the target regardless
 //! of disk speed variations.
 
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 

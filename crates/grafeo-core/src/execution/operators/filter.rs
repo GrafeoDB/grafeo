@@ -1744,7 +1744,9 @@ mod tests {
         // Test STARTS WITH
         let pred_starts = ExpressionPredicate::new(
             FilterExpression::Binary {
-                left: Box::new(FilterExpression::Literal(Value::String("hello world".into()))),
+                left: Box::new(FilterExpression::Literal(Value::String(
+                    "hello world".into(),
+                ))),
                 op: BinaryFilterOp::StartsWith,
                 right: Box::new(FilterExpression::Literal(Value::String("hello".into()))),
             },
@@ -1756,7 +1758,9 @@ mod tests {
         // Test ENDS WITH
         let pred_ends = ExpressionPredicate::new(
             FilterExpression::Binary {
-                left: Box::new(FilterExpression::Literal(Value::String("hello world".into()))),
+                left: Box::new(FilterExpression::Literal(Value::String(
+                    "hello world".into(),
+                ))),
                 op: BinaryFilterOp::EndsWith,
                 right: Box::new(FilterExpression::Literal(Value::String("world".into()))),
             },
@@ -1768,7 +1772,9 @@ mod tests {
         // Test CONTAINS
         let pred_contains = ExpressionPredicate::new(
             FilterExpression::Binary {
-                left: Box::new(FilterExpression::Literal(Value::String("hello world".into()))),
+                left: Box::new(FilterExpression::Literal(Value::String(
+                    "hello world".into(),
+                ))),
                 op: BinaryFilterOp::Contains,
                 right: Box::new(FilterExpression::Literal(Value::String("lo wo".into()))),
             },

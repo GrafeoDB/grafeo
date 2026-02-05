@@ -71,7 +71,7 @@ impl QuantizationType {
     pub fn compression_ratio(&self, dimensions: usize) -> usize {
         match self {
             Self::None => 1,
-            Self::Scalar => 4, // f32 (4 bytes) -> u8 (1 byte)
+            Self::Scalar => 4,  // f32 (4 bytes) -> u8 (1 byte)
             Self::Binary => 32, // f32 (4 bytes) -> 1 bit (0.125 bytes)
             Self::Product { num_subvectors } => {
                 // Original: dimensions * 4 bytes (f32)
@@ -104,7 +104,10 @@ impl QuantizationType {
             "product" | "pq" => Some(Self::Product { num_subvectors: 8 }),
             s if s.starts_with("pq") => {
                 // Parse "pq8", "pq16", etc.
-                s[2..].parse().ok().map(|n| Self::Product { num_subvectors: n })
+                s[2..]
+                    .parse()
+                    .ok()
+                    .map(|n| Self::Product { num_subvectors: n })
             }
             _ => None,
         }
@@ -440,10 +443,7 @@ impl BinaryQuantizer {
     pub fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
         debug_assert_eq!(a.len(), b.len(), "Binary vectors must have same length");
 
-        a.iter()
-            .zip(b)
-            .map(|(&x, &y)| (x ^ y).count_ones())
-            .sum()
+        a.iter().zip(b).map(|(&x, &y)| (x ^ y).count_ones()).sum()
     }
 
     /// Computes normalized hamming distance (0.0 to 1.0).
@@ -555,7 +555,10 @@ impl ProductQuantizer {
         iterations: usize,
     ) -> Self {
         assert!(!vectors.is_empty(), "Cannot train on empty vector set");
-        assert!(num_centroids <= 256, "num_centroids must be <= 256 for u8 codes");
+        assert!(
+            num_centroids <= 256,
+            "num_centroids must be <= 256 for u8 codes"
+        );
         assert!(num_subvectors > 0, "num_subvectors must be > 0");
 
         let dimensions = vectors[0].len();
@@ -601,12 +604,7 @@ impl ProductQuantizer {
     }
 
     /// Simple k-means clustering implementation.
-    fn kmeans(
-        vectors: &[Vec<f32>],
-        k: usize,
-        dims: usize,
-        iterations: usize,
-    ) -> Vec<f32> {
+    fn kmeans(vectors: &[Vec<f32>], k: usize, dims: usize, iterations: usize) -> Vec<f32> {
         let n = vectors.len();
 
         // Initialize centroids using k-means++ style (first k vectors or random sampling)
@@ -770,8 +768,7 @@ impl ProductQuantizer {
             let mut best_k = 0u8;
 
             for k in 0..self.num_centroids {
-                let centroid_start =
-                    (m * self.num_centroids + k) * self.subvector_dim;
+                let centroid_start = (m * self.num_centroids + k) * self.subvector_dim;
                 let dist: f32 = subvec
                     .iter()
                     .enumerate()
@@ -815,8 +812,7 @@ impl ProductQuantizer {
             let query_subvec = &query[query_start..query_start + self.subvector_dim];
 
             for k in 0..self.num_centroids {
-                let centroid_start =
-                    (m * self.num_centroids + k) * self.subvector_dim;
+                let centroid_start = (m * self.num_centroids + k) * self.subvector_dim;
 
                 let dist: f32 = query_subvec
                     .iter()
@@ -877,8 +873,7 @@ impl ProductQuantizer {
         let mut result = Vec::with_capacity(self.dimensions);
 
         for (m, &code) in codes.iter().enumerate() {
-            let centroid_start =
-                (m * self.num_centroids + code as usize) * self.subvector_dim;
+            let centroid_start = (m * self.num_centroids + code as usize) * self.subvector_dim;
             result.extend_from_slice(
                 &self.centroids[centroid_start..centroid_start + self.subvector_dim],
             );
@@ -961,11 +956,26 @@ mod tests {
 
     #[test]
     fn test_quantization_type_from_str() {
-        assert_eq!(QuantizationType::from_str("none"), Some(QuantizationType::None));
-        assert_eq!(QuantizationType::from_str("scalar"), Some(QuantizationType::Scalar));
-        assert_eq!(QuantizationType::from_str("SQ"), Some(QuantizationType::Scalar));
-        assert_eq!(QuantizationType::from_str("binary"), Some(QuantizationType::Binary));
-        assert_eq!(QuantizationType::from_str("bit"), Some(QuantizationType::Binary));
+        assert_eq!(
+            QuantizationType::from_str("none"),
+            Some(QuantizationType::None)
+        );
+        assert_eq!(
+            QuantizationType::from_str("scalar"),
+            Some(QuantizationType::Scalar)
+        );
+        assert_eq!(
+            QuantizationType::from_str("SQ"),
+            Some(QuantizationType::Scalar)
+        );
+        assert_eq!(
+            QuantizationType::from_str("binary"),
+            Some(QuantizationType::Binary)
+        );
+        assert_eq!(
+            QuantizationType::from_str("bit"),
+            Some(QuantizationType::Binary)
+        );
         assert_eq!(QuantizationType::from_str("invalid"), None);
     }
 
@@ -1113,7 +1123,9 @@ mod tests {
 
     #[test]
     fn test_binary_quantizer_large_vector() {
-        let v: Vec<f32> = (0..1000).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let v: Vec<f32> = (0..1000)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
         let bits = BinaryQuantizer::quantize(&v);
 
         // 1000 dims needs ceil(1000/64) = 16 words

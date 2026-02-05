@@ -34,7 +34,7 @@
 //! ```
 
 use super::quantization::{BinaryQuantizer, ProductQuantizer, QuantizationType, ScalarQuantizer};
-use super::{compute_distance, HnswConfig, HnswIndex};
+use super::{HnswConfig, HnswIndex, compute_distance};
 use grafeo_common::types::NodeId;
 use ordered_float::OrderedFloat;
 use parking_lot::RwLock;
@@ -188,7 +188,9 @@ impl QuantizedHnswIndex {
         let quantized = match self.quantization_type {
             QuantizationType::None => 0,
             QuantizationType::Scalar => self.hnsw.len() * self.config().dimensions, // u8 vectors
-            QuantizationType::Binary => self.hnsw.len() * BinaryQuantizer::bytes_needed(self.config().dimensions),
+            QuantizationType::Binary => {
+                self.hnsw.len() * BinaryQuantizer::bytes_needed(self.config().dimensions)
+            }
             QuantizationType::Product { num_subvectors } => self.hnsw.len() * num_subvectors, // M u8 codes
         };
         base + quantized
@@ -208,7 +210,8 @@ impl QuantizedHnswIndex {
     /// because both full and quantized vectors are stored.
     #[must_use]
     pub fn theoretical_compression_ratio(&self) -> f32 {
-        self.quantization_type.compression_ratio(self.config().dimensions) as f32
+        self.quantization_type
+            .compression_ratio(self.config().dimensions) as f32
     }
 
     /// Returns the actual memory ratio compared to storing only full vectors.
@@ -347,15 +350,9 @@ impl QuantizedHnswIndex {
                 // No quantization, use standard HNSW
                 self.hnsw.search_with_ef(query, k, ef)
             }
-            QuantizationType::Scalar => {
-                self.search_scalar_quantized(query, k, ef)
-            }
-            QuantizationType::Binary => {
-                self.search_binary_quantized(query, k, ef)
-            }
-            QuantizationType::Product { .. } => {
-                self.search_product_quantized(query, k, ef)
-            }
+            QuantizationType::Scalar => self.search_scalar_quantized(query, k, ef),
+            QuantizationType::Binary => self.search_binary_quantized(query, k, ef),
+            QuantizationType::Product { .. } => self.search_product_quantized(query, k, ef),
         }
     }
 
@@ -413,7 +410,8 @@ impl QuantizedHnswIndex {
             .iter()
             .filter_map(|(id, _)| {
                 binary_vecs.get(id).map(|bits| {
-                    let approx_dist = BinaryQuantizer::approximate_euclidean(&query_bits, bits, dims);
+                    let approx_dist =
+                        BinaryQuantizer::approximate_euclidean(&query_bits, bits, dims);
                     (*id, approx_dist)
                 })
             })
@@ -568,7 +566,10 @@ impl std::fmt::Debug for QuantizedHnswIndex {
             .field("quantization", &self.quantization_type)
             .field("rescore", &self.rescore)
             .field("rescore_factor", &self.rescore_factor)
-            .field("theoretical_compression", &self.theoretical_compression_ratio())
+            .field(
+                "theoretical_compression",
+                &self.theoretical_compression_ratio(),
+            )
             .finish()
     }
 }
@@ -710,7 +711,10 @@ mod tests {
         assert_eq!(QuantizationType::Scalar.compression_ratio(dims), 4);
         assert_eq!(QuantizationType::Binary.compression_ratio(dims), 32);
         // Product: (384 * 4) / 8 = 192
-        assert_eq!(QuantizationType::Product { num_subvectors: 8 }.compression_ratio(dims), 192);
+        assert_eq!(
+            QuantizationType::Product { num_subvectors: 8 }.compression_ratio(dims),
+            192
+        );
     }
 
     #[test]

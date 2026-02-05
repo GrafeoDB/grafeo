@@ -423,8 +423,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let index: Arc<FingerprintedHashIndex<u64, u64>> =
-            Arc::new(FingerprintedHashIndex::new());
+        let index: Arc<FingerprintedHashIndex<u64, u64>> = Arc::new(FingerprintedHashIndex::new());
 
         // Spawn multiple writers
         let mut handles = vec![];
@@ -495,7 +494,10 @@ mod tests {
 
         // With 100 entries and 100 misses, we should see many rejections
         // Each miss iterates through entries until no match
-        assert!(stats.fingerprint_rejections > 0, "Expected some fingerprint rejections");
+        assert!(
+            stats.fingerprint_rejections > 0,
+            "Expected some fingerprint rejections"
+        );
 
         // Rejection rate should be high (most entries rejected by fingerprint)
         if stats.fingerprint_rejections + stats.full_comparisons > 0 {

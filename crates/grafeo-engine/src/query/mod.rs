@@ -1,14 +1,16 @@
-//! Query processing pipeline.
+//! The complete query processing pipeline.
 //!
-//! This module provides the complete query execution pipeline:
+//! Your query goes through several stages before results come back:
 //!
-//! - **Translators**: Convert query languages (GQL, Cypher, SPARQL, etc.) to logical plans
-//! - **Binder**: Semantic validation and variable resolution
-//! - **Optimizer**: Plan optimization (filter pushdown, join reorder, etc.)
-//! - **Planner**: Convert logical plans to physical operators
-//! - **Executor**: Execute physical operators and collect results
-//! - **Processor**: Unified interface orchestrating the full pipeline
-//! - **Cache**: LRU cache for parsed and optimized query plans
+//! 1. **Translator** - Parses GQL/Cypher/SPARQL into a logical plan
+//! 2. **Binder** - Validates that variables and properties exist
+//! 3. **Optimizer** - Pushes filters down, reorders joins for speed
+//! 4. **Planner** - Converts the logical plan to physical operators
+//! 5. **Executor** - Actually runs the operators and streams results
+//!
+//! Most users don't interact with these directly - just call
+//! [`Session::execute()`](crate::Session::execute). But if you're building
+//! custom query processing, [`QueryProcessor`] is the unified interface.
 
 pub mod binder;
 pub mod cache;

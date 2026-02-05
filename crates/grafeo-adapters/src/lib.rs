@@ -1,13 +1,15 @@
 //! # grafeo-adapters
 //!
-//! Adapters layer for Grafeo: storage backends, query language parsers,
-//! and plugin interfaces.
+//! The integration layer - parsers, storage backends, and plugins.
+//!
+//! This is where external formats meet Grafeo's internal representation.
+//! You probably don't need this crate directly unless you're extending Grafeo.
 //!
 //! ## Modules
 //!
-//! - [`storage`] - Storage backends (memory, mmap, WAL)
-//! - [`query`] - Query language parsers (GQL, Cypher)
-//! - [`plugins`] - Plugin system and bridges
+//! - [`query`] - Parsers for GQL, Cypher, SPARQL, Gremlin, GraphQL
+//! - [`storage`] - Persistence: write-ahead log, memory-mapped files
+//! - [`plugins`] - Extension points for custom functions and algorithms
 
 pub mod plugins;
 pub mod query;

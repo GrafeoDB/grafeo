@@ -10,37 +10,28 @@ tags:
 
 Find clusters and communities within graphs.
 
-!!! note "Coming Soon"
-    These algorithms are planned for upcoming releases.
-
 ## Louvain Algorithm
 
 Fast modularity-based community detection.
 
 ```python
-from grafeo.algorithms import louvain
+import grafeo
 
-communities = louvain(db,
-    resolution=1.0
-)
+db = grafeo.GrafeoDB()
+algs = db.algorithms()
+
+communities = algs.louvain()
+for community_id, members in communities.items():
+    print(f"Community {community_id}: {len(members)} members")
 ```
-
-### Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `resolution` | 1.0 | Higher = smaller communities |
 
 ## Label Propagation
 
 Semi-supervised community detection.
 
 ```python
-from grafeo.algorithms import label_propagation
-
-communities = label_propagation(db,
-    max_iterations=100
-)
+algs = db.algorithms()
+communities = algs.label_propagation()
 ```
 
 ## Connected Components
@@ -48,9 +39,8 @@ communities = label_propagation(db,
 Find disconnected subgraphs.
 
 ```python
-from grafeo.algorithms import connected_components
-
-components = connected_components(db)
+algs = db.algorithms()
+components = algs.connected_components()
 
 print(f"Found {len(components)} components")
 for i, comp in enumerate(components):
@@ -62,9 +52,17 @@ for i, comp in enumerate(components):
 For directed graphs.
 
 ```python
-from grafeo.algorithms import strongly_connected_components
+algs = db.algorithms()
+sccs = algs.strongly_connected_components()
+```
 
-sccs = strongly_connected_components(db)
+## Weakly Connected Components
+
+For directed graphs, ignoring edge direction.
+
+```python
+algs = db.algorithms()
+wccs = algs.weakly_connected_components()
 ```
 
 ## Triangle Count
@@ -72,10 +70,9 @@ sccs = strongly_connected_components(db)
 Count triangles for clustering analysis.
 
 ```python
-from grafeo.algorithms import triangle_count
-
-triangles = triangle_count(db)
-print(f"Total triangles: {triangles['total']}")
+algs = db.algorithms()
+triangles = algs.triangles()
+print(f"Total triangles: {triangles}")
 ```
 
 ## Use Cases

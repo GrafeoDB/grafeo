@@ -34,6 +34,7 @@ bincode.workspace = true
 # Concurrency
 parking_lot.workspace = true
 crossbeam.workspace = true
+rayon.workspace = true
 
 # Async
 tokio.workspace = true

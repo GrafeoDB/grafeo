@@ -1,11 +1,15 @@
-//! Database catalog.
+//! Schema metadata - what labels, properties, and indexes exist.
 //!
-//! Manages schema definitions, name-to-ID mappings, and index metadata.
+//! The catalog is the "dictionary" of your database. When you write `(:Person)`,
+//! the catalog maps "Person" to an internal LabelId. This indirection keeps
+//! storage compact while names stay readable.
 //!
-//! The catalog provides:
-//! - Bidirectional mappings for labels, property keys, and edge types
-//! - Index definitions and lookups
-//! - Optional schema constraints
+//! | What it tracks | Why it matters |
+//! | -------------- | -------------- |
+//! | Labels | Maps "Person" → LabelId for efficient storage |
+//! | Property keys | Maps "name" → PropertyKeyId |
+//! | Edge types | Maps "KNOWS" → EdgeTypeId |
+//! | Indexes | Which properties are indexed for fast lookups |
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,13 +19,10 @@ use parking_lot::RwLock;
 
 use grafeo_common::types::{EdgeTypeId, IndexId, LabelId, PropertyKeyId};
 
-/// The main database catalog.
+/// The database's schema dictionary - maps names to compact internal IDs.
 ///
-/// Manages all metadata about the database schema including:
-/// - Labels (node categories)
-/// - Property keys (property names)
-/// - Edge types (relationship types)
-/// - Index definitions
+/// You rarely interact with this directly. The query processor uses it to
+/// resolve names like "Person" and "name" to internal IDs.
 pub struct Catalog {
     /// Label name-to-ID mappings.
     labels: LabelCatalog,

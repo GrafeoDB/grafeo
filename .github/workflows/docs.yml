@@ -1,4 +1,4 @@
-name: Documentation
+name: mkdocs
 
 on:
   push:
@@ -42,17 +42,12 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-docs-${{ hashFiles('docs/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-docs-
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
         run: |
-          pip install -r docs/requirements.txt
+          uv pip install --system -r docs/requirements.txt
 
       - name: Build documentation
         run: mkdocs build --strict
@@ -92,9 +87,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
       - name: Install dependencies
         run: |
-          pip install -r docs/requirements.txt
+          uv pip install --system -r docs/requirements.txt
 
       - name: Build and validate
         run: |

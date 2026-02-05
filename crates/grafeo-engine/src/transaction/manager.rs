@@ -19,6 +19,48 @@ pub enum TxState {
     Aborted,
 }
 
+/// Transaction isolation level.
+///
+/// Controls the consistency guarantees and performance tradeoffs for transactions.
+///
+/// # Comparison
+///
+/// | Level | Dirty Reads | Non-Repeatable Reads | Phantom Reads | Write Skew |
+/// |-------|-------------|----------------------|---------------|------------|
+/// | ReadCommitted | No | Yes | Yes | Yes |
+/// | SnapshotIsolation | No | No | No | Yes |
+/// | Serializable | No | No | No | No |
+///
+/// # Performance
+///
+/// Higher isolation levels require more bookkeeping:
+/// - `ReadCommitted`: Only tracks writes
+/// - `SnapshotIsolation`: Tracks writes + snapshot versioning
+/// - `Serializable`: Tracks writes + reads + SSI validation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IsolationLevel {
+    /// Read Committed: sees only committed data, but may see different
+    /// versions of the same row within a transaction.
+    ///
+    /// Lowest overhead, highest throughput, but weaker consistency.
+    ReadCommitted,
+
+    /// Snapshot Isolation (default): each transaction sees a consistent
+    /// snapshot as of transaction start. Prevents non-repeatable reads
+    /// and phantom reads.
+    ///
+    /// Vulnerable to write skew anomaly.
+    #[default]
+    SnapshotIsolation,
+
+    /// Serializable Snapshot Isolation (SSI): provides full serializability
+    /// by detecting read-write conflicts in addition to write-write conflicts.
+    ///
+    /// Prevents all anomalies including write skew, but may abort more
+    /// transactions due to stricter conflict detection.
+    Serializable,
+}
+
 /// Entity identifier for write tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntityId {
@@ -44,6 +86,8 @@ impl From<EdgeId> for EntityId {
 pub struct TxInfo {
     /// Transaction state.
     pub state: TxState,
+    /// Isolation level for this transaction.
+    pub isolation_level: IsolationLevel,
     /// Start epoch (snapshot epoch for reads).
     pub start_epoch: EpochId,
     /// Set of entities written by this transaction.
@@ -53,10 +97,11 @@ pub struct TxInfo {
 }
 
 impl TxInfo {
-    /// Creates a new transaction info.
-    fn new(start_epoch: EpochId) -> Self {
+    /// Creates a new transaction info with the given isolation level.
+    fn new(start_epoch: EpochId, isolation_level: IsolationLevel) -> Self {
         Self {
             state: TxState::Active,
+            isolation_level,
             start_epoch,
             write_set: HashSet::new(),
             read_set: HashSet::new(),
@@ -91,14 +136,27 @@ impl TransactionManager {
         }
     }
 
-    /// Begins a new transaction.
+    /// Begins a new transaction with the default isolation level (Snapshot Isolation).
     pub fn begin(&self) -> TxId {
+        self.begin_with_isolation(IsolationLevel::default())
+    }
+
+    /// Begins a new transaction with the specified isolation level.
+    pub fn begin_with_isolation(&self, isolation_level: IsolationLevel) -> TxId {
         let tx_id = TxId::new(self.next_tx_id.fetch_add(1, Ordering::Relaxed));
         let epoch = EpochId::new(self.current_epoch.load(Ordering::Acquire));
 
-        let info = TxInfo::new(epoch);
+        let info = TxInfo::new(epoch, isolation_level);
         self.transactions.write().insert(tx_id, info);
         tx_id
+    }
+
+    /// Returns the isolation level of a transaction.
+    pub fn isolation_level(&self, tx_id: TxId) -> Option<IsolationLevel> {
+        self.transactions
+            .read()
+            .get(&tx_id)
+            .map(|info| info.isolation_level)
     }
 
     /// Records a write operation for the transaction.
@@ -149,17 +207,27 @@ impl TransactionManager {
 
     /// Commits a transaction with conflict detection.
     ///
+    /// # Conflict Detection
+    ///
+    /// - **All isolation levels**: Write-write conflicts (two transactions writing
+    ///   to the same entity) are always detected and cause the second committer to abort.
+    ///
+    /// - **Serializable only**: Read-write conflicts (SSI validation) are additionally
+    ///   checked. If transaction T1 read an entity that another transaction T2 wrote,
+    ///   and T2 committed after T1 started, T1 will abort. This prevents write skew.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The transaction is not active
     /// - There's a write-write conflict with another committed transaction
+    /// - (Serializable only) There's a read-write conflict (SSI violation)
     pub fn commit(&self, tx_id: TxId) -> Result<EpochId> {
         let mut txns = self.transactions.write();
         let committed = self.committed_epochs.read();
 
         // First, validate the transaction exists and is active
-        {
+        let (our_isolation, our_start_epoch, our_write_set, our_read_set) = {
             let info = txns.get(&tx_id).ok_or_else(|| {
                 Error::Transaction(TransactionError::InvalidState(
                     "Transaction not found".to_string(),
@@ -171,18 +239,14 @@ impl TransactionManager {
                     "Transaction is not active".to_string(),
                 )));
             }
-        }
 
-        // Get our write set for conflict checking
-        let our_write_set: HashSet<EntityId> = txns
-            .get(&tx_id)
-            .map(|info| info.write_set.clone())
-            .unwrap_or_default();
-
-        let our_start_epoch = txns
-            .get(&tx_id)
-            .map(|info| info.start_epoch)
-            .unwrap_or(EpochId::new(0));
+            (
+                info.isolation_level,
+                info.start_epoch,
+                info.write_set.clone(),
+                info.read_set.clone(),
+            )
+        };
 
         // Check for write-write conflicts with other committed transactions
         for (other_tx, other_info) in txns.iter() {
@@ -211,6 +275,58 @@ impl TransactionManager {
                             return Err(Error::Transaction(TransactionError::WriteConflict(
                                 format!("Write-write conflict on entity {:?}", entity),
                             )));
+                        }
+                    }
+                }
+            }
+        }
+
+        // SSI validation for Serializable isolation level
+        // Check for read-write conflicts: if we read an entity that another
+        // transaction (that committed after we started) wrote, we have a
+        // "rw-antidependency" which can cause write skew.
+        if our_isolation == IsolationLevel::Serializable && !our_read_set.is_empty() {
+            for (other_tx, commit_epoch) in committed.iter() {
+                if *other_tx != tx_id && commit_epoch.as_u64() > our_start_epoch.as_u64() {
+                    // Check if that transaction wrote to any entity we read
+                    if let Some(other_info) = txns.get(other_tx) {
+                        for entity in &our_read_set {
+                            if other_info.write_set.contains(entity) {
+                                return Err(Error::Transaction(
+                                    TransactionError::SerializationFailure(format!(
+                                        "Read-write conflict on entity {:?}: \
+                                         another transaction modified data we read",
+                                        entity
+                                    )),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Also check against transactions that are already marked committed
+            // but not yet in committed_epochs map
+            for (other_tx, other_info) in txns.iter() {
+                if *other_tx == tx_id {
+                    continue;
+                }
+                if other_info.state == TxState::Committed {
+                    // If we can see their write set and we read something they wrote
+                    for entity in &our_read_set {
+                        if other_info.write_set.contains(entity) {
+                            // Check if they committed after we started
+                            if let Some(commit_epoch) = committed.get(other_tx) {
+                                if commit_epoch.as_u64() > our_start_epoch.as_u64() {
+                                    return Err(Error::Transaction(
+                                        TransactionError::SerializationFailure(format!(
+                                            "Read-write conflict on entity {:?}: \
+                                             another transaction modified data we read",
+                                            entity
+                                        )),
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
@@ -690,5 +806,244 @@ mod tests {
             (num_threads * commits_per_thread) as u64,
             "Final epoch should equal total commits"
         );
+    }
+
+    #[test]
+    fn test_isolation_level_default() {
+        let mgr = TransactionManager::new();
+
+        let tx = mgr.begin();
+        assert_eq!(
+            mgr.isolation_level(tx),
+            Some(IsolationLevel::SnapshotIsolation)
+        );
+    }
+
+    #[test]
+    fn test_isolation_level_explicit() {
+        let mgr = TransactionManager::new();
+
+        let tx_rc = mgr.begin_with_isolation(IsolationLevel::ReadCommitted);
+        let tx_si = mgr.begin_with_isolation(IsolationLevel::SnapshotIsolation);
+        let tx_ser = mgr.begin_with_isolation(IsolationLevel::Serializable);
+
+        assert_eq!(
+            mgr.isolation_level(tx_rc),
+            Some(IsolationLevel::ReadCommitted)
+        );
+        assert_eq!(
+            mgr.isolation_level(tx_si),
+            Some(IsolationLevel::SnapshotIsolation)
+        );
+        assert_eq!(
+            mgr.isolation_level(tx_ser),
+            Some(IsolationLevel::Serializable)
+        );
+    }
+
+    #[test]
+    fn test_ssi_read_write_conflict_detected() {
+        let mgr = TransactionManager::new();
+
+        // tx1 starts with Serializable isolation
+        let tx1 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+
+        // tx2 starts and will modify an entity
+        let tx2 = mgr.begin();
+
+        // tx1 reads entity 42
+        let entity = NodeId::new(42);
+        mgr.record_read(tx1, entity).unwrap();
+
+        // tx2 writes to the same entity and commits
+        mgr.record_write(tx2, entity).unwrap();
+        mgr.commit(tx2).unwrap();
+
+        // tx1 tries to commit - should fail due to SSI read-write conflict
+        let result = mgr.commit(tx1);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Serialization failure"),
+            "Expected serialization failure error"
+        );
+    }
+
+    #[test]
+    fn test_ssi_no_conflict_when_not_serializable() {
+        let mgr = TransactionManager::new();
+
+        // tx1 starts with default Snapshot Isolation
+        let tx1 = mgr.begin();
+
+        // tx2 starts and will modify an entity
+        let tx2 = mgr.begin();
+
+        // tx1 reads entity 42
+        let entity = NodeId::new(42);
+        mgr.record_read(tx1, entity).unwrap();
+
+        // tx2 writes to the same entity and commits
+        mgr.record_write(tx2, entity).unwrap();
+        mgr.commit(tx2).unwrap();
+
+        // tx1 should commit successfully (SI doesn't check read-write conflicts)
+        let result = mgr.commit(tx1);
+        assert!(
+            result.is_ok(),
+            "Snapshot Isolation should not detect read-write conflicts"
+        );
+    }
+
+    #[test]
+    fn test_ssi_no_conflict_when_write_before_read() {
+        let mgr = TransactionManager::new();
+
+        // tx1 writes and commits first
+        let tx1 = mgr.begin();
+        let entity = NodeId::new(42);
+        mgr.record_write(tx1, entity).unwrap();
+        mgr.commit(tx1).unwrap();
+
+        // tx2 starts AFTER tx1 committed and reads the entity
+        let tx2 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+        mgr.record_read(tx2, entity).unwrap();
+
+        // tx2 should commit successfully (tx1 committed before tx2 started)
+        let result = mgr.commit(tx2);
+        assert!(
+            result.is_ok(),
+            "Should not conflict when writer committed before reader started"
+        );
+    }
+
+    #[test]
+    fn test_write_skew_prevented_by_ssi() {
+        // Classic write skew scenario:
+        // Account A = 50, Account B = 50, constraint: A + B >= 0
+        // T1 reads A, B, writes A = A - 100
+        // T2 reads A, B, writes B = B - 100
+        // Without SSI, both could commit violating the constraint.
+
+        let mgr = TransactionManager::new();
+
+        let account_a = NodeId::new(1);
+        let account_b = NodeId::new(2);
+
+        // T1 and T2 both start with Serializable isolation
+        let tx1 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+        let tx2 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+
+        // Both read both accounts
+        mgr.record_read(tx1, account_a).unwrap();
+        mgr.record_read(tx1, account_b).unwrap();
+        mgr.record_read(tx2, account_a).unwrap();
+        mgr.record_read(tx2, account_b).unwrap();
+
+        // T1 writes to A, T2 writes to B (no write-write conflict)
+        mgr.record_write(tx1, account_a).unwrap();
+        mgr.record_write(tx2, account_b).unwrap();
+
+        // T1 commits first
+        let result1 = mgr.commit(tx1);
+        assert!(result1.is_ok(), "First commit should succeed");
+
+        // T2 tries to commit - should fail because it read account_a which T1 wrote
+        let result2 = mgr.commit(tx2);
+        assert!(result2.is_err(), "Second commit should fail due to SSI");
+        assert!(
+            result2
+                .unwrap_err()
+                .to_string()
+                .contains("Serialization failure"),
+            "Expected serialization failure error for write skew prevention"
+        );
+    }
+
+    #[test]
+    fn test_read_committed_allows_non_repeatable_reads() {
+        let mgr = TransactionManager::new();
+
+        // tx1 starts with ReadCommitted isolation
+        let tx1 = mgr.begin_with_isolation(IsolationLevel::ReadCommitted);
+        let entity = NodeId::new(42);
+
+        // tx1 reads entity
+        mgr.record_read(tx1, entity).unwrap();
+
+        // tx2 writes and commits
+        let tx2 = mgr.begin();
+        mgr.record_write(tx2, entity).unwrap();
+        mgr.commit(tx2).unwrap();
+
+        // tx1 can still commit (ReadCommitted allows non-repeatable reads)
+        let result = mgr.commit(tx1);
+        assert!(
+            result.is_ok(),
+            "ReadCommitted should allow non-repeatable reads"
+        );
+    }
+
+    #[test]
+    fn test_isolation_level_debug() {
+        assert_eq!(
+            format!("{:?}", IsolationLevel::ReadCommitted),
+            "ReadCommitted"
+        );
+        assert_eq!(
+            format!("{:?}", IsolationLevel::SnapshotIsolation),
+            "SnapshotIsolation"
+        );
+        assert_eq!(
+            format!("{:?}", IsolationLevel::Serializable),
+            "Serializable"
+        );
+    }
+
+    #[test]
+    fn test_isolation_level_default_trait() {
+        let default: IsolationLevel = Default::default();
+        assert_eq!(default, IsolationLevel::SnapshotIsolation);
+    }
+
+    #[test]
+    fn test_ssi_concurrent_reads_no_conflict() {
+        let mgr = TransactionManager::new();
+
+        let entity = NodeId::new(42);
+
+        // Both transactions read the same entity
+        let tx1 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+        let tx2 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+
+        mgr.record_read(tx1, entity).unwrap();
+        mgr.record_read(tx2, entity).unwrap();
+
+        // Both should commit successfully (read-read is not a conflict)
+        assert!(mgr.commit(tx1).is_ok());
+        assert!(mgr.commit(tx2).is_ok());
+    }
+
+    #[test]
+    fn test_ssi_write_write_conflict() {
+        let mgr = TransactionManager::new();
+
+        let entity = NodeId::new(42);
+
+        // Both transactions write the same entity
+        let tx1 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+        let tx2 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+
+        mgr.record_write(tx1, entity).unwrap();
+        mgr.record_write(tx2, entity).unwrap();
+
+        // First commit succeeds
+        assert!(mgr.commit(tx1).is_ok());
+
+        // Second commit fails (write-write conflict)
+        let result = mgr.commit(tx2);
+        assert!(result.is_err());
     }
 }

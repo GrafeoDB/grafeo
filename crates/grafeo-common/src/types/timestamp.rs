@@ -1,14 +1,16 @@
-//! Timestamp type for temporal values.
+//! Timestamps for temporal properties.
+//!
+//! Stored as microseconds since Unix epoch - plenty of precision for most uses.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// A timestamp representing a point in time.
+/// A point in time, stored as microseconds since Unix epoch.
 ///
-/// Internally stored as microseconds since the Unix epoch (1970-01-01 00:00:00 UTC).
-/// This provides microsecond precision and can represent dates from roughly
-/// 290,000 BCE to 290,000 CE.
+/// Microsecond precision, covering roughly 290,000 years in each direction
+/// from 1970. Create with [`from_secs()`](Self::from_secs),
+/// [`from_millis()`](Self::from_millis), or [`now()`](Self::now).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 #[repr(transparent)]
 pub struct Timestamp(i64);

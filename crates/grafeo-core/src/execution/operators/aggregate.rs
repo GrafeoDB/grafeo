@@ -4,7 +4,8 @@
 //! - `HashAggregateOperator`: Hash-based grouping with aggregation functions
 //! - Various aggregation functions: COUNT, SUM, AVG, MIN, MAX, etc.
 
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 use grafeo_common::types::{LogicalType, Value};
 
@@ -63,6 +64,14 @@ pub enum AggregateFunction {
     Last,
     /// Collect values into a list.
     Collect,
+    /// Sample standard deviation (STDEV).
+    StdDev,
+    /// Population standard deviation (STDEVP).
+    StdDevPop,
+    /// Discrete percentile (PERCENTILE_DISC).
+    PercentileDisc,
+    /// Continuous percentile (PERCENTILE_CONT).
+    PercentileCont,
 }
 
 /// An aggregation expression.
@@ -76,6 +85,8 @@ pub struct AggregateExpr {
     pub distinct: bool,
     /// Output alias (for naming the result column).
     pub alias: Option<String>,
+    /// Percentile parameter for PERCENTILE_DISC/PERCENTILE_CONT (0.0 to 1.0).
+    pub percentile: Option<f64>,
 }
 
 impl AggregateExpr {
@@ -86,6 +97,7 @@ impl AggregateExpr {
             column: None,
             distinct: false,
             alias: None,
+            percentile: None,
         }
     }
 
@@ -96,6 +108,7 @@ impl AggregateExpr {
             column: Some(column),
             distinct: false,
             alias: None,
+            percentile: None,
         }
     }
 
@@ -106,6 +119,7 @@ impl AggregateExpr {
             column: Some(column),
             distinct: false,
             alias: None,
+            percentile: None,
         }
     }
 
@@ -116,6 +130,7 @@ impl AggregateExpr {
             column: Some(column),
             distinct: false,
             alias: None,
+            percentile: None,
         }
     }
 
@@ -126,6 +141,7 @@ impl AggregateExpr {
             column: Some(column),
             distinct: false,
             alias: None,
+            percentile: None,
         }
     }
 
@@ -136,6 +152,7 @@ impl AggregateExpr {
             column: Some(column),
             distinct: false,
             alias: None,
+            percentile: None,
         }
     }
 
@@ -146,6 +163,7 @@ impl AggregateExpr {
             column: Some(column),
             distinct: false,
             alias: None,
+            percentile: None,
         }
     }
 
@@ -156,6 +174,7 @@ impl AggregateExpr {
             column: Some(column),
             distinct: false,
             alias: None,
+            percentile: None,
         }
     }
 
@@ -166,6 +185,59 @@ impl AggregateExpr {
             column: Some(column),
             distinct: false,
             alias: None,
+            percentile: None,
+        }
+    }
+
+    /// Creates a STDEV(column) expression (sample standard deviation).
+    pub fn stdev(column: usize) -> Self {
+        Self {
+            function: AggregateFunction::StdDev,
+            column: Some(column),
+            distinct: false,
+            alias: None,
+            percentile: None,
+        }
+    }
+
+    /// Creates a STDEVP(column) expression (population standard deviation).
+    pub fn stdev_pop(column: usize) -> Self {
+        Self {
+            function: AggregateFunction::StdDevPop,
+            column: Some(column),
+            distinct: false,
+            alias: None,
+            percentile: None,
+        }
+    }
+
+    /// Creates a PERCENTILE_DISC(column, percentile) expression.
+    ///
+    /// # Arguments
+    /// * `column` - Column index to aggregate
+    /// * `percentile` - Percentile value between 0.0 and 1.0 (e.g., 0.5 for median)
+    pub fn percentile_disc(column: usize, percentile: f64) -> Self {
+        Self {
+            function: AggregateFunction::PercentileDisc,
+            column: Some(column),
+            distinct: false,
+            alias: None,
+            percentile: Some(percentile.clamp(0.0, 1.0)),
+        }
+    }
+
+    /// Creates a PERCENTILE_CONT(column, percentile) expression.
+    ///
+    /// # Arguments
+    /// * `column` - Column index to aggregate
+    /// * `percentile` - Percentile value between 0.0 and 1.0 (e.g., 0.5 for median)
+    pub fn percentile_cont(column: usize, percentile: f64) -> Self {
+        Self {
+            function: AggregateFunction::PercentileCont,
+            column: Some(column),
+            distinct: false,
+            alias: None,
+            percentile: Some(percentile.clamp(0.0, 1.0)),
         }
     }
 
@@ -213,11 +285,19 @@ enum AggregateState {
     Collect(Vec<Value>),
     /// Collect distinct state (values, seen).
     CollectDistinct(Vec<Value>, HashSet<HashableValue>),
+    /// Sample standard deviation state using Welford's algorithm (count, mean, M2).
+    StdDev { count: i64, mean: f64, m2: f64 },
+    /// Population standard deviation state using Welford's algorithm (count, mean, M2).
+    StdDevPop { count: i64, mean: f64, m2: f64 },
+    /// Discrete percentile state (values, percentile).
+    PercentileDisc { values: Vec<f64>, percentile: f64 },
+    /// Continuous percentile state (values, percentile).
+    PercentileCont { values: Vec<f64>, percentile: f64 },
 }
 
 impl AggregateState {
     /// Creates initial state for an aggregation function.
-    fn new(function: AggregateFunction, distinct: bool) -> Self {
+    fn new(function: AggregateFunction, distinct: bool, percentile: Option<f64>) -> Self {
         match (function, distinct) {
             (AggregateFunction::Count | AggregateFunction::CountNonNull, false) => {
                 AggregateState::Count(0)
@@ -237,6 +317,25 @@ impl AggregateState {
             (AggregateFunction::Collect, true) => {
                 AggregateState::CollectDistinct(Vec::new(), HashSet::new())
             }
+            // Statistical functions (Welford's algorithm for online computation)
+            (AggregateFunction::StdDev, _) => AggregateState::StdDev {
+                count: 0,
+                mean: 0.0,
+                m2: 0.0,
+            },
+            (AggregateFunction::StdDevPop, _) => AggregateState::StdDevPop {
+                count: 0,
+                mean: 0.0,
+                m2: 0.0,
+            },
+            (AggregateFunction::PercentileDisc, _) => AggregateState::PercentileDisc {
+                values: Vec::new(),
+                percentile: percentile.unwrap_or(0.5),
+            },
+            (AggregateFunction::PercentileCont, _) => AggregateState::PercentileCont {
+                values: Vec::new(),
+                percentile: percentile.unwrap_or(0.5),
+            },
         }
     }
 
@@ -260,6 +359,11 @@ impl AggregateState {
                 } else if let Some(Value::Float64(v)) = value {
                     // Convert to float sum
                     *self = AggregateState::SumFloat(*sum as f64 + v);
+                } else if let Some(ref v) = value {
+                    // RDF stores numeric literals as strings - try to parse
+                    if let Some(num) = value_to_f64(v) {
+                        *self = AggregateState::SumFloat(*sum as f64 + num);
+                    }
                 }
             }
             AggregateState::SumIntDistinct(sum, seen) => {
@@ -272,15 +376,20 @@ impl AggregateState {
                             // Convert to float distinct
                             let seen_clone = seen.clone();
                             *self = AggregateState::SumFloatDistinct(*sum as f64 + f, seen_clone);
+                        } else if let Some(num) = value_to_f64(v) {
+                            // RDF string-encoded numerics
+                            let seen_clone = seen.clone();
+                            *self = AggregateState::SumFloatDistinct(*sum as f64 + num, seen_clone);
                         }
                     }
                 }
             }
             AggregateState::SumFloat(sum) => {
-                if let Some(Value::Int64(v)) = value {
-                    *sum += v as f64;
-                } else if let Some(Value::Float64(v)) = value {
-                    *sum += v;
+                if let Some(ref v) = value {
+                    // Use value_to_f64 which now handles strings
+                    if let Some(num) = value_to_f64(v) {
+                        *sum += num;
+                    }
                 }
             }
             AggregateState::SumFloatDistinct(sum, seen) => {
@@ -359,6 +468,27 @@ impl AggregateState {
                     }
                 }
             }
+            // Statistical functions using Welford's online algorithm
+            AggregateState::StdDev { count, mean, m2 }
+            | AggregateState::StdDevPop { count, mean, m2 } => {
+                if let Some(ref v) = value {
+                    if let Some(x) = value_to_f64(v) {
+                        *count += 1;
+                        let delta = x - *mean;
+                        *mean += delta / *count as f64;
+                        let delta2 = x - *mean;
+                        *m2 += delta * delta2;
+                    }
+                }
+            }
+            AggregateState::PercentileDisc { values, .. }
+            | AggregateState::PercentileCont { values, .. } => {
+                if let Some(ref v) = value {
+                    if let Some(x) = value_to_f64(v) {
+                        values.push(x);
+                    }
+                }
+            }
         }
     }
 
@@ -388,28 +518,93 @@ impl AggregateState {
             AggregateState::Collect(list) | AggregateState::CollectDistinct(list, _) => {
                 Value::List(list.clone().into())
             }
+            // Sample standard deviation: sqrt(M2 / (n - 1))
+            AggregateState::StdDev { count, m2, .. } => {
+                if *count < 2 {
+                    Value::Null
+                } else {
+                    Value::Float64((*m2 / (*count - 1) as f64).sqrt())
+                }
+            }
+            // Population standard deviation: sqrt(M2 / n)
+            AggregateState::StdDevPop { count, m2, .. } => {
+                if *count == 0 {
+                    Value::Null
+                } else {
+                    Value::Float64((*m2 / *count as f64).sqrt())
+                }
+            }
+            // Discrete percentile: return actual value at percentile position
+            AggregateState::PercentileDisc { values, percentile } => {
+                if values.is_empty() {
+                    Value::Null
+                } else {
+                    let mut sorted = values.clone();
+                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    // Index calculation per SQL standard: floor(p * (n - 1))
+                    let index = (percentile * (sorted.len() - 1) as f64).floor() as usize;
+                    Value::Float64(sorted[index])
+                }
+            }
+            // Continuous percentile: interpolate between values
+            AggregateState::PercentileCont { values, percentile } => {
+                if values.is_empty() {
+                    Value::Null
+                } else {
+                    let mut sorted = values.clone();
+                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    // Linear interpolation per SQL standard
+                    let rank = percentile * (sorted.len() - 1) as f64;
+                    let lower_idx = rank.floor() as usize;
+                    let upper_idx = rank.ceil() as usize;
+                    if lower_idx == upper_idx {
+                        Value::Float64(sorted[lower_idx])
+                    } else {
+                        let fraction = rank - lower_idx as f64;
+                        let result =
+                            sorted[lower_idx] + fraction * (sorted[upper_idx] - sorted[lower_idx]);
+                        Value::Float64(result)
+                    }
+                }
+            }
         }
     }
 }
 
 /// Convert a value to f64 for numeric aggregations.
+/// Supports RDF values stored as strings by attempting numeric parsing.
 fn value_to_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Int64(i) => Some(*i as f64),
         Value::Float64(f) => Some(*f),
+        // RDF stores numeric literals as strings - try to parse them
+        Value::String(s) => s.parse::<f64>().ok(),
         _ => None,
     }
 }
 
 /// Compare two values.
+/// Supports RDF values stored as strings by attempting numeric parsing.
 fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
-        (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
+        (Value::String(a), Value::String(b)) => {
+            // Try numeric comparison first if both look like numbers
+            if let (Ok(a_num), Ok(b_num)) = (a.parse::<f64>(), b.parse::<f64>()) {
+                a_num.partial_cmp(&b_num)
+            } else {
+                Some(a.cmp(b))
+            }
+        }
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
         (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
         (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
+        // String-to-numeric comparisons for RDF
+        (Value::String(s), Value::Int64(i)) => s.parse::<f64>().ok()?.partial_cmp(&(*i as f64)),
+        (Value::String(s), Value::Float64(f)) => s.parse::<f64>().ok()?.partial_cmp(f),
+        (Value::Int64(i), Value::String(s)) => (*i as f64).partial_cmp(&s.parse::<f64>().ok()?),
+        (Value::Float64(f), Value::String(s)) => f.partial_cmp(&s.parse::<f64>().ok()?),
         _ => None,
     }
 }
@@ -475,8 +670,8 @@ pub struct HashAggregateOperator {
     aggregates: Vec<AggregateExpr>,
     /// Output schema.
     output_schema: Vec<LogicalType>,
-    /// Hash table: group key -> (group values, aggregate states).
-    groups: HashMap<GroupKey, Vec<AggregateState>>,
+    /// Ordered map: group key -> aggregate states (IndexMap for deterministic iteration order).
+    groups: IndexMap<GroupKey, Vec<AggregateState>>,
     /// Whether aggregation is complete.
     aggregation_complete: bool,
     /// Results iterator.
@@ -502,7 +697,7 @@ impl HashAggregateOperator {
             group_columns,
             aggregates,
             output_schema,
-            groups: HashMap::new(),
+            groups: IndexMap::new(),
             aggregation_complete: false,
             results: None,
         }
@@ -518,23 +713,34 @@ impl HashAggregateOperator {
                 let states = self.groups.entry(key).or_insert_with(|| {
                     self.aggregates
                         .iter()
-                        .map(|agg| AggregateState::new(agg.function, agg.distinct))
+                        .map(|agg| AggregateState::new(agg.function, agg.distinct, agg.percentile))
                         .collect()
                 });
 
                 // Update each aggregate
                 for (i, agg) in self.aggregates.iter().enumerate() {
-                    let value = match agg.function {
-                        AggregateFunction::Count => None, // COUNT(*) doesn't need a value
+                    let value = match (agg.function, agg.distinct) {
+                        // COUNT(*) without DISTINCT doesn't need a value
+                        (AggregateFunction::Count, false) => None,
+                        // COUNT DISTINCT needs the actual value to track unique values
+                        (AggregateFunction::Count, true) => agg
+                            .column
+                            .and_then(|col| chunk.column(col).and_then(|c| c.get_value(row))),
                         _ => agg
                             .column
                             .and_then(|col| chunk.column(col).and_then(|c| c.get_value(row))),
                     };
 
-                    // For COUNT, always update. For others, skip nulls unless counting.
-                    match agg.function {
-                        AggregateFunction::Count => states[i].update(None),
-                        AggregateFunction::CountNonNull => {
+                    // For COUNT without DISTINCT, always update. For others, skip nulls.
+                    match (agg.function, agg.distinct) {
+                        (AggregateFunction::Count, false) => states[i].update(None),
+                        (AggregateFunction::Count, true) => {
+                            // COUNT DISTINCT needs the value to track unique values
+                            if value.is_some() && !matches!(value, Some(Value::Null)) {
+                                states[i].update(value);
+                            }
+                        }
+                        (AggregateFunction::CountNonNull, _) => {
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
                                 states[i].update(value);
                             }
@@ -551,8 +757,8 @@ impl HashAggregateOperator {
 
         self.aggregation_complete = true;
 
-        // Convert to results iterator
-        let results: Vec<_> = self.groups.drain().collect();
+        // Convert to results iterator (IndexMap::drain takes a range)
+        let results: Vec<_> = self.groups.drain(..).collect();
         self.results = Some(results.into_iter());
 
         Ok(())
@@ -572,7 +778,7 @@ impl Operator for HashAggregateOperator {
             let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
 
             for agg in &self.aggregates {
-                let state = AggregateState::new(agg.function, agg.distinct);
+                let state = AggregateState::new(agg.function, agg.distinct, agg.percentile);
                 let value = state.finalize();
                 if let Some(col) = builder.column_mut(self.group_columns.len()) {
                     col.push_value(value);
@@ -659,7 +865,7 @@ impl SimpleAggregateOperator {
     ) -> Self {
         let states = aggregates
             .iter()
-            .map(|agg| AggregateState::new(agg.function, agg.distinct))
+            .map(|agg| AggregateState::new(agg.function, agg.distinct, agg.percentile))
             .collect();
 
         Self {
@@ -682,16 +888,27 @@ impl Operator for SimpleAggregateOperator {
         while let Some(chunk) = self.child.next()? {
             for row in chunk.selected_indices() {
                 for (i, agg) in self.aggregates.iter().enumerate() {
-                    let value = match agg.function {
-                        AggregateFunction::Count => None,
+                    let value = match (agg.function, agg.distinct) {
+                        // COUNT(*) without DISTINCT doesn't need a value
+                        (AggregateFunction::Count, false) => None,
+                        // COUNT DISTINCT needs the actual value to track unique values
+                        (AggregateFunction::Count, true) => agg
+                            .column
+                            .and_then(|col| chunk.column(col).and_then(|c| c.get_value(row))),
                         _ => agg
                             .column
                             .and_then(|col| chunk.column(col).and_then(|c| c.get_value(row))),
                     };
 
-                    match agg.function {
-                        AggregateFunction::Count => self.states[i].update(None),
-                        AggregateFunction::CountNonNull => {
+                    match (agg.function, agg.distinct) {
+                        (AggregateFunction::Count, false) => self.states[i].update(None),
+                        (AggregateFunction::Count, true) => {
+                            // COUNT DISTINCT needs the value to track unique values
+                            if value.is_some() && !matches!(value, Some(Value::Null)) {
+                                self.states[i].update(value);
+                            }
+                        }
+                        (AggregateFunction::CountNonNull, _) => {
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
                                 self.states[i].update(value);
                             }
@@ -725,7 +942,7 @@ impl Operator for SimpleAggregateOperator {
         self.states = self
             .aggregates
             .iter()
-            .map(|agg| AggregateState::new(agg.function, agg.distinct))
+            .map(|agg| AggregateState::new(agg.function, agg.distinct, agg.percentile))
             .collect();
         self.done = false;
     }
@@ -853,6 +1070,36 @@ mod tests {
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.column(0).unwrap().get_int64(0), Some(10)); // Min
         assert_eq!(result.column(1).unwrap().get_int64(0), Some(50)); // Max
+    }
+
+    #[test]
+    fn test_sum_with_string_values() {
+        // Test SUM with string values (like RDF stores numeric literals)
+        let mut builder = DataChunkBuilder::new(&[LogicalType::String]);
+        builder.column_mut(0).unwrap().push_string("30");
+        builder.advance_row();
+        builder.column_mut(0).unwrap().push_string("25");
+        builder.advance_row();
+        builder.column_mut(0).unwrap().push_string("35");
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        let mock = MockOperator::new(vec![chunk]);
+        let mut agg = SimpleAggregateOperator::new(
+            Box::new(mock),
+            vec![AggregateExpr::sum(0)],
+            vec![LogicalType::Float64],
+        );
+
+        let result = agg.next().unwrap().unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Should parse strings and sum: 30 + 25 + 35 = 90
+        let sum_val = result.column(0).unwrap().get_float64(0).unwrap();
+        assert!(
+            (sum_val - 90.0).abs() < 0.001,
+            "Expected 90.0, got {}",
+            sum_val
+        );
     }
 
     #[test]
@@ -1051,5 +1298,163 @@ mod tests {
         // Avg of distinct values: (10 + 20 + 30) / 3 = 20.0
         let avg = result.column(0).unwrap().get_float64(0).unwrap();
         assert!((avg - 20.0).abs() < 0.001);
+    }
+
+    fn create_statistical_test_chunk() -> DataChunk {
+        // Create data: [2, 4, 4, 4, 5, 5, 7, 9]
+        // Mean = 5.0, Sample StdDev = 2.138, Population StdDev = 2.0
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+
+        for value in [2i64, 4, 4, 4, 5, 5, 7, 9] {
+            builder.column_mut(0).unwrap().push_int64(value);
+            builder.advance_row();
+        }
+
+        builder.finish()
+    }
+
+    #[test]
+    fn test_stdev_sample() {
+        let mock = MockOperator::new(vec![create_statistical_test_chunk()]);
+
+        let mut agg = SimpleAggregateOperator::new(
+            Box::new(mock),
+            vec![AggregateExpr::stdev(0)],
+            vec![LogicalType::Float64],
+        );
+
+        let result = agg.next().unwrap().unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Sample standard deviation of [2, 4, 4, 4, 5, 5, 7, 9]
+        // Mean = 5.0, Variance = 32/7 = 4.571, StdDev = 2.138
+        let stdev = result.column(0).unwrap().get_float64(0).unwrap();
+        assert!((stdev - 2.138).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_stdev_population() {
+        let mock = MockOperator::new(vec![create_statistical_test_chunk()]);
+
+        let mut agg = SimpleAggregateOperator::new(
+            Box::new(mock),
+            vec![AggregateExpr::stdev_pop(0)],
+            vec![LogicalType::Float64],
+        );
+
+        let result = agg.next().unwrap().unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Population standard deviation of [2, 4, 4, 4, 5, 5, 7, 9]
+        // Mean = 5.0, Variance = 32/8 = 4.0, StdDev = 2.0
+        let stdev = result.column(0).unwrap().get_float64(0).unwrap();
+        assert!((stdev - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_percentile_disc() {
+        let mock = MockOperator::new(vec![create_statistical_test_chunk()]);
+
+        // Median (50th percentile discrete)
+        let mut agg = SimpleAggregateOperator::new(
+            Box::new(mock),
+            vec![AggregateExpr::percentile_disc(0, 0.5)],
+            vec![LogicalType::Float64],
+        );
+
+        let result = agg.next().unwrap().unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Sorted: [2, 4, 4, 4, 5, 5, 7, 9], index = floor(0.5 * 7) = 3, value = 4
+        let percentile = result.column(0).unwrap().get_float64(0).unwrap();
+        assert!((percentile - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_percentile_cont() {
+        let mock = MockOperator::new(vec![create_statistical_test_chunk()]);
+
+        // Median (50th percentile continuous)
+        let mut agg = SimpleAggregateOperator::new(
+            Box::new(mock),
+            vec![AggregateExpr::percentile_cont(0, 0.5)],
+            vec![LogicalType::Float64],
+        );
+
+        let result = agg.next().unwrap().unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Sorted: [2, 4, 4, 4, 5, 5, 7, 9], rank = 0.5 * 7 = 3.5
+        // Interpolate between index 3 (4) and index 4 (5): 4 + 0.5 * (5 - 4) = 4.5
+        let percentile = result.column(0).unwrap().get_float64(0).unwrap();
+        assert!((percentile - 4.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_percentile_extremes() {
+        // Test 0th and 100th percentiles
+        let mock = MockOperator::new(vec![create_statistical_test_chunk()]);
+
+        let mut agg = SimpleAggregateOperator::new(
+            Box::new(mock),
+            vec![
+                AggregateExpr::percentile_disc(0, 0.0),
+                AggregateExpr::percentile_disc(0, 1.0),
+            ],
+            vec![LogicalType::Float64, LogicalType::Float64],
+        );
+
+        let result = agg.next().unwrap().unwrap();
+        assert_eq!(result.row_count(), 1);
+        // 0th percentile = minimum = 2
+        let p0 = result.column(0).unwrap().get_float64(0).unwrap();
+        assert!((p0 - 2.0).abs() < 0.01);
+        // 100th percentile = maximum = 9
+        let p100 = result.column(1).unwrap().get_float64(0).unwrap();
+        assert!((p100 - 9.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_stdev_single_value() {
+        // Single value should return null for sample stdev
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        builder.column_mut(0).unwrap().push_int64(42);
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        let mock = MockOperator::new(vec![chunk]);
+
+        let mut agg = SimpleAggregateOperator::new(
+            Box::new(mock),
+            vec![AggregateExpr::stdev(0)],
+            vec![LogicalType::Float64],
+        );
+
+        let result = agg.next().unwrap().unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Sample stdev of single value is undefined (null)
+        assert!(matches!(
+            result.column(0).unwrap().get_value(0),
+            Some(Value::Null)
+        ));
+    }
+
+    #[test]
+    fn test_stdev_pop_single_value() {
+        // Single value should return 0 for population stdev
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        builder.column_mut(0).unwrap().push_int64(42);
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        let mock = MockOperator::new(vec![chunk]);
+
+        let mut agg = SimpleAggregateOperator::new(
+            Box::new(mock),
+            vec![AggregateExpr::stdev_pop(0)],
+            vec![LogicalType::Float64],
+        );
+
+        let result = agg.next().unwrap().unwrap();
+        assert_eq!(result.row_count(), 1);
+        // Population stdev of single value is 0
+        let stdev = result.column(0).unwrap().get_float64(0).unwrap();
+        assert!((stdev - 0.0).abs() < 0.01);
     }
 }

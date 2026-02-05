@@ -17,7 +17,7 @@ Persistent mode stores data durably on disk.
     ```python
     import grafeo
 
-    db = grafeo.Database(path="my_graph.db")
+    db = grafeo.GrafeoDB(path="my_graph.db")
     ```
 
 === "Rust"
@@ -46,7 +46,7 @@ my_graph.db/
 ## Configuration
 
 ```python
-db = grafeo.Database(
+db = grafeo.GrafeoDB(
     path="my_graph.db",
     # Sync mode: 'full' (default), 'normal', 'off'
     sync_mode='full'
@@ -63,14 +63,11 @@ db = grafeo.Database(
 
 ```python
 # First session
-db = grafeo.Database(path="my_graph.db")
-with db.session() as s:
-    s.execute("INSERT (:Person {name: 'Alice'})")
-db.close()
+db = grafeo.GrafeoDB(path="my_graph.db")
+db.execute("INSERT (:Person {name: 'Alice'})")
 
 # Later session - data persists
-db = grafeo.Database(path="my_graph.db")
-with db.session() as s:
-    result = s.execute("MATCH (p:Person) RETURN p.name")
-    # Returns 'Alice'
+db = grafeo.GrafeoDB(path="my_graph.db")
+result = db.execute("MATCH (p:Person) RETURN p.name")
+# Returns 'Alice'
 ```

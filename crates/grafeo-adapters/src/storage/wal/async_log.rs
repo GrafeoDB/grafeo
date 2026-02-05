@@ -169,6 +169,11 @@ impl AsyncWalManager {
                     *self.last_sync.lock().await = Instant::now();
                 }
             }
+            DurabilityMode::Adaptive { .. } => {
+                // Adaptive mode: just flush buffer, background thread handles sync
+                // Note: For async, consider using a tokio task-based flusher
+                log_file.writer.flush().await?;
+            }
             DurabilityMode::NoSync => {
                 // Just flush buffer, no sync
                 log_file.writer.flush().await?;

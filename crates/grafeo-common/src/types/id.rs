@@ -1,12 +1,25 @@
 //! Identifier types for graph elements and transactions.
+//!
+//! These are the handles you use to reference nodes, edges, and transactions.
+//! They're all thin wrappers around integers - cheap to copy and compare.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Unique identifier for a node in the graph.
+/// Identifies a node in the graph.
 ///
-/// Internally represented as a `u64`, allowing for up to 2^64 nodes.
-/// NodeIds are assigned sequentially and are never reused within an epoch.
+/// You get these back when you create nodes, and use them to look up or
+/// connect nodes later. Just a `u64` under the hood - cheap to copy.
+///
+/// # Examples
+///
+/// ```
+/// use grafeo_common::types::NodeId;
+///
+/// let id = NodeId::new(42);
+/// assert!(id.is_valid());
+/// assert_eq!(id.as_u64(), 42);
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 #[repr(transparent)]
 pub struct NodeId(pub u64);
@@ -65,9 +78,10 @@ impl From<NodeId> for u64 {
     }
 }
 
-/// Unique identifier for an edge in the graph.
+/// Identifies an edge (relationship) in the graph.
 ///
-/// Internally represented as a `u64`, allowing for up to 2^64 edges.
+/// Like [`NodeId`], just a `u64` wrapper. You get these when creating edges
+/// and use them to look up or modify relationships later.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 #[repr(transparent)]
 pub struct EdgeId(pub u64);
@@ -126,9 +140,10 @@ impl From<EdgeId> for u64 {
     }
 }
 
-/// Unique identifier for a transaction.
+/// Identifies a transaction for MVCC versioning.
 ///
-/// Transaction IDs are monotonically increasing and used for MVCC versioning.
+/// Each transaction gets a unique, monotonically increasing ID. This is how
+/// Grafeo knows which versions of data each transaction should see.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 #[repr(transparent)]
 pub struct TxId(pub u64);
@@ -198,11 +213,11 @@ impl From<TxId> for u64 {
     }
 }
 
-/// Unique identifier for an epoch in the arena allocator.
+/// Identifies an epoch for memory management.
 ///
-/// Epochs are used for structural sharing in MVCC. Each write transaction
-/// creates a new epoch, and old epochs can be garbage collected when no
-/// readers reference them.
+/// Think of epochs like garbage collection generations. When all readers from
+/// an old epoch finish, we can reclaim that memory. You usually don't interact
+/// with epochs directly - they're managed by the transaction system.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 #[repr(transparent)]
 pub struct EpochId(pub u64);

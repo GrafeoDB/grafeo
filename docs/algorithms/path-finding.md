@@ -15,56 +15,55 @@ Algorithms for finding paths between nodes.
 Find the shortest path between two nodes.
 
 ```python
-from grafeo.algorithms import shortest_path
+import grafeo
 
-path = shortest_path(db,
-    source=node_a,
-    target=node_b
-)
+db = grafeo.GrafeoDB()
+algs = db.algorithms()
 
-print(f"Path length: {len(path.nodes) - 1}")
-for node in path.nodes:
-    print(f"  -> {node}")
+path = algs.shortest_path(source=1, target=100)
+
+print(f"Path length: {len(path)}")
+for node_id in path:
+    print(f"  -> {node_id}")
 ```
 
-### Weighted Shortest Path
+## Dijkstra's Algorithm
+
+Weighted shortest path using Dijkstra's algorithm.
 
 ```python
-path = shortest_path(db,
-    source=node_a,
-    target=node_b,
-    weight_property='distance'
-)
-
-print(f"Total weight: {path.total_weight}")
+algs = db.algorithms()
+path = algs.dijkstra(source=1, target=100)
 ```
 
-## All Shortest Paths
+## Breadth-First Search
 
-Find all paths of minimum length.
+Traverse the graph level by level.
 
 ```python
-from grafeo.algorithms import all_shortest_paths
+algs = db.algorithms()
 
-paths = all_shortest_paths(db,
-    source=node_a,
-    target=node_b
-)
+# BFS from a starting node
+visited = algs.bfs(start=1)
 
-print(f"Found {len(paths)} shortest paths")
+# BFS with distance layers
+layers = algs.bfs_layers(start=1)
+for distance, nodes in enumerate(layers):
+    print(f"Distance {distance}: {len(nodes)} nodes")
 ```
 
-## Single Source Shortest Paths
+## Depth-First Search
 
-Find shortest paths from one node to all others.
+Traverse the graph depth-first.
 
 ```python
-from grafeo.algorithms import sssp
+algs = db.algorithms()
 
-distances = sssp(db, source=node_a)
+# DFS from a starting node
+visited = algs.dfs(start=1)
 
-for node_id, distance in distances.items():
-    print(f"Node {node_id}: distance {distance}")
+# DFS visiting all nodes
+all_visited = algs.dfs_all()
 ```
 
 ## All Pairs Shortest Paths
@@ -72,26 +71,8 @@ for node_id, distance in distances.items():
 Precompute all pairwise distances.
 
 ```python
-from grafeo.algorithms import apsp
-
-distances = apsp(db)
-
-# Query distance between any two nodes
-d = distances.get(node_a, node_b)
-```
-
-## K-Shortest Paths
-
-Find k shortest paths (may not be disjoint).
-
-```python
-from grafeo.algorithms import k_shortest_paths
-
-paths = k_shortest_paths(db,
-    source=node_a,
-    target=node_b,
-    k=5
-)
+algs = db.algorithms()
+distances = algs.all_pairs_shortest_path()
 ```
 
 ## Algorithm Complexity
@@ -100,6 +81,4 @@ paths = k_shortest_paths(db,
 |-----------|-----------------|-------|
 | Shortest Path (BFS) | O(V + E) | O(V) |
 | Shortest Path (Dijkstra) | O((V + E) log V) | O(V) |
-| SSSP | O((V + E) log V) | O(V) |
-| APSP (Floyd-Warshall) | O(V^3) | O(V^2) |
-| K-Shortest | O(K * V * (E + V log V)) | O(K * V) |
+| All Pairs (Floyd-Warshall) | O(V^3) | O(V^2) |

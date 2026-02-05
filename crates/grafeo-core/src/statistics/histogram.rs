@@ -1,12 +1,13 @@
-//! Equi-depth histograms for selectivity estimation.
+//! Equi-depth histograms for understanding value distributions.
 //!
-//! Histograms are used to estimate the selectivity of range predicates
-//! and equality predicates on high-cardinality columns.
+//! When the optimizer sees `WHERE age > 30`, it needs to know what fraction of
+//! rows match. Histograms split the value range into buckets of roughly equal
+//! row counts, letting us estimate selectivity without scanning the data.
 
 use grafeo_common::types::Value;
 use std::cmp::Ordering;
 
-/// An equi-depth histogram bucket.
+/// One slice of the value distribution - a range with its row count.
 #[derive(Debug, Clone)]
 pub struct HistogramBucket {
     /// Lower bound (inclusive).
@@ -37,9 +38,12 @@ impl HistogramBucket {
     }
 }
 
-/// An equi-depth histogram.
+/// Divides a column's value range into buckets of roughly equal row counts.
 ///
-/// Each bucket contains approximately the same number of rows.
+/// Build one with [`build()`](Self::build) from sorted values, then use
+/// [`estimate_equality_selectivity()`](Self::estimate_equality_selectivity)
+/// or [`estimate_range_selectivity()`](Self::estimate_range_selectivity)
+/// to predict how many rows will match a predicate.
 #[derive(Debug, Clone)]
 pub struct Histogram {
     /// Histogram buckets, sorted by lower bound.

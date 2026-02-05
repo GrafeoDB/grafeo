@@ -104,6 +104,54 @@ pub enum LogicalOperator {
 
     /// Merge a pattern (match or create).
     Merge(MergeOp),
+
+    /// Find shortest path between nodes.
+    ShortestPath(ShortestPathOp),
+
+    // ==================== SPARQL Update Operators ====================
+    /// Insert RDF triples.
+    InsertTriple(InsertTripleOp),
+
+    /// Delete RDF triples.
+    DeleteTriple(DeleteTripleOp),
+
+    /// SPARQL MODIFY operation (DELETE/INSERT WHERE).
+    /// Evaluates WHERE once, applies DELETE templates, then INSERT templates.
+    Modify(ModifyOp),
+
+    /// Clear a graph (remove all triples).
+    ClearGraph(ClearGraphOp),
+
+    /// Create a new named graph.
+    CreateGraph(CreateGraphOp),
+
+    /// Drop (remove) a named graph.
+    DropGraph(DropGraphOp),
+
+    /// Load data from a URL into a graph.
+    LoadGraph(LoadGraphOp),
+
+    /// Copy triples from one graph to another.
+    CopyGraph(CopyGraphOp),
+
+    /// Move triples from one graph to another.
+    MoveGraph(MoveGraphOp),
+
+    /// Add (merge) triples from one graph to another.
+    AddGraph(AddGraphOp),
+
+    // ==================== Vector Search Operators ====================
+    /// Scan using vector similarity search.
+    VectorScan(VectorScanOp),
+
+    /// Join graph patterns with vector similarity search.
+    ///
+    /// Computes vector distances between entities from the left input and
+    /// a query vector, then joins with similarity scores. Useful for:
+    /// - Filtering graph traversal results by vector similarity
+    /// - Computing aggregated embeddings and finding similar entities
+    /// - Combining multiple vector sources with graph structure
+    VectorJoin(VectorJoinOp),
 }
 
 /// Scan nodes from the graph.
@@ -147,6 +195,9 @@ pub struct ExpandOp {
     pub max_hops: Option<u32>,
     /// Input operator.
     pub input: Box<LogicalOperator>,
+    /// Path alias for variable-length patterns (e.g., `p` in `p = (a)-[*1..3]->(b)`).
+    /// When set, a path length column will be output under this name.
+    pub path_alias: Option<String>,
 }
 
 /// Direction for edge expansion.
@@ -210,6 +261,8 @@ pub struct AggregateOp {
     pub aggregates: Vec<AggregateExpr>,
     /// Input operator.
     pub input: Box<LogicalOperator>,
+    /// HAVING clause filter (applied after aggregation).
+    pub having: Option<LogicalExpression>,
 }
 
 /// An aggregate expression.
@@ -223,13 +276,17 @@ pub struct AggregateExpr {
     pub distinct: bool,
     /// Alias for the result.
     pub alias: Option<String>,
+    /// Percentile parameter for PERCENTILE_DISC/PERCENTILE_CONT (0.0 to 1.0).
+    pub percentile: Option<f64>,
 }
 
 /// Aggregate function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregateFunction {
-    /// Count rows.
+    /// Count all rows (COUNT(*)).
     Count,
+    /// Count non-null values (COUNT(expr)).
+    CountNonNull,
     /// Sum values.
     Sum,
     /// Average values.
@@ -240,6 +297,14 @@ pub enum AggregateFunction {
     Max,
     /// Collect into list.
     Collect,
+    /// Sample standard deviation (STDEV).
+    StdDev,
+    /// Population standard deviation (STDEVP).
+    StdDevPop,
+    /// Discrete percentile (PERCENTILE_DISC).
+    PercentileDisc,
+    /// Continuous percentile (PERCENTILE_CONT).
+    PercentileCont,
 }
 
 /// Filter rows based on a predicate.
@@ -319,6 +384,9 @@ pub enum SortOrder {
 pub struct DistinctOp {
     /// Input operator.
     pub input: Box<LogicalOperator>,
+    /// Optional columns to use for deduplication.
+    /// If None, all columns are used.
+    pub columns: Option<Vec<String>>,
 }
 
 /// Create a new node.
@@ -356,6 +424,8 @@ pub struct CreateEdgeOp {
 pub struct DeleteNodeOp {
     /// Variable of the node to delete.
     pub variable: String,
+    /// Whether to detach (delete connected edges) before deleting.
+    pub detach: bool,
     /// Input operator.
     pub input: Box<LogicalOperator>,
 }
@@ -505,6 +575,268 @@ pub struct MergeOp {
     pub input: Box<LogicalOperator>,
 }
 
+/// Find shortest path between two nodes.
+///
+/// This operator uses Dijkstra's algorithm to find the shortest path(s)
+/// between a source node and a target node, optionally filtered by edge type.
+#[derive(Debug, Clone)]
+pub struct ShortestPathOp {
+    /// Input operator providing source/target nodes.
+    pub input: Box<LogicalOperator>,
+    /// Variable name for the source node.
+    pub source_var: String,
+    /// Variable name for the target node.
+    pub target_var: String,
+    /// Optional edge type filter.
+    pub edge_type: Option<String>,
+    /// Direction of edge traversal.
+    pub direction: ExpandDirection,
+    /// Variable name to bind the path result.
+    pub path_alias: String,
+    /// Whether to find all shortest paths (vs. just one).
+    pub all_paths: bool,
+}
+
+// ==================== SPARQL Update Operators ====================
+
+/// Insert RDF triples.
+#[derive(Debug, Clone)]
+pub struct InsertTripleOp {
+    /// Subject of the triple.
+    pub subject: TripleComponent,
+    /// Predicate of the triple.
+    pub predicate: TripleComponent,
+    /// Object of the triple.
+    pub object: TripleComponent,
+    /// Named graph (optional).
+    pub graph: Option<String>,
+    /// Input operator (provides variable bindings).
+    pub input: Option<Box<LogicalOperator>>,
+}
+
+/// Delete RDF triples.
+#[derive(Debug, Clone)]
+pub struct DeleteTripleOp {
+    /// Subject pattern.
+    pub subject: TripleComponent,
+    /// Predicate pattern.
+    pub predicate: TripleComponent,
+    /// Object pattern.
+    pub object: TripleComponent,
+    /// Named graph (optional).
+    pub graph: Option<String>,
+    /// Input operator (provides variable bindings).
+    pub input: Option<Box<LogicalOperator>>,
+}
+
+/// SPARQL MODIFY operation (DELETE/INSERT WHERE).
+///
+/// Per SPARQL 1.1 Update spec, this operator:
+/// 1. Evaluates the WHERE clause once to get bindings
+/// 2. Applies DELETE templates using those bindings
+/// 3. Applies INSERT templates using the SAME bindings
+///
+/// This ensures DELETE and INSERT see consistent data.
+#[derive(Debug, Clone)]
+pub struct ModifyOp {
+    /// DELETE triple templates (patterns with variables).
+    pub delete_templates: Vec<TripleTemplate>,
+    /// INSERT triple templates (patterns with variables).
+    pub insert_templates: Vec<TripleTemplate>,
+    /// WHERE clause that provides variable bindings.
+    pub where_clause: Box<LogicalOperator>,
+    /// Named graph context (for WITH clause).
+    pub graph: Option<String>,
+}
+
+/// A triple template for DELETE/INSERT operations.
+#[derive(Debug, Clone)]
+pub struct TripleTemplate {
+    /// Subject (may be a variable).
+    pub subject: TripleComponent,
+    /// Predicate (may be a variable).
+    pub predicate: TripleComponent,
+    /// Object (may be a variable or literal).
+    pub object: TripleComponent,
+    /// Named graph (optional).
+    pub graph: Option<String>,
+}
+
+/// Clear all triples from a graph.
+#[derive(Debug, Clone)]
+pub struct ClearGraphOp {
+    /// Target graph (None = default graph, Some("") = all named, Some(iri) = specific graph).
+    pub graph: Option<String>,
+    /// Whether to silently ignore errors.
+    pub silent: bool,
+}
+
+/// Create a new named graph.
+#[derive(Debug, Clone)]
+pub struct CreateGraphOp {
+    /// IRI of the graph to create.
+    pub graph: String,
+    /// Whether to silently ignore if graph already exists.
+    pub silent: bool,
+}
+
+/// Drop (remove) a named graph.
+#[derive(Debug, Clone)]
+pub struct DropGraphOp {
+    /// Target graph (None = default graph).
+    pub graph: Option<String>,
+    /// Whether to silently ignore errors.
+    pub silent: bool,
+}
+
+/// Load data from a URL into a graph.
+#[derive(Debug, Clone)]
+pub struct LoadGraphOp {
+    /// Source URL to load data from.
+    pub source: String,
+    /// Destination graph (None = default graph).
+    pub destination: Option<String>,
+    /// Whether to silently ignore errors.
+    pub silent: bool,
+}
+
+/// Copy triples from one graph to another.
+#[derive(Debug, Clone)]
+pub struct CopyGraphOp {
+    /// Source graph.
+    pub source: Option<String>,
+    /// Destination graph.
+    pub destination: Option<String>,
+    /// Whether to silently ignore errors.
+    pub silent: bool,
+}
+
+/// Move triples from one graph to another.
+#[derive(Debug, Clone)]
+pub struct MoveGraphOp {
+    /// Source graph.
+    pub source: Option<String>,
+    /// Destination graph.
+    pub destination: Option<String>,
+    /// Whether to silently ignore errors.
+    pub silent: bool,
+}
+
+/// Add (merge) triples from one graph to another.
+#[derive(Debug, Clone)]
+pub struct AddGraphOp {
+    /// Source graph.
+    pub source: Option<String>,
+    /// Destination graph.
+    pub destination: Option<String>,
+    /// Whether to silently ignore errors.
+    pub silent: bool,
+}
+
+// ==================== Vector Search Operators ====================
+
+/// Vector similarity scan operation.
+///
+/// Performs approximate nearest neighbor search using a vector index (HNSW)
+/// or brute-force search for small datasets. Returns nodes/edges whose
+/// embeddings are similar to the query vector.
+///
+/// # Example GQL
+///
+/// ```gql
+/// MATCH (m:Movie)
+/// WHERE vector_similarity(m.embedding, $query_vector) > 0.8
+/// RETURN m.title
+/// ```
+#[derive(Debug, Clone)]
+pub struct VectorScanOp {
+    /// Variable name to bind matching entities to.
+    pub variable: String,
+    /// Name of the vector index to use (None = brute-force).
+    pub index_name: Option<String>,
+    /// Property containing the vector embedding.
+    pub property: String,
+    /// Optional label filter (scan only nodes with this label).
+    pub label: Option<String>,
+    /// The query vector expression.
+    pub query_vector: LogicalExpression,
+    /// Number of nearest neighbors to return.
+    pub k: usize,
+    /// Distance metric (None = use index default, typically cosine).
+    pub metric: Option<VectorMetric>,
+    /// Minimum similarity threshold (filters results below this).
+    pub min_similarity: Option<f32>,
+    /// Maximum distance threshold (filters results above this).
+    pub max_distance: Option<f32>,
+    /// Input operator (for hybrid queries combining graph + vector).
+    pub input: Option<Box<LogicalOperator>>,
+}
+
+/// Vector distance/similarity metric for vector scan operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorMetric {
+    /// Cosine similarity (1 - cosine_distance). Best for normalized embeddings.
+    Cosine,
+    /// Euclidean (L2) distance. Best when magnitude matters.
+    Euclidean,
+    /// Dot product. Best for maximum inner product search.
+    DotProduct,
+    /// Manhattan (L1) distance. Less sensitive to outliers.
+    Manhattan,
+}
+
+/// Join graph patterns with vector similarity search.
+///
+/// This operator takes entities from the left input and computes vector
+/// similarity against a query vector, outputting (entity, distance) pairs.
+///
+/// # Use Cases
+///
+/// 1. **Hybrid graph + vector queries**: Find similar nodes after graph traversal
+/// 2. **Aggregated embeddings**: Use AVG(embeddings) as query vector
+/// 3. **Filtering by similarity**: Join with threshold-based filtering
+///
+/// # Example
+///
+/// ```gql
+/// // Find movies similar to what the user liked
+/// MATCH (u:User {id: $user_id})-[:LIKED]->(liked:Movie)
+/// WITH avg(liked.embedding) AS user_taste
+/// VECTOR JOIN (m:Movie) ON m.embedding
+/// WHERE vector_similarity(m.embedding, user_taste) > 0.7
+/// RETURN m.title
+/// ```
+#[derive(Debug, Clone)]
+pub struct VectorJoinOp {
+    /// Input operator providing entities to match against.
+    pub input: Box<LogicalOperator>,
+    /// Variable from input to extract vectors from (for entity-to-entity similarity).
+    /// If None, uses `query_vector` directly.
+    pub left_vector_variable: Option<String>,
+    /// Property containing the left vector (used with `left_vector_variable`).
+    pub left_property: Option<String>,
+    /// The query vector expression (constant or computed).
+    pub query_vector: LogicalExpression,
+    /// Variable name to bind the right-side matching entities.
+    pub right_variable: String,
+    /// Property containing the right-side vector embeddings.
+    pub right_property: String,
+    /// Optional label filter for right-side entities.
+    pub right_label: Option<String>,
+    /// Name of vector index on right side (None = brute-force).
+    pub index_name: Option<String>,
+    /// Number of nearest neighbors per left-side entity.
+    pub k: usize,
+    /// Distance metric.
+    pub metric: Option<VectorMetric>,
+    /// Minimum similarity threshold.
+    pub min_similarity: Option<f32>,
+    /// Maximum distance threshold.
+    pub max_distance: Option<f32>,
+    /// Variable to bind the distance/similarity score.
+    pub score_variable: Option<String>,
+}
+
 /// Return results (terminal operator).
 #[derive(Debug, Clone)]
 pub struct ReturnOp {
@@ -566,6 +898,8 @@ pub enum LogicalExpression {
         name: String,
         /// Arguments.
         args: Vec<LogicalExpression>,
+        /// Whether DISTINCT is applied (e.g., COUNT(DISTINCT x)).
+        distinct: bool,
     },
 
     /// List literal.

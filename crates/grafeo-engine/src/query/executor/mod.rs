@@ -2,11 +2,14 @@
 //!
 //! Executes physical plans and produces results.
 
+use crate::config::AdaptiveConfig;
 use crate::database::QueryResult;
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
-use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{Operator, OperatorError};
+use grafeo_core::execution::{
+    AdaptiveContext, AdaptiveSummary, CardinalityTrackingWrapper, DataChunk, SharedAdaptiveContext,
+};
 
 /// Executes a physical operator tree and collects results.
 pub struct Executor {
@@ -123,11 +126,14 @@ impl Executor {
     }
 
     /// Collects all rows from a DataChunk into the result.
+    ///
+    /// Uses `selected_indices()` to correctly handle chunks with selection vectors
+    /// (e.g., after filtering operations).
     fn collect_chunk(&self, chunk: &DataChunk, result: &mut QueryResult) -> Result<usize> {
-        let row_count = chunk.row_count();
         let col_count = chunk.column_count();
+        let mut collected = 0;
 
-        for row_idx in 0..row_count {
+        for row_idx in chunk.selected_indices() {
             let mut row = Vec::with_capacity(col_count);
             for col_idx in 0..col_count {
                 let value = chunk
@@ -137,22 +143,29 @@ impl Executor {
                 row.push(value);
             }
             result.rows.push(row);
+            collected += 1;
         }
 
-        Ok(row_count)
+        Ok(collected)
     }
 
     /// Collects up to `limit` rows from a DataChunk.
+    ///
+    /// Uses `selected_indices()` to correctly handle chunks with selection vectors
+    /// (e.g., after filtering operations).
     fn collect_chunk_limited(
         &self,
         chunk: &DataChunk,
         result: &mut QueryResult,
         limit: usize,
     ) -> Result<usize> {
-        let row_count = chunk.row_count().min(limit);
         let col_count = chunk.column_count();
+        let mut collected = 0;
 
-        for row_idx in 0..row_count {
+        for row_idx in chunk.selected_indices() {
+            if collected >= limit {
+                break;
+            }
             let mut row = Vec::with_capacity(col_count);
             for col_idx in 0..col_count {
                 let value = chunk
@@ -162,9 +175,102 @@ impl Executor {
                 row.push(value);
             }
             result.rows.push(row);
+            collected += 1;
         }
 
-        Ok(row_count)
+        Ok(collected)
+    }
+
+    /// Executes a physical operator with adaptive cardinality tracking.
+    ///
+    /// This wraps the operator in a cardinality tracking layer and monitors
+    /// deviation from estimates during execution. The adaptive summary is
+    /// returned alongside the query result.
+    ///
+    /// # Arguments
+    ///
+    /// * `operator` - The root physical operator to execute
+    /// * `adaptive_context` - Context with cardinality estimates from planning
+    /// * `config` - Adaptive execution configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if operator execution fails.
+    pub fn execute_adaptive(
+        &self,
+        operator: Box<dyn Operator>,
+        adaptive_context: Option<AdaptiveContext>,
+        config: &AdaptiveConfig,
+    ) -> Result<(QueryResult, Option<AdaptiveSummary>)> {
+        // If adaptive is disabled or no context, fall back to normal execution
+        if !config.enabled {
+            let mut op = operator;
+            let result = self.execute(op.as_mut())?;
+            return Ok((result, None));
+        }
+
+        let ctx = match adaptive_context {
+            Some(ctx) => ctx,
+            None => {
+                let mut op = operator;
+                let result = self.execute(op.as_mut())?;
+                return Ok((result, None));
+            }
+        };
+
+        // Create shared context for tracking
+        let shared_ctx = SharedAdaptiveContext::from_context(AdaptiveContext::with_thresholds(
+            config.threshold,
+            config.min_rows,
+        ));
+
+        // Copy estimates from the planning context to the shared tracking context
+        for (op_id, checkpoint) in ctx.all_checkpoints() {
+            if let Some(mut inner) = shared_ctx.snapshot() {
+                inner.set_estimate(op_id, checkpoint.estimated);
+            }
+        }
+
+        // Wrap operator with tracking
+        let mut wrapped = CardinalityTrackingWrapper::new(operator, "root", shared_ctx.clone());
+
+        // Execute with tracking
+        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone());
+        let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
+        let mut total_rows: u64 = 0;
+        let check_interval = config.min_rows;
+
+        loop {
+            match wrapped.next() {
+                Ok(Some(chunk)) => {
+                    let chunk_rows = chunk.row_count();
+                    total_rows += chunk_rows as u64;
+
+                    // Capture column types from first non-empty chunk
+                    if !types_captured && chunk.column_count() > 0 {
+                        self.capture_column_types(&chunk, &mut result);
+                        types_captured = true;
+                    }
+                    self.collect_chunk(&chunk, &mut result)?;
+
+                    // Periodically check for significant deviation
+                    if total_rows >= check_interval && total_rows.is_multiple_of(check_interval) {
+                        if shared_ctx.should_reoptimize() {
+                            // For now, just log/note that re-optimization would trigger
+                            // Full re-optimization would require plan regeneration
+                            // which is a more invasive change
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(err) => return Err(convert_operator_error(err)),
+            }
+        }
+
+        // Get final summary
+        let summary = shared_ctx.snapshot().map(|ctx| ctx.summary());
+
+        Ok((result, summary))
     }
 }
 

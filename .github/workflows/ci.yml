@@ -41,7 +41,9 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Check docs
-        run: cargo doc --no-deps --all-features
+        run: |
+          rm -rf target/doc
+          cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -119,6 +121,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -137,14 +142,14 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --out dist -m crates/grafeo-python/Cargo.toml
+          args: --release --out dist -m crates/bindings/python/Cargo.toml
           sccache: 'true'
 
       - name: Install Python package and test dependencies
         shell: bash
         run: |
-          pip install dist/*.whl
-          pip install pytest pytest-asyncio
+          uv pip install --system dist/*.whl
+          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor
 
       - name: Run Python tests
         run: pytest tests/python/ -v --ignore=tests/python/benchmark_grafeo.py --ignore=tests/python/benchmark_phases.py

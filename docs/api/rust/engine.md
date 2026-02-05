@@ -10,41 +10,42 @@ tags:
 
 Main database facade and coordination.
 
-## Database
+## GrafeoDB
 
 ```rust
-use grafeo_engine::{Database, Config};
+use grafeo_engine::{GrafeoDB, Config};
 
 // In-memory
-let db = Database::open_in_memory()?;
+let db = GrafeoDB::new_in_memory();
 
 // Persistent
-let db = Database::open("path/to/db")?;
+let db = GrafeoDB::open("path/to/db")?;
 
 // With config
 let config = Config::builder()
     .memory_limit(4 * 1024 * 1024 * 1024)
     .threads(8)
     .build()?;
-let db = Database::open_with_config("path", config)?;
+let db = GrafeoDB::with_config(config);
 ```
 
 ## Session
 
 ```rust
-let session = db.session()?;
+let mut session = db.session();
 
 session.execute("INSERT (:Person {name: 'Alice'})")?;
 
 let result = session.execute("MATCH (p:Person) RETURN p.name")?;
-for row in result {
-    println!("{}", row.get::<String>("p.name")?);
+for row in result.rows {
+    println!("{:?}", row);
 }
 ```
 
 ## Transactions
 
 ```rust
+let mut session = db.session();
 session.begin()?;
 session.execute("...")?;
 session.commit()?;

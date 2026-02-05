@@ -8,8 +8,8 @@ site_description: >-
   Gremlin, GraphQL, SPARQL), ACID transactions, and extensible storage backends.
 
 # Repository
-repo_name: StevenBtw/grafeo
-repo_url: https://github.com/StevenBtw/grafeo
+repo_name: GrafeoDB/grafeo
+repo_url: https://github.com/GrafeoDB/grafeo
 edit_uri: edit/main/docs/
 
 # Copyright
@@ -20,7 +20,7 @@ theme:
   name: material
   custom_dir: docs/overrides
   favicon: assets/favicon.ico
-  logo: assets/logo.svg
+  logo: assets/logo-full.png
 
   features:
     # Navigation
@@ -49,14 +49,13 @@ theme:
 
     # Header
     - header.autohide
-    - announce.dismiss
 
   palette:
     # Light mode
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: deep purple
-      accent: amber
+      primary: blue-grey
+      accent: teal
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
@@ -64,8 +63,8 @@ theme:
     # Dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: deep purple
-      accent: amber
+      primary: blue-grey
+      accent: teal
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
@@ -73,6 +72,10 @@ theme:
   font:
     text: Inter
     code: JetBrains Mono
+
+# Hooks
+hooks:
+  - docs/hooks/copy_markdown.py
 
 # Plugins
 plugins:
@@ -144,7 +147,7 @@ extra_javascript:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/StevenBtw/grafeo
+      link: https://github.com/GrafeoDB/grafeo
       name: GitHub
     - icon: fontawesome/brands/python
       link: https://pypi.org/project/grafeo/
@@ -169,6 +172,11 @@ nav:
     - Quick Start: getting-started/quickstart.md
     - Your First Graph: getting-started/first-graph.md
     - Configuration: getting-started/configuration.md
+    - Command-Line Interface: getting-started/cli.md
+    - Troubleshooting: getting-started/troubleshooting.md
+    - Glossary: getting-started/glossary.md
+    - Migration Guide: getting-started/migration.md
+    - Security: getting-started/security.md
 
   - User Guide:
     - user-guide/index.md
@@ -215,6 +223,12 @@ nav:
       - Aggregations: user-guide/sparql/aggregations.md
       - Property Paths: user-guide/sparql/paths.md
       - Built-in Functions: user-guide/sparql/functions.md
+    - Vector Search:
+      - user-guide/vector-search/index.md
+      - Getting Started: user-guide/vector-search/basics.md
+      - HNSW Index: user-guide/vector-search/hnsw-index.md
+      - Quantization: user-guide/vector-search/quantization.md
+      - Python API: user-guide/vector-search/python-api.md
     - Python API:
       - user-guide/python/index.md
       - Database Operations: user-guide/python/database.md
@@ -302,6 +316,13 @@ nav:
       - grafeo-adapters: api/rust/adapters.md
       - grafeo-engine: api/rust/engine.md
 
+  - Ecosystem:
+    - ecosystem/index.md
+    - Performance Baselines: ecosystem/performance.md
+    - graph-bench: ecosystem/graph-bench.md
+    - anywidget-vector: ecosystem/anywidget-vector.md
+    - anywidget-graph: ecosystem/anywidget-graph.md
+
   - Comparisons:
     - comparisons/index.md
     - Cypher vs GQL: comparisons/cypher-vs-gql.md
@@ -316,5 +337,5 @@ nav:
     - Testing: contributing/testing.md
     - Pull Requests: contributing/pull-requests.md
 
-  - Changelog: changelog.md
+  - Roadmap: roadmap.md
   - Tags: tags.md

@@ -10,22 +10,33 @@ tags:
 
 Algorithms for predicting missing or future edges.
 
-!!! note "Coming Soon"
-    These algorithms are planned for upcoming releases.
+!!! note "NetworkX Integration"
+    Link prediction algorithms are available through the NetworkX adapter.
+
+## Using the NetworkX Adapter
+
+```python
+import grafeo
+import networkx as nx
+
+db = grafeo.GrafeoDB()
+
+# Convert to NetworkX graph
+nx_adapter = db.as_networkx(directed=False)
+nx_graph = nx_adapter.to_networkx()
+
+# Get non-edges for prediction
+non_edges = list(nx.non_edges(nx_graph))[:100]  # Sample
+```
 
 ## Common Neighbors
 
 Predict links based on shared connections.
 
 ```python
-from grafeo.algorithms import common_neighbors
-
-predictions = common_neighbors(db,
-    node_a=1,
-    node_b=2
-)
-
-print(f"Common neighbor score: {predictions.score}")
+preds = nx.common_neighbor_centrality(nx_graph, non_edges)
+for u, v, score in preds:
+    print(f"({u}, {v}): {score:.4f}")
 ```
 
 ## Jaccard Coefficient
@@ -33,9 +44,9 @@ print(f"Common neighbor score: {predictions.score}")
 Normalized common neighbors.
 
 ```python
-from grafeo.algorithms import jaccard_coefficient
-
-score = jaccard_coefficient(db, node_a, node_b)
+preds = nx.jaccard_coefficient(nx_graph, non_edges)
+for u, v, score in preds:
+    print(f"Jaccard({u}, {v}) = {score:.4f}")
 ```
 
 ## Adamic-Adar Index
@@ -43,9 +54,9 @@ score = jaccard_coefficient(db, node_a, node_b)
 Weighted common neighbors (rare neighbors count more).
 
 ```python
-from grafeo.algorithms import adamic_adar
-
-score = adamic_adar(db, node_a, node_b)
+preds = nx.adamic_adar_index(nx_graph, non_edges)
+for u, v, score in preds:
+    print(f"Adamic-Adar({u}, {v}) = {score:.4f}")
 ```
 
 ## Preferential Attachment
@@ -53,9 +64,9 @@ score = adamic_adar(db, node_a, node_b)
 Product of node degrees.
 
 ```python
-from grafeo.algorithms import preferential_attachment
-
-score = preferential_attachment(db, node_a, node_b)
+preds = nx.preferential_attachment(nx_graph, non_edges)
+for u, v, score in preds:
+    print(f"PA({u}, {v}) = {score}")
 ```
 
 ## Resource Allocation
@@ -63,25 +74,9 @@ score = preferential_attachment(db, node_a, node_b)
 Similar to Adamic-Adar but with different weighting.
 
 ```python
-from grafeo.algorithms import resource_allocation
-
-score = resource_allocation(db, node_a, node_b)
-```
-
-## Batch Predictions
-
-Generate predictions for many node pairs.
-
-```python
-from grafeo.algorithms import predict_links
-
-predictions = predict_links(db,
-    method='adamic_adar',
-    limit=100
-)
-
-for source, target, score in predictions:
-    print(f"{source} -> {target}: {score:.4f}")
+preds = nx.resource_allocation_index(nx_graph, non_edges)
+for u, v, score in preds:
+    print(f"RA({u}, {v}) = {score:.4f}")
 ```
 
 ## Use Cases

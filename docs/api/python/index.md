@@ -18,9 +18,8 @@ uv add grafeo
 ```python
 import grafeo
 
-db = grafeo.Database()
-with db.session() as session:
-    session.execute("INSERT (:Person {name: 'Alice'})")
+db = grafeo.GrafeoDB()
+db.execute("INSERT (:Person {name: 'Alice'})")
 ```
 
 ## Classes

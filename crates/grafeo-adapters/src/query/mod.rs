@@ -1,12 +1,15 @@
-//! Query language parsers.
+//! Query language parsers - speak your preferred graph language.
 //!
-//! This module provides parsers for different query languages:
+//! Grafeo speaks GQL natively (the new ISO standard), but we also understand
+//! Cypher, SPARQL, Gremlin, and GraphQL. Enable what you need via features.
 //!
-//! - [`gql`] - GQL parser (ISO/IEC 39075:2024)
-//! - [`cypher`] - Cypher parser (openCypher 9.0, feature-gated)
-//! - [`sparql`] - SPARQL parser (W3C SPARQL 1.1, feature-gated)
-//! - [`gremlin`] - Gremlin parser (Apache TinkerPop, feature-gated)
-//! - [`graphql`] - GraphQL parser (spec-compliant, feature-gated)
+//! | Language | Standard | Feature flag | Notes |
+//! | -------- | -------- | ------------ | ----- |
+//! | GQL | ISO/IEC 39075:2024 | `gql` (default) | The ISO standard, our native tongue |
+//! | Cypher | openCypher 9.0 | `cypher` | Neo4j's query language |
+//! | SPARQL | W3C SPARQL 1.1 | `sparql` | For RDF triple stores |
+//! | Gremlin | Apache TinkerPop | `gremlin` | Graph traversal DSL |
+//! | GraphQL | June 2018 spec | `graphql` | API query language |
 
 #[cfg(feature = "gql")]
 pub mod gql;

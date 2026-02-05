@@ -58,7 +58,7 @@ impl ExpandOperator {
             chunk_capacity: 2048,
             current_input: None,
             current_row: 0,
-            current_edges: Vec::new(),
+            current_edges: Vec::with_capacity(16), // typical node degree
             current_edge_idx: 0,
             exhausted: false,
             tx_id: None,
@@ -84,7 +84,9 @@ impl ExpandOperator {
     /// Loads the next input chunk.
     fn load_next_input(&mut self) -> Result<bool, OperatorError> {
         match self.input.next() {
-            Ok(Some(chunk)) => {
+            Ok(Some(mut chunk)) => {
+                // Flatten the chunk if it has a selection vector so we can use direct indexing
+                chunk.flatten();
                 self.current_input = Some(chunk);
                 self.current_row = 0;
                 self.current_edges.clear();
@@ -130,7 +132,7 @@ impl ExpandOperator {
                 // Filter by edge type if specified
                 let type_matches = if let Some(ref filter_type) = self.edge_type {
                     if let Some(edge_type) = self.store.edge_type(*edge_id) {
-                        edge_type.as_ref() == filter_type.as_str()
+                        edge_type.as_str() == filter_type.as_str()
                     } else {
                         false
                     }

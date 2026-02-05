@@ -1,18 +1,34 @@
-//! Bump allocator for fast temporary allocations.
+//! Bump allocator for temporary allocations.
 //!
-//! The bump allocator is used for short-lived allocations within a single
-//! operation or query. It's extremely fast for allocation but cannot
-//! deallocate individual allocations.
+//! When you need fast allocations that all get freed together (like during
+//! a single query), this is your friend. Just keep allocating, then call
+//! `reset()` when you're done. Wraps `bumpalo` for the heavy lifting.
 
 use std::cell::Cell;
 use std::ptr::NonNull;
 
-/// A fast bump allocator for temporary allocations.
+/// Allocates by bumping a pointer - fast, but no individual frees.
 ///
-/// Allocates memory by simply incrementing a pointer. All allocated memory
-/// is freed at once when the allocator is reset or dropped.
+/// Keep allocating throughout an operation, then call [`reset()`](Self::reset)
+/// to free everything at once. Not thread-safe - use one per thread.
 ///
-/// This allocator is not thread-safe and should only be used from a single thread.
+/// # Examples
+///
+/// ```
+/// use grafeo_common::memory::BumpAllocator;
+///
+/// let mut bump = BumpAllocator::new();
+///
+/// // Allocate a bunch of stuff
+/// let a = bump.alloc(42u64);
+/// let b = bump.alloc_str("hello");
+///
+/// // Use them...
+/// assert_eq!(*a, 42);
+///
+/// // Free everything at once
+/// bump.reset();
+/// ```
 pub struct BumpAllocator {
     /// The underlying bumpalo allocator.
     inner: bumpalo::Bump,
@@ -111,9 +127,11 @@ impl Default for BumpAllocator {
     }
 }
 
-/// A scoped bump allocator that automatically resets when dropped.
+/// Tracks allocations within a specific scope.
 ///
-/// Useful for allocating temporary data within a scope.
+/// Wraps a [`BumpAllocator`] and tracks how much was allocated in this scope.
+/// Note: bumpalo doesn't support partial reset, so memory is only freed when
+/// the parent allocator is reset.
 pub struct ScopedBump<'a> {
     bump: &'a mut BumpAllocator,
     start_bytes: usize,

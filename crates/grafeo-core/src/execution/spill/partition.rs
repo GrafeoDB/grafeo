@@ -509,6 +509,14 @@ fn hash_key(key: &[Value]) -> u64 {
                 8u8.hash(&mut hasher);
                 m.len().hash(&mut hasher);
             }
+            Value::Vector(v) => {
+                9u8.hash(&mut hasher);
+                v.len().hash(&mut hasher);
+                // Hash first few elements for distribution
+                for &f in v.iter().take(4) {
+                    f.to_bits().hash(&mut hasher);
+                }
+            }
         }
     }
 
@@ -550,6 +558,7 @@ mod tests {
     }
 
     /// Simple i64 serializer for tests.
+    #[allow(clippy::trivially_copy_pass_by_ref)] // Required by PartitionedState::new signature
     fn serialize_i64(value: &i64, w: &mut dyn Write) -> std::io::Result<()> {
         w.write_all(&value.to_le_bytes())
     }

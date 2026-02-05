@@ -1,14 +1,18 @@
 //! RDF-specific statistics for SPARQL query optimization.
 //!
-//! This module provides statistics structures specific to RDF triple stores,
-//! including predicate selectivity, triple pattern cardinality estimation,
-//! and join selectivity for SPARQL queries.
+//! SPARQL queries are built from triple patterns like `?person :knows ?friend`.
+//! To pick the best join order, the optimizer needs to estimate how many results
+//! each pattern will produce. This module tracks the distribution of subjects,
+//! predicates, and objects to make those estimates.
 
 use super::histogram::Histogram;
 use grafeo_common::types::Value;
 use std::collections::HashMap;
 
-/// Statistics for an RDF triple store.
+/// Everything the SPARQL optimizer knows about your RDF data.
+///
+/// Use [`estimate_triple_pattern_cardinality()`](Self::estimate_triple_pattern_cardinality)
+/// to predict how many triples match a pattern like `?s :knows ?o`.
 #[derive(Debug, Clone, Default)]
 pub struct RdfStatistics {
     /// Total number of triples.
@@ -181,7 +185,7 @@ impl RdfStatistics {
     }
 }
 
-/// Position in a triple pattern.
+/// Which position in a triple pattern - subject, predicate, or object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriplePosition {
     /// Subject position.
@@ -192,7 +196,7 @@ pub enum TriplePosition {
     Object,
 }
 
-/// Statistics for a specific predicate (property).
+/// Statistics for a single predicate (like `:knows` or `:name`).
 #[derive(Debug, Clone)]
 pub struct PredicateStatistics {
     /// Number of triples with this predicate.
@@ -277,7 +281,10 @@ impl PredicateStatistics {
     }
 }
 
-/// Statistics about index access patterns for cost estimation.
+/// Cost estimates for different index access patterns.
+///
+/// RDF stores typically have multiple indexes (SPO, POS, OSP). This tracks
+/// how expensive each one is to use, so the optimizer can pick the cheapest.
 #[derive(Debug, Clone, Default)]
 pub struct IndexStatistics {
     /// Average cost of SPO index lookup (subject first).
@@ -321,7 +328,10 @@ impl IndexStatistics {
     }
 }
 
-/// Collector for building RDF statistics from a triple store.
+/// Streams triples through to build RDF statistics automatically.
+///
+/// Call [`record_triple()`](Self::record_triple) for each triple, then
+/// [`build()`](Self::build) to get the final [`RdfStatistics`].
 #[derive(Default)]
 pub struct RdfStatisticsCollector {
     /// Total triple count.

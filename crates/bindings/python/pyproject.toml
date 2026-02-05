@@ -1,0 +1,73 @@
+[build-system]
+requires = ["maturin>=1.11.5"]
+build-backend = "maturin"
+
+[project]
+name = "grafeo"
+version = "0.3.4"
+description = "A high-performance, embeddable graph database with Python bindings"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.12"
+authors = [
+    { name = "S.T. Grond" }
+]
+keywords = ["graph", "database", "gql", "knowledge-graph", "embedded"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "solvor>=0.6.1"
+]
+
+[project.urls]
+Homepage = "https://grafeo.dev"
+Documentation = "https://grafeo.dev/user-guide/"
+Repository = "https://github.com/GrafeoDB/grafeo"
+Issues = "https://github.com/GrafeoDB/grafeo/issues"
+
+[project.optional-dependencies]
+cli = [
+    "click>=8.3.1",
+]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "ty>=0.0.15",
+    "ruff>=0.15.0",
+]
+
+[project.scripts]
+grafeo = "grafeo.cli:main"
+
+[tool.maturin]
+features = ["pyo3/extension-module", "full"]
+python-source = "python"
+module-name = "grafeo"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+
+[tool.ty.environment]
+python-version = "3.12"

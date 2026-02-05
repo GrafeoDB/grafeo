@@ -29,18 +29,16 @@ Grafeo supports Snapshot Isolation by default.
 ## Example
 
 ```python
-# Transaction 1
-with db.session() as s1:
-    s1.begin()
-    # Sees snapshot at begin time
+# Transaction 1 sees a consistent snapshot
+with db.begin_transaction() as tx1:
+    # Sees snapshot at transaction begin time
 
-    # Transaction 2 commits changes
-    with db.session() as s2:
-        s2.execute("SET x = 100")
+    # Meanwhile, another transaction commits changes
+    db.execute("MATCH (n {id: 'x'}) SET n.value = 100")
 
-    # s1 still sees old value
-    result = s1.execute("SELECT x")  # Old value
-    s1.commit()
+    # tx1 still sees the old value (snapshot isolation)
+    result = tx1.execute("MATCH (n {id: 'x'}) RETURN n.value")
+    tx1.commit()
 ```
 
 ## Conflict Detection

@@ -10,81 +10,46 @@ tags:
 
 Measure similarity between nodes or graphs.
 
-!!! note "Coming Soon"
-    These algorithms are planned for upcoming releases.
+!!! note "Advanced Feature"
+    Some similarity algorithms are available through the NetworkX adapter for extended functionality.
 
-## Node Similarity
+## Using the NetworkX Adapter
 
-### Cosine Similarity
-
-Based on shared neighbors.
+For advanced similarity measures, use the NetworkX integration:
 
 ```python
-from grafeo.algorithms import node_similarity
+import grafeo
 
-similar_nodes = node_similarity(db,
-    node_id=1,
-    method='cosine',
-    limit=10
-)
+db = grafeo.GrafeoDB()
+
+# Convert to NetworkX graph
+nx_adapter = db.as_networkx(directed=False)
+nx_graph = nx_adapter.to_networkx()
+
+# Use NetworkX similarity functions
+import networkx as nx
+
+# Jaccard coefficient for potential edges
+preds = nx.jaccard_coefficient(nx_graph, [(1, 2), (1, 3)])
+for u, v, score in preds:
+    print(f"Jaccard({u}, {v}) = {score:.4f}")
 ```
 
-### Jaccard Similarity
+## Node Similarity via Algorithms API
 
-Based on neighbor overlap.
-
-```python
-similar_nodes = node_similarity(db,
-    node_id=1,
-    method='jaccard',
-    limit=10
-)
-```
-
-### Overlap Coefficient
-
-Minimum set comparison.
+Basic similarity through the algorithms interface:
 
 ```python
-similar_nodes = node_similarity(db,
-    node_id=1,
-    method='overlap',
-    limit=10
-)
-```
+algs = db.algorithms()
 
-## Pairwise Similarity
-
-Compare two specific nodes.
-
-```python
-from grafeo.algorithms import pairwise_similarity
-
-score = pairwise_similarity(db,
-    node_a=1,
-    node_b=2,
-    method='cosine'
-)
-```
-
-## Graph Similarity
-
-Compare entire graphs or subgraphs.
-
-```python
-from grafeo.algorithms import graph_similarity
-
-score = graph_similarity(
-    graph_a,
-    graph_b,
-    method='edit_distance'
-)
+# Use clustering coefficient as a similarity proxy
+transitivity = algs.transitivity()
 ```
 
 ## Use Cases
 
 | Algorithm | Use Case |
 |-----------|----------|
-| Cosine | Feature-based comparison |
 | Jaccard | Set-based comparison |
-| Edit Distance | Structural comparison |
+| Cosine | Feature-based comparison |
+| Common Neighbors | Link prediction |

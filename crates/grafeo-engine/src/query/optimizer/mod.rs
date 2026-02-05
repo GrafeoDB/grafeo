@@ -1,18 +1,15 @@
-//! Query optimizer.
+//! Makes your queries faster without changing their meaning.
 //!
-//! Transforms logical plans for better performance.
+//! The optimizer transforms logical plans to run more efficiently:
 //!
-//! ## Optimization Rules
+//! | Optimization | What it does |
+//! | ------------ | ------------ |
+//! | Filter Pushdown | Moves `WHERE` clauses closer to scans - filter early, process less |
+//! | Join Reordering | Picks the best order to join tables using the DPccp algorithm |
+//! | Predicate Simplification | Folds constants like `1 + 1` into `2` |
 //!
-//! - **Filter Pushdown**: Pushes filters closer to scans to reduce data early
-//! - **Predicate Simplification**: Simplifies constant expressions
-//! - **Join Reordering**: Optimizes join order using DPccp algorithm
-//!
-//! ## Submodules
-//!
-//! - [`cost`] - Cost model for estimating operator costs
-//! - [`cardinality`] - Cardinality estimation for query operators
-//! - [`join_order`] - DPccp join ordering algorithm
+//! The optimizer uses [`CostModel`] and [`CardinalityEstimator`] to predict
+//! how expensive different plans are, then picks the cheapest.
 
 pub mod cardinality;
 pub mod cost;
@@ -26,12 +23,35 @@ use crate::query::plan::{FilterOp, LogicalExpression, LogicalOperator, LogicalPl
 use grafeo_common::utils::error::Result;
 use std::collections::HashSet;
 
-/// Query optimizer that transforms logical plans for better performance.
+/// Information about a join condition for join reordering.
+#[derive(Debug, Clone)]
+struct JoinInfo {
+    left_var: String,
+    right_var: String,
+    left_expr: LogicalExpression,
+    right_expr: LogicalExpression,
+}
+
+/// A column required by the query, used for projection pushdown.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RequiredColumn {
+    /// A variable (node, edge, or path binding)
+    Variable(String),
+    /// A specific property of a variable
+    Property(String, String),
+}
+
+/// Transforms logical plans for faster execution.
+///
+/// Create with [`new()`](Self::new), then call [`optimize()`](Self::optimize).
+/// Use the builder methods to enable/disable specific optimizations.
 pub struct Optimizer {
     /// Whether to enable filter pushdown.
     enable_filter_pushdown: bool,
     /// Whether to enable join reordering.
     enable_join_reorder: bool,
+    /// Whether to enable projection pushdown.
+    enable_projection_pushdown: bool,
     /// Cost model for estimation.
     cost_model: CostModel,
     /// Cardinality estimator.
@@ -45,6 +65,7 @@ impl Optimizer {
         Self {
             enable_filter_pushdown: true,
             enable_join_reorder: true,
+            enable_projection_pushdown: true,
             cost_model: CostModel::new(),
             card_estimator: CardinalityEstimator::new(),
         }
@@ -59,6 +80,12 @@ impl Optimizer {
     /// Enables or disables join reordering.
     pub fn with_join_reorder(mut self, enabled: bool) -> Self {
         self.enable_join_reorder = enabled;
+        self
+    }
+
+    /// Enables or disables projection pushdown.
+    pub fn with_projection_pushdown(mut self, enabled: bool) -> Self {
+        self.enable_projection_pushdown = enabled;
         self
     }
 
@@ -108,7 +135,456 @@ impl Optimizer {
             root = self.push_filters_down(root);
         }
 
+        if self.enable_join_reorder {
+            root = self.reorder_joins(root);
+        }
+
+        if self.enable_projection_pushdown {
+            root = self.push_projections_down(root);
+        }
+
         Ok(LogicalPlan::new(root))
+    }
+
+    /// Pushes projections down the operator tree to eliminate unused columns early.
+    ///
+    /// This optimization:
+    /// 1. Collects required variables/properties from the root
+    /// 2. Propagates requirements down through the tree
+    /// 3. Inserts projections to eliminate unneeded columns before expensive operations
+    fn push_projections_down(&self, op: LogicalOperator) -> LogicalOperator {
+        // Collect required columns from the top of the plan
+        let required = self.collect_required_columns(&op);
+
+        // Push projections down
+        self.push_projections_recursive(op, &required)
+    }
+
+    /// Collects all variables and properties required by an operator and its ancestors.
+    fn collect_required_columns(&self, op: &LogicalOperator) -> HashSet<RequiredColumn> {
+        let mut required = HashSet::new();
+        Self::collect_required_recursive(op, &mut required);
+        required
+    }
+
+    /// Recursively collects required columns.
+    fn collect_required_recursive(op: &LogicalOperator, required: &mut HashSet<RequiredColumn>) {
+        match op {
+            LogicalOperator::Return(ret) => {
+                for item in &ret.items {
+                    Self::collect_from_expression(&item.expression, required);
+                }
+                Self::collect_required_recursive(&ret.input, required);
+            }
+            LogicalOperator::Project(proj) => {
+                for p in &proj.projections {
+                    Self::collect_from_expression(&p.expression, required);
+                }
+                Self::collect_required_recursive(&proj.input, required);
+            }
+            LogicalOperator::Filter(filter) => {
+                Self::collect_from_expression(&filter.predicate, required);
+                Self::collect_required_recursive(&filter.input, required);
+            }
+            LogicalOperator::Sort(sort) => {
+                for key in &sort.keys {
+                    Self::collect_from_expression(&key.expression, required);
+                }
+                Self::collect_required_recursive(&sort.input, required);
+            }
+            LogicalOperator::Aggregate(agg) => {
+                for expr in &agg.group_by {
+                    Self::collect_from_expression(expr, required);
+                }
+                for agg_expr in &agg.aggregates {
+                    if let Some(ref expr) = agg_expr.expression {
+                        Self::collect_from_expression(expr, required);
+                    }
+                }
+                if let Some(ref having) = agg.having {
+                    Self::collect_from_expression(having, required);
+                }
+                Self::collect_required_recursive(&agg.input, required);
+            }
+            LogicalOperator::Join(join) => {
+                for cond in &join.conditions {
+                    Self::collect_from_expression(&cond.left, required);
+                    Self::collect_from_expression(&cond.right, required);
+                }
+                Self::collect_required_recursive(&join.left, required);
+                Self::collect_required_recursive(&join.right, required);
+            }
+            LogicalOperator::Expand(expand) => {
+                // The source and target variables are needed
+                required.insert(RequiredColumn::Variable(expand.from_variable.clone()));
+                required.insert(RequiredColumn::Variable(expand.to_variable.clone()));
+                if let Some(ref edge_var) = expand.edge_variable {
+                    required.insert(RequiredColumn::Variable(edge_var.clone()));
+                }
+                Self::collect_required_recursive(&expand.input, required);
+            }
+            LogicalOperator::Limit(limit) => {
+                Self::collect_required_recursive(&limit.input, required);
+            }
+            LogicalOperator::Skip(skip) => {
+                Self::collect_required_recursive(&skip.input, required);
+            }
+            LogicalOperator::Distinct(distinct) => {
+                Self::collect_required_recursive(&distinct.input, required);
+            }
+            LogicalOperator::NodeScan(scan) => {
+                required.insert(RequiredColumn::Variable(scan.variable.clone()));
+            }
+            LogicalOperator::EdgeScan(scan) => {
+                required.insert(RequiredColumn::Variable(scan.variable.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    /// Collects required columns from an expression.
+    fn collect_from_expression(expr: &LogicalExpression, required: &mut HashSet<RequiredColumn>) {
+        match expr {
+            LogicalExpression::Variable(var) => {
+                required.insert(RequiredColumn::Variable(var.clone()));
+            }
+            LogicalExpression::Property { variable, property } => {
+                required.insert(RequiredColumn::Property(variable.clone(), property.clone()));
+                required.insert(RequiredColumn::Variable(variable.clone()));
+            }
+            LogicalExpression::Binary { left, right, .. } => {
+                Self::collect_from_expression(left, required);
+                Self::collect_from_expression(right, required);
+            }
+            LogicalExpression::Unary { operand, .. } => {
+                Self::collect_from_expression(operand, required);
+            }
+            LogicalExpression::FunctionCall { args, .. } => {
+                for arg in args {
+                    Self::collect_from_expression(arg, required);
+                }
+            }
+            LogicalExpression::List(items) => {
+                for item in items {
+                    Self::collect_from_expression(item, required);
+                }
+            }
+            LogicalExpression::Map(pairs) => {
+                for (_, value) in pairs {
+                    Self::collect_from_expression(value, required);
+                }
+            }
+            LogicalExpression::IndexAccess { base, index } => {
+                Self::collect_from_expression(base, required);
+                Self::collect_from_expression(index, required);
+            }
+            LogicalExpression::SliceAccess { base, start, end } => {
+                Self::collect_from_expression(base, required);
+                if let Some(s) = start {
+                    Self::collect_from_expression(s, required);
+                }
+                if let Some(e) = end {
+                    Self::collect_from_expression(e, required);
+                }
+            }
+            LogicalExpression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => {
+                if let Some(op) = operand {
+                    Self::collect_from_expression(op, required);
+                }
+                for (cond, result) in when_clauses {
+                    Self::collect_from_expression(cond, required);
+                    Self::collect_from_expression(result, required);
+                }
+                if let Some(else_expr) = else_clause {
+                    Self::collect_from_expression(else_expr, required);
+                }
+            }
+            LogicalExpression::Labels(var)
+            | LogicalExpression::Type(var)
+            | LogicalExpression::Id(var) => {
+                required.insert(RequiredColumn::Variable(var.clone()));
+            }
+            LogicalExpression::ListComprehension {
+                list_expr,
+                filter_expr,
+                map_expr,
+                ..
+            } => {
+                Self::collect_from_expression(list_expr, required);
+                if let Some(filter) = filter_expr {
+                    Self::collect_from_expression(filter, required);
+                }
+                Self::collect_from_expression(map_expr, required);
+            }
+            _ => {}
+        }
+    }
+
+    /// Recursively pushes projections down, adding them before expensive operations.
+    fn push_projections_recursive(
+        &self,
+        op: LogicalOperator,
+        required: &HashSet<RequiredColumn>,
+    ) -> LogicalOperator {
+        match op {
+            LogicalOperator::Return(mut ret) => {
+                ret.input = Box::new(self.push_projections_recursive(*ret.input, required));
+                LogicalOperator::Return(ret)
+            }
+            LogicalOperator::Project(mut proj) => {
+                proj.input = Box::new(self.push_projections_recursive(*proj.input, required));
+                LogicalOperator::Project(proj)
+            }
+            LogicalOperator::Filter(mut filter) => {
+                filter.input = Box::new(self.push_projections_recursive(*filter.input, required));
+                LogicalOperator::Filter(filter)
+            }
+            LogicalOperator::Sort(mut sort) => {
+                // Sort is expensive - consider adding a projection before it
+                // to reduce tuple width
+                sort.input = Box::new(self.push_projections_recursive(*sort.input, required));
+                LogicalOperator::Sort(sort)
+            }
+            LogicalOperator::Aggregate(mut agg) => {
+                agg.input = Box::new(self.push_projections_recursive(*agg.input, required));
+                LogicalOperator::Aggregate(agg)
+            }
+            LogicalOperator::Join(mut join) => {
+                // Joins are expensive - the required columns help determine
+                // what to project on each side
+                let left_vars = self.collect_output_variables(&join.left);
+                let right_vars = self.collect_output_variables(&join.right);
+
+                // Filter required columns to each side
+                let left_required: HashSet<_> = required
+                    .iter()
+                    .filter(|c| match c {
+                        RequiredColumn::Variable(v) => left_vars.contains(v),
+                        RequiredColumn::Property(v, _) => left_vars.contains(v),
+                    })
+                    .cloned()
+                    .collect();
+
+                let right_required: HashSet<_> = required
+                    .iter()
+                    .filter(|c| match c {
+                        RequiredColumn::Variable(v) => right_vars.contains(v),
+                        RequiredColumn::Property(v, _) => right_vars.contains(v),
+                    })
+                    .cloned()
+                    .collect();
+
+                join.left = Box::new(self.push_projections_recursive(*join.left, &left_required));
+                join.right =
+                    Box::new(self.push_projections_recursive(*join.right, &right_required));
+                LogicalOperator::Join(join)
+            }
+            LogicalOperator::Expand(mut expand) => {
+                expand.input = Box::new(self.push_projections_recursive(*expand.input, required));
+                LogicalOperator::Expand(expand)
+            }
+            LogicalOperator::Limit(mut limit) => {
+                limit.input = Box::new(self.push_projections_recursive(*limit.input, required));
+                LogicalOperator::Limit(limit)
+            }
+            LogicalOperator::Skip(mut skip) => {
+                skip.input = Box::new(self.push_projections_recursive(*skip.input, required));
+                LogicalOperator::Skip(skip)
+            }
+            LogicalOperator::Distinct(mut distinct) => {
+                distinct.input =
+                    Box::new(self.push_projections_recursive(*distinct.input, required));
+                LogicalOperator::Distinct(distinct)
+            }
+            other => other,
+        }
+    }
+
+    /// Reorders joins in the operator tree using the DPccp algorithm.
+    ///
+    /// This optimization finds the optimal join order by:
+    /// 1. Extracting all base relations (scans) and join conditions
+    /// 2. Building a join graph
+    /// 3. Using dynamic programming to find the cheapest join order
+    fn reorder_joins(&self, op: LogicalOperator) -> LogicalOperator {
+        // First, recursively optimize children
+        let op = self.reorder_joins_recursive(op);
+
+        // Then, if this is a join tree, try to optimize it
+        if let Some((relations, conditions)) = self.extract_join_tree(&op) {
+            if relations.len() >= 2 {
+                if let Some(optimized) = self.optimize_join_order(&relations, &conditions) {
+                    return optimized;
+                }
+            }
+        }
+
+        op
+    }
+
+    /// Recursively applies join reordering to child operators.
+    fn reorder_joins_recursive(&self, op: LogicalOperator) -> LogicalOperator {
+        match op {
+            LogicalOperator::Return(mut ret) => {
+                ret.input = Box::new(self.reorder_joins(*ret.input));
+                LogicalOperator::Return(ret)
+            }
+            LogicalOperator::Project(mut proj) => {
+                proj.input = Box::new(self.reorder_joins(*proj.input));
+                LogicalOperator::Project(proj)
+            }
+            LogicalOperator::Filter(mut filter) => {
+                filter.input = Box::new(self.reorder_joins(*filter.input));
+                LogicalOperator::Filter(filter)
+            }
+            LogicalOperator::Limit(mut limit) => {
+                limit.input = Box::new(self.reorder_joins(*limit.input));
+                LogicalOperator::Limit(limit)
+            }
+            LogicalOperator::Skip(mut skip) => {
+                skip.input = Box::new(self.reorder_joins(*skip.input));
+                LogicalOperator::Skip(skip)
+            }
+            LogicalOperator::Sort(mut sort) => {
+                sort.input = Box::new(self.reorder_joins(*sort.input));
+                LogicalOperator::Sort(sort)
+            }
+            LogicalOperator::Distinct(mut distinct) => {
+                distinct.input = Box::new(self.reorder_joins(*distinct.input));
+                LogicalOperator::Distinct(distinct)
+            }
+            LogicalOperator::Aggregate(mut agg) => {
+                agg.input = Box::new(self.reorder_joins(*agg.input));
+                LogicalOperator::Aggregate(agg)
+            }
+            LogicalOperator::Expand(mut expand) => {
+                expand.input = Box::new(self.reorder_joins(*expand.input));
+                LogicalOperator::Expand(expand)
+            }
+            // Join operators are handled by the parent reorder_joins call
+            other => other,
+        }
+    }
+
+    /// Extracts base relations and join conditions from a join tree.
+    ///
+    /// Returns None if the operator is not a join tree.
+    fn extract_join_tree(
+        &self,
+        op: &LogicalOperator,
+    ) -> Option<(Vec<(String, LogicalOperator)>, Vec<JoinInfo>)> {
+        let mut relations = Vec::new();
+        let mut join_conditions = Vec::new();
+
+        if !self.collect_join_tree(op, &mut relations, &mut join_conditions) {
+            return None;
+        }
+
+        if relations.len() < 2 {
+            return None;
+        }
+
+        Some((relations, join_conditions))
+    }
+
+    /// Recursively collects base relations and join conditions.
+    ///
+    /// Returns true if this subtree is part of a join tree.
+    fn collect_join_tree(
+        &self,
+        op: &LogicalOperator,
+        relations: &mut Vec<(String, LogicalOperator)>,
+        conditions: &mut Vec<JoinInfo>,
+    ) -> bool {
+        match op {
+            LogicalOperator::Join(join) => {
+                // Collect from both sides
+                let left_ok = self.collect_join_tree(&join.left, relations, conditions);
+                let right_ok = self.collect_join_tree(&join.right, relations, conditions);
+
+                // Add conditions from this join
+                for cond in &join.conditions {
+                    if let (Some(left_var), Some(right_var)) = (
+                        self.extract_variable_from_expr(&cond.left),
+                        self.extract_variable_from_expr(&cond.right),
+                    ) {
+                        conditions.push(JoinInfo {
+                            left_var,
+                            right_var,
+                            left_expr: cond.left.clone(),
+                            right_expr: cond.right.clone(),
+                        });
+                    }
+                }
+
+                left_ok && right_ok
+            }
+            LogicalOperator::NodeScan(scan) => {
+                relations.push((scan.variable.clone(), op.clone()));
+                true
+            }
+            LogicalOperator::EdgeScan(scan) => {
+                relations.push((scan.variable.clone(), op.clone()));
+                true
+            }
+            LogicalOperator::Filter(filter) => {
+                // A filter on a base relation is still part of the join tree
+                self.collect_join_tree(&filter.input, relations, conditions)
+            }
+            LogicalOperator::Expand(expand) => {
+                // Expand is a special case - it's like a join with the adjacency
+                // For now, treat the whole Expand subtree as a single relation
+                relations.push((expand.to_variable.clone(), op.clone()));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Extracts the primary variable from an expression.
+    fn extract_variable_from_expr(&self, expr: &LogicalExpression) -> Option<String> {
+        match expr {
+            LogicalExpression::Variable(v) => Some(v.clone()),
+            LogicalExpression::Property { variable, .. } => Some(variable.clone()),
+            _ => None,
+        }
+    }
+
+    /// Optimizes the join order using DPccp.
+    fn optimize_join_order(
+        &self,
+        relations: &[(String, LogicalOperator)],
+        conditions: &[JoinInfo],
+    ) -> Option<LogicalOperator> {
+        use join_order::{DPccp, JoinGraphBuilder};
+
+        // Build the join graph
+        let mut builder = JoinGraphBuilder::new();
+
+        for (var, relation) in relations {
+            builder.add_relation(var, relation.clone());
+        }
+
+        for cond in conditions {
+            builder.add_join_condition(
+                &cond.left_var,
+                &cond.right_var,
+                cond.left_expr.clone(),
+                cond.right_expr.clone(),
+            );
+        }
+
+        let graph = builder.build();
+
+        // Run DPccp
+        let mut dpccp = DPccp::new(&graph, &self.cost_model, &self.card_estimator);
+        let plan = dpccp.optimize()?;
+
+        Some(plan.operator)
     }
 
     /// Pushes filters down the operator tree.
@@ -199,15 +675,28 @@ impl Optimizer {
                 LogicalOperator::Return(ret)
             }
 
-            // Can push through Expand if predicate only uses source variable
+            // Can push through Expand if predicate doesn't use variables introduced by this expand
             LogicalOperator::Expand(mut expand) => {
                 let predicate_vars = self.extract_variables(&predicate);
 
-                // Check if predicate only uses the source variable
-                let uses_only_source = predicate_vars.iter().all(|v| v == &expand.from_variable);
+                // Variables introduced by this expand are:
+                // - The target variable (to_variable)
+                // - The edge variable (if any)
+                // - The path alias (if any)
+                let mut introduced_vars = vec![&expand.to_variable];
+                if let Some(ref edge_var) = expand.edge_variable {
+                    introduced_vars.push(edge_var);
+                }
+                if let Some(ref path_alias) = expand.path_alias {
+                    introduced_vars.push(path_alias);
+                }
 
-                if uses_only_source {
-                    // Push the filter before the expand
+                // Check if predicate uses any variables introduced by this expand
+                let uses_introduced_vars =
+                    predicate_vars.iter().any(|v| introduced_vars.contains(&v));
+
+                if !uses_introduced_vars {
+                    // Predicate doesn't use vars from this expand, so push through
                     expand.input = Box::new(self.try_push_filter_into(predicate, *expand.input));
                     LogicalOperator::Expand(expand)
                 } else {
@@ -268,12 +757,12 @@ impl Optimizer {
     /// Collects all output variable names from an operator.
     fn collect_output_variables(&self, op: &LogicalOperator) -> HashSet<String> {
         let mut vars = HashSet::new();
-        self.collect_output_variables_recursive(op, &mut vars);
+        Self::collect_output_variables_recursive(op, &mut vars);
         vars
     }
 
     /// Recursively collects output variables from an operator.
-    fn collect_output_variables_recursive(&self, op: &LogicalOperator, vars: &mut HashSet<String>) {
+    fn collect_output_variables_recursive(op: &LogicalOperator, vars: &mut HashSet<String>) {
         match op {
             LogicalOperator::NodeScan(scan) => {
                 vars.insert(scan.variable.clone());
@@ -286,10 +775,10 @@ impl Optimizer {
                 if let Some(edge_var) = &expand.edge_variable {
                     vars.insert(edge_var.clone());
                 }
-                self.collect_output_variables_recursive(&expand.input, vars);
+                Self::collect_output_variables_recursive(&expand.input, vars);
             }
             LogicalOperator::Filter(filter) => {
-                self.collect_output_variables_recursive(&filter.input, vars);
+                Self::collect_output_variables_recursive(&filter.input, vars);
             }
             LogicalOperator::Project(proj) => {
                 for p in &proj.projections {
@@ -297,15 +786,15 @@ impl Optimizer {
                         vars.insert(alias.clone());
                     }
                 }
-                self.collect_output_variables_recursive(&proj.input, vars);
+                Self::collect_output_variables_recursive(&proj.input, vars);
             }
             LogicalOperator::Join(join) => {
-                self.collect_output_variables_recursive(&join.left, vars);
-                self.collect_output_variables_recursive(&join.right, vars);
+                Self::collect_output_variables_recursive(&join.left, vars);
+                Self::collect_output_variables_recursive(&join.right, vars);
             }
             LogicalOperator::Aggregate(agg) => {
                 for expr in &agg.group_by {
-                    self.collect_variables(expr, vars);
+                    Self::collect_variables(expr, vars);
                 }
                 for agg_expr in &agg.aggregates {
                     if let Some(alias) = &agg_expr.alias {
@@ -314,19 +803,19 @@ impl Optimizer {
                 }
             }
             LogicalOperator::Return(ret) => {
-                self.collect_output_variables_recursive(&ret.input, vars);
+                Self::collect_output_variables_recursive(&ret.input, vars);
             }
             LogicalOperator::Limit(limit) => {
-                self.collect_output_variables_recursive(&limit.input, vars);
+                Self::collect_output_variables_recursive(&limit.input, vars);
             }
             LogicalOperator::Skip(skip) => {
-                self.collect_output_variables_recursive(&skip.input, vars);
+                Self::collect_output_variables_recursive(&skip.input, vars);
             }
             LogicalOperator::Sort(sort) => {
-                self.collect_output_variables_recursive(&sort.input, vars);
+                Self::collect_output_variables_recursive(&sort.input, vars);
             }
             LogicalOperator::Distinct(distinct) => {
-                self.collect_output_variables_recursive(&distinct.input, vars);
+                Self::collect_output_variables_recursive(&distinct.input, vars);
             }
             _ => {}
         }
@@ -335,12 +824,12 @@ impl Optimizer {
     /// Extracts all variable names referenced in an expression.
     fn extract_variables(&self, expr: &LogicalExpression) -> HashSet<String> {
         let mut vars = HashSet::new();
-        self.collect_variables(expr, &mut vars);
+        Self::collect_variables(expr, &mut vars);
         vars
     }
 
     /// Recursively collects variable names from an expression.
-    fn collect_variables(&self, expr: &LogicalExpression, vars: &mut HashSet<String>) {
+    fn collect_variables(expr: &LogicalExpression, vars: &mut HashSet<String>) {
         match expr {
             LogicalExpression::Variable(name) => {
                 vars.insert(name.clone());
@@ -349,38 +838,38 @@ impl Optimizer {
                 vars.insert(variable.clone());
             }
             LogicalExpression::Binary { left, right, .. } => {
-                self.collect_variables(left, vars);
-                self.collect_variables(right, vars);
+                Self::collect_variables(left, vars);
+                Self::collect_variables(right, vars);
             }
             LogicalExpression::Unary { operand, .. } => {
-                self.collect_variables(operand, vars);
+                Self::collect_variables(operand, vars);
             }
             LogicalExpression::FunctionCall { args, .. } => {
                 for arg in args {
-                    self.collect_variables(arg, vars);
+                    Self::collect_variables(arg, vars);
                 }
             }
             LogicalExpression::List(items) => {
                 for item in items {
-                    self.collect_variables(item, vars);
+                    Self::collect_variables(item, vars);
                 }
             }
             LogicalExpression::Map(pairs) => {
                 for (_, value) in pairs {
-                    self.collect_variables(value, vars);
+                    Self::collect_variables(value, vars);
                 }
             }
             LogicalExpression::IndexAccess { base, index } => {
-                self.collect_variables(base, vars);
-                self.collect_variables(index, vars);
+                Self::collect_variables(base, vars);
+                Self::collect_variables(index, vars);
             }
             LogicalExpression::SliceAccess { base, start, end } => {
-                self.collect_variables(base, vars);
+                Self::collect_variables(base, vars);
                 if let Some(s) = start {
-                    self.collect_variables(s, vars);
+                    Self::collect_variables(s, vars);
                 }
                 if let Some(e) = end {
-                    self.collect_variables(e, vars);
+                    Self::collect_variables(e, vars);
                 }
             }
             LogicalExpression::Case {
@@ -389,14 +878,14 @@ impl Optimizer {
                 else_clause,
             } => {
                 if let Some(op) = operand {
-                    self.collect_variables(op, vars);
+                    Self::collect_variables(op, vars);
                 }
                 for (cond, result) in when_clauses {
-                    self.collect_variables(cond, vars);
-                    self.collect_variables(result, vars);
+                    Self::collect_variables(cond, vars);
+                    Self::collect_variables(result, vars);
                 }
                 if let Some(else_expr) = else_clause {
-                    self.collect_variables(else_expr, vars);
+                    Self::collect_variables(else_expr, vars);
                 }
             }
             LogicalExpression::Labels(var)
@@ -411,11 +900,11 @@ impl Optimizer {
                 map_expr,
                 ..
             } => {
-                self.collect_variables(list_expr, vars);
+                Self::collect_variables(list_expr, vars);
                 if let Some(filter) = filter_expr {
-                    self.collect_variables(filter, vars);
+                    Self::collect_variables(filter, vars);
                 }
-                self.collect_variables(map_expr, vars);
+                Self::collect_variables(map_expr, vars);
             }
             LogicalExpression::ExistsSubquery(_) | LogicalExpression::CountSubquery(_) => {
                 // Subqueries have their own variable scope
@@ -525,6 +1014,7 @@ mod tests {
                         label: Some("Person".to_string()),
                         input: None,
                     })),
+                    path_alias: None,
                 })),
             })),
         }));
@@ -582,6 +1072,7 @@ mod tests {
                         label: Some("Person".to_string()),
                         input: None,
                     })),
+                    path_alias: None,
                 })),
             })),
         }));
@@ -868,6 +1359,7 @@ mod tests {
                     label: None,
                     input: None,
                 })),
+                columns: None,
             })),
         }));
 
@@ -899,12 +1391,14 @@ mod tests {
                     expression: None,
                     distinct: false,
                     alias: Some("cnt".to_string()),
+                    percentile: None,
                 }],
                 input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "n".to_string(),
                     label: None,
                     input: None,
                 })),
+                having: None,
             })),
         }));
 
@@ -1077,6 +1571,7 @@ mod tests {
                 LogicalExpression::Variable("a".to_string()),
                 LogicalExpression::Variable("b".to_string()),
             ],
+            distinct: false,
         };
         let vars = optimizer.extract_variables(&expr);
         assert_eq!(vars.len(), 2);

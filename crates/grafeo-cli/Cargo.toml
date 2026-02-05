@@ -1,0 +1,48 @@
+[package]
+name = "grafeo-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Command-line interface for Grafeo graph database"
+
+[[bin]]
+name = "grafeo"
+path = "src/main.rs"
+
+[dependencies]
+grafeo-engine = { path = "../grafeo-engine" }
+grafeo-common = { path = "../grafeo-common" }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Output formatting
+comfy-table = "7"
+serde = { workspace = true }
+serde_json = "1"
+
+# Progress bars
+indicatif = "0.18"
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+default = ["gql"]
+gql = ["grafeo-engine/gql"]
+rdf = ["grafeo-engine/rdf"]
+full = ["gql", "rdf"]
+
+[dev-dependencies]
+tempfile = "3.24"
+
+[lints]
+workspace = true

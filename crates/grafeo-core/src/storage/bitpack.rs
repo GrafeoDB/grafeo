@@ -1,15 +1,17 @@
 //! Bit-packing for small integers.
 //!
-//! Bit-packing stores integers using only the minimum number of bits required
-//! to represent the largest value. This is especially effective when combined
-//! with delta encoding, where deltas are typically small.
+//! If your largest value is 15, why use 64 bits per number? Bit-packing uses
+//! only the bits you need - 4 bits for values up to 15, giving you 16x compression.
+//!
+//! This works especially well after delta encoding sorted data, where the deltas
+//! are often tiny even when the original values are huge.
 //!
 //! # Example
 //!
 //! ```ignore
-//! // Values: [5, 2, 3, 5, 5, 8, 2] - max is 8, needs 4 bits
-//! // Normal: 7 * 64 = 448 bits
-//! // Packed: 7 * 4 = 28 bits (16x compression)
+//! // Values [5, 2, 3, 5, 5, 8, 2] - max is 8, needs 4 bits
+//! // Without packing: 7 * 64 = 448 bits
+//! // With packing:    7 * 4  = 28 bits (16x smaller!)
 //!
 //! let values = vec![5u64, 2, 3, 5, 5, 8, 2];
 //! let packed = BitPackedInts::pack(&values);
@@ -19,10 +21,10 @@
 
 use std::io;
 
-/// Bit-packed integer array.
+/// Stores integers using only as many bits as the largest value needs.
 ///
-/// Stores integers using a fixed number of bits per value, determined by the
-/// maximum value in the array.
+/// Pass your values to [`pack()`](Self::pack) and we'll figure out the optimal
+/// bit width automatically. Random access via [`get()`](Self::get) is O(1).
 #[derive(Debug, Clone)]
 pub struct BitPackedInts {
     /// Packed data.
@@ -264,10 +266,11 @@ impl BitPackedInts {
     }
 }
 
-/// Delta + bit-packed encoding for sorted integers.
+/// The best compression for sorted integers - delta encoding plus bit-packing.
 ///
-/// Combines delta encoding with bit-packing for optimal compression of
-/// sorted integer sequences.
+/// Stores the first value, then packs the differences between consecutive values.
+/// For sequential IDs like [1000, 1001, 1002, ...], deltas are all 1, needing just
+/// 1 bit each - that's up to 64x compression!
 #[derive(Debug, Clone)]
 pub struct DeltaBitPacked {
     /// Base value (first value in sequence).

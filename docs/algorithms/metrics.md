@@ -13,71 +13,45 @@ Compute statistics that describe the overall graph structure.
 ## Basic Metrics
 
 ```python
-from grafeo.algorithms import graph_metrics
+import grafeo
 
-metrics = graph_metrics(db)
+db = grafeo.GrafeoDB()
 
-print(f"Nodes: {metrics.node_count}")
-print(f"Edges: {metrics.edge_count}")
-print(f"Density: {metrics.density:.4f}")
-print(f"Avg Degree: {metrics.average_degree:.2f}")
+# Basic counts via database methods
+print(f"Nodes: {db.node_count()}")
+print(f"Edges: {db.edge_count()}")
+
+# Additional metrics via algorithms
+algs = db.algorithms()
 ```
 
-## Density
+## Transitivity (Clustering Coefficient)
 
-Ratio of actual edges to possible edges.
+Global measure of how clustered the graph is.
 
 ```python
-from grafeo.algorithms import density
-
-d = density(db)
-# 0 = no edges, 1 = complete graph
+algs = db.algorithms()
+transitivity = algs.transitivity()
+print(f"Transitivity: {transitivity:.4f}")
 ```
 
-## Diameter
+## Triangle Count
 
-Longest shortest path in the graph.
-
-```python
-from grafeo.algorithms import diameter
-
-d = diameter(db)
-print(f"Graph diameter: {d}")
-```
-
-## Radius
-
-Minimum eccentricity (shortest max distance from any node).
+Count triangles for clustering analysis.
 
 ```python
-from grafeo.algorithms import radius
-
-r = radius(db)
-```
-
-## Clustering Coefficient
-
-Measure of how clustered the graph is.
-
-```python
-from grafeo.algorithms import clustering_coefficient
-
-# Global clustering coefficient
-global_cc = clustering_coefficient(db, method='global')
-
-# Local clustering coefficients
-local_cc = clustering_coefficient(db, method='local')
-
-# Average local
-avg_cc = clustering_coefficient(db, method='average')
+algs = db.algorithms()
+triangles = algs.triangles()
+print(f"Total triangles: {triangles}")
 ```
 
 ## Degree Distribution
 
-```python
-from grafeo.algorithms import degree_distribution
+Use the NetworkX adapter for degree statistics:
 
-dist = degree_distribution(db)
+```python
+nx_adapter = db.as_networkx(directed=True)
+dist = nx_adapter.degree_distribution()
 
 for degree, count in sorted(dist.items()):
     print(f"Degree {degree}: {count} nodes")
@@ -88,6 +62,5 @@ for degree, count in sorted(dist.items()):
 | Metric | Range | Interpretation |
 |--------|-------|----------------|
 | Density | 0-1 | Higher = more connected |
-| Diameter | 1-n | Lower = more compact |
-| Clustering | 0-1 | Higher = more clustered |
+| Transitivity | 0-1 | Higher = more clustered |
 | Avg Degree | 0-n | Higher = more edges per node |

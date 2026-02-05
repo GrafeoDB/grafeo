@@ -7,8 +7,8 @@ use crate::query::plan::{
     AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CreateEdgeOp, CreateNodeOp,
     DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, FilterOp, LeftJoinOp, LimitOp,
     LogicalExpression, LogicalOperator, LogicalPlan, MergeOp, NodeScanOp, ProjectOp, Projection,
-    RemoveLabelOp, ReturnItem, ReturnOp, SetPropertyOp, SkipOp, SortKey, SortOp, SortOrder,
-    UnaryOp, UnwindOp,
+    RemoveLabelOp, ReturnItem, ReturnOp, SetPropertyOp, ShortestPathOp, SkipOp, SortKey, SortOp,
+    SortOrder, UnaryOp, UnwindOp,
 };
 use grafeo_adapters::query::cypher::{self, ast};
 use grafeo_common::types::Value;
@@ -127,7 +127,19 @@ impl CypherTranslator {
         match pattern {
             ast::Pattern::Node(node_pattern) => self.translate_node_pattern(node_pattern, input),
             ast::Pattern::Path(path_pattern) => self.translate_path_pattern(path_pattern, input),
-            ast::Pattern::NamedPath { pattern, .. } => self.translate_pattern(pattern, input),
+            ast::Pattern::NamedPath {
+                name,
+                path_function,
+                pattern,
+            } => {
+                // Check if this is a path function (shortestPath/allShortestPaths)
+                if let Some(func) = path_function {
+                    self.translate_shortest_path(name, *func, pattern, input)
+                } else {
+                    // Pass the path alias through to the inner pattern
+                    self.translate_pattern_with_alias(pattern, input, Some(name.clone()))
+                }
+            }
         }
     }
 
@@ -139,11 +151,55 @@ impl CypherTranslator {
         let variable = node.variable.clone().unwrap_or_else(|| "_anon".to_string());
         let label = node.labels.first().cloned();
 
-        Ok(LogicalOperator::NodeScan(NodeScanOp {
-            variable,
+        let mut plan = LogicalOperator::NodeScan(NodeScanOp {
+            variable: variable.clone(),
             label,
             input: input.map(Box::new),
-        }))
+        });
+
+        // Add filter for inline properties (e.g., {city: 'NYC'})
+        if !node.properties.is_empty() {
+            let predicate = self.build_property_predicate(&variable, &node.properties)?;
+            plan = LogicalOperator::Filter(FilterOp {
+                predicate,
+                input: Box::new(plan),
+            });
+        }
+
+        Ok(plan)
+    }
+
+    /// Builds a predicate expression for property filters like {name: 'Alice', city: 'NYC'}.
+    fn build_property_predicate(
+        &self,
+        variable: &str,
+        properties: &[(String, ast::Expression)],
+    ) -> Result<LogicalExpression> {
+        let mut predicates: Vec<LogicalExpression> = Vec::new();
+
+        for (prop_name, prop_value) in properties {
+            let left = LogicalExpression::Property {
+                variable: variable.to_string(),
+                property: prop_name.clone(),
+            };
+            let right = self.translate_expression(prop_value)?;
+
+            predicates.push(LogicalExpression::Binary {
+                left: Box::new(left),
+                op: BinaryOp::Eq,
+                right: Box::new(right),
+            });
+        }
+
+        // Combine all predicates with AND
+        predicates
+            .into_iter()
+            .reduce(|acc, pred| LogicalExpression::Binary {
+                left: Box::new(acc),
+                op: BinaryOp::And,
+                right: Box::new(pred),
+            })
+            .ok_or_else(|| Error::Internal("Empty property predicate".into()))
     }
 
     fn translate_path_pattern(
@@ -151,21 +207,181 @@ impl CypherTranslator {
         path: &ast::PathPattern,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
+        self.translate_path_pattern_with_alias(path, input, None)
+    }
+
+    fn translate_path_pattern_with_alias(
+        &self,
+        path: &ast::PathPattern,
+        input: Option<LogicalOperator>,
+        path_alias: Option<String>,
+    ) -> Result<LogicalOperator> {
         let mut plan = self.translate_node_pattern(&path.start, input)?;
 
         for rel in &path.chain {
-            plan = self.translate_relationship_pattern(rel, plan)?;
+            plan = self.translate_relationship_pattern_with_alias(rel, plan, path_alias.clone())?;
         }
 
         Ok(plan)
     }
 
+    /// Translates a pattern with an optional path alias.
+    fn translate_pattern_with_alias(
+        &self,
+        pattern: &ast::Pattern,
+        input: Option<LogicalOperator>,
+        path_alias: Option<String>,
+    ) -> Result<LogicalOperator> {
+        match pattern {
+            ast::Pattern::Node(node_pattern) => self.translate_node_pattern(node_pattern, input),
+            ast::Pattern::Path(path_pattern) => {
+                self.translate_path_pattern_with_alias(path_pattern, input, path_alias)
+            }
+            ast::Pattern::NamedPath {
+                name,
+                path_function,
+                pattern: inner,
+            } => {
+                // Use the outer path alias if none was passed, otherwise use the inner one
+                let alias = path_alias.or_else(|| Some(name.clone()));
+                if let Some(func) = path_function {
+                    self.translate_shortest_path(name, *func, inner, input)
+                } else {
+                    self.translate_pattern_with_alias(inner, input, alias)
+                }
+            }
+        }
+    }
+
+    fn translate_shortest_path(
+        &self,
+        path_alias: &str,
+        path_function: ast::PathFunction,
+        pattern: &ast::Pattern,
+        input: Option<LogicalOperator>,
+    ) -> Result<LogicalOperator> {
+        // Extract the path pattern from the inner pattern
+        let path = match pattern {
+            ast::Pattern::Path(p) => p,
+            ast::Pattern::Node(_) => {
+                return Err(Error::Internal(
+                    "shortestPath requires a path pattern, not a node".into(),
+                ));
+            }
+            ast::Pattern::NamedPath { pattern: inner, .. } => {
+                // Recursively get the path pattern
+                if let ast::Pattern::Path(p) = inner.as_ref() {
+                    p
+                } else {
+                    return Err(Error::Internal(
+                        "shortestPath requires a path pattern".into(),
+                    ));
+                }
+            }
+        };
+
+        // Scan for the source node first
+        let source_var = path
+            .start
+            .variable
+            .clone()
+            .unwrap_or_else(|| "_src".to_string());
+        let source_label = path.start.labels.first().cloned();
+
+        let mut plan = LogicalOperator::NodeScan(NodeScanOp {
+            variable: source_var.clone(),
+            label: source_label,
+            input: input.map(Box::new),
+        });
+
+        // Apply property filters on the source node if any
+        for (key, value) in &path.start.properties {
+            let filter_expr = LogicalExpression::Binary {
+                left: Box::new(LogicalExpression::Property {
+                    variable: source_var.clone(),
+                    property: key.clone(),
+                }),
+                op: BinaryOp::Eq,
+                right: Box::new(self.translate_expression(value)?),
+            };
+            plan = LogicalOperator::Filter(FilterOp {
+                predicate: filter_expr,
+                input: Box::new(plan),
+            });
+        }
+
+        // Get the target node info from the relationship chain
+        // shortestPath typically has one relationship in the chain
+        if let Some(rel) = path.chain.first() {
+            let target_var = rel
+                .target
+                .variable
+                .clone()
+                .unwrap_or_else(|| "_tgt".to_string());
+            let target_label = rel.target.labels.first().cloned();
+
+            // Scan for target node
+            plan = LogicalOperator::NodeScan(NodeScanOp {
+                variable: target_var.clone(),
+                label: target_label,
+                input: Some(Box::new(plan)),
+            });
+
+            // Apply property filters on the target node if any
+            for (key, value) in &rel.target.properties {
+                let filter_expr = LogicalExpression::Binary {
+                    left: Box::new(LogicalExpression::Property {
+                        variable: target_var.clone(),
+                        property: key.clone(),
+                    }),
+                    op: BinaryOp::Eq,
+                    right: Box::new(self.translate_expression(value)?),
+                };
+                plan = LogicalOperator::Filter(FilterOp {
+                    predicate: filter_expr,
+                    input: Box::new(plan),
+                });
+            }
+
+            let direction = match rel.direction {
+                ast::Direction::Outgoing => ExpandDirection::Outgoing,
+                ast::Direction::Incoming => ExpandDirection::Incoming,
+                ast::Direction::Undirected => ExpandDirection::Both,
+            };
+
+            let edge_type = rel.types.first().cloned();
+            let all_paths = matches!(path_function, ast::PathFunction::AllShortestPaths);
+
+            plan = LogicalOperator::ShortestPath(ShortestPathOp {
+                input: Box::new(plan),
+                source_var,
+                target_var,
+                edge_type,
+                direction,
+                path_alias: path_alias.to_string(),
+                all_paths,
+            });
+        }
+
+        Ok(plan)
+    }
+
+    #[allow(dead_code)]
     fn translate_relationship_pattern(
         &self,
         rel: &ast::RelationshipPattern,
         input: LogicalOperator,
     ) -> Result<LogicalOperator> {
-        let from_variable = self.get_last_variable(&input)?;
+        self.translate_relationship_pattern_with_alias(rel, input, None)
+    }
+
+    fn translate_relationship_pattern_with_alias(
+        &self,
+        rel: &ast::RelationshipPattern,
+        input: LogicalOperator,
+        path_alias: Option<String>,
+    ) -> Result<LogicalOperator> {
+        let from_variable = Self::get_last_variable(&input)?;
         let edge_variable = rel.variable.clone();
         let edge_type = rel.types.first().cloned();
         let to_variable = rel
@@ -196,6 +412,7 @@ impl CypherTranslator {
             min_hops,
             max_hops,
             input: Box::new(input),
+            path_alias,
         });
 
         if let Some(label) = target_label {
@@ -206,6 +423,7 @@ impl CypherTranslator {
                         LogicalExpression::Variable(to_variable),
                         LogicalExpression::Literal(Value::from(label)),
                     ],
+                    distinct: false,
                 },
                 input: Box::new(expand),
             }))
@@ -233,7 +451,9 @@ impl CypherTranslator {
         with_clause: &ast::WithClause,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
-        let input = input.ok_or_else(|| Error::Internal("WITH requires input".into()))?;
+        // WITH can work with or without prior input (e.g., standalone WITH [1,2,3] AS nums)
+        // If there's no input, use Empty which produces a single row for projection evaluation
+        let input = input.unwrap_or(LogicalOperator::Empty);
 
         let projections: Vec<Projection> = with_clause
             .items
@@ -262,6 +482,7 @@ impl CypherTranslator {
         if with_clause.distinct {
             plan = LogicalOperator::Distinct(DistinctOp {
                 input: Box::new(plan),
+                columns: None,
             });
         }
 
@@ -441,6 +662,10 @@ impl CypherTranslator {
                 group_by,
                 aggregates,
                 input: Box::new(input),
+                // Note: Cypher doesn't have HAVING syntax. Aggregate filtering is done via
+                // `WITH ... WHERE` pattern (e.g., `WITH n, count(*) AS cnt WHERE cnt > 10`)
+                // which is handled by translate_with() adding a Filter after Project.
+                having: None,
             }))
         } else {
             // Normal return without aggregates
@@ -518,12 +743,31 @@ impl CypherTranslator {
                     } else {
                         Some(self.translate_expression(&args[0])?)
                     };
+                    // Extract percentile parameter for percentile functions
+                    let percentile = if matches!(
+                        function,
+                        AggregateFunction::PercentileDisc | AggregateFunction::PercentileCont
+                    ) && args.len() >= 2
+                    {
+                        // Second argument is the percentile value
+                        if let ast::Expression::Literal(ast::Literal::Float(p)) = &args[1] {
+                            Some((*p).clamp(0.0, 1.0))
+                        } else if let ast::Expression::Literal(ast::Literal::Integer(p)) = &args[1]
+                        {
+                            Some((*p as f64).clamp(0.0, 1.0))
+                        } else {
+                            Some(0.5) // Default to median
+                        }
+                    } else {
+                        None
+                    };
 
                     Ok(Some(AggregateExpr {
                         function,
                         expression,
                         distinct: *distinct,
                         alias: alias.clone(),
+                        percentile,
                     }))
                 } else {
                     Ok(None)
@@ -706,6 +950,7 @@ impl CypherTranslator {
                 // Check if it's a node or edge - for simplicity, try node first
                 plan = LogicalOperator::DeleteNode(DeleteNodeOp {
                     variable: var.clone(),
+                    detach: delete_clause.detach,
                     input: Box::new(plan),
                 });
             } else {
@@ -862,7 +1107,7 @@ impl CypherTranslator {
             ast::Expression::Binary { left, op, right } => {
                 let left_expr = self.translate_expression(left)?;
                 let right_expr = self.translate_expression(right)?;
-                let binary_op = self.translate_binary_op(op)?;
+                let binary_op = self.translate_binary_op(*op)?;
 
                 Ok(LogicalExpression::Binary {
                     left: Box::new(left_expr),
@@ -872,7 +1117,7 @@ impl CypherTranslator {
             }
             ast::Expression::Unary { op, operand } => {
                 let operand_expr = self.translate_expression(operand)?;
-                let unary_op = self.translate_unary_op(op)?;
+                let unary_op = self.translate_unary_op(*op)?;
 
                 Ok(LogicalExpression::Unary {
                     op: unary_op,
@@ -880,6 +1125,20 @@ impl CypherTranslator {
                 })
             }
             ast::Expression::FunctionCall { name, args, .. } => {
+                // Special handling for length() on path variables
+                // When length(p) is called where p is a path alias, we convert it
+                // to a variable reference to the path length column
+                if name.to_lowercase() == "length" && args.len() == 1 {
+                    if let ast::Expression::Variable(var_name) = &args[0] {
+                        // Check if this looks like a path variable
+                        // Path lengths are stored in columns named _path_length_{alias}
+                        return Ok(LogicalExpression::Variable(format!(
+                            "_path_length_{}",
+                            var_name
+                        )));
+                    }
+                }
+
                 let translated_args: Vec<LogicalExpression> = args
                     .iter()
                     .map(|a| self.translate_expression(a))
@@ -888,6 +1147,7 @@ impl CypherTranslator {
                 Ok(LogicalExpression::FunctionCall {
                     name: name.clone(),
                     args: translated_args,
+                    distinct: false,
                 })
             }
             ast::Expression::List(items) => {
@@ -985,7 +1245,7 @@ impl CypherTranslator {
         Ok(LogicalExpression::Literal(value))
     }
 
-    fn translate_binary_op(&self, op: &ast::BinaryOp) -> Result<BinaryOp> {
+    fn translate_binary_op(&self, op: ast::BinaryOp) -> Result<BinaryOp> {
         Ok(match op {
             ast::BinaryOp::Eq => BinaryOp::Eq,
             ast::BinaryOp::Ne => BinaryOp::Ne,
@@ -1013,7 +1273,7 @@ impl CypherTranslator {
         })
     }
 
-    fn translate_unary_op(&self, op: &ast::UnaryOp) -> Result<UnaryOp> {
+    fn translate_unary_op(&self, op: ast::UnaryOp) -> Result<UnaryOp> {
         Ok(match op {
             ast::UnaryOp::Not => UnaryOp::Not,
             ast::UnaryOp::Neg => UnaryOp::Neg,
@@ -1038,12 +1298,12 @@ impl CypherTranslator {
         }
     }
 
-    fn get_last_variable(&self, plan: &LogicalOperator) -> Result<String> {
+    fn get_last_variable(plan: &LogicalOperator) -> Result<String> {
         match plan {
             LogicalOperator::NodeScan(scan) => Ok(scan.variable.clone()),
             LogicalOperator::Expand(expand) => Ok(expand.to_variable.clone()),
-            LogicalOperator::Filter(filter) => self.get_last_variable(&filter.input),
-            LogicalOperator::Project(project) => self.get_last_variable(&project.input),
+            LogicalOperator::Filter(filter) => Self::get_last_variable(&filter.input),
+            LogicalOperator::Project(project) => Self::get_last_variable(&project.input),
             _ => Err(Error::Internal("Cannot get variable from operator".into())),
         }
     }
@@ -1084,7 +1344,18 @@ fn contains_aggregate(expr: &ast::Expression) -> bool {
 fn is_aggregate_function(name: &str) -> bool {
     matches!(
         name.to_uppercase().as_str(),
-        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "COLLECT"
+        "COUNT"
+            | "SUM"
+            | "AVG"
+            | "MIN"
+            | "MAX"
+            | "COLLECT"
+            | "STDEV"
+            | "STDDEV"
+            | "STDEVP"
+            | "STDDEVP"
+            | "PERCENTILEDISC"
+            | "PERCENTILECONT"
     )
 }
 
@@ -1097,6 +1368,10 @@ fn to_aggregate_function(name: &str) -> Option<AggregateFunction> {
         "MIN" => Some(AggregateFunction::Min),
         "MAX" => Some(AggregateFunction::Max),
         "COLLECT" => Some(AggregateFunction::Collect),
+        "STDEV" | "STDDEV" => Some(AggregateFunction::StdDev),
+        "STDEVP" | "STDDEVP" => Some(AggregateFunction::StdDevPop),
+        "PERCENTILEDISC" => Some(AggregateFunction::PercentileDisc),
+        "PERCENTILECONT" => Some(AggregateFunction::PercentileCont),
         _ => None,
     }
 }
@@ -1543,7 +1818,7 @@ mod tests {
         let plan = translate("MATCH (n:Person) RETURN toUpper(n.name)").unwrap();
 
         if let LogicalOperator::Return(ret) = &plan.root {
-            if let LogicalExpression::FunctionCall { name, args } = &ret.items[0].expression {
+            if let LogicalExpression::FunctionCall { name, args, .. } = &ret.items[0].expression {
                 assert_eq!(name.to_lowercase(), "toupper");
                 assert_eq!(args.len(), 1);
             } else {
@@ -1607,59 +1882,59 @@ mod tests {
 
         // Test all supported binary ops
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Eq).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Eq).unwrap(),
             BinaryOp::Eq
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Ne).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Ne).unwrap(),
             BinaryOp::Ne
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Lt).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Lt).unwrap(),
             BinaryOp::Lt
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Le).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Le).unwrap(),
             BinaryOp::Le
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Gt).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Gt).unwrap(),
             BinaryOp::Gt
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Ge).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Ge).unwrap(),
             BinaryOp::Ge
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::And).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::And).unwrap(),
             BinaryOp::And
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Or).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Or).unwrap(),
             BinaryOp::Or
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Xor).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Xor).unwrap(),
             BinaryOp::Xor
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Add).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Add).unwrap(),
             BinaryOp::Add
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Sub).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Sub).unwrap(),
             BinaryOp::Sub
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Mul).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Mul).unwrap(),
             BinaryOp::Mul
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Div).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Div).unwrap(),
             BinaryOp::Div
         );
         assert_eq!(
-            translator.translate_binary_op(&ast::BinaryOp::Mod).unwrap(),
+            translator.translate_binary_op(ast::BinaryOp::Mod).unwrap(),
             BinaryOp::Mod
         );
     }
@@ -1669,22 +1944,20 @@ mod tests {
         let translator = CypherTranslator::new();
 
         assert_eq!(
-            translator.translate_unary_op(&ast::UnaryOp::Not).unwrap(),
+            translator.translate_unary_op(ast::UnaryOp::Not).unwrap(),
             UnaryOp::Not
         );
         assert_eq!(
-            translator.translate_unary_op(&ast::UnaryOp::Neg).unwrap(),
+            translator.translate_unary_op(ast::UnaryOp::Neg).unwrap(),
             UnaryOp::Neg
         );
         assert_eq!(
-            translator
-                .translate_unary_op(&ast::UnaryOp::IsNull)
-                .unwrap(),
+            translator.translate_unary_op(ast::UnaryOp::IsNull).unwrap(),
             UnaryOp::IsNull
         );
         assert_eq!(
             translator
-                .translate_unary_op(&ast::UnaryOp::IsNotNull)
+                .translate_unary_op(ast::UnaryOp::IsNotNull)
                 .unwrap(),
             UnaryOp::IsNotNull
         );

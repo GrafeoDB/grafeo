@@ -1,14 +1,16 @@
-//! Graph algorithms for Grafeo.
+//! Classic graph algorithms - traversals, paths, centrality, communities.
 //!
-//! This module provides high-performance graph algorithm implementations
-//! inspired by rustworkx and GRAPE. Algorithms are designed to work with
-//! the Grafeo LPG store and can be exposed to Python via bridges.
+//! Everything you'd expect from a graph analytics library, designed to work
+//! seamlessly with Grafeo's LPG store. All algorithms are available from Python too.
 //!
-//! ## Algorithm Categories
-//!
-//! - `traversal` - BFS, DFS with visitor pattern
-//! - `components` - Connected components, SCC, topological sort
-//! - `shortest_path` - Dijkstra, A*, Bellman-Ford, Floyd-Warshall
+//! | Category | Algorithms |
+//! | -------- | ---------- |
+//! | Traversal | BFS, DFS with visitor pattern |
+//! | Components | Connected, strongly connected, topological sort |
+//! | Shortest paths | Dijkstra, A*, Bellman-Ford, Floyd-Warshall |
+//! | Centrality | PageRank, betweenness, closeness, degree |
+//! | Community | Louvain, label propagation |
+//! | Structure | K-core, bridges, articulation points |
 //!
 //! ## Usage
 //!
@@ -31,6 +33,7 @@
 //! ```
 
 mod centrality;
+mod clustering;
 mod community;
 mod components;
 mod flow;
@@ -66,6 +69,12 @@ pub use centrality::{
     degree_centrality_normalized, pagerank,
 };
 
+// Clustering algorithms
+pub use clustering::{
+    ClusteringCoefficientResult, clustering_coefficient, clustering_coefficient_parallel,
+    global_clustering_coefficient, local_clustering_coefficient, total_triangles, triangle_count,
+};
+
 // Community detection algorithms
 pub use community::{LouvainResult, community_count, label_propagation, louvain};
 
@@ -83,6 +92,7 @@ pub use centrality::{
     BetweennessCentralityAlgorithm, ClosenessCentralityAlgorithm, DegreeCentralityAlgorithm,
     PageRankAlgorithm,
 };
+pub use clustering::ClusteringCoefficientAlgorithm;
 pub use community::{LabelPropagationAlgorithm, LouvainAlgorithm};
 pub use components::{
     ConnectedComponentsAlgorithm, StronglyConnectedComponentsAlgorithm, TopologicalSortAlgorithm,

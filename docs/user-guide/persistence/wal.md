@@ -29,7 +29,7 @@ When opening a database after a crash:
 
 ```python
 # Recovery happens automatically on open
-db = grafeo.Database(path="my_graph.db")
+db = grafeo.GrafeoDB(path="my_graph.db")
 # Database is now in a consistent state
 ```
 

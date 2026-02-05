@@ -35,14 +35,6 @@ Convert to list of dicts.
 def to_list(self) -> List[Dict[str, Any]]
 ```
 
-### scalar()
-
-Get single scalar value.
-
-```python
-def scalar(self) -> Any
-```
-
 ### fetchone()
 
 Fetch one row.
@@ -62,16 +54,12 @@ def fetchall(self) -> List[Dict[str, Any]]
 ## Example
 
 ```python
-with db.session() as session:
-    result = session.execute("MATCH (p:Person) RETURN p.name, p.age")
+result = db.execute("MATCH (p:Person) RETURN p.name, p.age")
 
-    # Get column names
-    print(result.columns)  # ['p.name', 'p.age']
+# Iterate
+for row in result:
+    print(row['p.name'])
 
-    # Iterate
-    for row in result:
-        print(row['p.name'])
-
-    # Or convert to list
-    rows = result.to_list()
+# Or convert to list
+rows = list(result)
 ```

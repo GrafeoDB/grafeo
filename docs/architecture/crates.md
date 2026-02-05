@@ -1,6 +1,6 @@
 ---
 title: Crate Structure
-description: The five crates that make up Grafeo.
+description: The seven crates that make up Grafeo.
 tags:
   - architecture
   - crates
@@ -8,7 +8,7 @@ tags:
 
 # Crate Structure
 
-Grafeo is organized into five crates with clear responsibilities.
+Grafeo is organized into seven crates with clear responsibilities.
 
 ## Dependency Graph
 
@@ -18,7 +18,9 @@ graph BT
     CORE[grafeo-core]
     ADAPTERS[grafeo-adapters]
     ENGINE[grafeo-engine]
+    GRAFEO[grafeo]
     PYTHON[grafeo-python]
+    CLI[grafeo-cli]
 
     CORE --> COMMON
     ADAPTERS --> COMMON
@@ -26,7 +28,23 @@ graph BT
     ENGINE --> COMMON
     ENGINE --> CORE
     ENGINE --> ADAPTERS
+    GRAFEO --> ENGINE
     PYTHON --> ENGINE
+    CLI --> ENGINE
+```
+
+## grafeo
+
+Top-level facade crate that re-exports the public API.
+
+| Module | Purpose |
+|--------|---------|
+| `lib.rs` | Re-exports from grafeo-engine |
+
+```rust
+use grafeo::GrafeoDB;
+
+let db = GrafeoDB::new_in_memory();
 ```
 
 ## grafeo-common
@@ -82,18 +100,18 @@ Database facade and coordination.
 
 | Module | Purpose |
 |--------|---------|
-| `database.rs` | Database struct, lifecycle |
+| `database.rs` | GrafeoDB struct, lifecycle |
 | `session.rs` | Session management |
 | `query/` | Query processor, planner, optimizer |
 | `transaction/` | Transaction manager, MVCC |
 
 ```rust
-use grafeo_engine::{Database, Session, Config};
+use grafeo_engine::{GrafeoDB, Session, Config};
 ```
 
 ## grafeo-python
 
-Python bindings via PyO3.
+Python bindings via PyO3. Located at `crates/bindings/python`.
 
 | Module | Purpose |
 |--------|---------|
@@ -103,7 +121,21 @@ Python bindings via PyO3.
 
 ```python
 import grafeo
-db = grafeo.Database()
+db = grafeo.GrafeoDB()
+```
+
+## grafeo-cli
+
+Command-line interface for database administration.
+
+| Module | Purpose |
+|--------|---------|
+| `commands/` | CLI command implementations |
+| `output.rs` | Output formatting (table, JSON) |
+
+```bash
+grafeo info ./mydb
+grafeo stats ./mydb --format json
 ```
 
 ## Crate Guidelines

@@ -1,17 +1,32 @@
-//! Object pool for frequently allocated types.
+//! Object pool for reusing frequently allocated types.
 //!
-//! Object pools reduce allocation overhead by reusing previously allocated
-//! objects instead of freeing and reallocating them.
+//! If you're creating and destroying the same type of object repeatedly
+//! (like temporary buffers during query execution), a pool avoids the
+//! allocation overhead. Objects are reset and returned to the pool instead
+//! of being freed.
 
 use std::ops::{Deref, DerefMut};
 
 use parking_lot::Mutex;
 
-/// A thread-safe object pool.
+/// A thread-safe object pool for reusing allocations.
 ///
-/// Maintains a pool of reusable objects of type T. When an object is needed,
-/// it's taken from the pool (or created if the pool is empty). When the object
-/// is dropped, it's returned to the pool for reuse.
+/// Use [`get()`](Self::get) to grab an object (created fresh if the pool is
+/// empty). When you drop the returned [`Pooled`] wrapper, the object goes
+/// back to the pool for reuse.
+///
+/// # Examples
+///
+/// ```
+/// use grafeo_common::memory::ObjectPool;
+///
+/// // Pool of vectors that get cleared on return
+/// let pool = ObjectPool::with_reset(Vec::<u8>::new, |v| v.clear());
+///
+/// let mut buf = pool.get();
+/// buf.extend_from_slice(&[1, 2, 3]);
+/// // buf is returned to pool when dropped, and cleared
+/// ```
 pub struct ObjectPool<T> {
     /// The pool of available objects.
     pool: Mutex<Vec<T>>,
@@ -126,7 +141,10 @@ impl<T> ObjectPool<T> {
     }
 }
 
-/// A wrapper around a pooled object that returns it to the pool when dropped.
+/// A borrowed object from the pool - returns automatically when dropped.
+///
+/// Use [`take()`](Self::take) if you need to keep the object instead of
+/// returning it to the pool.
 pub struct Pooled<'a, T> {
     pool: &'a ObjectPool<T>,
     value: Option<T>,

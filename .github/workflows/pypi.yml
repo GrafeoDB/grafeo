@@ -27,7 +27,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter -m crates/grafeo-python/Cargo.toml
+          args: --release --out dist --find-interpreter -m crates/bindings/python/Cargo.toml
           sccache: "true"
           manylinux: auto
           rust-toolchain: stable
@@ -55,7 +55,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter -m crates/grafeo-python/Cargo.toml
+          args: --release --out dist --find-interpreter -m crates/bindings/python/Cargo.toml
           sccache: "true"
           manylinux: musllinux_1_2
           rust-toolchain: stable
@@ -84,7 +84,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist -m crates/grafeo-python/Cargo.toml
+          args: --release --out dist -m crates/bindings/python/Cargo.toml
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -110,7 +110,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist -m crates/grafeo-python/Cargo.toml
+          args: --release --out dist -m crates/bindings/python/Cargo.toml
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -126,7 +126,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --out dist -m crates/grafeo-python/Cargo.toml
+          args: --out dist -m crates/bindings/python/Cargo.toml
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:

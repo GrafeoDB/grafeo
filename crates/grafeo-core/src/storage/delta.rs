@@ -1,28 +1,27 @@
 //! Delta encoding for sorted integer sequences.
 //!
-//! Delta encoding stores the differences between consecutive values rather than
-//! the values themselves. This is highly effective for sorted or sequential data
-//! where consecutive values are close to each other.
+//! Instead of storing [100, 105, 107, 110], store the base (100) and the deltas
+//! [5, 2, 3]. The deltas are often tiny even when values are huge, making this
+//! a great first step before bit-packing.
+//!
+//! For signed integers, we use zig-zag encoding to map negative deltas to small
+//! positive numbers: 0→0, -1→1, 1→2, -2→3, etc.
 //!
 //! # Example
 //!
 //! ```ignore
-//! // Original: [100, 105, 107, 110, 115]
-//! // Deltas:   [5, 2, 3, 5]
-//! // Stored:   base=100, deltas=[5, 2, 3, 5]
-//!
 //! let values = vec![100u64, 105, 107, 110, 115];
 //! let encoded = DeltaEncoding::encode(&values);
-//! let decoded = encoded.decode();
-//! assert_eq!(values, decoded);
+//! // base=100, deltas=[5, 2, 3, 5]
+//! assert_eq!(encoded.decode(), values);
 //! ```
 
 use std::io;
 
-/// Delta-encoded integer sequence.
+/// Stores differences between consecutive values instead of the values themselves.
 ///
-/// Stores a base value and the deltas between consecutive values.
-/// Effective for sorted sequences where deltas are small.
+/// Pair this with [`BitPackedInts`](super::BitPackedInts) for maximum compression -
+/// use [`DeltaBitPacked`](super::DeltaBitPacked) for the combo.
 #[derive(Debug, Clone)]
 pub struct DeltaEncoding {
     /// The first value in the sequence.
@@ -36,7 +35,13 @@ pub struct DeltaEncoding {
 impl DeltaEncoding {
     /// Encodes a slice of u64 values using delta encoding.
     ///
-    /// For best compression, values should be sorted in ascending order.
+    /// # Requirements
+    ///
+    /// Values **must** be sorted in ascending order. Unsorted input will produce
+    /// incorrect results due to `saturating_sub` mapping negative deltas to zero.
+    /// A debug assertion checks this in debug builds.
+    ///
+    /// For signed or unsorted data, use [`encode_signed`](Self::encode_signed) instead.
     #[must_use]
     pub fn encode(values: &[u64]) -> Self {
         if values.is_empty() {
@@ -46,6 +51,12 @@ impl DeltaEncoding {
                 count: 0,
             };
         }
+
+        // Values must be sorted for unsigned delta encoding to work correctly
+        debug_assert!(
+            values.windows(2).all(|w| w[0] <= w[1]),
+            "DeltaEncoding::encode requires sorted input; use encode_signed for unsorted data"
+        );
 
         let base = values[0];
         let deltas: Vec<u64> = values

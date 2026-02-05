@@ -33,7 +33,7 @@ db.register_function("double", |args| {
 ```python
 import grafeo
 
-db = grafeo.Database()
+db = grafeo.GrafeoDB()
 
 # Register a Python function
 @db.register_function("greet")

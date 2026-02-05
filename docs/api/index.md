@@ -12,7 +12,7 @@ Complete API documentation for Python and Rust.
 The Python API provides a Pythonic interface to Grafeo.
 
 - [Python Overview](python/index.md)
-- [grafeo.Database](python/database.md)
+- [grafeo.GrafeoDB](python/database.md)
 - [grafeo.Node](python/node.md)
 - [grafeo.Edge](python/edge.md)
 - [grafeo.QueryResult](python/result.md)

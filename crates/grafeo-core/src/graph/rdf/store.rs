@@ -5,9 +5,27 @@
 
 use super::term::Term;
 use super::triple::{Triple, TriplePattern};
+use grafeo_common::types::TxId;
 use grafeo_common::utils::hash::FxHashSet;
+use hashbrown::HashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;
+
+/// A pending operation in a transaction buffer.
+#[derive(Debug, Clone)]
+enum PendingOp {
+    /// Insert a triple.
+    Insert(Triple),
+    /// Delete a triple.
+    Delete(Triple),
+}
+
+/// Transaction buffer for pending operations.
+#[derive(Debug, Default)]
+struct TransactionBuffer {
+    /// Pending operations for each transaction.
+    buffers: HashMap<TxId, Vec<PendingOp>>,
+}
 
 /// Configuration for the RDF store.
 #[derive(Debug, Clone)]
@@ -33,6 +51,10 @@ impl Default for RdfStoreConfig {
 /// - SPO (Subject, Predicate, Object): primary storage
 /// - POS (Predicate, Object, Subject): for predicate-based queries
 /// - OSP (Object, Subject, Predicate): for object-based queries (optional)
+///
+/// The store also supports transactional operations through buffering.
+/// When operations are performed within a transaction context, they are
+/// buffered until commit (applied) or rollback (discarded).
 pub struct RdfStore {
     /// Configuration.
     config: RdfStoreConfig,
@@ -44,6 +66,8 @@ pub struct RdfStore {
     predicate_index: RwLock<hashbrown::HashMap<Term, Vec<Arc<Triple>>, ahash::RandomState>>,
     /// Object index: object -> triples (optional).
     object_index: RwLock<Option<hashbrown::HashMap<Term, Vec<Arc<Triple>>, ahash::RandomState>>>,
+    /// Transaction buffers for pending operations.
+    tx_buffer: RwLock<TransactionBuffer>,
 }
 
 impl RdfStore {
@@ -74,6 +98,7 @@ impl RdfStore {
                 ahash::RandomState::new(),
             )),
             object_index: RwLock::new(object_index),
+            tx_buffer: RwLock::new(TransactionBuffer::default()),
             config,
         }
     }
@@ -345,6 +370,126 @@ impl RdfStore {
             },
         }
     }
+
+    // =========================================================================
+    // Transaction support
+    // =========================================================================
+
+    /// Inserts a triple within a transaction context.
+    ///
+    /// The insert is buffered until the transaction is committed.
+    /// If the transaction is rolled back, the insert is discarded.
+    pub fn insert_in_tx(&self, tx_id: TxId, triple: Triple) {
+        let mut buffer = self.tx_buffer.write();
+        buffer
+            .buffers
+            .entry(tx_id)
+            .or_default()
+            .push(PendingOp::Insert(triple));
+    }
+
+    /// Removes a triple within a transaction context.
+    ///
+    /// The removal is buffered until the transaction is committed.
+    /// If the transaction is rolled back, the removal is discarded.
+    pub fn remove_in_tx(&self, tx_id: TxId, triple: Triple) {
+        let mut buffer = self.tx_buffer.write();
+        buffer
+            .buffers
+            .entry(tx_id)
+            .or_default()
+            .push(PendingOp::Delete(triple));
+    }
+
+    /// Commits a transaction, applying all buffered operations.
+    ///
+    /// Returns the number of operations applied.
+    pub fn commit_tx(&self, tx_id: TxId) -> usize {
+        let ops = {
+            let mut buffer = self.tx_buffer.write();
+            buffer.buffers.remove(&tx_id).unwrap_or_default()
+        };
+
+        let count = ops.len();
+        for op in ops {
+            match op {
+                PendingOp::Insert(triple) => {
+                    self.insert(triple);
+                }
+                PendingOp::Delete(triple) => {
+                    self.remove(&triple);
+                }
+            }
+        }
+        count
+    }
+
+    /// Rolls back a transaction, discarding all buffered operations.
+    ///
+    /// Returns the number of operations discarded.
+    pub fn rollback_tx(&self, tx_id: TxId) -> usize {
+        let mut buffer = self.tx_buffer.write();
+        buffer
+            .buffers
+            .remove(&tx_id)
+            .map(|ops| ops.len())
+            .unwrap_or(0)
+    }
+
+    /// Checks if a transaction has pending operations.
+    #[must_use]
+    pub fn has_pending_ops(&self, tx_id: TxId) -> bool {
+        let buffer = self.tx_buffer.read();
+        buffer
+            .buffers
+            .get(&tx_id)
+            .map(|ops| !ops.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Returns triples matching the given pattern, including pending inserts
+    /// and excluding pending deletes from the specified transaction
+    /// (for read-your-writes within a transaction).
+    ///
+    /// This provides snapshot isolation semantics: within a transaction, you see
+    /// all your own pending changes (inserts and deletes) as if they were committed.
+    pub fn find_with_pending(
+        &self,
+        pattern: &TriplePattern,
+        tx_id: Option<TxId>,
+    ) -> Vec<Arc<Triple>> {
+        let mut results = self.find(pattern);
+
+        if let Some(tx) = tx_id {
+            let buffer = self.tx_buffer.read();
+            if let Some(ops) = buffer.buffers.get(&tx) {
+                // Collect pending deletes
+                let pending_deletes: FxHashSet<&Triple> = ops
+                    .iter()
+                    .filter_map(|op| match op {
+                        PendingOp::Delete(t) => Some(t),
+                        _ => None,
+                    })
+                    .collect();
+
+                // Filter out pending deletes from committed results
+                if !pending_deletes.is_empty() {
+                    results.retain(|t| !pending_deletes.contains(t.as_ref()));
+                }
+
+                // Include pending inserts
+                for op in ops {
+                    if let PendingOp::Insert(triple) = op {
+                        if pattern.matches(triple) {
+                            results.push(Arc::new(triple.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
 }
 
 impl Default for RdfStore {
@@ -521,5 +666,88 @@ mod tests {
         store.clear();
         assert!(store.is_empty());
         assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn test_find_with_pending_filters_deletes() {
+        let store = RdfStore::new();
+        let triples = sample_triples();
+
+        // Insert all triples into committed storage
+        for triple in &triples {
+            store.insert(triple.clone());
+        }
+
+        // Create a transaction and add a pending delete
+        let tx_id = TxId::new(1);
+        store.remove_in_tx(tx_id, triples[0].clone()); // Delete Alice's name triple
+
+        // Query with transaction context - should NOT see the deleted triple
+        let pattern = TriplePattern {
+            subject: Some(Term::iri("http://example.org/alice")),
+            predicate: None,
+            object: None,
+        };
+
+        let results = store.find_with_pending(&pattern, Some(tx_id));
+        assert_eq!(results.len(), 2); // Should be 2, not 3 (one deleted)
+
+        // Verify the deleted triple is not in results
+        let deleted = &triples[0];
+        for result in &results {
+            assert_ne!(result.as_ref(), deleted);
+        }
+
+        // Query without transaction context - should still see all 3
+        let results_no_tx = store.find_with_pending(&pattern, None);
+        assert_eq!(results_no_tx.len(), 3);
+
+        // Verify pending inserts are still included
+        let new_triple = Triple::new(
+            Term::iri("http://example.org/alice"),
+            Term::iri("http://xmlns.com/foaf/0.1/email"),
+            Term::literal("alice@example.org"),
+        );
+        store.insert_in_tx(tx_id, new_triple.clone());
+
+        let results_with_insert = store.find_with_pending(&pattern, Some(tx_id));
+        assert_eq!(results_with_insert.len(), 3); // 2 committed - 1 deleted + 1 inserted
+
+        // Verify the new triple is in results
+        let found_new = results_with_insert
+            .iter()
+            .any(|t| t.as_ref() == &new_triple);
+        assert!(found_new, "Pending insert should be visible");
+    }
+
+    #[test]
+    fn test_transaction_commit_and_rollback() {
+        let store = RdfStore::new();
+        let triples = sample_triples();
+
+        // Insert initial triples
+        for triple in &triples {
+            store.insert(triple.clone());
+        }
+        assert_eq!(store.len(), 4);
+
+        // Test rollback
+        let tx1 = TxId::new(1);
+        store.remove_in_tx(tx1, triples[0].clone());
+        assert!(store.has_pending_ops(tx1));
+
+        let discarded = store.rollback_tx(tx1);
+        assert_eq!(discarded, 1);
+        assert!(!store.has_pending_ops(tx1));
+        assert_eq!(store.len(), 4); // No change
+
+        // Test commit
+        let tx2 = TxId::new(2);
+        store.remove_in_tx(tx2, triples[0].clone());
+
+        let applied = store.commit_tx(tx2);
+        assert_eq!(applied, 1);
+        assert_eq!(store.len(), 3); // Triple removed
+        assert!(!store.contains(&triples[0]));
     }
 }

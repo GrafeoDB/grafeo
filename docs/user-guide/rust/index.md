@@ -10,17 +10,17 @@ Grafeo is written in Rust and provides a native Rust API.
 ## Quick Start
 
 ```rust
-use grafeo::Database;
+use grafeo::GrafeoDB;
 
-fn main() -> Result<(), grafeo::Error> {
-    let db = Database::open_in_memory()?;
-    let session = db.session()?;
+fn main() -> Result<(), grafeo_common::utils::error::Error> {
+    let db = GrafeoDB::new_in_memory();
+    let mut session = db.session();
 
     session.execute("INSERT (:Person {name: 'Alice'})")?;
 
     let result = session.execute("MATCH (p:Person) RETURN p.name")?;
-    for row in result {
-        println!("{}", row.get::<String>("p.name")?);
+    for row in result.rows {
+        println!("{:?}", row);
     }
 
     Ok(())

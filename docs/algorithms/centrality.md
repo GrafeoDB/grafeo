@@ -10,29 +10,21 @@ tags:
 
 Centrality algorithms identify the most important nodes in a graph.
 
-!!! note "Coming Soon"
-    These algorithms are planned for upcoming releases.
-
 ## PageRank
 
 Measures node importance based on incoming links.
 
 ```python
-from grafeo.algorithms import pagerank
+import grafeo
 
-scores = pagerank(db,
-    damping=0.85,
-    iterations=20
-)
+db = grafeo.GrafeoDB()
+algs = db.algorithms()
+
+scores = algs.pagerank()
+
+for node_id, score in scores.items():
+    print(f"Node {node_id}: {score:.4f}")
 ```
-
-### Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `damping` | 0.85 | Probability of following a link |
-| `iterations` | 20 | Maximum iterations |
-| `tolerance` | 1e-6 | Convergence threshold |
 
 ### Use Cases
 
@@ -45,9 +37,8 @@ scores = pagerank(db,
 Measures how often a node lies on shortest paths.
 
 ```python
-from grafeo.algorithms import betweenness_centrality
-
-scores = betweenness_centrality(db)
+algs = db.algorithms()
+scores = algs.betweenness_centrality()
 ```
 
 ### Use Cases
@@ -61,9 +52,8 @@ scores = betweenness_centrality(db)
 Measures average distance to all other nodes.
 
 ```python
-from grafeo.algorithms import closeness_centrality
-
-scores = closeness_centrality(db)
+algs = db.algorithms()
+scores = algs.closeness_centrality()
 ```
 
 ### Use Cases
@@ -77,11 +67,8 @@ scores = closeness_centrality(db)
 Simple count of connections.
 
 ```python
-from grafeo.algorithms import degree_centrality
-
-scores = degree_centrality(db,
-    direction='both'  # 'in', 'out', or 'both'
-)
+algs = db.algorithms()
+scores = algs.degree_centrality()
 ```
 
 ### Use Cases
@@ -95,9 +82,8 @@ scores = degree_centrality(db,
 Importance based on neighbor importance.
 
 ```python
-from grafeo.algorithms import eigenvector_centrality
-
-scores = eigenvector_centrality(db)
+algs = db.algorithms()
+scores = algs.eigenvector_centrality()
 ```
 
 ### Use Cases

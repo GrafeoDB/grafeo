@@ -1,4 +1,6 @@
-//! GrafeoDB main database struct.
+//! The main database struct and operations.
+//!
+//! Start here with [`GrafeoDB`] - it's your handle to everything.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -13,10 +15,32 @@ use grafeo_core::graph::lpg::LpgStore;
 use grafeo_core::graph::rdf::RdfStore;
 
 use crate::config::Config;
+use crate::query::cache::QueryCache;
 use crate::session::Session;
 use crate::transaction::TransactionManager;
 
-/// The main Grafeo database.
+/// Your handle to a Grafeo database.
+///
+/// Start here. Create one with [`new_in_memory()`](Self::new_in_memory) for
+/// quick experiments, or [`open()`](Self::open) for persistent storage.
+/// Then grab a [`session()`](Self::session) to start querying.
+///
+/// # Examples
+///
+/// ```
+/// use grafeo_engine::GrafeoDB;
+///
+/// // Quick in-memory database
+/// let db = GrafeoDB::new_in_memory();
+///
+/// // Add some data
+/// db.create_node(&["Person"]);
+///
+/// // Query it
+/// let session = db.session();
+/// let result = session.execute("MATCH (p:Person) RETURN p")?;
+/// # Ok::<(), grafeo_common::utils::error::Error>(())
+/// ```
 pub struct GrafeoDB {
     /// Database configuration.
     config: Config,
@@ -31,12 +55,17 @@ pub struct GrafeoDB {
     buffer_manager: Arc<BufferManager>,
     /// Write-ahead log manager (if durability is enabled).
     wal: Option<Arc<WalManager>>,
+    /// Query cache for parsed and optimized plans.
+    query_cache: Arc<QueryCache>,
     /// Whether the database is open.
     is_open: RwLock<bool>,
 }
 
 impl GrafeoDB {
-    /// Creates a new in-memory database.
+    /// Creates an in-memory database - fast to create, gone when dropped.
+    ///
+    /// Use this for tests, experiments, or when you don't need persistence.
+    /// For data that survives restarts, use [`open()`](Self::open) instead.
     ///
     /// # Examples
     ///
@@ -45,50 +74,58 @@ impl GrafeoDB {
     ///
     /// let db = GrafeoDB::new_in_memory();
     /// let session = db.session();
+    /// session.execute("INSERT (:Person {name: 'Alice'})")?;
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     #[must_use]
     pub fn new_in_memory() -> Self {
         Self::with_config(Config::in_memory()).expect("In-memory database creation should not fail")
     }
 
-    /// Opens or creates a database at the given path.
+    /// Opens a database at the given path, creating it if it doesn't exist.
     ///
-    /// If the database exists, it will be recovered from the WAL.
-    /// If the database does not exist, a new one will be created.
+    /// If you've used this path before, Grafeo recovers your data from the
+    /// write-ahead log automatically. First open on a new path creates an
+    /// empty database.
     ///
     /// # Errors
     ///
-    /// Returns an error if the database cannot be opened or created.
+    /// Returns an error if the path isn't writable or recovery fails.
     ///
     /// # Examples
     ///
     /// ```no_run
     /// use grafeo_engine::GrafeoDB;
     ///
-    /// let db = GrafeoDB::open("./my_database").expect("Failed to open database");
+    /// let db = GrafeoDB::open("./my_social_network")?;
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::with_config(Config::persistent(path.as_ref()))
     }
 
-    /// Creates a database with the given configuration.
+    /// Creates a database with custom configuration.
     ///
-    /// If WAL is enabled and a database exists at the configured path,
-    /// the database will be recovered from the WAL.
+    /// Use this when you need fine-grained control over memory limits,
+    /// thread counts, or persistence settings. For most cases,
+    /// [`new_in_memory()`](Self::new_in_memory) or [`open()`](Self::open)
+    /// are simpler.
     ///
     /// # Errors
     ///
-    /// Returns an error if the database cannot be created or recovery fails.
+    /// Returns an error if the database can't be created or recovery fails.
     ///
     /// # Examples
     ///
     /// ```
     /// use grafeo_engine::{GrafeoDB, Config};
     ///
+    /// // In-memory with a 512MB limit
     /// let config = Config::in_memory()
-    ///     .with_memory_limit(512 * 1024 * 1024); // 512MB
+    ///     .with_memory_limit(512 * 1024 * 1024);
     ///
-    /// let db = GrafeoDB::with_config(config).unwrap();
+    /// let db = GrafeoDB::with_config(config)?;
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     pub fn with_config(config: Config) -> Result<Self> {
         let store = Arc::new(LpgStore::new());
@@ -135,6 +172,9 @@ impl GrafeoDB {
             None
         };
 
+        // Create query cache with default capacity (1000 queries)
+        let query_cache = Arc::new(QueryCache::default());
+
         Ok(Self {
             config,
             store,
@@ -143,6 +183,7 @@ impl GrafeoDB {
             tx_manager,
             buffer_manager,
             wal,
+            query_cache,
             is_open: RwLock::new(true),
         })
     }
@@ -175,6 +216,12 @@ impl GrafeoDB {
                 WalRecord::SetEdgeProperty { id, key, value } => {
                     store.set_edge_property(*id, key, value.clone());
                 }
+                WalRecord::AddNodeLabel { id, label } => {
+                    store.add_label(*id, label);
+                }
+                WalRecord::RemoveNodeLabel { id, label } => {
+                    store.remove_label(*id, label);
+                }
                 WalRecord::TxCommit { .. }
                 | WalRecord::TxAbort { .. }
                 | WalRecord::Checkpoint { .. } => {
@@ -186,7 +233,11 @@ impl GrafeoDB {
         Ok(())
     }
 
-    /// Creates a new session for interacting with the database.
+    /// Opens a new session for running queries.
+    ///
+    /// Sessions are cheap to create - spin up as many as you need. Each
+    /// gets its own transaction context, so concurrent sessions won't
+    /// block each other on reads.
     ///
     /// # Examples
     ///
@@ -195,21 +246,51 @@ impl GrafeoDB {
     ///
     /// let db = GrafeoDB::new_in_memory();
     /// let session = db.session();
-    /// // Use session for queries and transactions
+    ///
+    /// // Run queries through the session
+    /// let result = session.execute("MATCH (n) RETURN count(n)")?;
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     #[must_use]
     pub fn session(&self) -> Session {
-        Session::new(Arc::clone(&self.store), Arc::clone(&self.tx_manager))
+        #[cfg(feature = "rdf")]
+        {
+            Session::with_rdf_store_and_adaptive(
+                Arc::clone(&self.store),
+                Arc::clone(&self.rdf_store),
+                Arc::clone(&self.tx_manager),
+                Arc::clone(&self.query_cache),
+                self.config.adaptive.clone(),
+                self.config.factorized_execution,
+            )
+        }
+        #[cfg(not(feature = "rdf"))]
+        {
+            Session::with_adaptive(
+                Arc::clone(&self.store),
+                Arc::clone(&self.tx_manager),
+                Arc::clone(&self.query_cache),
+                self.config.adaptive.clone(),
+                self.config.factorized_execution,
+            )
+        }
     }
 
-    /// Executes a query and returns the result.
+    /// Returns the adaptive execution configuration.
+    #[must_use]
+    pub fn adaptive_config(&self) -> &crate::config::AdaptiveConfig {
+        &self.config.adaptive
+    }
+
+    /// Runs a query directly on the database.
     ///
-    /// This is a convenience method that creates a session, executes the query,
-    /// and returns the result.
+    /// A convenience method that creates a temporary session behind the
+    /// scenes. If you're running multiple queries, grab a
+    /// [`session()`](Self::session) instead to avoid the overhead.
     ///
     /// # Errors
     ///
-    /// Returns an error if the query fails.
+    /// Returns an error if parsing or execution fails.
     pub fn execute(&self, query: &str) -> Result<QueryResult> {
         let session = self.session();
         session.execute(query)
@@ -227,6 +308,35 @@ impl GrafeoDB {
     ) -> Result<QueryResult> {
         let session = self.session();
         session.execute_with_params(query, params)
+    }
+
+    /// Executes a Cypher query and returns the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    #[cfg(feature = "cypher")]
+    pub fn execute_cypher(&self, query: &str) -> Result<QueryResult> {
+        let session = self.session();
+        session.execute_cypher(query)
+    }
+
+    /// Executes a Cypher query with parameters and returns the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    #[cfg(feature = "cypher")]
+    pub fn execute_cypher_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, grafeo_common::types::Value>,
+    ) -> Result<QueryResult> {
+        use crate::query::processor::{QueryLanguage, QueryProcessor};
+
+        // Create processor
+        let processor = QueryProcessor::for_lpg(Arc::clone(&self.store));
+        processor.process(query, QueryLanguage::Cypher, Some(&params))
     }
 
     /// Executes a Gremlin query and returns the result.
@@ -358,16 +468,15 @@ impl GrafeoDB {
         &self.buffer_manager
     }
 
-    /// Closes the database.
+    /// Closes the database, flushing all pending writes.
     ///
-    /// This will:
-    /// - Commit any pending WAL records
-    /// - Create a checkpoint
-    /// - Sync the WAL to disk
+    /// For persistent databases, this ensures everything is safely on disk.
+    /// Called automatically when the database is dropped, but you can call
+    /// it explicitly if you need to guarantee durability at a specific point.
     ///
     /// # Errors
     ///
-    /// Returns an error if the WAL cannot be flushed.
+    /// Returns an error if the WAL can't be flushed (check disk space/permissions).
     pub fn close(&self) -> Result<()> {
         let mut is_open = self.is_open.write();
         if !*is_open {
@@ -444,9 +553,20 @@ impl GrafeoDB {
 
     // === Node Operations ===
 
-    /// Creates a new node with the given labels.
+    /// Creates a node with the given labels and returns its ID.
     ///
-    /// If WAL is enabled, the operation is logged for durability.
+    /// Labels categorize nodes - think of them like tags. A node can have
+    /// multiple labels (e.g., `["Person", "Employee"]`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let alice = db.create_node(&["Person"]);
+    /// let company = db.create_node(&["Company", "Startup"]);
+    /// ```
     pub fn create_node(&self, labels: &[&str]) -> grafeo_common::types::NodeId {
         let id = self.store.create_node(labels);
 
@@ -554,11 +674,114 @@ impl GrafeoDB {
         self.store.set_node_property(id, key, value);
     }
 
+    /// Adds a label to an existing node.
+    ///
+    /// Returns `true` if the label was added, `false` if the node doesn't exist
+    /// or already has the label.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let alice = db.create_node(&["Person"]);
+    ///
+    /// // Promote Alice to Employee
+    /// let added = db.add_node_label(alice, "Employee");
+    /// assert!(added);
+    /// ```
+    pub fn add_node_label(&self, id: grafeo_common::types::NodeId, label: &str) -> bool {
+        let result = self.store.add_label(id, label);
+
+        if result {
+            // Log to WAL if enabled
+            if let Err(e) = self.log_wal(&WalRecord::AddNodeLabel {
+                id,
+                label: label.to_string(),
+            }) {
+                tracing::warn!("Failed to log AddNodeLabel to WAL: {}", e);
+            }
+        }
+
+        result
+    }
+
+    /// Removes a label from a node.
+    ///
+    /// Returns `true` if the label was removed, `false` if the node doesn't exist
+    /// or doesn't have the label.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let alice = db.create_node(&["Person", "Employee"]);
+    ///
+    /// // Remove Employee status
+    /// let removed = db.remove_node_label(alice, "Employee");
+    /// assert!(removed);
+    /// ```
+    pub fn remove_node_label(&self, id: grafeo_common::types::NodeId, label: &str) -> bool {
+        let result = self.store.remove_label(id, label);
+
+        if result {
+            // Log to WAL if enabled
+            if let Err(e) = self.log_wal(&WalRecord::RemoveNodeLabel {
+                id,
+                label: label.to_string(),
+            }) {
+                tracing::warn!("Failed to log RemoveNodeLabel to WAL: {}", e);
+            }
+        }
+
+        result
+    }
+
+    /// Gets all labels for a node.
+    ///
+    /// Returns `None` if the node doesn't exist.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let alice = db.create_node(&["Person", "Employee"]);
+    ///
+    /// let labels = db.get_node_labels(alice).unwrap();
+    /// assert!(labels.contains(&"Person".to_string()));
+    /// assert!(labels.contains(&"Employee".to_string()));
+    /// ```
+    #[must_use]
+    pub fn get_node_labels(&self, id: grafeo_common::types::NodeId) -> Option<Vec<String>> {
+        self.store
+            .get_node(id)
+            .map(|node| node.labels.iter().map(|s| s.to_string()).collect())
+    }
+
     // === Edge Operations ===
 
-    /// Creates a new edge between two nodes.
+    /// Creates an edge (relationship) between two nodes.
     ///
-    /// If WAL is enabled, the operation is logged for durability.
+    /// Edges connect nodes and have a type that describes the relationship.
+    /// They're directed - the order of `src` and `dst` matters.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let alice = db.create_node(&["Person"]);
+    /// let bob = db.create_node(&["Person"]);
+    ///
+    /// // Alice knows Bob (directed: Alice -> Bob)
+    /// let edge = db.create_edge(alice, bob, "KNOWS");
+    /// ```
     pub fn create_edge(
         &self,
         src: grafeo_common::types::NodeId,
@@ -694,6 +917,457 @@ impl GrafeoDB {
         // Note: RemoveProperty WAL records not yet implemented, but operation works in memory
         self.store.remove_edge_property(id, key).is_some()
     }
+
+    // =========================================================================
+    // PROPERTY INDEX API
+    // =========================================================================
+
+    /// Creates an index on a node property for O(1) lookups by value.
+    ///
+    /// After creating an index, calls to [`Self::find_nodes_by_property`] will be
+    /// O(1) instead of O(n) for this property. The index is automatically
+    /// maintained when properties are set or removed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Create an index on the 'email' property
+    /// db.create_property_index("email");
+    ///
+    /// // Now lookups by email are O(1)
+    /// let nodes = db.find_nodes_by_property("email", &Value::from("alice@example.com"));
+    /// ```
+    pub fn create_property_index(&self, property: &str) {
+        self.store.create_property_index(property);
+    }
+
+    /// Drops an index on a node property.
+    ///
+    /// Returns `true` if the index existed and was removed.
+    pub fn drop_property_index(&self, property: &str) -> bool {
+        self.store.drop_property_index(property)
+    }
+
+    /// Returns `true` if the property has an index.
+    #[must_use]
+    pub fn has_property_index(&self, property: &str) -> bool {
+        self.store.has_property_index(property)
+    }
+
+    /// Finds all nodes that have a specific property value.
+    ///
+    /// If the property is indexed, this is O(1). Otherwise, it scans all nodes
+    /// which is O(n). Use [`Self::create_property_index`] for frequently queried properties.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Create index for fast lookups (optional but recommended)
+    /// db.create_property_index("city");
+    ///
+    /// // Find all nodes where city = "NYC"
+    /// let nyc_nodes = db.find_nodes_by_property("city", &Value::from("NYC"));
+    /// ```
+    #[must_use]
+    pub fn find_nodes_by_property(
+        &self,
+        property: &str,
+        value: &grafeo_common::types::Value,
+    ) -> Vec<grafeo_common::types::NodeId> {
+        self.store.find_nodes_by_property(property, value)
+    }
+
+    // =========================================================================
+    // ADMIN API: Introspection
+    // =========================================================================
+
+    /// Returns true if this database is backed by a file (persistent).
+    ///
+    /// In-memory databases return false.
+    #[must_use]
+    pub fn is_persistent(&self) -> bool {
+        self.config.path.is_some()
+    }
+
+    /// Returns the database file path, if persistent.
+    ///
+    /// In-memory databases return None.
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        self.config.path.as_deref()
+    }
+
+    /// Returns high-level database information.
+    ///
+    /// Includes node/edge counts, persistence status, and mode (LPG/RDF).
+    #[must_use]
+    pub fn info(&self) -> crate::admin::DatabaseInfo {
+        crate::admin::DatabaseInfo {
+            mode: crate::admin::DatabaseMode::Lpg,
+            node_count: self.store.node_count(),
+            edge_count: self.store.edge_count(),
+            is_persistent: self.is_persistent(),
+            path: self.config.path.clone(),
+            wal_enabled: self.config.wal_enabled,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+
+    /// Returns detailed database statistics.
+    ///
+    /// Includes counts, memory usage, and index information.
+    #[must_use]
+    pub fn detailed_stats(&self) -> crate::admin::DatabaseStats {
+        let disk_bytes = self.config.path.as_ref().and_then(|p| {
+            if p.exists() {
+                Self::calculate_disk_usage(p).ok()
+            } else {
+                None
+            }
+        });
+
+        crate::admin::DatabaseStats {
+            node_count: self.store.node_count(),
+            edge_count: self.store.edge_count(),
+            label_count: self.store.label_count(),
+            edge_type_count: self.store.edge_type_count(),
+            property_key_count: self.store.property_key_count(),
+            index_count: 0, // TODO: implement index tracking
+            memory_bytes: self.buffer_manager.allocated(),
+            disk_bytes,
+        }
+    }
+
+    /// Calculates total disk usage for the database directory.
+    fn calculate_disk_usage(path: &Path) -> Result<usize> {
+        let mut total = 0usize;
+        if path.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                let entry = entry?;
+                let metadata = entry.metadata()?;
+                if metadata.is_file() {
+                    total += metadata.len() as usize;
+                } else if metadata.is_dir() {
+                    total += Self::calculate_disk_usage(&entry.path())?;
+                }
+            }
+        }
+        Ok(total)
+    }
+
+    /// Returns schema information (labels, edge types, property keys).
+    ///
+    /// For LPG mode, returns label and edge type information.
+    /// For RDF mode, returns predicate and named graph information.
+    #[must_use]
+    pub fn schema(&self) -> crate::admin::SchemaInfo {
+        let labels = self
+            .store
+            .all_labels()
+            .into_iter()
+            .map(|name| crate::admin::LabelInfo {
+                name: name.clone(),
+                count: self.store.nodes_with_label(&name).count(),
+            })
+            .collect();
+
+        let edge_types = self
+            .store
+            .all_edge_types()
+            .into_iter()
+            .map(|name| crate::admin::EdgeTypeInfo {
+                name: name.clone(),
+                count: self.store.edges_with_type(&name).count(),
+            })
+            .collect();
+
+        let property_keys = self.store.all_property_keys();
+
+        crate::admin::SchemaInfo::Lpg(crate::admin::LpgSchemaInfo {
+            labels,
+            edge_types,
+            property_keys,
+        })
+    }
+
+    /// Returns RDF schema information.
+    ///
+    /// Only available when the RDF feature is enabled.
+    #[cfg(feature = "rdf")]
+    #[must_use]
+    pub fn rdf_schema(&self) -> crate::admin::SchemaInfo {
+        let stats = self.rdf_store.stats();
+
+        let predicates = self
+            .rdf_store
+            .predicates()
+            .into_iter()
+            .map(|predicate| {
+                let count = self.rdf_store.triples_with_predicate(&predicate).len();
+                crate::admin::PredicateInfo {
+                    iri: predicate.to_string(),
+                    count,
+                }
+            })
+            .collect();
+
+        crate::admin::SchemaInfo::Rdf(crate::admin::RdfSchemaInfo {
+            predicates,
+            named_graphs: Vec::new(), // Named graphs not yet implemented in RdfStore
+            subject_count: stats.subject_count,
+            object_count: stats.object_count,
+        })
+    }
+
+    /// Validates database integrity.
+    ///
+    /// Checks for:
+    /// - Dangling edge references (edges pointing to non-existent nodes)
+    /// - Internal index consistency
+    ///
+    /// Returns a list of errors and warnings. Empty errors = valid.
+    #[must_use]
+    pub fn validate(&self) -> crate::admin::ValidationResult {
+        let mut result = crate::admin::ValidationResult::default();
+
+        // Check for dangling edge references
+        for edge in self.store.all_edges() {
+            if self.store.get_node(edge.src).is_none() {
+                result.errors.push(crate::admin::ValidationError {
+                    code: "DANGLING_SRC".to_string(),
+                    message: format!(
+                        "Edge {} references non-existent source node {}",
+                        edge.id.0, edge.src.0
+                    ),
+                    context: Some(format!("edge:{}", edge.id.0)),
+                });
+            }
+            if self.store.get_node(edge.dst).is_none() {
+                result.errors.push(crate::admin::ValidationError {
+                    code: "DANGLING_DST".to_string(),
+                    message: format!(
+                        "Edge {} references non-existent destination node {}",
+                        edge.id.0, edge.dst.0
+                    ),
+                    context: Some(format!("edge:{}", edge.id.0)),
+                });
+            }
+        }
+
+        // Add warnings for potential issues
+        if self.store.node_count() > 0 && self.store.edge_count() == 0 {
+            result.warnings.push(crate::admin::ValidationWarning {
+                code: "NO_EDGES".to_string(),
+                message: "Database has nodes but no edges".to_string(),
+                context: None,
+            });
+        }
+
+        result
+    }
+
+    /// Returns WAL (Write-Ahead Log) status.
+    ///
+    /// Returns None if WAL is not enabled.
+    #[must_use]
+    pub fn wal_status(&self) -> crate::admin::WalStatus {
+        if let Some(ref wal) = self.wal {
+            crate::admin::WalStatus {
+                enabled: true,
+                path: self.config.path.as_ref().map(|p| p.join("wal")),
+                size_bytes: wal.size_bytes(),
+                record_count: wal.record_count() as usize,
+                last_checkpoint: wal.last_checkpoint_timestamp(),
+                current_epoch: self.store.current_epoch().as_u64(),
+            }
+        } else {
+            crate::admin::WalStatus {
+                enabled: false,
+                path: None,
+                size_bytes: 0,
+                record_count: 0,
+                last_checkpoint: None,
+                current_epoch: self.store.current_epoch().as_u64(),
+            }
+        }
+    }
+
+    /// Forces a WAL checkpoint.
+    ///
+    /// Flushes all pending WAL records to the main storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checkpoint fails.
+    pub fn wal_checkpoint(&self) -> Result<()> {
+        if let Some(ref wal) = self.wal {
+            let epoch = self.store.current_epoch();
+            let tx_id = self
+                .tx_manager
+                .last_assigned_tx_id()
+                .unwrap_or_else(|| self.tx_manager.begin());
+            wal.checkpoint(tx_id, epoch)?;
+            wal.sync()?;
+        }
+        Ok(())
+    }
+
+    // =========================================================================
+    // ADMIN API: Persistence Control
+    // =========================================================================
+
+    /// Saves the database to a file path.
+    ///
+    /// - If in-memory: creates a new persistent database at path
+    /// - If file-backed: creates a copy at the new path
+    ///
+    /// The original database remains unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the save operation fails.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+
+        // Create target database with WAL enabled
+        let target_config = Config::persistent(path);
+        let target = Self::with_config(target_config)?;
+
+        // Copy all nodes using WAL-enabled methods
+        for node in self.store.all_nodes() {
+            let label_refs: Vec<&str> = node.labels.iter().map(|s| &**s).collect();
+            target.store.create_node_with_id(node.id, &label_refs);
+
+            // Log to WAL
+            target.log_wal(&WalRecord::CreateNode {
+                id: node.id,
+                labels: node.labels.iter().map(|s| s.to_string()).collect(),
+            })?;
+
+            // Copy properties
+            for (key, value) in node.properties {
+                target
+                    .store
+                    .set_node_property(node.id, key.as_str(), value.clone());
+                target.log_wal(&WalRecord::SetNodeProperty {
+                    id: node.id,
+                    key: key.to_string(),
+                    value,
+                })?;
+            }
+        }
+
+        // Copy all edges using WAL-enabled methods
+        for edge in self.store.all_edges() {
+            target
+                .store
+                .create_edge_with_id(edge.id, edge.src, edge.dst, &edge.edge_type);
+
+            // Log to WAL
+            target.log_wal(&WalRecord::CreateEdge {
+                id: edge.id,
+                src: edge.src,
+                dst: edge.dst,
+                edge_type: edge.edge_type.to_string(),
+            })?;
+
+            // Copy properties
+            for (key, value) in edge.properties {
+                target
+                    .store
+                    .set_edge_property(edge.id, key.as_str(), value.clone());
+                target.log_wal(&WalRecord::SetEdgeProperty {
+                    id: edge.id,
+                    key: key.to_string(),
+                    value,
+                })?;
+            }
+        }
+
+        // Checkpoint and close the target database
+        target.close()?;
+
+        Ok(())
+    }
+
+    /// Creates an in-memory copy of this database.
+    ///
+    /// Returns a new database that is completely independent.
+    /// Useful for:
+    /// - Testing modifications without affecting the original
+    /// - Faster operations when persistence isn't needed
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the copy operation fails.
+    pub fn to_memory(&self) -> Result<Self> {
+        let config = Config::in_memory();
+        let target = Self::with_config(config)?;
+
+        // Copy all nodes
+        for node in self.store.all_nodes() {
+            let label_refs: Vec<&str> = node.labels.iter().map(|s| &**s).collect();
+            target.store.create_node_with_id(node.id, &label_refs);
+
+            // Copy properties
+            for (key, value) in node.properties {
+                target.store.set_node_property(node.id, key.as_str(), value);
+            }
+        }
+
+        // Copy all edges
+        for edge in self.store.all_edges() {
+            target
+                .store
+                .create_edge_with_id(edge.id, edge.src, edge.dst, &edge.edge_type);
+
+            // Copy properties
+            for (key, value) in edge.properties {
+                target.store.set_edge_property(edge.id, key.as_str(), value);
+            }
+        }
+
+        Ok(target)
+    }
+
+    /// Opens a database file and loads it entirely into memory.
+    ///
+    /// The returned database has no connection to the original file.
+    /// Changes will NOT be written back to the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file can't be opened or loaded.
+    pub fn open_in_memory(path: impl AsRef<Path>) -> Result<Self> {
+        // Open the source database (triggers WAL recovery)
+        let source = Self::open(path)?;
+
+        // Create in-memory copy
+        let target = source.to_memory()?;
+
+        // Close the source (releases file handles)
+        source.close()?;
+
+        Ok(target)
+    }
+
+    // =========================================================================
+    // ADMIN API: Iteration
+    // =========================================================================
+
+    /// Returns an iterator over all nodes in the database.
+    ///
+    /// Useful for dump/export operations.
+    pub fn iter_nodes(&self) -> impl Iterator<Item = grafeo_core::graph::lpg::Node> + '_ {
+        self.store.all_nodes()
+    }
+
+    /// Returns an iterator over all edges in the database.
+    ///
+    /// Useful for dump/export operations.
+    pub fn iter_edges(&self) -> impl Iterator<Item = grafeo_core::graph::lpg::Edge> + '_ {
+        self.store.all_edges()
+    }
 }
 
 impl Drop for GrafeoDB {
@@ -704,15 +1378,43 @@ impl Drop for GrafeoDB {
     }
 }
 
-/// Result of a query execution.
+/// The result of running a query.
+///
+/// Contains rows and columns, like a table. Use [`iter()`](Self::iter) to
+/// loop through rows, or [`scalar()`](Self::scalar) if you expect a single value.
+///
+/// # Examples
+///
+/// ```
+/// use grafeo_engine::GrafeoDB;
+///
+/// let db = GrafeoDB::new_in_memory();
+/// db.create_node(&["Person"]);
+///
+/// let result = db.execute("MATCH (p:Person) RETURN count(p) AS total")?;
+///
+/// // Check what we got
+/// println!("Columns: {:?}", result.columns);
+/// println!("Rows: {}", result.row_count());
+///
+/// // Iterate through results
+/// for row in result.iter() {
+///     println!("{:?}", row);
+/// }
+/// # Ok::<(), grafeo_common::utils::error::Error>(())
+/// ```
 #[derive(Debug)]
 pub struct QueryResult {
-    /// Column names.
+    /// Column names from the RETURN clause.
     pub columns: Vec<String>,
-    /// Column types (used for distinguishing Node/Edge IDs from regular integers).
+    /// Column types - useful for distinguishing NodeId/EdgeId from plain integers.
     pub column_types: Vec<grafeo_common::types::LogicalType>,
-    /// Result rows.
+    /// The actual result rows.
     pub rows: Vec<Vec<grafeo_common::types::Value>>,
+    /// Query execution time in milliseconds (if timing was enabled).
+    pub execution_time_ms: Option<f64>,
+    /// Number of rows scanned during query execution (estimate).
+    pub rows_scanned: Option<u64>,
 }
 
 impl QueryResult {
@@ -724,6 +1426,8 @@ impl QueryResult {
             columns,
             column_types: vec![grafeo_common::types::LogicalType::Any; len],
             rows: Vec::new(),
+            execution_time_ms: None,
+            rows_scanned: None,
         }
     }
 
@@ -737,7 +1441,28 @@ impl QueryResult {
             columns,
             column_types,
             rows: Vec::new(),
+            execution_time_ms: None,
+            rows_scanned: None,
         }
+    }
+
+    /// Sets the execution metrics on this result.
+    pub fn with_metrics(mut self, execution_time_ms: f64, rows_scanned: u64) -> Self {
+        self.execution_time_ms = Some(execution_time_ms);
+        self.rows_scanned = Some(rows_scanned);
+        self
+    }
+
+    /// Returns the execution time in milliseconds, if available.
+    #[must_use]
+    pub fn execution_time_ms(&self) -> Option<f64> {
+        self.execution_time_ms
+    }
+
+    /// Returns the number of rows scanned, if available.
+    #[must_use]
+    pub fn rows_scanned(&self) -> Option<u64> {
+        self.rows_scanned
     }
 
     /// Returns the number of rows.
@@ -758,11 +1483,14 @@ impl QueryResult {
         self.rows.is_empty()
     }
 
-    /// Gets a single scalar value from the result.
+    /// Extracts a single value from the result.
+    ///
+    /// Use this when your query returns exactly one row with one column,
+    /// like `RETURN count(n)` or `RETURN sum(p.amount)`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the result doesn't have exactly one row and one column.
+    /// Returns an error if the result has multiple rows or columns.
     pub fn scalar<T: FromValue>(&self) -> Result<T> {
         if self.rows.len() != 1 || self.columns.len() != 1 {
             return Err(grafeo_common::utils::error::Error::InvalidValue(
@@ -778,13 +1506,12 @@ impl QueryResult {
     }
 }
 
-/// Trait for converting from Value.
+/// Converts a [`Value`](grafeo_common::types::Value) to a concrete Rust type.
+///
+/// Implemented for common types like `i64`, `f64`, `String`, and `bool`.
+/// Used by [`QueryResult::scalar()`] to extract typed values.
 pub trait FromValue: Sized {
-    /// Converts from a Value.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the conversion fails.
+    /// Attempts the conversion, returning an error on type mismatch.
     fn from_value(value: &grafeo_common::types::Value) -> Result<Self>;
 }
 
@@ -918,5 +1645,150 @@ mod tests {
         }
 
         db.close().unwrap();
+    }
+
+    #[test]
+    fn test_wal_recovery_multiple_sessions() {
+        // Tests that WAL recovery works correctly across multiple open/close cycles
+        use grafeo_common::types::Value;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("multi_session_db");
+
+        // Session 1: Create initial data
+        {
+            let db = GrafeoDB::open(&db_path).unwrap();
+            let alice = db.create_node(&["Person"]);
+            db.set_node_property(alice, "name", Value::from("Alice"));
+            db.close().unwrap();
+        }
+
+        // Session 2: Add more data
+        {
+            let db = GrafeoDB::open(&db_path).unwrap();
+            assert_eq!(db.node_count(), 1); // Previous data recovered
+            let bob = db.create_node(&["Person"]);
+            db.set_node_property(bob, "name", Value::from("Bob"));
+            db.close().unwrap();
+        }
+
+        // Session 3: Verify all data
+        {
+            let db = GrafeoDB::open(&db_path).unwrap();
+            assert_eq!(db.node_count(), 2);
+
+            // Verify properties were recovered correctly
+            let node0 = db.get_node(grafeo_common::types::NodeId::new(0)).unwrap();
+            assert!(node0.labels.iter().any(|l| l.as_str() == "Person"));
+
+            let node1 = db.get_node(grafeo_common::types::NodeId::new(1)).unwrap();
+            assert!(node1.labels.iter().any(|l| l.as_str() == "Person"));
+        }
+    }
+
+    #[test]
+    fn test_database_consistency_after_mutations() {
+        // Tests that database remains consistent after a series of create/delete operations
+        use grafeo_common::types::Value;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("consistency_db");
+
+        {
+            let db = GrafeoDB::open(&db_path).unwrap();
+
+            // Create nodes
+            let a = db.create_node(&["Node"]);
+            let b = db.create_node(&["Node"]);
+            let c = db.create_node(&["Node"]);
+
+            // Create edges
+            let e1 = db.create_edge(a, b, "LINKS");
+            let _e2 = db.create_edge(b, c, "LINKS");
+
+            // Delete middle node and its edge
+            db.delete_edge(e1);
+            db.delete_node(b);
+
+            // Set properties on remaining nodes
+            db.set_node_property(a, "value", Value::Int64(1));
+            db.set_node_property(c, "value", Value::Int64(3));
+
+            db.close().unwrap();
+        }
+
+        // Reopen and verify consistency
+        {
+            let db = GrafeoDB::open(&db_path).unwrap();
+
+            // Should have 2 nodes (a and c), b was deleted
+            // Note: node_count includes deleted nodes in some implementations
+            // What matters is that the non-deleted nodes are accessible
+            let node_a = db.get_node(grafeo_common::types::NodeId::new(0));
+            assert!(node_a.is_some());
+
+            let node_c = db.get_node(grafeo_common::types::NodeId::new(2));
+            assert!(node_c.is_some());
+
+            // Middle node should be deleted
+            let node_b = db.get_node(grafeo_common::types::NodeId::new(1));
+            assert!(node_b.is_none());
+        }
+    }
+
+    #[test]
+    fn test_close_is_idempotent() {
+        // Calling close() multiple times should not cause errors
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("close_test_db");
+
+        let db = GrafeoDB::open(&db_path).unwrap();
+        db.create_node(&["Test"]);
+
+        // First close should succeed
+        assert!(db.close().is_ok());
+
+        // Second close should also succeed (idempotent)
+        assert!(db.close().is_ok());
+    }
+
+    #[test]
+    fn test_query_result_has_metrics() {
+        // Verifies that query results include execution metrics
+        let db = GrafeoDB::new_in_memory();
+        db.create_node(&["Person"]);
+        db.create_node(&["Person"]);
+
+        #[cfg(feature = "gql")]
+        {
+            let result = db.execute("MATCH (n:Person) RETURN n").unwrap();
+
+            // Metrics should be populated
+            assert!(result.execution_time_ms.is_some());
+            assert!(result.rows_scanned.is_some());
+            assert!(result.execution_time_ms.unwrap() >= 0.0);
+            assert_eq!(result.rows_scanned.unwrap(), 2);
+        }
+    }
+
+    #[test]
+    fn test_empty_query_result_metrics() {
+        // Verifies metrics are correct for queries returning no results
+        let db = GrafeoDB::new_in_memory();
+        db.create_node(&["Person"]);
+
+        #[cfg(feature = "gql")]
+        {
+            // Query that matches nothing
+            let result = db.execute("MATCH (n:NonExistent) RETURN n").unwrap();
+
+            assert!(result.execution_time_ms.is_some());
+            assert!(result.rows_scanned.is_some());
+            assert_eq!(result.rows_scanned.unwrap(), 0);
+        }
     }
 }

@@ -22,15 +22,32 @@ pub struct QueryStatement {
     pub where_clause: Option<WhereClause>,
     /// SET clauses for property updates.
     pub set_clauses: Vec<SetClause>,
+    /// REMOVE clauses for label/property removal.
+    pub remove_clauses: Vec<RemoveClause>,
     /// WITH clauses for query chaining.
     pub with_clauses: Vec<WithClause>,
     /// UNWIND clauses for list expansion.
     pub unwind_clauses: Vec<UnwindClause>,
     /// MERGE clauses for conditional create/match.
     pub merge_clauses: Vec<MergeClause>,
+    /// CREATE clauses (Cypher-style data modification within query).
+    pub create_clauses: Vec<InsertStatement>,
+    /// DELETE clauses (data removal within query).
+    pub delete_clauses: Vec<DeleteStatement>,
     /// Required RETURN clause.
     pub return_clause: ReturnClause,
+    /// Optional HAVING clause (filters aggregate results).
+    pub having_clause: Option<HavingClause>,
     /// Source span in the original query.
+    pub span: Option<SourceSpan>,
+}
+
+/// A HAVING clause for filtering aggregate results.
+#[derive(Debug, Clone)]
+pub struct HavingClause {
+    /// The filter expression.
+    pub expression: Expression,
+    /// Source span.
     pub span: Option<SourceSpan>,
 }
 
@@ -39,6 +56,28 @@ pub struct QueryStatement {
 pub struct SetClause {
     /// Property assignments.
     pub assignments: Vec<PropertyAssignment>,
+    /// Label operations (add labels to nodes).
+    pub label_operations: Vec<LabelOperation>,
+    /// Source span.
+    pub span: Option<SourceSpan>,
+}
+
+/// A label operation for adding/removing labels.
+#[derive(Debug, Clone)]
+pub struct LabelOperation {
+    /// Variable name.
+    pub variable: String,
+    /// Labels to add.
+    pub labels: Vec<String>,
+}
+
+/// A REMOVE clause for removing labels or properties.
+#[derive(Debug, Clone)]
+pub struct RemoveClause {
+    /// Label removal operations.
+    pub label_operations: Vec<LabelOperation>,
+    /// Property removal operations (variable.property pairs).
+    pub property_removals: Vec<(String, String)>,
     /// Source span.
     pub span: Option<SourceSpan>,
 }
@@ -48,10 +87,30 @@ pub struct SetClause {
 pub struct MatchClause {
     /// Whether this is an OPTIONAL MATCH.
     pub optional: bool,
-    /// Graph patterns to match.
-    pub patterns: Vec<Pattern>,
+    /// Graph patterns to match, potentially with aliases and path functions.
+    pub patterns: Vec<AliasedPattern>,
     /// Source span.
     pub span: Option<SourceSpan>,
+}
+
+/// A pattern with optional alias and path function wrapper.
+#[derive(Debug, Clone)]
+pub struct AliasedPattern {
+    /// Optional alias for the pattern (e.g., `p` in `p = (a)-[*]-(b)`).
+    pub alias: Option<String>,
+    /// Optional path function wrapping the pattern.
+    pub path_function: Option<PathFunction>,
+    /// The underlying pattern.
+    pub pattern: Pattern,
+}
+
+/// Path functions for shortest path queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathFunction {
+    /// Find the shortest path between two nodes.
+    ShortestPath,
+    /// Find all shortest paths between two nodes.
+    AllShortestPaths,
 }
 
 /// A WITH clause for query chaining.
@@ -139,6 +198,8 @@ pub struct EdgePattern {
     pub min_hops: Option<u32>,
     /// Variable-length path: maximum hops (None means unlimited or same as min).
     pub max_hops: Option<u32>,
+    /// Property filters for the edge.
+    pub properties: Vec<(String, Expression)>,
     /// Source span.
     pub span: Option<SourceSpan>,
 }
@@ -276,6 +337,8 @@ pub enum SchemaStatement {
     CreateNodeType(CreateNodeTypeStatement),
     /// CREATE EDGE TYPE.
     CreateEdgeType(CreateEdgeTypeStatement),
+    /// CREATE VECTOR INDEX.
+    CreateVectorIndex(CreateVectorIndexStatement),
 }
 
 /// A CREATE NODE TYPE statement.
@@ -296,6 +359,41 @@ pub struct CreateEdgeTypeStatement {
     pub name: String,
     /// Property definitions.
     pub properties: Vec<PropertyDefinition>,
+    /// Source span.
+    pub span: Option<SourceSpan>,
+}
+
+/// A CREATE VECTOR INDEX statement.
+///
+/// Creates an index for vector similarity search on a node property.
+///
+/// # Syntax
+///
+/// ```text
+/// CREATE VECTOR INDEX index_name ON :Label(property)
+///   [DIMENSION dim]
+///   [METRIC metric_name]
+/// ```
+///
+/// # Example
+///
+/// ```text
+/// CREATE VECTOR INDEX movie_embeddings ON :Movie(embedding)
+///   DIMENSION 384
+///   METRIC 'cosine'
+/// ```
+#[derive(Debug, Clone)]
+pub struct CreateVectorIndexStatement {
+    /// Index name.
+    pub name: String,
+    /// Node label to index.
+    pub node_label: String,
+    /// Property containing the vector.
+    pub property: String,
+    /// Vector dimensions (optional, can be inferred).
+    pub dimensions: Option<usize>,
+    /// Distance metric (default: cosine).
+    pub metric: Option<String>,
     /// Source span.
     pub span: Option<SourceSpan>,
 }
@@ -427,6 +525,12 @@ pub enum BinaryOp {
     Like,
     /// IN list membership.
     In,
+    /// STARTS WITH prefix matching.
+    StartsWith,
+    /// ENDS WITH suffix matching.
+    EndsWith,
+    /// CONTAINS substring matching.
+    Contains,
 }
 
 /// A unary operator.

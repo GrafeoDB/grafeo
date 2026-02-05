@@ -235,6 +235,8 @@ pub enum ByModifier {
     Identity,
     /// .by(key)
     Key(String),
+    /// .by(key, order) - e.g., .by('age', asc)
+    KeyWithOrder(String, SortOrder),
     /// .by(traversal)
     Traversal(Vec<Step>),
     /// .by(T.id), .by(T.label)

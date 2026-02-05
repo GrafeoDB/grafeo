@@ -46,12 +46,24 @@ def items(self) -> List[Tuple[str, Any]]
 ## Example
 
 ```python
-with db.session() as session:
-    result = session.execute("MATCH (n:Person) RETURN n LIMIT 1")
-    row = next(iter(result))
-    node = row['n']
+result = db.execute("MATCH (n:Person) RETURN n LIMIT 1")
+row = next(iter(result))
+node = row['n']
 
-    print(f"ID: {node.id}")
-    print(f"Labels: {node.labels}")
-    print(f"Name: {node.get('name')}")
+print(f"ID: {node.id}")
+print(f"Labels: {node.labels}")
+print(f"Name: {node.get('name')}")
+```
+
+## Direct Node Creation
+
+```python
+# Create node with direct API
+node = db.create_node(["Person"], {"name": "Alice", "age": 30})
+print(f"Created node with ID: {node.id}")
+
+# Manage labels
+db.add_node_label(node.id, "Employee")
+db.remove_node_label(node.id, "Contractor")
+labels = db.get_node_labels(node.id)
 ```

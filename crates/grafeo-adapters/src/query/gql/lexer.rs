@@ -35,6 +35,8 @@ pub enum TokenKind {
     Delete,
     /// SET keyword.
     Set,
+    /// REMOVE keyword.
+    Remove,
     /// CREATE keyword.
     Create,
     /// NODE keyword.
@@ -97,8 +99,24 @@ pub enum TokenKind {
     Unwind,
     /// MERGE keyword.
     Merge,
+    /// HAVING keyword (for filtering aggregate results).
+    Having,
     /// ON keyword (for MERGE ON CREATE/MATCH).
     On,
+    /// STARTS keyword (for STARTS WITH).
+    Starts,
+    /// ENDS keyword (for ENDS WITH).
+    Ends,
+    /// CONTAINS keyword.
+    Contains,
+    /// VECTOR keyword (for vector index and type).
+    Vector,
+    /// INDEX keyword (for CREATE INDEX).
+    Index,
+    /// DIMENSION keyword (for vector dimensions).
+    Dimension,
+    /// METRIC keyword (for distance metric).
+    Metric,
 
     // Literals
     /// Integer literal.
@@ -357,7 +375,10 @@ impl<'a> Lexer<'a> {
 
     fn peek_char(&self) -> char {
         if self.position + 1 < self.input.len() {
-            self.input[self.position + 1..].chars().next().unwrap_or('\0')
+            self.input[self.position + 1..]
+                .chars()
+                .next()
+                .unwrap_or('\0')
         } else {
             '\0'
         }
@@ -480,6 +501,7 @@ impl<'a> Lexer<'a> {
             "INSERT" => TokenKind::Insert,
             "DELETE" => TokenKind::Delete,
             "SET" => TokenKind::Set,
+            "REMOVE" => TokenKind::Remove,
             "CREATE" => TokenKind::Create,
             "NODE" => TokenKind::Node,
             "EDGE" => TokenKind::Edge,
@@ -511,7 +533,15 @@ impl<'a> Lexer<'a> {
             "WITH" => TokenKind::With,
             "UNWIND" => TokenKind::Unwind,
             "MERGE" => TokenKind::Merge,
+            "HAVING" => TokenKind::Having,
             "ON" => TokenKind::On,
+            "STARTS" => TokenKind::Starts,
+            "ENDS" => TokenKind::Ends,
+            "CONTAINS" => TokenKind::Contains,
+            "VECTOR" => TokenKind::Vector,
+            "INDEX" => TokenKind::Index,
+            "DIMENSION" => TokenKind::Dimension,
+            "METRIC" => TokenKind::Metric,
             _ => TokenKind::Identifier,
         }
     }

@@ -13,15 +13,14 @@ Grafeo provides first-class Python support through the `grafeo` package.
 import grafeo
 
 # Create a database
-db = grafeo.Database()
+db = grafeo.GrafeoDB()
 
 # Execute queries
-with db.session() as session:
-    session.execute("INSERT (:Person {name: 'Alice'})")
+db.execute("INSERT (:Person {name: 'Alice'})")
 
-    result = session.execute("MATCH (p:Person) RETURN p.name")
-    for row in result:
-        print(row['p.name'])
+result = db.execute("MATCH (p:Person) RETURN p.name")
+for row in result:
+    print(row['p.name'])
 ```
 
 ## Sections

@@ -83,9 +83,20 @@ pub enum Pattern {
     NamedPath {
         /// Path variable name.
         name: String,
+        /// Optional path function (shortestPath, allShortestPaths).
+        path_function: Option<PathFunction>,
         /// The path pattern.
         pattern: Box<Pattern>,
     },
+}
+
+/// Path function type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathFunction {
+    /// shortestPath - finds a single shortest path.
+    ShortestPath,
+    /// allShortestPaths - finds all shortest paths.
+    AllShortestPaths,
 }
 
 /// A node pattern like (n:Person {name: 'Alice'}).

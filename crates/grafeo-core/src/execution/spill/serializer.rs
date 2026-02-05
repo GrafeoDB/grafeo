@@ -6,6 +6,7 @@
 //! - Fast serialization/deserialization
 //! - Compact representation
 
+use arcstr::ArcStr;
 use grafeo_common::types::Value;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -21,6 +22,7 @@ const TAG_BYTES: u8 = 5;
 const TAG_TIMESTAMP: u8 = 6;
 const TAG_LIST: u8 = 7;
 const TAG_MAP: u8 = 8;
+const TAG_VECTOR: u8 = 9;
 
 /// Serializes a Value to bytes.
 ///
@@ -93,6 +95,14 @@ pub fn serialize_value<W: Write + ?Sized>(value: &Value, w: &mut W) -> std::io::
             }
             Ok(total)
         }
+        Value::Vector(v) => {
+            w.write_all(&[TAG_VECTOR])?;
+            w.write_all(&(v.len() as u64).to_le_bytes())?;
+            for &f in v.iter() {
+                w.write_all(&f.to_le_bytes())?;
+            }
+            Ok(1 + 8 + v.len() * 4)
+        }
     }
 }
 
@@ -130,7 +140,7 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
             r.read_exact(&mut str_buf)?;
             let s = String::from_utf8(str_buf)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            Ok(Value::String(Arc::from(s)))
+            Ok(Value::String(ArcStr::from(s)))
         }
         TAG_BYTES => {
             let mut len_buf = [0u8; 8];
@@ -178,6 +188,18 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
                 map.insert(grafeo_common::types::PropertyKey::new(key_str), val);
             }
             Ok(Value::Map(Arc::new(map)))
+        }
+        TAG_VECTOR => {
+            let mut len_buf = [0u8; 8];
+            r.read_exact(&mut len_buf)?;
+            let len = u64::from_le_bytes(len_buf) as usize;
+            let mut floats = Vec::with_capacity(len);
+            let mut buf = [0u8; 4];
+            for _ in 0..len {
+                r.read_exact(&mut buf)?;
+                floats.push(f32::from_le_bytes(buf));
+            }
+            Ok(Value::Vector(Arc::from(floats)))
         }
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -242,6 +264,7 @@ pub fn deserialize_row<R: Read + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arcstr::ArcStr;
     use std::io::Cursor;
 
     fn roundtrip_value(value: Value) -> Value {
@@ -291,15 +314,15 @@ mod tests {
 
     #[test]
     fn test_serialize_string() {
-        let result = roundtrip_value(Value::String(Arc::from("hello world")));
+        let result = roundtrip_value(Value::String(ArcStr::from("hello world")));
         assert_eq!(result.as_str(), Some("hello world"));
 
         // Empty string
-        let result = roundtrip_value(Value::String(Arc::from("")));
+        let result = roundtrip_value(Value::String(ArcStr::from("")));
         assert_eq!(result.as_str(), Some(""));
 
         // Unicode
-        let result = roundtrip_value(Value::String(Arc::from("héllo 世界 🌍")));
+        let result = roundtrip_value(Value::String(ArcStr::from("héllo 世界 🌍")));
         assert_eq!(result.as_str(), Some("héllo 世界 🌍"));
     }
 
@@ -325,7 +348,7 @@ mod tests {
     fn test_serialize_list() {
         let list = Value::List(Arc::from(vec![
             Value::Int64(1),
-            Value::String(Arc::from("two")),
+            Value::String(ArcStr::from("two")),
             Value::Bool(true),
         ]));
         let result = roundtrip_value(list.clone());
@@ -350,7 +373,7 @@ mod tests {
         let mut map = BTreeMap::new();
         map.insert(
             grafeo_common::types::PropertyKey::new("name"),
-            Value::String(Arc::from("Alice")),
+            Value::String(ArcStr::from("Alice")),
         );
         map.insert(
             grafeo_common::types::PropertyKey::new("age"),
@@ -366,7 +389,7 @@ mod tests {
     fn test_serialize_row() {
         let row = vec![
             Value::Int64(1),
-            Value::String(Arc::from("test")),
+            Value::String(ArcStr::from("test")),
             Value::Bool(true),
             Value::Null,
         ];
@@ -400,9 +423,9 @@ mod tests {
     #[test]
     fn test_serialize_multiple_rows() {
         let rows = vec![
-            vec![Value::Int64(1), Value::String(Arc::from("a"))],
-            vec![Value::Int64(2), Value::String(Arc::from("b"))],
-            vec![Value::Int64(3), Value::String(Arc::from("c"))],
+            vec![Value::Int64(1), Value::String(ArcStr::from("a"))],
+            vec![Value::Int64(2), Value::String(ArcStr::from("b"))],
+            vec![Value::Int64(3), Value::String(ArcStr::from("c"))],
         ];
 
         let mut buf = Vec::new();
@@ -438,7 +461,7 @@ mod tests {
         buf.clear();
 
         // String "hi": 11 bytes (tag + 8 length + 2)
-        serialize_value(&Value::String(Arc::from("hi")), &mut buf).unwrap();
+        serialize_value(&Value::String(ArcStr::from("hi")), &mut buf).unwrap();
         assert_eq!(buf.len(), 11);
     }
 }

@@ -1,0 +1,31 @@
+{
+  "name": "@grafeo-db/js",
+  "version": "0.1.4",
+  "description": "Node.js/TypeScript bindings for Grafeo - a high-performance embeddable graph database",
+  "keywords": [
+    "graph",
+    "database",
+    "gql",
+    "cypher",
+    "sparql",
+    "knowledge-graph",
+    "native",
+    "napi"
+  ],
+  "author": "StevenBtw",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GrafeoDB/grafeo.git",
+    "directory": "crates/bindings/js"
+  },
+  "homepage": "https://grafeo.dev",
+  "bugs": {
+    "url": "https://github.com/GrafeoDB/grafeo/issues"
+  },
+  "main": "index.js",
+  "types": "index.d.ts",
+  "engines": {
+    "node": ">=18"
+  }
+}

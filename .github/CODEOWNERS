@@ -8,7 +8,7 @@
 /crates/grafeo-engine/ @StevenBtw
 
 # Python bindings
-/crates/grafeo-python/ @StevenBtw
+/crates/bindings/python/ @StevenBtw
 
 # CI/CD
 /.github/ @StevenBtw

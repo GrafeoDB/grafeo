@@ -1,18 +1,18 @@
-//! Transparent spilling for out-of-core query processing.
+//! Disk spilling for queries that exceed available memory.
 //!
-//! This module provides infrastructure for spilling operator state to disk
-//! when memory pressure is high, enabling queries to complete even when
-//! intermediate results exceed available memory.
+//! When a sort or aggregation grows too large for RAM, we spill partitions to
+//! disk and merge them back later. This lets queries complete even with limited
+//! memory - just slower.
 //!
-//! # Architecture
+//! | Component | Purpose |
+//! | --------- | ------- |
+//! | [`SpillManager`] | Manages spill file lifecycle with automatic cleanup |
+//! | [`SpillFile`] | Read/write individual spill files |
+//! | [`ExternalSort`] | External merge sort for big ORDER BY |
+//! | [`PartitionedState`] | Hash partitioning for spillable GROUP BY |
 //!
-//! - [`SpillManager`] - Manages spill file lifecycle with automatic cleanup (sync)
-//! - [`AsyncSpillManager`] - Async version using tokio for non-blocking I/O
-//! - [`SpillFile`] - Read/write abstraction for individual spill files (sync)
-//! - [`AsyncSpillFile`] - Async version using tokio
-//! - Serializer functions for binary Value encoding (no serde overhead)
-//! - [`ExternalSort`] - External merge sort for out-of-core sorting
-//! - [`PartitionedState`] - Hash partitioning for spillable aggregation
+//! Async variants (`AsyncSpillManager`, `AsyncSpillFile`) use tokio for
+//! non-blocking I/O when running in async contexts.
 
 mod async_file;
 mod async_manager;

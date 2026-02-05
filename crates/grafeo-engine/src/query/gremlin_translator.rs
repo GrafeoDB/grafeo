@@ -3,9 +3,10 @@
 //! Translates Gremlin AST to the common logical plan representation.
 
 use crate::query::plan::{
-    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CreateNodeOp, DeleteNodeOp,
-    DistinctOp, ExpandDirection, ExpandOp, FilterOp, LimitOp, LogicalExpression, LogicalOperator,
-    LogicalPlan, NodeScanOp, ReturnItem, ReturnOp, SkipOp, SortKey, SortOp, SortOrder, UnaryOp,
+    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CreateEdgeOp, CreateNodeOp,
+    DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, FilterOp, JoinOp, JoinType, LimitOp,
+    LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp, ProjectOp, Projection, ReturnItem,
+    ReturnOp, SetPropertyOp, SkipOp, SortKey, SortOp, SortOrder, UnaryOp,
 };
 use grafeo_adapters::query::gremlin::{self, ast};
 use grafeo_common::types::Value;
@@ -29,6 +30,14 @@ struct GremlinTranslator {
     var_counter: AtomicU32,
 }
 
+/// Context for building an edge during traversal processing.
+struct PendingEdge {
+    edge_type: String,
+    from_var: Option<String>,
+    to_var: Option<String>,
+    properties: Vec<(String, LogicalExpression)>,
+}
+
 impl GremlinTranslator {
     fn new() -> Self {
         Self {
@@ -37,14 +46,91 @@ impl GremlinTranslator {
     }
 
     fn translate_statement(&self, stmt: &ast::Statement) -> Result<LogicalPlan> {
+        // Special handling for addE source - need to collect from/to/property steps
+        if let ast::TraversalSource::AddE(edge_type) = &stmt.source {
+            return self.translate_add_edge_traversal(edge_type, &stmt.steps);
+        }
+
         // Start with the source
         let mut plan = self.translate_source(&stmt.source)?;
 
         // Track current variable for property access
         let mut current_var = self.get_current_var(&stmt.source);
 
+        // Track edge context for step-level addE
+        let mut pending_edge: Option<PendingEdge> = None;
+
         // Process each step
         for step in &stmt.steps {
+            // Handle edge creation steps specially
+            if let Some(ref mut edge) = pending_edge {
+                match step {
+                    ast::Step::From(from_to) => {
+                        let (var, new_plan) =
+                            self.extract_from_to_with_plan(from_to, plan, &current_var)?;
+                        plan = new_plan;
+                        edge.from_var = Some(var);
+                        continue;
+                    }
+                    ast::Step::To(from_to) => {
+                        let (var, new_plan) =
+                            self.extract_from_to_with_plan(from_to, plan, &current_var)?;
+                        plan = new_plan;
+                        edge.to_var = Some(var);
+                        // If we have both from and to, create the edge
+                        if edge.from_var.is_some() && edge.to_var.is_some() {
+                            let edge_var = self.next_var();
+                            plan = LogicalOperator::CreateEdge(CreateEdgeOp {
+                                variable: Some(edge_var.clone()),
+                                from_variable: edge.from_var.take().unwrap(),
+                                to_variable: edge.to_var.take().unwrap(),
+                                edge_type: edge.edge_type.clone(),
+                                properties: std::mem::take(&mut edge.properties),
+                                input: Box::new(plan),
+                            });
+                            current_var = edge_var;
+                            pending_edge = None;
+                        }
+                        continue;
+                    }
+                    ast::Step::Property(prop_step) => {
+                        edge.properties.push((
+                            prop_step.key.clone(),
+                            LogicalExpression::Literal(prop_step.value.clone()),
+                        ));
+                        continue;
+                    }
+                    _ => {
+                        // Non-edge step encountered, finalize edge if possible
+                        if edge.from_var.is_some() && edge.to_var.is_some() {
+                            let edge_var = self.next_var();
+                            plan = LogicalOperator::CreateEdge(CreateEdgeOp {
+                                variable: Some(edge_var.clone()),
+                                from_variable: edge.from_var.take().unwrap(),
+                                to_variable: edge.to_var.take().unwrap(),
+                                edge_type: edge.edge_type.clone(),
+                                properties: std::mem::take(&mut edge.properties),
+                                input: Box::new(plan),
+                            });
+                            current_var = edge_var;
+                            pending_edge = None;
+                        }
+                    }
+                }
+            }
+
+            // Check if this is a step-level addE
+            if let ast::Step::AddE(edge_type) = step {
+                // For step-level addE, the current context is the source by default
+                pending_edge = Some(PendingEdge {
+                    edge_type: edge_type.clone(),
+                    from_var: Some(current_var.clone()), // Default to current traversal context
+                    to_var: None,
+                    properties: Vec::new(),
+                });
+                continue;
+            }
+
             let (new_plan, new_var) = self.translate_step(step, plan, &current_var)?;
             plan = new_plan;
             if let Some(v) = new_var {
@@ -52,8 +138,28 @@ impl GremlinTranslator {
             }
         }
 
+        // Finalize any pending edge
+        if let Some(edge) = pending_edge {
+            if let (Some(from_var), Some(to_var)) = (edge.from_var, edge.to_var) {
+                let edge_var = self.next_var();
+                plan = LogicalOperator::CreateEdge(CreateEdgeOp {
+                    variable: Some(edge_var.clone()),
+                    from_variable: from_var,
+                    to_variable: to_var,
+                    edge_type: edge.edge_type,
+                    properties: edge.properties,
+                    input: Box::new(plan),
+                });
+                current_var = edge_var;
+            }
+        }
+
         // If the last step doesn't produce a Return, wrap with one
-        if !matches!(plan, LogicalOperator::Return(_)) {
+        // Exception: DeleteNode doesn't have output to return
+        if !matches!(
+            plan,
+            LogicalOperator::Return(_) | LogicalOperator::DeleteNode(_)
+        ) {
             plan = LogicalOperator::Return(ReturnOp {
                 items: vec![ReturnItem {
                     expression: LogicalExpression::Variable(current_var),
@@ -65,6 +171,128 @@ impl GremlinTranslator {
         }
 
         Ok(LogicalPlan::new(plan))
+    }
+
+    /// Handle g.addE('type').from(...).to(...) pattern
+    fn translate_add_edge_traversal(
+        &self,
+        edge_type: &str,
+        steps: &[ast::Step],
+    ) -> Result<LogicalPlan> {
+        let mut from_var: Option<String> = None;
+        let mut to_var: Option<String> = None;
+        let mut properties: Vec<(String, LogicalExpression)> = Vec::new();
+
+        // Start with an empty plan (will be built up with traversals)
+        let mut plan = LogicalOperator::Empty;
+
+        for step in steps {
+            match step {
+                ast::Step::From(from_to) => {
+                    let (var, new_plan) = self.extract_from_to_with_plan(from_to, plan, "")?;
+                    plan = new_plan;
+                    from_var = Some(var);
+                }
+                ast::Step::To(from_to) => {
+                    let (var, new_plan) = self.extract_from_to_with_plan(from_to, plan, "")?;
+                    plan = new_plan;
+                    to_var = Some(var);
+                }
+                ast::Step::Property(prop_step) => {
+                    properties.push((
+                        prop_step.key.clone(),
+                        LogicalExpression::Literal(prop_step.value.clone()),
+                    ));
+                }
+                _ => {
+                    // Ignore other steps for now
+                }
+            }
+        }
+
+        let from_var =
+            from_var.ok_or_else(|| Error::Internal("addE requires from() step".to_string()))?;
+        let to_var =
+            to_var.ok_or_else(|| Error::Internal("addE requires to() step".to_string()))?;
+
+        // If plan is still empty (both from/to were labels), create a scan
+        if matches!(plan, LogicalOperator::Empty) {
+            let scan_var = self.next_var();
+            plan = LogicalOperator::NodeScan(NodeScanOp {
+                variable: scan_var,
+                label: None,
+                input: None,
+            });
+        }
+
+        let edge_var = self.next_var();
+        let create_edge = LogicalOperator::CreateEdge(CreateEdgeOp {
+            variable: Some(edge_var.clone()),
+            from_variable: from_var,
+            to_variable: to_var,
+            edge_type: edge_type.to_string(),
+            properties,
+            input: Box::new(plan),
+        });
+
+        let final_plan = LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable(edge_var),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(create_edge),
+        });
+
+        Ok(LogicalPlan::new(final_plan))
+    }
+
+    /// Extract variable name from FromTo specification and optionally modify the plan.
+    /// Returns (variable_name, modified_plan).
+    fn extract_from_to_with_plan(
+        &self,
+        from_to: &ast::FromTo,
+        plan: LogicalOperator,
+        _current_var: &str,
+    ) -> Result<(String, LogicalOperator)> {
+        match from_to {
+            ast::FromTo::Label(label) => Ok((label.clone(), plan)),
+            ast::FromTo::Traversal(steps) => {
+                // Create a fresh NodeScan for the sub-traversal
+                let target_var = self.next_var();
+                let mut sub_plan = LogicalOperator::NodeScan(NodeScanOp {
+                    variable: target_var.clone(),
+                    label: None,
+                    input: None,
+                });
+
+                // Apply any steps from the sub-traversal
+                let mut sub_current_var = target_var.clone();
+                for step in steps {
+                    let (new_plan, new_var) =
+                        self.translate_step(step, sub_plan, &sub_current_var)?;
+                    sub_plan = new_plan;
+                    if let Some(v) = new_var {
+                        sub_current_var = v;
+                    }
+                }
+
+                // If the main plan is Empty, just return the sub-plan
+                if matches!(plan, LogicalOperator::Empty) {
+                    return Ok((sub_current_var, sub_plan));
+                }
+
+                // Join the main plan with the sub-traversal (cross product)
+                let joined_plan = LogicalOperator::Join(JoinOp {
+                    left: Box::new(plan),
+                    right: Box::new(sub_plan),
+                    join_type: JoinType::Inner,
+                    conditions: Vec::new(), // Cross product - no conditions
+                });
+
+                Ok((sub_current_var, joined_plan))
+            }
+        }
     }
 
     fn translate_source(&self, source: &ast::TraversalSource) -> Result<LogicalOperator> {
@@ -92,6 +320,7 @@ impl GremlinTranslator {
             }
             ast::TraversalSource::E(ids) => {
                 // Edge scan - need to scan nodes and expand
+                // Use Outgoing direction to get each edge exactly once (from its source node)
                 let var = self.next_var();
                 let mut plan = LogicalOperator::NodeScan(NodeScanOp {
                     variable: var.clone(),
@@ -106,11 +335,12 @@ impl GremlinTranslator {
                     from_variable: var,
                     to_variable: target_var,
                     edge_variable: Some(edge_var.clone()),
-                    direction: ExpandDirection::Both,
+                    direction: ExpandDirection::Outgoing, // Use Outgoing to avoid duplicate edges
                     edge_type: None,
                     min_hops: 1,
                     max_hops: Some(1),
                     input: Box::new(plan),
+                    path_alias: None,
                 });
 
                 // Filter by edge IDs if specified
@@ -164,6 +394,7 @@ impl GremlinTranslator {
                     min_hops: 1,
                     max_hops: Some(1),
                     input: Box::new(input),
+                    path_alias: None,
                 });
                 Ok((plan, Some(target_var)))
             }
@@ -179,6 +410,7 @@ impl GremlinTranslator {
                     min_hops: 1,
                     max_hops: Some(1),
                     input: Box::new(input),
+                    path_alias: None,
                 });
                 Ok((plan, Some(target_var)))
             }
@@ -194,6 +426,7 @@ impl GremlinTranslator {
                     min_hops: 1,
                     max_hops: Some(1),
                     input: Box::new(input),
+                    path_alias: None,
                 });
                 Ok((plan, Some(target_var)))
             }
@@ -210,6 +443,7 @@ impl GremlinTranslator {
                     min_hops: 1,
                     max_hops: Some(1),
                     input: Box::new(input),
+                    path_alias: None,
                 });
                 Ok((plan, Some(edge_var)))
             }
@@ -226,6 +460,7 @@ impl GremlinTranslator {
                     min_hops: 1,
                     max_hops: Some(1),
                     input: Box::new(input),
+                    path_alias: None,
                 });
                 Ok((plan, Some(edge_var)))
             }
@@ -242,6 +477,7 @@ impl GremlinTranslator {
                     min_hops: 1,
                     max_hops: Some(1),
                     input: Box::new(input),
+                    path_alias: None,
                 });
                 Ok((plan, Some(edge_var)))
             }
@@ -256,27 +492,38 @@ impl GremlinTranslator {
                 Ok((plan, None))
             }
             ast::Step::HasLabel(labels) => {
+                // Labels(var) returns a list of labels, so we need to check if the
+                // target label is IN that list, not if the list equals the label
                 let predicate = if labels.len() == 1 {
                     LogicalExpression::Binary {
-                        left: Box::new(LogicalExpression::Labels(current_var.to_string())),
-                        op: BinaryOp::Eq,
-                        right: Box::new(LogicalExpression::Literal(Value::String(
+                        left: Box::new(LogicalExpression::Literal(Value::String(
                             labels[0].clone().into(),
                         ))),
+                        op: BinaryOp::In,
+                        right: Box::new(LogicalExpression::Labels(current_var.to_string())),
                     }
                 } else {
-                    LogicalExpression::Binary {
-                        left: Box::new(LogicalExpression::Labels(current_var.to_string())),
-                        op: BinaryOp::In,
-                        right: Box::new(LogicalExpression::List(
-                            labels
-                                .iter()
-                                .map(|l| {
-                                    LogicalExpression::Literal(Value::String(l.clone().into()))
-                                })
-                                .collect(),
-                        )),
+                    // For multiple labels, check if ANY of them are in the node's labels
+                    let mut conditions: Vec<LogicalExpression> = labels
+                        .iter()
+                        .map(|l| LogicalExpression::Binary {
+                            left: Box::new(LogicalExpression::Literal(Value::String(
+                                l.clone().into(),
+                            ))),
+                            op: BinaryOp::In,
+                            right: Box::new(LogicalExpression::Labels(current_var.to_string())),
+                        })
+                        .collect();
+                    // OR all conditions together
+                    let mut result = conditions.pop().unwrap();
+                    for cond in conditions {
+                        result = LogicalExpression::Binary {
+                            left: Box::new(cond),
+                            op: BinaryOp::Or,
+                            right: Box::new(result),
+                        };
                     }
+                    result
                 };
                 let plan = LogicalOperator::Filter(FilterOp {
                     predicate,
@@ -306,10 +553,16 @@ impl GremlinTranslator {
                 });
                 Ok((plan, None))
             }
-            ast::Step::Dedup(_keys) => {
-                // TODO: Use keys for column-specific dedup when supported
+            ast::Step::Dedup(keys) => {
+                // If keys are specified, use column-specific dedup
+                let columns = if keys.is_empty() {
+                    None
+                } else {
+                    Some(keys.clone())
+                };
                 let plan = LogicalOperator::Distinct(DistinctOp {
                     input: Box::new(input),
+                    columns,
                 });
                 Ok((plan, None))
             }
@@ -341,37 +594,26 @@ impl GremlinTranslator {
 
             // Map steps
             ast::Step::Values(keys) => {
-                if keys.len() == 1 {
-                    let plan = LogicalOperator::Return(ReturnOp {
-                        items: vec![ReturnItem {
-                            expression: LogicalExpression::Property {
-                                variable: current_var.to_string(),
-                                property: keys[0].clone(),
-                            },
-                            alias: Some(keys[0].clone()),
-                        }],
-                        distinct: false,
-                        input: Box::new(input),
-                    });
-                    Ok((plan, None))
-                } else {
-                    let items: Vec<ReturnItem> = keys
-                        .iter()
-                        .map(|k| ReturnItem {
-                            expression: LogicalExpression::Property {
-                                variable: current_var.to_string(),
-                                property: k.clone(),
-                            },
-                            alias: Some(k.clone()),
-                        })
-                        .collect();
-                    let plan = LogicalOperator::Return(ReturnOp {
-                        items,
-                        distinct: false,
-                        input: Box::new(input),
-                    });
-                    Ok((plan, None))
-                }
+                // Use Project instead of Return to allow chaining with subsequent steps
+                let projections: Vec<Projection> = keys
+                    .iter()
+                    .map(|k| Projection {
+                        expression: LogicalExpression::Property {
+                            variable: current_var.to_string(),
+                            property: k.clone(),
+                        },
+                        alias: Some(k.clone()),
+                    })
+                    .collect();
+
+                let plan = LogicalOperator::Project(ProjectOp {
+                    projections,
+                    input: Box::new(input),
+                });
+
+                // Use the first key as the new variable name for subsequent steps
+                let new_var = keys.first().cloned();
+                Ok((plan, new_var))
             }
             ast::Step::Id => {
                 let plan = LogicalOperator::Return(ReturnOp {
@@ -396,69 +638,85 @@ impl GremlinTranslator {
                 Ok((plan, None))
             }
             ast::Step::Count => {
+                let alias = "count".to_string();
                 let plan = LogicalOperator::Aggregate(AggregateOp {
                     group_by: Vec::new(),
                     aggregates: vec![AggregateExpr {
                         function: AggregateFunction::Count,
                         expression: None,
                         distinct: false,
-                        alias: Some("count".to_string()),
+                        alias: Some(alias.clone()),
+                        percentile: None,
                     }],
                     input: Box::new(input),
+                    having: None,
                 });
-                Ok((plan, None))
+                // Return the aggregate alias as the new variable so Return uses correct column
+                Ok((plan, Some(alias)))
             }
             ast::Step::Sum => {
+                let alias = "sum".to_string();
                 let plan = LogicalOperator::Aggregate(AggregateOp {
                     group_by: Vec::new(),
                     aggregates: vec![AggregateExpr {
                         function: AggregateFunction::Sum,
                         expression: Some(LogicalExpression::Variable(current_var.to_string())),
                         distinct: false,
-                        alias: Some("sum".to_string()),
+                        alias: Some(alias.clone()),
+                        percentile: None,
                     }],
                     input: Box::new(input),
+                    having: None,
                 });
-                Ok((plan, None))
+                Ok((plan, Some(alias)))
             }
             ast::Step::Mean => {
+                let alias = "mean".to_string();
                 let plan = LogicalOperator::Aggregate(AggregateOp {
                     group_by: Vec::new(),
                     aggregates: vec![AggregateExpr {
                         function: AggregateFunction::Avg,
                         expression: Some(LogicalExpression::Variable(current_var.to_string())),
                         distinct: false,
-                        alias: Some("mean".to_string()),
+                        alias: Some(alias.clone()),
+                        percentile: None,
                     }],
                     input: Box::new(input),
+                    having: None,
                 });
-                Ok((plan, None))
+                Ok((plan, Some(alias)))
             }
             ast::Step::Min => {
+                let alias = "min".to_string();
                 let plan = LogicalOperator::Aggregate(AggregateOp {
                     group_by: Vec::new(),
                     aggregates: vec![AggregateExpr {
                         function: AggregateFunction::Min,
                         expression: Some(LogicalExpression::Variable(current_var.to_string())),
                         distinct: false,
-                        alias: Some("min".to_string()),
+                        alias: Some(alias.clone()),
+                        percentile: None,
                     }],
                     input: Box::new(input),
+                    having: None,
                 });
-                Ok((plan, None))
+                Ok((plan, Some(alias)))
             }
             ast::Step::Max => {
+                let alias = "max".to_string();
                 let plan = LogicalOperator::Aggregate(AggregateOp {
                     group_by: Vec::new(),
                     aggregates: vec![AggregateExpr {
                         function: AggregateFunction::Max,
                         expression: Some(LogicalExpression::Variable(current_var.to_string())),
                         distinct: false,
-                        alias: Some("max".to_string()),
+                        alias: Some(alias.clone()),
+                        percentile: None,
                     }],
                     input: Box::new(input),
+                    having: None,
                 });
-                Ok((plan, None))
+                Ok((plan, Some(alias)))
             }
             ast::Step::Fold => {
                 let plan = LogicalOperator::Aggregate(AggregateOp {
@@ -468,8 +726,10 @@ impl GremlinTranslator {
                         expression: Some(LogicalExpression::Variable(current_var.to_string())),
                         distinct: false,
                         alias: Some("fold".to_string()),
+                        percentile: None,
                     }],
                     input: Box::new(input),
+                    having: None,
                 });
                 Ok((plan, None))
             }
@@ -505,14 +765,39 @@ impl GremlinTranslator {
                 // In LogicalPlan, we use the label as an alias
                 Ok((input, Some(label.clone())))
             }
-            ast::Step::Property(_prop_step) => {
-                // TODO: Translate property setting to SetPropertyOp
-                Ok((input, None))
+            ast::Step::Property(prop_step) => {
+                // If setting property on a node being created, add to CreateNodeOp
+                // Otherwise, use SetPropertyOp
+                match input {
+                    LogicalOperator::CreateNode(mut create_op) => {
+                        // Add property to the CreateNodeOp
+                        create_op.properties.push((
+                            prop_step.key.clone(),
+                            LogicalExpression::Literal(prop_step.value.clone()),
+                        ));
+                        Ok((LogicalOperator::CreateNode(create_op), None))
+                    }
+                    _ => {
+                        // Use SetPropertyOp for existing nodes
+                        let plan = LogicalOperator::SetProperty(SetPropertyOp {
+                            variable: current_var.to_string(),
+                            properties: vec![(
+                                prop_step.key.clone(),
+                                LogicalExpression::Literal(prop_step.value.clone()),
+                            )],
+                            replace: false,
+                            input: Box::new(input),
+                        });
+                        Ok((plan, None))
+                    }
+                }
             }
             ast::Step::Drop => {
                 // Delete the current element
+                // Gremlin drop() is equivalent to DETACH DELETE
                 let plan = LogicalOperator::DeleteNode(DeleteNodeOp {
                     variable: current_var.to_string(),
+                    detach: true,
                     input: Box::new(input),
                 });
                 Ok((plan, None))
@@ -528,10 +813,77 @@ impl GremlinTranslator {
                 Ok((plan, Some(var)))
             }
             ast::Step::AddE(_label) => {
-                // AddE needs from/to context
-                Err(Error::Internal(
-                    "addE requires from() and to() context".to_string(),
-                ))
+                // AddE is handled specially in translate_statement with from/to context
+                // If we reach here, it means the step was processed outside the normal flow
+                Ok((input, None))
+            }
+
+            ast::Step::By(by_modifier) => {
+                // 'by' modifies a preceding order() step
+                // If the input is a Sort operation, we replace its keys with the by modifier
+                match input {
+                    LogicalOperator::Sort(mut sort_op) => {
+                        let (expr, order) = match by_modifier {
+                            ast::ByModifier::Identity => (
+                                LogicalExpression::Variable(current_var.to_string()),
+                                SortOrder::Ascending,
+                            ),
+                            ast::ByModifier::Key(key) => (
+                                LogicalExpression::Property {
+                                    variable: current_var.to_string(),
+                                    property: key.clone(),
+                                },
+                                SortOrder::Ascending,
+                            ),
+                            ast::ByModifier::KeyWithOrder(key, ast_order) => (
+                                LogicalExpression::Property {
+                                    variable: current_var.to_string(),
+                                    property: key.clone(),
+                                },
+                                match ast_order {
+                                    ast::SortOrder::Asc => SortOrder::Ascending,
+                                    ast::SortOrder::Desc => SortOrder::Descending,
+                                    ast::SortOrder::Shuffle => SortOrder::Ascending,
+                                },
+                            ),
+                            ast::ByModifier::Order(ast_order) => (
+                                LogicalExpression::Variable(current_var.to_string()),
+                                match ast_order {
+                                    ast::SortOrder::Asc => SortOrder::Ascending,
+                                    ast::SortOrder::Desc => SortOrder::Descending,
+                                    ast::SortOrder::Shuffle => SortOrder::Ascending,
+                                },
+                            ),
+                            ast::ByModifier::Token(token) => (
+                                match token {
+                                    ast::TokenType::Id => {
+                                        LogicalExpression::Id(current_var.to_string())
+                                    }
+                                    ast::TokenType::Label => {
+                                        LogicalExpression::Labels(current_var.to_string())
+                                    }
+                                    _ => LogicalExpression::Variable(current_var.to_string()),
+                                },
+                                SortOrder::Ascending,
+                            ),
+                            _ => (
+                                LogicalExpression::Variable(current_var.to_string()),
+                                SortOrder::Ascending,
+                            ),
+                        };
+
+                        // Replace or add to the sort keys
+                        sort_op.keys = vec![SortKey {
+                            expression: expr,
+                            order,
+                        }];
+                        Ok((LogicalOperator::Sort(sort_op), None))
+                    }
+                    _ => {
+                        // by() without a preceding order() - ignore
+                        Ok((input, None))
+                    }
+                }
             }
 
             // Steps not fully supported
@@ -567,16 +919,16 @@ impl GremlinTranslator {
                     variable: var.to_string(),
                     property: key.clone(),
                 };
-                self.translate_predicate(pred, prop)
+                Self::translate_predicate(pred, prop)
             }
             ast::HasStep::LabelKeyValue(label, key, value) => {
-                // has(label, key, value) - check label AND property
+                // has(label, key, value) - check label IN labels AND property equals value
                 let label_check = LogicalExpression::Binary {
-                    left: Box::new(LogicalExpression::Labels(var.to_string())),
-                    op: BinaryOp::Eq,
-                    right: Box::new(LogicalExpression::Literal(Value::String(
+                    left: Box::new(LogicalExpression::Literal(Value::String(
                         label.clone().into(),
                     ))),
+                    op: BinaryOp::In,
+                    right: Box::new(LogicalExpression::Labels(var.to_string())),
                 };
                 let prop_check = LogicalExpression::Binary {
                     left: Box::new(LogicalExpression::Property {
@@ -596,7 +948,6 @@ impl GremlinTranslator {
     }
 
     fn translate_predicate(
-        &self,
         pred: &ast::Predicate,
         expr: LogicalExpression,
     ) -> Result<LogicalExpression> {
@@ -683,9 +1034,9 @@ impl GremlinTranslator {
                 right: Box::new(LogicalExpression::Literal(Value::String(s.clone().into()))),
             }),
             ast::Predicate::And(preds) => {
-                let mut result = self.translate_predicate(&preds[0], expr.clone())?;
+                let mut result = Self::translate_predicate(&preds[0], expr.clone())?;
                 for pred in &preds[1..] {
-                    let right = self.translate_predicate(pred, expr.clone())?;
+                    let right = Self::translate_predicate(pred, expr.clone())?;
                     result = LogicalExpression::Binary {
                         left: Box::new(result),
                         op: BinaryOp::And,
@@ -695,9 +1046,9 @@ impl GremlinTranslator {
                 Ok(result)
             }
             ast::Predicate::Or(preds) => {
-                let mut result = self.translate_predicate(&preds[0], expr.clone())?;
+                let mut result = Self::translate_predicate(&preds[0], expr.clone())?;
                 for pred in &preds[1..] {
-                    let right = self.translate_predicate(pred, expr.clone())?;
+                    let right = Self::translate_predicate(pred, expr.clone())?;
                     result = LogicalExpression::Binary {
                         left: Box::new(result),
                         op: BinaryOp::Or,
@@ -708,7 +1059,7 @@ impl GremlinTranslator {
             }
             ast::Predicate::Not(pred) => Ok(LogicalExpression::Unary {
                 op: UnaryOp::Not,
-                operand: Box::new(self.translate_predicate(pred, expr)?),
+                operand: Box::new(Self::translate_predicate(pred, expr)?),
             }),
             _ => Err(Error::Internal("Unsupported predicate".to_string())),
         }
@@ -717,10 +1068,12 @@ impl GremlinTranslator {
     fn translate_by_modifier(&self, by: &ast::ByModifier, current_var: &str) -> LogicalExpression {
         match by {
             ast::ByModifier::Identity => LogicalExpression::Variable(current_var.to_string()),
-            ast::ByModifier::Key(key) => LogicalExpression::Property {
-                variable: current_var.to_string(),
-                property: key.clone(),
-            },
+            ast::ByModifier::Key(key) | ast::ByModifier::KeyWithOrder(key, _) => {
+                LogicalExpression::Property {
+                    variable: current_var.to_string(),
+                    property: key.clone(),
+                }
+            }
             ast::ByModifier::Token(token) => match token {
                 ast::TokenType::Id => LogicalExpression::Id(current_var.to_string()),
                 ast::TokenType::Label => LogicalExpression::Labels(current_var.to_string()),
@@ -750,8 +1103,22 @@ impl GremlinTranslator {
         }
     }
 
-    fn get_current_var(&self, _source: &ast::TraversalSource) -> String {
-        format!("_v{}", self.var_counter.load(Ordering::Relaxed))
+    fn get_current_var(&self, source: &ast::TraversalSource) -> String {
+        let counter = self.var_counter.load(Ordering::Relaxed);
+        match source {
+            // For g.E(), the edge variable is counter-2 (since we generate: node, edge, target)
+            ast::TraversalSource::E(_) => {
+                format!("_v{}", counter.saturating_sub(2))
+            }
+            _ => {
+                // Return the most recently generated variable (counter - 1)
+                if counter == 0 {
+                    "_v0".to_string()
+                } else {
+                    format!("_v{}", counter - 1)
+                }
+            }
+        }
     }
 
     fn next_var(&self) -> String {
@@ -1100,6 +1467,104 @@ mod tests {
         assert!(find_delete(&plan.root));
     }
 
+    #[test]
+    fn test_translate_add_v_with_property() {
+        let result = translate("g.addV('Person').property('name', 'Alice')");
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+
+        fn find_create(op: &LogicalOperator) -> Option<&CreateNodeOp> {
+            match op {
+                LogicalOperator::CreateNode(c) => Some(c),
+                LogicalOperator::Return(r) => find_create(&r.input),
+                _ => None,
+            }
+        }
+
+        let create = find_create(&plan.root).expect("Expected CreateNode");
+        assert_eq!(create.labels, vec!["Person".to_string()]);
+        assert_eq!(create.properties.len(), 1);
+        assert_eq!(create.properties[0].0, "name");
+    }
+
+    #[test]
+    fn test_translate_add_v_with_multiple_properties() {
+        let result = translate("g.addV('Person').property('name', 'Alice').property('age', 30)");
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+
+        fn find_create(op: &LogicalOperator) -> Option<&CreateNodeOp> {
+            match op {
+                LogicalOperator::CreateNode(c) => Some(c),
+                LogicalOperator::Return(r) => find_create(&r.input),
+                _ => None,
+            }
+        }
+
+        let create = find_create(&plan.root).expect("Expected CreateNode");
+        assert_eq!(create.labels, vec!["Person".to_string()]);
+        assert_eq!(create.properties.len(), 2);
+    }
+
+    #[test]
+    fn test_translate_property_on_existing_node() {
+        // property() on an existing node should create SetPropertyOp
+        let result = translate("g.V().has('name', 'Alice').property('updated', true)");
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+
+        fn find_set_property(op: &LogicalOperator) -> bool {
+            match op {
+                LogicalOperator::SetProperty(_) => true,
+                LogicalOperator::Return(r) => find_set_property(&r.input),
+                LogicalOperator::Filter(f) => find_set_property(&f.input),
+                _ => false,
+            }
+        }
+
+        assert!(find_set_property(&plan.root));
+    }
+
+    #[test]
+    fn test_translate_add_e_with_from_to() {
+        let result = translate("g.addE('knows').from('a').to('b')");
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+
+        fn find_create_edge(op: &LogicalOperator) -> Option<&CreateEdgeOp> {
+            match op {
+                LogicalOperator::CreateEdge(e) => Some(e),
+                LogicalOperator::Return(r) => find_create_edge(&r.input),
+                _ => None,
+            }
+        }
+
+        let edge = find_create_edge(&plan.root).expect("Expected CreateEdge");
+        assert_eq!(edge.edge_type, "knows");
+        assert_eq!(edge.from_variable, "a");
+        assert_eq!(edge.to_variable, "b");
+    }
+
+    #[test]
+    fn test_translate_add_e_with_properties() {
+        let result = translate("g.addE('knows').from('a').to('b').property('since', 2020)");
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+
+        fn find_create_edge(op: &LogicalOperator) -> Option<&CreateEdgeOp> {
+            match op {
+                LogicalOperator::CreateEdge(e) => Some(e),
+                LogicalOperator::Return(r) => find_create_edge(&r.input),
+                _ => None,
+            }
+        }
+
+        let edge = find_create_edge(&plan.root).expect("Expected CreateEdge");
+        assert_eq!(edge.edge_type, "knows");
+        assert_eq!(edge.properties.len(), 1);
+        assert_eq!(edge.properties[0].0, "since");
+    }
+
     // === Order Tests ===
 
     #[test]
@@ -1123,10 +1588,9 @@ mod tests {
 
     #[test]
     fn test_predicate_gt() {
-        let translator = GremlinTranslator::new();
         let expr = LogicalExpression::Variable("x".to_string());
         let pred = ast::Predicate::Gt(Value::Int64(10));
-        let result = translator.translate_predicate(&pred, expr).unwrap();
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
 
         if let LogicalExpression::Binary { op, .. } = result {
             assert_eq!(op, BinaryOp::Gt);
@@ -1137,10 +1601,9 @@ mod tests {
 
     #[test]
     fn test_predicate_within() {
-        let translator = GremlinTranslator::new();
         let expr = LogicalExpression::Variable("x".to_string());
         let pred = ast::Predicate::Within(vec![Value::Int64(1), Value::Int64(2)]);
-        let result = translator.translate_predicate(&pred, expr).unwrap();
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
 
         if let LogicalExpression::Binary { op, .. } = result {
             assert_eq!(op, BinaryOp::In);
@@ -1151,10 +1614,9 @@ mod tests {
 
     #[test]
     fn test_predicate_containing() {
-        let translator = GremlinTranslator::new();
         let expr = LogicalExpression::Variable("x".to_string());
         let pred = ast::Predicate::Containing("test".to_string());
-        let result = translator.translate_predicate(&pred, expr).unwrap();
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
 
         if let LogicalExpression::Binary { op, .. } = result {
             assert_eq!(op, BinaryOp::Contains);

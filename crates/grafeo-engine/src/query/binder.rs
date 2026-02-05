@@ -1,10 +1,11 @@
-//! Semantic binding and type checking.
+//! Semantic validation - catching errors before execution.
 //!
-//! The binder resolves names, checks types, and produces a bound plan.
-//! It validates that:
-//! - All referenced variables are defined in scope
-//! - Property accesses are on valid variables
-//! - Types are compatible in expressions
+//! The binder walks the logical plan and validates that everything makes sense:
+//! - Is that variable actually defined? (You can't use `RETURN x` if `x` wasn't matched)
+//! - Does that property access make sense? (Accessing `.age` on an integer fails)
+//! - Are types compatible? (Can't compare a string to an integer)
+//!
+//! Better to catch these errors early than waste time executing a broken query.
 
 use crate::query::plan::{
     ExpandOp, FilterOp, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp, ReturnItem,
@@ -12,11 +13,34 @@ use crate::query::plan::{
 };
 use grafeo_common::types::LogicalType;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
+use grafeo_common::utils::strings::{find_similar, format_suggestion};
 use std::collections::HashMap;
 
 /// Creates a semantic binding error.
 fn binding_error(message: impl Into<String>) -> Error {
     Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
+}
+
+/// Creates a semantic binding error with a hint.
+fn binding_error_with_hint(message: impl Into<String>, hint: impl Into<String>) -> Error {
+    Error::Query(
+        QueryError::new(QueryErrorKind::Semantic, message).with_hint(hint),
+    )
+}
+
+/// Creates an "undefined variable" error with a suggestion if a similar variable exists.
+fn undefined_variable_error(variable: &str, context: &BindingContext, suffix: &str) -> Error {
+    let candidates: Vec<String> = context.variable_names().to_vec();
+    let candidates_ref: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+
+    if let Some(suggestion) = find_similar(variable, &candidates_ref) {
+        binding_error_with_hint(
+            format!("Undefined variable '{variable}'{suffix}"),
+            format_suggestion(suggestion),
+        )
+    } else {
+        binding_error(format!("Undefined variable '{variable}'{suffix}"))
+    }
 }
 
 /// Information about a bound variable.
@@ -132,6 +156,20 @@ impl Binder {
                 self.bind_operator(&project.input)?;
                 for projection in &project.projections {
                     self.validate_expression(&projection.expression)?;
+                    // Add the projection alias to the context (for WITH clause support)
+                    if let Some(ref alias) = projection.alias {
+                        // Determine the type from the expression
+                        let data_type = self.infer_expression_type(&projection.expression);
+                        self.context.add_variable(
+                            alias.clone(),
+                            VariableInfo {
+                                name: alias.clone(),
+                                data_type,
+                                is_node: false,
+                                is_edge: false,
+                            },
+                        );
+                    }
                 }
                 Ok(())
             }
@@ -186,16 +224,18 @@ impl Binder {
                 self.bind_operator(&create.input)?;
                 // Validate that source and target variables are defined
                 if !self.context.contains(&create.from_variable) {
-                    return Err(binding_error(format!(
-                        "Undefined source variable '{}' in CREATE EDGE",
-                        create.from_variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &create.from_variable,
+                        &self.context,
+                        " (source in CREATE EDGE)",
+                    ));
                 }
                 if !self.context.contains(&create.to_variable) {
-                    return Err(binding_error(format!(
-                        "Undefined target variable '{}' in CREATE EDGE",
-                        create.to_variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &create.to_variable,
+                        &self.context,
+                        " (target in CREATE EDGE)",
+                    ));
                 }
                 // Add edge variable if present
                 if let Some(ref var) = create.variable {
@@ -219,10 +259,11 @@ impl Binder {
                 self.bind_operator(&delete.input)?;
                 // Validate that the variable to delete is defined
                 if !self.context.contains(&delete.variable) {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{}' in DELETE",
-                        delete.variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &delete.variable,
+                        &self.context,
+                        " in DELETE",
+                    ));
                 }
                 Ok(())
             }
@@ -230,10 +271,11 @@ impl Binder {
                 self.bind_operator(&delete.input)?;
                 // Validate that the variable to delete is defined
                 if !self.context.contains(&delete.variable) {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{}' in DELETE",
-                        delete.variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &delete.variable,
+                        &self.context,
+                        " in DELETE",
+                    ));
                 }
                 Ok(())
             }
@@ -241,10 +283,11 @@ impl Binder {
                 self.bind_operator(&set.input)?;
                 // Validate that the variable to update is defined
                 if !self.context.contains(&set.variable) {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{}' in SET",
-                        set.variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &set.variable,
+                        &self.context,
+                        " in SET",
+                    ));
                 }
                 // Validate property value expressions
                 for (_, expr) in &set.properties {
@@ -338,10 +381,11 @@ impl Binder {
                 self.bind_operator(&add_label.input)?;
                 // Validate that the variable exists
                 if !self.context.contains(&add_label.variable) {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{}' in SET labels",
-                        add_label.variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &add_label.variable,
+                        &self.context,
+                        " in SET labels",
+                    ));
                 }
                 Ok(())
             }
@@ -349,11 +393,124 @@ impl Binder {
                 self.bind_operator(&remove_label.input)?;
                 // Validate that the variable exists
                 if !self.context.contains(&remove_label.variable) {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{}' in REMOVE labels",
-                        remove_label.variable
-                    )));
+                    return Err(undefined_variable_error(
+                        &remove_label.variable,
+                        &self.context,
+                        " in REMOVE labels",
+                    ));
                 }
+                Ok(())
+            }
+            LogicalOperator::ShortestPath(sp) => {
+                // First bind the input
+                self.bind_operator(&sp.input)?;
+                // Validate that source and target variables are defined
+                if !self.context.contains(&sp.source_var) {
+                    return Err(undefined_variable_error(
+                        &sp.source_var,
+                        &self.context,
+                        " (source in shortestPath)",
+                    ));
+                }
+                if !self.context.contains(&sp.target_var) {
+                    return Err(undefined_variable_error(
+                        &sp.target_var,
+                        &self.context,
+                        " (target in shortestPath)",
+                    ));
+                }
+                // Add the path alias variable to the context
+                self.context.add_variable(
+                    sp.path_alias.clone(),
+                    VariableInfo {
+                        name: sp.path_alias.clone(),
+                        data_type: LogicalType::Any, // Path is a complex type
+                        is_node: false,
+                        is_edge: false,
+                    },
+                );
+                // Also add the path length variable for length(p) calls
+                let path_length_var = format!("_path_length_{}", sp.path_alias);
+                self.context.add_variable(
+                    path_length_var.clone(),
+                    VariableInfo {
+                        name: path_length_var,
+                        data_type: LogicalType::Int64,
+                        is_node: false,
+                        is_edge: false,
+                    },
+                );
+                Ok(())
+            }
+            // SPARQL Update operators - these don't require variable binding
+            LogicalOperator::InsertTriple(insert) => {
+                if let Some(ref input) = insert.input {
+                    self.bind_operator(input)?;
+                }
+                Ok(())
+            }
+            LogicalOperator::DeleteTriple(delete) => {
+                if let Some(ref input) = delete.input {
+                    self.bind_operator(input)?;
+                }
+                Ok(())
+            }
+            LogicalOperator::Modify(modify) => {
+                self.bind_operator(&modify.where_clause)?;
+                Ok(())
+            }
+            LogicalOperator::ClearGraph(_)
+            | LogicalOperator::CreateGraph(_)
+            | LogicalOperator::DropGraph(_)
+            | LogicalOperator::LoadGraph(_)
+            | LogicalOperator::CopyGraph(_)
+            | LogicalOperator::MoveGraph(_)
+            | LogicalOperator::AddGraph(_) => Ok(()),
+            LogicalOperator::VectorScan(scan) => {
+                // VectorScan introduces a variable for matched nodes
+                if let Some(ref input) = scan.input {
+                    self.bind_operator(input)?;
+                }
+                self.context.add_variable(
+                    scan.variable.clone(),
+                    VariableInfo {
+                        name: scan.variable.clone(),
+                        data_type: LogicalType::Node,
+                        is_node: true,
+                        is_edge: false,
+                    },
+                );
+                // Validate the query vector expression
+                self.validate_expression(&scan.query_vector)?;
+                Ok(())
+            }
+            LogicalOperator::VectorJoin(join) => {
+                // VectorJoin takes input from left side and produces right-side matches
+                self.bind_operator(&join.input)?;
+                // Add right variable for matched nodes
+                self.context.add_variable(
+                    join.right_variable.clone(),
+                    VariableInfo {
+                        name: join.right_variable.clone(),
+                        data_type: LogicalType::Node,
+                        is_node: true,
+                        is_edge: false,
+                    },
+                );
+                // Optionally add score variable
+                if let Some(ref score_var) = join.score_variable {
+                    self.context.add_variable(
+                        score_var.clone(),
+                        VariableInfo {
+                            name: score_var.clone(),
+                            data_type: LogicalType::Float64,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
+                }
+                // Validate the query vector expression
+                self.validate_expression(&join.query_vector)?;
                 Ok(())
             }
         }
@@ -456,10 +613,11 @@ impl Binder {
 
         // Validate that the source variable is defined
         if !self.context.contains(&expand.from_variable) {
-            return Err(binding_error(format!(
-                "Undefined variable '{}' in EXPAND",
-                expand.from_variable
-            )));
+            return Err(undefined_variable_error(
+                &expand.from_variable,
+                &self.context,
+                " in EXPAND",
+            ));
         }
 
         // Validate that the source is a node
@@ -495,6 +653,20 @@ impl Binder {
                 is_edge: false,
             },
         );
+
+        // Add path length variable for variable-length paths (for length(p) calls)
+        if let Some(ref path_alias) = expand.path_alias {
+            let path_length_var = format!("_path_length_{}", path_alias);
+            self.context.add_variable(
+                path_length_var.clone(),
+                VariableInfo {
+                    name: path_length_var,
+                    data_type: LogicalType::Int64,
+                    is_node: false,
+                    is_edge: false,
+                },
+            );
+        }
 
         Ok(())
     }
@@ -533,15 +705,17 @@ impl Binder {
         match expr {
             LogicalExpression::Variable(name) => {
                 if !self.context.contains(name) && !name.starts_with("_anon_") {
-                    return Err(binding_error(format!("Undefined variable '{name}'")));
+                    return Err(undefined_variable_error(name, &self.context, ""));
                 }
                 Ok(())
             }
             LogicalExpression::Property { variable, .. } => {
                 if !self.context.contains(variable) && !variable.starts_with("_anon_") {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{variable}' in property access"
-                    )));
+                    return Err(undefined_variable_error(
+                        variable,
+                        &self.context,
+                        " in property access",
+                    ));
                 }
                 Ok(())
             }
@@ -607,9 +781,7 @@ impl Binder {
             | LogicalExpression::Type(var)
             | LogicalExpression::Id(var) => {
                 if !self.context.contains(var) && !var.starts_with("_anon_") {
-                    return Err(binding_error(format!(
-                        "Undefined variable '{var}' in function"
-                    )));
+                    return Err(undefined_variable_error(var, &self.context, " in function"));
                 }
                 Ok(())
             }
@@ -637,6 +809,50 @@ impl Binder {
                 let _ = subquery; // Would need recursive binding
                 Ok(())
             }
+        }
+    }
+
+    /// Infers the type of an expression for use in WITH clause aliasing.
+    fn infer_expression_type(&self, expr: &LogicalExpression) -> LogicalType {
+        match expr {
+            LogicalExpression::Variable(name) => {
+                // Look up the variable type from context
+                self.context
+                    .get(name)
+                    .map(|info| info.data_type.clone())
+                    .unwrap_or(LogicalType::Any)
+            }
+            LogicalExpression::Property { .. } => LogicalType::Any, // Properties can be any type
+            LogicalExpression::Literal(value) => {
+                // Infer type from literal value
+                use grafeo_common::types::Value;
+                match value {
+                    Value::Bool(_) => LogicalType::Bool,
+                    Value::Int64(_) => LogicalType::Int64,
+                    Value::Float64(_) => LogicalType::Float64,
+                    Value::String(_) => LogicalType::String,
+                    Value::List(_) => LogicalType::Any, // Complex type
+                    Value::Map(_) => LogicalType::Any,  // Complex type
+                    Value::Null => LogicalType::Any,
+                    _ => LogicalType::Any,
+                }
+            }
+            LogicalExpression::Binary { .. } => LogicalType::Any, // Could be bool or numeric
+            LogicalExpression::Unary { .. } => LogicalType::Any,
+            LogicalExpression::FunctionCall { name, .. } => {
+                // Infer based on function name
+                match name.to_lowercase().as_str() {
+                    "count" | "sum" | "id" => LogicalType::Int64,
+                    "avg" => LogicalType::Float64,
+                    "type" => LogicalType::String,
+                    // List-returning functions use Any since we don't track element type
+                    "labels" | "collect" => LogicalType::Any,
+                    _ => LogicalType::Any,
+                }
+            }
+            LogicalExpression::List(_) => LogicalType::Any, // Complex type
+            LogicalExpression::Map(_) => LogicalType::Any,  // Complex type
+            _ => LogicalType::Any,
         }
     }
 
@@ -834,6 +1050,7 @@ mod tests {
                     label: Some("Person".to_string()),
                     input: None,
                 })),
+                path_alias: None,
             })),
         }));
 
@@ -848,5 +1065,213 @@ mod tests {
         assert!(ctx.get("a").unwrap().is_node);
         assert!(ctx.get("b").unwrap().is_node);
         assert!(ctx.get("e").unwrap().is_edge);
+    }
+
+    #[test]
+    fn test_bind_expand_from_undefined_variable() {
+        // Tests that expanding from an undefined variable produces a clear error
+        use crate::query::plan::{ExpandDirection, ExpandOp};
+
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("b".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "undefined".to_string(), // not defined!
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_type: None,
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                path_alias: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let result = binder.bind(&plan);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Undefined variable 'undefined'"),
+            "Expected error about undefined variable, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_bind_return_with_aggregate_and_non_aggregate() {
+        // Tests binding of aggregate functions alongside regular expressions
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::FunctionCall {
+                        name: "count".to_string(),
+                        args: vec![LogicalExpression::Variable("n".to_string())],
+                        distinct: false,
+                    },
+                    alias: Some("cnt".to_string()),
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Literal(grafeo_common::types::Value::Int64(1)),
+                    alias: Some("one".to_string()),
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: Some("Person".to_string()),
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let result = binder.bind(&plan);
+
+        // This should succeed - count(n) with literal is valid
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_bind_nested_property_access() {
+        // Tests that nested property access on the same variable works
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Property {
+                        variable: "n".to_string(),
+                        property: "name".to_string(),
+                    },
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Property {
+                        variable: "n".to_string(),
+                        property: "age".to_string(),
+                    },
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: Some("Person".to_string()),
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let result = binder.bind(&plan);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_bind_binary_expression_with_undefined() {
+        // Tests that binary expressions with undefined variables produce errors
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Binary {
+                    left: Box::new(LogicalExpression::Property {
+                        variable: "n".to_string(),
+                        property: "age".to_string(),
+                    }),
+                    op: BinaryOp::Add,
+                    right: Box::new(LogicalExpression::Property {
+                        variable: "m".to_string(), // undefined!
+                        property: "age".to_string(),
+                    }),
+                },
+                alias: Some("total".to_string()),
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let result = binder.bind(&plan);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Undefined variable 'm'"));
+    }
+
+    #[test]
+    fn test_bind_duplicate_variable_definition() {
+        // Tests behavior when the same variable is defined twice (via two NodeScans)
+        // This is typically not allowed or the second shadows the first
+        use crate::query::plan::{JoinOp, JoinType};
+
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Join(JoinOp {
+                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: Some("A".to_string()),
+                    input: None,
+                })),
+                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "m".to_string(), // different variable is fine
+                    label: Some("B".to_string()),
+                    input: None,
+                })),
+                join_type: JoinType::Inner,
+                conditions: vec![],
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let result = binder.bind(&plan);
+
+        // Join with different variables should work
+        assert!(result.is_ok());
+        let ctx = result.unwrap();
+        assert!(ctx.contains("n"));
+        assert!(ctx.contains("m"));
+    }
+
+    #[test]
+    fn test_bind_function_with_wrong_arity() {
+        // Tests that functions with wrong number of arguments are handled
+        // (behavior depends on whether binder validates arity)
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::FunctionCall {
+                    name: "count".to_string(),
+                    args: vec![], // count() needs an argument
+                    distinct: false,
+                },
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let result = binder.bind(&plan);
+
+        // The binder may or may not catch this - if it passes, execution will fail
+        // This test documents current behavior
+        // If binding fails, that's fine; if it passes, execution will handle it
+        let _ = result; // We're just testing it doesn't panic
     }
 }

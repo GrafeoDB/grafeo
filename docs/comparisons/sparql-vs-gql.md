@@ -208,10 +208,10 @@ This guide compares SPARQL (W3C standard for RDF) with GQL (ISO standard for pro
 
 Grafeo supports both query languages:
 
-```rust
-// Enable both features
+```toml
+# Enable both features
 [dependencies]
-grafeo-engine = { version = "0.1", features = ["gql", "sparql"] }
+grafeo-engine = { version = "0.2", features = ["gql", "sparql"] }
 ```
 
 === "SPARQL Query"
@@ -219,7 +219,7 @@ grafeo-engine = { version = "0.1", features = ["gql", "sparql"] }
     ```python
     import grafeo
 
-    db = grafeo.Database()
+    db = grafeo.GrafeoDB()
 
     # SPARQL query
     result = db.sparql("""
@@ -234,7 +234,7 @@ grafeo-engine = { version = "0.1", features = ["gql", "sparql"] }
     ```python
     import grafeo
 
-    db = grafeo.Database()
+    db = grafeo.GrafeoDB()
 
     # GQL query
     result = db.query("""

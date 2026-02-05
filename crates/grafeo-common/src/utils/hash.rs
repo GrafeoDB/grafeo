@@ -1,7 +1,8 @@
-//! Fast hashing utilities.
+//! Fast, non-cryptographic hashing for internal use.
 //!
-//! This module provides fast, non-cryptographic hash functions suitable
-//! for use in hash tables and other data structures.
+//! Use [`FxHashMap`] and [`FxHashSet`] instead of the standard library versions
+//! for better performance. For hashes that need to be stable across runs
+//! (like in the WAL), use [`stable_hash()`].
 
 use ahash::AHasher;
 use std::hash::{BuildHasher, Hasher};

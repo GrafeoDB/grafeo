@@ -6,25 +6,26 @@ members = [
     "crates/grafeo-core",
     "crates/grafeo-adapters",
     "crates/grafeo-engine",
-    "crates/grafeo-python",
+    "crates/grafeo-cli",
+    "crates/bindings/python",
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.3.4"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
-repository = "https://github.com/StevenBtw/grafeo"
-authors = ["Grafeo Contributors"]
+repository = "https://github.com/GrafeoDB/grafeo"
+authors = ["S.T. Grond"]
 description = "A pure-Rust, high-performance, embeddable graph database"
 
 [workspace.dependencies]
 # Internal crates
-grafeo-common = { path = "crates/grafeo-common", version = "0.1.1" }
-grafeo-core = { path = "crates/grafeo-core", version = "0.1.1" }
-grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.1.1" }
-grafeo-engine = { path = "crates/grafeo-engine", version = "0.1.1" }
-grafeo = { path = "crates/grafeo", version = "0.1.1" }
+grafeo-common = { path = "crates/grafeo-common", version = "0.3.4" }
+grafeo-core = { path = "crates/grafeo-core", version = "0.3.4" }
+grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.3.4" }
+grafeo-engine = { path = "crates/grafeo-engine", version = "0.3.4" }
+grafeo = { path = "crates/grafeo", version = "0.3.4" }
 
 # Error handling
 thiserror = "2.0"
@@ -40,14 +41,16 @@ hashbrown = "0.16.1"
 smallvec = "1.13"
 bumpalo = "3.16"
 indexmap = "2.7"
+dashmap = "6.1"
+arcstr = { version = "1.2", features = ["serde"] }
 
 # Memory & I/O
 memmap2 = "0.9"
-bytes = "1.9"
+bytes = "1.11.1"
 byteorder = "1.5"
 
 # Checksums & hashing
-crc32fast = "1.4"
+crc32fast = "1.5"
 ahash = "0.8"
 
 # Serialization
@@ -59,7 +62,7 @@ arrow = "57.2.0"
 polars = "0.52.0"
 
 # Python bindings
-pyo3 = "0.27.2"
+pyo3 = "0.27"
 pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
 
 # Async runtime
@@ -70,16 +73,29 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # Regex
-regex = "1.10"
+regex = "1.12.3"
 
 # Testing
-proptest = "1.6"
-criterion = "0.8.1"
-tempfile = "3.15"
+proptest = "1.10.0"
+criterion = "0.8.2"
+tempfile = "3.22"
+
+# Allocators (platform-optimized)
+tikv-jemallocator = "0.6"
+mimalloc = "0.1"
+
+# Fast hashing
+rustc-hash = "2.1"
+
+# Vector index support
+ordered-float = "5.0"
+rand = "0.9"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
-# TODO: Enable missing_docs = "warn" once all public items are documented
+# TODO(0.4.x): Enable missing_docs = "warn" once all public items are documented
+# This requires adding documentation to all public types, functions, and modules.
+# Track progress by running: cargo doc --all-features 2>&1 | grep "missing documentation"
 # missing_docs = "warn"
 
 [workspace.lints.clippy]
@@ -104,7 +120,6 @@ similar_names = "allow"
 too_many_lines = "allow"
 type_complexity = "allow"
 needless_pass_by_value = "allow"
-trivially_copy_pass_by_ref = "allow"
 items_after_statements = "allow"
 unreadable_literal = "allow"
 struct_field_names = "allow"
@@ -174,7 +189,6 @@ needless_borrows_for_generic_args = "allow"
 needless_borrow = "allow"
 mismatching_type_param_order = "allow"
 only_used_in_recursion = "allow"
-self_only_used_in_recursion = "allow"
 clone_on_copy = "allow"
 unnecessary_literal_bound = "allow"
 zero_sized_map_values = "allow"
@@ -190,3 +204,19 @@ opt-level = 1
 [profile.bench]
 lto = "thin"
 codegen-units = 1
+
+# Profiling: release performance with debug symbols for flamegraphs
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = "full"
+lto = false
+
+# Minimal size for WASM or embedded
+[profile.minimal-size]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

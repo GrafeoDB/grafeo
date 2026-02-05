@@ -1,8 +1,16 @@
-//! Transaction management with MVCC and Snapshot Isolation.
+//! Transaction management with MVCC and configurable isolation levels.
 //!
-//! # Isolation Level
+//! # Isolation Levels
 //!
-//! Grafeo provides **Snapshot Isolation (SI)**, which offers strong consistency
+//! Grafeo supports multiple isolation levels to balance consistency vs. performance:
+//!
+//! | Level | Anomalies Prevented | Use Case |
+//! |-------|---------------------|----------|
+//! | [`ReadCommitted`](IsolationLevel::ReadCommitted) | Dirty reads | High throughput, relaxed consistency |
+//! | [`SnapshotIsolation`](IsolationLevel::SnapshotIsolation) | + Non-repeatable reads, phantom reads | Default - good balance |
+//! | [`Serializable`](IsolationLevel::Serializable) | + Write skew | Full ACID, financial/critical workloads |
+//!
+//! The default is **Snapshot Isolation (SI)**, which offers strong consistency
 //! guarantees while maintaining high concurrency. Each transaction sees a consistent
 //! snapshot of the database as of its start time.
 //!
@@ -70,6 +78,11 @@
 
 mod manager;
 mod mvcc;
+#[cfg(feature = "block-stm")]
+pub mod parallel;
 
-pub use manager::{EntityId, TransactionManager, TxInfo, TxState};
+pub use manager::{EntityId, IsolationLevel, TransactionManager, TxInfo, TxState};
 pub use mvcc::{Version, VersionChain, VersionInfo};
+
+#[cfg(feature = "block-stm")]
+pub use parallel::{BatchRequest, BatchResult, ExecutionStatus, ParallelExecutor};

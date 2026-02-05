@@ -19,7 +19,7 @@ hide:
 ### A pure-Rust, high-performance, embeddable graph database
 
 [Get Started](getting-started/index.md){ .md-button .md-button--primary }
-[View on GitHub](https://github.com/StevenBtw/grafeo){ .md-button }
+[View on GitHub](https://github.com/GrafeoDB/grafeo){ .md-button }
 
 </div>
 
@@ -35,6 +35,24 @@ hide:
 
     Built from the ground up in Rust for maximum performance with vectorized execution, adaptive chunking, and SIMD-optimized operations.
 
+-   :material-database-search:{ .lg .middle } **Multi-Language Queries**
+
+    ---
+
+    GQL, Cypher, Gremlin, GraphQL, and SPARQL. Choose the query language that fits your needs and expertise.
+
+-   :material-graph:{ .lg .middle } **LPG & RDF Support**
+
+    ---
+
+    Dual data model support for both Labeled Property Graphs and RDF triples. Choose the model that fits your domain.
+
+-   :material-vector-line:{ .lg .middle } **Vector Search**
+
+    ---
+
+    HNSW-based similarity search with quantization (Scalar, Binary, Product). Combine graph traversal with semantic similarity.
+
 -   :material-memory:{ .lg .middle } **Embeddable**
 
     ---
@@ -47,23 +65,23 @@ hide:
 
     Written entirely in safe Rust with no C dependencies. Memory-safe by design with fearless concurrency.
 
+-   :material-shield-check:{ .lg .middle } **ACID Transactions**
+
+    ---
+
+    Full ACID compliance with MVCC-based snapshot isolation. Reliable transactions for production workloads.
+
 -   :fontawesome-brands-python:{ .lg .middle } **Python Bindings**
 
     ---
 
     First-class Python support via PyO3. Use Grafeo from Python with a Pythonic API that feels natural.
 
--   :material-database-search:{ .lg .middle } **Multi-Language Queries**
+-   :material-notebook:{ .lg .middle } **Notebook Widgets**
 
     ---
 
-    GQL, Cypher, Gremlin, GraphQL, and SPARQL. Choose the query language that fits your needs and expertise.
-
--   :material-shield-check:{ .lg .middle } **ACID Transactions**
-
-    ---
-
-    Full ACID compliance with MVCC-based snapshot isolation. Reliable transactions for production workloads.
+    Interactive graph and vector visualizations for Marimo, Jupyter, and other notebooks. Explore your data visually.
 
 </div>
 
@@ -81,28 +99,27 @@ hide:
     import grafeo
 
     # Create an in-memory database
-    db = grafeo.Database()
+    db = grafeo.GrafeoDB()
 
     # Create nodes and edges
-    with db.session() as session:
-        session.execute("""
-            INSERT (:Person {name: 'Alice', age: 30})
-            INSERT (:Person {name: 'Bob', age: 25})
-        """)
+    db.execute("""
+        INSERT (:Person {name: 'Alice', age: 30})
+        INSERT (:Person {name: 'Bob', age: 25})
+    """)
 
-        session.execute("""
-            MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
-            INSERT (a)-[:KNOWS {since: 2024}]->(b)
-        """)
+    db.execute("""
+        MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+        INSERT (a)-[:KNOWS {since: 2024}]->(b)
+    """)
 
-        # Query the graph
-        result = session.execute("""
-            MATCH (p:Person)-[:KNOWS]->(friend)
-            RETURN p.name, friend.name
-        """)
+    # Query the graph
+    result = db.execute("""
+        MATCH (p:Person)-[:KNOWS]->(friend)
+        RETURN p.name, friend.name
+    """)
 
-        for row in result:
-            print(f"{row['p.name']} knows {row['friend.name']}")
+    for row in result:
+        print(f"{row['p.name']} knows {row['friend.name']}")
     ```
 
 === "Rust"
@@ -112,14 +129,14 @@ hide:
     ```
 
     ```rust
-    use grafeo::Database;
+    use grafeo::GrafeoDB;
 
-    fn main() -> Result<(), grafeo::Error> {
+    fn main() -> Result<(), grafeo_common::utils::error::Error> {
         // Create an in-memory database
-        let db = Database::open_in_memory()?;
+        let db = GrafeoDB::new_in_memory();
 
         // Create a session and execute queries
-        let session = db.session()?;
+        let mut session = db.session();
 
         session.execute(r#"
             INSERT (:Person {name: 'Alice', age: 30})
@@ -137,8 +154,8 @@ hide:
             RETURN p.name, friend.name
         "#)?;
 
-        for row in result {
-            println!("{} knows {}", row.get("p.name")?, row.get("friend.name")?);
+        for row in result.rows {
+            println!("{:?}", row);
         }
 
         Ok(())
@@ -252,11 +269,11 @@ Choose the query language that fits your needs:
 
     ```toml
     [dependencies]
-    grafeo = "0.1"
+    grafeo = "0.2"
     ```
 
 ---
 
 ## License
 
-Grafeo is licensed under the [Apache-2.0 License](https://github.com/StevenBtw/grafeo/blob/main/LICENSE).
+Grafeo is licensed under the [Apache-2.0 License](https://github.com/GrafeoDB/grafeo/blob/main/LICENSE).

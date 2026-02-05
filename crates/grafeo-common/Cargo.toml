@@ -16,9 +16,13 @@ thiserror.workspace = true
 smallvec.workspace = true
 bumpalo.workspace = true
 hashbrown.workspace = true
+dashmap.workspace = true
+indexmap.workspace = true
+arcstr.workspace = true
 
 # Hashing
 ahash.workspace = true
+rustc-hash.workspace = true
 
 # Serialization
 serde.workspace = true
@@ -31,6 +35,10 @@ parking_lot.workspace = true
 
 # Async
 tokio.workspace = true
+
+[features]
+default = []
+tiered-storage = []
 
 [dev-dependencies]
 proptest.workspace = true

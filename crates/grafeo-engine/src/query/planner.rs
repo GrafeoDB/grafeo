@@ -1,32 +1,46 @@
-//! Logical query planner.
+//! Converts logical plans into physical execution trees.
 //!
-//! Converts a logical plan into a physical plan (tree of operators).
+//! The optimizer produces a logical plan (what data you want), but the planner
+//! converts it to a physical plan (how to actually get it). This means choosing
+//! hash joins vs nested loops, picking index scans vs full scans, etc.
 
 use crate::query::plan::{
     AddLabelOp, AggregateFunction as LogicalAggregateFunction, AggregateOp, AntiJoinOp, BinaryOp,
     CreateEdgeOp, CreateNodeOp, DeleteEdgeOp, DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp,
     FilterOp, JoinOp, JoinType, LeftJoinOp, LimitOp, LogicalExpression, LogicalOperator,
-    LogicalPlan, MergeOp, NodeScanOp, RemoveLabelOp, ReturnOp, SetPropertyOp, SkipOp, SortOp,
-    SortOrder, UnaryOp, UnionOp, UnwindOp,
+    LogicalPlan, MergeOp, NodeScanOp, RemoveLabelOp, ReturnOp, SetPropertyOp, ShortestPathOp,
+    SkipOp, SortOp, SortOrder, UnaryOp, UnionOp, UnwindOp,
 };
-use grafeo_common::types::LogicalType;
 use grafeo_common::types::{EpochId, TxId};
+use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
+use grafeo_core::execution::AdaptiveContext;
 use grafeo_core::execution::operators::{
     AddLabelOperator, AggregateExpr as PhysicalAggregateExpr,
     AggregateFunction as PhysicalAggregateFunction, BinaryFilterOp, CreateEdgeOperator,
-    CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator, DistinctOperator, ExpandOperator,
-    ExpressionPredicate, FilterExpression, FilterOperator, HashAggregateOperator, HashJoinOperator,
-    JoinType as PhysicalJoinType, LimitOperator, MergeOperator, NullOrder, Operator, ProjectExpr,
-    ProjectOperator, PropertySource, RemoveLabelOperator, ScanOperator, SetPropertyOperator,
-    SimpleAggregateOperator, SkipOperator, SortDirection, SortKey as PhysicalSortKey, SortOperator,
-    UnaryFilterOp, UnionOperator, UnwindOperator,
+    CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator, DistinctOperator, EmptyOperator,
+    ExpandOperator, ExpandStep, ExpressionPredicate, FactorizedAggregate,
+    FactorizedAggregateOperator, FilterExpression, FilterOperator, HashAggregateOperator,
+    HashJoinOperator, JoinType as PhysicalJoinType, LazyFactorizedChainOperator,
+    LeapfrogJoinOperator, LimitOperator, MergeOperator, NestedLoopJoinOperator, NodeListOperator,
+    NullOrder, Operator, ProjectExpr, ProjectOperator, PropertySource, RemoveLabelOperator,
+    ScanOperator, SetPropertyOperator, ShortestPathOperator, SimpleAggregateOperator, SkipOperator,
+    SortDirection, SortKey as PhysicalSortKey, SortOperator, UnaryFilterOp, UnionOperator,
+    UnwindOperator, VariableLengthExpandOperator,
 };
 use grafeo_core::graph::{Direction, lpg::LpgStore};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::transaction::TransactionManager;
+
+/// Range bounds for property-based range queries.
+struct RangeBounds<'a> {
+    min: Option<&'a Value>,
+    max: Option<&'a Value>,
+    min_inclusive: bool,
+    max_inclusive: bool,
+}
 
 /// Converts a logical plan to a physical operator tree.
 pub struct Planner {
@@ -40,6 +54,8 @@ pub struct Planner {
     viewing_epoch: EpochId,
     /// Counter for generating unique anonymous edge column names.
     anon_edge_counter: std::cell::Cell<u32>,
+    /// Whether to use factorized execution for multi-hop queries.
+    factorized_execution: bool,
 }
 
 impl Planner {
@@ -56,6 +72,7 @@ impl Planner {
             tx_id: None,
             viewing_epoch: epoch,
             anon_edge_counter: std::cell::Cell::new(0),
+            factorized_execution: true,
         }
     }
 
@@ -80,6 +97,7 @@ impl Planner {
             tx_id,
             viewing_epoch,
             anon_edge_counter: std::cell::Cell::new(0),
+            factorized_execution: true,
         }
     }
 
@@ -101,6 +119,56 @@ impl Planner {
         self.tx_manager.as_ref()
     }
 
+    /// Enables or disables factorized execution for multi-hop queries.
+    #[must_use]
+    pub fn with_factorized_execution(mut self, enabled: bool) -> Self {
+        self.factorized_execution = enabled;
+        self
+    }
+
+    /// Counts consecutive single-hop expand operations.
+    ///
+    /// Returns the count and the deepest non-expand operator (the base of the chain).
+    fn count_expand_chain(op: &LogicalOperator) -> (usize, &LogicalOperator) {
+        match op {
+            LogicalOperator::Expand(expand) => {
+                // Only count single-hop expands (factorization doesn't apply to variable-length)
+                let is_single_hop = expand.min_hops == 1 && expand.max_hops == Some(1);
+
+                if is_single_hop {
+                    let (inner_count, base) = Self::count_expand_chain(&expand.input);
+                    (inner_count + 1, base)
+                } else {
+                    // Variable-length path breaks the chain
+                    (0, op)
+                }
+            }
+            _ => (0, op),
+        }
+    }
+
+    /// Collects expand operations from the outermost down to the base.
+    ///
+    /// Returns expands in order from innermost (base) to outermost.
+    fn collect_expand_chain(op: &LogicalOperator) -> Vec<&ExpandOp> {
+        let mut chain = Vec::new();
+        let mut current = op;
+
+        while let LogicalOperator::Expand(expand) = current {
+            // Only include single-hop expands
+            let is_single_hop = expand.min_hops == 1 && expand.max_hops == Some(1);
+            if !is_single_hop {
+                break;
+            }
+            chain.push(expand);
+            current = &expand.input;
+        }
+
+        // Reverse so we go from base to outer
+        chain.reverse();
+        chain
+    }
+
     /// Plans a logical plan into a physical operator.
     ///
     /// # Errors
@@ -108,20 +176,213 @@ impl Planner {
     /// Returns an error if planning fails.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
-        Ok(PhysicalPlan { operator, columns })
+        Ok(PhysicalPlan {
+            operator,
+            columns,
+            adaptive_context: None,
+        })
+    }
+
+    /// Plans a logical plan with adaptive execution support.
+    ///
+    /// Creates cardinality checkpoints at key points in the plan (scans, filters,
+    /// joins) that can be monitored during execution to detect estimate errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if planning fails.
+    pub fn plan_adaptive(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
+        let (operator, columns) = self.plan_operator(&logical_plan.root)?;
+
+        // Build adaptive context with cardinality estimates
+        let mut adaptive_context = AdaptiveContext::new();
+        self.collect_cardinality_estimates(&logical_plan.root, &mut adaptive_context, 0);
+
+        Ok(PhysicalPlan {
+            operator,
+            columns,
+            adaptive_context: Some(adaptive_context),
+        })
+    }
+
+    /// Collects cardinality estimates from the logical plan into an adaptive context.
+    fn collect_cardinality_estimates(
+        &self,
+        op: &LogicalOperator,
+        ctx: &mut AdaptiveContext,
+        depth: usize,
+    ) {
+        match op {
+            LogicalOperator::NodeScan(scan) => {
+                // Estimate based on label statistics
+                let estimate = if let Some(label) = &scan.label {
+                    self.store.nodes_by_label(label).len() as f64
+                } else {
+                    self.store.node_count() as f64
+                };
+                let id = format!("scan_{}", scan.variable);
+                ctx.set_estimate(&id, estimate);
+
+                // Recurse into input if present
+                if let Some(input) = &scan.input {
+                    self.collect_cardinality_estimates(input, ctx, depth + 1);
+                }
+            }
+            LogicalOperator::Filter(filter) => {
+                // Default selectivity estimate for filters (30%)
+                let input_estimate = self.estimate_cardinality(&filter.input);
+                let estimate = input_estimate * 0.3;
+                let id = format!("filter_{depth}");
+                ctx.set_estimate(&id, estimate);
+
+                self.collect_cardinality_estimates(&filter.input, ctx, depth + 1);
+            }
+            LogicalOperator::Expand(expand) => {
+                // Estimate based on average degree
+                let input_estimate = self.estimate_cardinality(&expand.input);
+                let avg_degree = 10.0; // Default estimate
+                let estimate = input_estimate * avg_degree;
+                let id = format!("expand_{}", expand.to_variable);
+                ctx.set_estimate(&id, estimate);
+
+                self.collect_cardinality_estimates(&expand.input, ctx, depth + 1);
+            }
+            LogicalOperator::Join(join) => {
+                // Estimate join output (product with selectivity)
+                let left_est = self.estimate_cardinality(&join.left);
+                let right_est = self.estimate_cardinality(&join.right);
+                let estimate = (left_est * right_est).sqrt(); // Geometric mean as rough estimate
+                let id = format!("join_{depth}");
+                ctx.set_estimate(&id, estimate);
+
+                self.collect_cardinality_estimates(&join.left, ctx, depth + 1);
+                self.collect_cardinality_estimates(&join.right, ctx, depth + 1);
+            }
+            LogicalOperator::Aggregate(agg) => {
+                // Aggregates typically reduce cardinality
+                let input_estimate = self.estimate_cardinality(&agg.input);
+                let estimate = if agg.group_by.is_empty() {
+                    1.0 // Scalar aggregate
+                } else {
+                    (input_estimate * 0.1).max(1.0) // 10% of input as group estimate
+                };
+                let id = format!("aggregate_{depth}");
+                ctx.set_estimate(&id, estimate);
+
+                self.collect_cardinality_estimates(&agg.input, ctx, depth + 1);
+            }
+            LogicalOperator::Distinct(distinct) => {
+                let input_estimate = self.estimate_cardinality(&distinct.input);
+                let estimate = (input_estimate * 0.5).max(1.0);
+                let id = format!("distinct_{depth}");
+                ctx.set_estimate(&id, estimate);
+
+                self.collect_cardinality_estimates(&distinct.input, ctx, depth + 1);
+            }
+            LogicalOperator::Return(ret) => {
+                self.collect_cardinality_estimates(&ret.input, ctx, depth + 1);
+            }
+            LogicalOperator::Limit(limit) => {
+                let input_estimate = self.estimate_cardinality(&limit.input);
+                let estimate = (input_estimate).min(limit.count as f64);
+                let id = format!("limit_{depth}");
+                ctx.set_estimate(&id, estimate);
+
+                self.collect_cardinality_estimates(&limit.input, ctx, depth + 1);
+            }
+            LogicalOperator::Skip(skip) => {
+                let input_estimate = self.estimate_cardinality(&skip.input);
+                let estimate = (input_estimate - skip.count as f64).max(0.0);
+                let id = format!("skip_{depth}");
+                ctx.set_estimate(&id, estimate);
+
+                self.collect_cardinality_estimates(&skip.input, ctx, depth + 1);
+            }
+            LogicalOperator::Sort(sort) => {
+                // Sort doesn't change cardinality
+                self.collect_cardinality_estimates(&sort.input, ctx, depth + 1);
+            }
+            LogicalOperator::Union(union) => {
+                let estimate: f64 = union
+                    .inputs
+                    .iter()
+                    .map(|input| self.estimate_cardinality(input))
+                    .sum();
+                let id = format!("union_{depth}");
+                ctx.set_estimate(&id, estimate);
+
+                for input in &union.inputs {
+                    self.collect_cardinality_estimates(input, ctx, depth + 1);
+                }
+            }
+            _ => {
+                // For other operators, try to recurse into known input patterns
+            }
+        }
+    }
+
+    /// Estimates cardinality for a logical operator subtree.
+    fn estimate_cardinality(&self, op: &LogicalOperator) -> f64 {
+        match op {
+            LogicalOperator::NodeScan(scan) => {
+                if let Some(label) = &scan.label {
+                    self.store.nodes_by_label(label).len() as f64
+                } else {
+                    self.store.node_count() as f64
+                }
+            }
+            LogicalOperator::Filter(filter) => self.estimate_cardinality(&filter.input) * 0.3,
+            LogicalOperator::Expand(expand) => self.estimate_cardinality(&expand.input) * 10.0,
+            LogicalOperator::Join(join) => {
+                let left = self.estimate_cardinality(&join.left);
+                let right = self.estimate_cardinality(&join.right);
+                (left * right).sqrt()
+            }
+            LogicalOperator::Aggregate(agg) => {
+                if agg.group_by.is_empty() {
+                    1.0
+                } else {
+                    (self.estimate_cardinality(&agg.input) * 0.1).max(1.0)
+                }
+            }
+            LogicalOperator::Distinct(distinct) => {
+                (self.estimate_cardinality(&distinct.input) * 0.5).max(1.0)
+            }
+            LogicalOperator::Return(ret) => self.estimate_cardinality(&ret.input),
+            LogicalOperator::Limit(limit) => self
+                .estimate_cardinality(&limit.input)
+                .min(limit.count as f64),
+            LogicalOperator::Skip(skip) => {
+                (self.estimate_cardinality(&skip.input) - skip.count as f64).max(0.0)
+            }
+            LogicalOperator::Sort(sort) => self.estimate_cardinality(&sort.input),
+            LogicalOperator::Union(union) => union
+                .inputs
+                .iter()
+                .map(|input| self.estimate_cardinality(input))
+                .sum(),
+            _ => 1000.0, // Default estimate for unknown operators
+        }
     }
 
     /// Plans a single logical operator.
     fn plan_operator(&self, op: &LogicalOperator) -> Result<(Box<dyn Operator>, Vec<String>)> {
         match op {
             LogicalOperator::NodeScan(scan) => self.plan_node_scan(scan),
-            LogicalOperator::Expand(expand) => self.plan_expand(expand),
+            LogicalOperator::Expand(expand) => {
+                // Check for expand chains when factorized execution is enabled
+                if self.factorized_execution {
+                    let (chain_len, _base) = Self::count_expand_chain(op);
+                    if chain_len >= 2 {
+                        // Use factorized chain for 2+ consecutive single-hop expands
+                        return self.plan_expand_chain(op);
+                    }
+                }
+                self.plan_expand(expand)
+            }
             LogicalOperator::Return(ret) => self.plan_return(ret),
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
-            LogicalOperator::Project(project) => {
-                // For now, just plan the input
-                self.plan_operator(&project.input)
-            }
+            LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
             LogicalOperator::Skip(skip) => self.plan_skip(skip),
             LogicalOperator::Sort(sort) => self.plan_sort(sort),
@@ -140,7 +401,14 @@ impl Planner {
             LogicalOperator::AddLabel(add_label) => self.plan_add_label(add_label),
             LogicalOperator::RemoveLabel(remove_label) => self.plan_remove_label(remove_label),
             LogicalOperator::SetProperty(set_prop) => self.plan_set_property(set_prop),
+            LogicalOperator::ShortestPath(sp) => self.plan_shortest_path(sp),
             LogicalOperator::Empty => Err(Error::Internal("Empty plan".to_string())),
+            LogicalOperator::VectorScan(_) => Err(Error::Internal(
+                "VectorScan requires vector-index feature".to_string(),
+            )),
+            LogicalOperator::VectorJoin(_) => Err(Error::Internal(
+                "VectorJoin requires vector-index feature".to_string(),
+            )),
             _ => Err(Error::Internal(format!(
                 "Unsupported operator: {:?}",
                 std::mem::discriminant(op)
@@ -157,14 +425,35 @@ impl Planner {
         };
 
         // Apply MVCC context if available
-        let operator: Box<dyn Operator> =
+        let scan_operator: Box<dyn Operator> =
             Box::new(scan_op.with_tx_context(self.viewing_epoch, self.tx_id));
 
-        let columns = vec![scan.variable.clone()];
+        // If there's an input, chain operators with a nested loop join (cross join)
+        if let Some(input) = &scan.input {
+            let (input_op, mut input_columns) = self.plan_operator(input)?;
 
-        // If there's an input, we'd need to chain operators
-        // For now, just return the scan
-        Ok((operator, columns))
+            // Build output schema: input columns + scan column
+            let mut output_schema: Vec<LogicalType> =
+                input_columns.iter().map(|_| LogicalType::Any).collect();
+            output_schema.push(LogicalType::Node);
+
+            // Add scan column to input columns
+            input_columns.push(scan.variable.clone());
+
+            // Use nested loop join to combine input rows with scanned nodes
+            let join_op = Box::new(NestedLoopJoinOperator::new(
+                input_op,
+                scan_operator,
+                None, // No join condition (cross join)
+                PhysicalJoinType::Cross,
+                output_schema,
+            ));
+
+            Ok((join_op, input_columns))
+        } else {
+            let columns = vec![scan.variable.clone()];
+            Ok((scan_operator, columns))
+        }
     }
 
     /// Plans an expand operator.
@@ -190,19 +479,44 @@ impl Planner {
             ExpandDirection::Both => Direction::Both,
         };
 
-        // Create the expand operator with MVCC context
-        let expand_op = ExpandOperator::new(
-            Arc::clone(&self.store),
-            input_op,
-            source_column,
-            direction,
-            expand.edge_type.clone(),
-        )
-        .with_tx_context(self.viewing_epoch, self.tx_id);
+        // Check if this is a variable-length path
+        let is_variable_length =
+            expand.min_hops != 1 || expand.max_hops.is_none() || expand.max_hops != Some(1);
 
-        let operator: Box<dyn Operator> = Box::new(expand_op);
+        let operator: Box<dyn Operator> = if is_variable_length {
+            // Use VariableLengthExpandOperator for multi-hop paths
+            let max_hops = expand.max_hops.unwrap_or(expand.min_hops + 10); // Default max if unlimited
+            let mut expand_op = VariableLengthExpandOperator::new(
+                Arc::clone(&self.store),
+                input_op,
+                source_column,
+                direction,
+                expand.edge_type.clone(),
+                expand.min_hops,
+                max_hops,
+            )
+            .with_tx_context(self.viewing_epoch, self.tx_id);
 
-        // Build output columns: [input_columns..., edge, target]
+            // If a path alias is set, enable path length output
+            if expand.path_alias.is_some() {
+                expand_op = expand_op.with_path_length_output();
+            }
+
+            Box::new(expand_op)
+        } else {
+            // Use simple ExpandOperator for single-hop paths
+            let expand_op = ExpandOperator::new(
+                Arc::clone(&self.store),
+                input_op,
+                source_column,
+                direction,
+                expand.edge_type.clone(),
+            )
+            .with_tx_context(self.viewing_epoch, self.tx_id);
+            Box::new(expand_op)
+        };
+
+        // Build output columns: [input_columns..., edge, target, (path_length)?]
         // Preserve all input columns and add edge + target to match ExpandOperator output
         let mut columns = input_columns;
 
@@ -216,7 +530,95 @@ impl Planner {
 
         columns.push(expand.to_variable.clone());
 
+        // If a path alias is set, add a column for the path length
+        if let Some(ref path_alias) = expand.path_alias {
+            columns.push(format!("_path_length_{}", path_alias));
+        }
+
         Ok((operator, columns))
+    }
+
+    /// Plans a chain of consecutive expand operations using factorized execution.
+    ///
+    /// This avoids the Cartesian product explosion that occurs with separate expands.
+    /// For a 2-hop query with degree d, this uses O(d) memory instead of O(d^2).
+    ///
+    /// The chain is executed lazily at query time, not during planning. This ensures
+    /// that any filters applied above the expand chain are properly respected.
+    fn plan_expand_chain(&self, op: &LogicalOperator) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let expands = Self::collect_expand_chain(op);
+        if expands.is_empty() {
+            return Err(Error::Internal("Empty expand chain".to_string()));
+        }
+
+        // Get the base operator (before first expand)
+        let first_expand = expands[0];
+        let (base_op, base_columns) = self.plan_operator(&first_expand.input)?;
+
+        let mut columns = base_columns.clone();
+        let mut steps = Vec::new();
+
+        // Track the level-local source column for each expand
+        // For the first expand, it's the column in the input (base_columns)
+        // For subsequent expands, the target from the previous level is always at index 1
+        // (each level adds [edge, target], so target is at index 1)
+        let mut is_first = true;
+
+        for expand in &expands {
+            // Find source column for this expand
+            let source_column = if is_first {
+                // For first expand, find in base columns
+                base_columns
+                    .iter()
+                    .position(|c| c == &expand.from_variable)
+                    .ok_or_else(|| {
+                        Error::Internal(format!(
+                            "Source variable '{}' not found in base columns",
+                            expand.from_variable
+                        ))
+                    })?
+            } else {
+                // For subsequent expands, the target from the previous level is at index 1
+                // (each level adds [edge, target], so target is the second column)
+                1
+            };
+
+            // Convert direction
+            let direction = match expand.direction {
+                ExpandDirection::Outgoing => Direction::Outgoing,
+                ExpandDirection::Incoming => Direction::Incoming,
+                ExpandDirection::Both => Direction::Both,
+            };
+
+            // Add expand step configuration
+            steps.push(ExpandStep {
+                source_column,
+                direction,
+                edge_type: expand.edge_type.clone(),
+            });
+
+            // Add edge and target columns
+            let edge_col_name = expand.edge_variable.clone().unwrap_or_else(|| {
+                let count = self.anon_edge_counter.get();
+                self.anon_edge_counter.set(count + 1);
+                format!("_anon_edge_{}", count)
+            });
+            columns.push(edge_col_name);
+            columns.push(expand.to_variable.clone());
+
+            is_first = false;
+        }
+
+        // Create lazy operator that executes at query time, not planning time
+        let mut lazy_op = LazyFactorizedChainOperator::new(Arc::clone(&self.store), base_op, steps);
+
+        if let Some(tx_id) = self.tx_id {
+            lazy_op = lazy_op.with_tx_context(self.viewing_epoch, Some(tx_id));
+        } else {
+            lazy_op = lazy_op.with_tx_context(self.viewing_epoch, None);
+        }
+
+        Ok((Box::new(lazy_op), columns))
     }
 
     /// Plans a RETURN clause.
@@ -272,12 +674,84 @@ impl Planner {
                             column: col_idx,
                             property: property.clone(),
                         });
-                        // Property could be any type - use String as default
-                        output_types.push(LogicalType::String);
+                        // Property could be any type - use Any/Generic to preserve type
+                        output_types.push(LogicalType::Any);
                     }
                     LogicalExpression::Literal(value) => {
                         projections.push(ProjectExpr::Constant(value.clone()));
                         output_types.push(value_to_logical_type(value));
+                    }
+                    LogicalExpression::FunctionCall { name, args, .. } => {
+                        // Handle built-in functions
+                        match name.to_lowercase().as_str() {
+                            "type" => {
+                                // type(r) returns the edge type string
+                                if args.len() != 1 {
+                                    return Err(Error::Internal(
+                                        "type() requires exactly one argument".to_string(),
+                                    ));
+                                }
+                                if let LogicalExpression::Variable(var_name) = &args[0] {
+                                    let col_idx =
+                                        *variable_columns.get(var_name).ok_or_else(|| {
+                                            Error::Internal(format!(
+                                                "Variable '{}' not found in input",
+                                                var_name
+                                            ))
+                                        })?;
+                                    projections.push(ProjectExpr::EdgeType { column: col_idx });
+                                    output_types.push(LogicalType::String);
+                                } else {
+                                    return Err(Error::Internal(
+                                        "type() argument must be a variable".to_string(),
+                                    ));
+                                }
+                            }
+                            "length" => {
+                                // length(p) returns the path length
+                                // For shortestPath results, the path column already contains the length
+                                if args.len() != 1 {
+                                    return Err(Error::Internal(
+                                        "length() requires exactly one argument".to_string(),
+                                    ));
+                                }
+                                if let LogicalExpression::Variable(var_name) = &args[0] {
+                                    let col_idx =
+                                        *variable_columns.get(var_name).ok_or_else(|| {
+                                            Error::Internal(format!(
+                                                "Variable '{}' not found in input",
+                                                var_name
+                                            ))
+                                        })?;
+                                    // Pass through the column value directly
+                                    projections.push(ProjectExpr::Column(col_idx));
+                                    output_types.push(LogicalType::Int64);
+                                } else {
+                                    return Err(Error::Internal(
+                                        "length() argument must be a variable".to_string(),
+                                    ));
+                                }
+                            }
+                            // For other functions (head, tail, size, etc.), use expression evaluation
+                            _ => {
+                                let filter_expr = self.convert_expression(&item.expression)?;
+                                projections.push(ProjectExpr::Expression {
+                                    expr: filter_expr,
+                                    variable_columns: variable_columns.clone(),
+                                });
+                                output_types.push(LogicalType::Any);
+                            }
+                        }
+                    }
+                    LogicalExpression::Case { .. } => {
+                        // Convert CASE expression to FilterExpression for evaluation
+                        let filter_expr = self.convert_expression(&item.expression)?;
+                        projections.push(ProjectExpr::Expression {
+                            expr: filter_expr,
+                            variable_columns: variable_columns.clone(),
+                        });
+                        // CASE can return any type - use Any
+                        output_types.push(LogicalType::Any);
                     }
                     _ => {
                         return Err(Error::Internal(format!(
@@ -328,8 +802,113 @@ impl Planner {
         }
     }
 
+    /// Plans a project operator (for WITH clause).
+    fn plan_project(
+        &self,
+        project: &crate::query::plan::ProjectOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Handle Empty input specially (standalone WITH like: WITH [1,2,3] AS nums)
+        let (input_op, input_columns): (Box<dyn Operator>, Vec<String>) =
+            if matches!(project.input.as_ref(), LogicalOperator::Empty) {
+                // Create a single-row operator for projecting literals
+                let single_row_op: Box<dyn Operator> = Box::new(
+                    grafeo_core::execution::operators::single_row::SingleRowOperator::new(),
+                );
+                (single_row_op, Vec::new())
+            } else {
+                self.plan_operator(&project.input)?
+            };
+
+        // Build variable to column index mapping
+        let variable_columns: HashMap<String, usize> = input_columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        // Build projections and new column names
+        let mut projections = Vec::with_capacity(project.projections.len());
+        let mut output_types = Vec::with_capacity(project.projections.len());
+        let mut output_columns = Vec::with_capacity(project.projections.len());
+
+        for projection in &project.projections {
+            // Determine the output column name (alias or expression string)
+            let col_name = projection
+                .alias
+                .clone()
+                .unwrap_or_else(|| expression_to_string(&projection.expression));
+            output_columns.push(col_name);
+
+            match &projection.expression {
+                LogicalExpression::Variable(name) => {
+                    let col_idx = *variable_columns.get(name).ok_or_else(|| {
+                        Error::Internal(format!("Variable '{}' not found in input", name))
+                    })?;
+                    projections.push(ProjectExpr::Column(col_idx));
+                    output_types.push(LogicalType::Node);
+                }
+                LogicalExpression::Property { variable, property } => {
+                    let col_idx = *variable_columns.get(variable).ok_or_else(|| {
+                        Error::Internal(format!("Variable '{}' not found in input", variable))
+                    })?;
+                    projections.push(ProjectExpr::PropertyAccess {
+                        column: col_idx,
+                        property: property.clone(),
+                    });
+                    output_types.push(LogicalType::Any);
+                }
+                LogicalExpression::Literal(value) => {
+                    projections.push(ProjectExpr::Constant(value.clone()));
+                    output_types.push(value_to_logical_type(value));
+                }
+                _ => {
+                    // For complex expressions, use full expression evaluation
+                    let filter_expr = self.convert_expression(&projection.expression)?;
+                    projections.push(ProjectExpr::Expression {
+                        expr: filter_expr,
+                        variable_columns: variable_columns.clone(),
+                    });
+                    output_types.push(LogicalType::Any);
+                }
+            }
+        }
+
+        let operator = Box::new(ProjectOperator::with_store(
+            input_op,
+            projections,
+            output_types,
+            Arc::clone(&self.store),
+        ));
+
+        Ok((operator, output_columns))
+    }
+
     /// Plans a filter operator.
+    ///
+    /// Uses zone map pre-filtering to potentially skip scans when predicates
+    /// definitely won't match any data. Also uses property indexes when available
+    /// for O(1) lookups instead of full scans.
     fn plan_filter(&self, filter: &FilterOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Check zone maps for simple property predicates before scanning
+        // If zone map says "definitely no matches", we can short-circuit
+        if let Some(false) = self.check_zone_map_for_predicate(&filter.predicate) {
+            // Zone map says no matches possible - return empty result
+            let (_, columns) = self.plan_operator(&filter.input)?;
+            let schema = self.derive_schema_from_columns(&columns);
+            let empty_op = Box::new(EmptyOperator::new(schema));
+            return Ok((empty_op, columns));
+        }
+
+        // Try to use property index for equality predicates on indexed properties
+        if let Some(result) = self.try_plan_filter_with_property_index(filter)? {
+            return Ok(result);
+        }
+
+        // Try to use range optimization for range predicates (>, <, >=, <=)
+        if let Some(result) = self.try_plan_filter_with_range_index(filter)? {
+            return Ok(result);
+        }
+
         // Plan the input operator first
         let (input_op, columns) = self.plan_operator(&filter.input)?;
 
@@ -351,6 +930,432 @@ impl Planner {
         let operator = Box::new(FilterOperator::new(input_op, Box::new(predicate)));
 
         Ok((operator, columns))
+    }
+
+    /// Checks zone maps for a predicate to see if we can skip the scan entirely.
+    ///
+    /// Returns:
+    /// - `Some(false)` if zone map proves no matches possible (can skip)
+    /// - `Some(true)` if zone map says matches might exist
+    /// - `None` if zone map check not applicable
+    fn check_zone_map_for_predicate(&self, predicate: &LogicalExpression) -> Option<bool> {
+        use grafeo_core::graph::lpg::CompareOp;
+
+        match predicate {
+            LogicalExpression::Binary { left, op, right } => {
+                // Check for AND/OR first (compound conditions)
+                match op {
+                    BinaryOp::And => {
+                        let left_result = self.check_zone_map_for_predicate(left);
+                        let right_result = self.check_zone_map_for_predicate(right);
+
+                        return match (left_result, right_result) {
+                            // If either side definitely won't match, the AND won't match
+                            (Some(false), _) | (_, Some(false)) => Some(false),
+                            // If both might match, might match overall
+                            (Some(true), Some(true)) => Some(true),
+                            // Otherwise, can't determine
+                            _ => None,
+                        };
+                    }
+                    BinaryOp::Or => {
+                        let left_result = self.check_zone_map_for_predicate(left);
+                        let right_result = self.check_zone_map_for_predicate(right);
+
+                        return match (left_result, right_result) {
+                            // Both sides definitely won't match
+                            (Some(false), Some(false)) => Some(false),
+                            // At least one side might match
+                            (Some(true), _) | (_, Some(true)) => Some(true),
+                            // Otherwise, can't determine
+                            _ => None,
+                        };
+                    }
+                    _ => {}
+                }
+
+                // Simple property comparison: n.property op value
+                let (property, compare_op, value) = match (left.as_ref(), right.as_ref()) {
+                    (
+                        LogicalExpression::Property { property, .. },
+                        LogicalExpression::Literal(val),
+                    ) => {
+                        let cmp = match op {
+                            BinaryOp::Eq => CompareOp::Eq,
+                            BinaryOp::Ne => CompareOp::Ne,
+                            BinaryOp::Lt => CompareOp::Lt,
+                            BinaryOp::Le => CompareOp::Le,
+                            BinaryOp::Gt => CompareOp::Gt,
+                            BinaryOp::Ge => CompareOp::Ge,
+                            _ => return None,
+                        };
+                        (property.clone(), cmp, val.clone())
+                    }
+                    (
+                        LogicalExpression::Literal(val),
+                        LogicalExpression::Property { property, .. },
+                    ) => {
+                        // Flip comparison for reversed operands
+                        let cmp = match op {
+                            BinaryOp::Eq => CompareOp::Eq,
+                            BinaryOp::Ne => CompareOp::Ne,
+                            BinaryOp::Lt => CompareOp::Gt, // val < prop means prop > val
+                            BinaryOp::Le => CompareOp::Ge,
+                            BinaryOp::Gt => CompareOp::Lt,
+                            BinaryOp::Ge => CompareOp::Le,
+                            _ => return None,
+                        };
+                        (property.clone(), cmp, val.clone())
+                    }
+                    _ => return None,
+                };
+
+                // Check zone map for node properties
+                let might_match =
+                    self.store
+                        .node_property_might_match(&property.into(), compare_op, &value);
+
+                Some(might_match)
+            }
+
+            _ => None,
+        }
+    }
+
+    /// Tries to use a property index for filter optimization.
+    ///
+    /// When a filter predicate is an equality check on an indexed property,
+    /// and the input is a simple NodeScan, we can use the index to look up
+    /// matching nodes directly instead of scanning all nodes.
+    ///
+    /// Returns `Ok(Some((operator, columns)))` if optimization was applied,
+    /// `Ok(None)` if not applicable, or `Err` on error.
+    fn try_plan_filter_with_property_index(
+        &self,
+        filter: &FilterOp,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        // Only optimize if input is a simple NodeScan (not nested)
+        let (scan_variable, scan_label) = match filter.input.as_ref() {
+            LogicalOperator::NodeScan(scan) if scan.input.is_none() => {
+                (scan.variable.clone(), scan.label.clone())
+            }
+            _ => return Ok(None),
+        };
+
+        // Extract property equality conditions from the predicate
+        // Handles both simple (n.prop = val) and compound (n.a = 1 AND n.b = 2)
+        let conditions = self.extract_equality_conditions(&filter.predicate, &scan_variable);
+
+        if conditions.is_empty() {
+            return Ok(None);
+        }
+
+        // Check if at least one condition has an index (otherwise full scan is needed anyway)
+        let has_indexed_condition = conditions
+            .iter()
+            .any(|(prop, _)| self.store.has_property_index(prop));
+
+        if !has_indexed_condition {
+            return Ok(None);
+        }
+
+        // Use the optimized batch lookup for multiple conditions
+        let conditions_ref: Vec<(&str, Value)> = conditions
+            .iter()
+            .map(|(p, v)| (p.as_str(), v.clone()))
+            .collect();
+        let mut matching_nodes = self.store.find_nodes_by_properties(&conditions_ref);
+
+        // If there's a label filter, also filter by label
+        if let Some(label) = &scan_label {
+            let label_nodes: std::collections::HashSet<_> =
+                self.store.nodes_by_label(label).into_iter().collect();
+            matching_nodes.retain(|n| label_nodes.contains(n));
+        }
+
+        // Create a NodeListOperator with the matching nodes
+        let node_list_op = Box::new(NodeListOperator::new(matching_nodes, 2048));
+        let columns = vec![scan_variable];
+
+        Ok(Some((node_list_op, columns)))
+    }
+
+    /// Extracts equality conditions (property = literal) from a predicate.
+    ///
+    /// Handles both simple predicates and AND chains:
+    /// - `n.name = "Alice"` → `[("name", "Alice")]`
+    /// - `n.name = "Alice" AND n.age = 30` → `[("name", "Alice"), ("age", 30)]`
+    fn extract_equality_conditions(
+        &self,
+        predicate: &LogicalExpression,
+        target_variable: &str,
+    ) -> Vec<(String, Value)> {
+        let mut conditions = Vec::new();
+        self.collect_equality_conditions(predicate, target_variable, &mut conditions);
+        conditions
+    }
+
+    /// Recursively collects equality conditions from AND expressions.
+    fn collect_equality_conditions(
+        &self,
+        expr: &LogicalExpression,
+        target_variable: &str,
+        conditions: &mut Vec<(String, Value)>,
+    ) {
+        match expr {
+            // Handle AND: recurse into both sides
+            LogicalExpression::Binary {
+                left,
+                op: BinaryOp::And,
+                right,
+            } => {
+                self.collect_equality_conditions(left, target_variable, conditions);
+                self.collect_equality_conditions(right, target_variable, conditions);
+            }
+
+            // Handle equality: extract property and value
+            LogicalExpression::Binary {
+                left,
+                op: BinaryOp::Eq,
+                right,
+            } => {
+                if let Some((var, prop, val)) = self.extract_property_equality(left, right) {
+                    if var == target_variable {
+                        conditions.push((prop, val));
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    /// Extracts (variable, property, value) from a property equality expression.
+    fn extract_property_equality(
+        &self,
+        left: &LogicalExpression,
+        right: &LogicalExpression,
+    ) -> Option<(String, String, Value)> {
+        match (left, right) {
+            (
+                LogicalExpression::Property { variable, property },
+                LogicalExpression::Literal(val),
+            ) => Some((variable.clone(), property.clone(), val.clone())),
+            (
+                LogicalExpression::Literal(val),
+                LogicalExpression::Property { variable, property },
+            ) => Some((variable.clone(), property.clone(), val.clone())),
+            _ => None,
+        }
+    }
+
+    /// Tries to optimize a filter using range queries on properties.
+    ///
+    /// This optimization is applied when:
+    /// - The input is a simple NodeScan (no nested operations)
+    /// - The predicate contains range comparisons (>, <, >=, <=)
+    /// - The same variable and property are being filtered
+    ///
+    /// Handles both simple range predicates (`n.age > 30`) and BETWEEN patterns
+    /// (`n.age >= 30 AND n.age <= 50`).
+    ///
+    /// Returns `Ok(Some((operator, columns)))` if optimization was applied,
+    /// `Ok(None)` if not applicable, or `Err` on error.
+    fn try_plan_filter_with_range_index(
+        &self,
+        filter: &FilterOp,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        // Only optimize if input is a simple NodeScan (not nested)
+        let (scan_variable, scan_label) = match filter.input.as_ref() {
+            LogicalOperator::NodeScan(scan) if scan.input.is_none() => {
+                (scan.variable.clone(), scan.label.clone())
+            }
+            _ => return Ok(None),
+        };
+
+        // Try to extract BETWEEN pattern first (more efficient)
+        if let Some((variable, property, min, max, min_inc, max_inc)) =
+            self.extract_between_predicate(&filter.predicate)
+        {
+            if variable == scan_variable {
+                return self.plan_range_filter(
+                    &scan_variable,
+                    &scan_label,
+                    &property,
+                    RangeBounds {
+                        min: Some(&min),
+                        max: Some(&max),
+                        min_inclusive: min_inc,
+                        max_inclusive: max_inc,
+                    },
+                );
+            }
+        }
+
+        // Try to extract simple range predicate
+        if let Some((variable, property, op, value)) =
+            self.extract_range_predicate(&filter.predicate)
+        {
+            if variable == scan_variable {
+                let (min, max, min_inc, max_inc) = match op {
+                    BinaryOp::Lt => (None, Some(value), false, false),
+                    BinaryOp::Le => (None, Some(value), false, true),
+                    BinaryOp::Gt => (Some(value), None, false, false),
+                    BinaryOp::Ge => (Some(value), None, true, false),
+                    _ => return Ok(None),
+                };
+                return self.plan_range_filter(
+                    &scan_variable,
+                    &scan_label,
+                    &property,
+                    RangeBounds {
+                        min: min.as_ref(),
+                        max: max.as_ref(),
+                        min_inclusive: min_inc,
+                        max_inclusive: max_inc,
+                    },
+                );
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Plans a range filter using `find_nodes_in_range`.
+    fn plan_range_filter(
+        &self,
+        scan_variable: &str,
+        scan_label: &Option<String>,
+        property: &str,
+        bounds: RangeBounds<'_>,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        // Use the store's range query method
+        let mut matching_nodes = self.store.find_nodes_in_range(
+            property,
+            bounds.min,
+            bounds.max,
+            bounds.min_inclusive,
+            bounds.max_inclusive,
+        );
+
+        // If there's a label filter, also filter by label
+        if let Some(label) = scan_label {
+            let label_nodes: std::collections::HashSet<_> =
+                self.store.nodes_by_label(label).into_iter().collect();
+            matching_nodes.retain(|n| label_nodes.contains(n));
+        }
+
+        // Create a NodeListOperator with the matching nodes
+        let node_list_op = Box::new(NodeListOperator::new(matching_nodes, 2048));
+        let columns = vec![scan_variable.to_string()];
+
+        Ok(Some((node_list_op, columns)))
+    }
+
+    /// Extracts a simple range predicate (>, <, >=, <=) from an expression.
+    ///
+    /// Returns `(variable, property, operator, value)` if found.
+    fn extract_range_predicate(
+        &self,
+        predicate: &LogicalExpression,
+    ) -> Option<(String, String, BinaryOp, Value)> {
+        match predicate {
+            LogicalExpression::Binary { left, op, right } => {
+                match op {
+                    BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+                        // Try property on left: n.age > 30
+                        if let (
+                            LogicalExpression::Property { variable, property },
+                            LogicalExpression::Literal(val),
+                        ) = (left.as_ref(), right.as_ref())
+                        {
+                            return Some((variable.clone(), property.clone(), *op, val.clone()));
+                        }
+
+                        // Try property on right: 30 < n.age (flip operator)
+                        if let (
+                            LogicalExpression::Literal(val),
+                            LogicalExpression::Property { variable, property },
+                        ) = (left.as_ref(), right.as_ref())
+                        {
+                            let flipped_op = match op {
+                                BinaryOp::Lt => BinaryOp::Gt,
+                                BinaryOp::Le => BinaryOp::Ge,
+                                BinaryOp::Gt => BinaryOp::Lt,
+                                BinaryOp::Ge => BinaryOp::Le,
+                                _ => return None,
+                            };
+                            return Some((
+                                variable.clone(),
+                                property.clone(),
+                                flipped_op,
+                                val.clone(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Extracts a BETWEEN pattern from compound predicates.
+    ///
+    /// Recognizes patterns like:
+    /// - `n.age >= 30 AND n.age <= 50`
+    /// - `n.age > 30 AND n.age < 50`
+    ///
+    /// Returns `(variable, property, min_value, max_value, min_inclusive, max_inclusive)`.
+    fn extract_between_predicate(
+        &self,
+        predicate: &LogicalExpression,
+    ) -> Option<(String, String, Value, Value, bool, bool)> {
+        // Must be an AND expression
+        let (left, right) = match predicate {
+            LogicalExpression::Binary {
+                left,
+                op: BinaryOp::And,
+                right,
+            } => (left.as_ref(), right.as_ref()),
+            _ => return None,
+        };
+
+        // Extract range predicates from both sides
+        let left_range = self.extract_range_predicate(left);
+        let right_range = self.extract_range_predicate(right);
+
+        let (left_var, left_prop, left_op, left_val) = left_range?;
+        let (right_var, right_prop, right_op, right_val) = right_range?;
+
+        // Must be same variable and property
+        if left_var != right_var || left_prop != right_prop {
+            return None;
+        }
+
+        // Determine which is lower bound and which is upper bound
+        let (min_val, max_val, min_inc, max_inc) = match (left_op, right_op) {
+            // n.x >= min AND n.x <= max
+            (BinaryOp::Ge, BinaryOp::Le) => (left_val, right_val, true, true),
+            // n.x >= min AND n.x < max
+            (BinaryOp::Ge, BinaryOp::Lt) => (left_val, right_val, true, false),
+            // n.x > min AND n.x <= max
+            (BinaryOp::Gt, BinaryOp::Le) => (left_val, right_val, false, true),
+            // n.x > min AND n.x < max
+            (BinaryOp::Gt, BinaryOp::Lt) => (left_val, right_val, false, false),
+            // Reversed order: n.x <= max AND n.x >= min
+            (BinaryOp::Le, BinaryOp::Ge) => (right_val, left_val, true, true),
+            // n.x < max AND n.x >= min
+            (BinaryOp::Lt, BinaryOp::Ge) => (right_val, left_val, true, false),
+            // n.x <= max AND n.x > min
+            (BinaryOp::Le, BinaryOp::Gt) => (right_val, left_val, false, true),
+            // n.x < max AND n.x > min
+            (BinaryOp::Lt, BinaryOp::Gt) => (right_val, left_val, false, false),
+            _ => return None,
+        };
+
+        Some((left_var, left_prop, min_val, max_val, min_inc, max_inc))
     }
 
     /// Plans a LIMIT operator.
@@ -407,7 +1412,8 @@ impl Planner {
             let mut projections = Vec::new();
             let mut output_types = Vec::new();
 
-            // First, pass through all existing columns
+            // First, pass through all existing columns (use Node type to preserve node IDs
+            // for subsequent property access - nodes need VectorData::NodeId for get_node_id())
             for (i, _) in input_columns.iter().enumerate() {
                 projections.push(ProjectExpr::Column(i));
                 output_types.push(LogicalType::Node);
@@ -442,8 +1448,8 @@ impl Planner {
             .keys
             .iter()
             .map(|key| {
-                let col_idx =
-                    self.resolve_sort_expression_with_properties(&key.expression, &variable_columns)?;
+                let col_idx = self
+                    .resolve_sort_expression_with_properties(&key.expression, &variable_columns)?;
                 Ok(PhysicalSortKey {
                     column: col_idx,
                     direction: match key.order {
@@ -467,10 +1473,11 @@ impl Planner {
         variable_columns: &HashMap<String, usize>,
     ) -> Result<usize> {
         match expr {
-            LogicalExpression::Variable(name) => variable_columns
-                .get(name)
-                .copied()
-                .ok_or_else(|| Error::Internal(format!("Variable '{}' not found for ORDER BY", name))),
+            LogicalExpression::Variable(name) => {
+                variable_columns.get(name).copied().ok_or_else(|| {
+                    Error::Internal(format!("Variable '{}' not found for ORDER BY", name))
+                })
+            }
             LogicalExpression::Property { variable, property } => {
                 // Look up the projected property column (e.g., "p_age" for p.age)
                 let col_name = format!("{}_{}", variable, property);
@@ -488,13 +1495,30 @@ impl Planner {
         }
     }
 
-    /// Derives a schema from column names (assumes Node type as default).
+    /// Derives a schema from column names (uses Any type to handle all value types).
     fn derive_schema_from_columns(&self, columns: &[String]) -> Vec<LogicalType> {
-        columns.iter().map(|_| LogicalType::Node).collect()
+        columns.iter().map(|_| LogicalType::Any).collect()
     }
 
     /// Plans an AGGREGATE operator.
     fn plan_aggregate(&self, agg: &AggregateOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Check if we can use factorized aggregation for speedup
+        // Conditions:
+        // 1. Factorized execution is enabled
+        // 2. Input is an expand chain (multi-hop)
+        // 3. No GROUP BY
+        // 4. All aggregates are simple (COUNT, SUM, AVG, MIN, MAX)
+        if self.factorized_execution
+            && agg.group_by.is_empty()
+            && Self::count_expand_chain(&agg.input).0 >= 2
+            && self.is_simple_aggregate(agg)
+        {
+            if let Ok((op, cols)) = self.plan_factorized_aggregate(agg) {
+                return Ok((op, cols));
+            }
+            // Fall through to regular aggregate if factorized planning fails
+        }
+
         let (mut input_op, input_columns) = self.plan_operator(&agg.input)?;
 
         // Build variable to column index mapping
@@ -545,7 +1569,8 @@ impl Planner {
             let mut projections = Vec::new();
             let mut output_types = Vec::new();
 
-            // First, pass through all existing columns
+            // First, pass through all existing columns (use Node type to preserve node IDs
+            // for subsequent property access - nodes need VectorData::NodeId for get_node_id())
             for (i, _) in input_columns.iter().enumerate() {
                 projections.push(ProjectExpr::Column(i));
                 output_types.push(LogicalType::Node);
@@ -563,7 +1588,7 @@ impl Planner {
                     column: source_col,
                     property: property.clone(),
                 });
-                output_types.push(LogicalType::Int64); // Properties are typically numeric for aggregates
+                output_types.push(LogicalType::Any); // Properties can be any type (string, int, etc.)
             }
 
             input_op = Box::new(ProjectOperator::with_store(
@@ -599,6 +1624,7 @@ impl Planner {
                     column,
                     distinct: agg_expr.distinct,
                     alias: agg_expr.alias.clone(),
+                    percentile: agg_expr.percentile,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -608,19 +1634,17 @@ impl Planner {
         let mut output_columns = Vec::new();
 
         // Add group-by columns
-        for (idx, expr) in agg.group_by.iter().enumerate() {
-            output_schema.push(LogicalType::Node); // Default type
+        for expr in &agg.group_by {
+            output_schema.push(LogicalType::Any); // Group-by values can be any type
             output_columns.push(expression_to_string(expr));
-            // If there's a group column, we need to track it
-            if idx < group_columns.len() {
-                // Group column preserved
-            }
         }
 
         // Add aggregate result columns
         for agg_expr in &agg.aggregates {
             let result_type = match agg_expr.function {
-                LogicalAggregateFunction::Count => LogicalType::Int64,
+                LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => {
+                    LogicalType::Int64
+                }
                 LogicalAggregateFunction::Sum => LogicalType::Int64,
                 LogicalAggregateFunction::Avg => LogicalType::Float64,
                 LogicalAggregateFunction::Min | LogicalAggregateFunction::Max => {
@@ -629,7 +1653,12 @@ impl Planner {
                     // is numeric values from property expressions
                     LogicalType::Int64
                 }
-                LogicalAggregateFunction::Collect => LogicalType::String, // List type
+                LogicalAggregateFunction::Collect => LogicalType::Any, // List type (using Any since List is a complex type)
+                // Statistical functions return Float64
+                LogicalAggregateFunction::StdDev
+                | LogicalAggregateFunction::StdDevPop
+                | LogicalAggregateFunction::PercentileDisc
+                | LogicalAggregateFunction::PercentileCont => LogicalType::Float64,
             };
             output_schema.push(result_type);
             output_columns.push(
@@ -641,7 +1670,7 @@ impl Planner {
         }
 
         // Choose operator based on whether there are group-by columns
-        let operator: Box<dyn Operator> = if group_columns.is_empty() {
+        let mut operator: Box<dyn Operator> = if group_columns.is_empty() {
             Box::new(SimpleAggregateOperator::new(
                 input_op,
                 physical_aggregates,
@@ -656,7 +1685,169 @@ impl Planner {
             ))
         };
 
+        // Apply HAVING clause filter if present
+        if let Some(having_expr) = &agg.having {
+            // Build variable to column mapping for the aggregate output
+            let having_var_columns: HashMap<String, usize> = output_columns
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), i))
+                .collect();
+
+            let filter_expr = self.convert_expression(having_expr)?;
+            let predicate =
+                ExpressionPredicate::new(filter_expr, having_var_columns, Arc::clone(&self.store));
+            operator = Box::new(FilterOperator::new(operator, Box::new(predicate)));
+        }
+
         Ok((operator, output_columns))
+    }
+
+    /// Checks if an aggregate is simple enough for factorized execution.
+    ///
+    /// Simple aggregates:
+    /// - COUNT(*) or COUNT(variable)
+    /// - SUM, AVG, MIN, MAX on variables (not properties for now)
+    fn is_simple_aggregate(&self, agg: &AggregateOp) -> bool {
+        agg.aggregates.iter().all(|agg_expr| {
+            match agg_expr.function {
+                LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => {
+                    // COUNT(*) is always OK, COUNT(var) is OK
+                    agg_expr.expression.is_none()
+                        || matches!(&agg_expr.expression, Some(LogicalExpression::Variable(_)))
+                }
+                LogicalAggregateFunction::Sum
+                | LogicalAggregateFunction::Avg
+                | LogicalAggregateFunction::Min
+                | LogicalAggregateFunction::Max => {
+                    // For now, only support when expression is a variable
+                    // (property access would require flattening first)
+                    matches!(&agg_expr.expression, Some(LogicalExpression::Variable(_)))
+                }
+                // Other aggregates (Collect, StdDev, Percentile) not supported in factorized form
+                _ => false,
+            }
+        })
+    }
+
+    /// Plans a factorized aggregate that operates directly on factorized data.
+    ///
+    /// This avoids the O(n²) cost of flattening before aggregation.
+    fn plan_factorized_aggregate(
+        &self,
+        agg: &AggregateOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Build the expand chain - this returns a LazyFactorizedChainOperator
+        let expands = Self::collect_expand_chain(&agg.input);
+        if expands.is_empty() {
+            return Err(Error::Internal(
+                "Expected expand chain for factorized aggregate".to_string(),
+            ));
+        }
+
+        // Get the base operator (before first expand)
+        let first_expand = expands[0];
+        let (base_op, base_columns) = self.plan_operator(&first_expand.input)?;
+
+        let mut columns = base_columns.clone();
+        let mut steps = Vec::new();
+        let mut is_first = true;
+
+        for expand in &expands {
+            // Find source column for this expand
+            let source_column = if is_first {
+                base_columns
+                    .iter()
+                    .position(|c| c == &expand.from_variable)
+                    .ok_or_else(|| {
+                        Error::Internal(format!(
+                            "Source variable '{}' not found in base columns",
+                            expand.from_variable
+                        ))
+                    })?
+            } else {
+                1 // Target from previous level
+            };
+
+            let direction = match expand.direction {
+                ExpandDirection::Outgoing => Direction::Outgoing,
+                ExpandDirection::Incoming => Direction::Incoming,
+                ExpandDirection::Both => Direction::Both,
+            };
+
+            steps.push(ExpandStep {
+                source_column,
+                direction,
+                edge_type: expand.edge_type.clone(),
+            });
+
+            let edge_col_name = expand.edge_variable.clone().unwrap_or_else(|| {
+                let count = self.anon_edge_counter.get();
+                self.anon_edge_counter.set(count + 1);
+                format!("_anon_edge_{}", count)
+            });
+            columns.push(edge_col_name);
+            columns.push(expand.to_variable.clone());
+
+            is_first = false;
+        }
+
+        // Create the lazy factorized chain operator
+        let mut lazy_op = LazyFactorizedChainOperator::new(Arc::clone(&self.store), base_op, steps);
+
+        if let Some(tx_id) = self.tx_id {
+            lazy_op = lazy_op.with_tx_context(self.viewing_epoch, Some(tx_id));
+        } else {
+            lazy_op = lazy_op.with_tx_context(self.viewing_epoch, None);
+        }
+
+        // Convert logical aggregates to factorized aggregates
+        let factorized_aggs: Vec<FactorizedAggregate> = agg
+            .aggregates
+            .iter()
+            .map(|agg_expr| {
+                match agg_expr.function {
+                    LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => {
+                        // COUNT(*) uses simple count, COUNT(col) uses column count
+                        if agg_expr.expression.is_none() {
+                            FactorizedAggregate::count()
+                        } else {
+                            // For COUNT(variable), we use the deepest level's target column
+                            // which is the last column added to the schema
+                            FactorizedAggregate::count_column(1) // Target is at index 1 in deepest level
+                        }
+                    }
+                    LogicalAggregateFunction::Sum => {
+                        // SUM on deepest level target
+                        FactorizedAggregate::sum(1)
+                    }
+                    LogicalAggregateFunction::Avg => FactorizedAggregate::avg(1),
+                    LogicalAggregateFunction::Min => FactorizedAggregate::min(1),
+                    LogicalAggregateFunction::Max => FactorizedAggregate::max(1),
+                    _ => {
+                        // Shouldn't reach here due to is_simple_aggregate check
+                        FactorizedAggregate::count()
+                    }
+                }
+            })
+            .collect();
+
+        // Build output column names
+        let output_columns: Vec<String> = agg
+            .aggregates
+            .iter()
+            .map(|agg_expr| {
+                agg_expr
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}(...)", agg_expr.function).to_lowercase())
+            })
+            .collect();
+
+        // Create the factorized aggregate operator
+        let factorized_agg_op = FactorizedAggregateOperator::new(lazy_op, factorized_aggs);
+
+        Ok((Box::new(factorized_agg_op), output_columns))
     }
 
     /// Resolves a logical expression to a column index.
@@ -739,7 +1930,7 @@ impl Planner {
                     operand: Box::new(operand_expr),
                 })
             }
-            LogicalExpression::FunctionCall { name, args } => {
+            LogicalExpression::FunctionCall { name, args, .. } => {
                 let filter_args: Vec<FilterExpression> = args
                     .iter()
                     .map(|a| self.convert_expression(a))
@@ -953,6 +2144,13 @@ impl Planner {
 
         let output_schema = self.derive_schema_from_columns(&columns);
 
+        // Check if we should use leapfrog join for cyclic patterns
+        // Currently we use hash join by default; leapfrog is available but
+        // requires explicit multi-way join detection which will be added
+        // when we have proper cyclic pattern detection in the optimizer.
+        // For now, LeapfrogJoinOperator is available for direct use.
+        let _ = LeapfrogJoinOperator::new; // Suppress unused warning
+
         let operator: Box<dyn Operator> = Box::new(HashJoinOperator::new(
             left_op,
             right_op,
@@ -963,6 +2161,174 @@ impl Planner {
         ));
 
         Ok((operator, columns))
+    }
+
+    /// Checks if a join pattern is cyclic (e.g., triangle, clique).
+    ///
+    /// A cyclic pattern occurs when join conditions reference variables
+    /// that create a cycle in the join graph. For example, a triangle
+    /// pattern (a)->(b)->(c)->(a) creates a cycle.
+    ///
+    /// Returns true if the join graph contains at least one cycle with 3+ nodes,
+    /// indicating potential for worst-case optimal join (WCOJ) optimization.
+    #[allow(dead_code)]
+    fn is_cyclic_join_pattern(&self, join: &JoinOp) -> bool {
+        // Build adjacency list for join variables
+        let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+        let mut all_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Collect edges from join conditions
+        Self::collect_join_edges(
+            &LogicalOperator::Join(join.clone()),
+            &mut edges,
+            &mut all_vars,
+        );
+
+        // Need at least 3 variables to form a cycle
+        if all_vars.len() < 3 {
+            return false;
+        }
+
+        // Detect cycle using DFS with coloring
+        Self::has_cycle(&edges, &all_vars)
+    }
+
+    /// Collects edges from join conditions into an adjacency list.
+    fn collect_join_edges(
+        op: &LogicalOperator,
+        edges: &mut HashMap<String, Vec<String>>,
+        vars: &mut std::collections::HashSet<String>,
+    ) {
+        match op {
+            LogicalOperator::Join(join) => {
+                // Process join conditions
+                for cond in &join.conditions {
+                    if let (Some(left_var), Some(right_var)) = (
+                        Self::extract_join_variable(&cond.left),
+                        Self::extract_join_variable(&cond.right),
+                    ) {
+                        if left_var != right_var {
+                            vars.insert(left_var.clone());
+                            vars.insert(right_var.clone());
+
+                            // Add bidirectional edge
+                            edges
+                                .entry(left_var.clone())
+                                .or_default()
+                                .push(right_var.clone());
+                            edges.entry(right_var).or_default().push(left_var);
+                        }
+                    }
+                }
+
+                // Recurse into children
+                Self::collect_join_edges(&join.left, edges, vars);
+                Self::collect_join_edges(&join.right, edges, vars);
+            }
+            LogicalOperator::Expand(expand) => {
+                // Expand creates implicit join between from_variable and to_variable
+                vars.insert(expand.from_variable.clone());
+                vars.insert(expand.to_variable.clone());
+
+                edges
+                    .entry(expand.from_variable.clone())
+                    .or_default()
+                    .push(expand.to_variable.clone());
+                edges
+                    .entry(expand.to_variable.clone())
+                    .or_default()
+                    .push(expand.from_variable.clone());
+
+                Self::collect_join_edges(&expand.input, edges, vars);
+            }
+            LogicalOperator::Filter(filter) => {
+                Self::collect_join_edges(&filter.input, edges, vars);
+            }
+            LogicalOperator::NodeScan(scan) => {
+                vars.insert(scan.variable.clone());
+            }
+            _ => {}
+        }
+    }
+
+    /// Extracts the variable name from a join expression.
+    fn extract_join_variable(expr: &LogicalExpression) -> Option<String> {
+        match expr {
+            LogicalExpression::Variable(v) => Some(v.clone()),
+            LogicalExpression::Property { variable, .. } => Some(variable.clone()),
+            LogicalExpression::Id(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+
+    /// Detects if the graph has a cycle using DFS coloring.
+    ///
+    /// Colors: 0 = white (unvisited), 1 = gray (in progress), 2 = black (done)
+    fn has_cycle(
+        edges: &HashMap<String, Vec<String>>,
+        vars: &std::collections::HashSet<String>,
+    ) -> bool {
+        let mut color: HashMap<&String, u8> = HashMap::new();
+
+        for var in vars {
+            color.insert(var, 0);
+        }
+
+        for start in vars {
+            if color[start] == 0 {
+                if Self::dfs_cycle(start, None, edges, &mut color) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// DFS helper for cycle detection.
+    fn dfs_cycle(
+        node: &String,
+        parent: Option<&String>,
+        edges: &HashMap<String, Vec<String>>,
+        color: &mut HashMap<&String, u8>,
+    ) -> bool {
+        *color.get_mut(node).unwrap() = 1; // Gray
+
+        if let Some(neighbors) = edges.get(node) {
+            for neighbor in neighbors {
+                // Skip the edge back to parent (undirected graph)
+                if parent == Some(neighbor) {
+                    continue;
+                }
+
+                if let Some(&c) = color.get(neighbor) {
+                    if c == 1 {
+                        // Found a back edge - cycle detected
+                        return true;
+                    }
+                    if c == 0 && Self::dfs_cycle(neighbor, Some(node), edges, color) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        *color.get_mut(node).unwrap() = 2; // Black
+        false
+    }
+
+    /// Counts the number of base relations in a logical operator tree.
+    #[allow(dead_code)]
+    fn count_relations(op: &LogicalOperator) -> usize {
+        match op {
+            LogicalOperator::NodeScan(_) | LogicalOperator::EdgeScan(_) => 1,
+            LogicalOperator::Expand(e) => Self::count_relations(&e.input),
+            LogicalOperator::Filter(f) => Self::count_relations(&f.input),
+            LogicalOperator::Join(j) => {
+                Self::count_relations(&j.left) + Self::count_relations(&j.right)
+            }
+            _ => 0,
+        }
     }
 
     /// Extracts a column index from an expression.
@@ -1102,19 +2468,22 @@ impl Planner {
 
         let output_schema = self.derive_schema_from_columns(&columns);
 
-        let operator = Box::new(
-            CreateEdgeOperator::new(
-                Arc::clone(&self.store),
-                input_op,
-                from_column,
-                to_column,
-                create.edge_type.clone(),
-                properties,
-                output_schema,
-                output_column,
-            )
-            .with_tx_context(self.viewing_epoch, self.tx_id),
-        );
+        let mut operator = CreateEdgeOperator::new(
+            Arc::clone(&self.store),
+            input_op,
+            from_column,
+            to_column,
+            create.edge_type.clone(),
+            output_schema,
+        )
+        .with_properties(properties)
+        .with_tx_context(self.viewing_epoch, self.tx_id);
+
+        if let Some(col) = output_column {
+            operator = operator.with_output_column(col);
+        }
+
+        let operator = Box::new(operator);
 
         Ok((operator, columns))
     }
@@ -1143,7 +2512,7 @@ impl Planner {
                 input_op,
                 node_column,
                 output_schema,
-                true, // detach = true to delete connected edges
+                delete.detach, // DETACH DELETE deletes connected edges first
             )
             .with_tx_context(self.viewing_epoch, self.tx_id),
         );
@@ -1252,7 +2621,33 @@ impl Planner {
     /// Plans an unwind operator.
     fn plan_unwind(&self, unwind: &UnwindOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Plan the input operator first
-        let (input_op, input_columns) = self.plan_operator(&unwind.input)?;
+        // Handle Empty specially - use a single-row operator
+        let (input_op, input_columns): (Box<dyn Operator>, Vec<String>) =
+            if matches!(&*unwind.input, LogicalOperator::Empty) {
+                // For UNWIND without prior MATCH, create a single-row input
+                // We need an operator that produces one row with the list to unwind
+                // For now, use EmptyScan which produces no rows - we'll handle the literal
+                // list in the unwind operator itself
+                let literal_list = self.convert_expression(&unwind.expression)?;
+
+                // Create a project operator that produces a single row with the list
+                let single_row_op: Box<dyn Operator> = Box::new(
+                    grafeo_core::execution::operators::single_row::SingleRowOperator::new(),
+                );
+                let project_op: Box<dyn Operator> = Box::new(ProjectOperator::with_store(
+                    single_row_op,
+                    vec![ProjectExpr::Expression {
+                        expr: literal_list,
+                        variable_columns: HashMap::new(),
+                    }],
+                    vec![LogicalType::Any],
+                    Arc::clone(&self.store),
+                ));
+
+                (project_op, vec!["__list__".to_string()])
+            } else {
+                self.plan_operator(&unwind.input)?
+            };
 
         // The UNWIND expression should be a list - we need to find/evaluate it
         // For now, we handle the case where the expression references an existing column
@@ -1297,8 +2692,13 @@ impl Planner {
 
     /// Plans a MERGE operator.
     fn plan_merge(&self, merge: &MergeOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Plan the input operator first (if any)
-        let (_input_op, mut columns) = self.plan_operator(&merge.input)?;
+        // Plan the input operator if present (skip if Empty)
+        let mut columns = if matches!(merge.input.as_ref(), LogicalOperator::Empty) {
+            Vec::new()
+        } else {
+            let (_input_op, cols) = self.plan_operator(&merge.input)?;
+            cols
+        };
 
         // Convert match properties from LogicalExpression to Value
         let match_properties: Vec<(String, grafeo_common::types::Value)> = merge
@@ -1350,6 +2750,59 @@ impl Planner {
             on_create_properties,
             on_match_properties,
         ));
+
+        Ok((operator, columns))
+    }
+
+    /// Plans a SHORTEST PATH operator.
+    fn plan_shortest_path(&self, sp: &ShortestPathOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Plan the input operator
+        let (input_op, mut columns) = self.plan_operator(&sp.input)?;
+
+        // Find source and target node columns
+        let source_column = columns
+            .iter()
+            .position(|c| c == &sp.source_var)
+            .ok_or_else(|| {
+                Error::Internal(format!(
+                    "Source variable '{}' not found for shortestPath",
+                    sp.source_var
+                ))
+            })?;
+
+        let target_column = columns
+            .iter()
+            .position(|c| c == &sp.target_var)
+            .ok_or_else(|| {
+                Error::Internal(format!(
+                    "Target variable '{}' not found for shortestPath",
+                    sp.target_var
+                ))
+            })?;
+
+        // Convert direction
+        let direction = match sp.direction {
+            ExpandDirection::Outgoing => Direction::Outgoing,
+            ExpandDirection::Incoming => Direction::Incoming,
+            ExpandDirection::Both => Direction::Both,
+        };
+
+        // Create the shortest path operator
+        let operator: Box<dyn Operator> = Box::new(
+            ShortestPathOperator::new(
+                Arc::clone(&self.store),
+                input_op,
+                source_column,
+                target_column,
+                sp.edge_type.clone(),
+                direction,
+            )
+            .with_all_paths(sp.all_paths),
+        );
+
+        // Add path length column with the expected naming convention
+        // The translator expects _path_length_{alias} format for length(p) calls
+        columns.push(format!("_path_length_{}", sp.path_alias));
 
         Ok((operator, columns))
     }
@@ -1534,11 +2987,16 @@ pub fn convert_unary_op(op: UnaryOp) -> Result<UnaryFilterOp> {
 pub fn convert_aggregate_function(func: LogicalAggregateFunction) -> PhysicalAggregateFunction {
     match func {
         LogicalAggregateFunction::Count => PhysicalAggregateFunction::Count,
+        LogicalAggregateFunction::CountNonNull => PhysicalAggregateFunction::CountNonNull,
         LogicalAggregateFunction::Sum => PhysicalAggregateFunction::Sum,
         LogicalAggregateFunction::Avg => PhysicalAggregateFunction::Avg,
         LogicalAggregateFunction::Min => PhysicalAggregateFunction::Min,
         LogicalAggregateFunction::Max => PhysicalAggregateFunction::Max,
         LogicalAggregateFunction::Collect => PhysicalAggregateFunction::Collect,
+        LogicalAggregateFunction::StdDev => PhysicalAggregateFunction::StdDev,
+        LogicalAggregateFunction::StdDevPop => PhysicalAggregateFunction::StdDevPop,
+        LogicalAggregateFunction::PercentileDisc => PhysicalAggregateFunction::PercentileDisc,
+        LogicalAggregateFunction::PercentileCont => PhysicalAggregateFunction::PercentileCont,
     }
 }
 
@@ -1571,7 +3029,7 @@ pub fn convert_filter_expression(expr: &LogicalExpression) -> Result<FilterExpre
                 operand: Box::new(operand_expr),
             })
         }
-        LogicalExpression::FunctionCall { name, args } => {
+        LogicalExpression::FunctionCall { name, args, .. } => {
             let filter_args: Vec<FilterExpression> = args
                 .iter()
                 .map(|a| convert_filter_expression(a))
@@ -1696,6 +3154,7 @@ fn value_to_logical_type(value: &grafeo_common::types::Value) -> LogicalType {
         Value::Timestamp(_) => LogicalType::Timestamp,
         Value::List(_) => LogicalType::String, // Lists not yet supported as logical type
         Value::Map(_) => LogicalType::String,  // Maps not yet supported as logical type
+        Value::Vector(v) => LogicalType::Vector(v.len()),
     }
 }
 
@@ -1718,6 +3177,12 @@ pub struct PhysicalPlan {
     pub operator: Box<dyn Operator>,
     /// Column names for the result.
     pub columns: Vec<String>,
+    /// Adaptive execution context with cardinality estimates.
+    ///
+    /// When adaptive execution is enabled, this context contains estimated
+    /// cardinalities at various checkpoints in the plan. During execution,
+    /// actual row counts are recorded and compared against estimates.
+    pub adaptive_context: Option<AdaptiveContext>,
 }
 
 impl PhysicalPlan {
@@ -1730,6 +3195,46 @@ impl PhysicalPlan {
     /// Consumes the plan and returns the operator.
     pub fn into_operator(self) -> Box<dyn Operator> {
         self.operator
+    }
+
+    /// Returns the adaptive context, if adaptive execution is enabled.
+    #[must_use]
+    pub fn adaptive_context(&self) -> Option<&AdaptiveContext> {
+        self.adaptive_context.as_ref()
+    }
+
+    /// Takes ownership of the adaptive context.
+    pub fn take_adaptive_context(&mut self) -> Option<AdaptiveContext> {
+        self.adaptive_context.take()
+    }
+}
+
+/// Helper operator that returns a single result chunk once.
+///
+/// Used by the factorized expand chain to wrap the final result.
+#[allow(dead_code)]
+struct SingleResultOperator {
+    result: Option<grafeo_core::execution::DataChunk>,
+}
+
+impl SingleResultOperator {
+    #[allow(dead_code)]
+    fn new(result: Option<grafeo_core::execution::DataChunk>) -> Self {
+        Self { result }
+    }
+}
+
+impl Operator for SingleResultOperator {
+    fn next(&mut self) -> grafeo_core::execution::operators::OperatorResult {
+        Ok(self.result.take())
+    }
+
+    fn reset(&mut self) {
+        // Cannot reset - result is consumed
+    }
+
+    fn name(&self) -> &'static str {
+        "SingleResult"
     }
 }
 
@@ -2035,6 +3540,7 @@ mod tests {
                             variable: "n".to_string(),
                             property: "friends".to_string(),
                         }],
+                        distinct: false,
                     }),
                     op: BinaryOp::Gt,
                     right: Box::new(LogicalExpression::Literal(Value::Int64(0))),
@@ -2084,6 +3590,7 @@ mod tests {
                     label: Some("Person".to_string()),
                     input: None,
                 })),
+                path_alias: None,
             })),
         }));
 
@@ -2128,6 +3635,7 @@ mod tests {
                     label: None,
                     input: None,
                 })),
+                path_alias: None,
             })),
         }));
 
@@ -2267,6 +3775,7 @@ mod tests {
                     label: None,
                     input: None,
                 })),
+                columns: None,
             })),
         }));
 
@@ -2295,12 +3804,14 @@ mod tests {
                     expression: Some(LogicalExpression::Variable("n".to_string())),
                     distinct: false,
                     alias: Some("cnt".to_string()),
+                    percentile: None,
                 }],
                 input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "n".to_string(),
                     label: None,
                     input: None,
                 })),
+                having: None,
             })),
         }));
 
@@ -2324,12 +3835,14 @@ mod tests {
                 expression: Some(LogicalExpression::Variable("n".to_string())),
                 distinct: false,
                 alias: Some("cnt".to_string()),
+                percentile: None,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
             })),
+            having: None,
         }));
 
         let physical = planner.plan(&logical).unwrap();
@@ -2352,12 +3865,14 @@ mod tests {
                 }),
                 distinct: false,
                 alias: Some("total".to_string()),
+                percentile: None,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
             })),
+            having: None,
         }));
 
         let physical = planner.plan(&logical).unwrap();
@@ -2380,12 +3895,14 @@ mod tests {
                 }),
                 distinct: false,
                 alias: Some("average".to_string()),
+                percentile: None,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
             })),
+            having: None,
         }));
 
         let physical = planner.plan(&logical).unwrap();
@@ -2409,6 +3926,7 @@ mod tests {
                     }),
                     distinct: false,
                     alias: Some("youngest".to_string()),
+                    percentile: None,
                 },
                 LogicalAggregateExpr {
                     function: LogicalAggregateFunction::Max,
@@ -2418,6 +3936,7 @@ mod tests {
                     }),
                     distinct: false,
                     alias: Some("oldest".to_string()),
+                    percentile: None,
                 },
             ],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
@@ -2425,6 +3944,7 @@ mod tests {
                 label: None,
                 input: None,
             })),
+            having: None,
         }));
 
         let physical = planner.plan(&logical).unwrap();
@@ -2587,6 +4107,7 @@ mod tests {
         // MATCH (n) DELETE n
         let logical = LogicalPlan::new(LogicalOperator::DeleteNode(DeleteNodeOp {
             variable: "n".to_string(),
+            detach: false,
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
                 label: None,
@@ -2709,5 +4230,608 @@ mod tests {
 
         // Test into_operator
         let _ = physical.into_operator();
+    }
+
+    // ==================== Adaptive Planning Tests ====================
+
+    #[test]
+    fn test_plan_adaptive_with_scan() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        // MATCH (n:Person) RETURN n
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: Some("Person".to_string()),
+                input: None,
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert_eq!(physical.columns(), &["n"]);
+        // Should have adaptive context with estimates
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_filter() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        // MATCH (n) WHERE n.age > 30 RETURN n
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Filter(FilterOp {
+                predicate: LogicalExpression::Binary {
+                    left: Box::new(LogicalExpression::Property {
+                        variable: "n".to_string(),
+                        property: "age".to_string(),
+                    }),
+                    op: BinaryOp::Gt,
+                    right: Box::new(LogicalExpression::Literal(Value::Int64(30))),
+                },
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_expand() {
+        let store = create_test_store();
+        let planner = Planner::new(Arc::clone(&store)).with_factorized_execution(false);
+
+        // MATCH (a)-[:KNOWS]->(b) RETURN a, b
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_type: Some("KNOWS".to_string()),
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                path_alias: None,
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_join() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Join(JoinOp {
+                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "b".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                join_type: JoinType::Cross,
+                conditions: vec![],
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_aggregate() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Aggregate(AggregateOp {
+            group_by: vec![],
+            aggregates: vec![LogicalAggregateExpr {
+                function: LogicalAggregateFunction::Count,
+                expression: Some(LogicalExpression::Variable("n".to_string())),
+                distinct: false,
+                alias: Some("cnt".to_string()),
+                percentile: None,
+            }],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+            having: None,
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_distinct() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Distinct(LogicalDistinctOp {
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                columns: None,
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_limit() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Limit(LogicalLimitOp {
+                count: 10,
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_skip() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Skip(LogicalSkipOp {
+                count: 5,
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_sort() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Sort(SortOp {
+                keys: vec![SortKey {
+                    expression: LogicalExpression::Variable("n".to_string()),
+                    order: SortOrder::Ascending,
+                }],
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    #[test]
+    fn test_plan_adaptive_with_union() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Union(UnionOp {
+                inputs: vec![
+                    LogicalOperator::NodeScan(NodeScanOp {
+                        variable: "n".to_string(),
+                        label: Some("Person".to_string()),
+                        input: None,
+                    }),
+                    LogicalOperator::NodeScan(NodeScanOp {
+                        variable: "n".to_string(),
+                        label: Some("Company".to_string()),
+                        input: None,
+                    }),
+                ],
+            })),
+        }));
+
+        let physical = planner.plan_adaptive(&logical).unwrap();
+        assert!(physical.adaptive_context.is_some());
+    }
+
+    // ==================== Variable Length Path Tests ====================
+
+    #[test]
+    fn test_plan_expand_variable_length() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        // MATCH (a)-[:KNOWS*1..3]->(b) RETURN a, b
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_type: Some("KNOWS".to_string()),
+                min_hops: 1,
+                max_hops: Some(3),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                path_alias: None,
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        assert!(physical.columns().contains(&"a".to_string()));
+        assert!(physical.columns().contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_plan_expand_with_path_alias() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        // MATCH p = (a)-[:KNOWS*1..3]->(b) RETURN a, b
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_type: Some("KNOWS".to_string()),
+                min_hops: 1,
+                max_hops: Some(3),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                path_alias: Some("p".to_string()),
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        // Verify plan was created successfully with expected output columns
+        assert!(physical.columns().contains(&"a".to_string()));
+        assert!(physical.columns().contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_plan_expand_incoming() {
+        let store = create_test_store();
+        let planner = Planner::new(Arc::clone(&store)).with_factorized_execution(false);
+
+        // MATCH (a)<-[:KNOWS]-(b) RETURN a, b
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Incoming,
+                edge_type: Some("KNOWS".to_string()),
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                path_alias: None,
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        assert!(physical.columns().contains(&"a".to_string()));
+        assert!(physical.columns().contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_plan_expand_both_directions() {
+        let store = create_test_store();
+        let planner = Planner::new(Arc::clone(&store)).with_factorized_execution(false);
+
+        // MATCH (a)-[:KNOWS]-(b) RETURN a, b
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Both,
+                edge_type: Some("KNOWS".to_string()),
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                path_alias: None,
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        assert!(physical.columns().contains(&"a".to_string()));
+        assert!(physical.columns().contains(&"b".to_string()));
+    }
+
+    // ==================== With Context Tests ====================
+
+    #[test]
+    fn test_planner_with_context() {
+        use crate::transaction::TransactionManager;
+
+        let store = create_test_store();
+        let tx_manager = Arc::new(TransactionManager::new());
+        let tx_id = tx_manager.begin();
+        let epoch = tx_manager.current_epoch();
+
+        let planner = Planner::with_context(
+            Arc::clone(&store),
+            Arc::clone(&tx_manager),
+            Some(tx_id),
+            epoch,
+        );
+
+        assert_eq!(planner.tx_id(), Some(tx_id));
+        assert!(planner.tx_manager().is_some());
+        assert_eq!(planner.viewing_epoch(), epoch);
+    }
+
+    #[test]
+    fn test_planner_with_factorized_execution_disabled() {
+        let store = create_test_store();
+        let planner = Planner::new(Arc::clone(&store)).with_factorized_execution(false);
+
+        // Two consecutive expands - should NOT use factorized execution
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("c".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "b".to_string(),
+                to_variable: "c".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_type: None,
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(LogicalOperator::Expand(ExpandOp {
+                    from_variable: "a".to_string(),
+                    to_variable: "b".to_string(),
+                    edge_variable: None,
+                    direction: ExpandDirection::Outgoing,
+                    edge_type: None,
+                    min_hops: 1,
+                    max_hops: Some(1),
+                    input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                        variable: "a".to_string(),
+                        label: None,
+                        input: None,
+                    })),
+                    path_alias: None,
+                })),
+                path_alias: None,
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        assert!(physical.columns().contains(&"a".to_string()));
+        assert!(physical.columns().contains(&"c".to_string()));
+    }
+
+    // ==================== Sort with Property Tests ====================
+
+    #[test]
+    fn test_plan_sort_by_property() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        // MATCH (n) RETURN n ORDER BY n.name ASC
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Sort(SortOp {
+                keys: vec![SortKey {
+                    expression: LogicalExpression::Property {
+                        variable: "n".to_string(),
+                        property: "name".to_string(),
+                    },
+                    order: SortOrder::Ascending,
+                }],
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        // Should have the property column projected
+        assert!(physical.columns().contains(&"n".to_string()));
+    }
+
+    // ==================== Scan with Input Tests ====================
+
+    #[test]
+    fn test_plan_scan_with_input() {
+        let store = create_test_store();
+        let planner = Planner::new(store);
+
+        // A scan with another scan as input (for chained patterns)
+        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: LogicalExpression::Variable("a".to_string()),
+                    alias: None,
+                },
+                ReturnItem {
+                    expression: LogicalExpression::Variable("b".to_string()),
+                    alias: None,
+                },
+            ],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "b".to_string(),
+                label: Some("Company".to_string()),
+                input: Some(Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: Some("Person".to_string()),
+                    input: None,
+                }))),
+            })),
+        }));
+
+        let physical = planner.plan(&logical).unwrap();
+        assert!(physical.columns().contains(&"a".to_string()));
+        assert!(physical.columns().contains(&"b".to_string()));
     }
 }

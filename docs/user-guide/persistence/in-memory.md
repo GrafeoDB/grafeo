@@ -18,7 +18,7 @@ In-memory mode provides the fastest performance by keeping all data in RAM.
     import grafeo
 
     # Default is in-memory
-    db = grafeo.Database()
+    db = grafeo.GrafeoDB()
     ```
 
 === "Rust"
@@ -47,7 +47,7 @@ In-memory mode provides the fastest performance by keeping all data in RAM.
 
 ```python
 # Set memory limit for in-memory database
-db = grafeo.Database(
+db = grafeo.GrafeoDB(
     memory_limit=1 * 1024 * 1024 * 1024  # 1 GB
 )
 ```

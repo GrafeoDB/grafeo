@@ -1,8 +1,11 @@
 //! Trie index for Worst-Case Optimal Joins (WCOJ).
 //!
-//! The trie index is built lazily on-demand for complex pattern queries
-//! like triangles, cliques, and multi-way joins. It enables the
-//! Leapfrog Trie Join algorithm.
+//! When you're finding triangles, cliques, or other complex patterns, traditional
+//! binary joins can be slow. This trie enables the Leapfrog Trie Join algorithm
+//! which is worst-case optimal - it runs in time proportional to the output size.
+//!
+//! Built lazily on-demand. You won't interact with this directly unless you're
+//! implementing custom join algorithms.
 
 use grafeo_common::types::{EdgeId, NodeId};
 use grafeo_common::utils::hash::FxHashMap;
@@ -53,10 +56,10 @@ impl TrieNode {
     }
 }
 
-/// A trie index for edge patterns.
+/// A trie index for edge patterns in multi-way joins.
 ///
-/// Used to support Worst-Case Optimal Joins (WCOJ) via the
-/// Leapfrog Trie Join algorithm.
+/// Edges are indexed by path (usually [src, dst]). The trie structure
+/// enables efficient intersection of multiple edge sets via leapfrogging.
 pub struct TrieIndex {
     /// Root of the trie.
     root: TrieNode,
@@ -189,9 +192,11 @@ impl<'a> TrieIterator<'a> {
     }
 }
 
-/// Leapfrog trie join implementation.
+/// Leapfrog trie join - the workhorse of WCOJ.
 ///
-/// This performs worst-case optimal joins over multiple trie iterators.
+/// Given multiple sorted iterators, finds their intersection by "leapfrogging"
+/// - each iterator jumps ahead to match the maximum of the others. This avoids
+///   the Cartesian product explosion of naive binary joins.
 pub struct LeapfrogJoin<'a> {
     iters: Vec<TrieIterator<'a>>,
     current_key: Option<NodeId>,

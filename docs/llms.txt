@@ -1,0 +1,211 @@
+# Grafeo
+
+> A pure-Rust, high-performance, embeddable graph database with Python bindings.
+
+Grafeo is designed for applications that need graph database capabilities without external dependencies. It can be embedded directly into Python or Rust applications.
+
+## Key Features
+
+- **Embeddable**: Single library, no external dependencies
+- **High Performance**: Vectorized execution, SIMD, columnar storage
+- **Pure Rust**: Memory-safe, fearless concurrency
+- **Python Bindings**: First-class Python support via PyO3
+- **ACID Transactions**: MVCC-based snapshot isolation
+
+## Data Models
+
+Grafeo supports two graph data models:
+
+1. **LPG (Labeled Property Graph)**: Nodes with labels and properties, edges with types and properties
+2. **RDF (Resource Description Framework)**: Subject-predicate-object triples with SPO/POS/OSP indexes
+
+## Query Languages
+
+| Language | Data Model | Description |
+|----------|------------|-------------|
+| GQL | LPG | ISO standard, declarative pattern matching (default) |
+| Cypher | LPG | Neo4j-compatible syntax |
+| Gremlin | LPG | Apache TinkerPop traversal-based |
+| GraphQL | LPG/RDF | Schema-driven queries |
+| SPARQL | RDF | W3C standard for RDF |
+
+## Installation
+
+Python:
+```bash
+uv add grafeo
+# or: pip install grafeo
+```
+
+Rust:
+```bash
+cargo add grafeo
+```
+
+## Quick Start (Python)
+
+```python
+import grafeo
+
+# Create database (in-memory or persistent)
+db = grafeo.GrafeoDB()  # in-memory
+db = grafeo.GrafeoDB(path="my_graph.db")  # persistent
+
+# Insert nodes
+db.execute("""
+    INSERT (:Person {name: 'Alice', age: 30})
+    INSERT (:Person {name: 'Bob', age: 25})
+""")
+
+# Insert edges
+db.execute("""
+    MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+    INSERT (a)-[:KNOWS {since: 2024}]->(b)
+""")
+
+# Query with pattern matching
+result = db.execute("""
+    MATCH (p:Person)-[:KNOWS]->(friend)
+    RETURN p.name, friend.name
+""")
+
+for row in result:
+    print(row['p.name'], row['friend.name'])
+```
+
+## Quick Start (Rust)
+
+```rust
+use grafeo::GrafeoDB;
+
+fn main() -> Result<(), grafeo_common::utils::error::Error> {
+    let db = GrafeoDB::new_in_memory();
+    let mut session = db.session();
+
+    session.execute(r#"
+        INSERT (:Person {name: 'Alice', age: 30})
+    "#)?;
+
+    let result = session.execute(r#"
+        MATCH (p:Person) RETURN p.name, p.age
+    "#)?;
+
+    for row in result.rows {
+        println!("{:?}", row);
+    }
+
+    Ok(())
+}
+```
+
+## Python API
+
+### Database
+
+```python
+grafeo.GrafeoDB(
+    path: str | None = None     # None for in-memory
+)
+```
+
+Methods:
+- `execute(query: str) -> QueryResult`: Execute a query
+- `execute_cypher(query: str) -> QueryResult`: Execute Cypher
+- `execute_gremlin(query: str) -> QueryResult`: Execute Gremlin
+- `execute_graphql(query: str) -> QueryResult`: Execute GraphQL
+- `execute_sparql(query: str) -> QueryResult`: Execute SPARQL
+- `begin_transaction() -> Transaction`: Start a transaction
+
+### Transaction
+
+```python
+with db.begin_transaction() as tx:
+    result = tx.execute(query: str) -> QueryResult
+    tx.commit()
+    tx.rollback()
+```
+
+### QueryResult
+
+Iterable rows with dictionary-like access:
+```python
+for row in result:
+    value = row['column_name']
+    value = row.get('column_name', default)
+```
+
+## GQL Query Examples
+
+Pattern matching:
+```sql
+MATCH (p:Person)-[:KNOWS]->(friend)
+WHERE p.age > 25
+RETURN p.name, friend.name
+```
+
+Aggregation:
+```sql
+MATCH (p:Person)
+RETURN p.city, COUNT(*) as count
+GROUP BY p.city
+```
+
+Path queries:
+```sql
+MATCH path = (a:Person)-[:KNOWS*1..3]->(b:Person)
+WHERE a.name = 'Alice'
+RETURN path
+```
+
+Mutations:
+```sql
+INSERT (:Person {name: 'Carol', age: 28})
+
+MATCH (p:Person {name: 'Alice'})
+SET p.age = 31
+
+MATCH (p:Person {name: 'Bob'})
+DETACH DELETE p
+```
+
+## Architecture
+
+### Crate Structure
+
+- **grafeo-common**: Foundation types, memory allocators
+- **grafeo-core**: LPG storage, indexes, execution engine
+- **grafeo-adapters**: Parsers, storage backends
+- **grafeo-engine**: Database facade, sessions, transactions
+- **grafeo-python** (`crates/bindings/python`): PyO3 bindings
+
+### Query Processing Pipeline
+
+1. Parser: Query string → AST
+2. Binder: Semantic analysis
+3. Planner: AST → Logical plan
+4. Optimizer: Cost-based optimization
+5. Executor: Push-based execution
+
+### Storage
+
+- Columnar property storage with compression
+- Adjacency list indexes for traversals
+- Zone maps for data skipping
+- WAL for durability
+
+## Documentation
+
+Full documentation: https://grafeo.dev
+
+- Getting Started: https://grafeo.dev/getting-started/
+- User Guide: https://grafeo.dev/user-guide/
+- API Reference: https://grafeo.dev/api/
+- Architecture: https://grafeo.dev/architecture/
+
+## Source Code
+
+Repository: https://github.com/GrafeoDB/grafeo
+
+## License
+
+Apache-2.0

@@ -32,7 +32,7 @@ import grafeo
 print(grafeo.__version__)
 
 # Create a test database
-db = grafeo.Database()
+db = grafeo.GrafeoDB()
 print("Grafeo installed successfully!")
 ```
 
@@ -60,22 +60,30 @@ Or add it manually to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-grafeo = "0.1"
+grafeo = "0.2"
 ```
 
 ### Feature Flags
 
-Grafeo supports optional features:
+All query languages are enabled by default. To use a minimal build:
 
 ```toml
 [dependencies]
-grafeo = { version = "0.1", features = ["full"] }
+# Default: all query languages enabled
+grafeo = "0.2"
+
+# Minimal: only specific languages
+grafeo = { version = "0.1", default-features = false, features = ["gql"] }
 ```
 
 | Feature | Description |
 |---------|-------------|
-| `default` | Core functionality |
-| `full` | All features enabled |
+| `default` | All query languages (GQL, Cypher, Gremlin, GraphQL, SPARQL) |
+| `gql` | GQL only |
+| `cypher` | Cypher only |
+| `sparql` | SPARQL and RDF support |
+| `gremlin` | Gremlin only |
+| `graphql` | GraphQL only |
 
 ### Verify Installation
 
@@ -94,7 +102,7 @@ fn main() -> Result<(), grafeo::Error> {
 ### Clone the Repository
 
 ```bash
-git clone https://github.com/StevenBtw/grafeo.git
+git clone https://github.com/GrafeoDB/grafeo.git
 cd grafeo
 ```
 
@@ -107,7 +115,7 @@ cargo build --workspace --release
 ### Build Python Package
 
 ```bash
-cd crates/grafeo-python
+cd crates/bindings/python
 uv add maturin
 maturin develop --release
 ```

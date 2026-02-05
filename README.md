@@ -1,40 +1,55 @@
-# Grafeo
-
-[![CI](https://github.com/StevenBtw/grafeo/actions/workflows/ci.yml/badge.svg)](https://github.com/StevenBtw/grafeo/actions/workflows/ci.yml)
-[![Docs](https://github.com/StevenBtw/grafeo/actions/workflows/docs.yml/badge.svg)](https://github.com/StevenBtw/grafeo/actions/workflows/docs.yml)
-[![codecov](https://codecov.io/gh/StevenBtw/grafeo/graph/badge.svg)](https://codecov.io/gh/StevenBtw/grafeo)
+[![CI](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml/badge.svg)](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml)
+[![Docs](https://github.com/GrafeoDB/grafeo/actions/workflows/docs.yml/badge.svg)](https://github.com/GrafeoDB/grafeo/actions/workflows/docs.yml)
+[![codecov](https://codecov.io/gh/GrafeoDB/grafeo/graph/badge.svg)](https://codecov.io/gh/GrafeoDB/grafeo)
 [![Crates.io](https://img.shields.io/crates/v/grafeo.svg)](https://crates.io/crates/grafeo)
 [![PyPI](https://img.shields.io/pypi/v/grafeo.svg)](https://pypi.org/project/grafeo/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-grafeo.tech-blue)](https://grafeo.tech)
 [![MSRV](https://img.shields.io/badge/MSRV-1.91.1-blue)](https://www.rust-lang.org)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 
-A pure-Rust, high-performance, embeddable graph database supporting both **Labeled Property Graph (LPG)** and **RDF** data models.
+# Grafeo
+
+Grafeo is a pure-Rust, high-performance graph database that can be embedded as a library or run as a standalone database, with optional in-memory or persistent storage. Grafeo supports both **Labeled Property Graph (LPG)** and **Resource Description Framework (RDF)** graph data models and all major query languages. 
 
 ## Features
 
+### Core Capabilities
+
 - **Dual data model support**: LPG and RDF with optimized storage for each
 - **Multi-language queries**: GQL, Cypher, Gremlin, GraphQL, and SPARQL
-- **GQL** (ISO/IEC 39075) - enabled by default
-- **Cypher** (openCypher 9.0) - via feature flag
-- **Gremlin** (Apache TinkerPop) - via feature flag
-- **GraphQL** - via feature flag, supports both LPG and RDF
-- **SPARQL** (W3C 1.1) - via feature flag for RDF queries
 - Embeddable with zero external dependencies
 - Python bindings via PyO3
 - In-memory and persistent storage modes
 - MVCC transactions with snapshot isolation
 
+### Query Languages
+
+- **GQL** (ISO/IEC 39075)
+- **Cypher** (openCypher 9.0)
+- **Gremlin** (Apache TinkerPop)
+- **GraphQL** (September 2025)
+- **SPARQL** (W3C 1.1)
+
+### Performance Features
+
+- **Push-based vectorized execution** with adaptive chunk sizing
+- **Morsel-driven parallelism** with auto-detected thread count
+- **Columnar storage** with dictionary, delta, and RLE compression
+- **Cost-based optimizer** with DPccp join ordering and histograms
+- **Zone maps** for intelligent data skipping
+- **Adaptive query execution** with runtime re-optimization
+- **Transparent spilling** for out-of-core processing
+- **Bloom filters** for efficient membership tests
+
 ## Query Language & Data Model Support
 
-| Query Language | LPG | RDF | Status |
-|----------------|-----|-----|--------|
-| GQL (ISO/IEC 39075) | ✅ | — | Default |
-| Cypher (openCypher 9.0) | ✅ | — | Feature flag |
-| Gremlin (Apache TinkerPop) | ✅ | — | Feature flag |
-| GraphQL | ✅ | ✅ | Feature flag |
-| SPARQL (W3C 1.1) | — | ✅ | Feature flag |
+| Query Language | LPG | RDF |
+|----------------|-----|-----|
+| GQL | ✅ | — |
+| Cypher | ✅ | — |
+| Gremlin | ✅ | — |
+| GraphQL | ✅ | ✅ | 
+| SPARQL | — | ✅ |
 
 Grafeo uses a modular translator architecture where query languages are parsed into ASTs, then translated to a unified logical plan that executes against the appropriate storage backend (LPG or RDF).
 
@@ -51,19 +66,22 @@ Grafeo uses a modular translator architecture where query languages are parsed i
 cargo add grafeo
 ```
 
-With additional query languages:
+All query languages (GQL, Cypher, Gremlin, GraphQL, SPARQL) are enabled by default. To disable specific languages:
 
 ```bash
-cargo add grafeo --features cypher   # Add Cypher support
-cargo add grafeo --features gremlin  # Add Gremlin support
-cargo add grafeo --features graphql  # Add GraphQL support
-cargo add grafeo --features full     # All query languages
+cargo add grafeo --no-default-features --features gql,cypher
 ```
 
 ### Python
 
 ```bash
 uv add grafeo
+```
+
+With CLI support:
+
+```bash
+uv add grafeo[cli]
 ```
 
 ## Quick Start
@@ -101,6 +119,30 @@ for row in result:
 # Or use the direct API
 node = db.create_node(["Person"], {"name": "Carol"})
 print(f"Created node with ID: {node.id}")
+
+# Manage labels
+db.add_node_label(node.id, "Employee")     # Add a label
+db.remove_node_label(node.id, "Contractor") # Remove a label
+labels = db.get_node_labels(node.id)        # Get all labels
+```
+
+### Admin APIs (Python)
+
+```python
+# Database inspection
+db.info()           # Overview: mode, counts, persistence
+db.detailed_stats() # Memory usage, index counts
+db.schema()         # Labels, edge types, property keys
+db.validate()       # Integrity check
+
+# Persistence control
+db.save("/path/to/backup")    # Save to disk
+db.to_memory()                # Create in-memory copy
+GrafeoDB.open_in_memory(path) # Load as in-memory
+
+# WAL management
+db.wal_status()      # WAL info
+db.wal_checkpoint()  # Force checkpoint
 ```
 
 ### Rust
@@ -125,13 +167,47 @@ fn main() {
 }
 ```
 
+## Command-Line Interface
+
+Optional admin CLI for operators and DevOps:
+
+```bash
+# Install with CLI support
+uv add grafeo[cli]
+
+# Inspection
+grafeo info ./mydb              # Overview: counts, size, mode
+grafeo stats ./mydb             # Detailed statistics
+grafeo schema ./mydb            # Labels, edge types, property keys
+grafeo validate ./mydb          # Integrity check
+
+# Backup & restore
+grafeo backup create ./mydb -o backup
+grafeo backup restore backup ./copy --force
+
+# WAL management
+grafeo wal status ./mydb
+grafeo wal checkpoint ./mydb
+
+# Output formats
+grafeo info ./mydb --format json  # Machine-readable JSON
+grafeo info ./mydb --format table # Human-readable table (default)
+```
+
 ## Documentation
 
-Full documentation is available at [grafeo.tech](https://grafeo.tech).
+Full documentation is available at [grafeo.dev](https://grafeo.dev).
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+
+## Acknowledgments
+
+Grafeo's execution engine draws inspiration from:
+
+- [DuckDB](https://duckdb.org/), vectorized push-based execution, morsel-driven parallelism
+- [LadybugDB](https://github.com/LadybugDB/ladybug), CSR-based adjacency indexing, factorized query processing
 
 ## License
 

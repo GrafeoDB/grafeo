@@ -1,8 +1,14 @@
-//! Error types for Grafeo.
+//! Error types for Grafeo operations.
+//!
+//! [`Error`] is the main error type you'll encounter. For query-specific errors,
+//! [`QueryError`] includes source location and hints to help users fix issues.
 
 use std::fmt;
 
-/// The main error type for Grafeo operations.
+/// The main error type - covers everything that can go wrong in Grafeo.
+///
+/// Most methods return `Result<T, Error>`. Use pattern matching to handle
+/// specific cases, or just propagate with `?`.
 #[derive(Debug)]
 pub enum Error {
     /// A node was not found.
@@ -95,6 +101,12 @@ pub enum TransactionError {
     /// Write-write conflict with another transaction.
     WriteConflict(String),
 
+    /// Serialization failure (SSI violation).
+    ///
+    /// Occurs when running at Serializable isolation level and a read-write
+    /// conflict is detected (we read data that another committed transaction wrote).
+    SerializationFailure(String),
+
     /// Deadlock detected.
     Deadlock,
 
@@ -114,6 +126,9 @@ impl fmt::Display for TransactionError {
             TransactionError::Aborted => write!(f, "Transaction aborted"),
             TransactionError::Conflict => write!(f, "Transaction conflict"),
             TransactionError::WriteConflict(msg) => write!(f, "Write conflict: {msg}"),
+            TransactionError::SerializationFailure(msg) => {
+                write!(f, "Serialization failure (SSI): {msg}")
+            }
             TransactionError::Deadlock => write!(f, "Deadlock detected"),
             TransactionError::Timeout => write!(f, "Transaction timeout"),
             TransactionError::ReadOnly => write!(f, "Cannot write in read-only transaction"),
@@ -169,18 +184,22 @@ impl From<StorageError> for Error {
     }
 }
 
-/// Query-specific errors.
+/// A query error with source location and helpful hints.
+///
+/// When something goes wrong in a query (syntax error, unknown label, type
+/// mismatch), you get one of these. The error message includes the location
+/// in your query and often a suggestion for fixing it.
 #[derive(Debug, Clone)]
 pub struct QueryError {
-    /// The kind of query error.
+    /// What category of error (lexer, syntax, semantic, etc.)
     pub kind: QueryErrorKind,
-    /// Human-readable error message.
+    /// Human-readable explanation of what went wrong.
     pub message: String,
-    /// Source span in the original query (if applicable).
+    /// Where in the query the error occurred.
     pub span: Option<SourceSpan>,
-    /// The original query text.
+    /// The original query text (for showing context).
     pub source_query: Option<String>,
-    /// A hint for fixing the error.
+    /// A suggestion for fixing the error.
     pub hint: Option<String>,
 }
 

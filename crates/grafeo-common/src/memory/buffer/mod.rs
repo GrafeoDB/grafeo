@@ -1,7 +1,9 @@
-//! Unified buffer manager for memory management.
+//! Centralized memory management with pressure handling.
 //!
-//! This module provides centralized memory management across all subsystems
-//! with pressure-aware allocation, eviction, and spilling support.
+//! When you need to control total memory usage across the database (not just
+//! individual allocations), this is what you use. The [`BufferManager`] tracks
+//! all allocations, monitors memory pressure, and can trigger spilling when
+//! you're running low.
 //!
 //! # Architecture
 //!

@@ -1,7 +1,8 @@
-//! Bit vector for boolean compression.
+//! Stores booleans as individual bits - 8x smaller than `Vec<bool>`.
 //!
-//! Stores boolean values as individual bits, achieving 8x compression compared
-//! to storing each boolean as a byte.
+//! Use this when you're tracking lots of boolean flags (like "visited" markers
+//! in graph traversals, or null bitmaps). Backed by `Vec<u64>` so bitwise
+//! operations like AND/OR/XOR stay cache-friendly.
 //!
 //! # Example
 //!
@@ -12,14 +13,15 @@
 //!
 //! assert_eq!(bitvec.get(0), Some(true));
 //! assert_eq!(bitvec.get(1), Some(false));
+//! assert_eq!(bitvec.count_ones(), 4);
 //! ```
 
 use std::io;
 
-/// A compact bit vector for storing boolean values.
+/// Stores booleans as individual bits - 8x smaller than `Vec<bool>`.
 ///
-/// Each boolean is stored as a single bit, providing 8x compression
-/// compared to `Vec<bool>`.
+/// Supports bitwise operations ([`and`](Self::and), [`or`](Self::or),
+/// [`not`](Self::not)) for combining filter results efficiently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BitVector {
     /// Packed bits (little-endian within each word).

@@ -18,6 +18,8 @@ thiserror.workspace = true
 smallvec.workspace = true
 hashbrown.workspace = true
 indexmap.workspace = true
+dashmap.workspace = true
+arcstr.workspace = true
 
 # Hashing
 ahash.workspace = true
@@ -26,16 +28,22 @@ ahash.workspace = true
 serde.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
+bincode = { workspace = true, optional = true }
 
 # Concurrency
 parking_lot.workspace = true
 crossbeam.workspace = true
+rayon.workspace = true
 
 # Async
 tokio.workspace = true
 
 # Regex
 regex.workspace = true
+
+# Vector index (optional)
+ordered-float = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
@@ -45,6 +53,10 @@ tempfile.workspace = true
 [features]
 default = []
 rdf = []  # Enable RDF graph model
+tiered-storage = ["grafeo-common/tiered-storage", "bincode"]  # Enable tiered hot/cold storage
+succinct-indexes = []  # Enable succinct data structures (rank/select bitvectors, Elias-Fano, wavelet trees)
+ring-index = ["succinct-indexes", "rdf"]  # Ring Index for RDF (3x space reduction, requires succinct-indexes and rdf)
+vector-index = ["ordered-float", "rand"]  # HNSW vector index for approximate nearest neighbor search
 
 [lints]
 workspace = true

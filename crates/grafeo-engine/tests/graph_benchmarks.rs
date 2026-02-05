@@ -17,12 +17,43 @@ use grafeo_engine::GrafeoDB;
 // Benchmark Configuration
 // ============================================================================
 
-const SMALL_SCALE: usize = 10_000;
-const MEDIUM_SCALE: usize = 100_000;
-const LARGE_SCALE: usize = 500_000;
+// In debug mode, use small datasets for fast iteration
+#[cfg(debug_assertions)]
+mod scale {
+    pub const SMALL_SCALE: usize = 100;
+    pub const MEDIUM_SCALE: usize = 500;
+    pub const LARGE_SCALE: usize = 1_000;
+    pub const NODE_COUNT: usize = 100;
+    pub const TRAVERSAL_NODES: usize = 500;
+    pub const FILTER_NODES: usize = 1_000;
+    pub const LOOKUP_NODES: usize = 1_000;
+    pub const CONCURRENT_NODES: usize = 1_000;
+    pub const PATTERN_NODES: usize = 200;
+    pub const MIXED_NODES: usize = 500;
+    pub const AGGREGATION_NODES: usize = 1_000;
+    pub const EDGE_NODES: usize = 100;
+}
 
-// Use MEDIUM_SCALE for CI, can override for local testing
-const NODE_COUNT: usize = MEDIUM_SCALE;
+// In release mode, use larger datasets for meaningful benchmarks
+// Keep values reasonable for CI (~10-30s per test max)
+#[cfg(not(debug_assertions))]
+mod scale {
+    pub const SMALL_SCALE: usize = 500;
+    pub const MEDIUM_SCALE: usize = 2_000;
+    pub const LARGE_SCALE: usize = 5_000;
+    pub const NODE_COUNT: usize = 5_000;
+    pub const TRAVERSAL_NODES: usize = 1_000;
+    pub const FILTER_NODES: usize = 2_000;
+    pub const LOOKUP_NODES: usize = 1_000;
+    pub const CONCURRENT_NODES: usize = 2_000;
+    pub const PATTERN_NODES: usize = 500;
+    pub const MIXED_NODES: usize = 1_000;
+    pub const AGGREGATION_NODES: usize = 2_000;
+    pub const EDGE_NODES: usize = 500;
+}
+
+use scale::*;
+
 const EDGE_MULTIPLIER: usize = 10; // Average edges per node
 
 // ============================================================================
@@ -143,7 +174,7 @@ fn bench_bulk_edge_insertion() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let node_count = NODE_COUNT / 10; // Use fewer nodes for edge tests
+    let node_count = EDGE_NODES; // Use fewer nodes for edge tests
     let edge_count = node_count * EDGE_MULTIPLIER;
 
     println!("  Setting up {} nodes...", node_count);
@@ -208,7 +239,7 @@ fn bench_graph_traversals() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let node_count = 10_000;
+    let node_count = TRAVERSAL_NODES;
     let edge_count = node_count * 5;
 
     println!(
@@ -311,7 +342,7 @@ fn bench_filtering() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let node_count = 50_000;
+    let node_count = FILTER_NODES;
 
     println!(
         "  Setting up {} nodes with varied properties...",
@@ -412,7 +443,7 @@ fn bench_aggregations() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let node_count = 50_000;
+    let node_count = AGGREGATION_NODES;
 
     println!("  Setting up {} nodes...", node_count);
 
@@ -514,7 +545,7 @@ fn bench_point_lookups() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let node_count = 100_000;
+    let node_count = LOOKUP_NODES;
 
     println!("  Setting up {} nodes...", node_count);
 
@@ -583,7 +614,7 @@ fn bench_pattern_matching() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let node_count = 5_000;
+    let node_count = PATTERN_NODES;
     let edge_count = node_count * 8;
 
     println!(
@@ -664,7 +695,7 @@ fn bench_mixed_workload() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let initial_nodes = 10_000;
+    let initial_nodes = MIXED_NODES;
 
     println!("  Setting up {} initial nodes...", initial_nodes);
 
@@ -788,7 +819,7 @@ fn bench_concurrent_reads() {
     print_header("CONCURRENT READ BENCHMARKS");
 
     let db = Arc::new(GrafeoDB::new_in_memory());
-    let node_count = 50_000;
+    let node_count = CONCURRENT_NODES;
 
     println!("  Setting up {} nodes...", node_count);
 

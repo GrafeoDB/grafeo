@@ -3,10 +3,11 @@
 //! Translates GQL AST to the common logical plan representation.
 
 use crate::query::plan::{
-    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, DeleteNodeOp, DistinctOp,
-    ExpandDirection, ExpandOp, FilterOp, JoinOp, JoinType, LeftJoinOp, LimitOp, LogicalExpression,
-    LogicalOperator, LogicalPlan, NodeScanOp, ProjectOp, Projection, ReturnItem, ReturnOp,
-    SetPropertyOp, SkipOp, SortKey, SortOp, SortOrder, UnaryOp,
+    AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CreateEdgeOp,
+    CreateNodeOp, DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, FilterOp, JoinOp, JoinType,
+    LeftJoinOp, LimitOp, LogicalExpression, LogicalOperator, LogicalPlan, MergeOp, NodeScanOp,
+    ProjectOp, Projection, RemoveLabelOp, ReturnItem, ReturnOp, SetPropertyOp, ShortestPathOp,
+    SkipOp, SortKey, SortOp, SortOrder, UnaryOp, UnwindOp,
 };
 use grafeo_adapters::query::gql::{self, ast};
 use grafeo_common::types::Value;
@@ -67,6 +68,76 @@ impl GqlTranslator {
             }
         }
 
+        // Handle UNWIND clauses
+        for unwind_clause in &query.unwind_clauses {
+            let expression = self.translate_expression(&unwind_clause.expression)?;
+            plan = LogicalOperator::Unwind(UnwindOp {
+                expression,
+                variable: unwind_clause.alias.clone(),
+                input: Box::new(plan),
+            });
+        }
+
+        // Handle MERGE clauses
+        for merge_clause in &query.merge_clauses {
+            // Extract the pattern - we only support simple node patterns for now
+            let (variable, labels, match_properties) = match &merge_clause.pattern {
+                ast::Pattern::Node(node) => {
+                    let var = node
+                        .variable
+                        .clone()
+                        .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+                    let labels = node.labels.clone();
+                    let props: Vec<(String, LogicalExpression)> = node
+                        .properties
+                        .iter()
+                        .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
+                        .collect::<Result<_>>()?;
+                    (var, labels, props)
+                }
+                ast::Pattern::Path(_) => {
+                    return Err(Error::Internal(
+                        "MERGE with path patterns is not yet supported".to_string(),
+                    ));
+                }
+            };
+
+            // Translate ON CREATE properties
+            let on_create: Vec<(String, LogicalExpression)> = merge_clause
+                .on_create
+                .as_ref()
+                .map(|assignments| {
+                    assignments
+                        .iter()
+                        .map(|a| Ok((a.property.clone(), self.translate_expression(&a.value)?)))
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+
+            // Translate ON MATCH properties
+            let on_match: Vec<(String, LogicalExpression)> = merge_clause
+                .on_match
+                .as_ref()
+                .map(|assignments| {
+                    assignments
+                        .iter()
+                        .map(|a| Ok((a.property.clone(), self.translate_expression(&a.value)?)))
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+
+            plan = LogicalOperator::Merge(MergeOp {
+                variable,
+                labels,
+                match_properties,
+                on_create,
+                on_match,
+                input: Box::new(plan),
+            });
+        }
+
         // Apply WHERE filter
         if let Some(where_clause) = &query.where_clause {
             let predicate = self.translate_expression(&where_clause.expression)?;
@@ -78,12 +149,58 @@ impl GqlTranslator {
 
         // Handle SET clauses
         for set_clause in &query.set_clauses {
+            // Handle property assignments
             for assignment in &set_clause.assignments {
                 let value = self.translate_expression(&assignment.value)?;
                 plan = LogicalOperator::SetProperty(SetPropertyOp {
                     variable: assignment.variable.clone(),
                     properties: vec![(assignment.property.clone(), value)],
                     replace: false,
+                    input: Box::new(plan),
+                });
+            }
+            // Handle label operations (SET n:Label)
+            for label_op in &set_clause.label_operations {
+                plan = LogicalOperator::AddLabel(AddLabelOp {
+                    variable: label_op.variable.clone(),
+                    labels: label_op.labels.clone(),
+                    input: Box::new(plan),
+                });
+            }
+        }
+
+        // Handle REMOVE clauses
+        for remove_clause in &query.remove_clauses {
+            // Handle label removal (REMOVE n:Label)
+            for label_op in &remove_clause.label_operations {
+                plan = LogicalOperator::RemoveLabel(RemoveLabelOp {
+                    variable: label_op.variable.clone(),
+                    labels: label_op.labels.clone(),
+                    input: Box::new(plan),
+                });
+            }
+            // Handle property removal (REMOVE n.prop) - set to null
+            for (variable, property) in &remove_clause.property_removals {
+                plan = LogicalOperator::SetProperty(SetPropertyOp {
+                    variable: variable.clone(),
+                    properties: vec![(property.clone(), LogicalExpression::Literal(Value::Null))],
+                    replace: false,
+                    input: Box::new(plan),
+                });
+            }
+        }
+
+        // Handle CREATE clauses (Cypher-style: MATCH ... CREATE ...)
+        for create_clause in &query.create_clauses {
+            plan = self.translate_create_patterns(&create_clause.patterns, plan)?;
+        }
+
+        // Handle DELETE clauses (Cypher-style: MATCH ... DELETE ...)
+        for delete_clause in &query.delete_clauses {
+            for variable in &delete_clause.variables {
+                plan = LogicalOperator::DeleteNode(DeleteNodeOp {
+                    variable: variable.clone(),
+                    detach: delete_clause.detach,
                     input: Box::new(plan),
                 });
             }
@@ -120,6 +237,7 @@ impl GqlTranslator {
             if with_clause.distinct {
                 plan = LogicalOperator::Distinct(DistinctOp {
                     input: Box::new(plan),
+                    columns: None,
                 });
             }
         }
@@ -156,13 +274,44 @@ impl GqlTranslator {
             let (aggregates, group_by) =
                 self.extract_aggregates_and_groups(&query.return_clause.items)?;
 
+            // Translate HAVING clause if present
+            let having = if let Some(having_clause) = &query.having_clause {
+                Some(self.translate_expression(&having_clause.expression)?)
+            } else {
+                None
+            };
+
             // Insert Aggregate operator - this is the final operator for aggregate queries
             // The aggregate operator produces the output columns directly
             plan = LogicalOperator::Aggregate(AggregateOp {
                 group_by,
                 aggregates,
                 input: Box::new(plan),
+                having,
             });
+
+            // Apply ORDER BY for aggregate queries
+            // Note: ORDER BY sort keys reference aggregate output columns (aliases)
+            if let Some(order_by) = &query.return_clause.order_by {
+                let keys = order_by
+                    .items
+                    .iter()
+                    .map(|item| {
+                        Ok(SortKey {
+                            expression: self.translate_expression(&item.expression)?,
+                            order: match item.order {
+                                ast::SortOrder::Asc => SortOrder::Ascending,
+                                ast::SortOrder::Desc => SortOrder::Descending,
+                            },
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                plan = LogicalOperator::Sort(SortOp {
+                    keys,
+                    input: Box::new(plan),
+                });
+            }
 
             // Note: For aggregate queries, we don't add a Return operator
             // because Aggregate already produces the final output
@@ -248,23 +397,231 @@ impl GqlTranslator {
     fn translate_match(&self, match_clause: &ast::MatchClause) -> Result<LogicalOperator> {
         let mut plan: Option<LogicalOperator> = None;
 
-        for pattern in &match_clause.patterns {
-            let pattern_plan = self.translate_pattern(pattern, plan.take())?;
-            plan = Some(pattern_plan);
+        for aliased_pattern in &match_clause.patterns {
+            // Handle shortestPath patterns specially
+            if let Some(path_function) = &aliased_pattern.path_function {
+                plan = Some(self.translate_shortest_path(
+                    &aliased_pattern.pattern,
+                    aliased_pattern.alias.as_deref(),
+                    *path_function,
+                    plan.take(),
+                )?);
+            } else {
+                let pattern_plan = self.translate_pattern_with_alias(
+                    &aliased_pattern.pattern,
+                    plan.take(),
+                    aliased_pattern.alias.as_deref(),
+                )?;
+                plan = Some(pattern_plan);
+            }
         }
 
         plan.ok_or_else(|| Error::Internal("Empty MATCH clause".to_string()))
     }
 
+    /// Translates a shortestPath pattern into a logical operator.
+    fn translate_shortest_path(
+        &self,
+        pattern: &ast::Pattern,
+        alias: Option<&str>,
+        path_function: ast::PathFunction,
+        input: Option<LogicalOperator>,
+    ) -> Result<LogicalOperator> {
+        // Extract source and target from the pattern
+        let (source_node, target_node, edge_type, direction) = match pattern {
+            ast::Pattern::Path(path) => {
+                let target_node = if let Some(edge) = path.edges.last() {
+                    &edge.target
+                } else {
+                    return Err(Error::Internal(
+                        "shortestPath requires a path pattern".to_string(),
+                    ));
+                };
+                let edge_type = path.edges.first().and_then(|e| e.types.first().cloned());
+                let direction = path
+                    .edges
+                    .first()
+                    .map(|e| match e.direction {
+                        ast::EdgeDirection::Outgoing => ExpandDirection::Outgoing,
+                        ast::EdgeDirection::Incoming => ExpandDirection::Incoming,
+                        ast::EdgeDirection::Undirected => ExpandDirection::Both,
+                    })
+                    .unwrap_or(ExpandDirection::Both);
+                (&path.source, target_node, edge_type, direction)
+            }
+            ast::Pattern::Node(_) => {
+                return Err(Error::Internal(
+                    "shortestPath requires a path pattern, not a single node".to_string(),
+                ));
+            }
+        };
+
+        // Get variable names
+        let source_var = source_node
+            .variable
+            .clone()
+            .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+        let target_var = target_node
+            .variable
+            .clone()
+            .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+
+        // For shortestPath, we need to scan source and target nodes separately
+        // (not expand between them - the ShortestPathOperator will find the path)
+
+        // Scan source node first
+        let source_plan = self.translate_node_pattern(source_node, input)?;
+
+        // Scan target node (cross-product with source)
+        let target_plan = self.translate_node_pattern(target_node, Some(source_plan))?;
+
+        // Wrap with ShortestPath operator
+        Ok(LogicalOperator::ShortestPath(ShortestPathOp {
+            input: Box::new(target_plan),
+            source_var,
+            target_var,
+            edge_type,
+            direction,
+            path_alias: alias.unwrap_or("_path").to_string(),
+            all_paths: matches!(path_function, ast::PathFunction::AllShortestPaths),
+        }))
+    }
+
+    #[allow(dead_code)]
     fn translate_pattern(
         &self,
         pattern: &ast::Pattern,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
+        self.translate_pattern_with_alias(pattern, input, None)
+    }
+
+    fn translate_pattern_with_alias(
+        &self,
+        pattern: &ast::Pattern,
+        input: Option<LogicalOperator>,
+        path_alias: Option<&str>,
+    ) -> Result<LogicalOperator> {
         match pattern {
             ast::Pattern::Node(node) => self.translate_node_pattern(node, input),
-            ast::Pattern::Path(path) => self.translate_path_pattern(path, input),
+            ast::Pattern::Path(path) => {
+                self.translate_path_pattern_with_alias(path, input, path_alias)
+            }
         }
+    }
+
+    /// Translates CREATE patterns to create operators.
+    fn translate_create_patterns(
+        &self,
+        patterns: &[ast::Pattern],
+        mut plan: LogicalOperator,
+    ) -> Result<LogicalOperator> {
+        for pattern in patterns {
+            match pattern {
+                ast::Pattern::Node(node) => {
+                    let variable = node
+                        .variable
+                        .clone()
+                        .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+                    let properties: Vec<(String, LogicalExpression)> = node
+                        .properties
+                        .iter()
+                        .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
+                        .collect::<Result<_>>()?;
+
+                    plan = LogicalOperator::CreateNode(CreateNodeOp {
+                        variable,
+                        labels: node.labels.clone(),
+                        properties,
+                        input: Some(Box::new(plan)),
+                    });
+                }
+                ast::Pattern::Path(path) => {
+                    // First create the source node if it has labels (new node)
+                    let source_var = path
+                        .source
+                        .variable
+                        .clone()
+                        .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+
+                    // If source has labels, it's a new node to create
+                    if !path.source.labels.is_empty() {
+                        let source_props: Vec<(String, LogicalExpression)> = path
+                            .source
+                            .properties
+                            .iter()
+                            .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
+                            .collect::<Result<_>>()?;
+
+                        plan = LogicalOperator::CreateNode(CreateNodeOp {
+                            variable: source_var.clone(),
+                            labels: path.source.labels.clone(),
+                            properties: source_props,
+                            input: Some(Box::new(plan)),
+                        });
+                    }
+
+                    // Create edges and target nodes
+                    for edge in &path.edges {
+                        let target_var = edge
+                            .target
+                            .variable
+                            .clone()
+                            .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+
+                        // If target has labels, create it
+                        if !edge.target.labels.is_empty() {
+                            let target_props: Vec<(String, LogicalExpression)> = edge
+                                .target
+                                .properties
+                                .iter()
+                                .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
+                                .collect::<Result<_>>()?;
+
+                            plan = LogicalOperator::CreateNode(CreateNodeOp {
+                                variable: target_var.clone(),
+                                labels: edge.target.labels.clone(),
+                                properties: target_props,
+                                input: Some(Box::new(plan)),
+                            });
+                        }
+
+                        // Create the edge
+                        let edge_type = edge.types.first().cloned().unwrap_or_default();
+                        let edge_var = edge.variable.clone();
+                        let edge_props: Vec<(String, LogicalExpression)> = edge
+                            .properties
+                            .iter()
+                            .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
+                            .collect::<Result<_>>()?;
+
+                        // Determine direction
+                        let (from_var, to_var) = match edge.direction {
+                            ast::EdgeDirection::Outgoing => (source_var.clone(), target_var),
+                            ast::EdgeDirection::Incoming => {
+                                let tv = edge
+                                    .target
+                                    .variable
+                                    .clone()
+                                    .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+                                (tv, source_var.clone())
+                            }
+                            ast::EdgeDirection::Undirected => (source_var.clone(), target_var),
+                        };
+
+                        plan = LogicalOperator::CreateEdge(CreateEdgeOp {
+                            variable: edge_var,
+                            from_variable: from_var,
+                            to_variable: to_var,
+                            edge_type,
+                            properties: edge_props,
+                            input: Box::new(plan),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(plan)
     }
 
     fn translate_node_pattern(
@@ -279,17 +636,73 @@ impl GqlTranslator {
 
         let label = node.labels.first().cloned();
 
-        Ok(LogicalOperator::NodeScan(NodeScanOp {
-            variable,
+        let mut plan = LogicalOperator::NodeScan(NodeScanOp {
+            variable: variable.clone(),
             label,
             input: input.map(Box::new),
-        }))
+        });
+
+        // Add filter for node pattern properties (e.g., {name: 'Alice'})
+        if !node.properties.is_empty() {
+            let predicate = self.build_property_predicate(&variable, &node.properties)?;
+            plan = LogicalOperator::Filter(FilterOp {
+                predicate,
+                input: Box::new(plan),
+            });
+        }
+
+        Ok(plan)
     }
 
+    /// Builds a predicate expression for property filters like {name: 'Alice', age: 30}.
+    fn build_property_predicate(
+        &self,
+        variable: &str,
+        properties: &[(String, ast::Expression)],
+    ) -> Result<LogicalExpression> {
+        let mut predicates: Vec<LogicalExpression> = Vec::new();
+
+        for (prop_name, prop_value) in properties {
+            let left = LogicalExpression::Property {
+                variable: variable.to_string(),
+                property: prop_name.clone(),
+            };
+            let right = self.translate_expression(prop_value)?;
+
+            predicates.push(LogicalExpression::Binary {
+                left: Box::new(left),
+                op: BinaryOp::Eq,
+                right: Box::new(right),
+            });
+        }
+
+        // Combine all predicates with AND
+        let mut result = predicates.remove(0);
+        for pred in predicates {
+            result = LogicalExpression::Binary {
+                left: Box::new(result),
+                op: BinaryOp::And,
+                right: Box::new(pred),
+            };
+        }
+
+        Ok(result)
+    }
+
+    #[allow(dead_code)]
     fn translate_path_pattern(
         &self,
         path: &ast::PathPattern,
         input: Option<LogicalOperator>,
+    ) -> Result<LogicalOperator> {
+        self.translate_path_pattern_with_alias(path, input, None)
+    }
+
+    fn translate_path_pattern_with_alias(
+        &self,
+        path: &ast::PathPattern,
+        input: Option<LogicalOperator>,
+        path_alias: Option<&str>,
     ) -> Result<LogicalOperator> {
         // Start with the source node
         let source_var = path
@@ -306,10 +719,20 @@ impl GqlTranslator {
             input: input.map(Box::new),
         });
 
+        // Add filter for source node properties (e.g., {id: 'a'})
+        if !path.source.properties.is_empty() {
+            let predicate = self.build_property_predicate(&source_var, &path.source.properties)?;
+            plan = LogicalOperator::Filter(FilterOp {
+                predicate,
+                input: Box::new(plan),
+            });
+        }
+
         // Process each edge in the chain
         let mut current_source = source_var;
+        let edge_count = path.edges.len();
 
-        for edge in &path.edges {
+        for (idx, edge) in path.edges.iter().enumerate() {
             let target_var = edge
                 .target
                 .variable
@@ -325,16 +748,50 @@ impl GqlTranslator {
                 ast::EdgeDirection::Undirected => ExpandDirection::Both,
             };
 
+            let edge_var_for_filter = edge_var.clone();
+
+            // Only set path_alias on the last edge of a variable-length path
+            let is_variable_length = edge.min_hops.unwrap_or(1) != 1
+                || edge.max_hops.is_none()
+                || edge.max_hops.map_or(false, |m| m != 1);
+            let expand_path_alias = if is_variable_length && idx == edge_count - 1 {
+                path_alias.map(String::from)
+            } else {
+                None
+            };
+
             plan = LogicalOperator::Expand(ExpandOp {
                 from_variable: current_source,
                 to_variable: target_var.clone(),
                 edge_variable: edge_var,
                 direction,
                 edge_type,
-                min_hops: 1,
-                max_hops: Some(1),
+                min_hops: edge.min_hops.unwrap_or(1),
+                max_hops: edge.max_hops.or(Some(1)),
                 input: Box::new(plan),
+                path_alias: expand_path_alias,
             });
+
+            // Add filter for edge properties
+            if !edge.properties.is_empty() {
+                if let Some(ref ev) = edge_var_for_filter {
+                    let predicate = self.build_property_predicate(ev, &edge.properties)?;
+                    plan = LogicalOperator::Filter(FilterOp {
+                        predicate,
+                        input: Box::new(plan),
+                    });
+                }
+            }
+
+            // Add filter for target node properties
+            if !edge.target.properties.is_empty() {
+                let predicate =
+                    self.build_property_predicate(&target_var, &edge.target.properties)?;
+                plan = LogicalOperator::Filter(FilterOp {
+                    predicate,
+                    input: Box::new(plan),
+                });
+            }
 
             current_source = target_var;
         }
@@ -378,6 +835,7 @@ impl GqlTranslator {
         // Delete the first variable
         let mut plan = LogicalOperator::DeleteNode(DeleteNodeOp {
             variable: first_var.clone(),
+            detach: delete.detach,
             input: Box::new(scan),
         });
 
@@ -385,6 +843,7 @@ impl GqlTranslator {
         for var in delete.variables.iter().skip(1) {
             plan = LogicalOperator::DeleteNode(DeleteNodeOp {
                 variable: var.clone(),
+                detach: delete.detach,
                 input: Box::new(plan),
             });
         }
@@ -508,16 +967,33 @@ impl GqlTranslator {
                     operand: Box::new(operand),
                 })
             }
-            ast::Expression::FunctionCall { name, args, distinct } => {
+            ast::Expression::FunctionCall {
+                name,
+                args,
+                distinct,
+            } => {
+                // Special handling for length() on path variables
+                // When length(p) is called where p is a path alias, we convert it
+                // to a variable reference to the path length column
+                if name.to_lowercase() == "length" && args.len() == 1 {
+                    if let ast::Expression::Variable(var_name) = &args[0] {
+                        // Check if this looks like a path variable
+                        // Path lengths are stored in columns named _path_length_{alias}
+                        return Ok(LogicalExpression::Variable(format!(
+                            "_path_length_{}",
+                            var_name
+                        )));
+                    }
+                }
+
                 let args = args
                     .iter()
                     .map(|a| self.translate_expression(a))
                     .collect::<Result<Vec<_>>>()?;
-                // TODO: Pass distinct flag to aggregate expressions when needed
-                let _ = distinct; // Currently handled separately in aggregate translation
                 Ok(LogicalExpression::FunctionCall {
                     name: name.clone(),
                     args,
+                    distinct: *distinct,
                 })
             }
             ast::Expression::List(items) => {
@@ -597,6 +1073,9 @@ impl GqlTranslator {
             ast::BinaryOp::Concat => BinaryOp::Concat,
             ast::BinaryOp::Like => BinaryOp::Like,
             ast::BinaryOp::In => BinaryOp::In,
+            ast::BinaryOp::StartsWith => BinaryOp::StartsWith,
+            ast::BinaryOp::EndsWith => BinaryOp::EndsWith,
+            ast::BinaryOp::Contains => BinaryOp::Contains,
         }
     }
 
@@ -669,7 +1148,11 @@ impl GqlTranslator {
         alias: &Option<String>,
     ) -> Result<Option<AggregateExpr>> {
         match expr {
-            ast::Expression::FunctionCall { name, args, distinct } => {
+            ast::Expression::FunctionCall {
+                name,
+                args,
+                distinct,
+            } => {
                 if let Some(func) = to_aggregate_function(name) {
                     let agg_expr = if args.is_empty() {
                         // COUNT(*) case
@@ -678,14 +1161,41 @@ impl GqlTranslator {
                             expression: None,
                             distinct: *distinct,
                             alias: alias.clone(),
+                            percentile: None,
                         }
                     } else {
                         // COUNT(x), SUM(x), etc.
+                        // For COUNT with an expression, use CountNonNull to ensure we fetch values
+                        let actual_func = if func == AggregateFunction::Count {
+                            AggregateFunction::CountNonNull
+                        } else {
+                            func
+                        };
+                        // Extract percentile parameter for percentile functions
+                        let percentile = if matches!(
+                            actual_func,
+                            AggregateFunction::PercentileDisc | AggregateFunction::PercentileCont
+                        ) && args.len() >= 2
+                        {
+                            // Second argument is the percentile value
+                            if let ast::Expression::Literal(ast::Literal::Float(p)) = &args[1] {
+                                Some((*p).clamp(0.0, 1.0))
+                            } else if let ast::Expression::Literal(ast::Literal::Integer(p)) =
+                                &args[1]
+                            {
+                                Some((*p as f64).clamp(0.0, 1.0))
+                            } else {
+                                Some(0.5) // Default to median
+                            }
+                        } else {
+                            None
+                        };
                         AggregateExpr {
-                            function: func,
+                            function: actual_func,
                             expression: Some(self.translate_expression(&args[0])?),
                             distinct: *distinct,
                             alias: alias.clone(),
+                            percentile,
                         }
                     };
                     Ok(Some(agg_expr))
@@ -709,7 +1219,20 @@ fn rand_id() -> u32 {
 fn is_aggregate_function(name: &str) -> bool {
     matches!(
         name.to_uppercase().as_str(),
-        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "COLLECT"
+        "COUNT"
+            | "SUM"
+            | "AVG"
+            | "MIN"
+            | "MAX"
+            | "COLLECT"
+            | "STDEV"
+            | "STDDEV"
+            | "STDEVP"
+            | "STDDEVP"
+            | "PERCENTILE_DISC"
+            | "PERCENTILEDISC"
+            | "PERCENTILE_CONT"
+            | "PERCENTILECONT"
     )
 }
 
@@ -722,6 +1245,10 @@ fn to_aggregate_function(name: &str) -> Option<AggregateFunction> {
         "MIN" => Some(AggregateFunction::Min),
         "MAX" => Some(AggregateFunction::Max),
         "COLLECT" => Some(AggregateFunction::Collect),
+        "STDEV" | "STDDEV" => Some(AggregateFunction::StdDev),
+        "STDEVP" | "STDDEVP" => Some(AggregateFunction::StdDevPop),
+        "PERCENTILE_DISC" | "PERCENTILEDISC" => Some(AggregateFunction::PercentileDisc),
+        "PERCENTILE_CONT" | "PERCENTILECONT" => Some(AggregateFunction::PercentileCont),
         _ => None,
     }
 }
@@ -974,7 +1501,8 @@ mod tests {
         let plan = result.unwrap();
         if let LogicalOperator::Aggregate(agg) = &plan.root {
             assert_eq!(agg.aggregates.len(), 1);
-            assert_eq!(agg.aggregates[0].function, AggregateFunction::Count);
+            // COUNT(expr) uses CountNonNull to ensure we fetch values for DISTINCT support
+            assert_eq!(agg.aggregates[0].function, AggregateFunction::CountNonNull);
         } else {
             panic!("Expected Aggregate operator, got {:?}", plan.root);
         }

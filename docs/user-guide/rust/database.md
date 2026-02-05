@@ -13,39 +13,39 @@ Learn how to create and configure Grafeo databases in Rust.
 ## Creating a Database
 
 ```rust
-use grafeo::Database;
+use grafeo::GrafeoDB;
 
 // In-memory database
-let db = Database::open_in_memory()?;
+let db = GrafeoDB::new_in_memory();
 
 // Persistent database
-let db = Database::open("my_graph.db")?;
+let db = GrafeoDB::open("my_graph.db")?;
 ```
 
 ## Configuration
 
 ```rust
-use grafeo::{Database, Config};
+use grafeo::{GrafeoDB, Config};
 
 let config = Config::builder()
     .memory_limit(4 * 1024 * 1024 * 1024)  // 4 GB
     .threads(8)
     .build()?;
 
-let db = Database::open_with_config("my_graph.db", config)?;
+let db = GrafeoDB::with_config(config);
 ```
 
 ## Database Lifecycle
 
 ```rust
-use grafeo::Database;
+use grafeo::GrafeoDB;
 
-fn main() -> Result<(), grafeo::Error> {
+fn main() -> Result<(), grafeo_common::utils::error::Error> {
     // Create database
-    let db = Database::open("my_graph.db")?;
+    let db = GrafeoDB::open("my_graph.db")?;
 
     // Use the database
-    let session = db.session()?;
+    let mut session = db.session();
     session.execute("INSERT (:Person {name: 'Alice'})")?;
 
     // Database is dropped and closed when it goes out of scope
@@ -55,19 +55,19 @@ fn main() -> Result<(), grafeo::Error> {
 
 ## Thread Safety
 
-`Database` is `Send` and `Sync`, so it can be shared across threads:
+`GrafeoDB` is `Send` and `Sync`, so it can be shared across threads:
 
 ```rust
-use grafeo::Database;
+use grafeo::GrafeoDB;
 use std::sync::Arc;
 use std::thread;
 
-let db = Arc::new(Database::open_in_memory()?);
+let db = Arc::new(GrafeoDB::new_in_memory());
 
 let handles: Vec<_> = (0..4).map(|i| {
     let db = Arc::clone(&db);
     thread::spawn(move || {
-        let session = db.session().unwrap();
+        let mut session = db.session();
         session.execute(&format!(
             "INSERT (:Person {{id: {}}})", i
         )).unwrap();

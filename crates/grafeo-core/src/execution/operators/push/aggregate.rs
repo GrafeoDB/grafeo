@@ -172,6 +172,8 @@ fn value_to_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Int64(i) => Some(*i as f64),
         Value::Float64(f) => Some(*f),
+        // RDF stores numeric literals as strings - try to parse
+        Value::String(s) => s.parse::<f64>().ok(),
         _ => None,
     }
 }
@@ -181,7 +183,29 @@ fn compare_for_min(current: &Option<Value>, new: &Value) -> bool {
         (None, _) => true,
         (Some(Value::Int64(a)), Value::Int64(b)) => b < a,
         (Some(Value::Float64(a)), Value::Float64(b)) => b < a,
-        (Some(Value::String(a)), Value::String(b)) => b < a,
+        (Some(Value::String(a)), Value::String(b)) => {
+            // Try numeric comparison for RDF values
+            if let (Ok(a_num), Ok(b_num)) = (a.parse::<f64>(), b.parse::<f64>()) {
+                b_num < a_num
+            } else {
+                b < a
+            }
+        }
+        // Cross-type comparisons for RDF
+        (Some(Value::String(a)), Value::Int64(b)) => {
+            if let Ok(a_num) = a.parse::<f64>() {
+                (*b as f64) < a_num
+            } else {
+                false
+            }
+        }
+        (Some(Value::Int64(a)), Value::String(b)) => {
+            if let Ok(b_num) = b.parse::<f64>() {
+                b_num < *a as f64
+            } else {
+                false
+            }
+        }
         _ => false,
     }
 }
@@ -191,7 +215,29 @@ fn compare_for_max(current: &Option<Value>, new: &Value) -> bool {
         (None, _) => true,
         (Some(Value::Int64(a)), Value::Int64(b)) => b > a,
         (Some(Value::Float64(a)), Value::Float64(b)) => b > a,
-        (Some(Value::String(a)), Value::String(b)) => b > a,
+        (Some(Value::String(a)), Value::String(b)) => {
+            // Try numeric comparison for RDF values
+            if let (Ok(a_num), Ok(b_num)) = (a.parse::<f64>(), b.parse::<f64>()) {
+                b_num > a_num
+            } else {
+                b > a
+            }
+        }
+        // Cross-type comparisons for RDF
+        (Some(Value::String(a)), Value::Int64(b)) => {
+            if let Ok(a_num) = a.parse::<f64>() {
+                (*b as f64) > a_num
+            } else {
+                false
+            }
+        }
+        (Some(Value::Int64(a)), Value::String(b)) => {
+            if let Ok(b_num) = b.parse::<f64>() {
+                b_num > *a as f64
+            } else {
+                false
+            }
+        }
         _ => false,
     }
 }

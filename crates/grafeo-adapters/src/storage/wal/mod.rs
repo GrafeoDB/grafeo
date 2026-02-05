@@ -1,22 +1,46 @@
-//! Write-Ahead Log (WAL) for durability.
+//! Write-Ahead Log - your safety net for crashes.
 //!
-//! This module provides both synchronous and asynchronous WAL implementations:
+//! Every mutation goes to the WAL before being applied to the main store.
+//! If you crash mid-transaction, [`WalRecovery`] replays the log to restore
+//! a consistent state. No committed data is lost.
 //!
-//! - [`WalManager`] - Synchronous WAL with blocking I/O (suitable for sync contexts)
-//! - [`AsyncWalManager`] - Asynchronous WAL with tokio (suitable for async contexts)
+//! | Durability mode | What it does | When to use |
+//! | --------------- | ------------ | ----------- |
+//! | [`Sync`](DurabilityMode::Sync) | fsync after every commit | Can't lose any data |
+//! | [`Batch`](DurabilityMode::Batch) | Periodic fsync | Balance of safety and speed |
+//! | [`Adaptive`](DurabilityMode::Adaptive) | Self-tuning background sync | Variable disk latency |
+//! | [`NoSync`](DurabilityMode::NoSync) | Let OS decide | Testing, when speed matters most |
 //!
-//! Both implementations support the same durability modes:
+//! ## Adaptive Mode
 //!
-//! - [`DurabilityMode::Sync`] - fsync after every commit (safest, slowest)
-//! - [`DurabilityMode::Batch`] - periodic fsync based on time/records (balanced)
-//! - [`DurabilityMode::NoSync`] - no fsync, rely on OS (fastest, least safe)
+//! For workloads with variable disk latency, use [`Adaptive`](DurabilityMode::Adaptive)
+//! mode with an [`AdaptiveFlusher`]:
+//!
+//! ```ignore
+//! use grafeo_adapters::storage::wal::{WalManager, WalConfig, DurabilityMode, AdaptiveFlusher};
+//! use std::sync::Arc;
+//!
+//! let config = WalConfig {
+//!     durability: DurabilityMode::Adaptive { target_interval_ms: 100 },
+//!     ..Default::default()
+//! };
+//! let wal = Arc::new(WalManager::with_config("wal_dir", config)?);
+//! let flusher = AdaptiveFlusher::new(Arc::clone(&wal), 100);
+//!
+//! // Use wal normally - flusher handles background syncing
+//! // Drop flusher for graceful shutdown with final flush
+//! ```
+//!
+//! Choose [`WalManager`] for sync code, [`AsyncWalManager`] for async.
 
 mod async_log;
+mod flusher;
 mod log;
 mod record;
 mod recovery;
 
 pub use async_log::AsyncWalManager;
+pub use flusher::{AdaptiveFlusher, FlusherStats};
 pub use log::{CheckpointMetadata, DurabilityMode, WalConfig, WalManager};
 pub use record::WalRecord;
 pub use recovery::WalRecovery;

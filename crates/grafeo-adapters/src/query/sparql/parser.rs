@@ -11,7 +11,6 @@ pub struct Parser<'a> {
     lexer: Lexer<'a>,
     current: Token,
     /// Source string for error reporting.
-    #[allow(dead_code)]
     source: &'a str,
 }
 
@@ -91,7 +90,17 @@ impl<'a> Parser<'a> {
             TokenKind::Construct => Ok(QueryForm::Construct(self.parse_construct_query()?)),
             TokenKind::Ask => Ok(QueryForm::Ask(self.parse_ask_query()?)),
             TokenKind::Describe => Ok(QueryForm::Describe(self.parse_describe_query()?)),
-            _ => Err(self.error("expected SELECT, CONSTRUCT, ASK, or DESCRIBE")),
+            TokenKind::Insert
+            | TokenKind::Delete
+            | TokenKind::Load
+            | TokenKind::Clear
+            | TokenKind::Drop
+            | TokenKind::Create
+            | TokenKind::Copy
+            | TokenKind::Move
+            | TokenKind::Add
+            | TokenKind::With => Ok(QueryForm::Update(self.parse_update_operation()?)),
+            _ => Err(self.error("expected SELECT, CONSTRUCT, ASK, DESCRIBE, or update operation")),
         }
     }
 
@@ -182,6 +191,325 @@ impl<'a> Parser<'a> {
         }
 
         Ok(resources)
+    }
+
+    // ==================== Update Operations ====================
+
+    fn parse_update_operation(&mut self) -> Result<UpdateOperation> {
+        match self.current.kind {
+            TokenKind::Insert => self.parse_insert_operation(),
+            TokenKind::Delete => self.parse_delete_operation(),
+            TokenKind::Load => self.parse_load(),
+            TokenKind::Clear => self.parse_clear(),
+            TokenKind::Drop => self.parse_drop(),
+            TokenKind::Create => self.parse_create(),
+            TokenKind::Copy => self.parse_copy(),
+            TokenKind::Move => self.parse_move(),
+            TokenKind::Add => self.parse_add(),
+            TokenKind::With => self.parse_modify_with_graph(),
+            _ => Err(self.error("expected update operation")),
+        }
+    }
+
+    fn parse_insert_operation(&mut self) -> Result<UpdateOperation> {
+        self.expect(TokenKind::Insert)?;
+
+        if self.current.kind == TokenKind::Data {
+            // INSERT DATA { ... }
+            self.advance();
+            let data = self.parse_quad_data()?;
+            Ok(UpdateOperation::InsertData { data })
+        } else {
+            // INSERT { ... } WHERE { ... } (part of Modify)
+            let insert_template = self.parse_quad_pattern()?;
+            let using_clauses = self.parse_using_clauses()?;
+            let where_clause = self.parse_where_clause()?;
+            Ok(UpdateOperation::Modify {
+                with_graph: None,
+                delete_template: None,
+                insert_template: Some(insert_template),
+                using_clauses,
+                where_clause,
+            })
+        }
+    }
+
+    fn parse_delete_operation(&mut self) -> Result<UpdateOperation> {
+        self.expect(TokenKind::Delete)?;
+
+        if self.current.kind == TokenKind::Data {
+            // DELETE DATA { ... }
+            self.advance();
+            let data = self.parse_quad_data()?;
+            Ok(UpdateOperation::DeleteData { data })
+        } else if self.current.kind == TokenKind::Where {
+            // DELETE WHERE { ... }
+            self.advance();
+            let pattern = self.parse_group_graph_pattern()?;
+            Ok(UpdateOperation::DeleteWhere { pattern })
+        } else {
+            // DELETE { ... } INSERT { ... } WHERE { ... } or DELETE { ... } WHERE { ... }
+            let delete_template = self.parse_quad_pattern()?;
+
+            let insert_template = if self.current.kind == TokenKind::Insert {
+                self.advance();
+                Some(self.parse_quad_pattern()?)
+            } else {
+                None
+            };
+
+            let using_clauses = self.parse_using_clauses()?;
+            let where_clause = self.parse_where_clause()?;
+            Ok(UpdateOperation::Modify {
+                with_graph: None,
+                delete_template: Some(delete_template),
+                insert_template,
+                using_clauses,
+                where_clause,
+            })
+        }
+    }
+
+    fn parse_modify_with_graph(&mut self) -> Result<UpdateOperation> {
+        self.expect(TokenKind::With)?;
+        let graph = self.expect_iri()?;
+
+        // Now expect DELETE and/or INSERT
+        let delete_template = if self.current.kind == TokenKind::Delete {
+            self.advance();
+            Some(self.parse_quad_pattern()?)
+        } else {
+            None
+        };
+
+        let insert_template = if self.current.kind == TokenKind::Insert {
+            self.advance();
+            Some(self.parse_quad_pattern()?)
+        } else {
+            None
+        };
+
+        if delete_template.is_none() && insert_template.is_none() {
+            return Err(self.error("expected DELETE or INSERT after WITH"));
+        }
+
+        let using_clauses = self.parse_using_clauses()?;
+        let where_clause = self.parse_where_clause()?;
+
+        Ok(UpdateOperation::Modify {
+            with_graph: Some(graph),
+            delete_template,
+            insert_template,
+            using_clauses,
+            where_clause,
+        })
+    }
+
+    fn parse_quad_data(&mut self) -> Result<Vec<QuadPattern>> {
+        self.expect(TokenKind::LeftBrace)?;
+        let quads = self.parse_quads()?;
+        self.expect(TokenKind::RightBrace)?;
+        Ok(quads)
+    }
+
+    fn parse_quad_pattern(&mut self) -> Result<Vec<QuadPattern>> {
+        self.expect(TokenKind::LeftBrace)?;
+        let quads = self.parse_quads()?;
+        self.expect(TokenKind::RightBrace)?;
+        Ok(quads)
+    }
+
+    fn parse_quads(&mut self) -> Result<Vec<QuadPattern>> {
+        let mut quads = Vec::new();
+
+        while self.current.kind != TokenKind::RightBrace {
+            if self.current.kind == TokenKind::Eof {
+                return Err(self.error("unexpected end of input in quad block"));
+            }
+
+            if self.current.kind == TokenKind::Graph {
+                // GRAPH <iri> { triples }
+                self.advance();
+                let graph = self.parse_variable_or_iri()?;
+
+                self.expect(TokenKind::LeftBrace)?;
+                while self.current.kind != TokenKind::RightBrace {
+                    let mut triples = Vec::new();
+                    self.parse_triples_same_subject(&mut triples)?;
+                    for triple in triples {
+                        quads.push(QuadPattern {
+                            graph: Some(graph.clone()),
+                            triple,
+                        });
+                    }
+                    if self.current.kind == TokenKind::Dot {
+                        self.advance();
+                    }
+                }
+                self.expect(TokenKind::RightBrace)?;
+            } else if self.is_triple_start() {
+                // Default graph triples
+                let mut triples = Vec::new();
+                self.parse_triples_same_subject(&mut triples)?;
+                for triple in triples {
+                    quads.push(QuadPattern {
+                        graph: None,
+                        triple,
+                    });
+                }
+                if self.current.kind == TokenKind::Dot {
+                    self.advance();
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(quads)
+    }
+
+    fn parse_using_clauses(&mut self) -> Result<Vec<UsingClause>> {
+        let mut clauses = Vec::new();
+
+        while self.current.kind == TokenKind::Using {
+            self.advance();
+            if self.current.kind == TokenKind::Named {
+                self.advance();
+                clauses.push(UsingClause::Named(self.expect_iri()?));
+            } else {
+                clauses.push(UsingClause::Default(self.expect_iri()?));
+            }
+        }
+
+        Ok(clauses)
+    }
+
+    fn parse_load(&mut self) -> Result<UpdateOperation> {
+        self.expect(TokenKind::Load)?;
+        let silent = self.parse_silent()?;
+        let source = self.expect_iri()?;
+
+        let destination = if self.current.kind == TokenKind::Into {
+            self.advance();
+            self.expect(TokenKind::Graph)?;
+            Some(self.expect_iri()?)
+        } else {
+            None
+        };
+
+        Ok(UpdateOperation::Load {
+            silent,
+            source,
+            destination,
+        })
+    }
+
+    fn parse_clear(&mut self) -> Result<UpdateOperation> {
+        self.expect(TokenKind::Clear)?;
+        let silent = self.parse_silent()?;
+        let target = self.parse_graph_ref_all()?;
+        Ok(UpdateOperation::Clear { silent, target })
+    }
+
+    fn parse_drop(&mut self) -> Result<UpdateOperation> {
+        self.expect(TokenKind::Drop)?;
+        let silent = self.parse_silent()?;
+        let target = self.parse_graph_ref_all()?;
+        Ok(UpdateOperation::Drop { silent, target })
+    }
+
+    fn parse_create(&mut self) -> Result<UpdateOperation> {
+        self.expect(TokenKind::Create)?;
+        let silent = self.parse_silent()?;
+        self.expect(TokenKind::Graph)?;
+        let graph = self.expect_iri()?;
+        Ok(UpdateOperation::Create { silent, graph })
+    }
+
+    fn parse_copy(&mut self) -> Result<UpdateOperation> {
+        self.expect(TokenKind::Copy)?;
+        let silent = self.parse_silent()?;
+        let source = self.parse_graph_or_default()?;
+        self.expect(TokenKind::To)?;
+        let destination = self.parse_graph_or_default()?;
+        Ok(UpdateOperation::Copy {
+            silent,
+            source,
+            destination,
+        })
+    }
+
+    fn parse_move(&mut self) -> Result<UpdateOperation> {
+        self.expect(TokenKind::Move)?;
+        let silent = self.parse_silent()?;
+        let source = self.parse_graph_or_default()?;
+        self.expect(TokenKind::To)?;
+        let destination = self.parse_graph_or_default()?;
+        Ok(UpdateOperation::Move {
+            silent,
+            source,
+            destination,
+        })
+    }
+
+    fn parse_add(&mut self) -> Result<UpdateOperation> {
+        self.expect(TokenKind::Add)?;
+        let silent = self.parse_silent()?;
+        let source = self.parse_graph_or_default()?;
+        self.expect(TokenKind::To)?;
+        let destination = self.parse_graph_or_default()?;
+        Ok(UpdateOperation::Add {
+            silent,
+            source,
+            destination,
+        })
+    }
+
+    fn parse_silent(&mut self) -> Result<bool> {
+        if self.current.kind == TokenKind::Silent {
+            self.advance();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn parse_graph_ref_all(&mut self) -> Result<GraphTarget> {
+        match self.current.kind {
+            TokenKind::Graph => {
+                self.advance();
+                let iri = self.expect_iri()?;
+                Ok(GraphTarget::Named(iri))
+            }
+            TokenKind::Default => {
+                self.advance();
+                Ok(GraphTarget::Default)
+            }
+            TokenKind::Named => {
+                self.advance();
+                Ok(GraphTarget::Named(Iri::new(""))) // All named graphs
+            }
+            TokenKind::All => {
+                self.advance();
+                Ok(GraphTarget::All)
+            }
+            _ => Err(self.error("expected GRAPH, DEFAULT, NAMED, or ALL")),
+        }
+    }
+
+    fn parse_graph_or_default(&mut self) -> Result<GraphTarget> {
+        if self.current.kind == TokenKind::Default {
+            self.advance();
+            Ok(GraphTarget::Default)
+        } else if self.current.kind == TokenKind::Graph {
+            self.advance();
+            let iri = self.expect_iri()?;
+            Ok(GraphTarget::Named(iri))
+        } else {
+            // Just an IRI without GRAPH keyword
+            let iri = self.expect_iri()?;
+            Ok(GraphTarget::Named(iri))
+        }
     }
 
     // ==================== Select Clause ====================
@@ -1279,6 +1607,19 @@ impl<'a> Parser<'a> {
                 | "REGEX"
                 | "SUBSTR"
                 | "REPLACE"
+                // Vector functions (extension for AI/ML workloads)
+                | "VECTOR"
+                | "COSINE_SIMILARITY"
+                | "EUCLIDEAN_DISTANCE"
+                | "DOT_PRODUCT"
+                | "MANHATTAN_DISTANCE"
+        ) || matches!(
+            self.current.kind,
+            TokenKind::Vector
+                | TokenKind::CosineSimilarity
+                | TokenKind::EuclideanDistance
+                | TokenKind::DotProduct
+                | TokenKind::ManhattanDistance
         )
     }
 
@@ -1364,6 +1705,12 @@ impl<'a> Parser<'a> {
             "REGEX" => BuiltInFunction::Regex,
             "SUBSTR" => BuiltInFunction::Substr,
             "REPLACE" => BuiltInFunction::Replace,
+            // Vector functions (extension for AI/ML workloads)
+            "VECTOR" => BuiltInFunction::Vector,
+            "COSINE_SIMILARITY" => BuiltInFunction::CosineSimilarity,
+            "EUCLIDEAN_DISTANCE" => BuiltInFunction::EuclideanDistance,
+            "DOT_PRODUCT" => BuiltInFunction::DotProduct,
+            "MANHATTAN_DISTANCE" => BuiltInFunction::ManhattanDistance,
             _ => return Err(self.error(&format!("unknown function: {}", func_name))),
         };
 
@@ -1869,6 +2216,54 @@ mod tests {
     #[test]
     fn test_literal_with_language() {
         let query = parse(r#"SELECT ?x WHERE { ?x ?y "hello"@en }"#).unwrap();
+        assert!(matches!(query.query_form, QueryForm::Select(_)));
+    }
+
+    #[test]
+    fn test_vector_cosine_similarity() {
+        let query = parse(
+            r#"SELECT ?doc WHERE { ?doc ?embed ?vec FILTER(COSINE_SIMILARITY(?vec, ?query) > 0.8) }"#,
+        )
+        .unwrap();
+        assert!(matches!(query.query_form, QueryForm::Select(_)));
+    }
+
+    #[test]
+    fn test_vector_euclidean_distance() {
+        let query = parse(
+            r#"SELECT ?doc WHERE { ?doc ?embed ?vec FILTER(EUCLIDEAN_DISTANCE(?vec, ?query) < 1.5) }"#,
+        )
+        .unwrap();
+        assert!(matches!(query.query_form, QueryForm::Select(_)));
+    }
+
+    #[test]
+    fn test_vector_function_order_by() {
+        let query = parse(
+            r#"SELECT ?doc (COSINE_SIMILARITY(?vec, ?query) AS ?score)
+               WHERE { ?doc ?embed ?vec }
+               ORDER BY DESC(?score)
+               LIMIT 10"#,
+        )
+        .unwrap();
+        if let QueryForm::Select(select) = query.query_form {
+            assert!(select.solution_modifiers.order_by.is_some());
+            assert_eq!(select.solution_modifiers.limit, Some(10));
+        } else {
+            panic!("expected SELECT query");
+        }
+    }
+
+    #[test]
+    fn test_vector_literal_function() {
+        // Test VECTOR() function call with list syntax
+        let query = parse(
+            r#"SELECT ?doc WHERE {
+                ?doc ?embed ?vec
+                BIND(VECTOR(?v1, ?v2, ?v3) AS ?query_vec)
+            }"#,
+        )
+        .unwrap();
         assert!(matches!(query.query_form, QueryForm::Select(_)));
     }
 }

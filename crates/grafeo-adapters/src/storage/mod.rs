@@ -1,9 +1,12 @@
-//! Storage backends for Grafeo.
+//! Storage backends - how your data gets persisted.
 //!
-//! This module provides different storage strategies:
+//! | Backend | Speed | Durability | Use when |
+//! | ------- | ----- | ---------- | -------- |
+//! | [`memory`] | Fastest | None (data lost on restart) | Testing, prototyping |
+//! | [`wal`] | Fast | Survives crashes | Production workloads |
 //!
-//! - [`memory`] - Pure in-memory storage (default)
-//! - [`wal`] - Write-Ahead Log for durability
+//! The WAL (Write-Ahead Log) writes changes to disk before applying them,
+//! so you can recover after crashes without losing committed transactions.
 
 pub mod memory;
 pub mod wal;

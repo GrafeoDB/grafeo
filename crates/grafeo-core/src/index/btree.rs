@@ -1,13 +1,33 @@
-//! BTree index for range queries.
+//! BTree index for ordered data and range queries.
+//!
+//! Use this when you need to answer range queries like `age > 30 AND age < 50`
+//! or when you need min/max values. O(log n) lookups but efficient range scans.
 
 use grafeo_common::types::NodeId;
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 
-/// A concurrent BTree index for range queries.
+/// A thread-safe BTree index for range queries.
 ///
-/// This index provides O(log n) lookup and efficient range scans.
+/// Unlike [`HashIndex`](super::HashIndex), this maintains keys in sorted order,
+/// making it perfect for range queries and finding min/max values.
+///
+/// # Example
+///
+/// ```
+/// use grafeo_core::index::BTreeIndex;
+/// use grafeo_common::types::NodeId;
+///
+/// let index: BTreeIndex<i64, NodeId> = BTreeIndex::new();
+/// index.insert(25, NodeId::new(1));  // age 25
+/// index.insert(35, NodeId::new(2));  // age 35
+/// index.insert(45, NodeId::new(3));  // age 45
+///
+/// // Find all people between 30 and 50
+/// let results = index.range(30..50);
+/// assert_eq!(results.len(), 2);  // ages 35 and 45
+/// ```
 pub struct BTreeIndex<K: Ord, V: Copy> {
     /// The underlying BTree map.
     map: RwLock<BTreeMap<K, V>>,
@@ -100,7 +120,10 @@ pub type Int64Index = BTreeIndex<i64, NodeId>;
 /// Note: f64 doesn't implement Ord, so we use a wrapper.
 pub type Float64Index = BTreeIndex<OrderedFloat, NodeId>;
 
-/// A wrapper around f64 that implements Ord.
+/// A wrapper around f64 that implements Ord for use in BTreeIndex.
+///
+/// Since f64 doesn't implement Ord (due to NaN), we need this wrapper.
+/// NaN values are treated as equal to each other.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OrderedFloat(pub f64);
 

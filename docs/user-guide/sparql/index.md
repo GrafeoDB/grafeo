@@ -38,22 +38,46 @@ Example triples:
 <http://example.org/alice> <http://xmlns.com/foaf/0.1/knows> <http://example.org/bob> .
 ```
 
-## Enabling SPARQL
+## Using SPARQL
 
-SPARQL support requires the `sparql` feature flag:
-
-=== "Rust"
-
-    ```toml
-    [dependencies]
-    grafeo-engine = { version = "0.1", features = ["sparql"] }
-    ```
+SPARQL is enabled by default in Grafeo:
 
 === "Python"
 
     ```python
-    # SPARQL is enabled by default in the Python package
     import grafeo
+
+    db = grafeo.GrafeoDB()
+
+    # Insert RDF triples
+    db.execute_sparql("""
+        INSERT DATA {
+            <http://example.org/alice> <http://xmlns.com/foaf/0.1/name> "Alice" .
+            <http://example.org/alice> <http://xmlns.com/foaf/0.1/knows> <http://example.org/bob> .
+        }
+    """)
+
+    # Query triples
+    result = db.execute_sparql("""
+        SELECT ?name WHERE {
+            <http://example.org/alice> <http://xmlns.com/foaf/0.1/name> ?name .
+        }
+    """)
+    for row in result:
+        print(row)
+    ```
+
+=== "Rust"
+
+    ```rust
+    use grafeo::GrafeoDB;
+
+    let db = GrafeoDB::new_in_memory();
+    let mut session = db.session();
+
+    session.execute_sparql(r#"
+        SELECT ?s ?p ?o WHERE { ?s ?p ?o }
+    "#)?;
     ```
 
 ## Learn More

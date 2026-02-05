@@ -1,19 +1,39 @@
 //! Node types for the LPG model.
+//!
+//! Two representations here: [`Node`] is the friendly one with all the data,
+//! [`NodeRecord`] is the compact 32-byte struct for storage.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
+use arcstr::ArcStr;
 use grafeo_common::types::{EpochId, NodeId, PropertyKey, Value};
+use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
-/// A node in the labeled property graph.
+/// A node with its labels and properties fully loaded.
 ///
-/// This is the high-level representation of a node with all its data.
+/// This is what you get back from [`LpgStore::get_node()`](super::LpgStore::get_node).
+/// For bulk operations, the store works with [`NodeRecord`] internally.
+///
+/// # Example
+///
+/// ```
+/// use grafeo_core::graph::lpg::Node;
+/// use grafeo_common::types::NodeId;
+///
+/// let mut person = Node::new(NodeId::new(1));
+/// person.add_label("Person");
+/// person.set_property("name", "Alice");
+/// person.set_property("age", 30i64);
+///
+/// assert!(person.has_label("Person"));
+/// ```
 #[derive(Debug, Clone)]
 pub struct Node {
     /// Unique identifier.
     pub id: NodeId,
-    /// Labels attached to this node.
-    pub labels: Vec<Arc<str>>,
+    /// Labels attached to this node (inline storage for 1-2 labels).
+    pub labels: SmallVec<[ArcStr; 2]>,
     /// Properties stored on this node.
     pub properties: BTreeMap<PropertyKey, Value>,
 }
@@ -24,14 +44,14 @@ impl Node {
     pub fn new(id: NodeId) -> Self {
         Self {
             id,
-            labels: Vec::new(),
+            labels: SmallVec::new(),
             properties: BTreeMap::new(),
         }
     }
 
     /// Creates a new node with labels.
     #[must_use]
-    pub fn with_labels(id: NodeId, labels: impl IntoIterator<Item = impl Into<Arc<str>>>) -> Self {
+    pub fn with_labels(id: NodeId, labels: impl IntoIterator<Item = impl Into<ArcStr>>) -> Self {
         Self {
             id,
             labels: labels.into_iter().map(Into::into).collect(),
@@ -40,16 +60,16 @@ impl Node {
     }
 
     /// Adds a label to this node.
-    pub fn add_label(&mut self, label: impl Into<Arc<str>>) {
+    pub fn add_label(&mut self, label: impl Into<ArcStr>) {
         let label = label.into();
-        if !self.labels.iter().any(|l| l.as_ref() == label.as_ref()) {
+        if !self.labels.iter().any(|l| l.as_str() == label.as_str()) {
             self.labels.push(label);
         }
     }
 
     /// Removes a label from this node.
     pub fn remove_label(&mut self, label: &str) -> bool {
-        if let Some(pos) = self.labels.iter().position(|l| l.as_ref() == label) {
+        if let Some(pos) = self.labels.iter().position(|l| l.as_str() == label) {
             self.labels.remove(pos);
             true
         } else {
@@ -60,7 +80,7 @@ impl Node {
     /// Checks if this node has the given label.
     #[must_use]
     pub fn has_label(&self, label: &str) -> bool {
-        self.labels.iter().any(|l| l.as_ref() == label)
+        self.labels.iter().any(|l| l.as_str() == label)
     }
 
     /// Sets a property on this node.
@@ -80,13 +100,15 @@ impl Node {
     }
 }
 
-/// The compact, cache-line friendly representation of a node.
+/// The compact storage format for a node - exactly 32 bytes.
 ///
-/// This struct is exactly 32 bytes and is used for the primary node storage.
-/// Properties and labels are stored separately for flexibility.
+/// You won't interact with this directly most of the time. It's what lives
+/// in memory for each node, with properties and labels stored separately.
+/// The 32-byte size means two records fit in a cache line.
+///
 /// Fields are ordered to minimize padding: u64s first, then u32, then u16s.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NodeRecord {
     /// Unique node identifier.
     pub id: NodeId,
@@ -154,9 +176,11 @@ impl NodeRecord {
     }
 }
 
-/// Flags for a node record.
+/// Bit flags packed into a node record.
+///
+/// Check flags with [`contains()`](Self::contains), set with [`set()`](Self::set).
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct NodeFlags(pub u16);
 
 impl NodeFlags {

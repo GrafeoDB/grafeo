@@ -270,7 +270,7 @@ SELECT (STRUUID() AS ?uuidString)
 Grafeo supports custom functions via plugins:
 
 ```sparql
-PREFIX gfn: <http://grafeo.tech/functions/>
+PREFIX gfn: <http://grafeo.dev/functions/>
 
 SELECT ?result
 WHERE {

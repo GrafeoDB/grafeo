@@ -41,7 +41,7 @@ cargo tarpaulin --workspace --out Html
 | grafeo-core | 90% |
 | grafeo-adapters | 85% |
 | grafeo-engine | 85% |
-| grafeo-python | 80% |
+| grafeo-python (`crates/bindings/python`) | 80% |
 
 ## Test Categories
 

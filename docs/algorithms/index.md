@@ -5,10 +5,7 @@ description: Built-in graph algorithms in Grafeo.
 
 # Graph Algorithms
 
-Grafeo includes a library of built-in graph algorithms for common analysis tasks.
-
-!!! note "Coming Soon"
-    The algorithms module is under active development. This page documents the planned API and available algorithms.
+Grafeo includes a library of built-in graph algorithms for common analysis tasks, accessible via the `db.algorithms()` API.
 
 ## Algorithm Categories
 
@@ -76,77 +73,82 @@ Grafeo includes a library of built-in graph algorithms for common analysis tasks
 
 ## Using Algorithms
 
-### From GQL
-
-```sql
--- PageRank
-CALL grafeo.pagerank({
-    node_label: 'Page',
-    relationship_type: 'LINKS',
-    damping: 0.85,
-    iterations: 20
-})
-YIELD nodeId, score
-MATCH (p:Page) WHERE id(p) = nodeId
-RETURN p.url, score
-ORDER BY score DESC
-LIMIT 10
-```
-
 ### From Python
+
+Algorithms are accessed through the `db.algorithms()` method:
 
 ```python
 import grafeo
-from grafeo.algorithms import pagerank, shortest_path
 
-db = grafeo.Database()
+db = grafeo.GrafeoDB()
+
+# Get the algorithms interface
+algs = db.algorithms()
 
 # Run PageRank
-scores = pagerank(db, damping=0.85, iterations=20)
+scores = algs.pagerank()
 for node_id, score in scores.items():
     print(f"Node {node_id}: {score:.4f}")
 
 # Find shortest path
-path = shortest_path(db, source_id=1, target_id=100)
+path = algs.shortest_path(source=1, target=100)
 print(f"Path length: {len(path)}")
+
+# Connected components
+components = algs.connected_components()
+print(f"Found {len(components)} components")
 ```
 
-### From Rust
+### Available Methods
 
-```rust
-use grafeo::algorithms::{pagerank, PageRankConfig};
+The `algorithms()` object provides these methods:
 
-let config = PageRankConfig {
-    damping: 0.85,
-    iterations: 20,
-    tolerance: 1e-6,
-};
+**Traversal:**
 
-let scores = pagerank(&db, config)?;
+- `bfs(start)` - Breadth-first search
+- `dfs(start)` - Depth-first search
 
-for (node_id, score) in scores.iter() {
-    println!("Node {}: {:.4}", node_id, score);
-}
-```
+**Shortest Paths:**
 
-## Algorithm Configuration
+- `dijkstra(source, target)` - Dijkstra's algorithm
+- `shortest_path(source, target)` - Generic shortest path
+- `all_pairs_shortest_path()` - All-to-all shortest paths
 
-Most algorithms accept configuration parameters:
+**Centrality:**
+
+- `pagerank()` - PageRank algorithm
+- `betweenness_centrality()` - Betweenness centrality
+- `closeness_centrality()` - Closeness centrality
+- `eigenvector_centrality()` - Eigenvector centrality
+- `degree_centrality()` - Degree centrality
+
+**Community Detection:**
+
+- `connected_components()` - Find connected components
+- `strongly_connected_components()` - Find SCCs
+- `louvain()` - Louvain community detection
+- `label_propagation()` - Label propagation
+
+**Structure:**
+
+- `triangles()` - Triangle counting
+- `transitivity()` - Global clustering coefficient
+- `minimum_spanning_tree()` - MST construction
+- `max_flow(source, sink)` - Maximum flow
+
+## NetworkX Integration
+
+For additional algorithms, use the NetworkX adapter:
 
 ```python
-# PageRank configuration
-pagerank(db,
-    damping=0.85,           # Damping factor (0-1)
-    iterations=20,          # Max iterations
-    tolerance=1e-6,         # Convergence threshold
-    node_label='Page',      # Filter by label
-    relationship_type='LINKS'  # Filter by type
-)
+# Convert to NetworkX graph
+nx_adapter = db.as_networkx(directed=True)
+nx_graph = nx_adapter.to_networkx()
+
+# Use any NetworkX algorithm
+import networkx as nx
+centrality = nx.eigenvector_centrality(nx_graph)
 ```
-
-## Custom Algorithms
-
-See [Extending Grafeo](../user-guide/extending/plugins.md) to learn how to add custom algorithms.
 
 ## Performance Considerations
 

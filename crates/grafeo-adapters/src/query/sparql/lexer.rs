@@ -26,6 +26,40 @@ pub enum TokenKind {
     /// DESCRIBE keyword.
     Describe,
 
+    // SPARQL Update keywords
+    /// INSERT keyword.
+    Insert,
+    /// DELETE keyword.
+    Delete,
+    /// DATA keyword.
+    Data,
+    /// WITH keyword.
+    With,
+    /// INTO keyword.
+    Into,
+    /// USING keyword.
+    Using,
+    /// DEFAULT keyword.
+    Default,
+    /// ALL keyword.
+    All,
+    /// LOAD keyword.
+    Load,
+    /// CLEAR keyword.
+    Clear,
+    /// DROP keyword.
+    Drop,
+    /// CREATE keyword.
+    Create,
+    /// COPY keyword.
+    Copy,
+    /// MOVE keyword.
+    Move,
+    /// ADD keyword.
+    Add,
+    /// TO keyword.
+    To,
+
     // Prologue keywords
     /// PREFIX keyword.
     Prefix,
@@ -123,6 +157,18 @@ pub enum TokenKind {
     A,
     /// UNDEF keyword.
     Undef,
+
+    // Vector keywords (extension for AI/ML workloads)
+    /// VECTOR keyword.
+    Vector,
+    /// COSINE_SIMILARITY function.
+    CosineSimilarity,
+    /// EUCLIDEAN_DISTANCE function.
+    EuclideanDistance,
+    /// DOT_PRODUCT function.
+    DotProduct,
+    /// MANHATTAN_DISTANCE function.
+    ManhattanDistance,
 
     // Literals
     /// Integer literal (value stored in text).
@@ -690,6 +736,22 @@ impl<'a> Lexer<'a> {
             "CONSTRUCT" => TokenKind::Construct,
             "ASK" => TokenKind::Ask,
             "DESCRIBE" => TokenKind::Describe,
+            "INSERT" => TokenKind::Insert,
+            "DELETE" => TokenKind::Delete,
+            "DATA" => TokenKind::Data,
+            "WITH" => TokenKind::With,
+            "INTO" => TokenKind::Into,
+            "USING" => TokenKind::Using,
+            "DEFAULT" => TokenKind::Default,
+            "ALL" => TokenKind::All,
+            "LOAD" => TokenKind::Load,
+            "CLEAR" => TokenKind::Clear,
+            "DROP" => TokenKind::Drop,
+            "CREATE" => TokenKind::Create,
+            "COPY" => TokenKind::Copy,
+            "MOVE" => TokenKind::Move,
+            "ADD" => TokenKind::Add,
+            "TO" => TokenKind::To,
             "PREFIX" => TokenKind::Prefix,
             "BASE" => TokenKind::Base,
             "WHERE" => TokenKind::Where,
@@ -732,6 +794,12 @@ impl<'a> Lexer<'a> {
             // Special: 'a' is shorthand for rdf:type
             // Note: This gets uppercased to "A" by keyword_or_identifier
             "A" => TokenKind::A,
+            // Vector functions (extension for AI/ML workloads)
+            "VECTOR" => TokenKind::Vector,
+            "COSINE_SIMILARITY" => TokenKind::CosineSimilarity,
+            "EUCLIDEAN_DISTANCE" => TokenKind::EuclideanDistance,
+            "DOT_PRODUCT" => TokenKind::DotProduct,
+            "MANHATTAN_DISTANCE" => TokenKind::ManhattanDistance,
             _ => TokenKind::PrefixedName, // Treat as prefixed name without colon (just prefix part)
         }
     }

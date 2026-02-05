@@ -44,6 +44,19 @@ pub enum DurabilityMode {
         /// Maximum records between syncs.
         max_records: u64,
     },
+    /// Adaptive sync - background thread adjusts timing based on flush duration.
+    ///
+    /// Unlike `Batch` which checks thresholds inline, `Adaptive` spawns a
+    /// dedicated flusher thread that maintains consistent flush cadence
+    /// regardless of disk speed. Use [`AdaptiveFlusher`](super::AdaptiveFlusher)
+    /// to manage the background thread.
+    ///
+    /// The WAL itself only buffers writes; the flusher thread handles syncing.
+    Adaptive {
+        /// Target interval between flushes in milliseconds.
+        /// The flusher adjusts wait times to maintain this cadence.
+        target_interval_ms: u64,
+    },
     /// No sync - rely on OS buffer flushing.
     /// Fastest but may lose recent data on crash.
     NoSync,
@@ -227,6 +240,11 @@ impl WalManager {
                     self.records_since_sync.store(0, Ordering::Relaxed);
                     *self.last_sync.lock() = Instant::now();
                 }
+            }
+            DurabilityMode::Adaptive { .. } => {
+                // Adaptive mode: just flush buffer, background thread handles sync
+                // The AdaptiveFlusher calls sync() periodically with self-tuning timing
+                log_file.writer.flush()?;
             }
             DurabilityMode::NoSync => {
                 // Just flush buffer, no sync
@@ -442,6 +460,36 @@ impl WalManager {
         *self.checkpoint_epoch.lock()
     }
 
+    /// Returns the total size of all WAL files in bytes.
+    #[must_use]
+    pub fn size_bytes(&self) -> usize {
+        let mut total = 0usize;
+        if let Ok(files) = self.log_files() {
+            for file in files {
+                if let Ok(metadata) = fs::metadata(&file) {
+                    total += metadata.len() as usize;
+                }
+            }
+        }
+        // Also include checkpoint metadata file
+        let metadata_path = self.dir.join(CHECKPOINT_METADATA_FILE);
+        if let Ok(metadata) = fs::metadata(&metadata_path) {
+            total += metadata.len() as usize;
+        }
+        total
+    }
+
+    /// Returns the timestamp of the last checkpoint (Unix epoch seconds), if any.
+    #[must_use]
+    pub fn last_checkpoint_timestamp(&self) -> Option<u64> {
+        if let Ok(Some(metadata)) = self.read_checkpoint_metadata() {
+            // Convert milliseconds to seconds
+            Some(metadata.timestamp_ms / 1000)
+        } else {
+            None
+        }
+    }
+
     // === Private methods ===
 
     fn ensure_active_log(&self) -> Result<()> {
@@ -628,6 +676,24 @@ mod tests {
             })
             .unwrap();
         }
+
+        // Test Adaptive mode (just buffer flush, no inline sync)
+        let config = WalConfig {
+            durability: DurabilityMode::Adaptive {
+                target_interval_ms: 100,
+            },
+            ..Default::default()
+        };
+        let wal = WalManager::with_config(dir.path().join("adaptive"), config).unwrap();
+        for i in 0..10 {
+            wal.log(&WalRecord::CreateNode {
+                id: NodeId::new(i),
+                labels: vec![],
+            })
+            .unwrap();
+        }
+        // Manually sync since no flusher thread in this test
+        wal.sync().unwrap();
     }
 
     #[test]

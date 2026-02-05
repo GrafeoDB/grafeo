@@ -1,29 +1,33 @@
-//! Dictionary encoding for string compression.
+//! Dictionary encoding for repeated strings.
 //!
-//! Dictionary encoding replaces repeated string values with integer codes,
-//! which is efficient for strings with low cardinality (many repeated values).
+//! If your data has lots of repeated strings (like node labels or edge types),
+//! dictionary encoding stores each unique string once and references it by a
+//! small integer code. A million "Person" labels becomes one string + a million
+//! 4-byte codes instead of a million strings.
 //!
 //! # Example
 //!
 //! ```ignore
 //! let mut builder = DictionaryBuilder::new();
-//! builder.add("apple");
-//! builder.add("banana");
-//! builder.add("apple");  // repeated
-//! builder.add("cherry");
-//! builder.add("apple");  // repeated
+//! builder.add("Person");
+//! builder.add("Company");
+//! builder.add("Person");  // same as first - reuses code 0
+//! builder.add("Person");  // reuses code 0 again
 //!
 //! let dict = builder.build();
-//! // Dictionary: ["apple", "banana", "cherry"]
-//! // Encoded: [0, 1, 0, 2, 0]
+//! // Dictionary: ["Person", "Company"]
+//! // Codes:      [0, 1, 0, 0]
+//! assert_eq!(dict.dictionary_size(), 2);  // Only 2 unique strings stored
 //! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// A dictionary-encoded string column.
+/// Stores repeated strings efficiently by referencing them with integer codes.
 ///
-/// Stores unique strings in a dictionary and references them by integer codes.
+/// Each unique string appears once in the dictionary. Values are stored as u32
+/// indices pointing into that dictionary. Great for labels, categories, and
+/// other low-cardinality string columns.
 #[derive(Debug, Clone)]
 pub struct DictionaryEncoding {
     /// The dictionary of unique strings.
@@ -168,7 +172,10 @@ impl DictionaryEncoding {
     }
 }
 
-/// Builder for creating dictionary encodings.
+/// Builds a dictionary encoding by streaming values through.
+///
+/// Call [`add()`](Self::add) for each value - we'll automatically assign codes
+/// and build the dictionary. Then [`build()`](Self::build) to get the final encoding.
 #[derive(Debug)]
 pub struct DictionaryBuilder {
     /// Map from string to code.

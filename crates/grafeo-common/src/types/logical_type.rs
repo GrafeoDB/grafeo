@@ -1,17 +1,15 @@
-//! Logical type system for Grafeo.
+//! The type system for schemas and query type checking.
 //!
-//! This module defines the type system used for schema definitions and
-//! type checking in queries.
+//! [`LogicalType`] describes the types that can appear in schemas and query
+//! results. Used by the query optimizer for type inference and coercion.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Logical type for values in Grafeo.
+/// Describes the type of a value or column.
 ///
-/// These types correspond to the GQL/Cypher type system and are used for:
-/// - Schema definitions (column types in node/edge tables)
-/// - Query type checking
-/// - Value coercion rules
+/// Follows the GQL type system. Used for schema definitions and query type
+/// checking. Supports coercion rules (e.g., Int32 can coerce to Int64).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LogicalType {
     /// Unknown or any type (used during type inference)
@@ -81,6 +79,12 @@ pub enum LogicalType {
 
     /// Path (sequence of nodes and edges)
     Path,
+
+    /// Fixed-dimension vector of floats (for embeddings).
+    ///
+    /// The usize parameter is the dimension (e.g., 384, 768, 1536).
+    /// Common embedding sizes: 384 (MiniLM), 768 (BERT), 1536 (OpenAI).
+    Vector(usize),
 }
 
 impl LogicalType {
@@ -144,6 +148,21 @@ impl LogicalType {
     pub fn list_element_type(&self) -> Option<&LogicalType> {
         match self {
             LogicalType::List(elem) => Some(elem),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this type is a vector type.
+    #[must_use]
+    pub const fn is_vector(&self) -> bool {
+        matches!(self, LogicalType::Vector(_))
+    }
+
+    /// Returns the vector dimensions if this is a Vector type.
+    #[must_use]
+    pub const fn vector_dimensions(&self) -> Option<usize> {
+        match self {
+            LogicalType::Vector(dim) => Some(*dim),
             _ => None,
         }
     }
@@ -253,6 +272,7 @@ impl fmt::Display for LogicalType {
             LogicalType::Node => write!(f, "NODE"),
             LogicalType::Edge => write!(f, "EDGE"),
             LogicalType::Path => write!(f, "PATH"),
+            LogicalType::Vector(dim) => write!(f, "VECTOR({dim})"),
         }
     }
 }
@@ -345,5 +365,38 @@ mod tests {
             .to_string(),
             "MAP<STRING, INT64>"
         );
+    }
+
+    #[test]
+    fn test_vector_type() {
+        let v384 = LogicalType::Vector(384);
+        let v768 = LogicalType::Vector(768);
+        let v1536 = LogicalType::Vector(1536);
+
+        // Type checks
+        assert!(v384.is_vector());
+        assert!(v768.is_vector());
+        assert!(!LogicalType::Float64.is_vector());
+        assert!(!LogicalType::List(Box::new(LogicalType::Float32)).is_vector());
+
+        // Dimensions
+        assert_eq!(v384.vector_dimensions(), Some(384));
+        assert_eq!(v768.vector_dimensions(), Some(768));
+        assert_eq!(v1536.vector_dimensions(), Some(1536));
+        assert_eq!(LogicalType::Float64.vector_dimensions(), None);
+
+        // Display
+        assert_eq!(v384.to_string(), "VECTOR(384)");
+        assert_eq!(v768.to_string(), "VECTOR(768)");
+        assert_eq!(v1536.to_string(), "VECTOR(1536)");
+
+        // Equality
+        assert_eq!(LogicalType::Vector(384), LogicalType::Vector(384));
+        assert_ne!(LogicalType::Vector(384), LogicalType::Vector(768));
+
+        // Not numeric
+        assert!(!v384.is_numeric());
+        assert!(!v384.is_integer());
+        assert!(!v384.is_float());
     }
 }

@@ -1,6 +1,6 @@
 //! ValueVector for columnar data storage.
 
-use std::sync::Arc;
+use arcstr::ArcStr;
 
 use grafeo_common::types::{EdgeId, LogicalType, NodeId, Value};
 
@@ -32,8 +32,8 @@ enum VectorData {
     Int64(Vec<i64>),
     /// 64-bit floats.
     Float64(Vec<f64>),
-    /// Strings (stored as Arc for cheap cloning).
-    String(Vec<Arc<str>>),
+    /// Strings (stored as ArcStr for cheap cloning).
+    String(Vec<ArcStr>),
     /// Node IDs.
     NodeId(Vec<NodeId>),
     /// Edge IDs.
@@ -152,7 +152,7 @@ impl ValueVector {
     }
 
     /// Pushes a string value.
-    pub fn push_string(&mut self, value: impl Into<Arc<str>>) {
+    pub fn push_string(&mut self, value: impl Into<ArcStr>) {
         if let VectorData::String(vec) = &mut self.data {
             vec.push(value.into());
             self.len += 1;
@@ -198,6 +198,10 @@ impl ValueVector {
             (VectorData::Int64(vec), Value::Int64(i)) => vec.push(*i),
             (VectorData::Float64(vec), Value::Float64(f)) => vec.push(*f),
             (VectorData::String(vec), Value::String(s)) => vec.push(s.clone()),
+            // Handle Int64 -> NodeId conversion (from get_value roundtrip)
+            (VectorData::NodeId(vec), Value::Int64(i)) => vec.push(NodeId::new(*i as u64)),
+            // Handle Int64 -> EdgeId conversion (from get_value roundtrip)
+            (VectorData::EdgeId(vec), Value::Int64(i)) => vec.push(EdgeId::new(*i as u64)),
             (VectorData::Generic(vec), _) => vec.push(value),
             _ => {
                 // Type mismatch - push a default value to maintain vector alignment
@@ -273,10 +277,14 @@ impl ValueVector {
         if self.is_null(index) {
             return None;
         }
-        if let VectorData::NodeId(vec) = &self.data {
-            vec.get(index).copied()
-        } else {
-            None
+        match &self.data {
+            VectorData::NodeId(vec) => vec.get(index).copied(),
+            // Handle Generic vectors that contain node IDs stored as Int64
+            VectorData::Generic(vec) => match vec.get(index) {
+                Some(Value::Int64(i)) => Some(NodeId::new(*i as u64)),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -286,10 +294,14 @@ impl ValueVector {
         if self.is_null(index) {
             return None;
         }
-        if let VectorData::EdgeId(vec) = &self.data {
-            vec.get(index).copied()
-        } else {
-            None
+        match &self.data {
+            VectorData::EdgeId(vec) => vec.get(index).copied(),
+            // Handle Generic vectors that contain edge IDs stored as Int64
+            VectorData::Generic(vec) => match vec.get(index) {
+                Some(Value::Int64(i)) => Some(EdgeId::new(*i as u64)),
+                _ => None,
+            },
+            _ => None,
         }
     }
 

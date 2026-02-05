@@ -9,20 +9,22 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::{LogicalType, TxId, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::JoinType;
 use grafeo_core::execution::operators::{
-    BinaryFilterOp, FilterExpression, FilterOperator, HashAggregateOperator, LimitOperator,
-    NestedLoopJoinOperator, Operator, OperatorError, Predicate, SimpleAggregateOperator,
-    SkipOperator, SortOperator, UnaryFilterOp,
+    BinaryFilterOp, FilterExpression, FilterOperator, HashAggregateOperator, JoinCondition,
+    LimitOperator, NestedLoopJoinOperator, Operator, OperatorError, Predicate, ProjectExpr,
+    ProjectOperator, SimpleAggregateOperator, SkipOperator, SortOperator, UnaryFilterOp,
 };
 use grafeo_core::graph::rdf::{Literal, RdfStore, Term, Triple, TriplePattern};
 
 use crate::query::plan::{
-    AggregateFunction as LogicalAggregateFunction, AggregateOp, FilterOp, LimitOp,
-    LogicalExpression, LogicalOperator, LogicalPlan, SkipOp, SortOp, TripleComponent, TripleScanOp,
+    AggregateFunction as LogicalAggregateFunction, AggregateOp, AntiJoinOp, ClearGraphOp,
+    CreateGraphOp, DeleteTripleOp, DropGraphOp, FilterOp, InsertTripleOp, LeftJoinOp, LimitOp,
+    LogicalExpression, LogicalOperator, LogicalPlan, ModifyOp, SkipOp, SortOp, TripleComponent,
+    TripleScanOp, TripleTemplate,
 };
 use crate::query::planner::{PhysicalPlan, convert_aggregate_function, convert_filter_expression};
 
@@ -38,6 +40,8 @@ pub struct RdfPlanner {
     store: Arc<RdfStore>,
     /// Chunk size for vectorized execution.
     chunk_size: usize,
+    /// Optional transaction ID for transactional operations.
+    tx_id: Option<TxId>,
 }
 
 impl RdfPlanner {
@@ -47,6 +51,7 @@ impl RdfPlanner {
         Self {
             store,
             chunk_size: DEFAULT_CHUNK_SIZE,
+            tx_id: None,
         }
     }
 
@@ -57,6 +62,13 @@ impl RdfPlanner {
         self
     }
 
+    /// Sets the transaction ID for transactional operations.
+    #[must_use]
+    pub fn with_tx_id(mut self, tx_id: Option<TxId>) -> Self {
+        self.tx_id = tx_id;
+        self
+    }
+
     /// Plans a logical plan into a physical operator tree.
     ///
     /// # Errors
@@ -64,7 +76,11 @@ impl RdfPlanner {
     /// Returns an error if planning fails.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
-        Ok(PhysicalPlan { operator, columns })
+        Ok(PhysicalPlan {
+            operator,
+            columns,
+            adaptive_context: None,
+        })
     }
 
     /// Plans a single logical operator.
@@ -72,15 +88,23 @@ impl RdfPlanner {
         match op {
             LogicalOperator::TripleScan(scan) => self.plan_triple_scan(scan),
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
-            LogicalOperator::Project(project) => self.plan_operator(&project.input),
+            LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
             LogicalOperator::Skip(skip) => self.plan_skip(skip),
             LogicalOperator::Sort(sort) => self.plan_sort(sort),
             LogicalOperator::Aggregate(agg) => self.plan_aggregate(agg),
             LogicalOperator::Return(ret) => self.plan_return(ret),
             LogicalOperator::Join(join) => self.plan_join(join),
+            LogicalOperator::LeftJoin(join) => self.plan_left_join(join),
+            LogicalOperator::AntiJoin(join) => self.plan_anti_join(join),
             LogicalOperator::Union(union) => self.plan_union(union),
             LogicalOperator::Distinct(distinct) => self.plan_operator(&distinct.input),
+            LogicalOperator::InsertTriple(insert) => self.plan_insert_triple(insert),
+            LogicalOperator::DeleteTriple(delete) => self.plan_delete_triple(delete),
+            LogicalOperator::Modify(modify) => self.plan_modify(modify),
+            LogicalOperator::ClearGraph(clear) => self.plan_clear_graph(clear),
+            LogicalOperator::CreateGraph(create) => self.plan_create_graph(create),
+            LogicalOperator::DropGraph(drop_op) => self.plan_drop_graph(drop_op),
             LogicalOperator::Empty => Err(Error::Internal("Empty plan".to_string())),
             _ => Err(Error::Internal(format!(
                 "Unsupported RDF operator: {:?}",
@@ -160,7 +184,14 @@ impl RdfPlanner {
     }
 
     /// Plans a filter operator.
+    ///
+    /// Handles EXISTS/NOT EXISTS patterns by transforming them into semi-joins/anti-joins.
     fn plan_filter(&self, filter: &FilterOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Check for EXISTS/NOT EXISTS patterns and transform to semi/anti joins
+        if let Some((subquery, is_negated)) = self.extract_exists_pattern(&filter.predicate) {
+            return self.plan_exists_as_join(&filter.input, subquery, is_negated);
+        }
+
         let (input_op, columns) = self.plan_operator(&filter.input)?;
 
         // Build variable to column index mapping
@@ -178,6 +209,96 @@ impl RdfPlanner {
 
         let operator = Box::new(FilterOperator::new(input_op, Box::new(predicate)));
         Ok((operator, columns))
+    }
+
+    /// Extracts an EXISTS or NOT EXISTS pattern from a filter predicate.
+    /// Returns the subquery operator and whether it's negated (NOT EXISTS).
+    fn extract_exists_pattern<'a>(
+        &self,
+        predicate: &'a LogicalExpression,
+    ) -> Option<(&'a LogicalOperator, bool)> {
+        use crate::query::plan::UnaryOp;
+
+        match predicate {
+            // EXISTS { pattern }
+            LogicalExpression::ExistsSubquery(subquery) => Some((subquery.as_ref(), false)),
+            // NOT EXISTS { pattern }
+            LogicalExpression::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => {
+                if let LogicalExpression::ExistsSubquery(subquery) = operand.as_ref() {
+                    Some((subquery.as_ref(), true))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Plans an EXISTS/NOT EXISTS pattern as a semi-join or anti-join.
+    fn plan_exists_as_join(
+        &self,
+        input: &LogicalOperator,
+        subquery: &LogicalOperator,
+        is_negated: bool,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let (left_op, left_columns) = self.plan_operator(input)?;
+        let (right_op, right_columns) = self.plan_operator(subquery)?;
+
+        let left_col_count = left_columns.len();
+
+        // Find shared variables for equi-join (correlation between outer and inner query)
+        let mut shared_vars: Vec<(usize, usize)> = Vec::new();
+        for (left_idx, left_col) in left_columns.iter().enumerate() {
+            for (right_idx, right_col) in right_columns.iter().enumerate() {
+                if left_col == right_col {
+                    shared_vars.push((left_idx, right_idx));
+                }
+            }
+        }
+
+        // Build full schema for the join (left + right columns)
+        let mut full_columns: Vec<String> = left_columns.clone();
+        full_columns.extend(right_columns.clone());
+        let full_schema = derive_rdf_schema(&full_columns);
+
+        // For semi/anti joins, we only output the left columns
+        let output_schema = derive_rdf_schema(&left_columns);
+
+        // Create join condition if there are shared variables
+        let join_condition: Option<Box<dyn JoinCondition>> = if shared_vars.is_empty() {
+            None
+        } else {
+            Some(Box::new(RdfJoinCondition::new(shared_vars.clone())))
+        };
+
+        // Use Semi for EXISTS, Anti for NOT EXISTS
+        let join_type = if is_negated {
+            JoinType::Anti
+        } else {
+            JoinType::Semi
+        };
+
+        let join_op = Box::new(NestedLoopJoinOperator::new(
+            left_op,
+            right_op,
+            join_condition,
+            join_type,
+            full_schema,
+        ));
+
+        // Project to only output left columns (the original input columns)
+        let projection_exprs: Vec<ProjectExpr> =
+            (0..left_col_count).map(ProjectExpr::Column).collect();
+        let project_op = Box::new(ProjectOperator::new(
+            join_op,
+            projection_exprs,
+            output_schema,
+        ));
+
+        Ok((project_op, left_columns))
     }
 
     /// Plans a LIMIT operator.
@@ -230,6 +351,59 @@ impl RdfPlanner {
         Ok((operator, columns))
     }
 
+    /// Plans a PROJECT operator.
+    ///
+    /// Projects only the requested columns from the input.
+    fn plan_project(
+        &self,
+        project: &crate::query::plan::ProjectOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        use grafeo_core::execution::operators::{ProjectExpr, ProjectOperator};
+
+        let (input_op, input_columns) = self.plan_operator(&project.input)?;
+
+        // Build mapping from variable name to column index
+        let variable_columns: HashMap<String, usize> = input_columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        let mut projections = Vec::new();
+        let mut output_columns = Vec::new();
+        let mut output_types = Vec::new();
+
+        for proj in &project.projections {
+            match &proj.expression {
+                LogicalExpression::Variable(name) => {
+                    if let Some(&col_idx) = variable_columns.get(name) {
+                        projections.push(ProjectExpr::Column(col_idx));
+                        output_columns.push(proj.alias.clone().unwrap_or_else(|| name.clone()));
+                        output_types.push(LogicalType::String); // RDF values are strings
+                    } else {
+                        return Err(Error::Internal(format!(
+                            "Variable '{}' not found in input columns",
+                            name
+                        )));
+                    }
+                }
+                _ => {
+                    // For non-variable expressions, we need to evaluate them
+                    // For now, skip complex expressions in projection
+                    continue;
+                }
+            }
+        }
+
+        // If no projections were extracted, just return the input as-is
+        if projections.is_empty() {
+            return Ok((input_op, input_columns));
+        }
+
+        let operator = Box::new(ProjectOperator::new(input_op, projections, output_types));
+        Ok((operator, output_columns))
+    }
+
     /// Plans an AGGREGATE operator.
     fn plan_aggregate(&self, agg: &AggregateOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
         use grafeo_core::execution::operators::AggregateExpr as PhysicalAggregateExpr;
@@ -263,6 +437,7 @@ impl RdfPlanner {
                     column,
                     distinct: agg_expr.distinct,
                     alias: agg_expr.alias.clone(),
+                    percentile: agg_expr.percentile,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -276,9 +451,11 @@ impl RdfPlanner {
         }
 
         for agg_expr in &agg.aggregates {
+            // For RDF, numeric values are strings that get converted to floats
+            // So SUM should also output Float64 (since SumFloat returns Float64)
             let result_type = match agg_expr.function {
                 LogicalAggregateFunction::Count => LogicalType::Int64,
-                LogicalAggregateFunction::Sum => LogicalType::Int64,
+                LogicalAggregateFunction::Sum => LogicalType::Float64,
                 LogicalAggregateFunction::Avg => LogicalType::Float64,
                 _ => LogicalType::String,
             };
@@ -310,6 +487,9 @@ impl RdfPlanner {
     }
 
     /// Plans a JOIN operator.
+    ///
+    /// For SPARQL, we need to join on shared variables (equi-join).
+    /// Variables that appear in both left and right should be matched.
     fn plan_join(
         &self,
         join: &crate::query::plan::JoinOp,
@@ -317,18 +497,162 @@ impl RdfPlanner {
         let (left_op, left_columns) = self.plan_operator(&join.left)?;
         let (right_op, right_columns) = self.plan_operator(&join.right)?;
 
-        let mut columns = left_columns;
-        columns.extend(right_columns);
+        let left_col_count = left_columns.len();
 
-        let output_schema = derive_rdf_schema(&columns);
-        let operator = Box::new(NestedLoopJoinOperator::new(
+        // Find shared variables for equi-join
+        let mut shared_vars: Vec<(usize, usize)> = Vec::new(); // (left_idx, right_idx)
+        for (left_idx, left_col) in left_columns.iter().enumerate() {
+            for (right_idx, right_col) in right_columns.iter().enumerate() {
+                if left_col == right_col {
+                    shared_vars.push((left_idx, right_idx));
+                }
+            }
+        }
+
+        // Build the full join output (all left + all right columns)
+        let mut full_columns: Vec<String> = left_columns.clone();
+        full_columns.extend(right_columns.clone());
+        let full_schema = derive_rdf_schema(&full_columns);
+
+        // Determine which columns to project (all left + non-duplicate right)
+        let mut projection_indices: Vec<usize> = (0..left_col_count).collect();
+        let mut output_columns = left_columns.clone();
+        for (right_idx, right_col) in right_columns.iter().enumerate() {
+            if !left_columns.contains(right_col) {
+                projection_indices.push(left_col_count + right_idx);
+                output_columns.push(right_col.clone());
+            }
+        }
+
+        let join_type = if shared_vars.is_empty() {
+            JoinType::Cross
+        } else {
+            JoinType::Inner
+        };
+
+        let join_condition: Option<Box<dyn JoinCondition>> = if shared_vars.is_empty() {
+            None
+        } else {
+            Some(Box::new(RdfJoinCondition::new(shared_vars)))
+        };
+
+        let join_op = Box::new(NestedLoopJoinOperator::new(
             left_op,
             right_op,
-            None, // No join condition
-            JoinType::Cross,
-            output_schema,
+            join_condition,
+            join_type,
+            full_schema,
         ));
 
+        // If we have duplicate columns to remove, wrap with projection
+        if projection_indices.len() < full_columns.len() {
+            let output_schema = derive_rdf_schema(&output_columns);
+            let project_op = Box::new(ProjectOperator::select_columns(
+                join_op,
+                projection_indices,
+                output_schema,
+            ));
+            Ok((project_op, output_columns))
+        } else {
+            Ok((join_op, output_columns))
+        }
+    }
+
+    /// Plans a LEFT JOIN operator (for SPARQL OPTIONAL).
+    fn plan_left_join(&self, join: &LeftJoinOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let (left_op, left_columns) = self.plan_operator(&join.left)?;
+        let (right_op, right_columns) = self.plan_operator(&join.right)?;
+
+        let left_col_count = left_columns.len();
+
+        // Find shared variables for equi-join
+        let mut shared_vars: Vec<(usize, usize)> = Vec::new();
+        for (left_idx, left_col) in left_columns.iter().enumerate() {
+            for (right_idx, right_col) in right_columns.iter().enumerate() {
+                if left_col == right_col {
+                    shared_vars.push((left_idx, right_idx));
+                }
+            }
+        }
+
+        // Build the full join output (all left + all right columns)
+        let mut full_columns: Vec<String> = left_columns.clone();
+        full_columns.extend(right_columns.clone());
+        let full_schema = derive_rdf_schema(&full_columns);
+
+        // Determine which columns to project (all left + non-duplicate right)
+        let mut projection_indices: Vec<usize> = (0..left_col_count).collect();
+        let mut output_columns = left_columns.clone();
+        for (right_idx, right_col) in right_columns.iter().enumerate() {
+            if !left_columns.contains(right_col) {
+                projection_indices.push(left_col_count + right_idx);
+                output_columns.push(right_col.clone());
+            }
+        }
+
+        let join_condition: Option<Box<dyn JoinCondition>> = if shared_vars.is_empty() {
+            None
+        } else {
+            Some(Box::new(RdfJoinCondition::new(shared_vars)))
+        };
+
+        let join_op = Box::new(NestedLoopJoinOperator::new(
+            left_op,
+            right_op,
+            join_condition,
+            JoinType::Left,
+            full_schema,
+        ));
+
+        // If we have duplicate columns to remove, wrap with projection
+        if projection_indices.len() < full_columns.len() {
+            let output_schema = derive_rdf_schema(&output_columns);
+            let project_op = Box::new(ProjectOperator::select_columns(
+                join_op,
+                projection_indices,
+                output_schema,
+            ));
+            Ok((project_op, output_columns))
+        } else {
+            Ok((join_op, output_columns))
+        }
+    }
+
+    /// Plans an ANTI JOIN operator (for SPARQL MINUS).
+    ///
+    /// Note: NestedLoopJoinOperator doesn't properly implement Anti join semantics.
+    /// For now, we use HashJoinOperator for anti-joins which does support it.
+    fn plan_anti_join(&self, join: &AntiJoinOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        use grafeo_core::execution::operators::HashJoinOperator;
+
+        let (left_op, left_columns) = self.plan_operator(&join.left)?;
+        let (right_op, right_columns) = self.plan_operator(&join.right)?;
+
+        // Find shared variables for anti-join matching
+        let mut left_keys: Vec<usize> = Vec::new();
+        let mut right_keys: Vec<usize> = Vec::new();
+        for (left_idx, left_col) in left_columns.iter().enumerate() {
+            for (right_idx, right_col) in right_columns.iter().enumerate() {
+                if left_col == right_col {
+                    left_keys.push(left_idx);
+                    right_keys.push(right_idx);
+                }
+            }
+        }
+
+        // Output is just left columns (anti-join filters out matching rows)
+        let columns = left_columns.clone();
+        let output_schema = derive_rdf_schema(&columns);
+
+        // Use HashJoinOperator which properly implements Anti join
+        let operator = Box::new(HashJoinOperator::new(
+            left_op,
+            right_op,
+            left_keys,
+            right_keys,
+            JoinType::Anti,
+            output_schema,
+        ));
         Ok((operator, columns))
     }
 
@@ -341,15 +665,902 @@ impl RdfPlanner {
             return Err(Error::Internal("Empty UNION".to_string()));
         }
 
-        let (first_op, columns) = self.plan_operator(&union.inputs[0])?;
+        // For INSERT operations, we execute all operators in sequence
+        let mut operators: Vec<Box<dyn Operator>> = Vec::new();
+        let mut columns = Vec::new();
 
-        if union.inputs.len() == 1 {
-            return Ok((first_op, columns));
+        for (i, input) in union.inputs.iter().enumerate() {
+            let (op, cols) = self.plan_operator(input)?;
+            operators.push(op);
+            if i == 0 {
+                columns = cols;
+            }
         }
 
-        Err(Error::Internal(
-            "UNION with multiple inputs not yet implemented".to_string(),
-        ))
+        if operators.len() == 1 {
+            return Ok((operators.into_iter().next().unwrap(), columns));
+        }
+
+        // Create a chain operator that executes all operators in sequence
+        let operator = Box::new(RdfUnionOperator::new(operators));
+        Ok((operator, columns))
+    }
+
+    /// Plans an INSERT TRIPLE operator.
+    fn plan_insert_triple(
+        &self,
+        insert: &InsertTripleOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Check if this is a pattern-based insert (has variables in the template)
+        let has_variables = matches!(&insert.subject, TripleComponent::Variable(_))
+            || matches!(&insert.predicate, TripleComponent::Variable(_))
+            || matches!(&insert.object, TripleComponent::Variable(_));
+
+        if has_variables {
+            // Pattern-based insertion: need to query first, then insert each match
+            if let Some(ref input) = insert.input {
+                let (input_op, input_columns) = self.plan_operator(input)?;
+
+                // Build column index map for variable substitution
+                let column_map: HashMap<String, usize> = input_columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| (name.clone(), i))
+                    .collect();
+
+                let operator = Box::new(RdfInsertPatternOperator::new(
+                    Arc::clone(&self.store),
+                    input_op,
+                    insert.subject.clone(),
+                    insert.predicate.clone(),
+                    insert.object.clone(),
+                    column_map,
+                ));
+
+                return Ok((operator, Vec::new()));
+            }
+        }
+
+        // Direct insertion with concrete terms
+        let subject = self.component_to_term(&insert.subject)?;
+        let predicate = self.component_to_term(&insert.predicate)?;
+        let object = self.component_to_term(&insert.object)?;
+
+        let triple = Triple::new(subject, predicate, object);
+        let operator = Box::new(RdfInsertTripleOperator::new(
+            Arc::clone(&self.store),
+            triple,
+            self.tx_id,
+        ));
+
+        // Insert operations don't output columns
+        Ok((operator, Vec::new()))
+    }
+
+    /// Converts a TripleComponent to an RDF Term.
+    fn component_to_term(&self, component: &TripleComponent) -> Result<Term> {
+        match component {
+            TripleComponent::Iri(iri) => Ok(Term::Iri(iri.clone().into())),
+            TripleComponent::Literal(value) => {
+                let lit = match value {
+                    Value::String(s) => Literal::simple(s.to_string()),
+                    Value::Int64(n) => Literal::integer(*n),
+                    Value::Float64(f) => {
+                        Literal::typed(f.to_string(), "http://www.w3.org/2001/XMLSchema#double")
+                    }
+                    Value::Bool(b) => {
+                        Literal::typed(b.to_string(), "http://www.w3.org/2001/XMLSchema#boolean")
+                    }
+                    _ => Literal::simple(format!("{:?}", value)),
+                };
+                Ok(Term::Literal(lit))
+            }
+            TripleComponent::Variable(name) => {
+                // Variables in INSERT DATA should have been bound
+                Err(Error::Internal(format!(
+                    "Unbound variable '{}' in INSERT DATA",
+                    name
+                )))
+            }
+        }
+    }
+
+    /// Plans a DELETE TRIPLE operator.
+    fn plan_delete_triple(
+        &self,
+        delete: &DeleteTripleOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Check if this is a pattern-based delete (has variables in the template)
+        let has_variables = matches!(&delete.subject, TripleComponent::Variable(_))
+            || matches!(&delete.predicate, TripleComponent::Variable(_))
+            || matches!(&delete.object, TripleComponent::Variable(_));
+
+        if has_variables {
+            // Pattern-based deletion: need to query first, then delete each match
+            if let Some(ref input) = delete.input {
+                let (input_op, input_columns) = self.plan_operator(input)?;
+
+                // Build column index map for variable substitution
+                let column_map: HashMap<String, usize> = input_columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| (name.clone(), i))
+                    .collect();
+
+                let operator = Box::new(RdfDeletePatternOperator::new(
+                    Arc::clone(&self.store),
+                    input_op,
+                    delete.subject.clone(),
+                    delete.predicate.clone(),
+                    delete.object.clone(),
+                    column_map,
+                ));
+
+                return Ok((operator, Vec::new()));
+            }
+        }
+
+        // Direct deletion with concrete terms
+        let subject = self.component_to_term(&delete.subject)?;
+        let predicate = self.component_to_term(&delete.predicate)?;
+        let object = self.component_to_term(&delete.object)?;
+
+        let triple = Triple::new(subject, predicate, object);
+        let operator = Box::new(RdfDeleteTripleOperator::new(
+            Arc::clone(&self.store),
+            triple,
+            self.tx_id,
+        ));
+
+        Ok((operator, Vec::new()))
+    }
+
+    /// Plans a CLEAR GRAPH operator.
+    fn plan_clear_graph(&self, clear: &ClearGraphOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let operator = Box::new(RdfClearGraphOperator::new(
+            Arc::clone(&self.store),
+            clear.graph.clone(),
+            clear.silent,
+        ));
+        Ok((operator, Vec::new()))
+    }
+
+    /// Plans a CREATE GRAPH operator.
+    fn plan_create_graph(
+        &self,
+        create: &CreateGraphOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Named graphs are not yet fully supported in the RDF store
+        // For now, CREATE GRAPH is a no-op (the graph is implicitly created when triples are added)
+        let operator = Box::new(RdfNoOpOperator::new(create.silent));
+        Ok((operator, Vec::new()))
+    }
+
+    /// Plans a DROP GRAPH operator.
+    fn plan_drop_graph(&self, drop_op: &DropGraphOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // For default graph (None), clear all triples
+        // For named graph, we would need named graph support
+        if drop_op.graph.is_none() {
+            let operator = Box::new(RdfClearGraphOperator::new(
+                Arc::clone(&self.store),
+                None,
+                drop_op.silent,
+            ));
+            Ok((operator, Vec::new()))
+        } else {
+            // Named graphs not yet fully supported
+            let operator = Box::new(RdfNoOpOperator::new(drop_op.silent));
+            Ok((operator, Vec::new()))
+        }
+    }
+
+    /// Plans a SPARQL MODIFY operator (DELETE/INSERT WHERE).
+    ///
+    /// Per SPARQL 1.1 spec:
+    /// 1. Evaluate WHERE clause once to get bindings
+    /// 2. Apply DELETE templates using those bindings
+    /// 3. Apply INSERT templates using the SAME bindings
+    fn plan_modify(&self, modify: &ModifyOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Plan the WHERE clause
+        let (where_op, where_columns) = self.plan_operator(&modify.where_clause)?;
+
+        // Build column index map for variable substitution
+        let column_map: HashMap<String, usize> = where_columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        let operator = Box::new(RdfModifyOperator::new(
+            Arc::clone(&self.store),
+            where_op,
+            modify.delete_templates.clone(),
+            modify.insert_templates.clone(),
+            column_map,
+        ));
+
+        Ok((operator, Vec::new()))
+    }
+}
+
+// ============================================================================
+// RDF Insert Triple Operator
+// ============================================================================
+
+/// Operator that inserts a triple into the RDF store.
+struct RdfInsertTripleOperator {
+    store: Arc<RdfStore>,
+    triple: Triple,
+    tx_id: Option<TxId>,
+    inserted: bool,
+}
+
+impl RdfInsertTripleOperator {
+    fn new(store: Arc<RdfStore>, triple: Triple, tx_id: Option<TxId>) -> Self {
+        Self {
+            store,
+            triple,
+            tx_id,
+            inserted: false,
+        }
+    }
+}
+
+impl Operator for RdfInsertTripleOperator {
+    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
+        if self.inserted {
+            return Ok(None);
+        }
+
+        // Insert the triple (buffered if in a transaction)
+        if let Some(tx_id) = self.tx_id {
+            self.store.insert_in_tx(tx_id, self.triple.clone());
+        } else {
+            self.store.insert(self.triple.clone());
+        }
+        self.inserted = true;
+
+        // Return an empty result (INSERT doesn't produce rows)
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.inserted = false;
+    }
+
+    fn name(&self) -> &'static str {
+        "RdfInsertTriple"
+    }
+}
+
+// ============================================================================
+// RDF Insert Pattern Operator
+// ============================================================================
+
+/// Operator that inserts triples based on a pattern from the RDF store.
+/// Used for INSERT { } WHERE { } operations where the triple template contains variables.
+struct RdfInsertPatternOperator {
+    store: Arc<RdfStore>,
+    input: Box<dyn Operator>,
+    subject: TripleComponent,
+    predicate: TripleComponent,
+    object: TripleComponent,
+    column_map: HashMap<String, usize>,
+    done: bool,
+}
+
+impl RdfInsertPatternOperator {
+    fn new(
+        store: Arc<RdfStore>,
+        input: Box<dyn Operator>,
+        subject: TripleComponent,
+        predicate: TripleComponent,
+        object: TripleComponent,
+        column_map: HashMap<String, usize>,
+    ) -> Self {
+        Self {
+            store,
+            input,
+            subject,
+            predicate,
+            object,
+            column_map,
+            done: false,
+        }
+    }
+
+    fn resolve_component(
+        &self,
+        component: &TripleComponent,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<Term> {
+        match component {
+            TripleComponent::Iri(iri) => Some(Term::Iri(iri.clone().into())),
+            TripleComponent::Literal(value) => {
+                let lit = match value {
+                    Value::String(s) => Literal::simple(s.to_string()),
+                    Value::Int64(n) => Literal::integer(*n),
+                    Value::Float64(f) => {
+                        Literal::typed(f.to_string(), "http://www.w3.org/2001/XMLSchema#double")
+                    }
+                    Value::Bool(b) => {
+                        Literal::typed(b.to_string(), "http://www.w3.org/2001/XMLSchema#boolean")
+                    }
+                    _ => Literal::simple(format!("{:?}", value)),
+                };
+                Some(Term::Literal(lit))
+            }
+            TripleComponent::Variable(name) => {
+                // Remove the leading '?' if present
+                let var_name = name.strip_prefix('?').unwrap_or(name);
+                if let Some(&col_idx) = self.column_map.get(var_name) {
+                    if let Some(col) = chunk.column(col_idx) {
+                        if let Some(value) = col.get_value(row) {
+                            return Self::value_to_term(&value);
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn value_to_term(value: &Value) -> Option<Term> {
+        match value {
+            Value::String(s) => {
+                // Check if it looks like an IRI
+                if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:") {
+                    Some(Term::Iri(s.to_string().into()))
+                } else if let Ok(n) = s.parse::<i64>() {
+                    // Try to parse as integer
+                    Some(Term::Literal(Literal::integer(n)))
+                } else if let Ok(f) = s.parse::<f64>() {
+                    // Try to parse as float
+                    Some(Term::Literal(Literal::typed(
+                        f.to_string(),
+                        "http://www.w3.org/2001/XMLSchema#double",
+                    )))
+                } else {
+                    Some(Term::Literal(Literal::simple(s.to_string())))
+                }
+            }
+            Value::Int64(n) => Some(Term::Literal(Literal::integer(*n))),
+            Value::Float64(f) => Some(Term::Literal(Literal::typed(
+                f.to_string(),
+                "http://www.w3.org/2001/XMLSchema#double",
+            ))),
+            Value::Bool(b) => Some(Term::Literal(Literal::typed(
+                b.to_string(),
+                "http://www.w3.org/2001/XMLSchema#boolean",
+            ))),
+            _ => None,
+        }
+    }
+}
+
+impl Operator for RdfInsertPatternOperator {
+    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
+        if self.done {
+            return Ok(None);
+        }
+
+        // Collect all triples to insert
+        let mut triples_to_insert = Vec::new();
+
+        while let Some(chunk) = self.input.next()? {
+            for row in 0..chunk.row_count() {
+                let subject = self.resolve_component(&self.subject, &chunk, row);
+                let predicate = self.resolve_component(&self.predicate, &chunk, row);
+                let object = self.resolve_component(&self.object, &chunk, row);
+
+                if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
+                    triples_to_insert.push(Triple::new(s, p, o));
+                }
+            }
+        }
+
+        // Insert all collected triples
+        for triple in triples_to_insert {
+            self.store.insert(triple);
+        }
+
+        self.done = true;
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.done = false;
+        self.input.reset();
+    }
+
+    fn name(&self) -> &'static str {
+        "RdfInsertPattern"
+    }
+}
+
+// ============================================================================
+// RDF Delete Triple Operator
+// ============================================================================
+
+/// Operator that deletes a triple from the RDF store.
+struct RdfDeleteTripleOperator {
+    store: Arc<RdfStore>,
+    triple: Triple,
+    tx_id: Option<TxId>,
+    deleted: bool,
+}
+
+impl RdfDeleteTripleOperator {
+    fn new(store: Arc<RdfStore>, triple: Triple, tx_id: Option<TxId>) -> Self {
+        Self {
+            store,
+            triple,
+            tx_id,
+            deleted: false,
+        }
+    }
+}
+
+impl Operator for RdfDeleteTripleOperator {
+    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
+        if self.deleted {
+            return Ok(None);
+        }
+
+        // Delete the triple (buffered if in a transaction)
+        if let Some(tx_id) = self.tx_id {
+            self.store.remove_in_tx(tx_id, self.triple.clone());
+        } else {
+            self.store.remove(&self.triple);
+        }
+        self.deleted = true;
+
+        // Return an empty result (DELETE doesn't produce rows)
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.deleted = false;
+    }
+
+    fn name(&self) -> &'static str {
+        "RdfDeleteTriple"
+    }
+}
+
+// ============================================================================
+// RDF Delete Pattern Operator
+// ============================================================================
+
+/// Operator that deletes triples matching a pattern from the RDF store.
+/// Used for DELETE WHERE operations where the triple template contains variables.
+struct RdfDeletePatternOperator {
+    store: Arc<RdfStore>,
+    input: Box<dyn Operator>,
+    subject: TripleComponent,
+    predicate: TripleComponent,
+    object: TripleComponent,
+    column_map: HashMap<String, usize>,
+    done: bool,
+}
+
+impl RdfDeletePatternOperator {
+    fn new(
+        store: Arc<RdfStore>,
+        input: Box<dyn Operator>,
+        subject: TripleComponent,
+        predicate: TripleComponent,
+        object: TripleComponent,
+        column_map: HashMap<String, usize>,
+    ) -> Self {
+        Self {
+            store,
+            input,
+            subject,
+            predicate,
+            object,
+            column_map,
+            done: false,
+        }
+    }
+
+    fn resolve_component(
+        &self,
+        component: &TripleComponent,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<Term> {
+        match component {
+            TripleComponent::Iri(iri) => Some(Term::Iri(iri.clone().into())),
+            TripleComponent::Literal(value) => {
+                let lit = match value {
+                    Value::String(s) => Literal::simple(s.to_string()),
+                    Value::Int64(n) => Literal::integer(*n),
+                    Value::Float64(f) => {
+                        Literal::typed(f.to_string(), "http://www.w3.org/2001/XMLSchema#double")
+                    }
+                    Value::Bool(b) => {
+                        Literal::typed(b.to_string(), "http://www.w3.org/2001/XMLSchema#boolean")
+                    }
+                    _ => Literal::simple(format!("{:?}", value)),
+                };
+                Some(Term::Literal(lit))
+            }
+            TripleComponent::Variable(name) => {
+                // Remove the leading '?' if present
+                let var_name = name.strip_prefix('?').unwrap_or(name);
+                if let Some(&col_idx) = self.column_map.get(var_name) {
+                    if let Some(col) = chunk.column(col_idx) {
+                        if let Some(value) = col.get_value(row) {
+                            return Self::value_to_term(&value);
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn value_to_term(value: &Value) -> Option<Term> {
+        match value {
+            Value::String(s) => {
+                // Check if it looks like an IRI
+                if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:") {
+                    Some(Term::Iri(s.to_string().into()))
+                } else if let Ok(n) = s.parse::<i64>() {
+                    // Try to parse as integer
+                    Some(Term::Literal(Literal::integer(n)))
+                } else if let Ok(f) = s.parse::<f64>() {
+                    // Try to parse as float
+                    Some(Term::Literal(Literal::typed(
+                        f.to_string(),
+                        "http://www.w3.org/2001/XMLSchema#double",
+                    )))
+                } else {
+                    Some(Term::Literal(Literal::simple(s.to_string())))
+                }
+            }
+            Value::Int64(n) => Some(Term::Literal(Literal::integer(*n))),
+            Value::Float64(f) => Some(Term::Literal(Literal::typed(
+                f.to_string(),
+                "http://www.w3.org/2001/XMLSchema#double",
+            ))),
+            Value::Bool(b) => Some(Term::Literal(Literal::typed(
+                b.to_string(),
+                "http://www.w3.org/2001/XMLSchema#boolean",
+            ))),
+            _ => None,
+        }
+    }
+}
+
+impl Operator for RdfDeletePatternOperator {
+    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
+        if self.done {
+            return Ok(None);
+        }
+
+        // Collect all triples to delete
+        let mut triples_to_delete = Vec::new();
+
+        while let Some(chunk) = self.input.next()? {
+            for row in 0..chunk.row_count() {
+                let subject = self.resolve_component(&self.subject, &chunk, row);
+                let predicate = self.resolve_component(&self.predicate, &chunk, row);
+                let object = self.resolve_component(&self.object, &chunk, row);
+
+                if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
+                    triples_to_delete.push(Triple::new(s, p, o));
+                }
+            }
+        }
+
+        // Delete all collected triples
+        for triple in triples_to_delete {
+            self.store.remove(&triple);
+        }
+
+        self.done = true;
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.done = false;
+        self.input.reset();
+    }
+
+    fn name(&self) -> &'static str {
+        "RdfDeletePattern"
+    }
+}
+
+// ============================================================================
+// RDF Clear Graph Operator
+// ============================================================================
+
+/// Operator that clears triples from a graph in the RDF store.
+struct RdfClearGraphOperator {
+    store: Arc<RdfStore>,
+    #[allow(dead_code)]
+    graph: Option<String>,
+    #[allow(dead_code)]
+    silent: bool,
+    cleared: bool,
+}
+
+impl RdfClearGraphOperator {
+    fn new(store: Arc<RdfStore>, graph: Option<String>, silent: bool) -> Self {
+        Self {
+            store,
+            graph,
+            silent,
+            cleared: false,
+        }
+    }
+}
+
+impl Operator for RdfClearGraphOperator {
+    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
+        if self.cleared {
+            return Ok(None);
+        }
+
+        // For now, clear all triples (named graph support would filter by graph)
+        self.store.clear();
+        self.cleared = true;
+
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.cleared = false;
+    }
+
+    fn name(&self) -> &'static str {
+        "RdfClearGraph"
+    }
+}
+
+// ============================================================================
+// RDF No-Op Operator
+// ============================================================================
+
+/// A no-op operator for operations that are not fully supported yet.
+struct RdfNoOpOperator {
+    #[allow(dead_code)]
+    silent: bool,
+    executed: bool,
+}
+
+impl RdfNoOpOperator {
+    fn new(silent: bool) -> Self {
+        Self {
+            silent,
+            executed: false,
+        }
+    }
+}
+
+impl Operator for RdfNoOpOperator {
+    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
+        if self.executed {
+            return Ok(None);
+        }
+        self.executed = true;
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.executed = false;
+    }
+
+    fn name(&self) -> &'static str {
+        "RdfNoOp"
+    }
+}
+
+// ============================================================================
+// RDF Modify Operator (SPARQL DELETE/INSERT WHERE)
+// ============================================================================
+
+/// Operator that handles SPARQL MODIFY operations (DELETE/INSERT WHERE).
+///
+/// Per SPARQL 1.1 Update spec:
+/// 1. Evaluate WHERE clause once to get all bindings
+/// 2. Apply DELETE templates to each binding
+/// 3. Apply INSERT templates to each binding (using SAME bindings)
+struct RdfModifyOperator {
+    store: Arc<RdfStore>,
+    input: Box<dyn Operator>,
+    delete_templates: Vec<TripleTemplate>,
+    insert_templates: Vec<TripleTemplate>,
+    column_map: HashMap<String, usize>,
+    done: bool,
+}
+
+impl RdfModifyOperator {
+    fn new(
+        store: Arc<RdfStore>,
+        input: Box<dyn Operator>,
+        delete_templates: Vec<TripleTemplate>,
+        insert_templates: Vec<TripleTemplate>,
+        column_map: HashMap<String, usize>,
+    ) -> Self {
+        Self {
+            store,
+            input,
+            delete_templates,
+            insert_templates,
+            column_map,
+            done: false,
+        }
+    }
+
+    fn resolve_component(
+        &self,
+        component: &TripleComponent,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<Term> {
+        match component {
+            TripleComponent::Iri(iri) => Some(Term::Iri(iri.clone().into())),
+            TripleComponent::Literal(value) => {
+                let lit = match value {
+                    Value::String(s) => Literal::simple(s.to_string()),
+                    Value::Int64(n) => Literal::integer(*n),
+                    Value::Float64(f) => {
+                        Literal::typed(f.to_string(), "http://www.w3.org/2001/XMLSchema#double")
+                    }
+                    Value::Bool(b) => {
+                        Literal::typed(b.to_string(), "http://www.w3.org/2001/XMLSchema#boolean")
+                    }
+                    _ => Literal::simple(format!("{:?}", value)),
+                };
+                Some(Term::Literal(lit))
+            }
+            TripleComponent::Variable(name) => {
+                let var_name = name.strip_prefix('?').unwrap_or(name);
+                if let Some(&col_idx) = self.column_map.get(var_name) {
+                    if let Some(col) = chunk.column(col_idx) {
+                        if let Some(value) = col.get_value(row) {
+                            return Self::value_to_term(&value);
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn value_to_term(value: &Value) -> Option<Term> {
+        match value {
+            Value::String(s) => {
+                if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:") {
+                    Some(Term::Iri(s.to_string().into()))
+                } else if let Ok(n) = s.parse::<i64>() {
+                    Some(Term::Literal(Literal::integer(n)))
+                } else if let Ok(f) = s.parse::<f64>() {
+                    Some(Term::Literal(Literal::typed(
+                        f.to_string(),
+                        "http://www.w3.org/2001/XMLSchema#double",
+                    )))
+                } else {
+                    Some(Term::Literal(Literal::simple(s.to_string())))
+                }
+            }
+            Value::Int64(n) => Some(Term::Literal(Literal::integer(*n))),
+            Value::Float64(f) => Some(Term::Literal(Literal::typed(
+                f.to_string(),
+                "http://www.w3.org/2001/XMLSchema#double",
+            ))),
+            Value::Bool(b) => Some(Term::Literal(Literal::typed(
+                b.to_string(),
+                "http://www.w3.org/2001/XMLSchema#boolean",
+            ))),
+            _ => None,
+        }
+    }
+}
+
+impl Operator for RdfModifyOperator {
+    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
+        if self.done {
+            return Ok(None);
+        }
+
+        // Step 1: Collect all bindings from WHERE clause (before any modifications)
+        let mut bindings: Vec<(DataChunk, usize)> = Vec::new();
+        while let Some(chunk) = self.input.next()? {
+            for row in 0..chunk.row_count() {
+                bindings.push((chunk.clone(), row));
+            }
+        }
+
+        // Step 2: Apply DELETE templates using collected bindings
+        for template in &self.delete_templates {
+            for (chunk, row) in &bindings {
+                let subject = self.resolve_component(&template.subject, chunk, *row);
+                let predicate = self.resolve_component(&template.predicate, chunk, *row);
+                let object = self.resolve_component(&template.object, chunk, *row);
+
+                if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
+                    let triple = Triple::new(s, p, o);
+                    self.store.remove(&triple);
+                }
+            }
+        }
+
+        // Step 3: Apply INSERT templates using the SAME bindings
+        for template in &self.insert_templates {
+            for (chunk, row) in &bindings {
+                let subject = self.resolve_component(&template.subject, chunk, *row);
+                let predicate = self.resolve_component(&template.predicate, chunk, *row);
+                let object = self.resolve_component(&template.object, chunk, *row);
+
+                if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
+                    let triple = Triple::new(s, p, o);
+                    self.store.insert(triple);
+                }
+            }
+        }
+
+        self.done = true;
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.done = false;
+        self.input.reset();
+    }
+
+    fn name(&self) -> &'static str {
+        "RdfModify"
+    }
+}
+
+// ============================================================================
+// RDF Union Operator
+// ============================================================================
+
+/// Operator that executes multiple operators in sequence.
+/// Used for UNION of INSERT operations.
+struct RdfUnionOperator {
+    operators: Vec<Box<dyn Operator>>,
+    current_idx: usize,
+}
+
+impl RdfUnionOperator {
+    fn new(operators: Vec<Box<dyn Operator>>) -> Self {
+        Self {
+            operators,
+            current_idx: 0,
+        }
+    }
+}
+
+impl Operator for RdfUnionOperator {
+    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
+        // Execute all operators
+        while self.current_idx < self.operators.len() {
+            let op = &mut self.operators[self.current_idx];
+            match op.next()? {
+                Some(chunk) => return Ok(Some(chunk)),
+                None => self.current_idx += 1,
+            }
+        }
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.current_idx = 0;
+        for op in &mut self.operators {
+            op.reset();
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "RdfUnion"
     }
 }
 
@@ -527,9 +1738,11 @@ impl RdfExpressionPredicate {
                 let col_idx = *self.variable_columns.get(var)?;
                 chunk.column(col_idx)?.get_value(row)
             }
+            FilterExpression::FunctionCall { name, args } => {
+                self.eval_function_call(name, args, chunk, row)
+            }
             // These expression types are not commonly used in RDF FILTER clauses
-            FilterExpression::FunctionCall { .. }
-            | FilterExpression::List(_)
+            FilterExpression::List(_)
             | FilterExpression::Case { .. }
             | FilterExpression::Map(_)
             | FilterExpression::IndexAccess { .. }
@@ -550,38 +1763,102 @@ impl RdfExpressionPredicate {
             BinaryFilterOp::Le => compare_values(left, right, |o| o.is_le()),
             BinaryFilterOp::Gt => compare_values(left, right, |o| o.is_gt()),
             BinaryFilterOp::Ge => compare_values(left, right, |o| o.is_ge()),
-            BinaryFilterOp::Add => match (left, right) {
-                (Value::Int64(l), Value::Int64(r)) => Some(Value::Int64(l + r)),
-                (Value::Float64(l), Value::Float64(r)) => Some(Value::Float64(l + r)),
-                (Value::Int64(l), Value::Float64(r)) => Some(Value::Float64(*l as f64 + r)),
-                (Value::Float64(l), Value::Int64(r)) => Some(Value::Float64(l + *r as f64)),
-                _ => None,
-            },
-            BinaryFilterOp::Sub => match (left, right) {
-                (Value::Int64(l), Value::Int64(r)) => Some(Value::Int64(l - r)),
-                (Value::Float64(l), Value::Float64(r)) => Some(Value::Float64(l - r)),
-                (Value::Int64(l), Value::Float64(r)) => Some(Value::Float64(*l as f64 - r)),
-                (Value::Float64(l), Value::Int64(r)) => Some(Value::Float64(l - *r as f64)),
-                _ => None,
-            },
-            BinaryFilterOp::Mul => match (left, right) {
-                (Value::Int64(l), Value::Int64(r)) => Some(Value::Int64(l * r)),
-                (Value::Float64(l), Value::Float64(r)) => Some(Value::Float64(l * r)),
-                (Value::Int64(l), Value::Float64(r)) => Some(Value::Float64(*l as f64 * r)),
-                (Value::Float64(l), Value::Int64(r)) => Some(Value::Float64(l * *r as f64)),
-                _ => None,
-            },
-            BinaryFilterOp::Div => match (left, right) {
-                (Value::Int64(l), Value::Int64(r)) if *r != 0 => Some(Value::Int64(l / r)),
-                (Value::Float64(l), Value::Float64(r)) if *r != 0.0 => Some(Value::Float64(l / r)),
-                (Value::Int64(l), Value::Float64(r)) if *r != 0.0 => {
-                    Some(Value::Float64(*l as f64 / r))
+            BinaryFilterOp::Add => {
+                // Helper to convert to f64 for arithmetic
+                fn to_f64(v: &Value) -> Option<f64> {
+                    match v {
+                        Value::Int64(i) => Some(*i as f64),
+                        Value::Float64(f) => Some(*f),
+                        Value::String(s) => s.parse::<f64>().ok(),
+                        _ => None,
+                    }
                 }
-                (Value::Float64(l), Value::Int64(r)) if *r != 0 => {
-                    Some(Value::Float64(l / *r as f64))
+                match (left, right) {
+                    (Value::Int64(l), Value::Int64(r)) => Some(Value::Int64(l + r)),
+                    (Value::Float64(l), Value::Float64(r)) => Some(Value::Float64(l + r)),
+                    (Value::Int64(l), Value::Float64(r)) => Some(Value::Float64(*l as f64 + r)),
+                    (Value::Float64(l), Value::Int64(r)) => Some(Value::Float64(l + *r as f64)),
+                    // Handle string-to-numeric conversion for RDF
+                    _ => {
+                        let l = to_f64(left)?;
+                        let r = to_f64(right)?;
+                        Some(Value::Float64(l + r))
+                    }
                 }
-                _ => None,
-            },
+            }
+            BinaryFilterOp::Sub => {
+                fn to_f64(v: &Value) -> Option<f64> {
+                    match v {
+                        Value::Int64(i) => Some(*i as f64),
+                        Value::Float64(f) => Some(*f),
+                        Value::String(s) => s.parse::<f64>().ok(),
+                        _ => None,
+                    }
+                }
+                match (left, right) {
+                    (Value::Int64(l), Value::Int64(r)) => Some(Value::Int64(l - r)),
+                    (Value::Float64(l), Value::Float64(r)) => Some(Value::Float64(l - r)),
+                    (Value::Int64(l), Value::Float64(r)) => Some(Value::Float64(*l as f64 - r)),
+                    (Value::Float64(l), Value::Int64(r)) => Some(Value::Float64(l - *r as f64)),
+                    _ => {
+                        let l = to_f64(left)?;
+                        let r = to_f64(right)?;
+                        Some(Value::Float64(l - r))
+                    }
+                }
+            }
+            BinaryFilterOp::Mul => {
+                fn to_f64(v: &Value) -> Option<f64> {
+                    match v {
+                        Value::Int64(i) => Some(*i as f64),
+                        Value::Float64(f) => Some(*f),
+                        Value::String(s) => s.parse::<f64>().ok(),
+                        _ => None,
+                    }
+                }
+                match (left, right) {
+                    (Value::Int64(l), Value::Int64(r)) => Some(Value::Int64(l * r)),
+                    (Value::Float64(l), Value::Float64(r)) => Some(Value::Float64(l * r)),
+                    (Value::Int64(l), Value::Float64(r)) => Some(Value::Float64(*l as f64 * r)),
+                    (Value::Float64(l), Value::Int64(r)) => Some(Value::Float64(l * *r as f64)),
+                    _ => {
+                        let l = to_f64(left)?;
+                        let r = to_f64(right)?;
+                        Some(Value::Float64(l * r))
+                    }
+                }
+            }
+            BinaryFilterOp::Div => {
+                fn to_f64(v: &Value) -> Option<f64> {
+                    match v {
+                        Value::Int64(i) => Some(*i as f64),
+                        Value::Float64(f) => Some(*f),
+                        Value::String(s) => s.parse::<f64>().ok(),
+                        _ => None,
+                    }
+                }
+                match (left, right) {
+                    (Value::Int64(l), Value::Int64(r)) if *r != 0 => Some(Value::Int64(l / r)),
+                    (Value::Float64(l), Value::Float64(r)) if *r != 0.0 => {
+                        Some(Value::Float64(l / r))
+                    }
+                    (Value::Int64(l), Value::Float64(r)) if *r != 0.0 => {
+                        Some(Value::Float64(*l as f64 / r))
+                    }
+                    (Value::Float64(l), Value::Int64(r)) if *r != 0 => {
+                        Some(Value::Float64(l / *r as f64))
+                    }
+                    _ => {
+                        let l = to_f64(left)?;
+                        let r = to_f64(right)?;
+                        if r != 0.0 {
+                            Some(Value::Float64(l / r))
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
             BinaryFilterOp::Mod => match (left, right) {
                 (Value::Int64(l), Value::Int64(r)) if *r != 0 => Some(Value::Int64(l % r)),
                 _ => None,
@@ -603,9 +1880,17 @@ impl RdfExpressionPredicate {
                 None
             }
             BinaryFilterOp::Regex => {
-                // Regex matching - not yet implemented for RDF
-                // Would need regex crate for full support
-                None
+                // SPARQL REGEX(string, pattern) - returns true if string matches pattern
+                match (left, right) {
+                    (Value::String(text), Value::String(pattern)) => {
+                        // Compile the regex pattern
+                        match regex::Regex::new(pattern) {
+                            Ok(re) => Some(Value::Bool(re.is_match(text))),
+                            Err(_) => None, // Invalid regex pattern
+                        }
+                    }
+                    _ => None,
+                }
             }
             BinaryFilterOp::Pow => {
                 // Power operation
@@ -640,11 +1925,455 @@ impl RdfExpressionPredicate {
             },
         }
     }
+
+    /// Evaluates SPARQL function calls.
+    fn eval_function_call(
+        &self,
+        name: &str,
+        args: &[FilterExpression],
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<Value> {
+        // Normalize function name to uppercase for case-insensitive matching
+        let func_name = name.to_uppercase();
+
+        match func_name.as_str() {
+            // CONCAT - concatenate multiple strings
+            "CONCAT" => {
+                let mut result = String::new();
+                for arg in args {
+                    if let Some(Value::String(s)) = self.eval_expr(arg, chunk, row) {
+                        result.push_str(&s);
+                    } else if let Some(val) = self.eval_expr(arg, chunk, row) {
+                        // Convert non-string values to string
+                        result.push_str(&value_to_string(&val));
+                    }
+                }
+                Some(Value::String(result.into()))
+            }
+
+            // REPLACE - replace occurrences of pattern with replacement
+            "REPLACE" => {
+                if args.len() < 3 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let pattern = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let replacement = match self.eval_expr(&args[2], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+
+                // Check if the pattern should be treated as regex (4th argument with 'r' flag)
+                if args.len() >= 4 {
+                    if let Some(Value::String(flags)) = self.eval_expr(&args[3], chunk, row) {
+                        if flags.contains('r') || flags.contains('i') {
+                            // Regex-based replace
+                            let regex_pattern = if flags.contains('i') {
+                                format!("(?i){}", &pattern)
+                            } else {
+                                pattern.clone()
+                            };
+                            if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                                return Some(Value::String(
+                                    re.replace_all(&text, &replacement).into(),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Simple string replace
+                Some(Value::String(text.replace(&pattern, &replacement).into()))
+            }
+
+            // STRLEN - string length
+            "STRLEN" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                Some(Value::Int64(text.chars().count() as i64))
+            }
+
+            // UCASE - uppercase
+            "UCASE" | "UPPER" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                Some(Value::String(text.to_uppercase().into()))
+            }
+
+            // LCASE - lowercase
+            "LCASE" | "LOWER" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                Some(Value::String(text.to_lowercase().into()))
+            }
+
+            // SUBSTR - substring extraction
+            "SUBSTR" | "SUBSTRING" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let start = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::Int64(i) => (i.max(1) - 1) as usize, // SPARQL uses 1-based indexing
+                    _ => return None,
+                };
+                let len = if args.len() >= 3 {
+                    match self.eval_expr(&args[2], chunk, row)? {
+                        Value::Int64(i) => Some(i.max(0) as usize),
+                        _ => return None,
+                    }
+                } else {
+                    None
+                };
+
+                let chars: Vec<char> = text.chars().collect();
+                let substr: String = if let Some(len) = len {
+                    chars.iter().skip(start).take(len).collect()
+                } else {
+                    chars.iter().skip(start).collect()
+                };
+                Some(Value::String(substr.into()))
+            }
+
+            // STRSTARTS - check if string starts with prefix
+            "STRSTARTS" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let prefix = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                Some(Value::Bool(text.starts_with(&prefix)))
+            }
+
+            // STRENDS - check if string ends with suffix
+            "STRENDS" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let suffix = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                Some(Value::Bool(text.ends_with(&suffix)))
+            }
+
+            // CONTAINS - check if string contains substring
+            "CONTAINS" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let pattern = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                Some(Value::Bool(text.contains(&pattern)))
+            }
+
+            // STRBEFORE - substring before pattern
+            "STRBEFORE" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let pattern = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                if let Some(pos) = text.find(&pattern) {
+                    Some(Value::String(text[..pos].to_string().into()))
+                } else {
+                    Some(Value::String("".into()))
+                }
+            }
+
+            // STRAFTER - substring after pattern
+            "STRAFTER" => {
+                if args.len() < 2 {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                let pattern = match self.eval_expr(&args[1], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                if let Some(pos) = text.find(&pattern) {
+                    Some(Value::String(
+                        text[pos + pattern.len()..].to_string().into(),
+                    ))
+                } else {
+                    Some(Value::String("".into()))
+                }
+            }
+
+            // ENCODE_FOR_URI - URL encode
+            "ENCODE_FOR_URI" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let text = match self.eval_expr(&args[0], chunk, row)? {
+                    Value::String(s) => s.to_string(),
+                    v => value_to_string(&v),
+                };
+                // Simple URL encoding for common characters
+                let encoded: String = text
+                    .chars()
+                    .map(|c| match c {
+                        'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+                        _ => format!("%{:02X}", c as u32),
+                    })
+                    .collect();
+                Some(Value::String(encoded.into()))
+            }
+
+            // COALESCE - return first non-null value
+            "COALESCE" => {
+                for arg in args {
+                    if let Some(val) = self.eval_expr(arg, chunk, row) {
+                        if !matches!(val, Value::Null) {
+                            return Some(val);
+                        }
+                    }
+                }
+                None
+            }
+
+            // IF - conditional expression
+            "IF" => {
+                if args.len() < 3 {
+                    return None;
+                }
+                let condition = self.eval_expr(&args[0], chunk, row)?;
+                if condition.as_bool()? {
+                    self.eval_expr(&args[1], chunk, row)
+                } else {
+                    self.eval_expr(&args[2], chunk, row)
+                }
+            }
+
+            // BOUND - check if variable is bound
+            "BOUND" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let is_bound = self.eval_expr(&args[0], chunk, row).is_some();
+                Some(Value::Bool(is_bound))
+            }
+
+            // STR - convert to string
+            "STR" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
+                Some(Value::String(value_to_string(&val).into()))
+            }
+
+            // ISIRI / ISURI - check if value is an IRI
+            "ISIRI" | "ISURI" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
+                if let Value::String(s) = val {
+                    // Check if it looks like an IRI (starts with a scheme)
+                    let is_iri = s.contains("://") || s.starts_with("urn:");
+                    Some(Value::Bool(is_iri))
+                } else {
+                    Some(Value::Bool(false))
+                }
+            }
+
+            // ISBLANK - check if value is a blank node
+            "ISBLANK" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
+                if let Value::String(s) = val {
+                    Some(Value::Bool(s.starts_with("_:")))
+                } else {
+                    Some(Value::Bool(false))
+                }
+            }
+
+            // ISLITERAL - check if value is a literal
+            "ISLITERAL" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
+                // In our model, non-IRI strings and other values are literals
+                match &val {
+                    Value::String(s) => {
+                        Some(Value::Bool(!s.contains("://") && !s.starts_with("_:")))
+                    }
+                    _ => Some(Value::Bool(true)),
+                }
+            }
+
+            // ISNUMERIC - check if value is numeric
+            "ISNUMERIC" => {
+                if args.is_empty() {
+                    return None;
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
+                let is_numeric = matches!(val, Value::Int64(_) | Value::Float64(_))
+                    || matches!(&val, Value::String(s) if s.parse::<f64>().is_ok());
+                Some(Value::Bool(is_numeric))
+            }
+
+            // ABS - absolute value
+            "ABS" => {
+                if args.is_empty() {
+                    return None;
+                }
+                match self.eval_expr(&args[0], chunk, row)? {
+                    Value::Int64(v) => Some(Value::Int64(v.abs())),
+                    Value::Float64(v) => Some(Value::Float64(v.abs())),
+                    _ => None,
+                }
+            }
+
+            // CEIL - ceiling
+            "CEIL" => {
+                if args.is_empty() {
+                    return None;
+                }
+                match self.eval_expr(&args[0], chunk, row)? {
+                    Value::Int64(v) => Some(Value::Int64(v)),
+                    Value::Float64(v) => Some(Value::Float64(v.ceil())),
+                    _ => None,
+                }
+            }
+
+            // FLOOR - floor
+            "FLOOR" => {
+                if args.is_empty() {
+                    return None;
+                }
+                match self.eval_expr(&args[0], chunk, row)? {
+                    Value::Int64(v) => Some(Value::Int64(v)),
+                    Value::Float64(v) => Some(Value::Float64(v.floor())),
+                    _ => None,
+                }
+            }
+
+            // ROUND - round to nearest integer
+            "ROUND" => {
+                if args.is_empty() {
+                    return None;
+                }
+                match self.eval_expr(&args[0], chunk, row)? {
+                    Value::Int64(v) => Some(Value::Int64(v)),
+                    Value::Float64(v) => Some(Value::Float64(v.round())),
+                    _ => None,
+                }
+            }
+
+            // Unknown function
+            _ => None,
+        }
+    }
 }
 
 impl Predicate for RdfExpressionPredicate {
     fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
         matches!(self.eval(chunk, row), Some(Value::Bool(true)))
+    }
+}
+
+// ============================================================================
+// RDF Join Condition
+// ============================================================================
+
+/// Join condition for joining on shared variables in SPARQL.
+///
+/// This condition checks that shared variables have equal values between
+/// left and right sides of a join.
+struct RdfJoinCondition {
+    /// Pairs of (left_col_idx, right_col_idx) for shared variables
+    shared_vars: Vec<(usize, usize)>,
+}
+
+impl RdfJoinCondition {
+    fn new(shared_vars: Vec<(usize, usize)>) -> Self {
+        Self { shared_vars }
+    }
+}
+
+impl JoinCondition for RdfJoinCondition {
+    fn evaluate(
+        &self,
+        left_chunk: &DataChunk,
+        left_row: usize,
+        right_chunk: &DataChunk,
+        right_row: usize,
+    ) -> bool {
+        // Check that all shared variables have equal values
+        for (left_idx, right_idx) in &self.shared_vars {
+            let left_val = left_chunk
+                .column(*left_idx)
+                .and_then(|c| c.get_value(left_row));
+            let right_val = right_chunk
+                .column(*right_idx)
+                .and_then(|c| c.get_value(right_row));
+
+            match (left_val, right_val) {
+                (Some(l), Some(r)) => {
+                    if l != r {
+                        return false;
+                    }
+                }
+                // If either is null/missing, they don't match
+                _ => return false,
+            }
+        }
+        true
     }
 }
 
@@ -662,34 +2391,18 @@ fn term_to_string(term: &Term) -> String {
 }
 
 /// Pushes an RDF term value to a column, preserving type where possible.
+/// Pushes an RDF term value to a column.
+///
+/// For RDF columns (which use String type), we always push as string to avoid
+/// type mismatches. The typed literal's value is preserved as a string, and
+/// numeric comparisons are handled at the filter level.
 fn push_term_value(col: &mut grafeo_core::execution::ValueVector, term: &Term) {
     match term {
         Term::Iri(iri) => col.push_string(iri.as_str().to_string()),
         Term::BlankNode(bnode) => col.push_string(format!("_:{}", bnode.id())),
         Term::Literal(lit) => {
-            // Try to preserve typed literals
-            let datatype = lit.datatype();
-            match datatype {
-                Literal::XSD_INTEGER | "http://www.w3.org/2001/XMLSchema#int" => {
-                    if let Ok(i) = lit.value().parse::<i64>() {
-                        col.push_int64(i);
-                        return;
-                    }
-                }
-                Literal::XSD_DOUBLE | "http://www.w3.org/2001/XMLSchema#float" => {
-                    if let Ok(f) = lit.value().parse::<f64>() {
-                        col.push_float64(f);
-                        return;
-                    }
-                }
-                Literal::XSD_BOOLEAN => {
-                    if let Ok(b) = lit.value().parse::<bool>() {
-                        col.push_bool(b);
-                        return;
-                    }
-                }
-                _ => {}
-            }
+            // Always push as string since RDF columns are String type
+            // Numeric operations are handled by the filter evaluation
             col.push_string(lit.value().to_string());
         }
     }
@@ -701,7 +2414,7 @@ fn component_to_term(component: &TripleComponent) -> Option<Term> {
         TripleComponent::Variable(_) => None,
         TripleComponent::Iri(iri) => Some(Term::iri(iri.clone())),
         TripleComponent::Literal(value) => match value {
-            Value::String(s) => Some(Term::literal(Arc::clone(s))),
+            Value::String(s) => Some(Term::literal(s.clone())),
             Value::Int64(i) => Some(Term::typed_literal(i.to_string(), Literal::XSD_INTEGER)),
             Value::Float64(f) => Some(Term::typed_literal(f.to_string(), Literal::XSD_DOUBLE)),
             Value::Bool(b) => Some(Term::typed_literal(b.to_string(), Literal::XSD_BOOLEAN)),
@@ -742,6 +2455,34 @@ fn expression_to_string(expr: &LogicalExpression) -> String {
     }
 }
 
+/// Converts a value to its string representation.
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Bool(b) => b.to_string(),
+        Value::Int64(i) => i.to_string(),
+        Value::Float64(f) => f.to_string(),
+        Value::String(s) => s.to_string(),
+        Value::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        Value::Timestamp(t) => t.to_string(),
+        Value::List(items) => {
+            let parts: Vec<String> = items.iter().map(value_to_string).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        Value::Map(entries) => {
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, value_to_string(v)))
+                .collect();
+            format!("{{{}}}", parts.join(", "))
+        }
+        Value::Vector(v) => {
+            let parts: Vec<String> = v.iter().map(|f| f.to_string()).collect();
+            format!("vector([{}])", parts.join(", "))
+        }
+    }
+}
+
 /// Compares two values and returns a boolean result.
 fn compare_values<F>(left: &Value, right: &Value, cmp: F) -> Option<Value>
 where
@@ -750,9 +2491,33 @@ where
     let ordering = match (left, right) {
         (Value::Int64(l), Value::Int64(r)) => l.cmp(r),
         (Value::Float64(l), Value::Float64(r)) => l.partial_cmp(r)?,
-        (Value::String(l), Value::String(r)) => l.cmp(r),
+        (Value::String(l), Value::String(r)) => {
+            // Try numeric comparison first if both look like numbers
+            if let (Ok(l_num), Ok(r_num)) = (l.parse::<f64>(), r.parse::<f64>()) {
+                l_num.partial_cmp(&r_num)?
+            } else {
+                l.cmp(r)
+            }
+        }
         (Value::Int64(l), Value::Float64(r)) => (*l as f64).partial_cmp(r)?,
         (Value::Float64(l), Value::Int64(r)) => l.partial_cmp(&(*r as f64))?,
+        // RDF values are often stored as strings - try numeric conversion
+        (Value::String(s), Value::Int64(r)) => {
+            let l_num = s.parse::<f64>().ok()?;
+            l_num.partial_cmp(&(*r as f64))?
+        }
+        (Value::String(s), Value::Float64(r)) => {
+            let l_num = s.parse::<f64>().ok()?;
+            l_num.partial_cmp(r)?
+        }
+        (Value::Int64(l), Value::String(s)) => {
+            let r_num = s.parse::<f64>().ok()?;
+            (*l as f64).partial_cmp(&r_num)?
+        }
+        (Value::Float64(l), Value::String(s)) => {
+            let r_num = s.parse::<f64>().ok()?;
+            l.partial_cmp(&r_num)?
+        }
         _ => return None,
     };
     Some(Value::Bool(cmp(ordering)))

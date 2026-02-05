@@ -57,6 +57,138 @@ pub enum QueryForm {
     Ask(AskQuery),
     /// DESCRIBE query.
     Describe(DescribeQuery),
+    /// Update operation (SPARQL Update).
+    Update(UpdateOperation),
+}
+
+/// A SPARQL Update operation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateOperation {
+    /// INSERT DATA { triples }.
+    InsertData {
+        /// The triples to insert.
+        data: Vec<QuadPattern>,
+    },
+
+    /// DELETE DATA { triples }.
+    DeleteData {
+        /// The triples to delete.
+        data: Vec<QuadPattern>,
+    },
+
+    /// DELETE WHERE { pattern }.
+    DeleteWhere {
+        /// The pattern to match and delete.
+        pattern: GraphPattern,
+    },
+
+    /// DELETE { template } INSERT { template } WHERE { pattern }
+    /// (also handles DELETE-only and INSERT-only variants).
+    Modify {
+        /// Optional WITH graph.
+        with_graph: Option<Iri>,
+        /// Optional delete template.
+        delete_template: Option<Vec<QuadPattern>>,
+        /// Optional insert template.
+        insert_template: Option<Vec<QuadPattern>>,
+        /// Optional USING clauses.
+        using_clauses: Vec<UsingClause>,
+        /// The WHERE pattern.
+        where_clause: GraphPattern,
+    },
+
+    /// LOAD url INTO graph.
+    Load {
+        /// Whether SILENT is specified.
+        silent: bool,
+        /// Source URL.
+        source: Iri,
+        /// Optional destination graph.
+        destination: Option<Iri>,
+    },
+
+    /// CLEAR graph.
+    Clear {
+        /// Whether SILENT is specified.
+        silent: bool,
+        /// The graph target.
+        target: GraphTarget,
+    },
+
+    /// DROP graph.
+    Drop {
+        /// Whether SILENT is specified.
+        silent: bool,
+        /// The graph target.
+        target: GraphTarget,
+    },
+
+    /// CREATE GRAPH uri.
+    Create {
+        /// Whether SILENT is specified.
+        silent: bool,
+        /// The graph to create.
+        graph: Iri,
+    },
+
+    /// COPY source TO destination.
+    Copy {
+        /// Whether SILENT is specified.
+        silent: bool,
+        /// Source graph.
+        source: GraphTarget,
+        /// Destination graph.
+        destination: GraphTarget,
+    },
+
+    /// MOVE source TO destination.
+    Move {
+        /// Whether SILENT is specified.
+        silent: bool,
+        /// Source graph.
+        source: GraphTarget,
+        /// Destination graph.
+        destination: GraphTarget,
+    },
+
+    /// ADD source TO destination.
+    Add {
+        /// Whether SILENT is specified.
+        silent: bool,
+        /// Source graph.
+        source: GraphTarget,
+        /// Destination graph.
+        destination: GraphTarget,
+    },
+}
+
+/// A quad pattern (triple with optional graph).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuadPattern {
+    /// Optional graph.
+    pub graph: Option<VariableOrIri>,
+    /// The triple pattern.
+    pub triple: TriplePattern,
+}
+
+/// USING clause for updates.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UsingClause {
+    /// `USING <iri>`.
+    Default(Iri),
+    /// `USING NAMED <iri>`.
+    Named(Iri),
+}
+
+/// Target for graph management operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GraphTarget {
+    /// DEFAULT graph.
+    Default,
+    /// NAMED graph by IRI.
+    Named(Iri),
+    /// ALL graphs.
+    All,
 }
 
 /// A SELECT query.
@@ -624,6 +756,18 @@ pub enum BuiltInFunction {
     // Comparison
     /// sameTerm(expr1, expr2).
     SameTerm,
+
+    // Vector functions (extension for AI/ML workloads)
+    /// COSINE_SIMILARITY(vec1, vec2).
+    CosineSimilarity,
+    /// EUCLIDEAN_DISTANCE(vec1, vec2).
+    EuclideanDistance,
+    /// DOT_PRODUCT(vec1, vec2).
+    DotProduct,
+    /// MANHATTAN_DISTANCE(vec1, vec2).
+    ManhattanDistance,
+    /// VECTOR([f1, f2, ...]) - creates a vector literal.
+    Vector,
 }
 
 /// Aggregate expression.

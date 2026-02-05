@@ -407,6 +407,11 @@ impl<'a> Parser<'a> {
             return Ok(HasStep::KeyPredicate(first, pred));
         }
 
+        // Check if next is a direct predicate call (gt, lt, etc. without P. prefix)
+        if let Some(pred) = self.try_parse_direct_predicate()? {
+            return Ok(HasStep::KeyPredicate(first, pred));
+        }
+
         let second = self.parse_value()?;
 
         if !self.check(TokenKind::Comma) {
@@ -421,6 +426,90 @@ impl<'a> Parser<'a> {
             _ => return Err(self.error("Expected string for key")),
         };
         Ok(HasStep::LabelKeyValue(first, key, third))
+    }
+
+    /// Tries to parse a direct predicate call like `gt(28)` without the `P.` prefix.
+    /// Returns `Ok(None)` if the current token is not a predicate keyword.
+    fn try_parse_direct_predicate(&mut self) -> Result<Option<Predicate>> {
+        let pred_kind = match self.current_kind() {
+            Some(TokenKind::Eq) => Some(TokenKind::Eq),
+            Some(TokenKind::Neq) => Some(TokenKind::Neq),
+            Some(TokenKind::Lt) => Some(TokenKind::Lt),
+            Some(TokenKind::Lte) => Some(TokenKind::Lte),
+            Some(TokenKind::Gt) => Some(TokenKind::Gt),
+            Some(TokenKind::Gte) => Some(TokenKind::Gte),
+            Some(TokenKind::Within) => Some(TokenKind::Within),
+            Some(TokenKind::Without) => Some(TokenKind::Without),
+            Some(TokenKind::Between) => Some(TokenKind::Between),
+            Some(TokenKind::Containing) => Some(TokenKind::Containing),
+            Some(TokenKind::StartingWith) => Some(TokenKind::StartingWith),
+            Some(TokenKind::EndingWith) => Some(TokenKind::EndingWith),
+            _ => None,
+        };
+
+        let Some(kind) = pred_kind else {
+            return Ok(None);
+        };
+
+        self.advance(); // consume predicate keyword
+        self.expect(TokenKind::LParen)?;
+
+        let pred = match kind {
+            TokenKind::Eq => {
+                let value = self.parse_value()?;
+                Predicate::Eq(value)
+            }
+            TokenKind::Neq => {
+                let value = self.parse_value()?;
+                Predicate::Neq(value)
+            }
+            TokenKind::Lt => {
+                let value = self.parse_value()?;
+                Predicate::Lt(value)
+            }
+            TokenKind::Lte => {
+                let value = self.parse_value()?;
+                Predicate::Lte(value)
+            }
+            TokenKind::Gt => {
+                let value = self.parse_value()?;
+                Predicate::Gt(value)
+            }
+            TokenKind::Gte => {
+                let value = self.parse_value()?;
+                Predicate::Gte(value)
+            }
+            TokenKind::Within => {
+                let values = self.parse_value_list()?;
+                Predicate::Within(values)
+            }
+            TokenKind::Without => {
+                let values = self.parse_value_list()?;
+                Predicate::Without(values)
+            }
+            TokenKind::Between => {
+                let start = self.parse_value()?;
+                self.expect(TokenKind::Comma)?;
+                let end = self.parse_value()?;
+                Predicate::Between(start, end)
+            }
+            TokenKind::Containing => {
+                let s = self.parse_string()?;
+                Predicate::Containing(s)
+            }
+            TokenKind::StartingWith => {
+                let s = self.parse_string()?;
+                Predicate::StartingWith(s)
+            }
+            TokenKind::EndingWith => {
+                let s = self.parse_string()?;
+                Predicate::EndingWith(s)
+            }
+            _ => return Err(self.error("Unknown predicate")),
+        };
+
+        self.expect(TokenKind::RParen)?;
+        Ok(Some(pred))
     }
 
     fn parse_predicate(&mut self) -> Result<Predicate> {
@@ -524,12 +613,102 @@ impl<'a> Parser<'a> {
             return Ok(ByModifier::Token(t));
         }
 
+        // Check for direct order tokens: asc, desc, shuffle
+        if let Some(order) = self.try_parse_sort_order() {
+            return Ok(ByModifier::Order(order));
+        }
+
+        // Check for step-like tokens (count(), sum(), etc.) for traversal-style by()
+        if let Some(step) = self.try_parse_by_step()? {
+            return Ok(ByModifier::Traversal(vec![step]));
+        }
+
         if self.check_string() {
             let key = self.parse_string()?;
+
+            // Check for optional second argument: order direction
+            if self.check(TokenKind::Comma) {
+                self.advance(); // consume ','
+                if let Some(order) = self.try_parse_sort_order() {
+                    return Ok(ByModifier::KeyWithOrder(key, order));
+                }
+                return Err(self.error("Expected sort order (asc, desc, or shuffle) after comma"));
+            }
+
             return Ok(ByModifier::Key(key));
         }
 
         Ok(ByModifier::Identity)
+    }
+
+    /// Tries to parse a step inside by() like count(), sum(), etc.
+    fn try_parse_by_step(&mut self) -> Result<Option<Step>> {
+        let step = match self.current_kind() {
+            Some(TokenKind::Count) => {
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                self.expect(TokenKind::RParen)?;
+                Some(Step::Count)
+            }
+            Some(TokenKind::Sum) => {
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                self.expect(TokenKind::RParen)?;
+                Some(Step::Sum)
+            }
+            Some(TokenKind::Mean) => {
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                self.expect(TokenKind::RParen)?;
+                Some(Step::Mean)
+            }
+            Some(TokenKind::Min) => {
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                self.expect(TokenKind::RParen)?;
+                Some(Step::Min)
+            }
+            Some(TokenKind::Max) => {
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                self.expect(TokenKind::RParen)?;
+                Some(Step::Max)
+            }
+            Some(TokenKind::Fold) => {
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                self.expect(TokenKind::RParen)?;
+                Some(Step::Fold)
+            }
+            Some(TokenKind::Values) => {
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                let keys = self.parse_string_list()?;
+                self.expect(TokenKind::RParen)?;
+                Some(Step::Values(keys))
+            }
+            _ => None,
+        };
+        Ok(step)
+    }
+
+    /// Tries to parse a sort order token (asc, desc, shuffle).
+    fn try_parse_sort_order(&mut self) -> Option<SortOrder> {
+        match self.current_kind() {
+            Some(TokenKind::Asc) => {
+                self.advance();
+                Some(SortOrder::Asc)
+            }
+            Some(TokenKind::Desc) => {
+                self.advance();
+                Some(SortOrder::Desc)
+            }
+            Some(TokenKind::Shuffle) => {
+                self.advance();
+                Some(SortOrder::Shuffle)
+            }
+            _ => None,
+        }
     }
 
     fn parse_property_args(&mut self) -> Result<PropertyStep> {
@@ -567,12 +746,59 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_from_to(&mut self) -> Result<FromTo> {
+        // Check for string label first
         if self.check_string() {
             let label = self.parse_string()?;
             return Ok(FromTo::Label(label));
         }
-        // Could also be a traversal, but for simplicity just handle labels
-        Err(self.error("Expected label for from/to"))
+
+        // Check for traversal starting with 'g'
+        if self.check(TokenKind::G) {
+            let steps = self.parse_sub_traversal()?;
+            return Ok(FromTo::Traversal(steps));
+        }
+
+        Err(self.error("Expected label or traversal for from/to"))
+    }
+
+    /// Parse a sub-traversal (e.g., g.V().has('name', 'Bob'))
+    /// Returns the steps as a Vec<Step>
+    fn parse_sub_traversal(&mut self) -> Result<Vec<Step>> {
+        // Consume 'g'
+        self.expect(TokenKind::G)?;
+        self.expect(TokenKind::Dot)?;
+
+        // Parse source (V, E, etc.) and convert to a step
+        let source = self.parse_source()?;
+
+        // Convert source to initial steps
+        let mut steps = match source {
+            TraversalSource::V(ids) => {
+                if let Some(ids) = ids {
+                    vec![Step::HasId(ids)]
+                } else {
+                    Vec::new()
+                }
+            }
+            TraversalSource::E(ids) => {
+                if let Some(ids) = ids {
+                    vec![Step::HasId(ids)]
+                } else {
+                    Vec::new()
+                }
+            }
+            TraversalSource::AddV(label) => vec![Step::AddV(label)],
+            TraversalSource::AddE(label) => vec![Step::AddE(label)],
+        };
+
+        // Parse additional steps until we hit the closing paren of from/to
+        while self.check(TokenKind::Dot) {
+            self.advance(); // consume '.'
+            let step = self.parse_step()?;
+            steps.push(step);
+        }
+
+        Ok(steps)
     }
 
     fn parse_string_list(&mut self) -> Result<Vec<String>> {
@@ -745,6 +971,54 @@ mod tests {
             assert_eq!(keys[1], "age");
         } else {
             panic!("Expected Values step");
+        }
+    }
+
+    #[test]
+    fn test_parse_has_with_direct_predicate_gt() {
+        let mut parser = Parser::new("g.V().has('age', gt(28))");
+        let result = parser.parse();
+        assert!(result.is_ok(), "Failed to parse: {:?}", result);
+        let stmt = result.unwrap();
+        assert_eq!(stmt.steps.len(), 1);
+        if let Step::Has(HasStep::KeyPredicate(key, Predicate::Gt(value))) = &stmt.steps[0] {
+            assert_eq!(key, "age");
+            assert_eq!(*value, Value::Int64(28));
+        } else {
+            panic!(
+                "Expected Has step with gt predicate, got: {:?}",
+                stmt.steps[0]
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_has_with_direct_predicate_lt() {
+        let mut parser = Parser::new("g.V().has('age', lt(50))");
+        let result = parser.parse();
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        if let Step::Has(HasStep::KeyPredicate(key, Predicate::Lt(value))) = &stmt.steps[0] {
+            assert_eq!(key, "age");
+            assert_eq!(*value, Value::Int64(50));
+        } else {
+            panic!("Expected Has step with lt predicate");
+        }
+    }
+
+    #[test]
+    fn test_parse_has_with_direct_predicate_within() {
+        let mut parser = Parser::new("g.V().has('status', within('active', 'pending'))");
+        let result = parser.parse();
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        if let Step::Has(HasStep::KeyPredicate(key, Predicate::Within(values))) = &stmt.steps[0] {
+            assert_eq!(key, "status");
+            assert_eq!(values.len(), 2);
+            assert_eq!(values[0], Value::String("active".into()));
+            assert_eq!(values[1], Value::String("pending".into()));
+        } else {
+            panic!("Expected Has step with within predicate");
         }
     }
 }

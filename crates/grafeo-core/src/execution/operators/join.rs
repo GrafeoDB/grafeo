@@ -79,6 +79,14 @@ impl HashKey {
                 keys.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
                 HashKey::Composite(keys)
             }
+            Value::Vector(v) => {
+                // Hash vectors by converting each f32 to its bit representation
+                HashKey::Composite(
+                    v.iter()
+                        .map(|f| HashKey::Int64(f.to_bits() as i64))
+                        .collect(),
+                )
+            }
         }
     }
 
@@ -593,6 +601,8 @@ pub struct NestedLoopJoinOperator {
     current_left_row: usize,
     /// Current chunk index in the right side.
     current_right_chunk: usize,
+    /// Whether the current left row has been matched (for Left Join).
+    current_left_matched: bool,
     /// Current row in the current right chunk.
     current_right_row: usize,
 }
@@ -670,6 +680,7 @@ impl NestedLoopJoinOperator {
             current_left_row: 0,
             current_right_chunk: 0,
             current_right_row: 0,
+            current_left_matched: false,
         }
     }
 
@@ -721,6 +732,38 @@ impl NestedLoopJoinOperator {
 
         builder.advance_row();
     }
+
+    /// Produces an output row with NULLs for the right side (for unmatched left rows in Left Join).
+    fn produce_left_unmatched_row(
+        &self,
+        builder: &mut DataChunkBuilder,
+        left_chunk: &DataChunk,
+        left_row: usize,
+        right_col_count: usize,
+    ) {
+        // Copy left columns
+        for col_idx in 0..left_chunk.column_count() {
+            if let (Some(src), Some(dst)) =
+                (left_chunk.column(col_idx), builder.column_mut(col_idx))
+            {
+                if let Some(val) = src.get_value(left_row) {
+                    dst.push_value(val);
+                } else {
+                    dst.push_value(Value::Null);
+                }
+            }
+        }
+
+        // Fill right columns with NULLs
+        let left_col_count = left_chunk.column_count();
+        for col_idx in 0..right_col_count {
+            if let Some(dst) = builder.column_mut(left_col_count + col_idx) {
+                dst.push_value(Value::Null);
+            }
+        }
+
+        builder.advance_row();
+    }
 }
 
 impl Operator for NestedLoopJoinOperator {
@@ -758,9 +801,24 @@ impl Operator for NestedLoopJoinOperator {
             let left_chunk = self.current_left_chunk.as_ref().unwrap();
             let left_rows: Vec<usize> = left_chunk.selected_indices().collect();
 
+            // Calculate right column count for potential unmatched rows
+            let right_col_count = if !self.right_chunks.is_empty() {
+                self.right_chunks[0].column_count()
+            } else {
+                // Infer from output schema
+                self.output_schema
+                    .len()
+                    .saturating_sub(left_chunk.column_count())
+            };
+
             // Process current left row against all right rows
             while self.current_left_row < left_rows.len() {
                 let left_row = left_rows[self.current_left_row];
+
+                // Reset match tracking for this left row
+                if self.current_right_chunk == 0 && self.current_right_row == 0 {
+                    self.current_left_matched = false;
+                }
 
                 // Cross join or inner/other join
                 while self.current_right_chunk < self.right_chunks.len() {
@@ -779,6 +837,7 @@ impl Operator for NestedLoopJoinOperator {
                         };
 
                         if matches {
+                            self.current_left_matched = true;
                             self.produce_row(
                                 &mut builder,
                                 left_chunk,
@@ -798,6 +857,24 @@ impl Operator for NestedLoopJoinOperator {
 
                     self.current_right_chunk += 1;
                     self.current_right_row = 0;
+                }
+
+                // Done processing all right rows for this left row
+                // For Left Join, emit unmatched left row with NULLs
+                if matches!(self.join_type, JoinType::Left) && !self.current_left_matched {
+                    self.produce_left_unmatched_row(
+                        &mut builder,
+                        left_chunk,
+                        left_row,
+                        right_col_count,
+                    );
+
+                    if builder.is_full() {
+                        self.current_left_row += 1;
+                        self.current_right_chunk = 0;
+                        self.current_right_row = 0;
+                        return Ok(Some(builder.finish()));
+                    }
                 }
 
                 // Move to next left row
@@ -824,6 +901,7 @@ impl Operator for NestedLoopJoinOperator {
         self.current_left_row = 0;
         self.current_right_chunk = 0;
         self.current_right_row = 0;
+        self.current_left_matched = false;
     }
 
     fn name(&self) -> &'static str {

@@ -208,23 +208,47 @@ impl GraphQLTranslator {
     ) -> Result<LogicalPlan> {
         let var = self.next_var();
 
-        // Find the id argument (required for update)
-        let id_arg = field
-            .arguments
-            .iter()
-            .find(|arg| arg.name == "id")
-            .ok_or_else(|| {
-                Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    "Update mutation requires an 'id' argument",
-                ))
-            })?;
+        // Need at least 2 arguments: one for filter, one for update
+        if field.arguments.len() < 2 {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                "Update mutation requires a filter argument and at least one property to update",
+            )));
+        }
 
-        // Collect properties to update (all arguments except 'id')
+        // Determine filter: prefer 'id', otherwise use first argument
+        let (filter_arg_name, filter_predicate) =
+            if let Some(id_arg) = field.arguments.iter().find(|arg| arg.name == "id") {
+                // Filter by id
+                (
+                    "id".to_string(),
+                    LogicalExpression::Binary {
+                        left: Box::new(LogicalExpression::Id(var.clone())),
+                        op: BinaryOp::Eq,
+                        right: Box::new(LogicalExpression::Literal(id_arg.value.to_value())),
+                    },
+                )
+            } else {
+                // Use first argument as property filter
+                let first_arg = &field.arguments[0];
+                (
+                    first_arg.name.clone(),
+                    LogicalExpression::Binary {
+                        left: Box::new(LogicalExpression::Property {
+                            variable: var.clone(),
+                            property: first_arg.name.clone(),
+                        }),
+                        op: BinaryOp::Eq,
+                        right: Box::new(LogicalExpression::Literal(first_arg.value.to_value())),
+                    },
+                )
+            };
+
+        // Collect properties to update (all arguments except the filter argument)
         let properties: Vec<(String, LogicalExpression)> = field
             .arguments
             .iter()
-            .filter(|arg| arg.name != "id")
+            .filter(|arg| arg.name != filter_arg_name)
             .map(|arg| {
                 (
                     arg.name.clone(),
@@ -247,13 +271,9 @@ impl GraphQLTranslator {
             input: None,
         });
 
-        // Filter by id
+        // Apply filter
         plan = LogicalOperator::Filter(FilterOp {
-            predicate: LogicalExpression::Binary {
-                left: Box::new(LogicalExpression::Id(var.clone())),
-                op: BinaryOp::Eq,
-                right: Box::new(LogicalExpression::Literal(id_arg.value.to_value())),
-            },
+            predicate: filter_predicate,
             input: Box::new(plan),
         });
 
@@ -289,17 +309,35 @@ impl GraphQLTranslator {
     ) -> Result<LogicalPlan> {
         let var = self.next_var();
 
-        // Find the id argument
-        let id_arg = field
-            .arguments
-            .iter()
-            .find(|arg| arg.name == "id")
-            .ok_or_else(|| {
-                Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    "Delete mutation requires an 'id' argument",
-                ))
-            })?;
+        // Need at least 1 argument for filter
+        if field.arguments.is_empty() {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                "Delete mutation requires a filter argument (id or property)",
+            )));
+        }
+
+        // Determine filter: prefer 'id', otherwise use first argument
+        let filter_predicate =
+            if let Some(id_arg) = field.arguments.iter().find(|arg| arg.name == "id") {
+                // Filter by id
+                LogicalExpression::Binary {
+                    left: Box::new(LogicalExpression::Id(var.clone())),
+                    op: BinaryOp::Eq,
+                    right: Box::new(LogicalExpression::Literal(id_arg.value.to_value())),
+                }
+            } else {
+                // Use first argument as property filter
+                let first_arg = &field.arguments[0];
+                LogicalExpression::Binary {
+                    left: Box::new(LogicalExpression::Property {
+                        variable: var.clone(),
+                        property: first_arg.name.clone(),
+                    }),
+                    op: BinaryOp::Eq,
+                    right: Box::new(LogicalExpression::Literal(first_arg.value.to_value())),
+                }
+            };
 
         // First scan for the node
         let mut plan = LogicalOperator::NodeScan(NodeScanOp {
@@ -308,19 +346,16 @@ impl GraphQLTranslator {
             input: None,
         });
 
-        // Filter by id
+        // Apply filter
         plan = LogicalOperator::Filter(FilterOp {
-            predicate: LogicalExpression::Binary {
-                left: Box::new(LogicalExpression::Id(var.clone())),
-                op: BinaryOp::Eq,
-                right: Box::new(LogicalExpression::Literal(id_arg.value.to_value())),
-            },
+            predicate: filter_predicate,
             input: Box::new(plan),
         });
 
-        // Delete the node
+        // Delete the node (GraphQL mutations are like DETACH DELETE)
         plan = LogicalOperator::DeleteNode(DeleteNodeOp {
             variable: var,
+            detach: true,
             input: Box::new(plan),
         });
 
@@ -452,22 +487,54 @@ impl GraphQLTranslator {
         input: LogicalOperator,
         current_var: &str,
     ) -> Result<LogicalOperator> {
+        // Collect all return items and build the plan
+        let (plan, return_items) =
+            self.collect_selection_items(selection_set, input, current_var)?;
+
+        // Wrap in Return if we have items
+        if !return_items.is_empty() {
+            Ok(LogicalOperator::Return(ReturnOp {
+                items: return_items,
+                distinct: false,
+                input: Box::new(plan),
+            }))
+        } else {
+            Ok(plan)
+        }
+    }
+
+    /// Collects return items from a selection set without wrapping in Return.
+    /// This allows nested selections to be collected and merged into a single Return.
+    fn collect_selection_items(
+        &self,
+        selection_set: &ast::SelectionSet,
+        input: LogicalOperator,
+        current_var: &str,
+    ) -> Result<(LogicalOperator, Vec<ReturnItem>)> {
         let mut return_items = Vec::new();
         let mut plan = input;
-        let mut nested_vars = Vec::new();
 
         for selection in &selection_set.selections {
             match selection {
                 ast::Selection::Field(field) => {
                     if field.selection_set.is_some() {
-                        // This is a relationship traversal
-                        let (new_plan, nested_var) =
-                            self.translate_nested_field(field, plan, current_var)?;
+                        // This is a relationship traversal - collect nested items
+                        let (new_plan, nested_items) =
+                            self.translate_nested_field_items(field, plan, current_var)?;
                         plan = new_plan;
-                        nested_vars.push((
-                            field.alias.clone().unwrap_or(field.name.clone()),
-                            nested_var,
-                        ));
+                        // Add nested items with proper aliasing
+                        for item in nested_items {
+                            let alias = field.alias.clone().unwrap_or(field.name.clone());
+                            let new_alias = if let Some(existing) = &item.alias {
+                                format!("{}_{}", alias, existing)
+                            } else {
+                                alias
+                            };
+                            return_items.push(ReturnItem {
+                                expression: item.expression,
+                                alias: Some(new_alias),
+                            });
+                        }
                     } else {
                         // Scalar field - add to return items
                         let alias = field.alias.clone().unwrap_or(field.name.clone());
@@ -512,26 +579,57 @@ impl GraphQLTranslator {
             }
         }
 
-        // Add nested variable references
-        for (alias, var) in nested_vars {
-            return_items.push(ReturnItem {
-                expression: LogicalExpression::Variable(var),
-                alias: Some(alias),
-            });
-        }
+        Ok((plan, return_items))
+    }
 
-        // If we have return items, wrap in Return
-        if !return_items.is_empty() {
-            plan = LogicalOperator::Return(ReturnOp {
-                items: return_items,
-                distinct: false,
+    /// Translates a nested field and returns the plan + return items (not wrapped in Return).
+    fn translate_nested_field_items(
+        &self,
+        field: &ast::Field,
+        input: LogicalOperator,
+        from_var: &str,
+    ) -> Result<(LogicalOperator, Vec<ReturnItem>)> {
+        let to_var = self.next_var();
+
+        // The field name is the edge type
+        let mut plan = LogicalOperator::Expand(ExpandOp {
+            from_variable: from_var.to_string(),
+            to_variable: to_var.clone(),
+            edge_variable: None,
+            direction: ExpandDirection::Outgoing,
+            edge_type: Some(field.name.clone()),
+            min_hops: 1,
+            max_hops: Some(1),
+            input: Box::new(input),
+            path_alias: None,
+        });
+
+        // Apply argument filters
+        if !field.arguments.is_empty() {
+            let filter = self.translate_arguments(&field.arguments, &to_var)?;
+            plan = LogicalOperator::Filter(FilterOp {
+                predicate: filter,
                 input: Box::new(plan),
             });
         }
 
-        Ok(plan)
+        // Collect nested selection items (without wrapping in Return)
+        let return_items = if let Some(selection_set) = &field.selection_set {
+            let (new_plan, items) = self.collect_selection_items(selection_set, plan, &to_var)?;
+            plan = new_plan;
+            items
+        } else {
+            // No nested selection - return the whole nested node
+            vec![ReturnItem {
+                expression: LogicalExpression::Variable(to_var),
+                alias: None,
+            }]
+        };
+
+        Ok((plan, return_items))
     }
 
+    #[allow(dead_code)]
     fn translate_nested_field(
         &self,
         field: &ast::Field,
@@ -550,6 +648,7 @@ impl GraphQLTranslator {
             min_hops: 1,
             max_hops: Some(1),
             input: Box::new(input),
+            path_alias: None,
         });
 
         // Apply argument filters
@@ -1068,10 +1167,18 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_mutation_requires_id() {
+    fn test_delete_mutation_by_property() {
+        // Delete mutations can use any property as filter, not just id
         let query = r#"mutation { deleteUser(name: "Alice") }"#;
         let result = translate(query);
-        // Should fail because 'id' argument is required
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_delete_mutation_requires_filter() {
+        // Delete mutations require at least one filter argument
+        let query = r#"mutation { deleteUser }"#;
+        let result = translate(query);
         assert!(result.is_err());
     }
 

@@ -3,9 +3,11 @@
 //! Translates SPARQL 1.1 AST to the common logical plan representation.
 
 use crate::query::plan::{
-    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, BindOp, DistinctOp, FilterOp, JoinOp,
-    JoinType, LimitOp, LogicalExpression, LogicalOperator, LogicalPlan, ProjectOp, Projection,
-    SkipOp, SortKey, SortOp, SortOrder, TripleComponent, TripleScanOp, UnaryOp, UnionOp,
+    AddGraphOp, AggregateExpr, AggregateFunction, AggregateOp, AntiJoinOp, BinaryOp, BindOp,
+    ClearGraphOp, CopyGraphOp, CreateGraphOp, DeleteTripleOp, DistinctOp, DropGraphOp, FilterOp,
+    InsertTripleOp, JoinOp, JoinType, LeftJoinOp, LimitOp, LoadGraphOp, LogicalExpression,
+    LogicalOperator, LogicalPlan, ModifyOp, MoveGraphOp, ProjectOp, Projection, SkipOp, SortKey,
+    SortOp, SortOrder, TripleComponent, TripleScanOp, TripleTemplate, UnaryOp, UnionOp,
 };
 use grafeo_adapters::query::sparql::{self, ast};
 use grafeo_common::types::Value;
@@ -59,6 +61,7 @@ impl SparqlTranslator {
             ast::QueryForm::Ask(ask) => self.translate_ask(ask),
             ast::QueryForm::Construct(construct) => self.translate_construct(construct),
             ast::QueryForm::Describe(describe) => self.translate_describe(describe),
+            ast::QueryForm::Update(update) => self.translate_update(update),
         }
     }
 
@@ -66,18 +69,29 @@ impl SparqlTranslator {
         // Start with the WHERE clause pattern
         let mut plan = self.translate_graph_pattern(&select.where_clause)?;
 
-        // Apply GROUP BY if present
-        if let Some(group_by) = &select.solution_modifiers.group_by {
+        // Check if projection contains aggregates (handles both explicit GROUP BY and implicit aggregation)
+        let has_aggregates = Self::has_aggregates_in_projection(&select.projection);
+
+        // Apply GROUP BY if present, OR create aggregate for implicit aggregation
+        if has_aggregates || select.solution_modifiers.group_by.is_some() {
             let (aggregates, _group_exprs) = self.extract_aggregates_for_select(select)?;
-            let group_by_exprs = group_by
-                .iter()
-                .map(|g| self.translate_group_condition(g))
-                .collect::<Result<Vec<_>>>()?;
+
+            // Get explicit GROUP BY expressions, or empty vec for whole-dataset aggregation
+            let group_by_exprs = if let Some(group_by) = &select.solution_modifiers.group_by {
+                group_by
+                    .iter()
+                    .map(|g| self.translate_group_condition(g))
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                // No GROUP BY means aggregate over entire dataset (empty group_by)
+                Vec::new()
+            };
 
             plan = LogicalOperator::Aggregate(AggregateOp {
                 group_by: group_by_exprs,
                 aggregates,
                 input: Box::new(plan),
+                having: None, // SPARQL HAVING handled as separate Filter below
             });
 
             // Apply HAVING if present
@@ -130,16 +144,20 @@ impl SparqlTranslator {
         if select.modifier == ast::SelectModifier::Distinct {
             plan = LogicalOperator::Distinct(DistinctOp {
                 input: Box::new(plan),
+                columns: None,
             });
         }
 
-        // Apply projection
-        let projections = self.translate_projection(&select.projection)?;
-        if !projections.is_empty() {
-            plan = LogicalOperator::Project(ProjectOp {
-                projections,
-                input: Box::new(plan),
-            });
+        // Apply projection (but NOT for aggregate queries - aggregate already produces correct columns)
+        // For aggregate queries, the AggregateOp outputs columns with proper aliases
+        if !has_aggregates {
+            let projections = self.translate_projection(&select.projection)?;
+            if !projections.is_empty() {
+                plan = LogicalOperator::Project(ProjectOp {
+                    projections,
+                    input: Box::new(plan),
+                });
+            }
         }
 
         Ok(LogicalPlan::new(plan))
@@ -187,6 +205,311 @@ impl SparqlTranslator {
         }
     }
 
+    // ==================== SPARQL Update Translation ====================
+
+    fn translate_update(&mut self, update: &ast::UpdateOperation) -> Result<LogicalPlan> {
+        match update {
+            ast::UpdateOperation::InsertData { data } => self.translate_insert_data(data),
+            ast::UpdateOperation::DeleteData { data } => self.translate_delete_data(data),
+            ast::UpdateOperation::DeleteWhere { pattern } => self.translate_delete_where(pattern),
+            ast::UpdateOperation::Modify {
+                with_graph,
+                delete_template,
+                insert_template,
+                using_clauses: _,
+                where_clause,
+            } => self.translate_modify(with_graph, delete_template, insert_template, where_clause),
+            ast::UpdateOperation::Load {
+                silent,
+                source,
+                destination,
+            } => self.translate_load(*silent, source, destination.as_ref()),
+            ast::UpdateOperation::Clear { silent, target } => self.translate_clear(*silent, target),
+            ast::UpdateOperation::Drop { silent, target } => self.translate_drop(*silent, target),
+            ast::UpdateOperation::Create { silent, graph } => self.translate_create(*silent, graph),
+            ast::UpdateOperation::Copy {
+                silent,
+                source,
+                destination,
+            } => self.translate_copy(*silent, source, destination),
+            ast::UpdateOperation::Move {
+                silent,
+                source,
+                destination,
+            } => self.translate_move(*silent, source, destination),
+            ast::UpdateOperation::Add {
+                silent,
+                source,
+                destination,
+            } => self.translate_add(*silent, source, destination),
+        }
+    }
+
+    fn translate_insert_data(&mut self, data: &[ast::QuadPattern]) -> Result<LogicalPlan> {
+        // Build a sequence of InsertTriple operators
+        let mut ops = Vec::new();
+        for quad in data {
+            let subject = self.translate_triple_term(&quad.triple.subject)?;
+            let predicate = self.translate_property_path(&quad.triple.predicate)?;
+            let object = self.translate_triple_term(&quad.triple.object)?;
+            let graph = quad.graph.as_ref().map(|g| self.resolve_variable_or_iri(g));
+
+            ops.push(LogicalOperator::InsertTriple(InsertTripleOp {
+                subject,
+                predicate,
+                object,
+                graph,
+                input: None,
+            }));
+        }
+
+        // Combine all inserts into a sequence using Union
+        if ops.is_empty() {
+            Ok(LogicalPlan::new(LogicalOperator::Empty))
+        } else if ops.len() == 1 {
+            Ok(LogicalPlan::new(ops.into_iter().next().unwrap()))
+        } else {
+            Ok(LogicalPlan::new(LogicalOperator::Union(UnionOp {
+                inputs: ops,
+            })))
+        }
+    }
+
+    fn translate_delete_data(&mut self, data: &[ast::QuadPattern]) -> Result<LogicalPlan> {
+        // Build a sequence of DeleteTriple operators
+        let mut ops = Vec::new();
+        for quad in data {
+            let subject = self.translate_triple_term(&quad.triple.subject)?;
+            let predicate = self.translate_property_path(&quad.triple.predicate)?;
+            let object = self.translate_triple_term(&quad.triple.object)?;
+            let graph = quad.graph.as_ref().map(|g| self.resolve_variable_or_iri(g));
+
+            ops.push(LogicalOperator::DeleteTriple(DeleteTripleOp {
+                subject,
+                predicate,
+                object,
+                graph,
+                input: None,
+            }));
+        }
+
+        if ops.is_empty() {
+            Ok(LogicalPlan::new(LogicalOperator::Empty))
+        } else if ops.len() == 1 {
+            Ok(LogicalPlan::new(ops.into_iter().next().unwrap()))
+        } else {
+            Ok(LogicalPlan::new(LogicalOperator::Union(UnionOp {
+                inputs: ops,
+            })))
+        }
+    }
+
+    fn translate_delete_where(&mut self, pattern: &ast::GraphPattern) -> Result<LogicalPlan> {
+        // DELETE WHERE uses the pattern both for matching and deletion
+        // First, translate the pattern to get bindings
+        let match_plan = self.translate_graph_pattern(pattern)?;
+
+        // For DELETE WHERE, the WHERE pattern is the same as the delete template
+        // We extract triples from the pattern and create delete operations
+        let triples = Self::extract_triples_from_pattern(pattern);
+
+        // Build delete operators with the match plan as input
+        let mut ops = Vec::new();
+        for triple in &triples {
+            let subject = self.translate_triple_term(&triple.subject)?;
+            let predicate = self.translate_property_path(&triple.predicate)?;
+            let object = self.translate_triple_term(&triple.object)?;
+
+            ops.push(LogicalOperator::DeleteTriple(DeleteTripleOp {
+                subject,
+                predicate,
+                object,
+                graph: None, // Default graph
+                input: Some(Box::new(match_plan.clone())),
+            }));
+        }
+
+        if ops.is_empty() {
+            Ok(LogicalPlan::new(match_plan))
+        } else if ops.len() == 1 {
+            Ok(LogicalPlan::new(ops.into_iter().next().unwrap()))
+        } else {
+            Ok(LogicalPlan::new(LogicalOperator::Union(UnionOp {
+                inputs: ops,
+            })))
+        }
+    }
+
+    fn extract_triples_from_pattern(pattern: &ast::GraphPattern) -> Vec<ast::TriplePattern> {
+        match pattern {
+            ast::GraphPattern::Basic(triples) => triples.clone(),
+            ast::GraphPattern::Group(patterns) => patterns
+                .iter()
+                .flat_map(Self::extract_triples_from_pattern)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn translate_modify(
+        &mut self,
+        with_graph: &Option<ast::Iri>,
+        delete_template: &Option<Vec<ast::QuadPattern>>,
+        insert_template: &Option<Vec<ast::QuadPattern>>,
+        where_clause: &ast::GraphPattern,
+    ) -> Result<LogicalPlan> {
+        // Translate the WHERE clause - this will be evaluated once and shared
+        let where_plan = self.translate_graph_pattern(where_clause)?;
+
+        let default_graph = with_graph.as_ref().map(|g| self.resolve_iri(g));
+
+        // Build DELETE templates
+        let mut delete_templates = Vec::new();
+        if let Some(delete_quads) = delete_template {
+            for quad in delete_quads {
+                let subject = self.translate_triple_term(&quad.triple.subject)?;
+                let predicate = self.translate_property_path(&quad.triple.predicate)?;
+                let object = self.translate_triple_term(&quad.triple.object)?;
+                let graph = quad
+                    .graph
+                    .as_ref()
+                    .map(|g| self.resolve_variable_or_iri(g))
+                    .or_else(|| default_graph.clone());
+
+                delete_templates.push(TripleTemplate {
+                    subject,
+                    predicate,
+                    object,
+                    graph,
+                });
+            }
+        }
+
+        // Build INSERT templates
+        let mut insert_templates = Vec::new();
+        if let Some(insert_quads) = insert_template {
+            for quad in insert_quads {
+                let subject = self.translate_triple_term(&quad.triple.subject)?;
+                let predicate = self.translate_property_path(&quad.triple.predicate)?;
+                let object = self.translate_triple_term(&quad.triple.object)?;
+                let graph = quad
+                    .graph
+                    .as_ref()
+                    .map(|g| self.resolve_variable_or_iri(g))
+                    .or_else(|| default_graph.clone());
+
+                insert_templates.push(TripleTemplate {
+                    subject,
+                    predicate,
+                    object,
+                    graph,
+                });
+            }
+        }
+
+        // Use ModifyOp which handles SPARQL MODIFY semantics correctly:
+        // 1. Evaluate WHERE once
+        // 2. Apply DELETE templates
+        // 3. Apply INSERT templates (using same bindings)
+        Ok(LogicalPlan::new(LogicalOperator::Modify(ModifyOp {
+            delete_templates,
+            insert_templates,
+            where_clause: Box::new(where_plan),
+            graph: default_graph,
+        })))
+    }
+
+    fn translate_load(
+        &mut self,
+        silent: bool,
+        source: &ast::Iri,
+        destination: Option<&ast::Iri>,
+    ) -> Result<LogicalPlan> {
+        Ok(LogicalPlan::new(LogicalOperator::LoadGraph(LoadGraphOp {
+            source: self.resolve_iri(source),
+            destination: destination.map(|d| self.resolve_iri(d)),
+            silent,
+        })))
+    }
+
+    fn translate_clear(&mut self, silent: bool, target: &ast::GraphTarget) -> Result<LogicalPlan> {
+        let graph = self.translate_graph_target(target);
+        Ok(LogicalPlan::new(LogicalOperator::ClearGraph(
+            ClearGraphOp { graph, silent },
+        )))
+    }
+
+    fn translate_drop(&mut self, silent: bool, target: &ast::GraphTarget) -> Result<LogicalPlan> {
+        let graph = self.translate_graph_target(target);
+        Ok(LogicalPlan::new(LogicalOperator::DropGraph(DropGraphOp {
+            graph,
+            silent,
+        })))
+    }
+
+    fn translate_create(&mut self, silent: bool, graph: &ast::Iri) -> Result<LogicalPlan> {
+        Ok(LogicalPlan::new(LogicalOperator::CreateGraph(
+            CreateGraphOp {
+                graph: self.resolve_iri(graph),
+                silent,
+            },
+        )))
+    }
+
+    fn translate_copy(
+        &mut self,
+        silent: bool,
+        source: &ast::GraphTarget,
+        destination: &ast::GraphTarget,
+    ) -> Result<LogicalPlan> {
+        Ok(LogicalPlan::new(LogicalOperator::CopyGraph(CopyGraphOp {
+            source: self.translate_graph_target(source),
+            destination: self.translate_graph_target(destination),
+            silent,
+        })))
+    }
+
+    fn translate_move(
+        &mut self,
+        silent: bool,
+        source: &ast::GraphTarget,
+        destination: &ast::GraphTarget,
+    ) -> Result<LogicalPlan> {
+        Ok(LogicalPlan::new(LogicalOperator::MoveGraph(MoveGraphOp {
+            source: self.translate_graph_target(source),
+            destination: self.translate_graph_target(destination),
+            silent,
+        })))
+    }
+
+    fn translate_add(
+        &mut self,
+        silent: bool,
+        source: &ast::GraphTarget,
+        destination: &ast::GraphTarget,
+    ) -> Result<LogicalPlan> {
+        Ok(LogicalPlan::new(LogicalOperator::AddGraph(AddGraphOp {
+            source: self.translate_graph_target(source),
+            destination: self.translate_graph_target(destination),
+            silent,
+        })))
+    }
+
+    fn translate_graph_target(&self, target: &ast::GraphTarget) -> Option<String> {
+        match target {
+            ast::GraphTarget::Default => None,
+            ast::GraphTarget::Named(iri) => Some(self.resolve_iri(iri)),
+            ast::GraphTarget::All => Some(String::new()), // Empty string represents "all"
+        }
+    }
+
+    fn resolve_variable_or_iri(&self, var_or_iri: &ast::VariableOrIri) -> String {
+        match var_or_iri {
+            ast::VariableOrIri::Variable(name) => format!("?{}", name),
+            ast::VariableOrIri::Iri(iri) => self.resolve_iri(iri),
+        }
+    }
+
     fn translate_projection(&mut self, projection: &ast::Projection) -> Result<Vec<Projection>> {
         match projection {
             ast::Projection::Wildcard => Ok(Vec::new()), // Empty means select all
@@ -207,18 +530,97 @@ impl SparqlTranslator {
             ast::GraphPattern::Basic(triples) => self.translate_basic_pattern(triples),
 
             ast::GraphPattern::Group(patterns) => {
-                let mut plan = LogicalOperator::Empty;
+                // Categorize patterns by type for proper composition
+                let mut basic_patterns: Vec<&ast::GraphPattern> = Vec::new();
+                let mut filter_exprs: Vec<&ast::Expression> = Vec::new();
+                let mut optional_patterns: Vec<&ast::GraphPattern> = Vec::new();
+                let mut minus_patterns: Vec<&ast::GraphPattern> = Vec::new();
+                let mut bind_patterns: Vec<(&ast::Expression, &String)> = Vec::new();
+
                 for p in patterns {
+                    match p {
+                        ast::GraphPattern::Filter(expr) => filter_exprs.push(expr),
+                        ast::GraphPattern::Optional(inner) => optional_patterns.push(inner),
+                        ast::GraphPattern::Minus(inner) => minus_patterns.push(inner),
+                        ast::GraphPattern::Bind {
+                            expression,
+                            variable,
+                        } => bind_patterns.push((expression, variable)),
+                        _ => basic_patterns.push(p),
+                    }
+                }
+
+                // 1. Translate and join basic/required patterns
+                let mut plan = LogicalOperator::Empty;
+                for p in basic_patterns {
                     let p_plan = self.translate_graph_pattern(p)?;
                     plan = self.join_patterns(plan, p_plan);
                 }
+
+                // 2. Apply BIND expressions (adds computed columns)
+                for (expression, variable) in bind_patterns {
+                    let expr = self.translate_expression(expression)?;
+                    plan = LogicalOperator::Bind(BindOp {
+                        expression: expr,
+                        variable: variable.clone(),
+                        input: Box::new(plan),
+                    });
+                }
+
+                // 3. Apply OPTIONAL patterns (left outer joins)
+                for inner in optional_patterns {
+                    let inner_plan = self.translate_graph_pattern(inner)?;
+                    if matches!(plan, LogicalOperator::Empty) {
+                        plan = inner_plan;
+                    } else {
+                        plan = LogicalOperator::LeftJoin(LeftJoinOp {
+                            left: Box::new(plan),
+                            right: Box::new(inner_plan),
+                            condition: None,
+                        });
+                    }
+                }
+
+                // 4. Apply MINUS patterns (anti joins)
+                for inner in minus_patterns {
+                    let inner_plan = self.translate_graph_pattern(inner)?;
+                    if !matches!(plan, LogicalOperator::Empty) {
+                        plan = LogicalOperator::AntiJoin(AntiJoinOp {
+                            left: Box::new(plan),
+                            right: Box::new(inner_plan),
+                        });
+                    }
+                }
+
+                // 5. Apply FILTER expressions last (they scope over entire group)
+                if !filter_exprs.is_empty() {
+                    let predicates: Vec<LogicalExpression> = filter_exprs
+                        .into_iter()
+                        .map(|e| self.translate_expression(e))
+                        .collect::<Result<Vec<_>>>()?;
+
+                    // Combine all predicates with AND
+                    let combined = predicates
+                        .into_iter()
+                        .reduce(|acc, pred| LogicalExpression::Binary {
+                            left: Box::new(acc),
+                            op: BinaryOp::And,
+                            right: Box::new(pred),
+                        })
+                        .unwrap();
+
+                    plan = LogicalOperator::Filter(FilterOp {
+                        predicate: combined,
+                        input: Box::new(plan),
+                    });
+                }
+
                 Ok(plan)
             }
 
             ast::GraphPattern::Optional(inner) => {
-                // OPTIONAL creates a left outer join
-                let inner_plan = self.translate_graph_pattern(inner)?;
-                Ok(inner_plan)
+                // Standalone OPTIONAL - handled in Group translation, but support direct call
+                self.translate_graph_pattern(inner)
             }
 
             ast::GraphPattern::Union(alternatives) => {
@@ -231,13 +633,13 @@ impl SparqlTranslator {
             }
 
             ast::GraphPattern::Minus(inner) => {
-                // MINUS is an anti-join
-                let inner_plan = self.translate_graph_pattern(inner)?;
-                Ok(inner_plan)
+                // Standalone MINUS - handled in Group translation, but support direct call
+                self.translate_graph_pattern(inner)
             }
 
             ast::GraphPattern::Filter(expr) => {
-                // Standalone FILTER - will be combined with its context
+                // Standalone FILTER - handled in Group translation, but support direct call
+                // This can happen when Filter is the top-level pattern
                 let predicate = self.translate_expression(expr)?;
                 Ok(LogicalOperator::Filter(FilterOp {
                     predicate,
@@ -249,6 +651,7 @@ impl SparqlTranslator {
                 expression,
                 variable,
             } => {
+                // Standalone BIND - handled in Group translation, but support direct call
                 let expr = self.translate_expression(expression)?;
                 Ok(LogicalOperator::Bind(BindOp {
                     expression: expr,
@@ -398,7 +801,11 @@ impl SparqlTranslator {
                     .iter()
                     .map(|a| self.translate_expression(a))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(LogicalExpression::FunctionCall { name, args })
+                Ok(LogicalExpression::FunctionCall {
+                    name,
+                    args,
+                    distinct: false,
+                })
             }
 
             ast::Expression::Bound(var) => {
@@ -406,6 +813,7 @@ impl SparqlTranslator {
                 Ok(LogicalExpression::FunctionCall {
                     name: "BOUND".to_string(),
                     args: vec![LogicalExpression::Variable(var.clone())],
+                    distinct: false,
                 })
             }
 
@@ -432,22 +840,22 @@ impl SparqlTranslator {
                 Ok(LogicalExpression::FunctionCall {
                     name: "COALESCE".to_string(),
                     args,
+                    distinct: false,
                 })
             }
 
-            ast::Expression::Exists(_pattern) => {
+            ast::Expression::Exists(pattern) => {
                 // EXISTS { pattern } - check if pattern has any matches
-                Ok(LogicalExpression::FunctionCall {
-                    name: "EXISTS".to_string(),
-                    args: vec![],
-                })
+                let subquery = self.translate_graph_pattern(pattern)?;
+                Ok(LogicalExpression::ExistsSubquery(Box::new(subquery)))
             }
 
-            ast::Expression::NotExists(_pattern) => {
-                // NOT EXISTS { pattern }
-                Ok(LogicalExpression::FunctionCall {
-                    name: "NOT_EXISTS".to_string(),
-                    args: vec![],
+            ast::Expression::NotExists(pattern) => {
+                // NOT EXISTS { pattern } - negate the EXISTS check
+                let subquery = self.translate_graph_pattern(pattern)?;
+                Ok(LogicalExpression::Unary {
+                    op: UnaryOp::Not,
+                    operand: Box::new(LogicalExpression::ExistsSubquery(Box::new(subquery))),
                 })
             }
 
@@ -490,14 +898,14 @@ impl SparqlTranslator {
         &mut self,
         agg: &ast::AggregateExpression,
     ) -> Result<LogicalExpression> {
-        let func_name = match agg {
-            ast::AggregateExpression::Count { .. } => "COUNT",
-            ast::AggregateExpression::Sum { .. } => "SUM",
-            ast::AggregateExpression::Average { .. } => "AVG",
-            ast::AggregateExpression::Minimum { .. } => "MIN",
-            ast::AggregateExpression::Maximum { .. } => "MAX",
-            ast::AggregateExpression::Sample { .. } => "SAMPLE",
-            ast::AggregateExpression::GroupConcat { .. } => "GROUP_CONCAT",
+        let (func_name, distinct) = match agg {
+            ast::AggregateExpression::Count { distinct, .. } => ("COUNT", *distinct),
+            ast::AggregateExpression::Sum { distinct, .. } => ("SUM", *distinct),
+            ast::AggregateExpression::Average { distinct, .. } => ("AVG", *distinct),
+            ast::AggregateExpression::Minimum { .. } => ("MIN", false),
+            ast::AggregateExpression::Maximum { .. } => ("MAX", false),
+            ast::AggregateExpression::Sample { .. } => ("SAMPLE", false),
+            ast::AggregateExpression::GroupConcat { distinct, .. } => ("GROUP_CONCAT", *distinct),
         };
 
         let args = match agg {
@@ -521,6 +929,7 @@ impl SparqlTranslator {
         Ok(LogicalExpression::FunctionCall {
             name: func_name.to_string(),
             args,
+            distinct,
         })
     }
 
@@ -595,6 +1004,46 @@ impl SparqlTranslator {
         matches!(expr, ast::Expression::Aggregate(_))
     }
 
+    /// Recursively checks if an expression contains any aggregate function.
+    fn contains_aggregate(expr: &ast::Expression) -> bool {
+        match expr {
+            ast::Expression::Aggregate(_) => true,
+            ast::Expression::Binary { left, right, .. } => {
+                Self::contains_aggregate(left) || Self::contains_aggregate(right)
+            }
+            ast::Expression::Unary { operand, .. } => Self::contains_aggregate(operand),
+            ast::Expression::FunctionCall { arguments, .. } => {
+                arguments.iter().any(Self::contains_aggregate)
+            }
+            ast::Expression::Bracketed(inner) => Self::contains_aggregate(inner),
+            ast::Expression::Conditional {
+                condition,
+                then_expression,
+                else_expression,
+            } => {
+                Self::contains_aggregate(condition)
+                    || Self::contains_aggregate(then_expression)
+                    || Self::contains_aggregate(else_expression)
+            }
+            ast::Expression::Coalesce(exprs) => exprs.iter().any(Self::contains_aggregate),
+            ast::Expression::In { expression, list }
+            | ast::Expression::NotIn { expression, list } => {
+                Self::contains_aggregate(expression) || list.iter().any(Self::contains_aggregate)
+            }
+            _ => false,
+        }
+    }
+
+    /// Checks if the SELECT projection contains any aggregate expressions.
+    fn has_aggregates_in_projection(projection: &ast::Projection) -> bool {
+        match projection {
+            ast::Projection::Wildcard => false,
+            ast::Projection::Variables(vars) => vars
+                .iter()
+                .any(|pv| Self::contains_aggregate(&pv.expression)),
+        }
+    }
+
     fn extract_aggregate(
         &mut self,
         expr: &ast::Expression,
@@ -650,6 +1099,7 @@ impl SparqlTranslator {
                 expression,
                 distinct,
                 alias: alias.clone(),
+                percentile: None, // SPARQL doesn't support percentile functions
             }))
         } else {
             Ok(None)
@@ -1020,5 +1470,157 @@ mod tests {
         assert_eq!(translator.next_anon(), 0);
         assert_eq!(translator.next_anon(), 1);
         assert_eq!(translator.next_anon(), 2);
+    }
+
+    // === SPARQL Update Tests ===
+
+    #[test]
+    fn test_translate_insert_data() {
+        let query = r#"INSERT DATA { <http://ex.org/s> <http://ex.org/p> "value" }"#;
+        let result = translate(query);
+        assert!(result.is_ok());
+
+        let plan = result.unwrap();
+        fn has_insert_triple(op: &LogicalOperator) -> bool {
+            match op {
+                LogicalOperator::InsertTriple(_) => true,
+                LogicalOperator::Union(u) => u.inputs.iter().any(has_insert_triple),
+                _ => false,
+            }
+        }
+        assert!(has_insert_triple(&plan.root));
+    }
+
+    #[test]
+    fn test_translate_delete_data() {
+        let query = r#"DELETE DATA { <http://ex.org/s> <http://ex.org/p> "value" }"#;
+        let result = translate(query);
+        assert!(result.is_ok());
+
+        let plan = result.unwrap();
+        fn has_delete_triple(op: &LogicalOperator) -> bool {
+            match op {
+                LogicalOperator::DeleteTriple(_) => true,
+                LogicalOperator::Union(u) => u.inputs.iter().any(has_delete_triple),
+                _ => false,
+            }
+        }
+        assert!(has_delete_triple(&plan.root));
+    }
+
+    #[test]
+    fn test_translate_delete_where() {
+        let query = r#"DELETE WHERE { ?s <http://ex.org/p> ?o }"#;
+        let result = translate(query);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_modify_delete_insert() {
+        let query = r#"
+            DELETE { ?s <http://ex.org/old> ?o }
+            INSERT { ?s <http://ex.org/new> ?o }
+            WHERE { ?s <http://ex.org/old> ?o }
+        "#;
+        let result = translate(query);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_clear_graph() {
+        let query = "CLEAR DEFAULT";
+        let result = translate(query);
+        assert!(result.is_ok());
+
+        let plan = result.unwrap();
+        assert!(matches!(plan.root, LogicalOperator::ClearGraph(_)));
+    }
+
+    #[test]
+    fn test_translate_drop_graph() {
+        let query = "DROP GRAPH <http://example.org/graph>";
+        let result = translate(query);
+        assert!(result.is_ok());
+
+        let plan = result.unwrap();
+        assert!(matches!(plan.root, LogicalOperator::DropGraph(_)));
+    }
+
+    #[test]
+    fn test_translate_create_graph() {
+        let query = "CREATE GRAPH <http://example.org/newgraph>";
+        let result = translate(query);
+        assert!(result.is_ok());
+
+        let plan = result.unwrap();
+        assert!(matches!(plan.root, LogicalOperator::CreateGraph(_)));
+    }
+
+    #[test]
+    fn test_translate_copy_graph() {
+        let query = "COPY DEFAULT TO <http://example.org/backup>";
+        let result = translate(query);
+        assert!(result.is_ok());
+
+        let plan = result.unwrap();
+        assert!(matches!(plan.root, LogicalOperator::CopyGraph(_)));
+    }
+
+    #[test]
+    fn test_translate_move_graph() {
+        let query = "MOVE <http://example.org/old> TO <http://example.org/new>";
+        let result = translate(query);
+        assert!(result.is_ok());
+
+        let plan = result.unwrap();
+        assert!(matches!(plan.root, LogicalOperator::MoveGraph(_)));
+    }
+
+    #[test]
+    fn test_translate_add_graph() {
+        let query = "ADD <http://example.org/source> TO <http://example.org/dest>";
+        let result = translate(query);
+        assert!(result.is_ok());
+
+        let plan = result.unwrap();
+        assert!(matches!(plan.root, LogicalOperator::AddGraph(_)));
+    }
+
+    #[test]
+    fn test_translate_load_graph() {
+        let query = "LOAD <http://example.org/data.ttl>";
+        let result = translate(query);
+        assert!(result.is_ok());
+
+        let plan = result.unwrap();
+        assert!(matches!(plan.root, LogicalOperator::LoadGraph(_)));
+    }
+
+    #[test]
+    fn test_translate_load_into_graph() {
+        let query = "LOAD <http://example.org/data.ttl> INTO GRAPH <http://example.org/target>";
+        let result = translate(query);
+        assert!(result.is_ok());
+
+        let plan = result.unwrap();
+        if let LogicalOperator::LoadGraph(load) = &plan.root {
+            assert!(load.destination.is_some());
+        } else {
+            panic!("Expected LoadGraph operator");
+        }
+    }
+
+    #[test]
+    fn test_translate_silent_operations() {
+        let query = "DROP SILENT GRAPH <http://example.org/graph>";
+        let result = translate(query);
+        assert!(result.is_ok());
+
+        let plan = result.unwrap();
+        if let LogicalOperator::DropGraph(drop) = &plan.root {
+            assert!(drop.silent);
+        } else {
+            panic!("Expected DropGraph operator");
+        }
     }
 }

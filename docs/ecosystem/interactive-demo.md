@@ -10,7 +10,7 @@ tags:
 
 # Interactive Demo
 
-These demos run **entirely in your browser** using [marimo](https://marimo.io) and WebAssembly -- no server or Python installation required. Pan, zoom, click, and interact with the widgets below.
+These demos run **entirely in your browser** using [marimo](https://marimo.io) and WebAssembly, no server or Python installation required. Pan, zoom, click, and interact with the widgets below.
 
 !!! info "First load"
     The first time you visit this page, the Python runtime (Pyodide) will be downloaded and

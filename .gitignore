@@ -42,6 +42,13 @@ venv/
 
 .benchmarks
 
+# Node.js / napi-rs
+node_modules/
+*.node
+crates/bindings/node/index.js
+crates/bindings/node/index.d.ts
+package-lock.json
+
 # Auto-generated docs (synced from root files)
 docs/changelog.md
 site/*

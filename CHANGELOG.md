@@ -2,27 +2,43 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.4.0] - 2026-02-06
+## [0.4.0] - Unreleased
 
-_Node.js/TypeScript Bindings_
+_Node.js/TypeScript Bindings, Vector Support & Code Quality_
 
 ### Added
 
-- **Node.js/TypeScript bindings** (`@grafeo-db/js`): Native Rust bindings via napi-rs
-  - `GrafeoDB.create()` / `GrafeoDB.open(path)` for in-memory and persistent databases
-  - Async `execute()` with GQL, Cypher, Gremlin, GraphQL, and SPARQL support
-  - Full CRUD: `createNode`, `createEdge`, `getNode`, `getEdge`, `deleteNode`, `deleteEdge`
-  - Property management: `setNodeProperty`, `setEdgeProperty`
-  - `QueryResult` with `toArray()`, `scalar()`, `rows()`, `nodes()`, `edges()`, column access
-  - `Transaction` with `commit()`, `rollback()`, `isActive`, and auto-rollback on drop
-  - Type mapping: JS primitives, BigInt, Date, Buffer, Float32Array all map to Grafeo types
-  - Auto-generated TypeScript definitions with full JSDoc documentation
-  - Parameterized queries via JSON objects
-  - Feature-gated query languages matching Rust crate features
+- **Node.js/TypeScript bindings** (`@grafeo-db/js`) via napi-rs: full CRUD, async queries (GQL/Cypher/Gremlin/GraphQL/SPARQL), transactions, type mapping, TypeScript definitions, 67 integration tests
+- **Python vector support**: `list[float]` auto-converts to native vectors; `grafeo.vector()` constructor; `cosine_similarity()`, `euclidean_distance()`, `dot_product()`, `manhattan_distance()` in GQL; `create_vector_index()` with HNSW tuning params (m, ef_construction); `vector_search()` for programmatic k-NN
+- **Python transaction isolation**: `begin_transaction()` accepts `isolation_level` parameter — `"read_committed"`, `"snapshot"` (default), or `"serializable"`
+- Node.js CI testing across 3 OS × 3 Node.js versions (18, 20, 22)
+- Miri CI job for undefined behavior detection on arena allocator
+- Arena allocator debug assertions for offset bounds and alignment validation
+- `cargo-deny` integration with updated `deny.toml` (v2 format)
 
 ### Changed
 
-- Bumped all crate versions from 0.3.4 to 0.4.0
+- **License changed from Apache-2.0 to AGPL-3.0**
+
+### Fixed
+
+- GQL INSERT with list or `vector()` properties no longer silently drops values (planner constant-folding fix)
+- Multi-hop MATCH queries (3+ hops) no longer return duplicate rows due to factorized iterator skipping empty intermediate levels
+- GQL multi-hop patterns now filter intermediate target nodes by label (e.g., `(a:Person)-[:KNOWS]->(b:Employee)` correctly requires `b` to be an `Employee`)
+- GraphQL filter queries now accept `filter` as alias for `where` argument
+- GraphQL nested relationship queries now match edge types case-insensitively (uppercase convention)
+- Transaction `execute()` rejects queries after commit/rollback
+- 33 Python lint issues (unused variables, ambiguous names, line length, unused imports)
+- 33 Rust clippy warnings from 6 previously suppressed lints
+- `deny.toml` migrated to cargo-deny v0.19 format
+- Pre-commit config typo (`end-of-file-fixers` → `end-of-file-fixer`)
+
+### Improved
+
+- Query optimizer uses actual store statistics (per-label node counts, per-edge-type degree) instead of hardcoded defaults
+- Arena allocator lock ordering documented for tiered-storage concurrent access
+- All 12 prek pre-commit hooks pass (including cargo-deny, ruff check, ruff format)
+- All query correctness tests now pass
 
 ## [0.3.4] - 2026-02-06
 

@@ -369,8 +369,11 @@ class TestBatchCreateNodes:
         node = db.get_node(ids[0])
         assert node is not None
         assert "Vec" in node.labels
-        # Vector property should exist
-        emb = node.properties.get("data")
+        # Vector property should be retrievable via GQL
+        result = db.execute(f"MATCH (n:Vec) WHERE id(n) = {ids[0]} RETURN n.data AS d")
+        rows = list(result)
+        assert len(rows) == 1
+        emb = rows[0]["d"]
         assert emb is not None
         assert len(emb) == 2
 

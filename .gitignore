@@ -37,6 +37,7 @@ build/
 *.egg
 .venv/
 venv/
+*.mypy_cache*
 
 *.tmp.*
 

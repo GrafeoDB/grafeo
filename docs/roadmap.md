@@ -61,43 +61,42 @@ This roadmap outlines the planned development of Grafeo. Priorities may shift ba
 
 ---
 
-## 0.3.x - AI Compatibility
+## 0.3.x - AI Compatibility (Complete)
 
 *Ready for modern AI/ML workloads*
 
-### Core Vector Features (0.3.0)
+### Vector Features (Delivered)
 
 - **Vector Type** - First-class `Vector` type with f32 storage (4x compression vs f64)
 - **Distance Functions** - Cosine, Euclidean, Dot Product, Manhattan metrics
-- **HNSW Index** (`vector-index` feature) - O(log n) approximate nearest neighbor search
+- **HNSW Index** - O(log n) approximate nearest neighbor search with batch insert/search
 - **Hybrid Queries** - Combine graph traversal with vector similarity in GQL/Cypher/SPARQL
 - **Serializable Isolation** - SSI for write skew prevention and strong consistency
 
-### Vector Quantization (0.3.1)
+### Vector Quantization (Delivered)
 
 - **Scalar Quantization** - f32 → u8, 4x compression with ~97% recall
-- **Binary Quantization** - f32 → 1 bit, 32x compression for fast filtering
+- **Binary Quantization** - f32 → 1 bit, 32x compression with SIMD-accelerated hamming distance
+- **Product Quantization** - Codebook-based 8-32x compression with asymmetric distance computation
 - **QuantizedHnswIndex** - Two-phase search with rescoring support
+- **SIMD Acceleration** - AVX2+FMA, SSE, and NEON support for 4-8x faster distance computations
 
-### Advanced Quantization & Storage (0.3.3)
+### Vector Storage & Search (Delivered)
 
-- **Product Quantization (PQ)** - Codebook-based compression achieving 8-32x reduction
-  - K-means training with configurable iterations
-  - Asymmetric Distance Computation (ADC) via precomputed tables
-  - 4.5ns distance computation (6x faster than raw vectors)
-- **Memory-Mapped Vector Storage** - Disk-backed storage for large datasets
-  - `VectorStorage` trait for backend abstraction
-  - `RamStorage` for in-memory (fastest access)
-  - `MmapStorage` for memory-mapped files (low memory footprint)
-  - LRU cache for frequently accessed vectors
+- **Memory-Mapped Vector Storage** - Disk-backed storage with LRU cache for large datasets
+- **VectorScan Operators** - HNSW and brute-force search in query execution plans
+- **VectorJoin Operator** - Hybrid graph pattern + vector similarity search
+- **Vector Zone Maps** - Centroid and bounding box pruning for block skipping
+- **Vector Cost Estimation** - HNSW O(ef * log N) and brute-force O(N) cost models
 - **Python Quantization API** - Full quantization support from Python
-  - `grafeo.QuantizationType` - None, Scalar, Binary, Product variants
-  - `grafeo.ScalarQuantizer` - Train, quantize, dequantize, distance methods
-  - `grafeo.ProductQuantizer` - Train, quantize, reconstruct, ADC methods
-  - `grafeo.BinaryQuantizer` - Quantize and hamming distance methods
-- **Vector Zone Maps** - Intelligent block skipping for large datasets
-  - Centroid-based pruning
-  - Bounding box pruning for Euclidean search
+
+### Execution & Quality (Delivered)
+
+- **Selective Property Loading** - Projection pushdown for O(N*K) vs O(N*C) reads
+- **Parallel Node Scan** - Morsel-driven parallel execution for 3-8x speedup on large scans
+- **Query Performance Metrics** - Execution timing and row counts on query results
+- **Error Message Suggestions** - Fuzzy "Did you mean X?" hints for undefined variables and labels
+- **Adaptive WAL Flusher** - Self-tuning background flush with consistent cadence
 
 ### Syntax Support
 
@@ -111,10 +110,6 @@ RETURN m.title
 CREATE VECTOR INDEX movie_embeddings ON :Movie(embedding)
   WITH (dimensions: 384, metric: 'cosine')
 ```
-
-### Bug Fixes
-
-- RDF `find_with_pending()` now correctly filters pending deletes within transactions
 
 ---
 

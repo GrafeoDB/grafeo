@@ -2,6 +2,28 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.4.0] - 2026-02-06
+
+_Node.js/TypeScript Bindings_
+
+### Added
+
+- **Node.js/TypeScript bindings** (`@grafeo-db/js`): Native Rust bindings via napi-rs
+  - `GrafeoDB.create()` / `GrafeoDB.open(path)` for in-memory and persistent databases
+  - Async `execute()` with GQL, Cypher, Gremlin, GraphQL, and SPARQL support
+  - Full CRUD: `createNode`, `createEdge`, `getNode`, `getEdge`, `deleteNode`, `deleteEdge`
+  - Property management: `setNodeProperty`, `setEdgeProperty`
+  - `QueryResult` with `toArray()`, `scalar()`, `rows()`, `nodes()`, `edges()`, column access
+  - `Transaction` with `commit()`, `rollback()`, `isActive`, and auto-rollback on drop
+  - Type mapping: JS primitives, BigInt, Date, Buffer, Float32Array all map to Grafeo types
+  - Auto-generated TypeScript definitions with full JSDoc documentation
+  - Parameterized queries via JSON objects
+  - Feature-gated query languages matching Rust crate features
+
+### Changed
+
+- Bumped all crate versions from 0.3.4 to 0.4.0
+
 ## [0.3.4] - 2026-02-06
 
 _Quality of Life Improvements_

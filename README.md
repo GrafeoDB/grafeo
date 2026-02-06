@@ -18,7 +18,7 @@ Grafeo is a pure-Rust, high-performance graph database that can be embedded as a
 - **Dual data model support**: LPG and RDF with optimized storage for each
 - **Multi-language queries**: GQL, Cypher, Gremlin, GraphQL, and SPARQL
 - Embeddable with zero external dependencies
-- Python bindings via PyO3
+- Python bindings via PyO3, Node.js/TypeScript bindings via napi-rs
 - In-memory and persistent storage modes
 - MVCC transactions with snapshot isolation
 
@@ -30,13 +30,23 @@ Grafeo is a pure-Rust, high-performance graph database that can be embedded as a
 - **GraphQL** (September 2025)
 - **SPARQL** (W3C 1.1)
 
+### Vector Search & AI
+
+- **Vector as a first-class type**: `Value::Vector(Arc<[f32]>)` stored alongside graph data
+- **HNSW index**: O(log n) approximate nearest neighbor search with tunable recall
+- **Distance functions**: Cosine, Euclidean, Dot Product, Manhattan (SIMD-accelerated: AVX2, SSE, NEON)
+- **Vector quantization**: Scalar (f32 → u8), Binary (1-bit), and Product Quantization (8-32x compression)
+- **Hybrid graph+vector queries**: Combine graph traversals with vector similarity in GQL and SPARQL
+- **Memory-mapped storage**: Disk-backed vectors with LRU cache for large datasets
+- **Batch operations**: Parallel multi-query search via rayon
+
 ### Performance Features
 
 - **Push-based vectorized execution** with adaptive chunk sizing
 - **Morsel-driven parallelism** with auto-detected thread count
 - **Columnar storage** with dictionary, delta, and RLE compression
 - **Cost-based optimizer** with DPccp join ordering and histograms
-- **Zone maps** for intelligent data skipping
+- **Zone maps** for intelligent data skipping (including vector zone maps)
 - **Adaptive query execution** with runtime re-optimization
 - **Transparent spilling** for out-of-core processing
 - **Bloom filters** for efficient membership tests
@@ -72,6 +82,12 @@ All query languages (GQL, Cypher, Gremlin, GraphQL, SPARQL) are enabled by defau
 cargo add grafeo --no-default-features --features gql,cypher
 ```
 
+### Node.js / TypeScript
+
+```bash
+npm install @grafeo-db/js
+```
+
 ### Python
 
 ```bash
@@ -85,6 +101,42 @@ uv add grafeo[cli]
 ```
 
 ## Quick Start
+
+### Node.js / TypeScript
+
+```js
+const { GrafeoDB } = require('@grafeo-db/js');
+
+// Create an in-memory database
+const db = GrafeoDB.create();
+
+// Or open a persistent database
+// const db = GrafeoDB.create('/path/to/database');
+
+// Create nodes and relationships
+await db.execute("INSERT (:Person {name: 'Alice', age: 30})");
+await db.execute("INSERT (:Person {name: 'Bob', age: 25})");
+await db.execute(`
+    MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+    INSERT (a)-[:KNOWS {since: 2020}]->(b)
+`);
+
+// Query the graph
+const result = await db.execute(`
+    MATCH (p:Person)-[:KNOWS]->(friend)
+    RETURN p.name, friend.name
+`);
+console.log(result.toArray());
+
+// Direct API
+const node = db.createNode(['Person'], { name: 'Carol' });
+console.log(`Created node with ID: ${node.id}`);
+
+// Transactions
+const tx = db.beginTransaction();
+await tx.execute("INSERT (:Person {name: 'Dave'})");
+tx.commit(); // or tx.rollback()
+```
 
 ### Python
 
@@ -165,6 +217,45 @@ fn main() {
         println!("{:?}", row);
     }
 }
+```
+
+### Vector Search
+
+```python
+import grafeo
+
+db = grafeo.GrafeoDB()
+
+# Store documents with embeddings
+db.execute("""INSERT (:Document {
+    title: 'Graph Databases',
+    embedding: vector([0.1, 0.8, 0.3, 0.5])
+})""")
+db.execute("""INSERT (:Document {
+    title: 'Vector Search',
+    embedding: vector([0.2, 0.7, 0.4, 0.6])
+})""")
+db.execute("""INSERT (:Document {
+    title: 'Cooking Recipes',
+    embedding: vector([0.9, 0.1, 0.2, 0.1])
+})""")
+
+# Create an HNSW index for fast approximate search
+db.execute("""
+    CREATE VECTOR INDEX doc_idx ON :Document(embedding)
+    WITH (dimensions: 4, metric: 'cosine')
+""")
+
+# Find similar documents using cosine similarity
+query = [0.15, 0.75, 0.35, 0.55]
+result = db.execute(f"""
+    MATCH (d:Document)
+    WHERE cosine_similarity(d.embedding, vector({query})) > 0.9
+    RETURN d.title, cosine_similarity(d.embedding, vector({query})) AS score
+    ORDER BY score DESC
+""")
+for row in result:
+    print(row)  # Graph Databases, Vector Search (Cooking Recipes filtered out)
 ```
 
 ## Command-Line Interface

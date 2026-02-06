@@ -245,6 +245,23 @@ impl Arena {
         let chunk = chunks
             .first()
             .expect("Arena should have at least one chunk");
+
+        debug_assert!(
+            (offset as usize) + std::mem::size_of::<T>() <= chunk.used(),
+            "read_at: offset {} + size_of::<{}>() = {} exceeds chunk used bytes {}",
+            offset,
+            std::any::type_name::<T>(),
+            (offset as usize) + std::mem::size_of::<T>(),
+            chunk.used()
+        );
+        debug_assert!(
+            (offset as usize).is_multiple_of(std::mem::align_of::<T>()),
+            "read_at: offset {} is not aligned for {} (alignment {})",
+            offset,
+            std::any::type_name::<T>(),
+            std::mem::align_of::<T>()
+        );
+
         // SAFETY: Caller guarantees offset is valid and T matches stored type
         unsafe {
             let ptr = chunk.ptr.as_ptr().add(offset as usize).cast::<T>();
@@ -266,6 +283,23 @@ impl Arena {
         let chunk = chunks
             .first()
             .expect("Arena should have at least one chunk");
+
+        debug_assert!(
+            (offset as usize) + std::mem::size_of::<T>() <= chunk.capacity,
+            "read_at_mut: offset {} + size_of::<{}>() = {} exceeds chunk capacity {}",
+            offset,
+            std::any::type_name::<T>(),
+            (offset as usize) + std::mem::size_of::<T>(),
+            chunk.capacity
+        );
+        debug_assert!(
+            (offset as usize).is_multiple_of(std::mem::align_of::<T>()),
+            "read_at_mut: offset {} is not aligned for {} (alignment {})",
+            offset,
+            std::any::type_name::<T>(),
+            std::mem::align_of::<T>()
+        );
+
         // SAFETY: Caller guarantees offset is valid, T matches, and no aliasing
         unsafe {
             let ptr = chunk.ptr.as_ptr().add(offset as usize).cast::<T>();
@@ -710,5 +744,105 @@ mod tiered_storage_tests {
 
         let read: &u64 = unsafe { arena.read_at(offset) };
         assert_eq!(*read, 42);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds chunk used bytes")]
+    fn test_read_at_out_of_bounds() {
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 4096);
+        let (_offset, _) = arena.alloc_value_with_offset(42u64);
+
+        // Read way past the allocated region — should panic in debug
+        unsafe {
+            let _: &u64 = arena.read_at(4000);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "is not aligned")]
+    fn test_read_at_misaligned() {
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 4096);
+        // Allocate a u8 at offset 0
+        let (_offset, _) = arena.alloc_value_with_offset(0xFFu8);
+        // Also allocate some bytes so offset 1 is within used range
+        let _ = arena.alloc_value_with_offset(0u64);
+
+        // Try to read a u64 at offset 1 (misaligned for u64)
+        unsafe {
+            let _: &u64 = arena.read_at(1);
+        }
+    }
+
+    #[test]
+    fn test_concurrent_read_stress() {
+        use std::sync::Arc;
+
+        let arena = Arc::new(Arena::with_chunk_size(EpochId::INITIAL, 1024 * 1024));
+        let num_threads = 8;
+        let values_per_thread = 1000;
+
+        // Each thread allocates values and records offsets
+        let mut all_offsets = Vec::new();
+        for t in 0..num_threads {
+            let base = (t * values_per_thread) as u64;
+            let mut offsets = Vec::with_capacity(values_per_thread);
+            for i in 0..values_per_thread as u64 {
+                let (offset, _) = arena.alloc_value_with_offset(base + i);
+                offsets.push(offset);
+            }
+            all_offsets.push(offsets);
+        }
+
+        // Now read all values back concurrently from multiple threads
+        let mut handles = Vec::new();
+        for (t, offsets) in all_offsets.into_iter().enumerate() {
+            let arena = Arc::clone(&arena);
+            let base = (t * values_per_thread) as u64;
+            handles.push(std::thread::spawn(move || {
+                for (i, offset) in offsets.iter().enumerate() {
+                    let val: &u64 = unsafe { arena.read_at(*offset) };
+                    assert_eq!(*val, base + i as u64);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+    }
+
+    #[test]
+    fn test_multi_type_interleaved() {
+        #[derive(Debug, Clone, PartialEq)]
+        #[repr(C)]
+        struct Record {
+            id: u64,
+            flags: u32,
+            weight: f32,
+        }
+
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 4096);
+
+        // Interleave different types
+        let (off_u8, _) = arena.alloc_value_with_offset(0xAAu8);
+        let (off_u32, _) = arena.alloc_value_with_offset(0xBBBBu32);
+        let (off_u64, _) = arena.alloc_value_with_offset(0xCCCCCCCCu64);
+        let (off_rec, _) = arena.alloc_value_with_offset(Record {
+            id: 42,
+            flags: 0xFF,
+            weight: 3.14,
+        });
+
+        // Read them all back
+        unsafe {
+            assert_eq!(*arena.read_at::<u8>(off_u8), 0xAA);
+            assert_eq!(*arena.read_at::<u32>(off_u32), 0xBBBB);
+            assert_eq!(*arena.read_at::<u64>(off_u64), 0xCCCCCCCC);
+
+            let rec: &Record = arena.read_at(off_rec);
+            assert_eq!(rec.id, 42);
+            assert_eq!(rec.flags, 0xFF);
+            assert!((rec.weight - 3.14).abs() < 0.001);
+        }
     }
 }

@@ -4,6 +4,14 @@ The GrafeoDB ecosystem extends beyond the core database with visualization tools
 
 <div class="grid cards" markdown>
 
+-   :material-server:{ .lg .middle } **grafeo-server**
+
+    ---
+
+    HTTP server & web UI for Grafeo: REST API, transactions, single binary (~20MB Docker image).
+
+    [:octicons-arrow-right-24: Learn more](grafeo-server.md)
+
 -   :material-chart-line:{ .lg .middle } **graph-bench**
 
     ---

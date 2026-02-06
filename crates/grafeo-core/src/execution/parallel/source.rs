@@ -793,7 +793,7 @@ mod tests {
 
     #[test]
     fn test_parallel_vector_source() {
-        let values: Vec<Value> = (0..100).map(|i| Value::Int64(i)).collect();
+        let values: Vec<Value> = (0..100).map(Value::Int64).collect();
         let source = ParallelVectorSource::single_column(values);
 
         assert_eq!(source.total_rows(), Some(100));
@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     fn test_parallel_vector_source_partition() {
-        let values: Vec<Value> = (0..100).map(|i| Value::Int64(i)).collect();
+        let values: Vec<Value> = (0..100).map(Value::Int64).collect();
         let source = ParallelVectorSource::single_column(values);
 
         let morsel = Morsel::new(0, 0, 20, 50);
@@ -851,7 +851,7 @@ mod tests {
     fn test_parallel_chunk_source() {
         let chunks: Vec<DataChunk> = (0..5)
             .map(|i| {
-                let values: Vec<Value> = (i * 10..(i + 1) * 10).map(|j| Value::Int64(j)).collect();
+                let values: Vec<Value> = (i * 10..(i + 1) * 10).map(Value::Int64).collect();
                 DataChunk::new(vec![ValueVector::from_values(&values)])
             })
             .collect();
@@ -865,7 +865,7 @@ mod tests {
     fn test_parallel_chunk_source_partition() {
         let chunks: Vec<DataChunk> = (0..5)
             .map(|i| {
-                let values: Vec<Value> = (i * 10..(i + 1) * 10).map(|j| Value::Int64(j)).collect();
+                let values: Vec<Value> = (i * 10..(i + 1) * 10).map(Value::Int64).collect();
                 DataChunk::new(vec![ValueVector::from_values(&values)])
             })
             .collect();

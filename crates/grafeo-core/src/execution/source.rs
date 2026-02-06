@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_vector_source_chunked() {
-        let values: Vec<Value> = (0..10).map(|i| Value::Int64(i)).collect();
+        let values: Vec<Value> = (0..10).map(Value::Int64).collect();
         let mut source = VectorSource::single_column(values);
 
         let chunk1 = source.next_chunk(3).unwrap().unwrap();

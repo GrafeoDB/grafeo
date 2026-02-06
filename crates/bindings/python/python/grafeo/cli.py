@@ -7,7 +7,6 @@ This module provides a Python CLI wrapper for the Grafeo admin functionality.
 import json
 import sys
 from pathlib import Path
-from typing import Optional
 
 try:
     import click
@@ -64,7 +63,13 @@ def print_key_value(items: list[tuple[str, str]], as_json: bool = False) -> None
 
 
 @click.group()
-@click.option("--format", "-f", type=click.Choice(["table", "json"]), default="table", help="Output format")
+@click.option(
+    "--format",
+    "-f",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Output format",
+)
 @click.option("--quiet", "-q", is_flag=True, help="Suppress progress messages")
 @click.version_option()
 @click.pass_context
@@ -145,13 +150,19 @@ def schema(ctx: click.Context, path: str) -> None:
             labels = schema_dict.get("labels", [])
             if labels:
                 print("Labels:")
-                print_table(["Name", "Count"], [[l["name"], str(l["count"])] for l in labels])
+                print_table(
+                    ["Name", "Count"],
+                    [[lbl["name"], str(lbl["count"])] for lbl in labels],
+                )
                 print()
 
             edge_types = schema_dict.get("edge_types", [])
             if edge_types:
                 print("Edge Types:")
-                print_table(["Name", "Count"], [[e["name"], str(e["count"])] for e in edge_types])
+                print_table(
+                    ["Name", "Count"],
+                    [[e["name"], str(e["count"])] for e in edge_types],
+                )
                 print()
 
             prop_keys = schema_dict.get("property_keys", [])
@@ -163,7 +174,10 @@ def schema(ctx: click.Context, path: str) -> None:
             predicates = schema_dict.get("predicates", [])
             if predicates:
                 print("Predicates:")
-                print_table(["IRI", "Count"], [[p["iri"], str(p["count"])] for p in predicates])
+                print_table(
+                    ["IRI", "Count"],
+                    [[p["iri"], str(p["count"])] for p in predicates],
+                )
                 print()
 
             graphs = schema_dict.get("named_graphs", [])
@@ -286,19 +300,27 @@ def backup_create(ctx: click.Context, path: str, output: str) -> None:
 @click.argument("target_path", type=click.Path())
 @click.option("--force", is_flag=True, help="Overwrite existing target")
 @click.pass_context
-def backup_restore(ctx: click.Context, backup_path: str, target_path: str, force: bool) -> None:
+def backup_restore(
+    ctx: click.Context,
+    backup_path: str,
+    target_path: str,
+    force: bool,
+) -> None:
     """Restore from a backup."""
     quiet = ctx.obj["quiet"]
     target = Path(target_path)
 
     if target.exists() and not force:
-        click.echo(f"Error: Target {target_path} already exists. Use --force to overwrite.", err=True)
+        click.echo(
+            f"Error: Target {target_path} already exists. Use --force to overwrite.", err=True
+        )
         sys.exit(1)
 
     if target.exists() and force:
         if not quiet:
             click.echo(f"Removing existing database at {target_path}...")
         import shutil
+
         shutil.rmtree(target_path)
 
     if not quiet:

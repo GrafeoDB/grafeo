@@ -307,7 +307,6 @@ mod gql_basic_patterns {
     }
 
     #[test]
-    #[ignore = "Parser issue with 'Node' label name - reserved keyword handling"]
     fn test_chain_traversal() {
         let db = create_chain();
         let session = db.session();
@@ -458,7 +457,6 @@ mod gql_joins {
     }
 
     #[test]
-    #[ignore = "Multi-pattern MATCH not fully implemented"]
     fn test_multi_pattern_match() {
         let db = create_social_network();
         let session = db.session();
@@ -490,7 +488,6 @@ mod gql_joins {
     }
 
     #[test]
-    #[ignore = "Parser issue with 'Node' label name - reserved keyword handling"]
     fn test_chain_full_traversal() {
         let db = create_chain();
         let session = db.session();
@@ -688,7 +685,6 @@ mod gremlin_tests {
     }
 
     #[test]
-    #[ignore = "Gremlin executor variable binding not fully implemented"]
     fn test_v_all_nodes() {
         let db = create_social_network();
         let session = db.session();
@@ -698,7 +694,6 @@ mod gremlin_tests {
     }
 
     #[test]
-    #[ignore = "Gremlin executor variable binding not fully implemented"]
     fn test_v_has_label() {
         let db = create_social_network();
         let session = db.session();
@@ -708,7 +703,6 @@ mod gremlin_tests {
     }
 
     #[test]
-    #[ignore = "Gremlin predicate parsing not fully implemented"]
     fn test_v_has_property() {
         let db = create_social_network();
         let session = db.session();
@@ -720,7 +714,6 @@ mod gremlin_tests {
     }
 
     #[test]
-    #[ignore = "Gremlin executor variable binding not fully implemented"]
     fn test_out_step() {
         let db = create_social_network();
         let session = db.session();
@@ -732,7 +725,6 @@ mod gremlin_tests {
     }
 
     #[test]
-    #[ignore = "Gremlin executor variable binding not fully implemented"]
     fn test_values_step() {
         let db = create_social_network();
         let session = db.session();
@@ -744,7 +736,6 @@ mod gremlin_tests {
     }
 
     #[test]
-    #[ignore = "Gremlin executor variable binding not fully implemented"]
     fn test_limit_step() {
         let db = create_social_network();
         let session = db.session();
@@ -754,7 +745,6 @@ mod gremlin_tests {
     }
 
     #[test]
-    #[ignore = "Gremlin executor variable binding not fully implemented"]
     fn test_count() {
         let db = create_social_network();
         let session = db.session();
@@ -770,7 +760,6 @@ mod gremlin_tests {
     }
 
     #[test]
-    #[ignore = "Gremlin executor variable binding not fully implemented"]
     fn test_sum() {
         let db = create_numeric_data();
         let session = db.session();
@@ -786,7 +775,6 @@ mod gremlin_tests {
     }
 
     #[test]
-    #[ignore = "Gremlin executor variable binding not fully implemented"]
     fn test_two_hop_traversal() {
         let db = create_social_network();
         let session = db.session();
@@ -847,7 +835,6 @@ mod graphql_tests {
     }
 
     #[test]
-    #[ignore = "GraphQL filter arguments not fully implemented"]
     fn test_query_with_filter() {
         let db = create_social_network();
         let session = db.session();
@@ -859,7 +846,6 @@ mod graphql_tests {
     }
 
     #[test]
-    #[ignore = "GraphQL nested queries not fully implemented"]
     fn test_nested_query() {
         let db = create_social_network();
         let session = db.session();
@@ -1127,7 +1113,6 @@ mod cross_language_consistency_gql_cypher {
     }
 
     #[test]
-    #[ignore = "Cypher SUM returning 0"]
     fn test_sum_aggregation_consistency() {
         let db = create_numeric_data();
         let session = db.session();
@@ -1163,7 +1148,6 @@ mod cross_language_consistency_all {
     use super::*;
 
     #[test]
-    #[ignore = "Gremlin executor variable binding not fully implemented"]
     fn test_node_count_with_gremlin() {
         let db = create_social_network();
         let session = db.session();
@@ -1179,7 +1163,6 @@ mod cross_language_consistency_all {
     }
 
     #[test]
-    #[ignore = "Gremlin executor variable binding not fully implemented"]
     fn test_label_filter_with_gremlin() {
         let db = create_social_network();
         let session = db.session();

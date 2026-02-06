@@ -160,7 +160,7 @@ impl Session {
             let _binding_context = binder.bind(&logical_plan)?;
 
             // Optimize the plan
-            let optimizer = Optimizer::new();
+            let optimizer = Optimizer::from_store(&self.store);
             let plan = optimizer.optimize(logical_plan)?;
 
             // Cache the optimized plan for future use
@@ -281,7 +281,7 @@ impl Session {
             let _binding_context = binder.bind(&logical_plan)?;
 
             // Optimize the plan
-            let optimizer = Optimizer::new();
+            let optimizer = Optimizer::from_store(&self.store);
             let plan = optimizer.optimize(logical_plan)?;
 
             // Cache the optimized plan
@@ -342,7 +342,7 @@ impl Session {
         let _binding_context = binder.bind(&logical_plan)?;
 
         // Optimize the plan
-        let optimizer = Optimizer::new();
+        let optimizer = Optimizer::from_store(&self.store);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // Get transaction context for MVCC visibility
@@ -427,7 +427,7 @@ impl Session {
         let _binding_context = binder.bind(&logical_plan)?;
 
         // Optimize the plan
-        let optimizer = Optimizer::new();
+        let optimizer = Optimizer::from_store(&self.store);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // Get transaction context for MVCC visibility
@@ -493,7 +493,7 @@ impl Session {
         let logical_plan = sparql_translator::translate(query)?;
 
         // Optimize the plan
-        let optimizer = Optimizer::new();
+        let optimizer = Optimizer::from_store(&self.store);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // Convert to physical plan using RDF planner
@@ -550,6 +550,30 @@ impl Session {
         }
 
         let tx_id = self.tx_manager.begin();
+        self.current_tx = Some(tx_id);
+        Ok(())
+    }
+
+    /// Begins a transaction with a specific isolation level.
+    ///
+    /// See [`begin_tx`](Self::begin_tx) for the default (`SnapshotIsolation`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a transaction is already active.
+    pub fn begin_tx_with_isolation(
+        &mut self,
+        isolation_level: crate::transaction::IsolationLevel,
+    ) -> Result<()> {
+        if self.current_tx.is_some() {
+            return Err(grafeo_common::utils::error::Error::Transaction(
+                grafeo_common::utils::error::TransactionError::InvalidState(
+                    "Transaction already active".to_string(),
+                ),
+            ));
+        }
+
+        let tx_id = self.tx_manager.begin_with_isolation(isolation_level);
         self.current_tx = Some(tx_id);
         Ok(())
     }

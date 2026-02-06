@@ -417,6 +417,50 @@ impl CardinalityEstimator {
         }
     }
 
+    /// Creates a cardinality estimator pre-populated from store statistics.
+    ///
+    /// Maps `LabelStatistics` to `TableStats` and computes the average edge
+    /// fanout from `EdgeTypeStatistics`. Falls back to defaults for any
+    /// missing statistics.
+    #[must_use]
+    pub fn from_statistics(stats: &grafeo_core::statistics::Statistics) -> Self {
+        let mut estimator = Self::new();
+
+        // Use total node count as default for unlabeled scans
+        if stats.total_nodes > 0 {
+            estimator.default_row_count = stats.total_nodes;
+        }
+
+        // Convert label statistics to optimizer table stats
+        for (label, label_stats) in &stats.labels {
+            let mut table_stats = TableStats::new(label_stats.node_count);
+
+            // Map property statistics (distinct count for selectivity estimation)
+            for (prop, col_stats) in &label_stats.properties {
+                let optimizer_col =
+                    ColumnStats::new(col_stats.distinct_count).with_nulls(col_stats.null_count);
+                table_stats = table_stats.with_column(prop, optimizer_col);
+            }
+
+            estimator.add_table_stats(label, table_stats);
+        }
+
+        // Compute average fanout from edge type statistics
+        if !stats.edge_types.is_empty() {
+            let total_out_degree: f64 = stats.edge_types.values().map(|e| e.avg_out_degree).sum();
+            estimator.avg_fanout = total_out_degree / stats.edge_types.len() as f64;
+        } else if stats.total_nodes > 0 {
+            estimator.avg_fanout = stats.total_edges as f64 / stats.total_nodes as f64;
+        }
+
+        // Clamp fanout to a reasonable minimum
+        if estimator.avg_fanout < 1.0 {
+            estimator.avg_fanout = 1.0;
+        }
+
+        estimator
+    }
+
     /// Adds statistics for a table/label.
     pub fn add_table_stats(&mut self, name: &str, stats: TableStats) {
         self.table_stats.insert(name.to_string(), stats);

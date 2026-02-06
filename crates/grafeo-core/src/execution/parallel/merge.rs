@@ -409,10 +409,7 @@ pub fn merge_sorted_chunks(
     chunk_size: usize,
 ) -> Result<Vec<DataChunk>, OperatorError> {
     // Convert chunks to row format for merging
-    let row_runs: Vec<Vec<Vec<Value>>> = runs
-        .into_iter()
-        .map(|chunks| chunks_to_rows(chunks))
-        .collect();
+    let row_runs: Vec<Vec<Vec<Value>>> = runs.into_iter().map(chunks_to_rows).collect();
 
     let merged_rows = merge_sorted_runs(row_runs, keys)?;
     rows_to_chunks(merged_rows, chunk_size)

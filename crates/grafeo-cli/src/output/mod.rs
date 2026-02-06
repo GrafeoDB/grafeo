@@ -81,7 +81,7 @@ mod tests {
     fn test_format_clone_and_copy() {
         let format = Format::Table;
         let copied = format;
-        let cloned = format.clone();
+        let cloned = Clone::clone(&format);
         // If this compiles, Clone and Copy are working
         assert!(matches!(copied, Format::Table));
         assert!(matches!(cloned, Format::Table));

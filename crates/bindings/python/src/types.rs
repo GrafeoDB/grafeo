@@ -7,7 +7,8 @@
 //! | `int` | `Int64` | |
 //! | `float` | `Float64` | |
 //! | `str` | `String` | |
-//! | `list` | `List` | Elements converted recursively |
+//! | `list[float]` | `Vector` | All-float lists become vectors |
+//! | `list` | `List` | Mixed-type lists converted recursively |
 //! | `dict` | `Map` | Keys must be strings |
 //! | `bytes` | `Bytes` | |
 //! | `datetime` | `Timestamp` | Converted to/from UTC |
@@ -139,6 +140,13 @@ impl PyValue {
 
         if let Ok(v) = obj.extract::<String>() {
             return Ok(Value::String(v.into()));
+        }
+
+        // All-float lists → Value::Vector (must come before generic list)
+        if let Ok(v) = obj.extract::<Vec<f32>>() {
+            if !v.is_empty() {
+                return Ok(Value::Vector(v.into()));
+            }
         }
 
         if let Ok(v) = obj.extract::<Vec<Bound<'_, PyAny>>>() {
@@ -278,4 +286,25 @@ impl From<PyValue> for Value {
     fn from(py_val: PyValue) -> Self {
         py_val.inner
     }
+}
+
+/// Creates a vector value from a list of floats.
+///
+/// Use this for explicit vector construction:
+/// ```python
+/// import grafeo
+/// vec = grafeo.vector([0.1, 0.2, 0.3])
+/// db.create_node(['Doc'], {'embedding': vec})
+/// ```
+///
+/// Note: All-float Python lists are automatically converted to vectors,
+/// so `[0.1, 0.2, 0.3]` works directly in most cases.
+#[pyfunction]
+pub fn vector(values: Vec<f32>) -> PyResult<Vec<f32>> {
+    if values.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "vector() requires at least one element",
+        ));
+    }
+    Ok(values)
 }

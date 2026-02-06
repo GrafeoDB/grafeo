@@ -52,6 +52,7 @@ gremlin = ["grafeo-adapters/gremlin"]
 graphql = ["grafeo-adapters/graphql"]
 rdf = ["grafeo-core/rdf", "grafeo-adapters/rdf"]  # RDF graph model and planner
 full = ["gql", "cypher", "sparql", "gremlin", "graphql", "rdf"]
+vector-index = ["grafeo-core/vector-index"]  # HNSW vector index for k-NN search
 block-stm = []  # Block-STM parallel transaction execution
 
 [lints]

@@ -615,7 +615,7 @@ mod tests {
 
         // Write invalid file (must be at least MMAP_HEADER_SIZE bytes)
         let invalid_data = [0u8; MMAP_HEADER_SIZE];
-        std::fs::write(&path, &invalid_data).unwrap();
+        std::fs::write(&path, invalid_data).unwrap();
 
         // Should fail to open due to invalid magic
         let result = MmapStorage::open(&path);

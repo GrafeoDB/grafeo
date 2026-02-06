@@ -606,11 +606,7 @@ impl LazyFactorizedChainOperator {
         // Execute each expand step
         for step in &self.steps {
             chain = chain
-                .expand(
-                    step.source_column,
-                    step.direction.clone(),
-                    step.edge_type.clone(),
-                )
+                .expand(step.source_column, step.direction, step.edge_type.clone())
                 .map_err(|e| {
                     OperatorError::Execution(format!("Factorized expand failed: {}", e))
                 })?;

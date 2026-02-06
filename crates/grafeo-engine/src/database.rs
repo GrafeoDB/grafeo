@@ -417,7 +417,7 @@ impl GrafeoDB {
         let logical_plan = sparql_translator::translate(query)?;
 
         // Optimize the plan
-        let optimizer = Optimizer::new();
+        let optimizer = Optimizer::from_store(&self.store);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // Convert to physical plan using RDF planner
@@ -939,6 +939,154 @@ impl GrafeoDB {
     /// ```
     pub fn create_property_index(&self, property: &str) {
         self.store.create_property_index(property);
+    }
+
+    /// Creates a vector similarity index on a node property.
+    ///
+    /// This enables efficient approximate nearest-neighbor search on vector
+    /// properties. Currently validates the index parameters and scans existing
+    /// nodes to verify the property contains vectors of the expected dimensions.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Node label to index (e.g., `"Doc"`)
+    /// * `property` - Property containing vector embeddings (e.g., `"embedding"`)
+    /// * `dimensions` - Expected vector dimensions (inferred from data if `None`)
+    /// * `metric` - Distance metric: `"cosine"` (default), `"euclidean"`, `"dot_product"`, `"manhattan"`
+    /// * `m` - HNSW links per node (default: 16). Higher = better recall, more memory.
+    /// * `ef_construction` - Construction beam width (default: 128). Higher = better index quality, slower build.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the metric is invalid, no vectors are found, or
+    /// dimensions don't match.
+    pub fn create_vector_index(
+        &self,
+        label: &str,
+        property: &str,
+        dimensions: Option<usize>,
+        metric: Option<&str>,
+        m: Option<usize>,
+        ef_construction: Option<usize>,
+    ) -> Result<()> {
+        use grafeo_common::types::{PropertyKey, Value};
+        use grafeo_core::index::vector::DistanceMetric;
+
+        let metric = match metric {
+            Some(m) => DistanceMetric::from_str(m).ok_or_else(|| {
+                grafeo_common::utils::error::Error::Internal(format!(
+                    "Unknown distance metric '{}'. Use: cosine, euclidean, dot_product, manhattan",
+                    m
+                ))
+            })?,
+            None => DistanceMetric::Cosine,
+        };
+
+        // Scan nodes to validate vectors exist and check dimensions
+        let prop_key = PropertyKey::new(property);
+        let mut found_dims: Option<usize> = dimensions;
+        let mut vector_count = 0usize;
+
+        #[cfg(feature = "vector-index")]
+        let mut vectors: Vec<(grafeo_common::types::NodeId, Vec<f32>)> = Vec::new();
+
+        for node in self.store.nodes_with_label(label) {
+            if let Some(Value::Vector(v)) = node.properties.get(&prop_key) {
+                if let Some(expected) = found_dims {
+                    if v.len() != expected {
+                        return Err(grafeo_common::utils::error::Error::Internal(format!(
+                            "Vector dimension mismatch: expected {}, found {} on node {}",
+                            expected,
+                            v.len(),
+                            node.id.0
+                        )));
+                    }
+                } else {
+                    found_dims = Some(v.len());
+                }
+                vector_count += 1;
+                #[cfg(feature = "vector-index")]
+                vectors.push((node.id, v.to_vec()));
+            }
+        }
+
+        if vector_count == 0 {
+            return Err(grafeo_common::utils::error::Error::Internal(format!(
+                "No vector properties found on :{label}({property})"
+            )));
+        }
+
+        let dims = found_dims.unwrap_or(0);
+
+        // Build and populate the HNSW index
+        #[cfg(feature = "vector-index")]
+        {
+            use grafeo_core::index::vector::{HnswConfig, HnswIndex};
+
+            let mut config = HnswConfig::new(dims, metric);
+            if let Some(m_val) = m {
+                config = config.with_m(m_val);
+            }
+            if let Some(ef_c) = ef_construction {
+                config = config.with_ef_construction(ef_c);
+            }
+
+            let index = HnswIndex::new(config);
+            for (node_id, vec) in &vectors {
+                index.insert(*node_id, vec);
+            }
+
+            self.store
+                .add_vector_index(label, property, Arc::new(index));
+        }
+
+        // Suppress unused variable warnings when vector-index is off
+        let _ = (m, ef_construction);
+
+        tracing::info!(
+            "Vector index created: :{label}({property}) - {vector_count} vectors, {dims} dimensions, metric={metric_name}",
+            metric_name = metric.name()
+        );
+
+        Ok(())
+    }
+
+    /// Searches for the k nearest neighbors of a query vector.
+    ///
+    /// Uses the HNSW index created by [`create_vector_index`](Self::create_vector_index).
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Node label that was indexed
+    /// * `property` - Property that was indexed
+    /// * `query` - Query vector (slice of floats)
+    /// * `k` - Number of nearest neighbors to return
+    /// * `ef` - Search beam width (higher = better recall, slower). Uses index default if `None`.
+    ///
+    /// # Returns
+    ///
+    /// Vector of `(NodeId, distance)` pairs sorted by distance ascending.
+    #[cfg(feature = "vector-index")]
+    pub fn vector_search(
+        &self,
+        label: &str,
+        property: &str,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+    ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
+        let index = self.store.get_vector_index(label, property).ok_or_else(|| {
+            grafeo_common::utils::error::Error::Internal(format!(
+                "No vector index found for :{label}({property}). Call create_vector_index() first."
+            ))
+        })?;
+
+        let results = match ef {
+            Some(ef_val) => index.search_with_ef(query, k, ef_val),
+            None => index.search(query, k),
+        };
+
+        Ok(results)
     }
 
     /// Drops an index on a node property.

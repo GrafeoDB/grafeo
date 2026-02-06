@@ -969,6 +969,93 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
+            // vector(list) - converts a list of numbers to a Vector
+            "vector" => {
+                if args.len() != 1 {
+                    return None;
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
+                match val {
+                    Value::List(items) => {
+                        let floats: Vec<f32> = items
+                            .iter()
+                            .filter_map(|v| match v {
+                                Value::Float64(f) => Some(*f as f32),
+                                Value::Int64(i) => Some(*i as f32),
+                                _ => None,
+                            })
+                            .collect();
+                        if floats.len() == items.len() {
+                            Some(Value::Vector(floats.into()))
+                        } else {
+                            None
+                        }
+                    }
+                    Value::Vector(v) => Some(Value::Vector(v)),
+                    _ => None,
+                }
+            }
+            // Vector distance / similarity functions (SIMD-accelerated)
+            "cosine_similarity" => {
+                if args.len() != 2 {
+                    return None;
+                }
+                let a_val = self.eval_expr(&args[0], chunk, row)?;
+                let b_val = self.eval_expr(&args[1], chunk, row)?;
+                let a = a_val.as_vector()?;
+                let b = b_val.as_vector()?;
+                if a.len() != b.len() {
+                    return None;
+                }
+                Some(Value::Float64(
+                    crate::index::vector::cosine_similarity(a, b) as f64,
+                ))
+            }
+            "euclidean_distance" => {
+                if args.len() != 2 {
+                    return None;
+                }
+                let a_val = self.eval_expr(&args[0], chunk, row)?;
+                let b_val = self.eval_expr(&args[1], chunk, row)?;
+                let a = a_val.as_vector()?;
+                let b = b_val.as_vector()?;
+                if a.len() != b.len() {
+                    return None;
+                }
+                Some(Value::Float64(
+                    crate::index::vector::euclidean_distance(a, b) as f64,
+                ))
+            }
+            "dot_product" => {
+                if args.len() != 2 {
+                    return None;
+                }
+                let a_val = self.eval_expr(&args[0], chunk, row)?;
+                let b_val = self.eval_expr(&args[1], chunk, row)?;
+                let a = a_val.as_vector()?;
+                let b = b_val.as_vector()?;
+                if a.len() != b.len() {
+                    return None;
+                }
+                Some(Value::Float64(
+                    crate::index::vector::dot_product(a, b) as f64
+                ))
+            }
+            "manhattan_distance" => {
+                if args.len() != 2 {
+                    return None;
+                }
+                let a_val = self.eval_expr(&args[0], chunk, row)?;
+                let b_val = self.eval_expr(&args[1], chunk, row)?;
+                let a = a_val.as_vector()?;
+                let b = b_val.as_vector()?;
+                if a.len() != b.len() {
+                    return None;
+                }
+                Some(Value::Float64(
+                    crate::index::vector::manhattan_distance(a, b) as f64,
+                ))
+            }
             _ => None, // Unknown function
         }
     }

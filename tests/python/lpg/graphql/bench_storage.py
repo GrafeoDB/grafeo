@@ -55,7 +55,9 @@ class BenchGraphQLStorage(BaseBenchStorage):
         """GraphQL filter query."""
         val = f'"{value}"' if isinstance(value, str) else value
         # GraphQL uses comparison operators via arguments
-        op_name = {"=": "eq", ">": "gt", "<": "lt", ">=": "gte", "<=": "lte"}.get(op, "eq")
+        op_name = {"=": "eq", ">": "gt", "<": "lt", ">=": "gte", "<=": "lte"}.get(
+            op, "eq"
+        )
         return f"""
             query {{
                 {label.lower()}(filter: {{ {prop}: {{ {op_name}: {val} }} }}) {{
@@ -75,8 +77,9 @@ class BenchGraphQLStorage(BaseBenchStorage):
             }}
         """
 
-    def one_hop_query(self, from_label: str, rel_type: str, to_label: str,
-                      limit: int = None) -> str:
+    def one_hop_query(
+        self, from_label: str, rel_type: str, to_label: str, limit: int = None
+    ) -> str:
         """GraphQL 1-hop traversal query."""
         limit_arg = f"(limit: {limit})" if limit else ""
         return f"""
@@ -116,8 +119,9 @@ class BenchGraphQLStorage(BaseBenchStorage):
             }}
         """
 
-    def sort_query(self, label: str, sort_prop: str, desc: bool = False,
-                   limit: int = 100) -> str:
+    def sort_query(
+        self, label: str, sort_prop: str, desc: bool = False, limit: int = 100
+    ) -> str:
         """GraphQL sort query."""
         order = "DESC" if desc else "ASC"
         return f"""
@@ -152,12 +156,15 @@ class BenchGraphQLStorage(BaseBenchStorage):
 
         node_ids = []
         for i in range(num_nodes):
-            node = db.create_node(["Person"], {
-                "name": f"Person{i}",
-                "age": 20 + rng.randint(0, 50),
-                "city": rng.choice(cities),
-                "email": f"user{i}@example.com",
-            })
+            node = db.create_node(
+                ["Person"],
+                {
+                    "name": f"Person{i}",
+                    "age": 20 + rng.randint(0, 50),
+                    "city": rng.choice(cities),
+                    "email": f"user{i}@example.com",
+                },
+            )
             node_ids.append(node.id)
 
         target_edges = num_nodes * avg_edges
@@ -184,6 +191,6 @@ class BenchGraphQLStorage(BaseBenchStorage):
                 node_ids.append(node.id)
 
             for i, src in enumerate(node_ids):
-                for dst in node_ids[i + 1:]:
+                for dst in node_ids[i + 1 :]:
                     db.create_edge(src, dst, "CONNECTED", {})
                     db.create_edge(dst, src, "CONNECTED", {})

@@ -9,14 +9,14 @@ import pytest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
 
 
 pytestmark = pytest.mark.skipif(
-    not GRAFEO_AVAILABLE,
-    reason="Grafeo Python bindings not installed"
+    not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"
 )
 
 

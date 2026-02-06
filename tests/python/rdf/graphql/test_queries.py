@@ -9,14 +9,14 @@ import pytest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
 
 
 pytestmark = pytest.mark.skipif(
-    not GRAFEO_AVAILABLE,
-    reason="Grafeo Python bindings not installed"
+    not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"
 )
 
 
@@ -30,17 +30,15 @@ class TestRDFGraphQLQueries:
 
     def _setup_test_data(self):
         """Create RDF-like test data."""
-        self.alice = self.db.create_node(["Resource", "Person"], {
-            "uri": "http://example.org/person/alice",
-            "name": "Alice",
-            "age": 30
-        })
+        self.alice = self.db.create_node(
+            ["Resource", "Person"],
+            {"uri": "http://example.org/person/alice", "name": "Alice", "age": 30},
+        )
 
-        self.bob = self.db.create_node(["Resource", "Person"], {
-            "uri": "http://example.org/person/bob",
-            "name": "Bob",
-            "age": 25
-        })
+        self.bob = self.db.create_node(
+            ["Resource", "Person"],
+            {"uri": "http://example.org/person/bob", "name": "Bob", "age": 25},
+        )
 
         self.db.create_edge(self.alice.id, self.bob.id, "knows", {})
 

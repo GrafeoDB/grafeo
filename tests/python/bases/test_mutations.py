@@ -8,7 +8,6 @@ This module defines test logic for all write operations:
 """
 
 from abc import ABC, abstractmethod
-import pytest
 
 
 class BaseMutationsTest(ABC):
@@ -121,7 +120,9 @@ class BaseMutationsTest(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_node_query(self, label: str, match_prop: str, match_value, set_prop: str, set_value) -> str:
+    def update_node_query(
+        self, label: str, match_prop: str, match_value, set_prop: str, set_value
+    ) -> str:
         """Return query to update a node property.
 
         Args:
@@ -181,7 +182,7 @@ class BaseMutationsTest(ABC):
         self.execute_query(db, query)
 
         # Verify properties exist
-        result = self.execute_query(db,"MATCH (n:Data) RETURN n.int_val")
+        result = self.execute_query(db, "MATCH (n:Data) RETURN n.int_val")
         rows = list(result)
         assert len(rows) == 1
         assert rows[0].get("n.int_val") == 42
@@ -201,20 +202,18 @@ class BaseMutationsTest(ABC):
     def test_create_edge(self, db):
         """Test creating an edge between nodes."""
         # Create two nodes
-        self.execute_query(db,self.create_node_query(["Person"], {"name": "Alice"}))
-        self.execute_query(db,self.create_node_query(["Person"], {"name": "Bob"}))
+        self.execute_query(db, self.create_node_query(["Person"], {"name": "Alice"}))
+        self.execute_query(db, self.create_node_query(["Person"], {"name": "Bob"}))
 
         # Create edge
         query = self.create_edge_query(
-            "Person", "name", "Alice",
-            "Person", "name", "Bob",
-            "KNOWS", {"since": 2020}
+            "Person", "name", "Alice", "Person", "name", "Bob", "KNOWS", {"since": 2020}
         )
         self.execute_query(db, query)
 
         # Verify edge exists
-        result = self.execute_query(db,
-            "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, b.name, r.since"
+        result = self.execute_query(
+            db, "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, b.name, r.since"
         )
         rows = list(result)
         assert len(rows) == 1
@@ -227,14 +226,16 @@ class BaseMutationsTest(ABC):
     def test_update_node_property(self, db):
         """Test updating a node property."""
         # Create node
-        self.execute_query(db,self.create_node_query(["Person"], {"name": "Alice", "age": 30}))
+        self.execute_query(
+            db, self.create_node_query(["Person"], {"name": "Alice", "age": 30})
+        )
 
         # Update age
         query = self.update_node_query("Person", "name", "Alice", "age", 31)
         self.execute_query(db, query)
 
         # Verify update
-        result = self.execute_query(db,"MATCH (n:Person {name: 'Alice'}) RETURN n.age")
+        result = self.execute_query(db, "MATCH (n:Person {name: 'Alice'}) RETURN n.age")
         rows = list(result)
         assert len(rows) == 1
         assert rows[0].get("n.age") == 31
@@ -246,8 +247,8 @@ class BaseMutationsTest(ABC):
     def test_delete_node(self, db):
         """Test deleting a node."""
         # Create nodes
-        self.execute_query(db,self.create_node_query(["Person"], {"name": "Alice"}))
-        self.execute_query(db,self.create_node_query(["Person"], {"name": "Bob"}))
+        self.execute_query(db, self.create_node_query(["Person"], {"name": "Alice"}))
+        self.execute_query(db, self.create_node_query(["Person"], {"name": "Bob"}))
 
         # Delete Alice
         query = self.delete_node_query("Person", "name", "Alice")
@@ -269,9 +270,15 @@ class BaseMutationsTest(ABC):
     def test_match_with_filter(self, db):
         """Test matching nodes with WHERE clause."""
         # Create test data
-        self.execute_query(db,self.create_node_query(["Person"], {"name": "Alice", "age": 30}))
-        self.execute_query(db,self.create_node_query(["Person"], {"name": "Bob", "age": 25}))
-        self.execute_query(db,self.create_node_query(["Person"], {"name": "Charlie", "age": 35}))
+        self.execute_query(
+            db, self.create_node_query(["Person"], {"name": "Alice", "age": 30})
+        )
+        self.execute_query(
+            db, self.create_node_query(["Person"], {"name": "Bob", "age": 25})
+        )
+        self.execute_query(
+            db, self.create_node_query(["Person"], {"name": "Charlie", "age": 35})
+        )
 
         # Query with filter
         query = self.match_where_query("Person", "age", ">", 28)

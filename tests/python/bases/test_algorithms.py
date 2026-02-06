@@ -10,7 +10,6 @@ This module defines test logic for graph algorithms:
 """
 
 from abc import ABC, abstractmethod
-import pytest
 
 
 class BaseAlgorithmsTest(ABC):
@@ -68,7 +67,9 @@ class BaseAlgorithmsTest(ABC):
 
         result = db.algorithms.dfs_all()
         unique_nodes = len(set(result))
-        assert unique_nodes <= len(node_ids), "DFS all should not visit more unique nodes than exist"
+        assert unique_nodes <= len(node_ids), (
+            "DFS all should not visit more unique nodes than exist"
+        )
 
     # ===== Component Tests =====
 
@@ -82,21 +83,21 @@ class BaseAlgorithmsTest(ABC):
 
     def test_connected_component_count(self, db):
         """Test counting connected components."""
-        graph_info = self.setup_algorithm_graph(db)
+        self.setup_algorithm_graph(db)
 
         count = db.algorithms.connected_component_count()
         assert count >= 1, "Should have at least one component"
 
     def test_strongly_connected_components(self, db):
         """Test strongly connected components."""
-        graph_info = self.setup_algorithm_graph(db)
+        self.setup_algorithm_graph(db)
 
         scc = db.algorithms.strongly_connected_components()
         assert len(scc) >= 1, "Should have at least one SCC"
 
     def test_is_dag(self, db):
         """Test DAG detection."""
-        graph_info = self.setup_algorithm_graph(db)
+        self.setup_algorithm_graph(db)
 
         is_dag = db.algorithms.is_dag()
         assert isinstance(is_dag, bool)
@@ -210,7 +211,7 @@ class BaseAlgorithmsTest(ABC):
 
     def test_louvain(self, db):
         """Test Louvain community detection."""
-        graph_info = self.setup_algorithm_graph(db)
+        self.setup_algorithm_graph(db)
 
         louvain = db.algorithms.louvain()
         assert "num_communities" in louvain
@@ -221,7 +222,7 @@ class BaseAlgorithmsTest(ABC):
 
     def test_kruskal(self, db):
         """Test Kruskal's MST algorithm."""
-        graph_info = self.setup_algorithm_graph(db)
+        self.setup_algorithm_graph(db)
 
         kruskal = db.algorithms.kruskal("weight")
         assert "edges" in kruskal
@@ -229,7 +230,7 @@ class BaseAlgorithmsTest(ABC):
 
     def test_prim(self, db):
         """Test Prim's MST algorithm."""
-        graph_info = self.setup_algorithm_graph(db)
+        self.setup_algorithm_graph(db)
 
         prim = db.algorithms.prim("weight")
         assert "edges" in prim
@@ -239,21 +240,21 @@ class BaseAlgorithmsTest(ABC):
 
     def test_articulation_points(self, db):
         """Test articulation points detection."""
-        graph_info = self.setup_algorithm_graph(db)
+        self.setup_algorithm_graph(db)
 
         ap = db.algorithms.articulation_points()
         assert isinstance(ap, (list, set))
 
     def test_bridges(self, db):
         """Test bridge detection."""
-        graph_info = self.setup_algorithm_graph(db)
+        self.setup_algorithm_graph(db)
 
         bridges = db.algorithms.bridges()
         assert isinstance(bridges, (list, set))
 
     def test_kcore(self, db):
         """Test k-core decomposition."""
-        graph_info = self.setup_algorithm_graph(db)
+        self.setup_algorithm_graph(db)
 
         kcore = db.algorithms.kcore()
         assert "max_core" in kcore or isinstance(kcore, dict)

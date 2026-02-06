@@ -53,7 +53,7 @@ class TestCypherAlgorithmVerification:
             "MATCH p = (start:Node {name: 'a'})-[:EDGE*0..10]->(end:Node) "
             "RETURN DISTINCT end.name"
         )
-        gql_reachable = {r["end.name"] for r in result}
+        gql_reachable = {r["end.name"] for r in result}  # noqa: F841
 
         assert a.id in bfs_result
         assert b.id in bfs_result

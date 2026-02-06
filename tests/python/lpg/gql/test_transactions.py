@@ -3,7 +3,6 @@
 Tests transaction operations using GQL (ISO standard) query language.
 """
 
-import pytest
 from tests.python.bases.test_transactions import BaseTransactionsTest
 
 
@@ -45,6 +44,7 @@ class TestGQLTransactions(BaseTransactionsTest):
 
 # Additional GQL-specific transaction tests
 
+
 class TestGQLSpecificTransactions:
     """GQL-specific transaction tests."""
 
@@ -57,7 +57,7 @@ class TestGQLSpecificTransactions:
         # Query from outside the transaction shouldn't see the node
         # (This depends on isolation level implementation)
         result = db.execute("MATCH (n:Person) WHERE n.name = 'Isolated' RETURN n")
-        rows = list(result)
+        list(result)  # Consume result to verify query executes
         # In proper isolation, this should be 0
         # But implementation may vary
 
@@ -109,8 +109,45 @@ class TestGQLSpecificTransactions:
             pass  # Expected to fail
 
         # Node should not exist if transaction rolled back on error
-        result = db.execute(
-            "MATCH (n:ErrorTest) WHERE n.name = 'BeforeError' RETURN n"
-        )
-        rows = list(result)
+        result = db.execute("MATCH (n:ErrorTest) WHERE n.name = 'BeforeError' RETURN n")
+        list(result)  # Consume result to verify query executes
         # Ideally 0, but depends on error handling implementation
+
+
+class TestGQLTransactionIsolationLevels:
+    """Tests for transaction isolation level selection."""
+
+    def test_isolation_level_default(self, db):
+        """Default isolation level is snapshot."""
+        tx = db.begin_transaction()
+        assert tx.isolation_level == "snapshot"
+        tx.rollback()
+
+    def test_isolation_level_read_committed(self, db):
+        """Explicit read_committed isolation level."""
+        tx = db.begin_transaction(isolation_level="read_committed")
+        assert tx.isolation_level == "read_committed"
+        tx.execute("INSERT (:IsoRC {name: 'rc_test'})")
+        tx.commit()
+
+        result = db.execute("MATCH (n:IsoRC) RETURN n.name")
+        rows = list(result)
+        assert len(rows) == 1
+
+    def test_isolation_level_serializable(self, db):
+        """Explicit serializable isolation level."""
+        tx = db.begin_transaction(isolation_level="serializable")
+        assert tx.isolation_level == "serializable"
+        tx.execute("INSERT (:IsoSet {name: 'set_test'})")
+        tx.commit()
+
+        result = db.execute("MATCH (n:IsoSet) RETURN n.name")
+        rows = list(result)
+        assert len(rows) == 1
+
+    def test_isolation_level_invalid(self, db):
+        """Unknown isolation level raises ValueError."""
+        import pytest
+
+        with pytest.raises(ValueError, match="Unknown isolation level"):
+            db.begin_transaction(isolation_level="bogus")

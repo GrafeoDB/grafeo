@@ -5,6 +5,7 @@ import pytest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
@@ -52,17 +53,17 @@ def db_api():
 def graphql_db(db):
     """Create a database with GraphQL test data."""
     # Create User nodes
-    alice = db.create_node(["User"], {
-        "name": "Alice", "email": "alice@example.com", "age": 30
-    })
-    bob = db.create_node(["User"], {
-        "name": "Bob", "email": "bob@example.com", "age": 25
-    })
+    alice = db.create_node(
+        ["User"], {"name": "Alice", "email": "alice@example.com", "age": 30}
+    )
+    bob = db.create_node(
+        ["User"], {"name": "Bob", "email": "bob@example.com", "age": 25}
+    )
 
     # Create Post nodes
-    post1 = db.create_node(["Post"], {
-        "title": "Hello World", "content": "My first post"
-    })
+    post1 = db.create_node(
+        ["Post"], {"title": "Hello World", "content": "My first post"}
+    )
 
     # Create relationships
     db.create_edge(alice.id, bob.id, "friends", {})

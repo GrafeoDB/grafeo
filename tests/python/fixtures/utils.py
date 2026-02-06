@@ -10,7 +10,8 @@ from typing import Callable, Any
 
 # Check if grafeo is available
 try:
-    import grafeo
+    import grafeo  # noqa: F401
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
@@ -27,13 +28,16 @@ def skip_if_unavailable(feature_name: str = "grafeo"):
         def test_something(self, db):
             ...
     """
+
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         def wrapper(*args, **kwargs):
             if feature_name == "grafeo" and not GRAFEO_AVAILABLE:
                 pytest.skip(f"{feature_name} not installed")
             return func(*args, **kwargs)
+
         return wrapper
+
     return decorator
 
 
@@ -51,7 +55,9 @@ def assert_row_count(result, expected: int, message: str = None):
     return rows
 
 
-def assert_contains_values(rows: list, key: str, expected_values: set, message: str = None):
+def assert_contains_values(
+    rows: list, key: str, expected_values: set, message: str = None
+):
     """Assert that rows contain expected values for a key.
 
     Args:

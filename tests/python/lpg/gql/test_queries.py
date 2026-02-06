@@ -3,7 +3,6 @@
 Tests pattern matching, paths, and aggregations using GQL (ISO standard) query language.
 """
 
-import pytest
 from tests.python.bases.test_queries import BaseQueriesTest
 
 
@@ -17,23 +16,15 @@ class TestGQLQueries(BaseQueriesTest):
     def setup_pattern_graph(self, db):
         """Set up test data for pattern tests."""
         # Create Person nodes
-        alice = db.create_node(["Person"], {
-            "name": "Alice", "age": 30, "city": "NYC"
-        })
-        bob = db.create_node(["Person"], {
-            "name": "Bob", "age": 25, "city": "LA"
-        })
-        charlie = db.create_node(["Person"], {
-            "name": "Charlie", "age": 35, "city": "NYC"
-        })
+        alice = db.create_node(["Person"], {"name": "Alice", "age": 30, "city": "NYC"})
+        bob = db.create_node(["Person"], {"name": "Bob", "age": 25, "city": "LA"})
+        charlie = db.create_node(
+            ["Person"], {"name": "Charlie", "age": 35, "city": "NYC"}
+        )
 
         # Create Company nodes
-        acme = db.create_node(["Company"], {
-            "name": "Acme Corp", "founded": 2010
-        })
-        globex = db.create_node(["Company"], {
-            "name": "Globex Inc", "founded": 2015
-        })
+        acme = db.create_node(["Company"], {"name": "Acme Corp", "founded": 2010})
+        globex = db.create_node(["Company"], {"name": "Globex Inc", "founded": 2015})
 
         # Create KNOWS edges
         db.create_edge(alice.id, bob.id, "KNOWS", {"since": 2020})
@@ -46,8 +37,11 @@ class TestGQLQueries(BaseQueriesTest):
         db.create_edge(charlie.id, acme.id, "WORKS_AT", {"role": "Director"})
 
         return {
-            "alice": alice, "bob": bob, "charlie": charlie,
-            "acme": acme, "globex": globex,
+            "alice": alice,
+            "bob": bob,
+            "charlie": charlie,
+            "acme": acme,
+            "globex": globex,
         }
 
     def setup_chain_graph(self, db):
@@ -102,7 +96,9 @@ class TestGQLQueries(BaseQueriesTest):
             value_str = f"'{value}'"
         else:
             value_str = str(value)
-        return f"MATCH (n:{label}) WHERE n.{prop} {op} {value_str} RETURN n.{return_prop}"
+        return (
+            f"MATCH (n:{label}) WHERE n.{prop} {op} {value_str} RETURN n.{return_prop}"
+        )
 
     def match_and_query(
         self,
@@ -225,8 +221,7 @@ class TestGQLQueries(BaseQueriesTest):
     def sum_avg_query(self, label: str, prop: str) -> str:
         """GQL: RETURN sum(p.<prop>) AS total, avg(p.<prop>) AS average"""
         return (
-            f"MATCH (p:{label}) "
-            f"RETURN sum(p.{prop}) AS total, avg(p.{prop}) AS average"
+            f"MATCH (p:{label}) RETURN sum(p.{prop}) AS total, avg(p.{prop}) AS average"
         )
 
     def min_max_query(self, label: str, prop: str) -> str:
@@ -249,12 +244,15 @@ class TestGQLQueries(BaseQueriesTest):
 # GQL-SPECIFIC TESTS
 # =============================================================================
 
+
 class TestGQLSpecificPatterns:
     """GQL-specific pattern tests."""
 
     def test_gql_optional_match(self, pattern_db):
         """Test GQL OPTIONAL MATCH."""
-        pattern_db.create_node(["Person"], {"name": "Diana", "age": 40, "city": "Chicago"})
+        pattern_db.create_node(
+            ["Person"], {"name": "Diana", "age": 40, "city": "Chicago"}
+        )
 
         result = pattern_db.execute(
             "MATCH (p:Person) "
@@ -267,9 +265,7 @@ class TestGQLSpecificPatterns:
     def test_gql_multiple_matches(self, pattern_db):
         """Test multiple MATCH clauses."""
         result = pattern_db.execute(
-            "MATCH (p:Person) "
-            "MATCH (c:Company) "
-            "RETURN p.name, c.name"
+            "MATCH (p:Person) MATCH (c:Company) RETURN p.name, c.name"
         )
         rows = list(result)
         assert len(rows) == 6  # 3 persons x 2 companies
@@ -277,8 +273,7 @@ class TestGQLSpecificPatterns:
     def test_gql_undirected_match(self, pattern_db):
         """Test undirected relationship match."""
         result = pattern_db.execute(
-            "MATCH (a:Person)-[:KNOWS]-(b:Person) "
-            "RETURN a.name, b.name"
+            "MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN a.name, b.name"
         )
         rows = list(result)
         assert len(rows) == 6  # Each edge counted twice
@@ -336,12 +331,11 @@ class TestGQLSpecificPaths:
 
     def test_gql_no_path_returns_empty(self, db):
         """Test that non-existent path returns no rows."""
-        a = db.create_node(["Node"], {"name": "a"})
-        b = db.create_node(["Node"], {"name": "b"})
+        db.create_node(["Node"], {"name": "a"})
+        db.create_node(["Node"], {"name": "b"})
 
         result = db.execute(
-            "MATCH (a:Node {name: 'a'})-[:EDGE]->(b:Node {name: 'b'}) "
-            "RETURN a, b"
+            "MATCH (a:Node {name: 'a'})-[:EDGE]->(b:Node {name: 'b'}) RETURN a, b"
         )
         rows = list(result)
         assert len(rows) == 0
@@ -356,9 +350,7 @@ class TestGQLSpecificAggregations:
         db.create_node(["Person"], {"name": "Bob", "age": 25})
         db.create_node(["Person"], {"name": "Charlie", "age": 35})
 
-        result = db.execute(
-            "MATCH (p:Person) RETURN collect(p.name) AS names"
-        )
+        result = db.execute("MATCH (p:Person) RETURN collect(p.name) AS names")
         rows = list(result)
         assert len(rows) == 1
         names = rows[0]["names"]
@@ -374,9 +366,7 @@ class TestGQLSpecificAggregations:
         db.create_node(["Person"], {"name": "Diana", "city": "NYC"})
 
         result = db.execute(
-            "MATCH (p:Person) "
-            "RETURN p.city, count(p) AS cnt "
-            "HAVING cnt > 1"
+            "MATCH (p:Person) RETURN p.city, count(p) AS cnt HAVING cnt > 1"
         )
         rows = list(result)
         assert len(rows) == 1
@@ -388,9 +378,7 @@ class TestGQLSpecificAggregations:
         db.create_node(["Person"], {"name": "Bob", "age": 25})
         db.create_node(["Person"], {"name": "Charlie", "age": 35})
 
-        result = db.execute(
-            "MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age ASC"
-        )
+        result = db.execute("MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age ASC")
         rows = list(result)
         assert rows[0]["p.name"] == "Bob"
         assert rows[2]["p.name"] == "Charlie"
@@ -401,9 +389,7 @@ class TestGQLSpecificAggregations:
         db.create_node(["Person"], {"name": "Bob"})
         db.create_node(["Person"], {"name": "Charlie"})
 
-        result = db.execute(
-            "MATCH (p:Person) RETURN p.name LIMIT 2"
-        )
+        result = db.execute("MATCH (p:Person) RETURN p.name LIMIT 2")
         rows = list(result)
         assert len(rows) == 2
 

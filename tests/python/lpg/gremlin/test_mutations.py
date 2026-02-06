@@ -40,9 +40,17 @@ class TestGremlinMutations(BaseMutationsTest):
         val = f"'{value}'" if isinstance(value, str) else value
         return f"g.V().hasLabel('{label}').has('{prop}', {val}).drop()"
 
-    def create_edge_query(self, from_label: str, from_prop: str, from_value,
-                          to_label: str, to_prop: str, to_value,
-                          edge_type: str, edge_props: dict) -> str:
+    def create_edge_query(
+        self,
+        from_label: str,
+        from_prop: str,
+        from_value,
+        to_label: str,
+        to_prop: str,
+        to_value,
+        edge_type: str,
+        edge_props: dict,
+    ) -> str:
         """Return Gremlin addE query."""
         from_val = f"'{from_value}'" if isinstance(from_value, str) else from_value
         to_val = f"'{to_value}'" if isinstance(to_value, str) else to_value
@@ -60,8 +68,9 @@ class TestGremlinMutations(BaseMutationsTest):
             f"{props_str}"
         )
 
-    def delete_edge_query(self, edge_type: str, from_prop: str, from_value,
-                          to_prop: str, to_value) -> str:
+    def delete_edge_query(
+        self, edge_type: str, from_prop: str, from_value, to_prop: str, to_value
+    ) -> str:
         """Return Gremlin edge drop query."""
         from_val = f"'{from_value}'" if isinstance(from_value, str) else from_value
         to_val = f"'{to_value}'" if isinstance(to_value, str) else to_value
@@ -72,8 +81,9 @@ class TestGremlinMutations(BaseMutationsTest):
             f".drop()"
         )
 
-    def update_node_query(self, label: str, match_prop: str, match_value,
-                          set_prop: str, set_value) -> str:
+    def update_node_query(
+        self, label: str, match_prop: str, match_value, set_prop: str, set_value
+    ) -> str:
         """Return Gremlin property update query."""
         match_val = f"'{match_value}'" if isinstance(match_value, str) else match_value
         set_val = f"'{set_value}'" if isinstance(set_value, str) else set_value
@@ -121,8 +131,7 @@ class TestGremlinMutationsDirect:
     def test_gremlin_add_vertex_multiple_props(self, db):
         """Test g.addV() with multiple properties."""
         result = self._execute_gremlin(
-            db,
-            "g.addV('Person').property('name', 'Bob').property('age', 25)"
+            db, "g.addV('Person').property('name', 'Bob').property('age', 25)"
         )
         rows = list(result)
         assert len(rows) >= 1
@@ -135,8 +144,7 @@ class TestGremlinMutationsDirect:
 
         # Add edge
         result = self._execute_gremlin(
-            db,
-            "g.V().has('name', 'Alice').addE('knows').to(g.V().has('name', 'Bob'))"
+            db, "g.V().has('name', 'Alice').addE('knows').to(g.V().has('name', 'Bob'))"
         )
         rows = list(result)
         assert len(rows) >= 1
@@ -164,7 +172,9 @@ class TestGremlinMutationsDirect:
 
     def test_gremlin_property_update(self, db):
         """Test property() update."""
-        self._execute_gremlin(db, "g.addV('Person').property('name', 'Alice').property('age', 30)")
+        self._execute_gremlin(
+            db, "g.addV('Person').property('name', 'Alice').property('age', 30)"
+        )
 
         # Update age
         self._execute_gremlin(db, "g.V().has('name', 'Alice').property('age', 31)")

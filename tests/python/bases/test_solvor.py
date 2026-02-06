@@ -17,6 +17,7 @@ try:
     from solvor import dijkstra as solvor_dijkstra
     from solvor import max_flow as solvor_max_flow
     from solvor import kruskal as solvor_kruskal
+
     SOLVOR_AVAILABLE = True
 except ImportError:
     SOLVOR_AVAILABLE = False
@@ -36,7 +37,9 @@ class BaseSolvORComparisonTest(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def setup_flow_network(self, db, n_nodes: int, n_edges: int, seed: int = 42) -> dict:
+    def setup_flow_network(
+        self, db, n_nodes: int, n_edges: int, seed: int = 42
+    ) -> dict:
         """Set up a flow network graph using the query language.
 
         Args:
@@ -82,9 +85,7 @@ class BaseSolvORComparisonTest(ABC):
             return adj.get(node, [])
 
         solvor_result = solvor_dijkstra(
-            node_to_idx[source],
-            node_to_idx[sink],
-            neighbors
+            node_to_idx[source], node_to_idx[sink], neighbors
         )
 
         if grafeo_result is not None and solvor_result.status.name == "OPTIMAL":
@@ -154,7 +155,10 @@ class BaseSolvORComparisonTest(ABC):
 
         solvor_result = solvor_kruskal(len(node_ids), edge_list, allow_forest=True)
 
-        if grafeo_result is not None and solvor_result.status.name in ("OPTIMAL", "FEASIBLE"):
+        if grafeo_result is not None and solvor_result.status.name in (
+            "OPTIMAL",
+            "FEASIBLE",
+        ):
             grafeo_weight = grafeo_result.get("total_weight", 0)
             solvor_weight = solvor_result.objective
             # MST weights should match (allowing small float error)
@@ -175,7 +179,9 @@ class BaseSolvORBenchmarkTest(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def setup_flow_network(self, db, n_nodes: int, n_edges: int, seed: int = 42) -> dict:
+    def setup_flow_network(
+        self, db, n_nodes: int, n_edges: int, seed: int = 42
+    ) -> dict:
         """Set up a flow network graph using the query language."""
         raise NotImplementedError
 
@@ -207,7 +213,7 @@ class BaseSolvORBenchmarkTest(ABC):
         solvor_max_flow(graph, node_to_idx[source], node_to_idx[sink])
         solvor_time = (time.perf_counter() - start) * 1000
 
-        print(f"\nMax Flow (100 nodes, 500 edges):")
+        print("\nMax Flow (100 nodes, 500 edges):")
         print(f"  Grafeo plugin: {grafeo_time:.2f}ms")
         print(f"  Standalone solvOR: {solvor_time:.2f}ms")
         if solvor_time > 0:
@@ -247,7 +253,7 @@ class BaseSolvORBenchmarkTest(ABC):
         solvor_dijkstra(node_to_idx[source], node_to_idx[sink], neighbors)
         solvor_time = (time.perf_counter() - start) * 1000
 
-        print(f"\nShortest Path (500 nodes, 2000 edges):")
+        print("\nShortest Path (500 nodes, 2000 edges):")
         print(f"  Grafeo plugin: {grafeo_time:.2f}ms")
         print(f"  Standalone solvOR: {solvor_time:.2f}ms")
         if solvor_time > 0:

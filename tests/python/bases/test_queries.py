@@ -7,7 +7,6 @@ This module defines test logic for all read operations:
 """
 
 from abc import ABC, abstractmethod
-import pytest
 
 
 class BaseQueriesTest(ABC):
@@ -227,9 +226,7 @@ class BaseQueriesTest(ABC):
         result = self.execute_query(db, query)
         rows = list(result)
 
-        names = [
-            r.get("n.name") or r.get("p.name") or r.get("name") for r in rows
-        ]
+        names = [r.get("n.name") or r.get("p.name") or r.get("name") for r in rows]
         assert len(rows) == 2
         assert "Alice" in names
         assert "Charlie" in names
@@ -239,15 +236,11 @@ class BaseQueriesTest(ABC):
         """Test MATCH with AND in WHERE clause."""
         self.setup_pattern_graph(db)
 
-        query = self.match_and_query(
-            "Person", "city", "=", "NYC", "age", ">", 25
-        )
+        query = self.match_and_query("Person", "city", "=", "NYC", "age", ">", 25)
         result = self.execute_query(db, query)
         rows = list(result)
 
-        names = [
-            r.get("n.name") or r.get("p.name") or r.get("name") for r in rows
-        ]
+        names = [r.get("n.name") or r.get("p.name") or r.get("name") for r in rows]
         assert "Alice" in names
         assert "Charlie" in names
 
@@ -307,10 +300,7 @@ class BaseQueriesTest(ABC):
         result = self.execute_query(db, query)
         rows = list(result)
 
-        names = [
-            r.get("end.name") or r.get("e.name") or r.get("name")
-            for r in rows
-        ]
+        names = [r.get("end.name") or r.get("e.name") or r.get("name") for r in rows]
         assert "b" in names
         assert "c" in names
         assert "d" in names
@@ -319,9 +309,7 @@ class BaseQueriesTest(ABC):
         """Test shortest path query."""
         self.setup_multi_path_graph(db)
 
-        query = self.shortest_path_query(
-            "Node", "name", "a", "Node", "name", "d"
-        )
+        query = self.shortest_path_query("Node", "name", "a", "Node", "name", "d")
         result = self.execute_query(db, query)
         rows = list(result)
 
@@ -343,10 +331,7 @@ class BaseQueriesTest(ABC):
         result = self.execute_query(db, query)
         rows = list(result)
 
-        names = [
-            r.get("end.name") or r.get("e.name") or r.get("name")
-            for r in rows
-        ]
+        names = [r.get("end.name") or r.get("e.name") or r.get("name") for r in rows]
         assert "c" in names
         assert "b" not in names
         assert "d" not in names

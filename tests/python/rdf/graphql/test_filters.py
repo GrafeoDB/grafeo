@@ -19,8 +19,7 @@ except ImportError:
 
 
 # Skip GraphQL RDF filter tests until GraphQL support is more complete
-pytestmark = pytest.mark.skip(reason="GraphQL filter syntax not yet fully implemented"
-)
+pytestmark = pytest.mark.skip(reason="GraphQL filter syntax not yet fully implemented")
 
 
 class TestRDFGraphQLFilters:
@@ -246,7 +245,9 @@ class TestRDFGraphQLFilters:
             list(result)
         elapsed = time.perf_counter() - start
 
-        assert elapsed < 1.0, f"10 GraphQL range filters took {elapsed:.3f}s, expected < 1.0s"
+        assert elapsed < 1.0, (
+            f"10 GraphQL range filters took {elapsed:.3f}s, expected < 1.0s"
+        )
 
     def test_direct_lookup_performance(self):
         """Direct lookup should be very fast."""
@@ -265,4 +266,6 @@ class TestRDFGraphQLFilters:
             assert node is not None
         elapsed = time.perf_counter() - start
 
-        assert elapsed < 0.5, f"1000 direct lookups took {elapsed:.3f}s, expected < 0.5s"
+        assert elapsed < 0.5, (
+            f"1000 direct lookups took {elapsed:.3f}s, expected < 0.5s"
+        )

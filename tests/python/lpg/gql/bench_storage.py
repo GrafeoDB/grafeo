@@ -10,6 +10,7 @@ from tests.python.bases.bench_storage import BaseBenchStorage
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
@@ -65,7 +66,9 @@ class BenchGQLStorage(BaseBenchStorage):
             value_str = str(value)
         return f"MATCH (n:{label}) WHERE n.{prop} = {value_str} RETURN n"
 
-    def one_hop_query(self, from_label: str, rel_type: str, to_label: str, limit: int = None) -> str:
+    def one_hop_query(
+        self, from_label: str, rel_type: str, to_label: str, limit: int = None
+    ) -> str:
         """GQL: MATCH (a:Label)-[:REL]->(b:Label) RETURN a, b"""
         query = f"MATCH (a:{from_label})-[:{rel_type}]->(b:{to_label}) RETURN a, b"
         if limit:
@@ -84,10 +87,14 @@ class BenchGQLStorage(BaseBenchStorage):
             f"ORDER BY cnt DESC"
         )
 
-    def sort_query(self, label: str, sort_prop: str, desc: bool = False, limit: int = 100) -> str:
+    def sort_query(
+        self, label: str, sort_prop: str, desc: bool = False, limit: int = 100
+    ) -> str:
         """GQL: MATCH (n:Label) RETURN n ORDER BY n.prop [DESC] LIMIT x"""
         order = "DESC" if desc else "ASC"
-        return f"MATCH (n:{label}) RETURN n ORDER BY n.{sort_prop} {order} LIMIT {limit}"
+        return (
+            f"MATCH (n:{label}) RETURN n ORDER BY n.{sort_prop} {order} LIMIT {limit}"
+        )
 
     def triangle_query(self, label: str, rel_type: str) -> str:
         """GQL: MATCH (a)-[:REL]->(b)-[:REL]->(c)-[:REL]->(a) RETURN count(a)"""
@@ -103,17 +110,27 @@ class BenchGQLStorage(BaseBenchStorage):
     def setup_social_network(self, db, num_nodes: int, avg_edges: int):
         """Set up a social network graph for benchmarking."""
         random.seed(42)
-        cities = ["New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia"]
+        cities = [
+            "New York",
+            "Los Angeles",
+            "Chicago",
+            "Houston",
+            "Phoenix",
+            "Philadelphia",
+        ]
 
         nodes = []
         for i in range(num_nodes):
-            node = db.create_node(["Person"], {
-                "name": f"user{i}",
-                "email": f"user{i}@example.com",
-                "age": random.randint(18, 80),
-                "city": random.choice(cities),
-                "salary": random.uniform(30000, 150000),
-            })
+            node = db.create_node(
+                ["Person"],
+                {
+                    "name": f"user{i}",
+                    "email": f"user{i}@example.com",
+                    "age": random.randint(18, 80),
+                    "city": random.choice(cities),
+                    "salary": random.uniform(30000, 150000),
+                },
+            )
             nodes.append(node)
 
         total_edges = num_nodes * avg_edges
@@ -121,7 +138,9 @@ class BenchGQLStorage(BaseBenchStorage):
             src = random.choice(nodes)
             dst = random.choice(nodes)
             if src.id != dst.id:
-                db.create_edge(src.id, dst.id, "KNOWS", {"since": random.randint(2000, 2024)})
+                db.create_edge(
+                    src.id, dst.id, "KNOWS", {"since": random.randint(2000, 2024)}
+                )
 
     def setup_clique_graph(self, db, num_cliques: int, clique_size: int):
         """Set up a clique graph for triangle benchmarking."""
@@ -136,7 +155,7 @@ class BenchGQLStorage(BaseBenchStorage):
             all_nodes.extend(clique_nodes)
 
             for i, n1 in enumerate(clique_nodes):
-                for n2 in clique_nodes[i + 1:]:
+                for n2 in clique_nodes[i + 1 :]:
                     db.create_edge(n1.id, n2.id, "CONNECTED", {})
                     db.create_edge(n2.id, n1.id, "CONNECTED", {})
 
@@ -150,6 +169,7 @@ class BenchGQLStorage(BaseBenchStorage):
 # =============================================================================
 # PYTEST FIXTURES AND TESTS
 # =============================================================================
+
 
 @pytest.fixture
 def bench_suite():
@@ -165,6 +185,7 @@ def db_factory():
 
     def create_db():
         return GrafeoDB()
+
     return create_db
 
 
@@ -189,24 +210,30 @@ class TestGQLStorageBenchmarks:
     @pytest.mark.benchmark
     def test_bench_full_scan(self, bench_suite, db_factory):
         """Benchmark full scan."""
+
         def setup(db):
             bench_suite.setup_social_network(db, 300, 3)
+
         result = bench_suite.bench_full_scan(db_factory, setup, 300)
         assert result.mean_time_ms > 0
 
     @pytest.mark.benchmark
     def test_bench_one_hop_traversal(self, bench_suite, db_factory):
         """Benchmark 1-hop traversal."""
+
         def setup(db):
             bench_suite.setup_social_network(db, 300, 3)
+
         result = bench_suite.bench_one_hop_traversal(db_factory, setup)
         assert result.mean_time_ms > 0
 
     @pytest.mark.benchmark
     def test_bench_aggregation(self, bench_suite, db_factory):
         """Benchmark aggregation."""
+
         def setup(db):
             bench_suite.setup_social_network(db, 300, 3)
+
         result = bench_suite.bench_aggregation(db_factory, setup)
         assert result.mean_time_ms > 0
 
@@ -214,6 +241,7 @@ class TestGQLStorageBenchmarks:
 # =============================================================================
 # STANDALONE RUNNER
 # =============================================================================
+
 
 def run_benchmarks():
     """Run all benchmarks when called directly."""

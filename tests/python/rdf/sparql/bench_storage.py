@@ -72,8 +72,9 @@ class BenchSPARQLStorage(BaseBenchStorage):
             }}
         """
 
-    def one_hop_query(self, from_label: str, rel_type: str, to_label: str,
-                      limit: int = None) -> str:
+    def one_hop_query(
+        self, from_label: str, rel_type: str, to_label: str, limit: int = None
+    ) -> str:
         """SPARQL 1-hop traversal query using property paths."""
         limit_clause = f"LIMIT {limit}" if limit else ""
         return f"""
@@ -106,8 +107,9 @@ class BenchSPARQLStorage(BaseBenchStorage):
             GROUP BY ?{group_prop}
         """
 
-    def sort_query(self, label: str, sort_prop: str, desc: bool = False,
-                   limit: int = 100) -> str:
+    def sort_query(
+        self, label: str, sort_prop: str, desc: bool = False, limit: int = 100
+    ) -> str:
         """SPARQL sort query."""
         order = "DESC" if desc else "ASC"
         return f"""
@@ -139,12 +141,15 @@ class BenchSPARQLStorage(BaseBenchStorage):
 
         node_ids = []
         for i in range(num_nodes):
-            node = db.create_node(["Person"], {
-                "name": f"Person{i}",
-                "age": 20 + rng.randint(0, 50),
-                "city": rng.choice(cities),
-                "email": f"user{i}@example.com",
-            })
+            node = db.create_node(
+                ["Person"],
+                {
+                    "name": f"Person{i}",
+                    "age": 20 + rng.randint(0, 50),
+                    "city": rng.choice(cities),
+                    "email": f"user{i}@example.com",
+                },
+            )
             node_ids.append(node.id)
 
         target_edges = num_nodes * avg_edges
@@ -171,6 +176,6 @@ class BenchSPARQLStorage(BaseBenchStorage):
                 node_ids.append(node.id)
 
             for i, src in enumerate(node_ids):
-                for dst in node_ids[i + 1:]:
+                for dst in node_ids[i + 1 :]:
                     db.create_edge(src, dst, "CONNECTED", {})
                     db.create_edge(dst, src, "CONNECTED", {})

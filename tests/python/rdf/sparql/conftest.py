@@ -5,6 +5,7 @@ import pytest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
@@ -45,26 +46,35 @@ def db_api():
 def sparql_db(db):
     """Create a database with RDF test data for SPARQL queries."""
     # Create resources representing triples
-    alice = db.create_node(["Resource"], {
-        "uri": "http://example.org/person/alice",
-        "rdf:type": "http://xmlns.com/foaf/0.1/Person",
-        "foaf:name": "Alice",
-        "foaf:age": 30
-    })
+    alice = db.create_node(
+        ["Resource"],
+        {
+            "uri": "http://example.org/person/alice",
+            "rdf:type": "http://xmlns.com/foaf/0.1/Person",
+            "foaf:name": "Alice",
+            "foaf:age": 30,
+        },
+    )
 
-    bob = db.create_node(["Resource"], {
-        "uri": "http://example.org/person/bob",
-        "rdf:type": "http://xmlns.com/foaf/0.1/Person",
-        "foaf:name": "Bob",
-        "foaf:age": 25
-    })
+    bob = db.create_node(
+        ["Resource"],
+        {
+            "uri": "http://example.org/person/bob",
+            "rdf:type": "http://xmlns.com/foaf/0.1/Person",
+            "foaf:name": "Bob",
+            "foaf:age": 25,
+        },
+    )
 
-    charlie = db.create_node(["Resource"], {
-        "uri": "http://example.org/person/charlie",
-        "rdf:type": "http://xmlns.com/foaf/0.1/Person",
-        "foaf:name": "Charlie",
-        "foaf:age": 35
-    })
+    charlie = db.create_node(
+        ["Resource"],
+        {
+            "uri": "http://example.org/person/charlie",
+            "rdf:type": "http://xmlns.com/foaf/0.1/Person",
+            "foaf:name": "Charlie",
+            "foaf:age": 35,
+        },
+    )
 
     # Create foaf:knows relationships
     db.create_edge(alice.id, bob.id, "foaf:knows", {})

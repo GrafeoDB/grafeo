@@ -53,22 +53,20 @@ class BenchGremlinStorage(BaseBenchStorage):
         val = f"'{value}'" if isinstance(value, str) else value
         return f"g.V().hasLabel('{label}').has('{prop}', {val})"
 
-    def one_hop_query(self, from_label: str, rel_type: str, to_label: str,
-                      limit: int = None) -> str:
+    def one_hop_query(
+        self, from_label: str, rel_type: str, to_label: str, limit: int = None
+    ) -> str:
         """Gremlin 1-hop traversal query."""
-        query = f"g.V().hasLabel('{from_label}').out('{rel_type}').hasLabel('{to_label}')"
+        query = (
+            f"g.V().hasLabel('{from_label}').out('{rel_type}').hasLabel('{to_label}')"
+        )
         if limit:
             query += f".limit({limit})"
         return query
 
     def two_hop_query(self, label: str, rel_type: str, limit: int = None) -> str:
         """Gremlin 2-hop traversal query."""
-        return (
-            f"g.V().hasLabel('{label}')"
-            f".out('{rel_type}')"
-            f".out('{rel_type}')"
-            f".count()"
-        )
+        return f"g.V().hasLabel('{label}').out('{rel_type}').out('{rel_type}').count()"
 
     def aggregation_query(self, label: str, group_prop: str, agg_prop: str) -> str:
         """Gremlin aggregation query."""
@@ -78,8 +76,9 @@ class BenchGremlinStorage(BaseBenchStorage):
             f".by(values('{agg_prop}').mean())"
         )
 
-    def sort_query(self, label: str, sort_prop: str, desc: bool = False,
-                   limit: int = 100) -> str:
+    def sort_query(
+        self, label: str, sort_prop: str, desc: bool = False, limit: int = 100
+    ) -> str:
         """Gremlin sort query."""
         order = "desc" if desc else "asc"
         return (
@@ -105,12 +104,15 @@ class BenchGremlinStorage(BaseBenchStorage):
 
         node_ids = []
         for i in range(num_nodes):
-            node = db.create_node(["Person"], {
-                "name": f"Person{i}",
-                "age": 20 + rng.randint(0, 50),
-                "city": rng.choice(cities),
-                "email": f"user{i}@example.com",
-            })
+            node = db.create_node(
+                ["Person"],
+                {
+                    "name": f"Person{i}",
+                    "age": 20 + rng.randint(0, 50),
+                    "city": rng.choice(cities),
+                    "email": f"user{i}@example.com",
+                },
+            )
             node_ids.append(node.id)
 
         target_edges = num_nodes * avg_edges
@@ -137,6 +139,6 @@ class BenchGremlinStorage(BaseBenchStorage):
                 node_ids.append(node.id)
 
             for i, src in enumerate(node_ids):
-                for dst in node_ids[i + 1:]:
+                for dst in node_ids[i + 1 :]:
                     db.create_edge(src, dst, "connected", {})
                     db.create_edge(dst, src, "connected", {})

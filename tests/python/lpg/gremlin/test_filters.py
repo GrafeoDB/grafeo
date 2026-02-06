@@ -45,25 +45,31 @@ class TestGremlinFilters(BaseFilterAndLookupTest):
 
     def filter_by_age_equals(self, db, age: int) -> list:
         """Filter using Gremlin has() step."""
-        result = self._execute_gremlin(db, f"g.V().hasLabel('Person').has('age', {age})")
+        result = self._execute_gremlin(
+            db, f"g.V().hasLabel('Person').has('age', {age})"
+        )
         return list(result)
 
     def filter_by_age_range(self, db, min_age: int, max_age: int) -> list:
         """Filter using Gremlin range predicates."""
         result = self._execute_gremlin(
-            db, f"g.V().hasLabel('Person').has('age', gt({min_age})).has('age', lt({max_age}))"
+            db,
+            f"g.V().hasLabel('Person').has('age', gt({min_age})).has('age', lt({max_age}))",
         )
         return list(result)
 
     def filter_by_city(self, db, city: str) -> list:
         """Filter using Gremlin string comparison."""
-        result = self._execute_gremlin(db, f"g.V().hasLabel('Person').has('city', '{city}')")
+        result = self._execute_gremlin(
+            db, f"g.V().hasLabel('Person').has('city', '{city}')"
+        )
         return list(result)
 
     def filter_compound_and(self, db, city: str, min_age: int) -> list:
         """Filter using compound Gremlin has() steps (implicit AND)."""
         result = self._execute_gremlin(
-            db, f"g.V().hasLabel('Person').has('city', '{city}').has('age', gt({min_age}))"
+            db,
+            f"g.V().hasLabel('Person').has('city', '{city}').has('age', gt({min_age}))",
         )
         return list(result)
 
@@ -91,8 +97,7 @@ class TestGremlinFilterVerification:
 
         # Find friends of Alice who are over 30
         result = self._execute_gremlin(
-            db,
-            "g.V().has('name', 'Alice').out('knows').has('age', gt(30))"
+            db, "g.V().has('name', 'Alice').out('knows').has('age', gt(30))"
         )
         friends = list(result)
         assert len(friends) == 1, "Should find 1 friend over 30"
@@ -104,8 +109,7 @@ class TestGremlinFilterVerification:
         db.create_node(["Person"], {"name": "Charlie", "age": 35})
 
         result = self._execute_gremlin(
-            db,
-            "g.V().hasLabel('Person').has('age', between(26, 34))"
+            db, "g.V().hasLabel('Person').has('age', between(26, 34))"
         )
         matches = list(result)
         assert len(matches) == 1, "Should find only Alice (age 30)"
@@ -117,8 +121,7 @@ class TestGremlinFilterVerification:
         db.create_node(["Person"], {"name": "Charlie", "city": "Chicago"})
 
         result = self._execute_gremlin(
-            db,
-            "g.V().hasLabel('Person').has('city', within('NYC', 'LA'))"
+            db, "g.V().hasLabel('Person').has('city', within('NYC', 'LA'))"
         )
         matches = list(result)
         assert len(matches) == 2, "Should find Alice and Bob"
@@ -129,8 +132,7 @@ class TestGremlinFilterVerification:
         db.create_node(["Person"], {"name": "Bob", "age": 25})
 
         result = self._execute_gremlin(
-            db,
-            "g.V().hasLabel('Person').has('age', gt(28)).values('name')"
+            db, "g.V().hasLabel('Person').has('age', gt(28)).values('name')"
         )
         names = list(result)
         assert len(names) == 1, "Should find only Alice's name"

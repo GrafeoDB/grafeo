@@ -9,14 +9,14 @@ import pytest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
 
 
 pytestmark = pytest.mark.skipif(
-    not GRAFEO_AVAILABLE,
-    reason="Grafeo Python bindings not installed"
+    not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"
 )
 
 
@@ -80,9 +80,7 @@ class TestCrossLanguageConsistency:
     def test_simple_match_consistency(self):
         """GQL and Cypher should return same results for simple MATCH."""
         # Both use the same syntax
-        result = self.db.execute(
-            "MATCH (n:Person) RETURN n.name ORDER BY n.name"
-        )
+        result = self.db.execute("MATCH (n:Person) RETURN n.name ORDER BY n.name")
         rows = list(result)
         names = [r.get("n.name") for r in rows]
 
@@ -102,18 +100,14 @@ class TestCrossLanguageConsistency:
     def test_aggregation_consistency(self):
         """Aggregation results should match across languages."""
         # GQL/Cypher
-        result = self.db.execute(
-            "MATCH (n:Person) RETURN sum(n.age) AS total"
-        )
+        result = self.db.execute("MATCH (n:Person) RETURN sum(n.age) AS total")
         rows = list(result)
         assert rows[0]["total"] == 90  # 30 + 25 + 35
 
     def test_filter_consistency(self):
         """WHERE clause filtering should be consistent."""
         # GQL/Cypher
-        result = self.db.execute(
-            "MATCH (n:Person) WHERE n.age > 26 RETURN n.name"
-        )
+        result = self.db.execute("MATCH (n:Person) WHERE n.age > 26 RETURN n.name")
         rows = list(result)
         names = [r.get("n.name") for r in rows]
 
@@ -139,15 +133,11 @@ class TestQuerySyntaxEquivalence:
     def test_where_vs_inline_properties(self):
         """WHERE clause vs inline properties should be equivalent."""
         # Using WHERE
-        result1 = self.db.execute(
-            "MATCH (n:Node) WHERE n.value = 2 RETURN n.value"
-        )
+        result1 = self.db.execute("MATCH (n:Node) WHERE n.value = 2 RETURN n.value")
         rows1 = list(result1)
 
         # Using inline properties
-        result2 = self.db.execute(
-            "MATCH (n:Node {value: 2}) RETURN n.value"
-        )
+        result2 = self.db.execute("MATCH (n:Node {value: 2}) RETURN n.value")
         rows2 = list(result2)
 
         assert len(rows1) == len(rows2) == 1
@@ -155,14 +145,10 @@ class TestQuerySyntaxEquivalence:
 
     def test_order_by_equivalence(self):
         """ORDER BY ASC and without explicit direction should be equivalent."""
-        result1 = self.db.execute(
-            "MATCH (n:Node) RETURN n.value ORDER BY n.value"
-        )
+        result1 = self.db.execute("MATCH (n:Node) RETURN n.value ORDER BY n.value")
         rows1 = list(result1)
 
-        result2 = self.db.execute(
-            "MATCH (n:Node) RETURN n.value ORDER BY n.value ASC"
-        )
+        result2 = self.db.execute("MATCH (n:Node) RETURN n.value ORDER BY n.value ASC")
         rows2 = list(result2)
 
         values1 = [r["n.value"] for r in rows1]

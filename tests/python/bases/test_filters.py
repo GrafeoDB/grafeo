@@ -8,7 +8,6 @@ This module defines test logic for:
 
 from abc import ABC, abstractmethod
 import time
-import pytest
 
 
 class BaseFilterAndLookupTest(ABC):
@@ -167,7 +166,9 @@ class BaseFilterAndLookupTest(ABC):
         results = self.filter_compound_and(db, "NYC", 50)
         # Results should be subset of both individual filters
         nyc_results = self.filter_by_city(db, "NYC")
-        assert len(results) <= len(nyc_results), "AND filter should be subset of single filter"
+        assert len(results) <= len(nyc_results), (
+            "AND filter should be subset of single filter"
+        )
 
     # ===== Filter Performance Tests =====
 
@@ -186,11 +187,13 @@ class BaseFilterAndLookupTest(ABC):
         # Time the filter
         start = time.perf_counter()
         for _ in range(10):  # Run 10 times for more stable measurement
-            results = self.filter_by_age_equals(db, 50)
+            self.filter_by_age_equals(db, 50)
         elapsed = time.perf_counter() - start
 
         # Should complete 10 filters on 1K nodes in under 1 second
-        assert elapsed < 1.0, f"10 equality filters took {elapsed:.3f}s, expected < 1.0s"
+        assert elapsed < 1.0, (
+            f"10 equality filters took {elapsed:.3f}s, expected < 1.0s"
+        )
 
     def test_filter_range_performance(self, db):
         """Filter range should complete quickly on 1K nodes."""
@@ -202,7 +205,7 @@ class BaseFilterAndLookupTest(ABC):
         # Time the filter
         start = time.perf_counter()
         for _ in range(10):
-            results = self.filter_by_age_range(db, 20, 40)
+            self.filter_by_age_range(db, 20, 40)
         elapsed = time.perf_counter() - start
 
         assert elapsed < 1.0, f"10 range filters took {elapsed:.3f}s, expected < 1.0s"
@@ -219,4 +222,6 @@ class BaseFilterAndLookupTest(ABC):
         elapsed = time.perf_counter() - start
 
         # 1000 lookups should complete in under 0.5 seconds
-        assert elapsed < 0.5, f"1000 direct lookups took {elapsed:.3f}s, expected < 0.5s"
+        assert elapsed < 0.5, (
+            f"1000 direct lookups took {elapsed:.3f}s, expected < 0.5s"
+        )

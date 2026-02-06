@@ -51,9 +51,9 @@ class TestSPARQLFilters:
             city = cities[i % len(cities)]
             triples.extend(
                 [
-                    f'{person_uri} rdf:type foaf:Person .',
+                    f"{person_uri} rdf:type foaf:Person .",
                     f'{person_uri} foaf:name "Person{i}" .',
-                    f'{person_uri} foaf:age {age} .',
+                    f"{person_uri} foaf:age {age} .",
                     f'{person_uri} ex:city "{city}" .',
                 ]
             )
@@ -283,4 +283,6 @@ class TestSPARQLFilters:
             list(result)
         elapsed = time.perf_counter() - start
 
-        assert elapsed < 2.0, f"10 SPARQL range filters took {elapsed:.3f}s, expected < 2.0s"
+        assert elapsed < 2.0, (
+            f"10 SPARQL range filters took {elapsed:.3f}s, expected < 2.0s"
+        )

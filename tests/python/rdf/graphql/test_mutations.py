@@ -14,14 +14,14 @@ import pytest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
 
 
 pytestmark = pytest.mark.skipif(
-    not GRAFEO_AVAILABLE,
-    reason="Grafeo Python bindings not installed"
+    not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"
 )
 
 
@@ -51,11 +51,13 @@ class TestRDFGraphQLMutations:
         """)
 
         # Verify data was inserted
-        result = list(self.db.execute_sparql("""
+        result = list(
+            self.db.execute_sparql("""
             SELECT ?name WHERE {
                 <http://example.org/alice> <http://example.org/name> ?name .
             }
-        """))
+        """)
+        )
         assert len(result) == 1
 
     def test_sparql_delete_data(self):
@@ -68,11 +70,13 @@ class TestRDFGraphQLMutations:
         """)
 
         # Verify insertion
-        result = list(self.db.execute_sparql("""
+        result = list(
+            self.db.execute_sparql("""
             SELECT ?name WHERE {
                 <http://example.org/bob> <http://example.org/name> ?name .
             }
-        """))
+        """)
+        )
         assert len(result) == 1
 
         # Delete the triple
@@ -83,11 +87,13 @@ class TestRDFGraphQLMutations:
         """)
 
         # Verify deletion
-        result = list(self.db.execute_sparql("""
+        result = list(
+            self.db.execute_sparql("""
             SELECT ?name WHERE {
                 <http://example.org/bob> <http://example.org/name> ?name .
             }
-        """))
+        """)
+        )
         assert len(result) == 0
 
     def test_use_sparql_for_rdf_mutations(self):
@@ -107,11 +113,13 @@ class TestRDFGraphQLMutations:
         """)
 
         # Verify data was inserted
-        result = list(self.db.execute_sparql("""
+        result = list(
+            self.db.execute_sparql("""
             SELECT ?name WHERE {
                 <http://example.org/alice> <http://example.org/name> ?name .
             }
-        """))
+        """)
+        )
         assert len(result) == 1
 
         # Delete using SPARQL
@@ -122,9 +130,11 @@ class TestRDFGraphQLMutations:
         """)
 
         # Verify deletion
-        result = list(self.db.execute_sparql("""
+        result = list(
+            self.db.execute_sparql("""
             SELECT ?name WHERE {
                 <http://example.org/alice> <http://example.org/name> ?name .
             }
-        """))
+        """)
+        )
         assert len(result) == 0

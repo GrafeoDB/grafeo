@@ -9,14 +9,14 @@ import pytest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
 
 
 pytestmark = pytest.mark.skipif(
-    not GRAFEO_AVAILABLE,
-    reason="Grafeo Python bindings not installed"
+    not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"
 )
 
 
@@ -131,9 +131,7 @@ class TestGremlinTraversal:
 
     def test_gremlin_dedup(self):
         """Gremlin: g.V().hasLabel('Person').values('age').dedup()"""
-        result = self._execute_gremlin(
-            "g.V().hasLabel('Person').values('age').dedup()"
-        )
+        result = self._execute_gremlin("g.V().hasLabel('Person').values('age').dedup()")
         rows = list(result)
         # All ages are unique, so 3 values
         assert len(rows) == 3

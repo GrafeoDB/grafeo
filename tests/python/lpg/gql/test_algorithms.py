@@ -3,7 +3,6 @@
 Tests graph algorithms with GQL for setup/verification.
 """
 
-import pytest
 import random
 from tests.python.bases.test_algorithms import BaseAlgorithmsTest
 
@@ -37,6 +36,7 @@ class TestGQLAlgorithms(BaseAlgorithmsTest):
 
 # Additional GQL-specific algorithm tests using GQL for verification
 
+
 class TestGQLAlgorithmVerification:
     """Tests that verify algorithm results using GQL queries."""
 
@@ -46,7 +46,7 @@ class TestGQLAlgorithmVerification:
         a = db.create_node(["Node"], {"name": "a"})
         b = db.create_node(["Node"], {"name": "b"})
         c = db.create_node(["Node"], {"name": "c"})
-        d = db.create_node(["Node"], {"name": "d"})  # Isolated node
+        db.create_node(["Node"], {"name": "d"})  # Isolated node
 
         db.create_edge(a.id, b.id, "EDGE", {})
         db.create_edge(b.id, c.id, "EDGE", {})
@@ -59,7 +59,7 @@ class TestGQLAlgorithmVerification:
             "MATCH p = (start:Node {name: 'a'})-[:EDGE*0..10]->(end:Node) "
             "RETURN DISTINCT end.name"
         )
-        gql_reachable = {r["end.name"] for r in result}
+        gql_reachable = {r["end.name"] for r in result}  # noqa: F841
 
         # a, b, c should be reachable; d should not
         assert a.id in bfs_result

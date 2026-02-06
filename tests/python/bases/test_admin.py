@@ -9,7 +9,6 @@ This module defines test logic for all admin operations:
 """
 
 from abc import ABC, abstractmethod
-import pytest
 import tempfile
 from pathlib import Path
 
@@ -127,7 +126,7 @@ class BaseAdminTest(ABC):
 
         # LPG schema has labels
         if "labels" in schema:
-            label_names = [l["name"] for l in schema["labels"]]
+            label_names = [lbl["name"] for lbl in schema["labels"]]
             assert "Person" in label_names
             assert "Company" in label_names
 
@@ -196,6 +195,7 @@ class BaseAdminTest(ABC):
 
             # Open the saved database
             from grafeo import GrafeoDB
+
             db2 = GrafeoDB.open(str(db_path))
 
             info = db2.info()
@@ -223,6 +223,7 @@ class BaseAdminTest(ABC):
 
             # Open as in-memory copy
             from grafeo import GrafeoDB
+
             db2 = GrafeoDB.open_in_memory(str(db_path))
 
             info = db2.info()

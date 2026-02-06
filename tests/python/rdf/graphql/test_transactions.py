@@ -10,14 +10,14 @@ import pytest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
 
 
 pytestmark = pytest.mark.skipif(
-    not GRAFEO_AVAILABLE,
-    reason="Grafeo Python bindings not installed"
+    not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"
 )
 
 
@@ -49,11 +49,13 @@ class TestRDFGraphQLTransactions:
         tx.commit()
 
         # Verify data persisted after commit
-        result = list(self.db.execute_sparql("""
+        result = list(
+            self.db.execute_sparql("""
             SELECT ?name WHERE {
                 <http://example.org/tx/alice> <http://example.org/name> ?name .
             }
-        """))
+        """)
+        )
         assert len(result) == 1
 
     def test_sparql_transaction_rollback(self):
@@ -70,11 +72,13 @@ class TestRDFGraphQLTransactions:
         tx.rollback()
 
         # Verify data was not persisted
-        result = list(self.db.execute_sparql("""
+        result = list(
+            self.db.execute_sparql("""
             SELECT ?name WHERE {
                 <http://example.org/rollback/bob> <http://example.org/name> ?name .
             }
-        """))
+        """)
+        )
         assert len(result) == 0
 
     def test_multiple_sparql_operations_in_transaction(self):
@@ -99,9 +103,11 @@ class TestRDFGraphQLTransactions:
         tx.commit()
 
         # Only Bob should remain
-        result = list(self.db.execute_sparql("""
+        result = list(
+            self.db.execute_sparql("""
             SELECT ?s WHERE {
                 ?s <http://example.org/name> ?name .
             }
-        """))
+        """)
+        )
         assert len(result) == 1

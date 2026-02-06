@@ -49,9 +49,17 @@ class TestGraphQLMutations(BaseMutationsTest):
             }}
         """
 
-    def create_edge_query(self, from_label: str, from_prop: str, from_value,
-                          to_label: str, to_prop: str, to_value,
-                          edge_type: str, edge_props: dict) -> str:
+    def create_edge_query(
+        self,
+        from_label: str,
+        from_prop: str,
+        from_value,
+        to_label: str,
+        to_prop: str,
+        to_value,
+        edge_type: str,
+        edge_props: dict,
+    ) -> str:
         """Return GraphQL createEdge mutation."""
         from_val = f'"{from_value}"' if isinstance(from_value, str) else from_value
         to_val = f'"{to_value}"' if isinstance(to_value, str) else to_value
@@ -72,8 +80,9 @@ class TestGraphQLMutations(BaseMutationsTest):
             }}
         """
 
-    def delete_edge_query(self, edge_type: str, from_prop: str, from_value,
-                          to_prop: str, to_value) -> str:
+    def delete_edge_query(
+        self, edge_type: str, from_prop: str, from_value, to_prop: str, to_value
+    ) -> str:
         """Return GraphQL deleteEdge mutation."""
         from_val = f'"{from_value}"' if isinstance(from_value, str) else from_value
         to_val = f'"{to_value}"' if isinstance(to_value, str) else to_value
@@ -89,8 +98,9 @@ class TestGraphQLMutations(BaseMutationsTest):
             }}
         """
 
-    def update_node_query(self, label: str, match_prop: str, match_value,
-                          set_prop: str, set_value) -> str:
+    def update_node_query(
+        self, label: str, match_prop: str, match_value, set_prop: str, set_value
+    ) -> str:
         """Return GraphQL updateNode mutation."""
         match_val = f'"{match_value}"' if isinstance(match_value, str) else match_value
         set_val = f'"{set_value}"' if isinstance(set_value, str) else set_value

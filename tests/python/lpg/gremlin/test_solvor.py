@@ -30,8 +30,9 @@ class TestGremlinSolvORComparison(BaseSolvORComparisonTest):
         """Create a fresh database instance."""
         return GrafeoDB()
 
-    def setup_flow_network(self, db, n_nodes: int, n_edges: int,
-                           seed: int = 42) -> dict:
+    def setup_flow_network(
+        self, db, n_nodes: int, n_edges: int, seed: int = 42
+    ) -> dict:
         """Set up a flow network using Python API."""
         rng = random.Random(seed)
 
@@ -80,8 +81,9 @@ class TestGremlinSolvORBenchmark(BaseSolvORBenchmarkTest):
         """Create a fresh database instance."""
         return GrafeoDB()
 
-    def setup_flow_network(self, db, n_nodes: int, n_edges: int,
-                           seed: int = 42) -> dict:
+    def setup_flow_network(
+        self, db, n_nodes: int, n_edges: int, seed: int = 42
+    ) -> dict:
         """Set up a flow network using Python API."""
         rng = random.Random(seed)
 

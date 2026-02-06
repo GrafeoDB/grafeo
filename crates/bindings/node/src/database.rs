@@ -378,6 +378,136 @@ impl JsGrafeoDB {
         Transaction::new(self.inner.clone())
     }
 
+    /// Create a vector similarity index on a node property.
+    #[napi(js_name = "createVectorIndex")]
+    pub async fn create_vector_index(
+        &self,
+        label: String,
+        property: String,
+        dimensions: Option<u32>,
+        metric: Option<String>,
+        m: Option<u32>,
+        ef_construction: Option<u32>,
+    ) -> Result<()> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = db.read();
+            db.create_vector_index(
+                &label,
+                &property,
+                dimensions.map(|d| d as usize),
+                metric.as_deref(),
+                m.map(|v| v as usize),
+                ef_construction.map(|v| v as usize),
+            )
+            .map_err(NodeGrafeoError::from)
+            .map_err(napi::Error::from)
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?
+    }
+
+    /// Search for the k nearest neighbors of a query vector.
+    #[napi(js_name = "vectorSearch")]
+    pub async fn vector_search(
+        &self,
+        label: String,
+        property: String,
+        query: Vec<f64>,
+        k: u32,
+        ef: Option<u32>,
+    ) -> Result<Vec<Vec<f64>>> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = db.read();
+            let query_f32: Vec<f32> = query.iter().map(|&v| v as f32).collect();
+            let results = db
+                .vector_search(
+                    &label,
+                    &property,
+                    &query_f32,
+                    k as usize,
+                    ef.map(|v| v as usize),
+                )
+                .map_err(NodeGrafeoError::from)
+                .map_err(napi::Error::from)?;
+            // Return as [[nodeId, distance], ...] since napi doesn't have tuples
+            Ok(results
+                .into_iter()
+                .map(|(id, dist)| vec![id.as_u64() as f64, dist as f64])
+                .collect::<Vec<Vec<f64>>>())
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?
+    }
+
+    /// Bulk-insert nodes with vector properties.
+    #[napi(js_name = "batchCreateNodes")]
+    pub async fn batch_create_nodes(
+        &self,
+        label: String,
+        property: String,
+        vectors: Vec<Vec<f64>>,
+    ) -> Result<Vec<f64>> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = db.read();
+            let vecs_f32: Vec<Vec<f32>> = vectors
+                .into_iter()
+                .map(|v| v.into_iter().map(|x| x as f32).collect())
+                .collect();
+            let ids = db.batch_create_nodes(&label, &property, vecs_f32);
+            Ok(ids
+                .into_iter()
+                .map(|id| id.as_u64() as f64)
+                .collect::<Vec<f64>>())
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?
+    }
+
+    /// Batch search for nearest neighbors of multiple query vectors.
+    #[cfg(feature = "vector-index")]
+    #[napi(js_name = "batchVectorSearch")]
+    pub async fn batch_vector_search(
+        &self,
+        label: String,
+        property: String,
+        queries: Vec<Vec<f64>>,
+        k: u32,
+        ef: Option<u32>,
+    ) -> Result<Vec<Vec<Vec<f64>>>> {
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = db.read();
+            let queries_f32: Vec<Vec<f32>> = queries
+                .into_iter()
+                .map(|v| v.into_iter().map(|x| x as f32).collect())
+                .collect();
+            let results = db
+                .batch_vector_search(
+                    &label,
+                    &property,
+                    &queries_f32,
+                    k as usize,
+                    ef.map(|v| v as usize),
+                )
+                .map_err(NodeGrafeoError::from)
+                .map_err(napi::Error::from)?;
+            Ok(results
+                .into_iter()
+                .map(|inner| {
+                    inner
+                        .into_iter()
+                        .map(|(id, dist)| vec![id.as_u64() as f64, dist as f64])
+                        .collect::<Vec<Vec<f64>>>()
+                })
+                .collect::<Vec<Vec<Vec<f64>>>>())
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?
+    }
+
     /// Close the database.
     #[napi]
     pub fn close(&self) -> Result<()> {

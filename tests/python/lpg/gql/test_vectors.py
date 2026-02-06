@@ -350,3 +350,89 @@ class TestVectorSearch:
         # Identical vector has distance ~0
         _, first_dist = results[0]
         assert first_dist < 0.01
+
+
+class TestBatchCreateNodes:
+    """Test batch_create_nodes() method."""
+
+    def test_batch_create_nodes_basic(self, db):
+        """Batch insert should create multiple nodes."""
+        vectors = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        ids = db.batch_create_nodes("Doc", "embedding", vectors)
+        assert len(ids) == 3
+        assert len(set(ids)) == 3  # All unique IDs
+
+    def test_batch_create_nodes_properties_stored(self, db):
+        """Batch-inserted vectors should be retrievable."""
+        vectors = [[1.0, 0.0], [0.0, 1.0]]
+        ids = db.batch_create_nodes("Vec", "data", vectors)
+        node = db.get_node(ids[0])
+        assert node is not None
+        assert "Vec" in node.labels
+        # Vector property should exist
+        emb = node.properties.get("data")
+        assert emb is not None
+        assert len(emb) == 2
+
+    def test_batch_create_nodes_indexable(self, db):
+        """Batch-inserted nodes should be indexable and searchable."""
+        vectors = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        db.batch_create_nodes("Doc", "embedding", vectors)
+        db.create_vector_index("Doc", "embedding", metric="cosine")
+        results = db.vector_search("Doc", "embedding", [1.0, 0.0, 0.0], k=3)
+        assert len(results) == 3
+        # Closest should be nearly 0 distance
+        _, first_dist = results[0]
+        assert first_dist < 0.01
+
+    def test_batch_create_nodes_empty(self, db):
+        """Batch insert with empty list should return empty."""
+        ids = db.batch_create_nodes("Doc", "embedding", [])
+        assert len(ids) == 0
+
+
+class TestBatchVectorSearch:
+    """Test batch_vector_search() method."""
+
+    def setup_data(self, db):
+        """Insert test vectors and build index."""
+        vectors = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        db.batch_create_nodes("Doc", "embedding", vectors)
+        db.create_vector_index("Doc", "embedding", metric="cosine")
+
+    def test_batch_vector_search_basic(self, db):
+        """Batch search should return results for each query."""
+        self.setup_data(db)
+        queries = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        results = db.batch_vector_search("Doc", "embedding", queries, k=2)
+        assert len(results) == 2
+        for result in results:
+            assert len(result) == 2
+            for node_id, distance in result:
+                assert isinstance(node_id, int)
+                assert isinstance(distance, float)
+
+    def test_batch_vector_search_with_ef(self, db):
+        """Batch search with explicit ef should work."""
+        self.setup_data(db)
+        queries = [[1.0, 0.0, 0.0]]
+        results = db.batch_vector_search("Doc", "embedding", queries, k=3, ef=200)
+        assert len(results) == 1
+        assert len(results[0]) == 3
+
+    def test_batch_vector_search_closest_correct(self, db):
+        """Each query's closest result should be the matching vector."""
+        self.setup_data(db)
+        queries = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        results = db.batch_vector_search("Doc", "embedding", queries, k=1)
+        assert len(results) == 3
+        for result in results:
+            assert len(result) == 1
+            _, dist = result[0]
+            assert dist < 0.01  # Each query matches its vector exactly
+
+    def test_batch_vector_search_no_index_fails(self, db):
+        """Batch searching without an index should fail."""
+        db.create_node(["Doc"], {"embedding": [1.0, 0.0, 0.0]})
+        with pytest.raises(RuntimeError, match="No vector index"):
+            db.batch_vector_search("Doc", "embedding", [[1.0, 0.0, 0.0]], k=1)

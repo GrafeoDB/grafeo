@@ -1031,7 +1031,7 @@ impl GrafeoDB {
                 config = config.with_ef_construction(ef_c);
             }
 
-            let index = HnswIndex::new(config);
+            let index = HnswIndex::with_capacity(config, vectors.len());
             for (node_id, vec) in &vectors {
                 index.insert(*node_id, vec);
             }
@@ -1084,6 +1084,95 @@ impl GrafeoDB {
         let results = match ef {
             Some(ef_val) => index.search_with_ef(query, k, ef_val),
             None => index.search(query, k),
+        };
+
+        Ok(results)
+    }
+
+    /// Creates multiple nodes in bulk, each with a single vector property.
+    ///
+    /// Much faster than individual `create_node_with_props` calls because it
+    /// acquires internal locks once and loops in Rust rather than crossing
+    /// the FFI boundary per vector.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Label applied to all created nodes
+    /// * `property` - Property name for the vector data
+    /// * `vectors` - Vector data for each node
+    ///
+    /// # Returns
+    ///
+    /// Vector of created `NodeId`s in the same order as the input vectors.
+    pub fn batch_create_nodes(
+        &self,
+        label: &str,
+        property: &str,
+        vectors: Vec<Vec<f32>>,
+    ) -> Vec<grafeo_common::types::NodeId> {
+        use grafeo_common::types::{PropertyKey, Value};
+
+        let prop_key = PropertyKey::new(property);
+        let labels: &[&str] = &[label];
+
+        vectors
+            .into_iter()
+            .map(|vec| {
+                let value = Value::Vector(vec.into());
+                let id = self.store.create_node_with_props(
+                    labels,
+                    std::iter::once((prop_key.clone(), value.clone())),
+                );
+
+                // Log to WAL
+                if let Err(e) = self.log_wal(&WalRecord::CreateNode {
+                    id,
+                    labels: labels.iter().map(|s| s.to_string()).collect(),
+                }) {
+                    tracing::warn!("Failed to log CreateNode to WAL: {}", e);
+                }
+                if let Err(e) = self.log_wal(&WalRecord::SetNodeProperty {
+                    id,
+                    key: property.to_string(),
+                    value,
+                }) {
+                    tracing::warn!("Failed to log SetNodeProperty to WAL: {}", e);
+                }
+
+                id
+            })
+            .collect()
+    }
+
+    /// Searches for nearest neighbors for multiple query vectors in parallel.
+    ///
+    /// Uses rayon parallel iteration under the hood for multi-core throughput.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Node label that was indexed
+    /// * `property` - Property that was indexed
+    /// * `queries` - Batch of query vectors
+    /// * `k` - Number of nearest neighbors per query
+    /// * `ef` - Search beam width (uses index default if `None`)
+    #[cfg(feature = "vector-index")]
+    pub fn batch_vector_search(
+        &self,
+        label: &str,
+        property: &str,
+        queries: &[Vec<f32>],
+        k: usize,
+        ef: Option<usize>,
+    ) -> Result<Vec<Vec<(grafeo_common::types::NodeId, f32)>>> {
+        let index = self.store.get_vector_index(label, property).ok_or_else(|| {
+            grafeo_common::utils::error::Error::Internal(format!(
+                "No vector index found for :{label}({property}). Call create_vector_index() first."
+            ))
+        })?;
+
+        let results = match ef {
+            Some(ef_val) => index.batch_search_with_ef(queries, k, ef_val),
+            None => index.batch_search(queries, k),
         };
 
         Ok(results)

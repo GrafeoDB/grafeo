@@ -184,6 +184,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))] // SystemTime::now() requires clock_gettime, blocked by Miri isolation
     fn test_timestamp_now() {
         let ts = Timestamp::now();
         // Should be after year 2020
@@ -215,6 +216,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))] // SystemTime::now() requires clock_gettime, blocked by Miri isolation
     fn test_timestamp_system_time_conversion() {
         let now = SystemTime::now();
         let ts: Timestamp = now.try_into().unwrap();

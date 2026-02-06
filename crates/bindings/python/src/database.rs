@@ -855,6 +855,73 @@ impl PyGrafeoDB {
             .collect())
     }
 
+    /// Bulk-insert nodes with vector properties.
+    ///
+    /// Creates N nodes all with the same label, each with a single vector
+    /// property. Much faster than N individual create_node() calls.
+    ///
+    /// Args:
+    ///     label: Node label for all nodes
+    ///     property: Property name for the vectors
+    ///     vectors: List of vectors (list of list of floats)
+    ///
+    /// Returns:
+    ///     List of created node IDs.
+    ///
+    /// Example:
+    ///     ids = db.batch_create_nodes("Doc", "embedding", [[1.0, 0.0], [0.0, 1.0]])
+    #[pyo3(signature = (label, property, vectors))]
+    fn batch_create_nodes(
+        &self,
+        label: &str,
+        property: &str,
+        vectors: Vec<Vec<f32>>,
+    ) -> PyResult<Vec<u64>> {
+        let db = self.inner.read();
+        let ids = db.batch_create_nodes(label, property, vectors);
+        Ok(ids.into_iter().map(|id| id.as_u64()).collect())
+    }
+
+    /// Batch search for nearest neighbors of multiple query vectors.
+    ///
+    /// Executes searches in parallel using all available CPU cores.
+    ///
+    /// Args:
+    ///     label: Node label that was indexed
+    ///     property: Property that was indexed
+    ///     queries: List of query vectors
+    ///     k: Number of nearest neighbors per query
+    ///     ef: Search beam width (higher = better recall, slower). Uses index default if None.
+    ///
+    /// Returns:
+    ///     List of results per query. Each result is a list of (node_id, distance) tuples.
+    ///
+    /// Example:
+    ///     results = db.batch_vector_search("Doc", "embedding", [[1.0, 0.0], [0.0, 1.0]], k=5)
+    #[pyo3(signature = (label, property, queries, k, ef=None))]
+    fn batch_vector_search(
+        &self,
+        label: &str,
+        property: &str,
+        queries: Vec<Vec<f32>>,
+        k: usize,
+        ef: Option<usize>,
+    ) -> PyResult<Vec<Vec<(u64, f32)>>> {
+        let db = self.inner.read();
+        let results = db
+            .batch_vector_search(label, property, &queries, k, ef)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(results
+            .into_iter()
+            .map(|inner| {
+                inner
+                    .into_iter()
+                    .map(|(id, dist)| (id.as_u64(), dist))
+                    .collect()
+            })
+            .collect())
+    }
+
     /// Remove an index on a node property.
     ///
     /// Returns True if the index existed and was removed.

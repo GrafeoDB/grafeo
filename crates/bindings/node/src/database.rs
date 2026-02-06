@@ -218,7 +218,12 @@ impl JsGrafeoDB {
 
     /// Create a node with labels and optional properties.
     #[napi(js_name = "createNode")]
-    pub fn create_node(&self, env: Env, labels: Vec<String>, properties: Option<JsObject>) -> Result<JsNode> {
+    pub fn create_node(
+        &self,
+        env: Env,
+        labels: Vec<String>,
+        properties: Option<JsObject>,
+    ) -> Result<JsNode> {
         let db = self.inner.read();
         let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
 
@@ -327,7 +332,13 @@ impl JsGrafeoDB {
 
     /// Set a property on a node.
     #[napi(js_name = "setNodeProperty")]
-    pub fn set_node_property(&self, env: Env, id: f64, key: String, value: JsUnknown) -> Result<()> {
+    pub fn set_node_property(
+        &self,
+        env: Env,
+        id: f64,
+        key: String,
+        value: JsUnknown,
+    ) -> Result<()> {
         let db = self.inner.read();
         let val = types::js_to_value(&env, value)?;
         db.set_node_property(NodeId(id as u64), &key, val);
@@ -336,7 +347,13 @@ impl JsGrafeoDB {
 
     /// Set a property on an edge.
     #[napi(js_name = "setEdgeProperty")]
-    pub fn set_edge_property(&self, env: Env, id: f64, key: String, value: JsUnknown) -> Result<()> {
+    pub fn set_edge_property(
+        &self,
+        env: Env,
+        id: f64,
+        key: String,
+        value: JsUnknown,
+    ) -> Result<()> {
         let db = self.inner.read();
         let val = types::js_to_value(&env, value)?;
         db.set_edge_property(EdgeId(id as u64), &key, val);
@@ -476,7 +493,10 @@ fn fetch_edge(db: &GrafeoDB, id: EdgeId) -> Result<JsEdge> {
 }
 
 /// Extract nodes and edges from query results based on column types.
-pub(crate) fn extract_entities(result: &EngineQueryResult, db: &GrafeoDB) -> (Vec<JsNode>, Vec<JsEdge>) {
+pub(crate) fn extract_entities(
+    result: &EngineQueryResult,
+    db: &GrafeoDB,
+) -> (Vec<JsNode>, Vec<JsEdge>) {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
     let mut seen_node_ids = HashSet::new();
@@ -486,14 +506,26 @@ pub(crate) fn extract_entities(result: &EngineQueryResult, db: &GrafeoDB) -> (Ve
         .column_types
         .iter()
         .enumerate()
-        .filter_map(|(i, t)| if *t == LogicalType::Node { Some(i) } else { None })
+        .filter_map(|(i, t)| {
+            if *t == LogicalType::Node {
+                Some(i)
+            } else {
+                None
+            }
+        })
         .collect();
 
     let edge_cols: Vec<usize> = result
         .column_types
         .iter()
         .enumerate()
-        .filter_map(|(i, t)| if *t == LogicalType::Edge { Some(i) } else { None })
+        .filter_map(|(i, t)| {
+            if *t == LogicalType::Edge {
+                Some(i)
+            } else {
+                None
+            }
+        })
         .collect();
 
     for row in &result.rows {

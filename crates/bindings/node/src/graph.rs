@@ -134,10 +134,7 @@ impl JsEdge {
     /// String representation.
     #[napi(js_name = "toString")]
     pub fn to_string_js(&self) -> String {
-        format!(
-            "()-[:{}]->() (id={})",
-            self.edge_type, self.id.0
-        )
+        format!("()-[:{}]->() (id={})", self.edge_type, self.id.0)
     }
 }
 

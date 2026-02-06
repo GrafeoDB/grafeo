@@ -43,9 +43,7 @@ impl From<NodeGrafeoError> for napi::Error {
 impl From<grafeo_common::utils::error::Error> for NodeGrafeoError {
     fn from(err: grafeo_common::utils::error::Error) -> Self {
         match &err {
-            grafeo_common::utils::error::Error::Query(_) => {
-                NodeGrafeoError::Query(err.to_string())
-            }
+            grafeo_common::utils::error::Error::Query(_) => NodeGrafeoError::Query(err.to_string()),
             grafeo_common::utils::error::Error::Transaction(_) => {
                 NodeGrafeoError::Transaction(err.to_string())
             }

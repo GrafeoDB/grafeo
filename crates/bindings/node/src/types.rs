@@ -151,9 +151,7 @@ pub fn value_to_js(env: &Env, value: &Value) -> Result<JsUnknown> {
             }
             Ok(obj.into_unknown())
         }
-        Value::Bytes(bytes) => Ok(env
-            .create_buffer_with_data(bytes.to_vec())?
-            .into_unknown()),
+        Value::Bytes(bytes) => Ok(env.create_buffer_with_data(bytes.to_vec())?.into_unknown()),
         Value::Timestamp(ts) => {
             let ms = ts.as_micros() as f64 / 1000.0;
             Ok(env.create_date(ms)?.into_unknown())

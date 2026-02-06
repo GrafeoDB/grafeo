@@ -108,10 +108,10 @@ uv add grafeo[cli]
 const { GrafeoDB } = require('@grafeo-db/js');
 
 // Create an in-memory database
-const db = GrafeoDB.create();
+const db = await GrafeoDB.create();
 
 // Or open a persistent database
-// const db = GrafeoDB.create('/path/to/database');
+// const db = await GrafeoDB.create({ path: './my-graph.db' });
 
 // Create nodes and relationships
 await db.execute("INSERT (:Person {name: 'Alice', age: 30})");
@@ -126,16 +126,9 @@ const result = await db.execute(`
     MATCH (p:Person)-[:KNOWS]->(friend)
     RETURN p.name, friend.name
 `);
-console.log(result.toArray());
+console.log(result.rows);
 
-// Direct API
-const node = db.createNode(['Person'], { name: 'Carol' });
-console.log(`Created node with ID: ${node.id}`);
-
-// Transactions
-const tx = db.beginTransaction();
-await tx.execute("INSERT (:Person {name: 'Dave'})");
-tx.commit(); // or tx.rollback()
+await db.close();
 ```
 
 ### Python
@@ -284,6 +277,16 @@ grafeo wal checkpoint ./mydb
 grafeo info ./mydb --format json  # Machine-readable JSON
 grafeo info ./mydb --format table # Human-readable table (default)
 ```
+
+## Ecosystem
+
+| Project | Description |
+|---------|-------------|
+| [**grafeo-server**](https://github.com/GrafeoDB/grafeo-server) | HTTP server & web UI: REST API, transactions, single binary (~20MB Docker image) |
+| [**grafeo-web**](https://github.com/GrafeoDB/grafeo-web) | Browser-based Grafeo via WebAssembly with IndexedDB persistence |
+| [**anywidget-graph**](https://github.com/GrafeoDB/anywidget-graph) | Interactive graph visualization for Python notebooks (Marimo, Jupyter, VS Code, Colab) |
+| [**anywidget-vector**](https://github.com/GrafeoDB/anywidget-vector) | 3D vector/embedding visualization for Python notebooks |
+| [**graph-bench**](https://github.com/GrafeoDB/graph-bench) | Benchmark suite comparing graph databases across 25+ benchmarks |
 
 ## Documentation
 

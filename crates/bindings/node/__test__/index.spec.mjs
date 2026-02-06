@@ -60,8 +60,8 @@ describe('database lifecycle', () => {
     expect(db2.nodeCount).toBe(1)
     db2.close()
 
-    // Cleanup
-    fs.rmSync(dir, { recursive: true })
+    // Cleanup — maxRetries handles Windows file-lock delays after db.close()
+    fs.rmSync(dir, { recursive: true, maxRetries: 3, retryDelay: 100 })
   })
 
   it('should close without error', () => {

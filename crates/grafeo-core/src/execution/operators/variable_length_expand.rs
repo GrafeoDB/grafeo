@@ -181,7 +181,9 @@ impl VariableLengthExpandOperator {
                 // Filter by edge type if specified
                 let type_matches = if let Some(ref filter_type) = self.edge_type {
                     if let Some(edge_type) = self.store.edge_type(*edge_id) {
-                        edge_type.as_str() == filter_type.as_str()
+                        edge_type
+                            .as_str()
+                            .eq_ignore_ascii_case(filter_type.as_str())
                     } else {
                         false
                     }

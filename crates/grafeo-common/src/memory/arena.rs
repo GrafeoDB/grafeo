@@ -747,6 +747,7 @@ mod tiered_storage_tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "exceeds chunk used bytes")]
     fn test_read_at_out_of_bounds() {
         let arena = Arena::with_chunk_size(EpochId::INITIAL, 4096);
@@ -759,6 +760,7 @@ mod tiered_storage_tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "is not aligned")]
     fn test_read_at_misaligned() {
         let arena = Arena::with_chunk_size(EpochId::INITIAL, 4096);

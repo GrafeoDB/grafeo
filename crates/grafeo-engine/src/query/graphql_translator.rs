@@ -591,13 +591,13 @@ impl GraphQLTranslator {
     ) -> Result<(LogicalOperator, Vec<ReturnItem>)> {
         let to_var = self.next_var();
 
-        // The field name is the edge type (uppercased to match convention: knows → KNOWS)
+        // The field name is the edge type — preserve original case to match how edges are stored
         let mut plan = LogicalOperator::Expand(ExpandOp {
             from_variable: from_var.to_string(),
             to_variable: to_var.clone(),
             edge_variable: None,
             direction: ExpandDirection::Outgoing,
-            edge_type: Some(field.name.to_uppercase()),
+            edge_type: Some(field.name.clone()),
             min_hops: 1,
             max_hops: Some(1),
             input: Box::new(input),
@@ -638,13 +638,13 @@ impl GraphQLTranslator {
     ) -> Result<(LogicalOperator, String)> {
         let to_var = self.next_var();
 
-        // The field name is the edge type (uppercased to match convention: knows → KNOWS)
+        // The field name is the edge type — preserve original case to match how edges are stored
         let mut plan = LogicalOperator::Expand(ExpandOp {
             from_variable: from_var.to_string(),
             to_variable: to_var.clone(),
             edge_variable: None,
             direction: ExpandDirection::Outgoing,
-            edge_type: Some(field.name.to_uppercase()),
+            edge_type: Some(field.name.clone()),
             min_hops: 1,
             max_hops: Some(1),
             input: Box::new(input),

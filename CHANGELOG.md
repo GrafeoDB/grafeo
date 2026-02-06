@@ -2,7 +2,7 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.4.0] - Unreleased
+## [0.4.0] - 2026-02-07
 
 _Node.js/TypeScript Bindings, Vector Support & Code Quality_
 

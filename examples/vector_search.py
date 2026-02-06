@@ -152,7 +152,7 @@ def __(db, documents, embeddings, np):
     similarities.sort(key=lambda x: x[1], reverse=True)
 
     print(f"Query: '{query_title}'")
-    print(f"\nTop 5 similar documents:")
+    print("\nTop 5 similar documents:")
     for title, sim, _ in similarities[:5]:
         print(f"  {title}: {sim:.4f}")
     return (
@@ -261,7 +261,9 @@ def __(db, documents, embeddings, mo, np):
 
     hybrid_results.sort(key=lambda x: x[2], reverse=True)
 
-    rows_hybrid = [f"| {title} | {year} | {sim:.4f} |" for title, year, sim in hybrid_results]
+    rows_hybrid = [
+        f"| {title} | {year} | {sim:.4f} |" for title, year, sim in hybrid_results
+    ]
 
     mo.md(f"""
     ## Hybrid Search (Vector + Filters)
@@ -285,17 +287,19 @@ def __(db, mo):
     stats = db.detailed_stats()
     schema = db.schema()
 
-    labels_text = ", ".join([f"{l['name']} ({l['count']})" for l in schema["labels"]])
+    labels_text = ", ".join(
+        [f"{lbl['name']} ({lbl['count']})" for lbl in schema["labels"]]
+    )
 
     mo.md(f"""
     ## Database Statistics
 
     | Metric | Value |
     |--------|-------|
-    | Total Nodes | {stats['node_count']} |
+    | Total Nodes | {stats["node_count"]} |
     | Labels | {labels_text} |
-    | Properties | {stats['property_key_count']} |
-    | Memory | {stats['memory_bytes'] / 1024:.1f} KB |
+    | Properties | {stats["property_key_count"]} |
+    | Memory | {stats["memory_bytes"] / 1024:.1f} KB |
 
     Each document stores a 128-dimensional embedding vector alongside its metadata.
     """)

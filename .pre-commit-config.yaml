@@ -9,7 +9,7 @@ repos:
     hooks:
       - id: trailing-whitespace
         exclude: '\.md$'
-      - id: end-of-file-fixers
+      - id: end-of-file-fixer
         exclude: '\.md$'
       - id: check-yaml
       - id: check-toml

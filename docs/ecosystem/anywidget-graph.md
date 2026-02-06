@@ -55,34 +55,35 @@ uv add "anywidget-graph[networkx,neo4j]"
 ### From Grafeo
 
 ```python
-from anywidget_graph import GraphWidget
-from grafeo import Database
+from anywidget_graph import Graph
+from grafeo import GrafeoDB
 
-db = Database()
-db.query("""
+db = GrafeoDB()
+db.execute("""
     INSERT (:Person {name: 'Alice'})-[:KNOWS]->(:Person {name: 'Bob'}),
            (:Person {name: 'Bob'})-[:KNOWS]->(:Person {name: 'Carol'})
 """)
 
-widget = GraphWidget.from_grafeo(db, "MATCH (n)-[r]->(m) RETURN n, r, m")
-widget
+result = db.execute("MATCH (n)-[r]->(m) RETURN n, r, m")
+graph = Graph.from_grafeo(result)
+graph
 ```
 
 ### From NetworkX
 
 ```python
 import networkx as nx
-from anywidget_graph import GraphWidget
+from anywidget_graph import Graph
 
 G = nx.karate_club_graph()
-widget = GraphWidget.from_networkx(G)
+widget = Graph.from_networkx(G)
 widget
 ```
 
 ### From Edge List
 
 ```python
-from anywidget_graph import GraphWidget
+from anywidget_graph import Graph
 
 nodes = [
     {"id": "1", "label": "Alice", "group": "person"},
@@ -95,7 +96,7 @@ edges = [
     {"source": "2", "target": "3", "label": "works_at"},
 ]
 
-widget = GraphWidget(nodes=nodes, edges=edges)
+widget = Graph(nodes=nodes, edges=edges)
 widget
 ```
 
@@ -104,7 +105,7 @@ widget
 ### Node Styling
 
 ```python
-widget = GraphWidget(
+widget = Graph(
     nodes=nodes,
     edges=edges,
     node_color_by="group",
@@ -119,7 +120,7 @@ widget = GraphWidget(
 ### Layout Algorithms
 
 ```python
-widget = GraphWidget(
+widget = Graph(
     nodes=nodes,
     edges=edges,
     layout="force",  # force, hierarchical, circular, grid
@@ -141,7 +142,7 @@ def handle_edge_click(edge_id, edge_data):
 ## Configuration
 
 ```python
-widget = GraphWidget(
+widget = Graph(
     nodes=nodes,
     edges=edges,
 
@@ -164,7 +165,7 @@ widget = GraphWidget(
 ### Neo4j
 
 ```python
-from anywidget_graph import GraphWidget
+from anywidget_graph import Graph
 from anywidget_graph.backends import Neo4jBackend
 
 backend = Neo4jBackend(
@@ -173,7 +174,7 @@ backend = Neo4jBackend(
     password="password"
 )
 
-widget = GraphWidget(
+widget = Graph(
     backend=backend,
     query="MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 100"
 )
@@ -191,7 +192,7 @@ backend = ArangoDBBackend(
     password="password"
 )
 
-widget = GraphWidget(
+widget = Graph(
     backend=backend,
     query="FOR v, e IN 1..2 OUTBOUND 'nodes/1' edges RETURN {v, e}"
 )

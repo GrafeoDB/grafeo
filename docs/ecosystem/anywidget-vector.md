@@ -14,10 +14,10 @@ anywidget-vector provides 3D visualization for high-dimensional embeddings and v
 ### 6D Visualization
 Encode six dimensions simultaneously:
 
-- **X, Y, Z** — 3D position coordinates
-- **Color** — Hue/gradient mapping
-- **Shape** — Geometry types (sphere, cube, etc.)
-- **Size** — Scale/importance
+- **X, Y, Z**: 3D position coordinates
+- **Color**: Hue/gradient mapping
+- **Shape**: Geometry types (sphere, cube, etc.)
+- **Size**: Scale/importance
 
 ### Multi-Backend Support
 

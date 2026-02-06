@@ -11,6 +11,8 @@ _Node.js/TypeScript Bindings, Vector Support & Code Quality_
 - **Node.js/TypeScript bindings** (`@grafeo-db/js`) via napi-rs: full CRUD, async queries (GQL/Cypher/Gremlin/GraphQL/SPARQL), transactions, type mapping, TypeScript definitions, 67 integration tests
 - **Python vector support**: `list[float]` auto-converts to native vectors; `grafeo.vector()` constructor; `cosine_similarity()`, `euclidean_distance()`, `dot_product()`, `manhattan_distance()` in GQL; `create_vector_index()` with HNSW tuning params (m, ef_construction); `vector_search()` for programmatic k-NN
 - **Python transaction isolation**: `begin_transaction()` accepts `isolation_level` parameter — `"read_committed"`, `"snapshot"` (default), or `"serializable"`
+- **Batch vector APIs**: `batch_create_nodes()` and `batch_vector_search()` for Python and Node.js
+- **Node.js vector APIs**: `createVectorIndex()`, `vectorSearch()`, `batchCreateNodes()`, `batchVectorSearch()` for full vector parity with Python
 - Node.js CI testing across 3 OS × 3 Node.js versions (18, 20, 22)
 - Miri CI job for undefined behavior detection on arena allocator
 - Arena allocator debug assertions for offset bounds and alignment validation
@@ -35,6 +37,8 @@ _Node.js/TypeScript Bindings, Vector Support & Code Quality_
 
 ### Improved
 
+- **HNSW recall**: Vamana-style diversity pruning with configurable alpha parameter
+- **HNSW speed**: Cosine vectors pre-normalized on insert (dot product instead of full cosine), HashMap pre-allocation, visited set capacity hints
 - Query optimizer uses actual store statistics (per-label node counts, per-edge-type degree) instead of hardcoded defaults
 - Arena allocator lock ordering documented for tiered-storage concurrent access
 - All 12 prek pre-commit hooks pass (including cargo-deny, ruff check, ruff format)

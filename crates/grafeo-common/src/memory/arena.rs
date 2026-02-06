@@ -776,6 +776,7 @@ mod tiered_storage_tests {
     }
 
     #[test]
+    #[cfg(not(miri))] // parking_lot uses integer-to-pointer casts incompatible with Miri strict provenance
     fn test_concurrent_read_stress() {
         use std::sync::Arc;
 

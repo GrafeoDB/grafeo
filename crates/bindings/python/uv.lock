@@ -41,11 +41,6 @@ dev = [
     { name = "ty" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "click", marker = "extra == 'cli'", specifier = ">=8.3.1" },
@@ -55,9 +50,6 @@ requires-dist = [
     { name = "solvor", specifier = ">=0.6.1" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.15" },
 ]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.0.2" }]
 
 [[package]]
 name = "iniconfig"

@@ -10,5 +10,11 @@ extend-exclude = [
 ]
 
 [default.extend-words]
-# Add false positives here as they're discovered
-# Example: "crate" = "crate"
+# "fof" = friend-of-friend (standard graph query pattern)
+fof = "fof"
+fofName = "fofName"
+
+[default.extend-identifiers]
+abd = "abd"         # Levenshtein distance test input
+Plase = "Plase"     # fuzzy-match test input
+INSERTs = "INSERTs" # plural of SQL INSERT keyword

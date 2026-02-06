@@ -7,7 +7,7 @@ name = "grafeo"
 version = "0.4.0"
 description = "A high-performance, embeddable graph database with Python bindings"
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.12"
 authors = [
     { name = "S.T. Grond" }
@@ -17,7 +17,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",

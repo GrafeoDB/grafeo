@@ -114,7 +114,12 @@ def __(accounts, db, random):
             ring_accounts[i].id,
             ring_accounts[next_i].id,
             "TRANSFERRED",
-            {"amount": 9999.00, "currency": "USD", "days_ago": 2, "flagged": False},  # Just under reporting threshold
+            {
+                "amount": 9999.00,
+                "currency": "USD",
+                "days_ago": 2,
+                "flagged": False,
+            },  # Just under reporting threshold
         )
 
     # Pattern 2: Mule account (many inputs, few outputs)
@@ -136,16 +141,30 @@ def __(accounts, db, random):
             sender.id,
             mule.id,
             "TRANSFERRED",
-            {"amount": random.uniform(100, 500), "currency": "USD", "days_ago": random.randint(1, 5), "flagged": False},
+            {
+                "amount": random.uniform(100, 500),
+                "currency": "USD",
+                "days_ago": random.randint(1, 5),
+                "flagged": False,
+            },
         )
 
     # One large withdrawal
     external = db.create_node(
         ["Account", "External"],
-        {"account_id": "EXT001", "type": "external", "created_days_ago": 1, "verified": False, "country": "XX"},
+        {
+            "account_id": "EXT001",
+            "type": "external",
+            "created_days_ago": 1,
+            "verified": False,
+            "country": "XX",
+        },
     )
     db.create_edge(
-        mule.id, external.id, "TRANSFERRED", {"amount": 5000.00, "currency": "USD", "days_ago": 1, "flagged": False}
+        mule.id,
+        external.id,
+        "TRANSFERRED",
+        {"amount": 5000.00, "currency": "USD", "days_ago": 1, "flagged": False},
     )
 
     print("Added fraudulent patterns: ring (5 accounts) and mule (1 account)")
@@ -173,7 +192,7 @@ def __(db, mo):
 
     Found **{len(cycle_accounts)}** accounts involved in circular transaction patterns.
 
-    Accounts in cycles: {', '.join(sorted(cycle_accounts)) if cycle_accounts else 'None'}
+    Accounts in cycles: {", ".join(sorted(cycle_accounts)) if cycle_accounts else "None"}
 
     **Why this matters:** Circular transactions are a classic money laundering technique
     where funds are moved through multiple accounts to obscure their origin.
@@ -196,7 +215,9 @@ def __(db, mo):
     """)
 
     mule_rows = [
-        f"| {row['account']} | {row['in_count']} | {row['out_count']} |" for row in mule_result if row["account"]
+        f"| {row['account']} | {row['in_count']} | {row['out_count']} |"
+        for row in mule_result
+        if row["account"]
     ]
 
     mo.md(f"""
@@ -265,11 +286,18 @@ def __(db, mo):
     pagerank = db.algorithms.pagerank(damping=0.85)
 
     # Get scores for suspicious accounts
-    suspicious_scores = [(suspicious_ids[node_id], score) for node_id, score in pagerank.items() if node_id in suspicious_ids]
+    suspicious_scores = [
+        (suspicious_ids[node_id], score)
+        for node_id, score in pagerank.items()
+        if node_id in suspicious_ids
+    ]
 
     suspicious_scores.sort(key=lambda x: x[1], reverse=True)
 
-    risk_rows = [f"| {account} | {score:.4f} | {'HIGH' if score > 0.05 else 'MEDIUM'} |" for account, score in suspicious_scores]
+    risk_rows = [
+        f"| {account} | {score:.4f} | {'HIGH' if score > 0.05 else 'MEDIUM'} |"
+        for account, score in suspicious_scores
+    ]
 
     mo.md(f"""
     ## Risk Scoring with PageRank
@@ -310,21 +338,25 @@ def __(db):
             labels = node.labels
             props = node.properties
             is_suspicious = "Suspicious" in labels
-            graph_nodes.append({
-                "id": str(node.id),
-                "label": props.get("account_id", f"Node {node.id}"),
-                "group": "Suspicious" if is_suspicious else "Normal",
-                "properties": props,
-            })
+            graph_nodes.append(
+                {
+                    "id": str(node.id),
+                    "label": props.get("account_id", f"Node {node.id}"),
+                    "group": "Suspicious" if is_suspicious else "Normal",
+                    "properties": props,
+                }
+            )
 
     graph_edges = []
     for edge in edges:
-        graph_edges.append({
-            "source": str(edge.source_id),
-            "target": str(edge.target_id),
-            "label": f"${edge.properties.get('amount', 0):.0f}",
-            "properties": edge.properties,
-        })
+        graph_edges.append(
+            {
+                "source": str(edge.source_id),
+                "target": str(edge.target_id),
+                "label": f"${edge.properties.get('amount', 0):.0f}",
+                "properties": edge.properties,
+            }
+        )
 
     # Create widget
     fraud_graph = Graph(
@@ -334,7 +366,16 @@ def __(db):
     )
 
     fraud_graph
-    return Graph, edges, fraud_graph, graph_edges, graph_nodes, nodes, seen_ids, viz_result
+    return (
+        Graph,
+        edges,
+        fraud_graph,
+        graph_edges,
+        graph_nodes,
+        nodes,
+        seen_ids,
+        viz_result,
+    )
 
 
 @app.cell
@@ -375,7 +416,7 @@ def __(cycle_accounts, db, external, mo, mule, ring_accounts):
     Based on our analysis, the following accounts require investigation:
 
     **HIGH RISK - Money Laundering Ring:**
-    {chr(10).join(f'- {a.properties["account_id"]}' for a in ring_accounts)}
+    {chr(10).join(f"- {a.properties["account_id"]}" for a in ring_accounts)}
 
     **HIGH RISK - Mule Account:**
     - {mule.properties["account_id"]}
@@ -399,7 +440,9 @@ def __(db, mo):
     total_suspicious = db.execute("MATCH (a:Suspicious) RETURN count(a) as count")
     suspicious_count = list(total_suspicious)[0]["count"]
 
-    total_flagged = db.execute("MATCH (a:Account) WHERE a.risk_level IS NOT NULL RETURN count(a) as count")
+    total_flagged = db.execute(
+        "MATCH (a:Account) WHERE a.risk_level IS NOT NULL RETURN count(a) as count"
+    )
     flagged_count = list(total_flagged)[0]["count"]
 
     mo.md(f"""
@@ -407,11 +450,11 @@ def __(db, mo):
 
     | Metric | Value |
     |--------|-------|
-    | Total Accounts | {stats['node_count']} |
-    | Total Transactions | {stats['edge_count']} |
+    | Total Accounts | {stats["node_count"]} |
+    | Total Transactions | {stats["edge_count"]} |
     | Suspicious Accounts | {suspicious_count} |
     | Flagged for Review | {flagged_count} |
-    | Detection Rate | {flagged_count / stats['node_count'] * 100:.1f}% |
+    | Detection Rate | {flagged_count / stats["node_count"] * 100:.1f}% |
 
     This demonstrates how graph analysis can efficiently identify fraud patterns
     that would be difficult to detect with traditional SQL queries.

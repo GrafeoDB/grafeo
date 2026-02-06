@@ -44,7 +44,9 @@ def __():
     alice = db.create_node(["Person"], {"name": "Alice", "age": 30, "city": "Seattle"})
     bob = db.create_node(["Person"], {"name": "Bob", "age": 35, "city": "Portland"})
     carol = db.create_node(["Person"], {"name": "Carol", "age": 28, "city": "Seattle"})
-    dave = db.create_node(["Person"], {"name": "Dave", "age": 40, "city": "San Francisco"})
+    dave = db.create_node(
+        ["Person"], {"name": "Dave", "age": 40, "city": "San Francisco"}
+    )
     eve = db.create_node(["Person"], {"name": "Eve", "age": 32, "city": "Portland"})
 
     # Create some companies
@@ -113,21 +115,25 @@ def __(db):
             seen_ids.add(node.id)
             labels = node.labels
             props = node.properties
-            graph_nodes.append({
-                "id": str(node.id),
-                "label": props.get("name", f"Node {node.id}"),
-                "group": labels[0] if labels else "Unknown",
-                "properties": props,
-            })
+            graph_nodes.append(
+                {
+                    "id": str(node.id),
+                    "label": props.get("name", f"Node {node.id}"),
+                    "group": labels[0] if labels else "Unknown",
+                    "properties": props,
+                }
+            )
 
     graph_edges = []
     for edge in edges:
-        graph_edges.append({
-            "source": str(edge.source_id),
-            "target": str(edge.target_id),
-            "label": edge.edge_type,
-            "properties": edge.properties,
-        })
+        graph_edges.append(
+            {
+                "source": str(edge.source_id),
+                "target": str(edge.target_id),
+                "label": edge.edge_type,
+                "properties": edge.properties,
+            }
+        )
 
     # Create interactive graph widget
     graph_widget = Graph(
@@ -160,7 +166,11 @@ def __(db, mo):
     rows = []
     for node_id, score in sorted_scores[:5]:
         node = db.get_node(node_id)
-        name = node.properties.get("name", f"Node {node_id}") if node else f"Node {node_id}"
+        name = (
+            node.properties.get("name", f"Node {node_id}")
+            if node
+            else f"Node {node_id}"
+        )
         rows.append(f"| {name} | {score:.4f} |")
 
     mo.md(f"""
@@ -260,12 +270,12 @@ def __(db, mo):
 
     | Metric | Value |
     |--------|-------|
-    | Nodes | {stats['node_count']} |
-    | Edges | {stats['edge_count']} |
-    | Labels | {stats['label_count']} |
-    | Edge Types | {stats['edge_type_count']} |
-    | Properties | {stats['property_key_count']} |
-    | Memory | {stats['memory_bytes'] / 1024:.1f} KB |
+    | Nodes | {stats["node_count"]} |
+    | Edges | {stats["edge_count"]} |
+    | Labels | {stats["label_count"]} |
+    | Edge Types | {stats["edge_type_count"]} |
+    | Properties | {stats["property_key_count"]} |
+    | Memory | {stats["memory_bytes"] / 1024:.1f} KB |
     """)
     return (stats,)
 

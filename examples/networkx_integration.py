@@ -139,9 +139,13 @@ def __(G, db, mo, people):
 
     # Format results
     betweenness_rows = []
-    for node_id in sorted(betweenness.keys(), key=lambda x: betweenness[x], reverse=True)[:5]:
+    for node_id in sorted(
+        betweenness.keys(), key=lambda x: betweenness[x], reverse=True
+    )[:5]:
         name = node_names.get(node_id, f"Node {node_id}")
-        betweenness_rows.append(f"| {name} | {betweenness[node_id]:.4f} | {clustering[node_id]:.4f} |")
+        betweenness_rows.append(
+            f"| {name} | {betweenness[node_id]:.4f} | {clustering[node_id]:.4f} |"
+        )
 
     mo.md(f"""
     ## NetworkX Algorithms
@@ -189,7 +193,7 @@ def __(avg_path, components, density, diameter, mo):
 
     | Metric | Value | Interpretation |
     |--------|-------|----------------|
-    | Connected Components | {len(components)} | The graph is {'connected' if len(components) == 1 else 'disconnected'} |
+    | Connected Components | {len(components)} | The graph is {"connected" if len(components) == 1 else "disconnected"} |
     | Diameter | {diameter} | Maximum distance between any two nodes |
     | Average Path Length | {avg_path:.2f} | Average steps to reach any node |
     | Density | {density:.4f} | Ratio of actual to possible edges |
@@ -273,7 +277,7 @@ def __(db, mo, nx):
     G_new = db.as_networkx().to_networkx()
     nx_pagerank = nx.pagerank(G_new, alpha=0.85)
 
-    mo.md(f"""
+    mo.md("""
     ## Algorithm Comparison
 
     Both Grafeo and NetworkX can compute PageRank:

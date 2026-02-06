@@ -22,6 +22,7 @@ We're building a modern graph database ecosystem in Rust, and we'd love your hel
 | **Python Bindings** | Rust + Python, PyO3 | [grafeo](https://github.com/GrafeoDB/grafeo) |
 | **Browser Runtime** | TypeScript, WebAssembly | [grafeo-web](https://github.com/GrafeoDB/grafeo-web) |
 | **Visualization** | Three.js, Sigma.js | [anywidget-graph](https://github.com/GrafeoDB/anywidget-graph), [anywidget-vector](https://github.com/GrafeoDB/anywidget-vector) |
+| **Server** | Rust, Axum, REST APIs | [grafeo-server](https://github.com/GrafeoDB/grafeo-server) |
 | **Benchmarking** | Python, data analysis | [graph-bench](https://github.com/GrafeoDB/graph-bench) |
 
 ### Non-Code Contributions
@@ -68,6 +69,7 @@ See each project's CONTRIBUTING.md for specific instructions.
 |-------|------------|
 | Core | Rust, Arrow, Polars |
 | Python | PyO3, maturin |
+| Server | Axum, Tower, Docker |
 | Browser | WebAssembly, IndexedDB |
 | Visualization | Three.js, Sigma.js, anywidget |
 | Build | Cargo, uv, hatch |

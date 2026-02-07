@@ -2,6 +2,29 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.4.1] - Unreleased
+
+_Go Bindings, C FFI & Coverage Improvements_
+
+### Added
+
+- **Go bindings** (`github.com/GrafeoDB/grafeo`) via CGO: full node/edge CRUD, property management, label operations, GQL/Cypher/SPARQL/Gremlin/GraphQL queries, ACID transactions with configurable isolation, HNSW vector search, property indexes, batch operations, admin info, 20 integration tests
+- **C FFI layer** (`grafeo-c`): C-compatible ABI for the Grafeo engine, chosen over pure-Go implementation to enable reuse for WASM bindings
+- Unit tests for config, admin types, WAL records, traversal algorithms, expand operators, variable-length expand, and network flow
+- Per-crate coverage component tracking in Codecov (common, core, adapters, engine)
+
+### Fixed
+
+- npm publish workflow and removed old JS stub package
+- Node.js test version now dynamically read from Cargo.toml
+- Coverage report now excludes bindings, build scripts, and test code for accurate metrics
+
+### Changed
+
+- Updated copyright year in LICENSE
+- Codecov action upgraded to v5
+- Patch coverage target adjusted from 80% to 70%
+
 ## [0.4.0] - 2026-02-07
 
 _Node.js/TypeScript Bindings, Vector Support & Code Quality_

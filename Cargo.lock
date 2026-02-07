@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bincode",
  "byteorder",
@@ -656,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-c"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "grafeo-common",
  "grafeo-core",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-cli"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ahash",
  "arcstr",
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ahash",
  "arcstr",
@@ -736,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "criterion",
@@ -759,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-node"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",
@@ -776,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-python"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",

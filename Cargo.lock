@@ -655,6 +655,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "grafeo-c"
+version = "0.4.0"
+dependencies = [
+ "grafeo-common",
+ "grafeo-core",
+ "grafeo-engine",
+ "parking_lot",
+ "serde_json",
+]
+
+[[package]]
 name = "grafeo-cli"
 version = "0.4.0"
 dependencies = [

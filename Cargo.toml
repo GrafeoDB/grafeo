@@ -9,6 +9,7 @@ members = [
     "crates/grafeo-cli",
     "crates/bindings/python",
     "crates/bindings/node",
+    "crates/bindings/c",
 ]
 
 [workspace.package]

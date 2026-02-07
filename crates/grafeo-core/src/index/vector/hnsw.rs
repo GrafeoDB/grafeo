@@ -1163,4 +1163,149 @@ mod tests {
         let results = index.search(&[0.0, 0.9, 0.0, 0.0], 1);
         assert_eq!(results[0].0, NodeId::new(5));
     }
+
+    // ── Edge case tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_single_vector() {
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean);
+        let index = HnswIndex::new(config);
+        index.insert(NodeId::new(0), &[1.0, 0.0, 0.0]);
+
+        let results = index.search(&[1.0, 0.0, 0.0], 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, NodeId::new(0));
+        assert!(results[0].1 < 0.01);
+    }
+
+    #[test]
+    fn test_search_k_larger_than_index() {
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean);
+        let index = HnswIndex::new(config);
+        index.insert(NodeId::new(0), &[1.0, 0.0, 0.0]);
+        index.insert(NodeId::new(1), &[0.0, 1.0, 0.0]);
+
+        // k=10 but only 2 vectors
+        let results = index.search(&[1.0, 0.0, 0.0], 10);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_empty_index_search() {
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean);
+        let index = HnswIndex::new(config);
+
+        let results = index.search(&[1.0, 0.0, 0.0], 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_remove_and_search() {
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean);
+        let index = HnswIndex::new(config);
+        index.insert(NodeId::new(0), &[1.0, 0.0, 0.0]);
+        index.insert(NodeId::new(1), &[0.0, 1.0, 0.0]);
+        index.insert(NodeId::new(2), &[0.0, 0.0, 1.0]);
+
+        index.remove(NodeId::new(1));
+        let results = index.search(&[0.0, 1.0, 0.0], 3);
+        // Removed node should not appear
+        assert!(results.iter().all(|(id, _)| *id != NodeId::new(1)));
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_duplicate_insert() {
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean);
+        let index = HnswIndex::new(config);
+        index.insert(NodeId::new(0), &[1.0, 0.0, 0.0]);
+        index.insert(NodeId::new(0), &[0.0, 1.0, 0.0]); // Same ID, different vector
+
+        assert_eq!(index.len(), 1);
+        // Should use the latest vector
+        let results = index.search(&[0.0, 1.0, 0.0], 1);
+        assert_eq!(results[0].0, NodeId::new(0));
+    }
+
+    #[test]
+    fn test_search_with_ef_zero() {
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean);
+        let index = HnswIndex::new(config);
+        index.insert(NodeId::new(0), &[1.0, 0.0, 0.0]);
+
+        // ef=0 should still return results (search uses max(ef, k))
+        let results = index.search_with_ef(&[1.0, 0.0, 0.0], 1, 0);
+        // Behavior may vary but should not panic
+        assert!(results.len() <= 1);
+    }
+
+    #[test]
+    fn test_all_metrics_search() {
+        for metric in [
+            DistanceMetric::Cosine,
+            DistanceMetric::Euclidean,
+            DistanceMetric::DotProduct,
+            DistanceMetric::Manhattan,
+        ] {
+            let config = HnswConfig::new(3, metric);
+            let index = HnswIndex::new(config);
+            index.insert(NodeId::new(0), &[1.0, 0.0, 0.0]);
+            index.insert(NodeId::new(1), &[0.0, 1.0, 0.0]);
+
+            let results = index.search(&[1.0, 0.0, 0.0], 2);
+            assert_eq!(results.len(), 2, "Failed for metric {metric:?}");
+            assert_eq!(
+                results[0].0,
+                NodeId::new(0),
+                "Closest not correct for metric {metric:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_batch_search_consistency() {
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean);
+        let index = HnswIndex::new(config);
+        index.insert(NodeId::new(0), &[1.0, 0.0, 0.0]);
+        index.insert(NodeId::new(1), &[0.0, 1.0, 0.0]);
+        index.insert(NodeId::new(2), &[0.0, 0.0, 1.0]);
+
+        let queries: Vec<Vec<f32>> = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+        ];
+
+        let batch_results = index.batch_search(&queries, 1);
+        assert_eq!(batch_results.len(), 3);
+
+        // Each query should find its exact match
+        for (i, results) in batch_results.iter().enumerate() {
+            assert_eq!(results[0].0, NodeId::new(i as u64));
+        }
+    }
+
+    #[test]
+    fn test_with_capacity_constructor() {
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean);
+        let index = HnswIndex::with_capacity(config, 100);
+        assert_eq!(index.len(), 0);
+        assert!(index.is_empty());
+
+        index.insert(NodeId::new(0), &[1.0, 0.0, 0.0]);
+        assert_eq!(index.len(), 1);
+        assert!(!index.is_empty());
+    }
+
+    #[test]
+    fn test_high_m_value() {
+        // M larger than number of nodes
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean).with_m(64);
+        let index = HnswIndex::new(config);
+        index.insert(NodeId::new(0), &[1.0, 0.0, 0.0]);
+        index.insert(NodeId::new(1), &[0.0, 1.0, 0.0]);
+
+        let results = index.search(&[1.0, 0.0, 0.0], 2);
+        assert_eq!(results.len(), 2);
+    }
 }

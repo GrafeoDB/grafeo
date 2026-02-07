@@ -679,3 +679,167 @@ describe('database getters', () => {
     expect(db.edgeCount).toBe(3) // knows1, knows2, worksAt
   })
 })
+
+// ── Vector operations ───────────────────────────────────────────────
+
+describe('vector operations', () => {
+  it('should create vector index and search', async () => {
+    const db = GrafeoDB.create()
+    await db.batchCreateNodes('Doc', 'embedding', [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ])
+
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine')
+    const results = await db.vectorSearch('Doc', 'embedding', [1, 0, 0], 3)
+
+    expect(results.length).toBe(3)
+    // Each result is [nodeId, distance]
+    expect(results[0].length).toBe(2)
+    // Closest should have near-zero distance
+    expect(results[0][1]).toBeLessThan(0.01)
+  })
+
+  it('should search with explicit ef parameter', async () => {
+    const db = GrafeoDB.create()
+    await db.batchCreateNodes('Doc', 'embedding', [
+      [1, 0, 0],
+      [0, 1, 0],
+    ])
+
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine')
+    const results = await db.vectorSearch('Doc', 'embedding', [1, 0, 0], 2, 200)
+
+    expect(results.length).toBe(2)
+  })
+
+  it('should create vector index with HNSW tuning params', async () => {
+    const db = GrafeoDB.create()
+    await db.batchCreateNodes('Doc', 'embedding', [[1, 0, 0]])
+
+    // Pass m and ef_construction
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine', 32, 200)
+    const results = await db.vectorSearch('Doc', 'embedding', [1, 0, 0], 1)
+    expect(results.length).toBe(1)
+  })
+
+  it('should create vector index with euclidean metric', async () => {
+    const db = GrafeoDB.create()
+    await db.batchCreateNodes('Doc', 'embedding', [
+      [1, 0, 0],
+      [0, 1, 0],
+    ])
+
+    await db.createVectorIndex('Doc', 'embedding', 3, 'euclidean')
+    const results = await db.vectorSearch('Doc', 'embedding', [1, 0, 0], 2)
+    expect(results.length).toBe(2)
+    // Identical vector should have distance ~0
+    expect(results[0][1]).toBeLessThan(0.01)
+  })
+
+  it('should batch create nodes with vectors', async () => {
+    const db = GrafeoDB.create()
+    const vectors = [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ]
+    const ids = await db.batchCreateNodes('Doc', 'embedding', vectors)
+    expect(ids.length).toBe(3)
+    expect(db.nodeCount).toBe(3)
+    // All unique IDs
+    expect(new Set(ids).size).toBe(3)
+  })
+
+  it('should batch create empty list', async () => {
+    const db = GrafeoDB.create()
+    const ids = await db.batchCreateNodes('Doc', 'embedding', [])
+    expect(ids.length).toBe(0)
+  })
+
+  it('should batch vector search', async () => {
+    const db = GrafeoDB.create()
+    const vectors = [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ]
+    await db.batchCreateNodes('Doc', 'embedding', vectors)
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine')
+
+    const queries = [
+      [1, 0, 0],
+      [0, 1, 0],
+    ]
+    const results = await db.batchVectorSearch('Doc', 'embedding', queries, 2)
+    expect(results.length).toBe(2)
+    for (const result of results) {
+      expect(result.length).toBe(2)
+      // Each result entry is [nodeId, distance]
+      expect(result[0].length).toBe(2)
+    }
+  })
+
+  it('should batch search closest match correctly', async () => {
+    const db = GrafeoDB.create()
+    await db.batchCreateNodes('Doc', 'embedding', [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ])
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine')
+
+    const queries = [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ]
+    const results = await db.batchVectorSearch('Doc', 'embedding', queries, 1)
+    expect(results.length).toBe(3)
+    for (const result of results) {
+      expect(result.length).toBe(1)
+      // Each query matches its vector exactly
+      expect(result[0][1]).toBeLessThan(0.01)
+    }
+  })
+
+  it('should batch search with explicit ef', async () => {
+    const db = GrafeoDB.create()
+    await db.batchCreateNodes('Doc', 'embedding', [
+      [1, 0, 0],
+      [0, 1, 0],
+    ])
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine')
+
+    const results = await db.batchVectorSearch(
+      'Doc',
+      'embedding',
+      [[1, 0, 0]],
+      2,
+      200
+    )
+    expect(results.length).toBe(1)
+    expect(results[0].length).toBe(2)
+  })
+
+  it('should error on vector search without index', async () => {
+    const db = GrafeoDB.create()
+    db.createNode(['Doc'], { embedding: new Float32Array([1, 0, 0]) })
+    await expect(
+      db.vectorSearch('Doc', 'embedding', [1, 0, 0], 1)
+    ).rejects.toThrow()
+  })
+})
+
+// ── GraphQL queries ─────────────────────────────────────────────────
+
+describe('GraphQL queries', () => {
+  it('should execute basic GraphQL query', async () => {
+    const db = GrafeoDB.create()
+    await db.execute("INSERT (:Person {name: 'Alice', age: 30})")
+    await db.execute("INSERT (:Person {name: 'Bob', age: 25})")
+    const result = await db.executeGraphql('{ Person { name } }')
+    expect(result.length).toBeGreaterThanOrEqual(1)
+  })
+})

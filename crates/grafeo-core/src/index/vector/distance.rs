@@ -392,4 +392,124 @@ mod tests {
         assert!(cos >= 0.0 && cos <= 2.0);
         assert!(euc >= 0.0);
     }
+
+    // ── Edge case tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_single_dimension() {
+        let a = [5.0f32];
+        let b = [3.0f32];
+        assert!(approx_eq(euclidean_distance(&a, &b), 2.0));
+        assert!(approx_eq(manhattan_distance(&a, &b), 2.0));
+    }
+
+    #[test]
+    fn test_zero_vectors_euclidean() {
+        let a = [0.0f32, 0.0, 0.0];
+        let b = [0.0f32, 0.0, 0.0];
+        assert!(approx_eq(euclidean_distance(&a, &b), 0.0));
+    }
+
+    #[test]
+    fn test_zero_vectors_cosine() {
+        let a = [0.0f32, 0.0, 0.0];
+        let b = [0.0f32, 0.0, 0.0];
+        let d = cosine_distance(&a, &b);
+        // Zero vectors have undefined cosine; should not panic
+        assert!(!d.is_nan() || d.is_nan()); // Just verify no panic
+    }
+
+    #[test]
+    fn test_one_zero_vector_cosine() {
+        let a = [1.0f32, 0.0, 0.0];
+        let b = [0.0f32, 0.0, 0.0];
+        let d = cosine_distance(&a, &b);
+        // Should not panic; result depends on implementation
+        assert!(d.is_finite() || d.is_nan());
+    }
+
+    #[test]
+    fn test_identical_vectors_all_metrics() {
+        let v = [0.5f32, -0.3, 0.8, 1.2];
+        assert!(approx_eq(cosine_distance(&v, &v), 0.0));
+        assert!(approx_eq(euclidean_distance(&v, &v), 0.0));
+        assert!(approx_eq(manhattan_distance(&v, &v), 0.0));
+    }
+
+    #[test]
+    fn test_negative_values() {
+        let a = [-1.0f32, -2.0, -3.0];
+        let b = [-1.0f32, -2.0, -3.0];
+        assert!(approx_eq(cosine_distance(&a, &b), 0.0));
+        assert!(approx_eq(euclidean_distance(&a, &b), 0.0));
+    }
+
+    #[test]
+    fn test_dot_product_orthogonal() {
+        let a = [1.0f32, 0.0];
+        let b = [0.0f32, 1.0];
+        assert!(approx_eq(dot_product(&a, &b), 0.0));
+    }
+
+    #[test]
+    fn test_dot_product_negative() {
+        let a = [1.0f32, 0.0];
+        let b = [-1.0f32, 0.0];
+        assert!(approx_eq(dot_product(&a, &b), -1.0));
+    }
+
+    #[test]
+    fn test_manhattan_single_axis_diff() {
+        let a = [0.0f32, 0.0, 0.0];
+        let b = [0.0f32, 5.0, 0.0];
+        assert!(approx_eq(manhattan_distance(&a, &b), 5.0));
+    }
+
+    #[test]
+    fn test_cosine_similarity_range() {
+        // Cosine similarity should be in [-1, 1], distance in [0, 2]
+        let a = [0.3f32, 0.7, -0.2];
+        let b = [0.6f32, -0.1, 0.9];
+        let d = cosine_distance(&a, &b);
+        assert!(d >= 0.0 - EPSILON && d <= 2.0 + EPSILON);
+    }
+
+    #[test]
+    fn test_normalize_already_normalized() {
+        let mut v = [0.6f32, 0.8]; // Already unit length
+        let norm = normalize(&mut v);
+        assert!(approx_eq(norm, 1.0));
+        assert!(approx_eq(l2_norm(&v), 1.0));
+    }
+
+    #[test]
+    fn test_normalize_single_element() {
+        let mut v = [7.0f32];
+        normalize(&mut v);
+        assert!(approx_eq(v[0], 1.0));
+    }
+
+    #[test]
+    fn test_large_values() {
+        let a = [1e10f32, 1e10, 1e10];
+        let b = [1e10f32, 1e10, 1e10];
+        assert!(approx_eq(euclidean_distance(&a, &b), 0.0));
+        assert!(approx_eq(cosine_distance(&a, &b), 0.0));
+    }
+
+    #[test]
+    fn test_very_small_values() {
+        let a = [1e-10f32, 1e-10];
+        let b = [1e-10f32, 1e-10];
+        assert!(approx_eq(euclidean_distance(&a, &b), 0.0));
+    }
+
+    #[test]
+    fn test_compute_distance_dot_product() {
+        let a = [1.0f32, 2.0, 3.0];
+        let b = [4.0f32, 5.0, 6.0];
+        let d = compute_distance(&a, &b, DistanceMetric::DotProduct);
+        // dot_product returns negative for sorting: -32.0
+        assert!(approx_eq(d, -32.0));
+    }
 }

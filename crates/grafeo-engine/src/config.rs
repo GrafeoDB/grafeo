@@ -226,3 +226,160 @@ mod num_cpus {
             .unwrap_or(4)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_default() {
+        let config = Config::default();
+        assert!(config.path.is_none());
+        assert!(config.memory_limit.is_none());
+        assert!(config.spill_path.is_none());
+        assert!(config.threads > 0);
+        assert!(config.wal_enabled);
+        assert_eq!(config.wal_flush_interval_ms, 100);
+        assert!(config.backward_edges);
+        assert!(!config.query_logging);
+        assert!(config.factorized_execution);
+    }
+
+    #[test]
+    fn test_config_in_memory() {
+        let config = Config::in_memory();
+        assert!(config.path.is_none());
+        assert!(!config.wal_enabled);
+        assert!(config.backward_edges);
+    }
+
+    #[test]
+    fn test_config_persistent() {
+        let config = Config::persistent("/tmp/test_db");
+        assert_eq!(
+            config.path.as_deref(),
+            Some(std::path::Path::new("/tmp/test_db"))
+        );
+        assert!(config.wal_enabled);
+    }
+
+    #[test]
+    fn test_config_with_memory_limit() {
+        let config = Config::in_memory().with_memory_limit(1024 * 1024);
+        assert_eq!(config.memory_limit, Some(1024 * 1024));
+    }
+
+    #[test]
+    fn test_config_with_threads() {
+        let config = Config::in_memory().with_threads(8);
+        assert_eq!(config.threads, 8);
+    }
+
+    #[test]
+    fn test_config_without_backward_edges() {
+        let config = Config::in_memory().without_backward_edges();
+        assert!(!config.backward_edges);
+    }
+
+    #[test]
+    fn test_config_with_query_logging() {
+        let config = Config::in_memory().with_query_logging();
+        assert!(config.query_logging);
+    }
+
+    #[test]
+    fn test_config_with_spill_path() {
+        let config = Config::in_memory().with_spill_path("/tmp/spill");
+        assert_eq!(
+            config.spill_path.as_deref(),
+            Some(std::path::Path::new("/tmp/spill"))
+        );
+    }
+
+    #[test]
+    fn test_config_with_memory_fraction() {
+        let config = Config::in_memory().with_memory_fraction(0.5);
+        assert!(config.memory_limit.is_some());
+        assert!(config.memory_limit.unwrap() > 0);
+    }
+
+    #[test]
+    fn test_config_with_adaptive() {
+        let adaptive = AdaptiveConfig::default().with_threshold(5.0);
+        let config = Config::in_memory().with_adaptive(adaptive);
+        assert!((config.adaptive.threshold - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_config_without_adaptive() {
+        let config = Config::in_memory().without_adaptive();
+        assert!(!config.adaptive.enabled);
+    }
+
+    #[test]
+    fn test_config_without_factorized_execution() {
+        let config = Config::in_memory().without_factorized_execution();
+        assert!(!config.factorized_execution);
+    }
+
+    #[test]
+    fn test_config_builder_chaining() {
+        let config = Config::persistent("/tmp/db")
+            .with_memory_limit(512 * 1024 * 1024)
+            .with_threads(4)
+            .with_query_logging()
+            .without_backward_edges()
+            .with_spill_path("/tmp/spill");
+
+        assert!(config.path.is_some());
+        assert_eq!(config.memory_limit, Some(512 * 1024 * 1024));
+        assert_eq!(config.threads, 4);
+        assert!(config.query_logging);
+        assert!(!config.backward_edges);
+        assert!(config.spill_path.is_some());
+    }
+
+    #[test]
+    fn test_adaptive_config_default() {
+        let config = AdaptiveConfig::default();
+        assert!(config.enabled);
+        assert!((config.threshold - 3.0).abs() < f64::EPSILON);
+        assert_eq!(config.min_rows, 1000);
+        assert_eq!(config.max_reoptimizations, 3);
+    }
+
+    #[test]
+    fn test_adaptive_config_disabled() {
+        let config = AdaptiveConfig::disabled();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_adaptive_config_with_threshold() {
+        let config = AdaptiveConfig::default().with_threshold(10.0);
+        assert!((config.threshold - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_adaptive_config_with_min_rows() {
+        let config = AdaptiveConfig::default().with_min_rows(500);
+        assert_eq!(config.min_rows, 500);
+    }
+
+    #[test]
+    fn test_adaptive_config_with_max_reoptimizations() {
+        let config = AdaptiveConfig::default().with_max_reoptimizations(5);
+        assert_eq!(config.max_reoptimizations, 5);
+    }
+
+    #[test]
+    fn test_adaptive_config_builder_chaining() {
+        let config = AdaptiveConfig::default()
+            .with_threshold(2.0)
+            .with_min_rows(100)
+            .with_max_reoptimizations(10);
+        assert!((config.threshold - 2.0).abs() < f64::EPSILON);
+        assert_eq!(config.min_rows, 100);
+        assert_eq!(config.max_reoptimizations, 10);
+    }
+}

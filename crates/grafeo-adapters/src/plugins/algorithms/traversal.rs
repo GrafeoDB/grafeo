@@ -549,4 +549,244 @@ mod tests {
 
         assert_eq!(found, Some(true));
     }
+
+    #[test]
+    fn test_bfs_visits_all_reachable() {
+        let store = create_test_graph();
+        let visited = bfs(&store, NodeId::new(0));
+        // All 5 nodes are reachable from node 0
+        assert_eq!(visited.len(), 5);
+    }
+
+    #[test]
+    fn test_bfs_layers_distances() {
+        let store = create_test_graph();
+        let layers = bfs_layers(&store, NodeId::new(0));
+
+        // Layer 0: node 0
+        // Layer 1: nodes 1, 3 (direct neighbors)
+        // Layer 2: nodes 2, 4 (distance 2)
+        assert_eq!(layers.len(), 3);
+        assert_eq!(layers[0].len(), 1);
+        assert_eq!(layers[1].len(), 2);
+        assert_eq!(layers[2].len(), 2);
+    }
+
+    #[test]
+    fn test_bfs_layers_empty_graph() {
+        let store = LpgStore::new();
+        let layers = bfs_layers(&store, NodeId::new(0));
+        assert!(layers.is_empty());
+    }
+
+    #[test]
+    fn test_bfs_single_node() {
+        let store = LpgStore::new();
+        let n0 = store.create_node(&["Node"]);
+        let visited = bfs(&store, n0);
+        assert_eq!(visited, vec![n0]);
+    }
+
+    #[test]
+    fn test_bfs_layers_single_node() {
+        let store = LpgStore::new();
+        let n0 = store.create_node(&["Node"]);
+        let layers = bfs_layers(&store, n0);
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0], vec![n0]);
+    }
+
+    #[test]
+    fn test_bfs_with_visitor_prune_on_start() {
+        let store = create_test_graph();
+        let result: Option<()> = bfs_with_visitor(&store, NodeId::new(0), |event| {
+            if let TraversalEvent::Discover(node) = event
+                && node == NodeId::new(0)
+            {
+                return Control::Prune;
+            }
+            Control::Continue
+        });
+        // Pruning start node means no further traversal
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_bfs_with_visitor_collects_tree_edges() {
+        let store = create_test_graph();
+        let mut tree_edges = Vec::new();
+
+        bfs_with_visitor(&store, NodeId::new(0), |event| -> Control<()> {
+            if let TraversalEvent::TreeEdge { source, target, .. } = event {
+                tree_edges.push((source, target));
+            }
+            Control::Continue
+        });
+
+        // BFS tree from node 0 has 4 tree edges (one per non-start node)
+        assert_eq!(tree_edges.len(), 4);
+    }
+
+    #[test]
+    fn test_bfs_with_visitor_detects_non_tree_edges() {
+        let store = create_test_graph();
+        let mut non_tree_edges = Vec::new();
+
+        bfs_with_visitor(&store, NodeId::new(0), |event| -> Control<()> {
+            if let TraversalEvent::NonTreeEdge { source, target, .. } = event {
+                non_tree_edges.push((source, target));
+            }
+            Control::Continue
+        });
+
+        // There's at least one non-tree edge (3->4 or 1->4)
+        assert!(!non_tree_edges.is_empty());
+    }
+
+    #[test]
+    fn test_dfs_visits_all_reachable() {
+        let store = create_test_graph();
+        let finished = dfs(&store, NodeId::new(0));
+        assert_eq!(finished.len(), 5);
+    }
+
+    #[test]
+    fn test_dfs_post_order() {
+        let store = create_test_graph();
+        let finished = dfs(&store, NodeId::new(0));
+        // In post-order, the start node is finished last
+        assert_eq!(*finished.last().unwrap(), NodeId::new(0));
+    }
+
+    #[test]
+    fn test_dfs_with_visitor_early_termination() {
+        let store = create_test_graph();
+        let found = dfs_with_visitor(&store, NodeId::new(0), |event| {
+            if let TraversalEvent::Discover(node) = event
+                && node == NodeId::new(4)
+            {
+                return Control::Break(node);
+            }
+            Control::Continue
+        });
+        assert_eq!(found, Some(NodeId::new(4)));
+    }
+
+    #[test]
+    fn test_dfs_with_visitor_prune() {
+        let store = create_test_graph();
+        let mut discovered = Vec::new();
+
+        dfs_with_visitor(&store, NodeId::new(0), |event| -> Control<()> {
+            if let TraversalEvent::Discover(node) = event {
+                discovered.push(node);
+                if node == NodeId::new(1) {
+                    return Control::Prune; // Don't explore node 1's children
+                }
+            }
+            Control::Continue
+        });
+
+        // Node 1 is discovered but its children (2, 4) may not all be
+        assert!(discovered.contains(&NodeId::new(0)));
+        assert!(discovered.contains(&NodeId::new(1)));
+        // Node 2 should not be discovered since we pruned node 1
+        assert!(!discovered.contains(&NodeId::new(2)));
+    }
+
+    #[test]
+    fn test_dfs_with_visitor_back_edge() {
+        // Create a cycle: 0 -> 1 -> 2 -> 0
+        let store = LpgStore::new();
+        let n0 = store.create_node(&["Node"]);
+        let n1 = store.create_node(&["Node"]);
+        let n2 = store.create_node(&["Node"]);
+        store.create_edge(n0, n1, "EDGE");
+        store.create_edge(n1, n2, "EDGE");
+        store.create_edge(n2, n0, "EDGE");
+
+        let mut back_edges = Vec::new();
+        dfs_with_visitor(&store, n0, |event| -> Control<()> {
+            if let TraversalEvent::BackEdge { source, target, .. } = event {
+                back_edges.push((source, target));
+            }
+            Control::Continue
+        });
+
+        // Edge 2->0 is a back edge (0 is ancestor of 2)
+        assert_eq!(back_edges.len(), 1);
+        assert_eq!(back_edges[0], (n2, n0));
+    }
+
+    #[test]
+    fn test_dfs_single_node() {
+        let store = LpgStore::new();
+        let n0 = store.create_node(&["Node"]);
+        let finished = dfs(&store, n0);
+        assert_eq!(finished, vec![n0]);
+    }
+
+    #[test]
+    fn test_dfs_all_visits_all_components() {
+        let store = LpgStore::new();
+        // Component 1: 0 -> 1
+        let n0 = store.create_node(&["Node"]);
+        let n1 = store.create_node(&["Node"]);
+        store.create_edge(n0, n1, "EDGE");
+
+        // Component 2: 2 -> 3
+        let n2 = store.create_node(&["Node"]);
+        let n3 = store.create_node(&["Node"]);
+        store.create_edge(n2, n3, "EDGE");
+
+        let finished = dfs_all(&store);
+        assert_eq!(finished.len(), 4);
+    }
+
+    #[test]
+    fn test_dfs_all_empty_graph() {
+        let store = LpgStore::new();
+        let finished = dfs_all(&store);
+        assert!(finished.is_empty());
+    }
+
+    #[test]
+    fn test_bfs_prune_tree_edge() {
+        let store = create_test_graph();
+        let mut discovered = Vec::new();
+
+        bfs_with_visitor(&store, NodeId::new(0), |event| -> Control<()> {
+            match event {
+                TraversalEvent::TreeEdge { target, .. } => {
+                    if target == NodeId::new(1) {
+                        return Control::Prune; // Skip node 1
+                    }
+                    Control::Continue
+                }
+                TraversalEvent::Discover(node) => {
+                    discovered.push(node);
+                    Control::Continue
+                }
+                _ => Control::Continue,
+            }
+        });
+
+        // Node 1 should not be discovered due to pruned tree edge
+        assert!(discovered.contains(&NodeId::new(0)));
+        assert!(!discovered.contains(&NodeId::new(1)));
+    }
+
+    #[test]
+    fn test_dfs_with_visitor_prune_start() {
+        let store = create_test_graph();
+        let result: Option<()> = dfs_with_visitor(&store, NodeId::new(0), |event| {
+            if let TraversalEvent::Discover(node) = event
+                && node == NodeId::new(0)
+            {
+                return Control::Prune;
+            }
+            Control::Continue
+        });
+        assert!(result.is_none());
+    }
 }

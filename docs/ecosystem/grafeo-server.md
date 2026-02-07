@@ -3,7 +3,7 @@
 Standalone HTTP server and web UI for the Grafeo graph database.
 
 [:octicons-mark-github-16: GitHub](https://github.com/GrafeoDB/grafeo-server){ .md-button }
-[:material-docker: Docker Hub](https://hub.docker.com/r/grafeodb/grafeo-server){ .md-button }
+[:material-docker: Docker Hub](https://hub.docker.com/r/grafeo/grafeo-server){ .md-button }
 
 ## Overview
 

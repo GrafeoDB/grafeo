@@ -57,12 +57,11 @@ impl BufferManagerConfig {
                 // Linux: Read from /proc/meminfo
                 if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
                     for line in contents.lines() {
-                        if line.starts_with("MemTotal:") {
-                            if let Some(kb_str) = line.split_whitespace().nth(1) {
-                                if let Ok(kb) = kb_str.parse::<usize>() {
-                                    return kb * 1024;
-                                }
-                            }
+                        if line.starts_with("MemTotal:")
+                            && let Some(kb_str) = line.split_whitespace().nth(1)
+                            && let Ok(kb) = kb_str.parse::<usize>()
+                        {
+                            return kb * 1024;
                         }
                     }
                 }

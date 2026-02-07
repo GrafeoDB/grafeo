@@ -209,13 +209,10 @@ impl Executor {
             return Ok((result, None));
         }
 
-        let ctx = match adaptive_context {
-            Some(ctx) => ctx,
-            None => {
-                let mut op = operator;
-                let result = self.execute(op.as_mut())?;
-                return Ok((result, None));
-            }
+        let Some(ctx) = adaptive_context else {
+            let mut op = operator;
+            let result = self.execute(op.as_mut())?;
+            return Ok((result, None));
         };
 
         // Create shared context for tracking
@@ -254,12 +251,13 @@ impl Executor {
                     self.collect_chunk(&chunk, &mut result)?;
 
                     // Periodically check for significant deviation
-                    if total_rows >= check_interval && total_rows.is_multiple_of(check_interval) {
-                        if shared_ctx.should_reoptimize() {
-                            // For now, just log/note that re-optimization would trigger
-                            // Full re-optimization would require plan regeneration
-                            // which is a more invasive change
-                        }
+                    if total_rows >= check_interval
+                        && total_rows.is_multiple_of(check_interval)
+                        && shared_ctx.should_reoptimize()
+                    {
+                        // For now, just log/note that re-optimization would trigger
+                        // Full re-optimization would require plan regeneration
+                        // which is a more invasive change
                     }
                 }
                 Ok(None) => break,

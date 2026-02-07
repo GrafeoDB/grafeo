@@ -120,10 +120,10 @@ impl ValueVector {
         if self.validity.is_none() {
             self.validity = Some(vec![true; self.len]);
         }
-        if let Some(validity) = &mut self.validity {
-            if index < validity.len() {
-                validity[index] = false;
-            }
+        if let Some(validity) = &mut self.validity
+            && index < validity.len()
+        {
+            validity[index] = false;
         }
     }
 

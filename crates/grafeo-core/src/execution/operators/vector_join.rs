@@ -239,17 +239,13 @@ impl VectorJoinOperator {
             &self.current_left_chunk,
             self.left_node_column,
             &self.left_property,
-        ) {
-            if let Some(col) = chunk.column(col_idx) {
-                if let Some(node_id) = col.get_node_id(self.current_left_row) {
-                    if let Some(Value::Vector(vec)) = self
-                        .store
-                        .get_node_property(node_id, &PropertyKey::new(prop))
-                    {
-                        return Some(vec.to_vec());
-                    }
-                }
-            }
+        ) && let Some(col) = chunk.column(col_idx)
+            && let Some(node_id) = col.get_node_id(self.current_left_row)
+            && let Some(Value::Vector(vec)) = self
+                .store
+                .get_node_property(node_id, &PropertyKey::new(prop))
+        {
+            return Some(vec.to_vec());
         }
 
         None
@@ -372,10 +368,8 @@ impl Operator for VectorJoinOperator {
         }
 
         // Ensure we have results to process (advances left if needed)
-        if self.current_result_position >= self.current_results.len() {
-            if !self.advance_left()? {
-                return Ok(None);
-            }
+        if self.current_result_position >= self.current_results.len() && !self.advance_left()? {
+            return Ok(None);
         }
 
         // Get left chunk schema for output (now guaranteed to have a chunk)
@@ -413,12 +407,11 @@ impl Operator for VectorJoinOperator {
 
             // Copy left columns
             for (col_idx, _) in left_schema.iter().enumerate() {
-                if let Some(col) = left_chunk.column(col_idx) {
-                    if let Some(out_col) = output.column_mut(col_idx) {
-                        if let Some(val) = col.get_value(self.current_left_row) {
-                            out_col.push_value(val);
-                        }
-                    }
+                if let Some(col) = left_chunk.column(col_idx)
+                    && let Some(out_col) = output.column_mut(col_idx)
+                    && let Some(val) = col.get_value(self.current_left_row)
+                {
+                    out_col.push_value(val);
                 }
             }
 

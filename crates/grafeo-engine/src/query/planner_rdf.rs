@@ -994,12 +994,11 @@ impl RdfInsertPatternOperator {
             TripleComponent::Variable(name) => {
                 // Remove the leading '?' if present
                 let var_name = name.strip_prefix('?').unwrap_or(name);
-                if let Some(&col_idx) = self.column_map.get(var_name) {
-                    if let Some(col) = chunk.column(col_idx) {
-                        if let Some(value) = col.get_value(row) {
-                            return Self::value_to_term(&value);
-                        }
-                    }
+                if let Some(&col_idx) = self.column_map.get(var_name)
+                    && let Some(col) = chunk.column(col_idx)
+                    && let Some(value) = col.get_value(row)
+                {
+                    return Self::value_to_term(&value);
                 }
                 None
             }
@@ -1190,12 +1189,11 @@ impl RdfDeletePatternOperator {
             TripleComponent::Variable(name) => {
                 // Remove the leading '?' if present
                 let var_name = name.strip_prefix('?').unwrap_or(name);
-                if let Some(&col_idx) = self.column_map.get(var_name) {
-                    if let Some(col) = chunk.column(col_idx) {
-                        if let Some(value) = col.get_value(row) {
-                            return Self::value_to_term(&value);
-                        }
-                    }
+                if let Some(&col_idx) = self.column_map.get(var_name)
+                    && let Some(col) = chunk.column(col_idx)
+                    && let Some(value) = col.get_value(row)
+                {
+                    return Self::value_to_term(&value);
                 }
                 None
             }
@@ -1421,12 +1419,11 @@ impl RdfModifyOperator {
             }
             TripleComponent::Variable(name) => {
                 let var_name = name.strip_prefix('?').unwrap_or(name);
-                if let Some(&col_idx) = self.column_map.get(var_name) {
-                    if let Some(col) = chunk.column(col_idx) {
-                        if let Some(value) = col.get_value(row) {
-                            return Self::value_to_term(&value);
-                        }
-                    }
+                if let Some(&col_idx) = self.column_map.get(var_name)
+                    && let Some(col) = chunk.column(col_idx)
+                    && let Some(value) = col.get_value(row)
+                {
+                    return Self::value_to_term(&value);
                 }
                 None
             }
@@ -1971,21 +1968,18 @@ impl RdfExpressionPredicate {
                 };
 
                 // Check if the pattern should be treated as regex (4th argument with 'r' flag)
-                if args.len() >= 4 {
-                    if let Some(Value::String(flags)) = self.eval_expr(&args[3], chunk, row) {
-                        if flags.contains('r') || flags.contains('i') {
-                            // Regex-based replace
-                            let regex_pattern = if flags.contains('i') {
-                                format!("(?i){}", &pattern)
-                            } else {
-                                pattern.clone()
-                            };
-                            if let Ok(re) = regex::Regex::new(&regex_pattern) {
-                                return Some(Value::String(
-                                    re.replace_all(&text, &replacement).into(),
-                                ));
-                            }
-                        }
+                if args.len() >= 4
+                    && let Some(Value::String(flags)) = self.eval_expr(&args[3], chunk, row)
+                    && (flags.contains('r') || flags.contains('i'))
+                {
+                    // Regex-based replace
+                    let regex_pattern = if flags.contains('i') {
+                        format!("(?i){}", &pattern)
+                    } else {
+                        pattern.clone()
+                    };
+                    if let Ok(re) = regex::Regex::new(&regex_pattern) {
+                        return Some(Value::String(re.replace_all(&text, &replacement).into()));
                     }
                 }
 
@@ -2173,10 +2167,10 @@ impl RdfExpressionPredicate {
             // COALESCE - return first non-null value
             "COALESCE" => {
                 for arg in args {
-                    if let Some(val) = self.eval_expr(arg, chunk, row) {
-                        if !matches!(val, Value::Null) {
-                            return Some(val);
-                        }
+                    if let Some(val) = self.eval_expr(arg, chunk, row)
+                        && !matches!(val, Value::Null)
+                    {
+                        return Some(val);
                     }
                 }
                 None

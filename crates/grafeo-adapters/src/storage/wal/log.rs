@@ -148,15 +148,13 @@ impl WalManager {
         let mut max_sequence = 0u64;
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if let Some(seq_str) = name
+                if let Some(name) = entry.file_name().to_str()
+                    && let Some(seq_str) = name
                         .strip_prefix("wal_")
                         .and_then(|s| s.strip_suffix(".log"))
-                    {
-                        if let Ok(seq) = seq_str.parse::<u64>() {
-                            max_sequence = max_sequence.max(seq);
-                        }
-                    }
+                    && let Ok(seq) = seq_str.parse::<u64>()
+                {
+                    max_sequence = max_sequence.max(seq);
                 }
             }
         }
@@ -528,9 +526,8 @@ impl WalManager {
     }
 
     fn truncate_old_logs(&self) -> Result<()> {
-        let checkpoint = match *self.checkpoint_epoch.lock() {
-            Some(e) => e,
-            None => return Ok(()),
+        let Some(checkpoint) = *self.checkpoint_epoch.lock() else {
+            return Ok(());
         };
 
         // Keep logs that might still be needed

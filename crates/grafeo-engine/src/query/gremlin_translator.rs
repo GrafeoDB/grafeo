@@ -139,19 +139,19 @@ impl GremlinTranslator {
         }
 
         // Finalize any pending edge
-        if let Some(edge) = pending_edge {
-            if let (Some(from_var), Some(to_var)) = (edge.from_var, edge.to_var) {
-                let edge_var = self.next_var();
-                plan = LogicalOperator::CreateEdge(CreateEdgeOp {
-                    variable: Some(edge_var.clone()),
-                    from_variable: from_var,
-                    to_variable: to_var,
-                    edge_type: edge.edge_type,
-                    properties: edge.properties,
-                    input: Box::new(plan),
-                });
-                current_var = edge_var;
-            }
+        if let Some(edge) = pending_edge
+            && let (Some(from_var), Some(to_var)) = (edge.from_var, edge.to_var)
+        {
+            let edge_var = self.next_var();
+            plan = LogicalOperator::CreateEdge(CreateEdgeOp {
+                variable: Some(edge_var.clone()),
+                from_variable: from_var,
+                to_variable: to_var,
+                edge_type: edge.edge_type,
+                properties: edge.properties,
+                input: Box::new(plan),
+            });
+            current_var = edge_var;
         }
 
         // If the last step doesn't produce a Return, wrap with one
@@ -306,14 +306,14 @@ impl GremlinTranslator {
                 });
 
                 // If specific IDs, add filter
-                if let Some(ids) = ids {
-                    if !ids.is_empty() {
-                        let id_filter = self.build_id_filter(&var, ids);
-                        plan = LogicalOperator::Filter(FilterOp {
-                            predicate: id_filter,
-                            input: Box::new(plan),
-                        });
-                    }
+                if let Some(ids) = ids
+                    && !ids.is_empty()
+                {
+                    let id_filter = self.build_id_filter(&var, ids);
+                    plan = LogicalOperator::Filter(FilterOp {
+                        predicate: id_filter,
+                        input: Box::new(plan),
+                    });
                 }
 
                 Ok(plan)
@@ -344,14 +344,14 @@ impl GremlinTranslator {
                 });
 
                 // Filter by edge IDs if specified
-                if let Some(ids) = ids {
-                    if !ids.is_empty() {
-                        let id_filter = self.build_id_filter(&edge_var, ids);
-                        plan = LogicalOperator::Filter(FilterOp {
-                            predicate: id_filter,
-                            input: Box::new(plan),
-                        });
-                    }
+                if let Some(ids) = ids
+                    && !ids.is_empty()
+                {
+                    let id_filter = self.build_id_filter(&edge_var, ids);
+                    plan = LogicalOperator::Filter(FilterOp {
+                        predicate: id_filter,
+                        input: Box::new(plan),
+                    });
                 }
 
                 Ok(plan)

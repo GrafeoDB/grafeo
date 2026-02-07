@@ -120,15 +120,14 @@ impl Operator for CreateNodeOperator {
 
                     // Copy input columns to output
                     for col_idx in 0..chunk.column_count() {
-                        if col_idx < self.output_column {
-                            if let (Some(src), Some(dst)) =
+                        if col_idx < self.output_column
+                            && let (Some(src), Some(dst)) =
                                 (chunk.column(col_idx), builder.column_mut(col_idx))
-                            {
-                                if let Some(val) = src.get_value(row) {
-                                    dst.push_value(val);
-                                } else {
-                                    dst.push_value(Value::Null);
-                                }
+                        {
+                            if let Some(val) = src.get_value(row) {
+                                dst.push_value(val);
+                            } else {
+                                dst.push_value(Value::Null);
                             }
                         }
                     }
@@ -343,10 +342,10 @@ impl Operator for CreateEdgeOperator {
                 }
 
                 // Add edge ID if requested
-                if let Some(out_col) = self.output_column {
-                    if let Some(dst) = builder.column_mut(out_col) {
-                        dst.push_value(Value::Int64(edge_id.0 as i64));
-                    }
+                if let Some(out_col) = self.output_column
+                    && let Some(dst) = builder.column_mut(out_col)
+                {
+                    dst.push_value(Value::Int64(edge_id.0 as i64));
                 }
 
                 builder.advance_row();

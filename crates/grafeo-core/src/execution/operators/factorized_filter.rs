@@ -44,9 +44,8 @@ pub trait FactorizedPredicate: Send + Sync {
     /// Returns a `LevelSelection` representing which indices pass.
     /// Default implementation calls `evaluate` for each index.
     fn evaluate_batch(&self, chunk: &FactorizedChunk, level: usize) -> LevelSelection {
-        let level_data = match chunk.level(level) {
-            Some(l) => l,
-            None => return LevelSelection::all(0),
+        let Some(level_data) = chunk.level(level) else {
+            return LevelSelection::all(0);
         };
 
         let count = level_data.physical_value_count();
@@ -180,19 +179,16 @@ impl FactorizedPredicate for ColumnPredicate {
             return true; // Predicate doesn't apply to this level
         }
 
-        let level_data = match chunk.level(level) {
-            Some(l) => l,
-            None => return false,
+        let Some(level_data) = chunk.level(level) else {
+            return false;
         };
 
-        let column = match level_data.column(self.column) {
-            Some(c) => c,
-            None => return false,
+        let Some(column) = level_data.column(self.column) else {
+            return false;
         };
 
-        let value = match column.get_physical(physical_idx) {
-            Some(v) => v,
-            None => return false,
+        let Some(value) = column.get_physical(physical_idx) else {
+            return false;
         };
 
         self.compare_values(&value)
@@ -300,28 +296,26 @@ impl FactorizedPredicate for PropertyPredicate {
             return true;
         }
 
-        let level_data = match chunk.level(level) {
-            Some(l) => l,
-            None => return false,
+        let Some(level_data) = chunk.level(level) else {
+            return false;
         };
 
-        let column = match level_data.column(self.column) {
-            Some(c) => c,
-            None => return false,
+        let Some(column) = level_data.column(self.column) else {
+            return false;
         };
 
         // Try as node first - use direct property lookup (O(1) vs O(properties))
-        if let Some(node_id) = column.get_node_id_physical(physical_idx) {
-            if let Some(prop_val) = self.store.get_node_property(node_id, &self.property) {
-                return self.compare_values(&prop_val);
-            }
+        if let Some(node_id) = column.get_node_id_physical(physical_idx)
+            && let Some(prop_val) = self.store.get_node_property(node_id, &self.property)
+        {
+            return self.compare_values(&prop_val);
         }
 
         // Try as edge - use direct property lookup
-        if let Some(edge_id) = column.get_edge_id_physical(physical_idx) {
-            if let Some(prop_val) = self.store.get_edge_property(edge_id, &self.property) {
-                return self.compare_values(&prop_val);
-            }
+        if let Some(edge_id) = column.get_edge_id_physical(physical_idx)
+            && let Some(prop_val) = self.store.get_edge_property(edge_id, &self.property)
+        {
+            return self.compare_values(&prop_val);
         }
 
         false
@@ -337,19 +331,13 @@ impl FactorizedPredicate for PropertyPredicate {
             return LevelSelection::all(count);
         }
 
-        let level_data = match chunk.level(level) {
-            Some(l) => l,
-            None => return LevelSelection::all(0),
+        let Some(level_data) = chunk.level(level) else {
+            return LevelSelection::all(0);
         };
 
-        let column = match level_data.column(self.column) {
-            Some(c) => c,
+        let Some(column) = level_data.column(self.column) else {
             // No column found means no matches - return empty selection
-            None => {
-                return LevelSelection::from_predicate(level_data.physical_value_count(), |_| {
-                    false
-                });
-            }
+            return LevelSelection::from_predicate(level_data.physical_value_count(), |_| false);
         };
 
         let count = level_data.physical_value_count();
@@ -357,16 +345,16 @@ impl FactorizedPredicate for PropertyPredicate {
         // Evaluate all at once using direct property lookups
         LevelSelection::from_predicate(count, |idx| {
             // Try as node first
-            if let Some(node_id) = column.get_node_id_physical(idx) {
-                if let Some(val) = self.store.get_node_property(node_id, &self.property) {
-                    return self.compare_values(&val);
-                }
+            if let Some(node_id) = column.get_node_id_physical(idx)
+                && let Some(val) = self.store.get_node_property(node_id, &self.property)
+            {
+                return self.compare_values(&val);
             }
             // Try as edge
-            if let Some(edge_id) = column.get_edge_id_physical(idx) {
-                if let Some(val) = self.store.get_edge_property(edge_id, &self.property) {
-                    return self.compare_values(&val);
-                }
+            if let Some(edge_id) = column.get_edge_id_physical(idx)
+                && let Some(val) = self.store.get_edge_property(edge_id, &self.property)
+            {
+                return self.compare_values(&val);
             }
             false
         })
@@ -542,9 +530,8 @@ impl FactorizedFilterOperator {
 impl FactorizedOperator for FactorizedFilterOperator {
     fn next_factorized(&mut self) -> FactorizedResult {
         // Get the factorized result from input
-        let mut chunk = match self.input.next_factorized()? {
-            Some(c) => c,
-            None => return Ok(None),
+        let Some(mut chunk) = self.input.next_factorized()? else {
+            return Ok(None);
         };
 
         // Apply the filter to create a selection
@@ -583,16 +570,16 @@ impl FactorizedFilterOperator {
     ) -> FactorizedChunk {
         // For now, use the existing filter_deepest_multi for deepest level
         // A full implementation would handle all levels
-        if let Some(target_level) = self.predicate.target_level() {
-            if target_level == chunk.level_count() - 1 {
-                // Filter at deepest level - use existing method
-                if let Some(filtered) = chunk.filter_deepest_multi(|_values| {
-                    // This is a simplified approach - in a full implementation,
-                    // we'd map the values back to physical indices
-                    true
-                }) {
-                    return filtered;
-                }
+        if let Some(target_level) = self.predicate.target_level()
+            && target_level == chunk.level_count() - 1
+        {
+            // Filter at deepest level - use existing method
+            if let Some(filtered) = chunk.filter_deepest_multi(|_values| {
+                // This is a simplified approach - in a full implementation,
+                // we'd map the values back to physical indices
+                true
+            }) {
+                return filtered;
             }
         }
 

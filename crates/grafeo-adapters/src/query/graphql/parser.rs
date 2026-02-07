@@ -531,11 +531,11 @@ mod tests {
         let result = parser.parse();
         assert!(result.is_ok());
         let doc = result.unwrap();
-        if let Definition::Operation(op) = &doc.definitions[0] {
-            if let Selection::Field(field) = &op.selection_set.selections[0] {
-                assert_eq!(field.directives.len(), 1);
-                assert_eq!(field.directives[0].name, "include");
-            }
+        if let Definition::Operation(op) = &doc.definitions[0]
+            && let Selection::Field(field) = &op.selection_set.selections[0]
+        {
+            assert_eq!(field.directives.len(), 1);
+            assert_eq!(field.directives[0].name, "include");
         }
     }
 }

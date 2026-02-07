@@ -316,16 +316,16 @@ impl TransactionManager {
                     for entity in &our_read_set {
                         if other_info.write_set.contains(entity) {
                             // Check if they committed after we started
-                            if let Some(commit_epoch) = committed.get(other_tx) {
-                                if commit_epoch.as_u64() > our_start_epoch.as_u64() {
-                                    return Err(Error::Transaction(
-                                        TransactionError::SerializationFailure(format!(
-                                            "Read-write conflict on entity {:?}: \
+                            if let Some(commit_epoch) = committed.get(other_tx)
+                                && commit_epoch.as_u64() > our_start_epoch.as_u64()
+                            {
+                                return Err(Error::Transaction(
+                                    TransactionError::SerializationFailure(format!(
+                                        "Read-write conflict on entity {:?}: \
                                              another transaction modified data we read",
-                                            entity
-                                        )),
-                                    ));
-                                }
+                                        entity
+                                    )),
+                                ));
                             }
                         }
                     }

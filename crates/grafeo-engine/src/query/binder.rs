@@ -524,60 +524,60 @@ impl Binder {
         }
 
         // Add variables for subject, predicate, object
-        if let TripleComponent::Variable(name) = &scan.subject {
-            if !self.context.contains(name) {
-                self.context.add_variable(
-                    name.clone(),
-                    VariableInfo {
-                        name: name.clone(),
-                        data_type: LogicalType::Any, // RDF term
-                        is_node: false,
-                        is_edge: false,
-                    },
-                );
-            }
+        if let TripleComponent::Variable(name) = &scan.subject
+            && !self.context.contains(name)
+        {
+            self.context.add_variable(
+                name.clone(),
+                VariableInfo {
+                    name: name.clone(),
+                    data_type: LogicalType::Any, // RDF term
+                    is_node: false,
+                    is_edge: false,
+                },
+            );
         }
 
-        if let TripleComponent::Variable(name) = &scan.predicate {
-            if !self.context.contains(name) {
-                self.context.add_variable(
-                    name.clone(),
-                    VariableInfo {
-                        name: name.clone(),
-                        data_type: LogicalType::Any, // IRI
-                        is_node: false,
-                        is_edge: false,
-                    },
-                );
-            }
+        if let TripleComponent::Variable(name) = &scan.predicate
+            && !self.context.contains(name)
+        {
+            self.context.add_variable(
+                name.clone(),
+                VariableInfo {
+                    name: name.clone(),
+                    data_type: LogicalType::Any, // IRI
+                    is_node: false,
+                    is_edge: false,
+                },
+            );
         }
 
-        if let TripleComponent::Variable(name) = &scan.object {
-            if !self.context.contains(name) {
-                self.context.add_variable(
-                    name.clone(),
-                    VariableInfo {
-                        name: name.clone(),
-                        data_type: LogicalType::Any, // RDF term
-                        is_node: false,
-                        is_edge: false,
-                    },
-                );
-            }
+        if let TripleComponent::Variable(name) = &scan.object
+            && !self.context.contains(name)
+        {
+            self.context.add_variable(
+                name.clone(),
+                VariableInfo {
+                    name: name.clone(),
+                    data_type: LogicalType::Any, // RDF term
+                    is_node: false,
+                    is_edge: false,
+                },
+            );
         }
 
-        if let Some(TripleComponent::Variable(name)) = &scan.graph {
-            if !self.context.contains(name) {
-                self.context.add_variable(
-                    name.clone(),
-                    VariableInfo {
-                        name: name.clone(),
-                        data_type: LogicalType::Any, // IRI
-                        is_node: false,
-                        is_edge: false,
-                    },
-                );
-            }
+        if let Some(TripleComponent::Variable(name)) = &scan.graph
+            && !self.context.contains(name)
+        {
+            self.context.add_variable(
+                name.clone(),
+                VariableInfo {
+                    name: name.clone(),
+                    data_type: LogicalType::Any, // IRI
+                    is_node: false,
+                    is_edge: false,
+                },
+            );
         }
 
         Ok(())
@@ -619,13 +619,13 @@ impl Binder {
         }
 
         // Validate that the source is a node
-        if let Some(info) = self.context.get(&expand.from_variable) {
-            if !info.is_node {
-                return Err(binding_error(format!(
-                    "Variable '{}' is not a node, cannot expand from it",
-                    expand.from_variable
-                )));
-            }
+        if let Some(info) = self.context.get(&expand.from_variable)
+            && !info.is_node
+        {
+            return Err(binding_error(format!(
+                "Variable '{}' is not a node, cannot expand from it",
+                expand.from_variable
+            )));
         }
 
         // Add edge variable if present

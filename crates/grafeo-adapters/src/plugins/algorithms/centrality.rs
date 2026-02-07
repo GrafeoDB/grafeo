@@ -318,7 +318,7 @@ pub fn betweenness_centrality(store: &LpgStore, normalized: bool) -> FxHashMap<N
     // Normalize if requested
     if normalized && n > 2 {
         let norm = 2.0 / ((n - 1) * (n - 2)) as f64;
-        for (_, v) in centrality.iter_mut() {
+        for (_, v) in &mut centrality {
             *v *= norm;
         }
     }

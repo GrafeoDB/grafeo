@@ -478,10 +478,10 @@ impl StatisticsCollector {
 
         let mut stats = ColumnStatistics::new(distinct_count, total_count, self.null_count);
 
-        if let Some(min) = self.min {
-            if let Some(max) = self.max {
-                stats = stats.with_min_max(min, max);
-            }
+        if let Some(min) = self.min
+            && let Some(max) = self.max
+        {
+            stats = stats.with_min_max(min, max);
         }
 
         if let Some(avg) = avg {

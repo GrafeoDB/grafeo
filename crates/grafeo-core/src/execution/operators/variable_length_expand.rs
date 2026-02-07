@@ -247,9 +247,8 @@ impl VariableLengthExpandOperator {
 
     /// Fill the output buffer with results from the next input row.
     fn fill_output_buffer(&mut self) {
-        let input_rows = match &self.input_rows {
-            Some(rows) => rows,
-            None => return,
+        let Some(input_rows) = &self.input_rows else {
+            return;
         };
 
         while self.output_buffer.is_empty() && self.current_input_idx < input_rows.len() {
@@ -339,12 +338,12 @@ impl Operator for VariableLengthExpandOperator {
             }
 
             // Add path length column if requested
-            if self.output_path_length {
-                if let Some(col) = chunk.column_mut(num_input_cols + 2) {
-                    col.push_value(grafeo_common::types::Value::Int64(i64::from(
-                        out_row.path_length,
-                    )));
-                }
+            if self.output_path_length
+                && let Some(col) = chunk.column_mut(num_input_cols + 2)
+            {
+                col.push_value(grafeo_common::types::Value::Int64(i64::from(
+                    out_row.path_length,
+                )));
             }
         }
 

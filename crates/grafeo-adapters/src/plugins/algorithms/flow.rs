@@ -21,32 +21,30 @@ use super::traits::GraphAlgorithm;
 
 /// Extracts capacity from an edge property.
 fn extract_capacity(store: &LpgStore, edge_id: EdgeId, capacity_prop: Option<&str>) -> f64 {
-    if let Some(prop_name) = capacity_prop {
-        if let Some(edge) = store.get_edge(edge_id) {
-            if let Some(value) = edge.get_property(prop_name) {
-                return match value {
-                    Value::Int64(i) => *i as f64,
-                    Value::Float64(f) => *f,
-                    _ => 1.0,
-                };
-            }
-        }
+    if let Some(prop_name) = capacity_prop
+        && let Some(edge) = store.get_edge(edge_id)
+        && let Some(value) = edge.get_property(prop_name)
+    {
+        return match value {
+            Value::Int64(i) => *i as f64,
+            Value::Float64(f) => *f,
+            _ => 1.0,
+        };
     }
     1.0
 }
 
 /// Extracts cost from an edge property.
 fn extract_cost(store: &LpgStore, edge_id: EdgeId, cost_prop: Option<&str>) -> f64 {
-    if let Some(prop_name) = cost_prop {
-        if let Some(edge) = store.get_edge(edge_id) {
-            if let Some(value) = edge.get_property(prop_name) {
-                return match value {
-                    Value::Int64(i) => *i as f64,
-                    Value::Float64(f) => *f,
-                    _ => 0.0,
-                };
-            }
-        }
+    if let Some(prop_name) = cost_prop
+        && let Some(edge) = store.get_edge(edge_id)
+        && let Some(value) = edge.get_property(prop_name)
+    {
+        return match value {
+            Value::Int64(i) => *i as f64,
+            Value::Float64(f) => *f,
+            _ => 0.0,
+        };
     }
     0.0
 }

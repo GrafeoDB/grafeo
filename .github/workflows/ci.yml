@@ -225,6 +225,62 @@ jobs:
         working-directory: crates/bindings/node
         run: npm test
 
+  # Go tests
+  go-test:
+    name: Go Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-go-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-go-
+
+      - name: Build shared library
+        run: cargo build --release -p grafeo-c --features full
+
+      - name: Copy library and run tests (Linux)
+        if: runner.os == 'Linux'
+        working-directory: crates/bindings/go
+        run: |
+          cp ../../../target/release/libgrafeo_c.so .
+          CGO_ENABLED=1 CGO_LDFLAGS="-L. -lgrafeo_c -lm -ldl -lpthread" LD_LIBRARY_PATH=. go test -v ./...
+
+      - name: Copy library and run tests (macOS)
+        if: runner.os == 'macOS'
+        working-directory: crates/bindings/go
+        run: |
+          cp ../../../target/release/libgrafeo_c.dylib .
+          CGO_ENABLED=1 CGO_LDFLAGS="-L. -lgrafeo_c -lm -ldl -lpthread -framework Security" DYLD_LIBRARY_PATH=. go test -v ./...
+
+      - name: Copy library and run tests (Windows)
+        if: runner.os == 'Windows'
+        working-directory: crates/bindings/go
+        shell: bash
+        run: |
+          cp ../../../target/release/grafeo_c.dll .
+          cp ../../../target/release/grafeo_c.dll.lib .
+          CGO_ENABLED=1 CGO_LDFLAGS="-L. -lgrafeo_c -lws2_32 -lbcrypt -lntdll -luserenv" go test -v ./...
+
   # Benchmark (only on main)
   benchmark:
     name: Benchmark

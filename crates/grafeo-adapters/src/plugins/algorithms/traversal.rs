@@ -539,10 +539,10 @@ mod tests {
         let target = NodeId::new(2);
 
         let found = bfs_with_visitor(&store, NodeId::new(0), |event| {
-            if let TraversalEvent::Discover(node) = event {
-                if node == target {
-                    return Control::Break(true);
-                }
+            if let TraversalEvent::Discover(node) = event
+                && node == target
+            {
+                return Control::Break(true);
             }
             Control::Continue
         });

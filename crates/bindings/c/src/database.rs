@@ -87,9 +87,8 @@ pub extern "C" fn grafeo_open_memory() -> *mut GrafeoDatabase {
 /// Returns an opaque pointer, or null on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_open(path: *const c_char) -> *mut GrafeoDatabase {
-    let path_str = match str_from_ptr(path) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+    let Ok(path_str) = str_from_ptr(path) else {
+        return std::ptr::null_mut();
     };
     match GrafeoDB::with_config(Config::persistent(path_str)) {
         Ok(db) => Box::into_raw(Box::new(GrafeoDatabase {
@@ -144,9 +143,8 @@ pub extern "C" fn grafeo_execute(
     query: *const c_char,
 ) -> *mut GrafeoResult {
     let db = db_ref_or_null!(db);
-    let query_str = match str_from_ptr(query) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+    let Ok(query_str) = str_from_ptr(query) else {
+        return std::ptr::null_mut();
     };
     let guard = db.inner.read();
     match guard.execute(query_str) {
@@ -166,9 +164,8 @@ pub extern "C" fn grafeo_execute_with_params(
     params_json: *const c_char,
 ) -> *mut GrafeoResult {
     let db = db_ref_or_null!(db);
-    let query_str = match str_from_ptr(query) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+    let Ok(query_str) = str_from_ptr(query) else {
+        return std::ptr::null_mut();
     };
     let guard = db.inner.read();
     let result = if let Some(params) = crate::types::parse_params(params_json) {
@@ -193,9 +190,8 @@ pub extern "C" fn grafeo_execute_cypher(
     query: *const c_char,
 ) -> *mut GrafeoResult {
     let db = db_ref_or_null!(db);
-    let query_str = match str_from_ptr(query) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+    let Ok(query_str) = str_from_ptr(query) else {
+        return std::ptr::null_mut();
     };
     match db.inner.read().execute_cypher(query_str) {
         Ok(r) => build_result(&r),
@@ -214,9 +210,8 @@ pub extern "C" fn grafeo_execute_gremlin(
     query: *const c_char,
 ) -> *mut GrafeoResult {
     let db = db_ref_or_null!(db);
-    let query_str = match str_from_ptr(query) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+    let Ok(query_str) = str_from_ptr(query) else {
+        return std::ptr::null_mut();
     };
     match db.inner.read().execute_gremlin(query_str) {
         Ok(r) => build_result(&r),
@@ -235,9 +230,8 @@ pub extern "C" fn grafeo_execute_graphql(
     query: *const c_char,
 ) -> *mut GrafeoResult {
     let db = db_ref_or_null!(db);
-    let query_str = match str_from_ptr(query) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+    let Ok(query_str) = str_from_ptr(query) else {
+        return std::ptr::null_mut();
     };
     match db.inner.read().execute_graphql(query_str) {
         Ok(r) => build_result(&r),
@@ -256,9 +250,8 @@ pub extern "C" fn grafeo_execute_sparql(
     query: *const c_char,
 ) -> *mut GrafeoResult {
     let db = db_ref_or_null!(db);
-    let query_str = match str_from_ptr(query) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+    let Ok(query_str) = str_from_ptr(query) else {
+        return std::ptr::null_mut();
     };
     match db.inner.read().execute_sparql(query_str) {
         Ok(r) => build_result(&r),
@@ -421,12 +414,9 @@ pub extern "C" fn grafeo_set_node_property(
         Ok(s) => s,
         Err(e) => return e,
     };
-    let value = match crate::types::parse_value(value_json) {
-        Some(v) => v,
-        None => {
-            set_last_error("Invalid JSON value");
-            return GrafeoStatus::ErrorSerialization;
-        }
+    let Some(value) = crate::types::parse_value(value_json) else {
+        set_last_error("Invalid JSON value");
+        return GrafeoStatus::ErrorSerialization;
     };
     db.inner
         .read()
@@ -447,9 +437,8 @@ pub extern "C" fn grafeo_remove_node_property(
     }
     // SAFETY: Caller guarantees valid pointer.
     let db = unsafe { &*db };
-    let key_str = match str_from_ptr(key) {
-        Ok(s) => s,
-        Err(_) => return -1,
+    let Ok(key_str) = str_from_ptr(key) else {
+        return -1;
     };
     i32::from(
         db.inner
@@ -471,9 +460,8 @@ pub extern "C" fn grafeo_add_node_label(
     }
     // SAFETY: Caller guarantees valid pointer.
     let db = unsafe { &*db };
-    let label_str = match str_from_ptr(label) {
-        Ok(s) => s,
-        Err(_) => return -1,
+    let Ok(label_str) = str_from_ptr(label) else {
+        return -1;
     };
     i32::from(db.inner.read().add_node_label(NodeId::new(id), label_str))
 }
@@ -491,9 +479,8 @@ pub extern "C" fn grafeo_remove_node_label(
     }
     // SAFETY: Caller guarantees valid pointer.
     let db = unsafe { &*db };
-    let label_str = match str_from_ptr(label) {
-        Ok(s) => s,
-        Err(_) => return -1,
+    let Ok(label_str) = str_from_ptr(label) else {
+        return -1;
     };
     i32::from(
         db.inner
@@ -580,9 +567,8 @@ pub extern "C" fn grafeo_create_edge(
     }
     // SAFETY: Caller guarantees valid pointer.
     let db = unsafe { &*db };
-    let type_str = match str_from_ptr(edge_type) {
-        Ok(s) => s,
-        Err(_) => return u64::MAX,
+    let Ok(type_str) = str_from_ptr(edge_type) else {
+        return u64::MAX;
     };
     let src = NodeId::new(source_id);
     let dst = NodeId::new(target_id);
@@ -660,12 +646,9 @@ pub extern "C" fn grafeo_set_edge_property(
         Ok(s) => s,
         Err(e) => return e,
     };
-    let value = match crate::types::parse_value(value_json) {
-        Some(v) => v,
-        None => {
-            set_last_error("Invalid JSON value");
-            return GrafeoStatus::ErrorSerialization;
-        }
+    let Some(value) = crate::types::parse_value(value_json) else {
+        set_last_error("Invalid JSON value");
+        return GrafeoStatus::ErrorSerialization;
     };
     db.inner
         .read()
@@ -686,9 +669,8 @@ pub extern "C" fn grafeo_remove_edge_property(
     }
     // SAFETY: Caller guarantees valid pointer.
     let db = unsafe { &*db };
-    let key_str = match str_from_ptr(key) {
-        Ok(s) => s,
-        Err(_) => return -1,
+    let Ok(key_str) = str_from_ptr(key) else {
+        return -1;
     };
     i32::from(db.inner.read().remove_edge_property(EdgeId(id), key_str))
 }
@@ -783,9 +765,8 @@ pub extern "C" fn grafeo_drop_property_index(
     }
     // SAFETY: Caller guarantees valid pointer.
     let db = unsafe { &*db };
-    let prop_str = match str_from_ptr(property) {
-        Ok(s) => s,
-        Err(_) => return -1,
+    let Ok(prop_str) = str_from_ptr(property) else {
+        return -1;
     };
     i32::from(db.inner.read().drop_property_index(prop_str))
 }
@@ -801,9 +782,8 @@ pub extern "C" fn grafeo_has_property_index(
     }
     // SAFETY: Caller guarantees valid pointer.
     let db = unsafe { &*db };
-    let prop_str = match str_from_ptr(property) {
-        Ok(s) => s,
-        Err(_) => return 0,
+    let Ok(prop_str) = str_from_ptr(property) else {
+        return 0;
     };
     i32::from(db.inner.read().has_property_index(prop_str))
 }
@@ -827,12 +807,9 @@ pub extern "C" fn grafeo_find_nodes_by_property(
         Ok(s) => s,
         Err(e) => return e,
     };
-    let value = match crate::types::parse_value(value_json) {
-        Some(v) => v,
-        None => {
-            set_last_error("Invalid JSON value");
-            return GrafeoStatus::ErrorSerialization;
-        }
+    let Some(value) = crate::types::parse_value(value_json) else {
+        set_last_error("Invalid JSON value");
+        return GrafeoStatus::ErrorSerialization;
     };
     let ids = db.inner.read().find_nodes_by_property(prop_str, &value);
     let count = ids.len();
@@ -1140,17 +1117,13 @@ pub extern "C" fn grafeo_tx_execute(
         set_last_error("Transaction is no longer active");
         return std::ptr::null_mut();
     }
-    let query_str = match str_from_ptr(query) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+    let Ok(query_str) = str_from_ptr(query) else {
+        return std::ptr::null_mut();
     };
     let guard = tx.session.lock();
-    let session = match guard.as_ref() {
-        Some(s) => s,
-        None => {
-            set_last_error("Transaction is no longer active");
-            return std::ptr::null_mut();
-        }
+    let Some(session) = guard.as_ref() else {
+        set_last_error("Transaction is no longer active");
+        return std::ptr::null_mut();
     };
     match session.execute(query_str) {
         Ok(r) => build_result(&r),
@@ -1178,17 +1151,13 @@ pub extern "C" fn grafeo_tx_execute_with_params(
         set_last_error("Transaction is no longer active");
         return std::ptr::null_mut();
     }
-    let query_str = match str_from_ptr(query) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+    let Ok(query_str) = str_from_ptr(query) else {
+        return std::ptr::null_mut();
     };
     let guard = tx.session.lock();
-    let session = match guard.as_ref() {
-        Some(s) => s,
-        None => {
-            set_last_error("Transaction is no longer active");
-            return std::ptr::null_mut();
-        }
+    let Some(session) = guard.as_ref() else {
+        set_last_error("Transaction is no longer active");
+        return std::ptr::null_mut();
     };
     let result = if let Some(params) = crate::types::parse_params(params_json) {
         session.execute_with_params(query_str, params)

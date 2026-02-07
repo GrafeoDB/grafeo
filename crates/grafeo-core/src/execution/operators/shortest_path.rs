@@ -119,10 +119,10 @@ impl ShortestPathOperator {
             let current_paths = *path_counts.get(&current).unwrap();
 
             // If we've found target and we're past its depth, stop
-            if let Some(td) = target_depth {
-                if current_depth >= td {
-                    continue;
-                }
+            if let Some(td) = target_depth
+                && current_depth >= td
+            {
+                continue;
             }
 
             for neighbor in self.get_neighbors(current) {
@@ -193,12 +193,9 @@ impl Operator for ShortestPathOperator {
         }
 
         // Get input chunk
-        let input_chunk = match self.input.next()? {
-            Some(chunk) => chunk,
-            None => {
-                self.exhausted = true;
-                return Ok(None);
-            }
+        let Some(input_chunk) = self.input.next()? else {
+            self.exhausted = true;
+            return Ok(None);
         };
 
         // Build output: input columns + path length
@@ -251,17 +248,17 @@ impl Operator for ShortestPathOperator {
             for path_length in path_lengths {
                 // Copy input columns
                 for col_idx in 0..num_input_cols {
-                    if let Some(in_col) = input_chunk.column(col_idx) {
-                        if let Some(out_col) = builder.column_mut(col_idx) {
-                            if let Some(node_id) = in_col.get_node_id(row) {
-                                out_col.push_node_id(node_id);
-                            } else if let Some(edge_id) = in_col.get_edge_id(row) {
-                                out_col.push_edge_id(edge_id);
-                            } else if let Some(value) = in_col.get_value(row) {
-                                out_col.push_value(value);
-                            } else {
-                                out_col.push_value(Value::Null);
-                            }
+                    if let Some(in_col) = input_chunk.column(col_idx)
+                        && let Some(out_col) = builder.column_mut(col_idx)
+                    {
+                        if let Some(node_id) = in_col.get_node_id(row) {
+                            out_col.push_node_id(node_id);
+                        } else if let Some(edge_id) = in_col.get_edge_id(row) {
+                            out_col.push_edge_id(edge_id);
+                        } else if let Some(value) = in_col.get_value(row) {
+                            out_col.push_value(value);
+                        } else {
+                            out_col.push_value(Value::Null);
                         }
                     }
                 }

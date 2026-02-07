@@ -67,14 +67,12 @@ impl ComparisonPredicate {
 
 impl Predicate for ComparisonPredicate {
     fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
-        let col = match chunk.column(self.column) {
-            Some(c) => c,
-            None => return false,
+        let Some(col) = chunk.column(self.column) else {
+            return false;
         };
 
-        let cell_value = match col.get_value(row) {
-            Some(v) => v,
-            None => return false,
+        let Some(cell_value) = col.get_value(row) else {
+            return false;
         };
 
         match (&cell_value, &self.value) {
@@ -334,16 +332,16 @@ impl ExpressionPredicate {
                 let col_idx = *self.variable_columns.get(variable)?;
                 let col = chunk.column(col_idx)?;
                 // Try as node first
-                if let Some(node_id) = col.get_node_id(row) {
-                    if let Some(node) = self.store.get_node(node_id) {
-                        return node.get_property(property).cloned();
-                    }
+                if let Some(node_id) = col.get_node_id(row)
+                    && let Some(node) = self.store.get_node(node_id)
+                {
+                    return node.get_property(property).cloned();
                 }
                 // Try as edge if node lookup failed
-                if let Some(edge_id) = col.get_edge_id(row) {
-                    if let Some(edge) = self.store.get_edge(edge_id) {
-                        return edge.get_property(property).cloned();
-                    }
+                if let Some(edge_id) = col.get_edge_id(row)
+                    && let Some(edge) = self.store.get_edge(edge_id)
+                {
+                    return edge.get_property(property).cloned();
                 }
                 None
             }
@@ -519,9 +517,8 @@ impl ExpressionPredicate {
             } => {
                 // Evaluate the source list
                 let list_val = self.eval_expr(list_expr, chunk, row)?;
-                let items = match list_val {
-                    Value::List(items) => items,
-                    _ => return None, // Not a list
+                let Value::List(items) = list_val else {
+                    return None; // Not a list
                 };
 
                 // Build the result list by iterating over source items
@@ -826,10 +823,10 @@ impl ExpressionPredicate {
             }
             "coalesce" => {
                 for arg in args {
-                    if let Some(val) = self.eval_expr(arg, chunk, row) {
-                        if !matches!(val, Value::Null) {
-                            return Some(val);
-                        }
+                    if let Some(val) = self.eval_expr(arg, chunk, row)
+                        && !matches!(val, Value::Null)
+                    {
+                        return Some(val);
                     }
                 }
                 Some(Value::Null)
@@ -903,9 +900,8 @@ impl ExpressionPredicate {
                     return None;
                 };
                 // Second arg is the label to check
-                let label = match self.eval_expr(&args[1], chunk, row)? {
-                    Value::String(s) => s,
-                    _ => return None,
+                let Value::String(label) = self.eval_expr(&args[1], chunk, row)? else {
+                    return None;
                 };
                 // Check if the node has this label
                 let node = self.store.get_node(node_id)?;
@@ -1194,16 +1190,15 @@ impl Operator for FilterOperator {
     fn next(&mut self) -> OperatorResult {
         loop {
             // Get next chunk from child
-            let mut chunk = match self.child.next()? {
-                Some(c) => c,
-                None => return Ok(None),
+            let Some(mut chunk) = self.child.next()? else {
+                return Ok(None);
             };
 
             // Zone map check: skip entire chunk if no rows can match
-            if let Some(hints) = chunk.zone_hints() {
-                if !self.predicate.might_match_chunk(hints) {
-                    continue; // Skip entire chunk - zone map proves no matches
-                }
+            if let Some(hints) = chunk.zone_hints()
+                && !self.predicate.might_match_chunk(hints)
+            {
+                continue; // Skip entire chunk - zone map proves no matches
             }
 
             // Apply predicate to create selection vector

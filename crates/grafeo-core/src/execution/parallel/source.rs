@@ -314,9 +314,8 @@ impl Source for PartitionedChunkSource {
         }
 
         // Find the chunk containing current_row
-        let chunk_idx = match self.find_chunk_index(self.current_row) {
-            Some(idx) => idx,
-            None => return Ok(None),
+        let Some(chunk_idx) = self.find_chunk_index(self.current_row) else {
+            return Ok(None);
         };
 
         if chunk_idx >= self.chunks.len() {
@@ -881,10 +880,10 @@ mod tests {
         let mut last_value: Option<i64> = None;
 
         while let Ok(Some(chunk)) = partition.next_chunk(10) {
-            if first_value.is_none() {
-                if let Some(Value::Int64(v)) = chunk.column(0).and_then(|c| c.get(0)) {
-                    first_value = Some(v);
-                }
+            if first_value.is_none()
+                && let Some(Value::Int64(v)) = chunk.column(0).and_then(|c| c.get(0))
+            {
+                first_value = Some(v);
             }
             if let Some(Value::Int64(v)) = chunk
                 .column(0)

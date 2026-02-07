@@ -433,12 +433,11 @@ impl Optimizer {
         let op = self.reorder_joins_recursive(op);
 
         // Then, if this is a join tree, try to optimize it
-        if let Some((relations, conditions)) = self.extract_join_tree(&op) {
-            if relations.len() >= 2 {
-                if let Some(optimized) = self.optimize_join_order(&relations, &conditions) {
-                    return optimized;
-                }
-            }
+        if let Some((relations, conditions)) = self.extract_join_tree(&op)
+            && relations.len() >= 2
+            && let Some(optimized) = self.optimize_join_order(&relations, &conditions)
+        {
+            return optimized;
         }
 
         op
@@ -988,13 +987,12 @@ mod tests {
         let optimized = optimizer.optimize(plan).unwrap();
 
         // The structure should remain similar (filter stays near scan)
-        if let LogicalOperator::Return(ret) = &optimized.root {
-            if let LogicalOperator::Filter(filter) = ret.input.as_ref() {
-                if let LogicalOperator::NodeScan(scan) = filter.input.as_ref() {
-                    assert_eq!(scan.variable, "n");
-                    return;
-                }
-            }
+        if let LogicalOperator::Return(ret) = &optimized.root
+            && let LogicalOperator::Filter(filter) = ret.input.as_ref()
+            && let LogicalOperator::NodeScan(scan) = filter.input.as_ref()
+        {
+            assert_eq!(scan.variable, "n");
+            return;
         }
         panic!("Expected Return -> Filter -> NodeScan structure");
     }
@@ -1042,17 +1040,15 @@ mod tests {
 
         // Filter on 'a' should be pushed before the expand
         // Expected: Return -> Expand -> Filter -> NodeScan
-        if let LogicalOperator::Return(ret) = &optimized.root {
-            if let LogicalOperator::Expand(expand) = ret.input.as_ref() {
-                if let LogicalOperator::Filter(filter) = expand.input.as_ref() {
-                    if let LogicalOperator::NodeScan(scan) = filter.input.as_ref() {
-                        assert_eq!(scan.variable, "a");
-                        assert_eq!(expand.from_variable, "a");
-                        assert_eq!(expand.to_variable, "b");
-                        return;
-                    }
-                }
-            }
+        if let LogicalOperator::Return(ret) = &optimized.root
+            && let LogicalOperator::Expand(expand) = ret.input.as_ref()
+            && let LogicalOperator::Filter(filter) = expand.input.as_ref()
+            && let LogicalOperator::NodeScan(scan) = filter.input.as_ref()
+        {
+            assert_eq!(scan.variable, "a");
+            assert_eq!(expand.from_variable, "a");
+            assert_eq!(expand.to_variable, "b");
+            return;
         }
         panic!("Expected Return -> Expand -> Filter -> NodeScan structure");
     }
@@ -1100,20 +1096,20 @@ mod tests {
 
         // Filter on 'b' should stay after the expand
         // Expected: Return -> Filter -> Expand -> NodeScan
-        if let LogicalOperator::Return(ret) = &optimized.root {
-            if let LogicalOperator::Filter(filter) = ret.input.as_ref() {
-                // Check that the filter is on 'b'
-                if let LogicalExpression::Binary { left, .. } = &filter.predicate {
-                    if let LogicalExpression::Property { variable, .. } = left.as_ref() {
-                        assert_eq!(variable, "b");
-                    }
-                }
+        if let LogicalOperator::Return(ret) = &optimized.root
+            && let LogicalOperator::Filter(filter) = ret.input.as_ref()
+        {
+            // Check that the filter is on 'b'
+            if let LogicalExpression::Binary { left, .. } = &filter.predicate
+                && let LogicalExpression::Property { variable, .. } = left.as_ref()
+            {
+                assert_eq!(variable, "b");
+            }
 
-                if let LogicalOperator::Expand(expand) = filter.input.as_ref() {
-                    if let LogicalOperator::NodeScan(_) = expand.input.as_ref() {
-                        return;
-                    }
-                }
+            if let LogicalOperator::Expand(expand) = filter.input.as_ref()
+                && let LogicalOperator::NodeScan(_) = expand.input.as_ref()
+            {
+                return;
             }
         }
         panic!("Expected Return -> Filter -> Expand -> NodeScan structure");
@@ -1170,10 +1166,10 @@ mod tests {
 
         let optimized = optimizer.optimize(plan).unwrap();
         // Structure should be unchanged
-        if let LogicalOperator::Return(ret) = &optimized.root {
-            if let LogicalOperator::Filter(_) = ret.input.as_ref() {
-                return;
-            }
+        if let LogicalOperator::Return(ret) = &optimized.root
+            && let LogicalOperator::Filter(_) = ret.input.as_ref()
+        {
+            return;
         }
         panic!("Expected unchanged structure");
     }
@@ -1262,10 +1258,10 @@ mod tests {
         let optimized = optimizer.optimize(plan).unwrap();
 
         // Filter should be pushed through Project
-        if let LogicalOperator::Project(proj) = &optimized.root {
-            if let LogicalOperator::Filter(_) = proj.input.as_ref() {
-                return;
-            }
+        if let LogicalOperator::Project(proj) = &optimized.root
+            && let LogicalOperator::Filter(_) = proj.input.as_ref()
+        {
+            return;
         }
         panic!("Expected Project -> Filter structure");
     }
@@ -1300,10 +1296,10 @@ mod tests {
         let optimized = optimizer.optimize(plan).unwrap();
 
         // Filter should stay above Project
-        if let LogicalOperator::Filter(filter) = &optimized.root {
-            if let LogicalOperator::Project(_) = filter.input.as_ref() {
-                return;
-            }
+        if let LogicalOperator::Filter(filter) = &optimized.root
+            && let LogicalOperator::Project(_) = filter.input.as_ref()
+        {
+            return;
         }
         panic!("Expected Filter -> Project structure");
     }
@@ -1327,10 +1323,10 @@ mod tests {
         let optimized = optimizer.optimize(plan).unwrap();
 
         // Filter stays above Limit (cannot be pushed through)
-        if let LogicalOperator::Filter(filter) = &optimized.root {
-            if let LogicalOperator::Limit(_) = filter.input.as_ref() {
-                return;
-            }
+        if let LogicalOperator::Filter(filter) = &optimized.root
+            && let LogicalOperator::Limit(_) = filter.input.as_ref()
+        {
+            return;
         }
         panic!("Expected Filter -> Limit structure");
     }
@@ -1357,10 +1353,10 @@ mod tests {
         let optimized = optimizer.optimize(plan).unwrap();
 
         // Filter stays above Sort
-        if let LogicalOperator::Filter(filter) = &optimized.root {
-            if let LogicalOperator::Sort(_) = filter.input.as_ref() {
-                return;
-            }
+        if let LogicalOperator::Filter(filter) = &optimized.root
+            && let LogicalOperator::Sort(_) = filter.input.as_ref()
+        {
+            return;
         }
         panic!("Expected Filter -> Sort structure");
     }
@@ -1384,10 +1380,10 @@ mod tests {
         let optimized = optimizer.optimize(plan).unwrap();
 
         // Filter stays above Distinct
-        if let LogicalOperator::Filter(filter) = &optimized.root {
-            if let LogicalOperator::Distinct(_) = filter.input.as_ref() {
-                return;
-            }
+        if let LogicalOperator::Filter(filter) = &optimized.root
+            && let LogicalOperator::Distinct(_) = filter.input.as_ref()
+        {
+            return;
         }
         panic!("Expected Filter -> Distinct structure");
     }
@@ -1423,10 +1419,10 @@ mod tests {
         let optimized = optimizer.optimize(plan).unwrap();
 
         // Filter should stay above Aggregate
-        if let LogicalOperator::Filter(filter) = &optimized.root {
-            if let LogicalOperator::Aggregate(_) = filter.input.as_ref() {
-                return;
-            }
+        if let LogicalOperator::Filter(filter) = &optimized.root
+            && let LogicalOperator::Aggregate(_) = filter.input.as_ref()
+        {
+            return;
         }
         panic!("Expected Filter -> Aggregate structure");
     }
@@ -1464,10 +1460,10 @@ mod tests {
         let optimized = optimizer.optimize(plan).unwrap();
 
         // Filter should be pushed to left side of join
-        if let LogicalOperator::Join(join) = &optimized.root {
-            if let LogicalOperator::Filter(_) = join.left.as_ref() {
-                return;
-            }
+        if let LogicalOperator::Join(join) = &optimized.root
+            && let LogicalOperator::Filter(_) = join.left.as_ref()
+        {
+            return;
         }
         panic!("Expected Join with Filter on left side");
     }
@@ -1505,10 +1501,10 @@ mod tests {
         let optimized = optimizer.optimize(plan).unwrap();
 
         // Filter should be pushed to right side of join
-        if let LogicalOperator::Join(join) = &optimized.root {
-            if let LogicalOperator::Filter(_) = join.right.as_ref() {
-                return;
-            }
+        if let LogicalOperator::Join(join) = &optimized.root
+            && let LogicalOperator::Filter(_) = join.right.as_ref()
+        {
+            return;
         }
         panic!("Expected Join with Filter on right side");
     }
@@ -1549,10 +1545,10 @@ mod tests {
         let optimized = optimizer.optimize(plan).unwrap();
 
         // Filter should stay above join
-        if let LogicalOperator::Filter(filter) = &optimized.root {
-            if let LogicalOperator::Join(_) = filter.input.as_ref() {
-                return;
-            }
+        if let LogicalOperator::Filter(filter) = &optimized.root
+            && let LogicalOperator::Join(_) = filter.input.as_ref()
+        {
+            return;
         }
         panic!("Expected Filter -> Join structure");
     }

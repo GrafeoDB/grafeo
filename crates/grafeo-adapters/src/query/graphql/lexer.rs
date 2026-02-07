@@ -228,10 +228,10 @@ impl<'a> Lexer<'a> {
                                         hex.push(h);
                                     }
                                 }
-                                if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                                    if let Some(c) = char::from_u32(code) {
-                                        value.push(c);
-                                    }
+                                if let Ok(code) = u32::from_str_radix(&hex, 16)
+                                    && let Some(c) = char::from_u32(code)
+                                {
+                                    value.push(c);
                                 }
                             }
                             _ => value.push(escaped),
@@ -307,10 +307,10 @@ impl<'a> Lexer<'a> {
                 is_float = true;
                 value.push(c);
                 self.advance();
-                if matches!(self.peek(), Some('+') | Some('-')) {
-                    if let Some(sign) = self.advance() {
-                        value.push(sign);
-                    }
+                if matches!(self.peek(), Some('+') | Some('-'))
+                    && let Some(sign) = self.advance()
+                {
+                    value.push(sign);
                 }
             } else {
                 break;

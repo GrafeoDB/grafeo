@@ -103,9 +103,8 @@ impl ExpandOperator {
 
     /// Loads edges for the current row.
     fn load_edges_for_current_row(&mut self) -> Result<bool, OperatorError> {
-        let chunk = match &self.current_input {
-            Some(c) => c,
-            None => return Ok(false),
+        let Some(chunk) = &self.current_input else {
+            return Ok(false);
         };
 
         if self.current_row >= chunk.row_count() {
@@ -233,11 +232,11 @@ impl Operator for ExpandOperator {
             // Copy all input columns to output
             let input = self.current_input.as_ref().unwrap();
             for col_idx in 0..input_col_count {
-                if let Some(input_col) = input.column(col_idx) {
-                    if let Some(output_col) = chunk.column_mut(col_idx) {
-                        // Use copy_row_to which preserves NodeId/EdgeId types
-                        input_col.copy_row_to(self.current_row, output_col);
-                    }
+                if let Some(input_col) = input.column(col_idx)
+                    && let Some(output_col) = chunk.column_mut(col_idx)
+                {
+                    // Use copy_row_to which preserves NodeId/EdgeId types
+                    input_col.copy_row_to(self.current_row, output_col);
                 }
             }
 

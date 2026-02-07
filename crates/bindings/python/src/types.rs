@@ -143,10 +143,10 @@ impl PyValue {
         }
 
         // All-float lists → Value::Vector (must come before generic list)
-        if let Ok(v) = obj.extract::<Vec<f32>>() {
-            if !v.is_empty() {
-                return Ok(Value::Vector(v.into()));
-            }
+        if let Ok(v) = obj.extract::<Vec<f32>>()
+            && !v.is_empty()
+        {
+            return Ok(Value::Vector(v.into()));
         }
 
         if let Ok(v) = obj.extract::<Vec<Bound<'_, PyAny>>>() {

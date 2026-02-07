@@ -209,15 +209,15 @@ impl EquiDepthHistogram {
             let bucket_upper = bucket.upper_bound;
 
             // Skip buckets entirely outside the range
-            if let Some(l) = lower {
-                if bucket_upper <= l {
-                    continue;
-                }
+            if let Some(l) = lower
+                && bucket_upper <= l
+            {
+                continue;
             }
-            if let Some(u) = upper {
-                if bucket_lower >= u {
-                    continue;
-                }
+            if let Some(u) = upper
+                && bucket_lower >= u
+            {
+                continue;
             }
 
             // Calculate the fraction of this bucket covered by the range
@@ -495,10 +495,10 @@ impl CardinalityEstimator {
 
     /// Estimates node scan cardinality.
     fn estimate_node_scan(&self, scan: &NodeScanOp) -> f64 {
-        if let Some(label) = &scan.label {
-            if let Some(stats) = self.table_stats.get(label) {
-                return stats.row_count as f64;
-            }
+        if let Some(label) = &scan.label
+            && let Some(stats) = self.table_stats.get(label)
+        {
+            return stats.row_count as f64;
         }
         // No label filter - scan all nodes
         self.default_row_count as f64
@@ -855,10 +855,10 @@ impl CardinalityEstimator {
         // Use the variable name as a heuristic label lookup
         // In practice, the optimizer would track which labels variables are bound to
         for label in self.table_stats.keys() {
-            if let Some(stats) = self.table_stats.get(label) {
-                if stats.columns.contains_key(&property) {
-                    return Some((label.clone(), property, value));
-                }
+            if let Some(stats) = self.table_stats.get(label)
+                && stats.columns.contains_key(&property)
+            {
+                return Some((label.clone(), property, value));
             }
         }
 
@@ -884,10 +884,10 @@ impl CardinalityEstimator {
     /// Estimates equality selectivity using column statistics.
     #[allow(dead_code)]
     fn estimate_equality_with_stats(&self, label: &str, column: &str) -> f64 {
-        if let Some(stats) = self.get_column_stats(label, column) {
-            if stats.distinct_count > 0 {
-                return 1.0 / stats.distinct_count as f64;
-            }
+        if let Some(stats) = self.get_column_stats(label, column)
+            && stats.distinct_count > 0
+        {
+            return 1.0 / stats.distinct_count as f64;
         }
         0.01 // Default for equality
     }
@@ -901,19 +901,19 @@ impl CardinalityEstimator {
         lower: Option<f64>,
         upper: Option<f64>,
     ) -> f64 {
-        if let Some(stats) = self.get_column_stats(label, column) {
-            if let (Some(min), Some(max)) = (stats.min_value, stats.max_value) {
-                let range = max - min;
-                if range <= 0.0 {
-                    return 1.0;
-                }
-
-                let effective_lower = lower.unwrap_or(min).max(min);
-                let effective_upper = upper.unwrap_or(max).min(max);
-
-                let overlap = (effective_upper - effective_lower).max(0.0);
-                return (overlap / range).min(1.0).max(0.0);
+        if let Some(stats) = self.get_column_stats(label, column)
+            && let (Some(min), Some(max)) = (stats.min_value, stats.max_value)
+        {
+            let range = max - min;
+            if range <= 0.0 {
+                return 1.0;
             }
+
+            let effective_lower = lower.unwrap_or(min).max(min);
+            let effective_upper = upper.unwrap_or(max).min(max);
+
+            let overlap = (effective_upper - effective_lower).max(0.0);
+            return (overlap / range).min(1.0).max(0.0);
         }
         0.33 // Default for range
     }

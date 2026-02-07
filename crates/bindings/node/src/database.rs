@@ -662,17 +662,16 @@ pub(crate) fn extract_entities(
         for &col_idx in &node_cols {
             if let Some(Value::Int64(id)) = row.get(col_idx) {
                 let node_id = NodeId(*id as u64);
-                if seen_node_ids.insert(node_id) {
-                    if let Some(node) = db.get_node(node_id) {
-                        let labels: Vec<String> =
-                            node.labels.iter().map(|s| s.to_string()).collect();
-                        let properties: HashMap<String, Value> = node
-                            .properties
-                            .into_iter()
-                            .map(|(k, v)| (k.as_str().to_string(), v))
-                            .collect();
-                        nodes.push(JsNode::new(node_id, labels, properties));
-                    }
+                if seen_node_ids.insert(node_id)
+                    && let Some(node) = db.get_node(node_id)
+                {
+                    let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
+                    let properties: HashMap<String, Value> = node
+                        .properties
+                        .into_iter()
+                        .map(|(k, v)| (k.as_str().to_string(), v))
+                        .collect();
+                    nodes.push(JsNode::new(node_id, labels, properties));
                 }
             }
         }
@@ -680,21 +679,21 @@ pub(crate) fn extract_entities(
         for &col_idx in &edge_cols {
             if let Some(Value::Int64(id)) = row.get(col_idx) {
                 let edge_id = EdgeId(*id as u64);
-                if seen_edge_ids.insert(edge_id) {
-                    if let Some(edge) = db.get_edge(edge_id) {
-                        let properties: HashMap<String, Value> = edge
-                            .properties
-                            .into_iter()
-                            .map(|(k, v)| (k.as_str().to_string(), v))
-                            .collect();
-                        edges.push(JsEdge::new(
-                            edge_id,
-                            edge.edge_type.to_string(),
-                            edge.src,
-                            edge.dst,
-                            properties,
-                        ));
-                    }
+                if seen_edge_ids.insert(edge_id)
+                    && let Some(edge) = db.get_edge(edge_id)
+                {
+                    let properties: HashMap<String, Value> = edge
+                        .properties
+                        .into_iter()
+                        .map(|(k, v)| (k.as_str().to_string(), v))
+                        .collect();
+                    edges.push(JsEdge::new(
+                        edge_id,
+                        edge.edge_type.to_string(),
+                        edge.src,
+                        edge.dst,
+                        properties,
+                    ));
                 }
             }
         }

@@ -1140,10 +1140,10 @@ impl Planner {
                 op: BinaryOp::Eq,
                 right,
             } => {
-                if let Some((var, prop, val)) = self.extract_property_equality(left, right) {
-                    if var == target_variable {
-                        conditions.push((prop, val));
-                    }
+                if let Some((var, prop, val)) = self.extract_property_equality(left, right)
+                    && var == target_variable
+                {
+                    conditions.push((prop, val));
                 }
             }
 
@@ -1197,46 +1197,44 @@ impl Planner {
         // Try to extract BETWEEN pattern first (more efficient)
         if let Some((variable, property, min, max, min_inc, max_inc)) =
             self.extract_between_predicate(&filter.predicate)
+            && variable == scan_variable
         {
-            if variable == scan_variable {
-                return self.plan_range_filter(
-                    &scan_variable,
-                    &scan_label,
-                    &property,
-                    RangeBounds {
-                        min: Some(&min),
-                        max: Some(&max),
-                        min_inclusive: min_inc,
-                        max_inclusive: max_inc,
-                    },
-                );
-            }
+            return self.plan_range_filter(
+                &scan_variable,
+                &scan_label,
+                &property,
+                RangeBounds {
+                    min: Some(&min),
+                    max: Some(&max),
+                    min_inclusive: min_inc,
+                    max_inclusive: max_inc,
+                },
+            );
         }
 
         // Try to extract simple range predicate
         if let Some((variable, property, op, value)) =
             self.extract_range_predicate(&filter.predicate)
+            && variable == scan_variable
         {
-            if variable == scan_variable {
-                let (min, max, min_inc, max_inc) = match op {
-                    BinaryOp::Lt => (None, Some(value), false, false),
-                    BinaryOp::Le => (None, Some(value), false, true),
-                    BinaryOp::Gt => (Some(value), None, false, false),
-                    BinaryOp::Ge => (Some(value), None, true, false),
-                    _ => return Ok(None),
-                };
-                return self.plan_range_filter(
-                    &scan_variable,
-                    &scan_label,
-                    &property,
-                    RangeBounds {
-                        min: min.as_ref(),
-                        max: max.as_ref(),
-                        min_inclusive: min_inc,
-                        max_inclusive: max_inc,
-                    },
-                );
-            }
+            let (min, max, min_inc, max_inc) = match op {
+                BinaryOp::Lt => (None, Some(value), false, false),
+                BinaryOp::Le => (None, Some(value), false, true),
+                BinaryOp::Gt => (Some(value), None, false, false),
+                BinaryOp::Ge => (Some(value), None, true, false),
+                _ => return Ok(None),
+            };
+            return self.plan_range_filter(
+                &scan_variable,
+                &scan_label,
+                &property,
+                RangeBounds {
+                    min: min.as_ref(),
+                    max: max.as_ref(),
+                    min_inclusive: min_inc,
+                    max_inclusive: max_inc,
+                },
+            );
         }
 
         Ok(None)
@@ -1533,12 +1531,11 @@ impl Planner {
             && agg.group_by.is_empty()
             && Self::count_expand_chain(&agg.input).0 >= 2
             && self.is_simple_aggregate(agg)
+            && let Ok((op, cols)) = self.plan_factorized_aggregate(agg)
         {
-            if let Ok((op, cols)) = self.plan_factorized_aggregate(agg) {
-                return Ok((op, cols));
-            }
-            // Fall through to regular aggregate if factorized planning fails
+            return Ok((op, cols));
         }
+        // Fall through to regular aggregate if factorized planning fails
 
         let (mut input_op, input_columns) = self.plan_operator(&agg.input)?;
 
@@ -2227,18 +2224,17 @@ impl Planner {
                     if let (Some(left_var), Some(right_var)) = (
                         Self::extract_join_variable(&cond.left),
                         Self::extract_join_variable(&cond.right),
-                    ) {
-                        if left_var != right_var {
-                            vars.insert(left_var.clone());
-                            vars.insert(right_var.clone());
+                    ) && left_var != right_var
+                    {
+                        vars.insert(left_var.clone());
+                        vars.insert(right_var.clone());
 
-                            // Add bidirectional edge
-                            edges
-                                .entry(left_var.clone())
-                                .or_default()
-                                .push(right_var.clone());
-                            edges.entry(right_var).or_default().push(left_var);
-                        }
+                        // Add bidirectional edge
+                        edges
+                            .entry(left_var.clone())
+                            .or_default()
+                            .push(right_var.clone());
+                        edges.entry(right_var).or_default().push(left_var);
                     }
                 }
 
@@ -2296,10 +2292,8 @@ impl Planner {
         }
 
         for start in vars {
-            if color[start] == 0 {
-                if Self::dfs_cycle(start, None, edges, &mut color) {
-                    return true;
-                }
+            if color[start] == 0 && Self::dfs_cycle(start, None, edges, &mut color) {
+                return true;
             }
         }
 

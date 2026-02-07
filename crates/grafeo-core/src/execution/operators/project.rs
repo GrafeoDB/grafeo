@@ -93,9 +93,8 @@ impl ProjectOperator {
 impl Operator for ProjectOperator {
     fn next(&mut self) -> OperatorResult {
         // Get next chunk from child
-        let input = match self.child.next()? {
-            Some(c) => c,
-            None => return Ok(None),
+        let Some(input) = self.child.next()? else {
+            return Ok(None);
         };
 
         // Create output chunk

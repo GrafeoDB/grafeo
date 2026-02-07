@@ -73,10 +73,10 @@ impl ZoneMapEntry {
         }
 
         // Check Bloom filter first if available
-        if let Some(ref bloom) = self.bloom_filter {
-            if !bloom.might_contain(value) {
-                return false;
-            }
+        if let Some(ref bloom) = self.bloom_filter
+            && !bloom.might_contain(value)
+        {
+            return false;
         }
 
         // Check min/max bounds
@@ -142,17 +142,17 @@ impl ZoneMapEntry {
         upper_inclusive: bool,
     ) -> bool {
         // Check lower bound
-        if let Some(lower_val) = lower {
-            if !self.might_contain_greater_than(lower_val, lower_inclusive) {
-                return false;
-            }
+        if let Some(lower_val) = lower
+            && !self.might_contain_greater_than(lower_val, lower_inclusive)
+        {
+            return false;
         }
 
         // Check upper bound
-        if let Some(upper_val) = upper {
-            if !self.might_contain_less_than(upper_val, upper_inclusive) {
-                return false;
-            }
+        if let Some(upper_val) = upper
+            && !self.might_contain_less_than(upper_val, upper_inclusive)
+        {
+            return false;
         }
 
         true

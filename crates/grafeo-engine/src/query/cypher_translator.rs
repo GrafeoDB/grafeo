@@ -1128,15 +1128,16 @@ impl CypherTranslator {
                 // Special handling for length() on path variables
                 // When length(p) is called where p is a path alias, we convert it
                 // to a variable reference to the path length column
-                if name.to_lowercase() == "length" && args.len() == 1 {
-                    if let ast::Expression::Variable(var_name) = &args[0] {
-                        // Check if this looks like a path variable
-                        // Path lengths are stored in columns named _path_length_{alias}
-                        return Ok(LogicalExpression::Variable(format!(
-                            "_path_length_{}",
-                            var_name
-                        )));
-                    }
+                if name.to_lowercase() == "length"
+                    && args.len() == 1
+                    && let ast::Expression::Variable(var_name) = &args[0]
+                {
+                    // Check if this looks like a path variable
+                    // Path lengths are stored in columns named _path_length_{alias}
+                    return Ok(LogicalExpression::Variable(format!(
+                        "_path_length_{}",
+                        var_name
+                    )));
                 }
 
                 let translated_args: Vec<LogicalExpression> = args

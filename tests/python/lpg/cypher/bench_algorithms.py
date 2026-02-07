@@ -15,8 +15,9 @@ class BenchCypherAlgorithms(BaseBenchAlgorithms):
     Cypher is used for graph setup only.
     """
 
-    def setup_random_graph(self, db, n_nodes: int, n_edges: int,
-                           weighted: bool = True) -> dict:
+    def setup_random_graph(
+        self, db, n_nodes: int, n_edges: int, weighted: bool = True
+    ) -> dict:
         """Set up a random graph for benchmarking."""
         rng = random.Random(42)
 

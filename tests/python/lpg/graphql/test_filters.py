@@ -65,6 +65,7 @@ class TestGraphQLFilters(BaseFilterAndLookupTest):
         Note: GraphQL range filters may not be supported. Skip if not available.
         """
         import pytest
+
         try:
             result = self._execute_graphql(
                 db,

@@ -39,6 +39,11 @@ impl Transaction {
         query: String,
         params: Option<serde_json::Value>,
     ) -> Result<QueryResult> {
+        if self.committed || self.rolled_back {
+            return Err(
+                NodeGrafeoError::Transaction("Transaction is no longer active".into()).into(),
+            );
+        }
         let session_guard = self.session.lock();
         let session = session_guard.as_ref().ok_or_else(|| {
             napi::Error::from(NodeGrafeoError::Transaction(

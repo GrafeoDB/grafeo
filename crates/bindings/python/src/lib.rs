@@ -84,6 +84,7 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Add module-level functions
     m.add_function(wrap_pyfunction!(simd_support, m)?)?;
+    m.add_function(wrap_pyfunction!(types::vector, m)?)?;
 
     // Add version info
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

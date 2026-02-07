@@ -13,11 +13,11 @@ Tests cover:
 
 from abc import ABC, abstractmethod
 import pytest
-import random
 
 # Try to import networkx
 try:
     import networkx as nx
+
     NETWORKX_AVAILABLE = True
 except ImportError:
     NETWORKX_AVAILABLE = False
@@ -36,7 +36,9 @@ class BaseNetworkXComparisonTest(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def setup_random_graph(self, db, n_nodes: int, n_edges: int, weighted: bool = True, seed: int = 42) -> dict:
+    def setup_random_graph(
+        self, db, n_nodes: int, n_edges: int, weighted: bool = True, seed: int = 42
+    ) -> dict:
         """Set up a random graph.
 
         Args:
@@ -83,7 +85,9 @@ class BaseNetworkXComparisonTest(ABC):
         """Run degree centrality and return {node: centrality} dict."""
         raise NotImplementedError
 
-    def _build_networkx_graph(self, edges: list, directed: bool = True, weighted: bool = True):
+    def _build_networkx_graph(
+        self, edges: list, directed: bool = True, weighted: bool = True
+    ):
         """Build a NetworkX graph from edge list."""
         if directed:
             G = nx.DiGraph()
@@ -219,15 +223,13 @@ class BaseNetworkXComparisonTest(ABC):
     @pytest.mark.skipif(not NETWORKX_AVAILABLE, reason="NetworkX not installed")
     def test_pagerank_sum(self, db):
         """PageRank scores should sum to approximately 1.0."""
-        graph_info = self.setup_random_graph(db, 50, 200, weighted=False, seed=42)
+        self.setup_random_graph(db, 50, 200, weighted=False, seed=42)
 
         # Grafeo PageRank
         grafeo_pr = self.run_pagerank(db)
         pr_sum = sum(grafeo_pr.values())
 
-        assert abs(pr_sum - 1.0) < 0.01, (
-            f"PageRank sum should be ~1.0, got {pr_sum}"
-        )
+        assert abs(pr_sum - 1.0) < 0.01, f"PageRank sum should be ~1.0, got {pr_sum}"
 
     @pytest.mark.skipif(not NETWORKX_AVAILABLE, reason="NetworkX not installed")
     def test_degree_centrality_values(self, db):
@@ -267,7 +269,9 @@ class BaseNetworkXBenchmarkTest(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def setup_random_graph(self, db, n_nodes: int, n_edges: int, weighted: bool = True, seed: int = 42) -> dict:
+    def setup_random_graph(
+        self, db, n_nodes: int, n_edges: int, weighted: bool = True, seed: int = 42
+    ) -> dict:
         """Set up a random graph and return graph info."""
         raise NotImplementedError
 
@@ -306,7 +310,7 @@ class BaseNetworkXBenchmarkTest(ABC):
         nx.pagerank(G, alpha=0.85)
         nx_time = (time.perf_counter() - start) * 1000
 
-        print(f"\nPageRank (1000 nodes, 5000 edges):")
+        print("\nPageRank (1000 nodes, 5000 edges):")
         print(f"  Grafeo: {grafeo_time:.2f}ms")
         print(f"  NetworkX: {nx_time:.2f}ms")
         print(f"  Ratio: {grafeo_time / nx_time:.2f}x")
@@ -337,7 +341,7 @@ class BaseNetworkXBenchmarkTest(ABC):
         nx.single_source_dijkstra_path_length(G, source, weight="weight")
         nx_time = (time.perf_counter() - start) * 1000
 
-        print(f"\nDijkstra (1000 nodes, 5000 edges):")
+        print("\nDijkstra (1000 nodes, 5000 edges):")
         print(f"  Grafeo: {grafeo_time:.2f}ms")
         print(f"  NetworkX: {nx_time:.2f}ms")
         print(f"  Ratio: {grafeo_time / nx_time:.2f}x")
@@ -368,7 +372,7 @@ class BaseNetworkXBenchmarkTest(ABC):
         list(nx.bfs_tree(G, start_node).nodes())
         nx_time = (time.perf_counter() - start) * 1000
 
-        print(f"\nBFS (1000 nodes, 5000 edges):")
+        print("\nBFS (1000 nodes, 5000 edges):")
         print(f"  Grafeo: {grafeo_time:.2f}ms")
         print(f"  NetworkX: {nx_time:.2f}ms")
         print(f"  Ratio: {grafeo_time / nx_time:.2f}x")

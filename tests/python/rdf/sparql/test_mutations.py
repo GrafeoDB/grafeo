@@ -8,14 +8,14 @@ import pytest
 
 # Try to import grafeo
 try:
-    from grafeo import GrafeoDB
+    from grafeo import GrafeoDB  # noqa: F401
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
 
 pytestmark = pytest.mark.skipif(
-    not GRAFEO_AVAILABLE,
-    reason="Grafeo Python bindings not installed"
+    not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"
 )
 
 
@@ -37,11 +37,13 @@ class TestSPARQLMutations:
         db.execute_sparql(query)
 
         # Verify the triple was inserted
-        result = list(db.execute_sparql("""
+        result = list(
+            db.execute_sparql("""
             SELECT ?name WHERE {
                 <http://example.org/alice> <http://example.org/name> ?name .
             }
-        """))
+        """)
+        )
         assert len(result) > 0
 
     def test_insert_data_multiple_triples(self, db):
@@ -56,11 +58,13 @@ class TestSPARQLMutations:
         db.execute_sparql(query)
 
         # Verify triples were inserted
-        result = list(db.execute_sparql("""
+        result = list(
+            db.execute_sparql("""
             SELECT ?p ?o WHERE {
                 <http://example.org/alice> ?p ?o .
             }
-        """))
+        """)
+        )
         assert len(result) >= 3
 
     def test_delete_data_single_triple(self, db):
@@ -80,11 +84,13 @@ class TestSPARQLMutations:
         """)
 
         # Verify deletion
-        result = list(db.execute_sparql("""
+        result = list(
+            db.execute_sparql("""
             SELECT ?name WHERE {
                 <http://example.org/bob> <http://example.org/name> ?name .
             }
-        """))
+        """)
+        )
         assert len(result) == 0
 
     def test_delete_where(self, db):
@@ -106,11 +112,13 @@ class TestSPARQLMutations:
         """)
 
         # Verify only permanent item remains
-        result = list(db.execute_sparql("""
+        result = list(
+            db.execute_sparql("""
             SELECT ?s WHERE {
                 ?s <http://example.org/status> ?status .
             }
-        """))
+        """)
+        )
         assert len(result) == 1
 
     def test_modify_delete_insert(self, db):
@@ -130,11 +138,13 @@ class TestSPARQLMutations:
         """)
 
         # Verify version was updated
-        result = list(db.execute_sparql("""
+        result = list(
+            db.execute_sparql("""
             SELECT ?v WHERE {
                 <http://example.org/item> <http://example.org/version> ?v .
             }
-        """))
+        """)
+        )
         assert len(result) == 1
         # Version should be 2 now
 
@@ -172,7 +182,9 @@ class TestSPARQLGraphManagement:
         db.execute_sparql("CLEAR DEFAULT")
 
         # Verify data is gone
-        result = list(db.execute_sparql("""
+        result = list(
+            db.execute_sparql("""
             SELECT ?s WHERE { ?s ?p ?o }
-        """))
+        """)
+        )
         assert len(result) == 0

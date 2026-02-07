@@ -12,12 +12,12 @@ This module provides various graph generators for testing and benchmarking:
 import random
 import string
 from dataclasses import dataclass
-from typing import Iterator
 
 
 @dataclass
 class NodeData:
     """Represents a node to be inserted."""
+
     labels: list[str]
     properties: dict
 
@@ -25,6 +25,7 @@ class NodeData:
 @dataclass
 class EdgeData:
     """Represents an edge to be inserted."""
+
     source_idx: int  # Index in the node list
     target_idx: int
     edge_type: str
@@ -41,15 +42,42 @@ class SyntheticDataGenerator:
 
     def random_string(self, length: int = 10) -> str:
         """Generate a random string."""
-        return ''.join(self.rng.choices(string.ascii_lowercase, k=length))
+        return "".join(self.rng.choices(string.ascii_lowercase, k=length))
 
     def random_name(self) -> str:
         """Generate a random name."""
-        first_names = ["Alice", "Bob", "Charlie", "Diana", "Eve", "Frank",
-                       "Grace", "Henry", "Ivy", "Jack", "Kate", "Leo",
-                       "Mia", "Noah", "Olivia", "Peter", "Quinn", "Rose"]
-        last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones",
-                      "Garcia", "Miller", "Davis", "Rodriguez", "Martinez"]
+        first_names = [
+            "Alice",
+            "Bob",
+            "Charlie",
+            "Diana",
+            "Eve",
+            "Frank",
+            "Grace",
+            "Henry",
+            "Ivy",
+            "Jack",
+            "Kate",
+            "Leo",
+            "Mia",
+            "Noah",
+            "Olivia",
+            "Peter",
+            "Quinn",
+            "Rose",
+        ]
+        last_names = [
+            "Smith",
+            "Johnson",
+            "Williams",
+            "Brown",
+            "Jones",
+            "Garcia",
+            "Miller",
+            "Davis",
+            "Rodriguez",
+            "Martinez",
+        ]
         return f"{self.rng.choice(first_names)} {self.rng.choice(last_names)}"
 
     def generate(self) -> tuple[list[NodeData], list[EdgeData]]:
@@ -78,22 +106,32 @@ class SocialNetworkGenerator(SyntheticDataGenerator):
         """Generate the social network."""
         # Generate Person nodes
         for i in range(self.num_nodes):
-            self.nodes.append(NodeData(
-                labels=["Person"],
-                properties={
-                    "name": self.random_name(),
-                    "age": self.rng.randint(18, 80),
-                    "city": self.rng.choice(["NYC", "LA", "Chicago", "Houston", "Phoenix"]),
-                    "email": f"user{i}@example.com",
-                }
-            ))
+            self.nodes.append(
+                NodeData(
+                    labels=["Person"],
+                    properties={
+                        "name": self.random_name(),
+                        "age": self.rng.randint(18, 80),
+                        "city": self.rng.choice(
+                            ["NYC", "LA", "Chicago", "Houston", "Phoenix"]
+                        ),
+                        "email": f"user{i}@example.com",
+                    },
+                )
+            )
 
         # Generate KNOWS edges using preferential attachment
         # Start with a small connected component
         if self.num_nodes >= 3:
-            self.edges.append(EdgeData(0, 1, "KNOWS", {"since": self.rng.randint(2010, 2024)}))
-            self.edges.append(EdgeData(1, 2, "KNOWS", {"since": self.rng.randint(2010, 2024)}))
-            self.edges.append(EdgeData(2, 0, "KNOWS", {"since": self.rng.randint(2010, 2024)}))
+            self.edges.append(
+                EdgeData(0, 1, "KNOWS", {"since": self.rng.randint(2010, 2024)})
+            )
+            self.edges.append(
+                EdgeData(1, 2, "KNOWS", {"since": self.rng.randint(2010, 2024)})
+            )
+            self.edges.append(
+                EdgeData(2, 0, "KNOWS", {"since": self.rng.randint(2010, 2024)})
+            )
 
         # Track degrees for preferential attachment
         degrees = [0] * self.num_nodes
@@ -125,10 +163,9 @@ class SocialNetworkGenerator(SyntheticDataGenerator):
 
             # Avoid self-loops and duplicates
             if src != dst and (src, dst) not in existing_edges:
-                self.edges.append(EdgeData(
-                    src, dst, "KNOWS",
-                    {"since": self.rng.randint(2010, 2024)}
-                ))
+                self.edges.append(
+                    EdgeData(src, dst, "KNOWS", {"since": self.rng.randint(2010, 2024)})
+                )
                 existing_edges.add((src, dst))
                 existing_edges.add((dst, src))
                 degrees[src] += 1
@@ -160,57 +197,91 @@ class LDBCLikeGenerator(SyntheticDataGenerator):
     def generate(self) -> tuple[list[NodeData], list[EdgeData]]:
         """Generate the LDBC-like dataset."""
         # Generate Cities
-        cities = ["New York", "San Francisco", "London", "Berlin", "Tokyo",
-                  "Sydney", "Toronto", "Paris", "Amsterdam", "Singapore",
-                  "Seattle", "Boston", "Austin", "Denver", "Miami",
-                  "Chicago", "Atlanta", "Portland", "Dublin", "Munich"]
+        cities = [
+            "New York",
+            "San Francisco",
+            "London",
+            "Berlin",
+            "Tokyo",
+            "Sydney",
+            "Toronto",
+            "Paris",
+            "Amsterdam",
+            "Singapore",
+            "Seattle",
+            "Boston",
+            "Austin",
+            "Denver",
+            "Miami",
+            "Chicago",
+            "Atlanta",
+            "Portland",
+            "Dublin",
+            "Munich",
+        ]
         for i in range(self.num_cities):
             city_name = cities[i % len(cities)]
             if i >= len(cities):
                 city_name = f"{city_name} {i // len(cities) + 1}"
-            self.nodes.append(NodeData(
-                labels=["City"],
-                properties={
-                    "name": city_name,
-                    "country": self.rng.choice(["USA", "UK", "Germany", "Japan", "Australia"]),
-                }
-            ))
+            self.nodes.append(
+                NodeData(
+                    labels=["City"],
+                    properties={
+                        "name": city_name,
+                        "country": self.rng.choice(
+                            ["USA", "UK", "Germany", "Japan", "Australia"]
+                        ),
+                    },
+                )
+            )
 
         # Generate Universities
-        uni_prefixes = ["University of", "Technical University", "MIT", "Stanford", "Harvard"]
+        uni_prefixes = [
+            "University of",
+            "Technical University",
+            "MIT",
+            "Stanford",
+            "Harvard",
+        ]
         for i in range(self.num_universities):
-            self.nodes.append(NodeData(
-                labels=["University"],
-                properties={
-                    "name": f"{self.rng.choice(uni_prefixes)} {self.random_string(6).title()}",
-                    "founded": self.rng.randint(1800, 2000),
-                }
-            ))
+            self.nodes.append(
+                NodeData(
+                    labels=["University"],
+                    properties={
+                        "name": f"{self.rng.choice(uni_prefixes)} {self.random_string(6).title()}",
+                        "founded": self.rng.randint(1800, 2000),
+                    },
+                )
+            )
 
         # Generate Companies
         company_types = ["Inc", "Corp", "LLC", "Ltd", "GmbH"]
         industries = ["Technology", "Finance", "Healthcare", "Manufacturing", "Retail"]
         for i in range(self.num_companies):
-            self.nodes.append(NodeData(
-                labels=["Company"],
-                properties={
-                    "name": f"{self.random_string(8).title()} {self.rng.choice(company_types)}",
-                    "industry": self.rng.choice(industries),
-                    "founded": self.rng.randint(1950, 2020),
-                }
-            ))
+            self.nodes.append(
+                NodeData(
+                    labels=["Company"],
+                    properties={
+                        "name": f"{self.random_string(8).title()} {self.rng.choice(company_types)}",
+                        "industry": self.rng.choice(industries),
+                        "founded": self.rng.randint(1950, 2020),
+                    },
+                )
+            )
 
         # Generate Persons
         for i in range(self.num_persons):
-            self.nodes.append(NodeData(
-                labels=["Person"],
-                properties={
-                    "name": self.random_name(),
-                    "age": self.rng.randint(18, 80),
-                    "email": f"user{i}@example.com",
-                    "joined": self.rng.randint(2010, 2024),
-                }
-            ))
+            self.nodes.append(
+                NodeData(
+                    labels=["Person"],
+                    properties={
+                        "name": self.random_name(),
+                        "age": self.rng.randint(18, 80),
+                        "email": f"user{i}@example.com",
+                        "joined": self.rng.randint(2010, 2024),
+                    },
+                )
+            )
 
         # Calculate base indices
         # Cities: 0..num_cities
@@ -230,21 +301,35 @@ class LDBCLikeGenerator(SyntheticDataGenerator):
         for i in range(self.num_persons):
             if self.rng.random() < 0.7:
                 person_idx = person_base + i
-                company_idx = self.num_cities + self.num_universities + self.rng.randint(0, self.num_companies - 1)
-                self.edges.append(EdgeData(
-                    person_idx, company_idx, "WORKS_AT",
-                    {"since": self.rng.randint(2010, 2024)}
-                ))
+                company_idx = (
+                    self.num_cities
+                    + self.num_universities
+                    + self.rng.randint(0, self.num_companies - 1)
+                )
+                self.edges.append(
+                    EdgeData(
+                        person_idx,
+                        company_idx,
+                        "WORKS_AT",
+                        {"since": self.rng.randint(2010, 2024)},
+                    )
+                )
 
         # Person -[STUDIED_AT]-> University (60% of persons studied)
         for i in range(self.num_persons):
             if self.rng.random() < 0.6:
                 person_idx = person_base + i
-                uni_idx = self.num_cities + self.rng.randint(0, self.num_universities - 1)
-                self.edges.append(EdgeData(
-                    person_idx, uni_idx, "STUDIED_AT",
-                    {"year": self.rng.randint(1990, 2020)}
-                ))
+                uni_idx = self.num_cities + self.rng.randint(
+                    0, self.num_universities - 1
+                )
+                self.edges.append(
+                    EdgeData(
+                        person_idx,
+                        uni_idx,
+                        "STUDIED_AT",
+                        {"year": self.rng.randint(1990, 2020)},
+                    )
+                )
 
         # Person -[KNOWS]-> Person (social connections)
         existing_knows = set()
@@ -254,10 +339,14 @@ class LDBCLikeGenerator(SyntheticDataGenerator):
             src = self.rng.randint(0, self.num_persons - 1)
             dst = self.rng.randint(0, self.num_persons - 1)
             if src != dst and (src, dst) not in existing_knows:
-                self.edges.append(EdgeData(
-                    person_base + src, person_base + dst, "KNOWS",
-                    {"since": self.rng.randint(2010, 2024)}
-                ))
+                self.edges.append(
+                    EdgeData(
+                        person_base + src,
+                        person_base + dst,
+                        "KNOWS",
+                        {"since": self.rng.randint(2010, 2024)},
+                    )
+                )
                 existing_knows.add((src, dst))
 
         # Company -[LOCATED_IN]-> City
@@ -296,13 +385,15 @@ class RandomGraphGenerator(SyntheticDataGenerator):
         """Generate the random graph."""
         # Generate nodes
         for i in range(self.num_nodes):
-            self.nodes.append(NodeData(
-                labels=["Node"],
-                properties={
-                    "id": i,
-                    "value": self.rng.random(),
-                }
-            ))
+            self.nodes.append(
+                NodeData(
+                    labels=["Node"],
+                    properties={
+                        "id": i,
+                        "value": self.rng.random(),
+                    },
+                )
+            )
 
         # Generate edges with probability p
         for i in range(self.num_nodes):
@@ -333,10 +424,11 @@ class TreeGenerator(SyntheticDataGenerator):
     def generate(self) -> tuple[list[NodeData], list[EdgeData]]:
         """Generate the tree."""
         # Generate root
-        self.nodes.append(NodeData(
-            labels=["TreeNode", "Root"],
-            properties={"level": 0, "name": "root"}
-        ))
+        self.nodes.append(
+            NodeData(
+                labels=["TreeNode", "Root"], properties={"level": 0, "name": "root"}
+            )
+        )
 
         # BFS to generate tree
         current_level = [0]
@@ -345,10 +437,12 @@ class TreeGenerator(SyntheticDataGenerator):
             for parent_idx in current_level:
                 for _ in range(self.branching_factor):
                     child_idx = len(self.nodes)
-                    self.nodes.append(NodeData(
-                        labels=["TreeNode"],
-                        properties={"level": level, "name": f"node_{child_idx}"}
-                    ))
+                    self.nodes.append(
+                        NodeData(
+                            labels=["TreeNode"],
+                            properties={"level": level, "name": f"node_{child_idx}"},
+                        )
+                    )
                     self.edges.append(EdgeData(parent_idx, child_idx, "PARENT_OF", {}))
                     next_level.append(child_idx)
             current_level = next_level
@@ -386,17 +480,19 @@ class CliqueGenerator(SyntheticDataGenerator):
 
             # Generate nodes in clique
             for i in range(self.clique_size):
-                self.nodes.append(NodeData(
-                    labels=["Node", f"Clique{c}"],
-                    properties={"clique": c, "local_id": i}
-                ))
+                self.nodes.append(
+                    NodeData(
+                        labels=["Node", f"Clique{c}"],
+                        properties={"clique": c, "local_id": i},
+                    )
+                )
 
             # Generate all edges within clique (complete graph)
             for i in range(self.clique_size):
                 for j in range(i + 1, self.clique_size):
-                    self.edges.append(EdgeData(
-                        start_idx + i, start_idx + j, "CONNECTED", {}
-                    ))
+                    self.edges.append(
+                        EdgeData(start_idx + i, start_idx + j, "CONNECTED", {})
+                    )
 
         # Generate inter-clique edges
         for _ in range(self.inter_clique_edges * self.num_cliques):

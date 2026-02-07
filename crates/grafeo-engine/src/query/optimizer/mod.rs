@@ -71,6 +71,24 @@ impl Optimizer {
         }
     }
 
+    /// Creates an optimizer with cardinality estimates from the store's statistics.
+    ///
+    /// Pre-populates the cardinality estimator with per-label row counts and
+    /// edge type fanout. Ensures statistics are fresh before reading.
+    #[must_use]
+    pub fn from_store(store: &grafeo_core::graph::lpg::LpgStore) -> Self {
+        store.ensure_statistics_fresh();
+        let stats = store.statistics();
+        let estimator = CardinalityEstimator::from_statistics(&stats);
+        Self {
+            enable_filter_pushdown: true,
+            enable_join_reorder: true,
+            enable_projection_pushdown: true,
+            cost_model: CostModel::new(),
+            card_estimator: estimator,
+        }
+    }
+
     /// Enables or disables filter pushdown.
     pub fn with_filter_pushdown(mut self, enabled: bool) -> Self {
         self.enable_filter_pushdown = enabled;

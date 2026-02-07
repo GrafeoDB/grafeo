@@ -43,8 +43,9 @@ class BenchCypherStorage(BaseBenchStorage):
         val = f"'{value}'" if isinstance(value, str) else value
         return f"MATCH (n:{label}) WHERE n.{prop} = {val} RETURN n"
 
-    def one_hop_query(self, from_label: str, rel_type: str, to_label: str,
-                      limit: int = None) -> str:
+    def one_hop_query(
+        self, from_label: str, rel_type: str, to_label: str, limit: int = None
+    ) -> str:
         """Cypher 1-hop traversal query."""
         query = f"MATCH (a:{from_label})-[:{rel_type}]->(b:{to_label}) RETURN a, b"
         if limit:
@@ -65,13 +66,13 @@ class BenchCypherStorage(BaseBenchStorage):
             f"RETURN n.{group_prop}, count(n) AS cnt, avg(n.{agg_prop}) AS avg_val"
         )
 
-    def sort_query(self, label: str, sort_prop: str, desc: bool = False,
-                   limit: int = 100) -> str:
+    def sort_query(
+        self, label: str, sort_prop: str, desc: bool = False, limit: int = 100
+    ) -> str:
         """Cypher sort query."""
         order = "DESC" if desc else "ASC"
         return (
-            f"MATCH (n:{label}) "
-            f"RETURN n ORDER BY n.{sort_prop} {order} LIMIT {limit}"
+            f"MATCH (n:{label}) RETURN n ORDER BY n.{sort_prop} {order} LIMIT {limit}"
         )
 
     def triangle_query(self, label: str, rel_type: str) -> str:
@@ -89,12 +90,15 @@ class BenchCypherStorage(BaseBenchStorage):
 
         node_ids = []
         for i in range(num_nodes):
-            node = db.create_node(["Person"], {
-                "name": f"Person{i}",
-                "age": 20 + rng.randint(0, 50),
-                "city": rng.choice(cities),
-                "email": f"user{i}@example.com",
-            })
+            node = db.create_node(
+                ["Person"],
+                {
+                    "name": f"Person{i}",
+                    "age": 20 + rng.randint(0, 50),
+                    "city": rng.choice(cities),
+                    "email": f"user{i}@example.com",
+                },
+            )
             node_ids.append(node.id)
 
         target_edges = num_nodes * avg_edges
@@ -121,6 +125,6 @@ class BenchCypherStorage(BaseBenchStorage):
                 node_ids.append(node.id)
 
             for i, src in enumerate(node_ids):
-                for dst in node_ids[i + 1:]:
+                for dst in node_ids[i + 1 :]:
                     db.create_edge(src, dst, "CONNECTED", {})
                     db.create_edge(dst, src, "CONNECTED", {})

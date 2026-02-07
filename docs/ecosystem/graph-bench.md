@@ -12,7 +12,7 @@ graph-bench provides standardized, reproducible performance testing across multi
 
 | Type | Databases |
 |------|-----------|
-| **Embedded** | Grafeo (GQL), LadybugDB (Cypher), DuckDB (SQL/PGQ) |
+| **Embedded** | Grafeo (GQL), LadybugDB (Cypher) |
 | **Server** | Neo4j, Memgraph, ArangoDB, FalkorDB, NebulaGraph |
 
 ## Benchmark Categories

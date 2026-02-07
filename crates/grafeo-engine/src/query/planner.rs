@@ -238,9 +238,10 @@ impl Planner {
                 self.collect_cardinality_estimates(&filter.input, ctx, depth + 1);
             }
             LogicalOperator::Expand(expand) => {
-                // Estimate based on average degree
+                // Estimate based on average degree from store statistics
                 let input_estimate = self.estimate_cardinality(&expand.input);
-                let avg_degree = 10.0; // Default estimate
+                let stats = self.store.statistics();
+                let avg_degree = self.estimate_expand_degree(&stats, expand);
                 let estimate = input_estimate * avg_degree;
                 let id = format!("expand_{}", expand.to_variable);
                 ctx.set_estimate(&id, estimate);
@@ -332,7 +333,11 @@ impl Planner {
                 }
             }
             LogicalOperator::Filter(filter) => self.estimate_cardinality(&filter.input) * 0.3,
-            LogicalOperator::Expand(expand) => self.estimate_cardinality(&expand.input) * 10.0,
+            LogicalOperator::Expand(expand) => {
+                let stats = self.store.statistics();
+                let avg_degree = self.estimate_expand_degree(&stats, expand);
+                self.estimate_cardinality(&expand.input) * avg_degree
+            }
             LogicalOperator::Join(join) => {
                 let left = self.estimate_cardinality(&join.left);
                 let right = self.estimate_cardinality(&join.right);
@@ -362,6 +367,22 @@ impl Planner {
                 .map(|input| self.estimate_cardinality(input))
                 .sum(),
             _ => 1000.0, // Default estimate for unknown operators
+        }
+    }
+
+    /// Estimates the average edge degree for an expand operation using store statistics.
+    fn estimate_expand_degree(
+        &self,
+        stats: &grafeo_core::statistics::Statistics,
+        expand: &ExpandOp,
+    ) -> f64 {
+        let outgoing = !matches!(expand.direction, ExpandDirection::Incoming);
+        if let Some(edge_type) = &expand.edge_type {
+            stats.estimate_avg_degree(edge_type, outgoing)
+        } else if stats.total_nodes > 0 {
+            (stats.total_edges as f64 / stats.total_nodes as f64).max(1.0)
+        } else {
+            10.0 // fallback for empty graph
         }
     }
 
@@ -2391,14 +2412,14 @@ impl Planner {
         let output_column = columns.len();
         columns.push(create.variable.clone());
 
-        // Convert properties
+        // Convert properties (with constant-folding for lists and function calls)
         let properties: Vec<(String, PropertySource)> = create
             .properties
             .iter()
             .map(|(name, expr)| {
-                let source = match expr {
-                    LogicalExpression::Literal(v) => PropertySource::Constant(v.clone()),
-                    _ => PropertySource::Constant(grafeo_common::types::Value::Null),
+                let source = match Self::try_fold_expression(expr) {
+                    Some(value) => PropertySource::Constant(value),
+                    None => PropertySource::Constant(grafeo_common::types::Value::Null),
                 };
                 (name.clone(), source)
             })
@@ -2453,14 +2474,14 @@ impl Planner {
             idx
         });
 
-        // Convert properties
+        // Convert properties (with constant-folding for function calls like vector())
         let properties: Vec<(String, PropertySource)> = create
             .properties
             .iter()
             .map(|(name, expr)| {
-                let source = match expr {
-                    LogicalExpression::Literal(v) => PropertySource::Constant(v.clone()),
-                    _ => PropertySource::Constant(grafeo_common::types::Value::Null),
+                let source = match Self::try_fold_expression(expr) {
+                    Some(value) => PropertySource::Constant(value),
+                    None => PropertySource::Constant(grafeo_common::types::Value::Null),
                 };
                 (name.clone(), source)
             })
@@ -2935,10 +2956,82 @@ impl Planner {
                     grafeo_common::types::Value::String(format!("${}", name).into()),
                 ))
             }
-            _ => Err(Error::Internal(format!(
-                "Unsupported expression type for property source: {:?}",
-                expr
-            ))),
+            _ => {
+                if let Some(value) = Self::try_fold_expression(expr) {
+                    Ok(PropertySource::Constant(value))
+                } else {
+                    Err(Error::Internal(format!(
+                        "Unsupported expression type for property source: {:?}",
+                        expr
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Tries to evaluate a constant expression at plan time.
+    ///
+    /// Recursively folds literals, lists, and known function calls (like `vector()`)
+    /// into concrete values. Returns `None` if the expression contains non-constant
+    /// parts (variables, property accesses, etc.).
+    fn try_fold_expression(expr: &LogicalExpression) -> Option<Value> {
+        match expr {
+            LogicalExpression::Literal(v) => Some(v.clone()),
+            LogicalExpression::List(items) => {
+                let values: Option<Vec<Value>> =
+                    items.iter().map(Self::try_fold_expression).collect();
+                let values = values?;
+                // All-numeric lists become vectors (matches Python list[float] behavior)
+                let all_numeric = !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| matches!(v, Value::Float64(_) | Value::Int64(_)));
+                if all_numeric {
+                    let floats: Vec<f32> = values
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::Float64(f) => Some(*f as f32),
+                            Value::Int64(i) => Some(*i as f32),
+                            _ => None,
+                        })
+                        .collect();
+                    Some(Value::Vector(floats.into()))
+                } else {
+                    Some(Value::List(values.into()))
+                }
+            }
+            LogicalExpression::FunctionCall { name, args, .. } => {
+                match name.to_lowercase().as_str() {
+                    "vector" => {
+                        if args.len() != 1 {
+                            return None;
+                        }
+                        let val = Self::try_fold_expression(&args[0])?;
+                        match val {
+                            Value::List(items) => {
+                                let floats: Vec<f32> = items
+                                    .iter()
+                                    .filter_map(|v| match v {
+                                        Value::Float64(f) => Some(*f as f32),
+                                        Value::Int64(i) => Some(*i as f32),
+                                        _ => None,
+                                    })
+                                    .collect();
+                                if floats.len() == items.len() {
+                                    Some(Value::Vector(floats.into()))
+                                } else {
+                                    None
+                                }
+                            }
+                            // Already a vector (from all-numeric list folding)
+                            Value::Vector(v) => Some(Value::Vector(v)),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 }
@@ -3032,7 +3125,7 @@ pub fn convert_filter_expression(expr: &LogicalExpression) -> Result<FilterExpre
         LogicalExpression::FunctionCall { name, args, .. } => {
             let filter_args: Vec<FilterExpression> = args
                 .iter()
-                .map(|a| convert_filter_expression(a))
+                .map(convert_filter_expression)
                 .collect::<Result<Vec<_>>>()?;
             Ok(FilterExpression::FunctionCall {
                 name: name.clone(),
@@ -3072,7 +3165,7 @@ pub fn convert_filter_expression(expr: &LogicalExpression) -> Result<FilterExpre
         LogicalExpression::List(items) => {
             let filter_items: Vec<FilterExpression> = items
                 .iter()
-                .map(|item| convert_filter_expression(item))
+                .map(convert_filter_expression)
                 .collect::<Result<Vec<_>>>()?;
             Ok(FilterExpression::List(filter_items))
         }

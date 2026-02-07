@@ -21,7 +21,7 @@ impl<'a> Parser<'a> {
         let previous = Token {
             kind: TokenKind::Eof,
             text: String::new(),
-            span: current.span.clone(),
+            span: current.span,
         };
         Self {
             lexer,
@@ -1209,7 +1209,7 @@ impl<'a> Parser<'a> {
 
     fn error(&self, message: &str) -> grafeo_common::utils::error::Error {
         QueryError::new(QueryErrorKind::Syntax, message)
-            .with_span(self.current.span.clone())
+            .with_span(self.current.span)
             .into()
     }
 }

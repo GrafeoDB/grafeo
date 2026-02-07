@@ -69,6 +69,21 @@ pub struct HnswConfig {
     /// Controls the probability distribution of node levels.
     /// Computed automatically from M.
     pub ml: f64,
+
+    /// Relaxation parameter for diversity-aware neighbor selection.
+    ///
+    /// Controls how aggressively the heuristic prunes neighbors that are
+    /// "covered" by already-selected neighbors. Based on the Vamana/DiskANN
+    /// algorithm's robust pruning.
+    ///
+    /// - **1.0** (default): Standard HNSW heuristic. A candidate is rejected
+    ///   if any selected neighbor is closer to it than the query is.
+    /// - **>1.0** (e.g., 1.2): Relaxed - allows some longer-range edges to
+    ///   survive, improving navigability and recall at the cost of slightly
+    ///   more edges.
+    ///
+    /// Typical values: 1.0-1.4.
+    pub alpha: f32,
 }
 
 impl HnswConfig {
@@ -86,6 +101,7 @@ impl HnswConfig {
             ef_construction: 128,
             ef: 50,
             ml: 1.0 / (m as f64).ln(),
+            alpha: 1.0,
         }
     }
 
@@ -104,6 +120,7 @@ impl HnswConfig {
             ef_construction: 256,
             ef: 100,
             ml: 1.0 / (m as f64).ln(),
+            alpha: 1.2,
         }
     }
 
@@ -121,6 +138,7 @@ impl HnswConfig {
             ef_construction: 100,
             ef: 32,
             ml: 1.0 / (m as f64).ln(),
+            alpha: 1.0,
         }
     }
 
@@ -151,6 +169,16 @@ impl HnswConfig {
     #[must_use]
     pub fn with_ef(mut self, ef: usize) -> Self {
         self.ef = ef;
+        self
+    }
+
+    /// Sets the diversity pruning relaxation parameter (alpha).
+    ///
+    /// - 1.0: Standard HNSW heuristic (default)
+    /// - >1.0: Relaxed pruning, more long-range edges, better recall
+    #[must_use]
+    pub fn with_alpha(mut self, alpha: f32) -> Self {
+        self.alpha = alpha;
         self
     }
 

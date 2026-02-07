@@ -35,41 +35,50 @@ impl BufferManagerConfig {
     /// Returns a conservative estimate if detection fails.
     #[must_use]
     pub fn detect_system_memory() -> usize {
-        // Try to detect system memory
-        // On failure, return a conservative 1GB default
-        #[cfg(target_os = "windows")]
+        // Under Miri, file I/O is blocked by isolation — use fallback directly
+        #[cfg(miri)]
         {
-            // Windows: Use GetPhysicallyInstalledSystemMemory or GlobalMemoryStatusEx
-            // For now, use a fallback
-            Self::fallback_system_memory()
+            return Self::fallback_system_memory();
         }
 
-        #[cfg(target_os = "linux")]
+        // Try to detect system memory
+        // On failure, return a conservative 1GB default
+        #[cfg(not(miri))]
         {
-            // Linux: Read from /proc/meminfo
-            if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
-                for line in contents.lines() {
-                    if line.starts_with("MemTotal:") {
-                        if let Some(kb_str) = line.split_whitespace().nth(1) {
-                            if let Ok(kb) = kb_str.parse::<usize>() {
-                                return kb * 1024;
+            #[cfg(target_os = "windows")]
+            {
+                // Windows: Use GetPhysicallyInstalledSystemMemory or GlobalMemoryStatusEx
+                // For now, use a fallback
+                Self::fallback_system_memory()
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                // Linux: Read from /proc/meminfo
+                if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
+                    for line in contents.lines() {
+                        if line.starts_with("MemTotal:") {
+                            if let Some(kb_str) = line.split_whitespace().nth(1) {
+                                if let Ok(kb) = kb_str.parse::<usize>() {
+                                    return kb * 1024;
+                                }
                             }
                         }
                     }
                 }
+                Self::fallback_system_memory()
             }
-            Self::fallback_system_memory()
-        }
 
-        #[cfg(target_os = "macos")]
-        {
-            // macOS: Use sysctl
-            Self::fallback_system_memory()
-        }
+            #[cfg(target_os = "macos")]
+            {
+                // macOS: Use sysctl
+                Self::fallback_system_memory()
+            }
 
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        {
-            Self::fallback_system_memory()
+            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+            {
+                Self::fallback_system_memory()
+            }
         }
     }
 

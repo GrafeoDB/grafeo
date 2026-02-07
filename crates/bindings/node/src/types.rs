@@ -175,21 +175,3 @@ pub fn value_to_js(env: &Env, value: &Value) -> Result<JsUnknown> {
         }
     }
 }
-
-/// Converts a JavaScript object to a HashMap<String, Value> for use as query parameters.
-#[allow(dead_code, clippy::trivially_copy_pass_by_ref)]
-pub fn js_object_to_params(
-    env: &Env,
-    obj: &JsObject,
-) -> Result<std::collections::HashMap<String, Value>> {
-    let keys = obj.get_property_names()?;
-    let len = keys.get_array_length()?;
-    let mut map = std::collections::HashMap::with_capacity(len as usize);
-    for i in 0..len {
-        let key: JsString = keys.get_element(i)?;
-        let key_str = key.into_utf8()?.into_owned()?;
-        let value: JsUnknown = obj.get_named_property(&key_str)?;
-        map.insert(key_str, js_to_value(env, value)?);
-    }
-    Ok(map)
-}

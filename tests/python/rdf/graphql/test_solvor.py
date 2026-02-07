@@ -17,14 +17,14 @@ from tests.python.bases.test_solvor import (
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
 
 
 pytestmark = pytest.mark.skipif(
-    not GRAFEO_AVAILABLE,
-    reason="Grafeo Python bindings not installed"
+    not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"
 )
 
 
@@ -45,17 +45,18 @@ class TestRDFGraphQLSolvORComparison(BaseSolvORComparisonTest):
         """Create a fresh database instance."""
         return GrafeoDB()
 
-    def setup_flow_network(self, db, n_nodes: int, n_edges: int,
-                           seed: int = 42) -> dict:
+    def setup_flow_network(
+        self, db, n_nodes: int, n_edges: int, seed: int = 42
+    ) -> dict:
         """Set up a flow network using Python API with RDF-style nodes."""
         rng = random.Random(seed)
 
         node_ids = []
         for i in range(n_nodes):
-            node = db.create_node(["Resource", "Node"], {
-                "uri": f"http://example.org/node/{i}",
-                "index": i
-            })
+            node = db.create_node(
+                ["Resource", "Node"],
+                {"uri": f"http://example.org/node/{i}", "index": i},
+            )
             node_ids.append(node.id)
 
         source = node_ids[0]
@@ -101,17 +102,18 @@ class TestRDFGraphQLSolvORBenchmark(BaseSolvORBenchmarkTest):
         """Create a fresh database instance."""
         return GrafeoDB()
 
-    def setup_flow_network(self, db, n_nodes: int, n_edges: int,
-                           seed: int = 42) -> dict:
+    def setup_flow_network(
+        self, db, n_nodes: int, n_edges: int, seed: int = 42
+    ) -> dict:
         """Set up a flow network using Python API with RDF-style nodes."""
         rng = random.Random(seed)
 
         node_ids = []
         for i in range(n_nodes):
-            node = db.create_node(["Resource", "Node"], {
-                "uri": f"http://example.org/node/{i}",
-                "index": i
-            })
+            node = db.create_node(
+                ["Resource", "Node"],
+                {"uri": f"http://example.org/node/{i}", "index": i},
+            )
             node_ids.append(node.id)
 
         source = node_ids[0]

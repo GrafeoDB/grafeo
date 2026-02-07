@@ -15,6 +15,7 @@ from tests.python.bases.test_algorithms import BaseAlgorithmsTest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
@@ -22,8 +23,7 @@ except ImportError:
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    not GRAFEO_AVAILABLE,
-    reason="Grafeo Python bindings not installed"
+    not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"
 )
 
 
@@ -40,10 +40,10 @@ class TestRDFGraphQLAlgorithms(BaseAlgorithmsTest):
 
         node_ids = []
         for i in range(n_nodes):
-            node = db.create_node(["Resource", "Node"], {
-                "uri": f"http://example.org/node/{i}",
-                "index": i
-            })
+            node = db.create_node(
+                ["Resource", "Node"],
+                {"uri": f"http://example.org/node/{i}", "index": i},
+            )
             node_ids.append(node.id)
 
         edges = set()
@@ -68,22 +68,18 @@ class TestRDFGraphQLAlgorithmVerification:
 
     def test_verify_bfs_reachability(self):
         """Verify BFS results on RDF graph."""
-        a = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/a",
-            "name": "a"
-        })
-        b = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/b",
-            "name": "b"
-        })
-        c = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/c",
-            "name": "c"
-        })
-        self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/d",
-            "name": "d"
-        })  # Isolated
+        a = self.db.create_node(
+            ["Resource", "Node"], {"uri": "http://example.org/node/a", "name": "a"}
+        )
+        b = self.db.create_node(
+            ["Resource", "Node"], {"uri": "http://example.org/node/b", "name": "b"}
+        )
+        c = self.db.create_node(
+            ["Resource", "Node"], {"uri": "http://example.org/node/c", "name": "c"}
+        )
+        self.db.create_node(
+            ["Resource", "Node"], {"uri": "http://example.org/node/d", "name": "d"}
+        )  # Isolated
 
         self.db.create_edge(a.id, b.id, "edge", {})
         self.db.create_edge(b.id, c.id, "edge", {})
@@ -96,34 +92,29 @@ class TestRDFGraphQLAlgorithmVerification:
 
     def test_verify_connected_components(self):
         """Verify connected components on RDF graph."""
-        a = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/a",
-            "name": "a",
-            "group": 1
-        })
-        b = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/b",
-            "name": "b",
-            "group": 1
-        })
-        c = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/c",
-            "name": "c",
-            "group": 1
-        })
+        a = self.db.create_node(
+            ["Resource", "Node"],
+            {"uri": "http://example.org/node/a", "name": "a", "group": 1},
+        )
+        b = self.db.create_node(
+            ["Resource", "Node"],
+            {"uri": "http://example.org/node/b", "name": "b", "group": 1},
+        )
+        c = self.db.create_node(
+            ["Resource", "Node"],
+            {"uri": "http://example.org/node/c", "name": "c", "group": 1},
+        )
         self.db.create_edge(a.id, b.id, "edge", {})
         self.db.create_edge(b.id, c.id, "edge", {})
 
-        x = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/x",
-            "name": "x",
-            "group": 2
-        })
-        y = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/y",
-            "name": "y",
-            "group": 2
-        })
+        x = self.db.create_node(
+            ["Resource", "Node"],
+            {"uri": "http://example.org/node/x", "name": "x", "group": 2},
+        )
+        y = self.db.create_node(
+            ["Resource", "Node"],
+            {"uri": "http://example.org/node/y", "name": "y", "group": 2},
+        )
         self.db.create_edge(x.id, y.id, "edge", {})
 
         components = self.db.algorithms.connected_components()
@@ -136,16 +127,16 @@ class TestRDFGraphQLAlgorithmVerification:
 
     def test_verify_pagerank_structure(self):
         """Verify PageRank reflects link structure on RDF graph."""
-        center = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/center",
-            "name": "center"
-        })
+        center = self.db.create_node(
+            ["Resource", "Node"],
+            {"uri": "http://example.org/node/center", "name": "center"},
+        )
         leaves = []
         for i in range(4):
-            leaf = self.db.create_node(["Resource", "Node"], {
-                "uri": f"http://example.org/node/leaf{i}",
-                "name": f"leaf{i}"
-            })
+            leaf = self.db.create_node(
+                ["Resource", "Node"],
+                {"uri": f"http://example.org/node/leaf{i}", "name": f"leaf{i}"},
+            )
             leaves.append(leaf)
             self.db.create_edge(leaf.id, center.id, "points_to", {})
 
@@ -157,22 +148,18 @@ class TestRDFGraphQLAlgorithmVerification:
 
     def test_verify_shortest_path(self):
         """Verify Dijkstra shortest path matches expected on RDF graph."""
-        a = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/a",
-            "name": "a"
-        })
-        b = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/b",
-            "name": "b"
-        })
-        c = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/c",
-            "name": "c"
-        })
-        d = self.db.create_node(["Resource", "Node"], {
-            "uri": "http://example.org/node/d",
-            "name": "d"
-        })
+        a = self.db.create_node(
+            ["Resource", "Node"], {"uri": "http://example.org/node/a", "name": "a"}
+        )
+        b = self.db.create_node(
+            ["Resource", "Node"], {"uri": "http://example.org/node/b", "name": "b"}
+        )
+        c = self.db.create_node(
+            ["Resource", "Node"], {"uri": "http://example.org/node/c", "name": "c"}
+        )
+        d = self.db.create_node(
+            ["Resource", "Node"], {"uri": "http://example.org/node/d", "name": "d"}
+        )
 
         self.db.create_edge(a.id, b.id, "edge", {"weight": 1})
         self.db.create_edge(a.id, c.id, "edge", {"weight": 10})

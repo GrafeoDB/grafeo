@@ -150,7 +150,7 @@ impl GraphQLTranslator {
         } else {
             Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
-                &format!(
+                format!(
                     "Unknown mutation: {}. Expected createX, updateX, or deleteX",
                     name
                 ),
@@ -591,7 +591,7 @@ impl GraphQLTranslator {
     ) -> Result<(LogicalOperator, Vec<ReturnItem>)> {
         let to_var = self.next_var();
 
-        // The field name is the edge type
+        // The field name is the edge type — preserve original case to match how edges are stored
         let mut plan = LogicalOperator::Expand(ExpandOp {
             from_variable: from_var.to_string(),
             to_variable: to_var.clone(),
@@ -638,7 +638,7 @@ impl GraphQLTranslator {
     ) -> Result<(LogicalOperator, String)> {
         let to_var = self.next_var();
 
-        // The field name is the edge type
+        // The field name is the edge type — preserve original case to match how edges are stored
         let mut plan = LogicalOperator::Expand(ExpandOp {
             from_variable: from_var.to_string(),
             to_variable: to_var.clone(),
@@ -682,7 +682,7 @@ impl GraphQLTranslator {
 
         for arg in args {
             // Check for "where" argument with nested object
-            if arg.name == "where" {
+            if arg.name == "where" || arg.name == "filter" {
                 if let ast::InputValue::Object(fields) = &arg.value {
                     for (field_name, value) in fields {
                         let (property, op) = self.parse_field_operator(field_name);

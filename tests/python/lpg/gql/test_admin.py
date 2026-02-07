@@ -7,6 +7,7 @@ from tests.python.bases.test_admin import BaseAdminTest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
@@ -25,23 +26,15 @@ class TestGqlAdmin(BaseAdminTest):
     def setup_test_graph(self, db):
         """Set up test data for admin tests."""
         # Create Person nodes
-        alice = db.create_node(["Person"], {
-            "name": "Alice", "age": 30, "city": "NYC"
-        })
-        bob = db.create_node(["Person"], {
-            "name": "Bob", "age": 25, "city": "LA"
-        })
-        charlie = db.create_node(["Person"], {
-            "name": "Charlie", "age": 35, "city": "NYC"
-        })
+        alice = db.create_node(["Person"], {"name": "Alice", "age": 30, "city": "NYC"})
+        bob = db.create_node(["Person"], {"name": "Bob", "age": 25, "city": "LA"})
+        charlie = db.create_node(
+            ["Person"], {"name": "Charlie", "age": 35, "city": "NYC"}
+        )
 
         # Create Company nodes
-        acme = db.create_node(["Company"], {
-            "name": "Acme Corp", "founded": 2010
-        })
-        globex = db.create_node(["Company"], {
-            "name": "Globex Inc", "founded": 2015
-        })
+        acme = db.create_node(["Company"], {"name": "Acme Corp", "founded": 2010})
+        globex = db.create_node(["Company"], {"name": "Globex Inc", "founded": 2015})
 
         # Create KNOWS edges
         db.create_edge(alice.id, bob.id, "KNOWS", {"since": 2020})

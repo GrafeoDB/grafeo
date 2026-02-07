@@ -23,7 +23,9 @@ class TestGQLNetworkXComparison(BaseNetworkXComparisonTest):
         """Create a fresh database instance."""
         return GrafeoDB()
 
-    def setup_random_graph(self, db, n_nodes: int, n_edges: int, weighted: bool = True, seed: int = 42) -> dict:
+    def setup_random_graph(
+        self, db, n_nodes: int, n_edges: int, weighted: bool = True, seed: int = 42
+    ) -> dict:
         """Set up a random graph for testing."""
         rng = random.Random(seed)
 
@@ -82,7 +84,9 @@ class TestGQLNetworkXBenchmark(BaseNetworkXBenchmarkTest):
         """Create a fresh database instance."""
         return GrafeoDB()
 
-    def setup_random_graph(self, db, n_nodes: int, n_edges: int, weighted: bool = True, seed: int = 42) -> dict:
+    def setup_random_graph(
+        self, db, n_nodes: int, n_edges: int, weighted: bool = True, seed: int = 42
+    ) -> dict:
         """Set up a random graph for benchmarking."""
         rng = random.Random(seed)
 

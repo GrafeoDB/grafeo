@@ -21,7 +21,6 @@ Read Operations:
 import time
 import gc
 import statistics
-import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -31,6 +30,7 @@ from contextlib import contextmanager
 @dataclass
 class BenchmarkResult:
     """Result of a single benchmark."""
+
     name: str
     mean_time_ms: float
     std_time_ms: float
@@ -136,7 +136,9 @@ class BaseBenchStorage(ABC):
 
         max_name_len = max(len(r.name) for r in self.results)
 
-        print(f"{'Benchmark':<{max_name_len}} | {'Mean (ms)':<12} | {'Std (ms)':<10} | {'Ops/sec':<12}")
+        print(
+            f"{'Benchmark':<{max_name_len}} | {'Mean (ms)':<12} | {'Std (ms)':<10} | {'Ops/sec':<12}"
+        )
         print("-" * 80)
 
         for r in self.results:
@@ -187,7 +189,9 @@ class BaseBenchStorage(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def one_hop_query(self, from_label: str, rel_type: str, to_label: str, limit: int = None) -> str:
+    def one_hop_query(
+        self, from_label: str, rel_type: str, to_label: str, limit: int = None
+    ) -> str:
         """Query: MATCH (a:Label)-[:REL]->(b:Label) RETURN a, b"""
         raise NotImplementedError
 
@@ -202,7 +206,9 @@ class BaseBenchStorage(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def sort_query(self, label: str, sort_prop: str, desc: bool = False, limit: int = 100) -> str:
+    def sort_query(
+        self, label: str, sort_prop: str, desc: bool = False, limit: int = 100
+    ) -> str:
         """Query: MATCH (n:Label) RETURN n ORDER BY n.prop [DESC] LIMIT x"""
         raise NotImplementedError
 
@@ -227,12 +233,15 @@ class BaseBenchStorage(ABC):
 
     def bench_single_node_insert(self, db_factory, count: int = 1000):
         """Benchmark single node insertion."""
+
         def setup():
             return db_factory()
 
         def operation(db):
             for i in range(count):
-                self.create_single_node(db, ["Person"], {"name": f"Person{i}", "age": 25 + i % 50})
+                self.create_single_node(
+                    db, ["Person"], {"name": f"Person{i}", "age": 25 + i % 50}
+                )
 
         return self.benchmark(
             f"Insert {count} nodes",
@@ -243,18 +252,23 @@ class BaseBenchStorage(ABC):
 
     def bench_node_with_properties(self, db_factory, count: int = 1000):
         """Benchmark node insertion with multiple properties."""
+
         def setup():
             return db_factory()
 
         def operation(db):
             for i in range(count):
-                self.create_single_node(db, ["Person", "Employee"], {
-                    "name": f"Person{i}",
-                    "age": 25 + i % 50,
-                    "email": f"person{i}@example.com",
-                    "city": ["NYC", "LA", "Chicago"][i % 3],
-                    "salary": 50000 + i * 100,
-                })
+                self.create_single_node(
+                    db,
+                    ["Person", "Employee"],
+                    {
+                        "name": f"Person{i}",
+                        "age": 25 + i % 50,
+                        "email": f"person{i}@example.com",
+                        "city": ["NYC", "LA", "Chicago"][i % 3],
+                        "salary": 50000 + i * 100,
+                    },
+                )
 
         return self.benchmark(
             f"Insert {count} nodes (5 props)",
@@ -265,6 +279,7 @@ class BaseBenchStorage(ABC):
 
     def bench_edge_insert(self, db_factory, node_count: int = 100):
         """Benchmark edge insertion."""
+
         def setup():
             db = db_factory()
             node_ids = []
@@ -277,7 +292,9 @@ class BaseBenchStorage(ABC):
             db, node_ids = ctx
             for i in range(len(node_ids)):
                 for j in range(i + 1, min(i + 10, len(node_ids))):
-                    self.create_edge(db, node_ids[i], node_ids[j], "CONNECTED", {"weight": i + j})
+                    self.create_edge(
+                        db, node_ids[i], node_ids[j], "CONNECTED", {"weight": i + j}
+                    )
 
         return self.benchmark(
             f"Insert edges ({node_count} nodes)",
@@ -288,15 +305,20 @@ class BaseBenchStorage(ABC):
 
     def bench_large_properties(self, db_factory, count: int = 100):
         """Benchmark nodes with large property values."""
+
         def setup():
             return db_factory()
 
         def operation(db):
             for i in range(count):
-                self.create_single_node(db, ["Data"], {
-                    "content": "x" * 1000,
-                    "idx": i,
-                })
+                self.create_single_node(
+                    db,
+                    ["Data"],
+                    {
+                        "content": "x" * 1000,
+                        "idx": i,
+                    },
+                )
 
         return self.benchmark(
             f"Insert {count} nodes (1KB props)",
@@ -325,6 +347,7 @@ class BaseBenchStorage(ABC):
 
     def bench_multi_label_nodes(self, db_factory, count: int = 500):
         """Benchmark multi-label node creation."""
+
         def setup():
             return db_factory()
 
@@ -350,6 +373,7 @@ class BaseBenchStorage(ABC):
 
     def bench_full_scan(self, db_factory, setup_func, node_count: int = 1000):
         """Benchmark full scan with LIMIT."""
+
         def setup():
             db = db_factory()
             setup_func(db)
@@ -360,7 +384,7 @@ class BaseBenchStorage(ABC):
             list(self.execute_query(db, query))
 
         return self.benchmark(
-            f"Full scan LIMIT 1000",
+            "Full scan LIMIT 1000",
             setup,
             operation,
             ops_count=1000,
@@ -368,6 +392,7 @@ class BaseBenchStorage(ABC):
 
     def bench_count_nodes(self, db_factory, setup_func):
         """Benchmark COUNT(*) all nodes."""
+
         def setup():
             db = db_factory()
             setup_func(db)
@@ -386,6 +411,7 @@ class BaseBenchStorage(ABC):
 
     def bench_high_selectivity_filter(self, db_factory, setup_func):
         """Benchmark high selectivity filter (should skip most data)."""
+
         def setup():
             db = db_factory()
             setup_func(db)
@@ -404,6 +430,7 @@ class BaseBenchStorage(ABC):
 
     def bench_low_selectivity_filter(self, db_factory, setup_func):
         """Benchmark low selectivity filter (scans most data)."""
+
         def setup():
             db = db_factory()
             setup_func(db)
@@ -422,6 +449,7 @@ class BaseBenchStorage(ABC):
 
     def bench_point_lookup(self, db_factory, setup_func, lookup_count: int = 100):
         """Benchmark point lookups."""
+
         def setup():
             db = db_factory()
             setup_func(db)
@@ -429,7 +457,9 @@ class BaseBenchStorage(ABC):
 
         def operation(db):
             for i in range(lookup_count):
-                query = self.point_lookup_query("Person", "email", f"user{i}@example.com")
+                query = self.point_lookup_query(
+                    "Person", "email", f"user{i}@example.com"
+                )
                 list(self.execute_query(db, query))
 
         return self.benchmark(
@@ -441,6 +471,7 @@ class BaseBenchStorage(ABC):
 
     def bench_one_hop_traversal(self, db_factory, setup_func):
         """Benchmark 1-hop traversal."""
+
         def setup():
             db = db_factory()
             setup_func(db)
@@ -459,6 +490,7 @@ class BaseBenchStorage(ABC):
 
     def bench_two_hop_traversal(self, db_factory, setup_func):
         """Benchmark 2-hop traversal."""
+
         def setup():
             db = db_factory()
             setup_func(db)
@@ -477,6 +509,7 @@ class BaseBenchStorage(ABC):
 
     def bench_aggregation(self, db_factory, setup_func):
         """Benchmark aggregation with GROUP BY."""
+
         def setup():
             db = db_factory()
             setup_func(db)
@@ -495,6 +528,7 @@ class BaseBenchStorage(ABC):
 
     def bench_sort(self, db_factory, setup_func, desc: bool = False):
         """Benchmark sorting."""
+
         def setup():
             db = db_factory()
             setup_func(db)
@@ -512,8 +546,11 @@ class BaseBenchStorage(ABC):
             ops_count=1,
         )
 
-    def bench_triangle_count(self, db_factory, num_cliques: int = 10, clique_size: int = 10):
+    def bench_triangle_count(
+        self, db_factory, num_cliques: int = 10, clique_size: int = 10
+    ):
         """Benchmark triangle counting."""
+
         def setup():
             db = db_factory()
             self.setup_clique_graph(db, num_cliques, clique_size)
@@ -542,8 +579,11 @@ class BaseBenchStorage(ABC):
         self.bench_many_properties(db_factory, count=50, prop_count=30)
         self.bench_multi_label_nodes(db_factory, count=200)
 
-    def run_read_benchmarks(self, db_factory, node_count: int = 500, avg_edges: int = 5):
+    def run_read_benchmarks(
+        self, db_factory, node_count: int = 500, avg_edges: int = 5
+    ):
         """Run all read benchmarks."""
+
         def setup_func(db):
             self.setup_social_network(db, node_count, avg_edges)
 

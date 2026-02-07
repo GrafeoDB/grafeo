@@ -30,7 +30,8 @@ cypher = ["grafeo-engine/cypher"]
 sparql = ["grafeo-engine/sparql", "grafeo-engine/rdf"]
 gremlin = ["grafeo-engine/gremlin"]
 graphql = ["grafeo-engine/graphql"]
-full = ["gql", "cypher", "sparql", "gremlin", "graphql"]
+vector-index = ["grafeo-engine/vector-index"]
+full = ["gql", "cypher", "sparql", "gremlin", "graphql", "vector-index"]
 
 [lints]
 workspace = true

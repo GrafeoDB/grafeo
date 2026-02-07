@@ -37,7 +37,7 @@ impl GqlTranslator {
             ast::Statement::Query(query) => self.translate_query(query),
             ast::Statement::DataModification(dm) => self.translate_data_modification(dm),
             ast::Statement::Schema(_) => Err(Error::Internal(
-                "Schema statements not yet supported".to_string(),
+                "Schema DDL is not supported via execute(). Use create_vector_index() for vector indexes.".to_string(),
             )),
         }
     }
@@ -793,6 +793,22 @@ impl GqlTranslator {
                 });
             }
 
+            // Add filter for target node labels (e.g., (b:Person) in a multi-hop pattern)
+            if !edge.target.labels.is_empty() {
+                let label = edge.target.labels[0].clone();
+                plan = LogicalOperator::Filter(FilterOp {
+                    predicate: LogicalExpression::FunctionCall {
+                        name: "hasLabel".into(),
+                        args: vec![
+                            LogicalExpression::Variable(target_var.clone()),
+                            LogicalExpression::Literal(Value::from(label)),
+                        ],
+                        distinct: false,
+                    },
+                    input: Box::new(plan),
+                });
+            }
+
             current_source = target_var;
         }
 
@@ -1463,6 +1479,7 @@ mod tests {
             match op {
                 LogicalOperator::Expand(e) => Some(e),
                 LogicalOperator::Return(r) => find_expand(&r.input),
+                LogicalOperator::Filter(f) => find_expand(&f.input),
                 _ => None,
             }
         }
@@ -1482,6 +1499,7 @@ mod tests {
             match op {
                 LogicalOperator::Expand(e) => Some(e),
                 LogicalOperator::Return(r) => find_expand(&r.input),
+                LogicalOperator::Filter(f) => find_expand(&f.input),
                 _ => None,
             }
         }

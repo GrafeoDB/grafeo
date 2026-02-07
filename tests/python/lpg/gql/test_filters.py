@@ -93,9 +93,7 @@ class TestGQLFilterVerification:
         db.create_node(["Person"], {"name": "Bob", "age": 25, "city": "LA"})
 
         # Filter by city <> NYC (not equal)
-        result = db.execute(
-            "MATCH (p:Person) WHERE p.city <> 'NYC' RETURN p.name"
-        )
+        result = db.execute("MATCH (p:Person) WHERE p.city <> 'NYC' RETURN p.name")
         matches = list(result)
         assert len(matches) == 1, "Should find only Bob (not in NYC)"
 
@@ -105,8 +103,6 @@ class TestGQLFilterVerification:
         db.create_node(["Person"], {"name": "Bob", "age": 25})
 
         # Filter by age < 28
-        result = db.execute(
-            "MATCH (p:Person) WHERE p.age < 28 RETURN p.name"
-        )
+        result = db.execute("MATCH (p:Person) WHERE p.age < 28 RETURN p.name")
         matches = list(result)
         assert len(matches) == 1, "Should find only Bob (age 25)"

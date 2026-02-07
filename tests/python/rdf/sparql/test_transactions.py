@@ -10,13 +10,13 @@ from tests.python.bases.test_transactions import BaseTransactionsTest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
 
 pytestmark = pytest.mark.skipif(
-    not GRAFEO_AVAILABLE,
-    reason="Grafeo Python bindings not installed"
+    not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"
 )
 
 
@@ -52,13 +52,13 @@ class TestSPARQLTransactions(BaseTransactionsTest):
         uri = f"<http://example.org/{label.lower()}/{name}>"
 
         triples = []
-        triples.append(f'{uri} a <http://example.org/{label}>')
+        triples.append(f"{uri} a <http://example.org/{label}>")
 
         for k, v in props.items():
             if isinstance(v, str):
                 triples.append(f'{uri} <http://example.org/{k}> "{v}"')
             else:
-                triples.append(f'{uri} <http://example.org/{k}> {v}')
+                triples.append(f"{uri} <http://example.org/{k}> {v}")
 
         return f"INSERT DATA {{ {' . '.join(triples)} }}"
 

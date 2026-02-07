@@ -14,12 +14,14 @@ Example:
 """
 
 from grafeo.grafeo import (
+    Edge,
     GrafeoDB,
     Node,
-    Edge,
     QueryResult,
     Value,
     __version__,
+    simd_support,
+    vector,
 )
 
 __all__ = [
@@ -29,4 +31,6 @@ __all__ = [
     "QueryResult",
     "Value",
     "__version__",
+    "simd_support",
+    "vector",
 ]

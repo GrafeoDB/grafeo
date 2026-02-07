@@ -166,7 +166,7 @@ impl PyGrafeoDB {
             let mut param_map = HashMap::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value).map_err(PyGrafeoError::from)?;
+                let val = PyValue::from_py(&value)?;
                 param_map.insert(key_str, val);
             }
             db.execute_with_params(query, param_map)
@@ -209,7 +209,7 @@ impl PyGrafeoDB {
             let mut param_map = HashMap::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value).map_err(PyGrafeoError::from)?;
+                let val = PyValue::from_py(&value)?;
                 param_map.insert(key_str, val);
             }
             db.execute_cypher_with_params(query, param_map)
@@ -257,7 +257,7 @@ impl PyGrafeoDB {
             let mut map = HashMap::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value).map_err(PyGrafeoError::from)?;
+                let val = PyValue::from_py(&value)?;
                 map.insert(key_str, val);
             }
             Some(map)
@@ -309,7 +309,7 @@ impl PyGrafeoDB {
             let mut param_map = HashMap::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value).map_err(PyGrafeoError::from)?;
+                let val = PyValue::from_py(&value)?;
                 param_map.insert(key_str, val);
             }
             db.execute_gremlin_with_params(query, param_map)
@@ -347,7 +347,7 @@ impl PyGrafeoDB {
             let mut param_map = HashMap::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value).map_err(PyGrafeoError::from)?;
+                let val = PyValue::from_py(&value)?;
                 param_map.insert(key_str, val);
             }
             db.execute_graphql_with_params(query, param_map)
@@ -387,7 +387,7 @@ impl PyGrafeoDB {
             let mut map = HashMap::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value).map_err(PyGrafeoError::from)?;
+                let val = PyValue::from_py(&value)?;
                 map.insert(key_str, val);
             }
             map
@@ -430,7 +430,7 @@ impl PyGrafeoDB {
             )> = Vec::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value).map_err(PyGrafeoError::from)?;
+                let val = PyValue::from_py(&value)?;
                 props.push((grafeo_common::types::PropertyKey::new(key_str), val));
             }
             db.create_node_with_props(&label_refs, props)
@@ -474,7 +474,7 @@ impl PyGrafeoDB {
             )> = Vec::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value).map_err(PyGrafeoError::from)?;
+                let val = PyValue::from_py(&value)?;
                 props.push((grafeo_common::types::PropertyKey::new(key_str), val));
             }
             db.create_edge_with_props(src, dst, &edge_type, props)
@@ -668,7 +668,7 @@ impl PyGrafeoDB {
         value: &Bound<'_, pyo3::prelude::PyAny>,
     ) -> PyResult<()> {
         let db = self.inner.read();
-        let val = PyValue::from_py(value).map_err(PyGrafeoError::from)?;
+        let val = PyValue::from_py(value)?;
         db.set_node_property(NodeId(node_id), key, val);
         Ok(())
     }
@@ -731,7 +731,7 @@ impl PyGrafeoDB {
         value: &Bound<'_, pyo3::prelude::PyAny>,
     ) -> PyResult<()> {
         let db = self.inner.read();
-        let val = PyValue::from_py(value).map_err(PyGrafeoError::from)?;
+        let val = PyValue::from_py(value)?;
         db.set_edge_property(EdgeId(edge_id), key, val);
         Ok(())
     }
@@ -788,6 +788,140 @@ impl PyGrafeoDB {
         Ok(())
     }
 
+    /// Create a vector similarity index on a node property.
+    ///
+    /// Enables efficient similarity search on vector embeddings.
+    ///
+    /// Args:
+    ///     label: Node label to index (e.g., "Doc")
+    ///     property: Property containing vectors (e.g., "embedding")
+    ///     dimensions: Expected vector dimensions (inferred if not given)
+    ///     metric: Distance metric - "cosine" (default), "euclidean", "dot_product", "manhattan"
+    ///     m: HNSW links per node (default: 16). Higher = better recall, more memory.
+    ///     ef_construction: Construction beam width (default: 128). Higher = better quality, slower build.
+    ///
+    /// Example:
+    ///     db.create_node(['Doc'], {'embedding': [1.0, 0.0, 0.0]})
+    ///     db.create_vector_index("Doc", "embedding", metric="cosine", m=32, ef_construction=200)
+    #[pyo3(signature = (label, property, dimensions=None, metric=None, m=None, ef_construction=None))]
+    fn create_vector_index(
+        &self,
+        label: &str,
+        property: &str,
+        dimensions: Option<usize>,
+        metric: Option<&str>,
+        m: Option<usize>,
+        ef_construction: Option<usize>,
+    ) -> PyResult<()> {
+        let db = self.inner.read();
+        db.create_vector_index(label, property, dimensions, metric, m, ef_construction)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Search for the k nearest neighbors of a query vector.
+    ///
+    /// Uses the HNSW index created by create_vector_index().
+    ///
+    /// Args:
+    ///     label: Node label that was indexed
+    ///     property: Property that was indexed
+    ///     query: Query vector (list of floats)
+    ///     k: Number of nearest neighbors to return
+    ///     ef: Search beam width (higher = better recall, slower). Uses index default if None.
+    ///
+    /// Returns:
+    ///     List of (node_id, distance) tuples, sorted by distance ascending.
+    ///
+    /// Example:
+    ///     results = db.vector_search("Doc", "embedding", [1.0, 0.0, 0.0], k=10, ef=200)
+    ///     for node_id, distance in results:
+    ///         print(f"Node {node_id}: distance={distance:.4f}")
+    #[pyo3(signature = (label, property, query, k, ef=None))]
+    fn vector_search(
+        &self,
+        label: &str,
+        property: &str,
+        query: Vec<f32>,
+        k: usize,
+        ef: Option<usize>,
+    ) -> PyResult<Vec<(u64, f32)>> {
+        let db = self.inner.read();
+        let results = db
+            .vector_search(label, property, &query, k, ef)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(results
+            .into_iter()
+            .map(|(id, dist)| (id.as_u64(), dist))
+            .collect())
+    }
+
+    /// Bulk-insert nodes with vector properties.
+    ///
+    /// Creates N nodes all with the same label, each with a single vector
+    /// property. Much faster than N individual create_node() calls.
+    ///
+    /// Args:
+    ///     label: Node label for all nodes
+    ///     property: Property name for the vectors
+    ///     vectors: List of vectors (list of list of floats)
+    ///
+    /// Returns:
+    ///     List of created node IDs.
+    ///
+    /// Example:
+    ///     ids = db.batch_create_nodes("Doc", "embedding", [[1.0, 0.0], [0.0, 1.0]])
+    #[pyo3(signature = (label, property, vectors))]
+    fn batch_create_nodes(
+        &self,
+        label: &str,
+        property: &str,
+        vectors: Vec<Vec<f32>>,
+    ) -> PyResult<Vec<u64>> {
+        let db = self.inner.read();
+        let ids = db.batch_create_nodes(label, property, vectors);
+        Ok(ids.into_iter().map(|id| id.as_u64()).collect())
+    }
+
+    /// Batch search for nearest neighbors of multiple query vectors.
+    ///
+    /// Executes searches in parallel using all available CPU cores.
+    ///
+    /// Args:
+    ///     label: Node label that was indexed
+    ///     property: Property that was indexed
+    ///     queries: List of query vectors
+    ///     k: Number of nearest neighbors per query
+    ///     ef: Search beam width (higher = better recall, slower). Uses index default if None.
+    ///
+    /// Returns:
+    ///     List of results per query. Each result is a list of (node_id, distance) tuples.
+    ///
+    /// Example:
+    ///     results = db.batch_vector_search("Doc", "embedding", [[1.0, 0.0], [0.0, 1.0]], k=5)
+    #[pyo3(signature = (label, property, queries, k, ef=None))]
+    fn batch_vector_search(
+        &self,
+        label: &str,
+        property: &str,
+        queries: Vec<Vec<f32>>,
+        k: usize,
+        ef: Option<usize>,
+    ) -> PyResult<Vec<Vec<(u64, f32)>>> {
+        let db = self.inner.read();
+        let results = db
+            .batch_vector_search(label, property, &queries, k, ef)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(results
+            .into_iter()
+            .map(|inner| {
+                inner
+                    .into_iter()
+                    .map(|(id, dist)| (id.as_u64(), dist))
+                    .collect()
+            })
+            .collect())
+    }
+
     /// Remove an index on a node property.
     ///
     /// Returns True if the index existed and was removed.
@@ -838,7 +972,7 @@ impl PyGrafeoDB {
         value: &Bound<'_, pyo3::prelude::PyAny>,
     ) -> PyResult<Vec<u64>> {
         let db = self.inner.read();
-        let val = PyValue::from_py(value).map_err(PyGrafeoError::from)?;
+        let val = PyValue::from_py(value)?;
         let nodes = db.find_nodes_by_property(property, &val);
         Ok(nodes.into_iter().map(|n| n.0).collect())
     }
@@ -855,9 +989,15 @@ impl PyGrafeoDB {
     ///     tx.execute("CREATE (n:Person {name: 'Alice'})")
     ///     tx.execute("CREATE (n:Person {name: 'Bob'})")
     ///     tx.commit()  # Both nodes created atomically
+    ///
+    /// # With explicit isolation level
+    /// with db.begin_transaction("serializable") as tx:
+    ///     tx.execute("MATCH (n:Counter) SET n.val = n.val + 1")
+    ///     tx.commit()
     /// ```
-    fn begin_transaction(&self) -> PyResult<PyTransaction> {
-        PyTransaction::new(self.inner.clone())
+    #[pyo3(signature = (isolation_level=None))]
+    fn begin_transaction(&self, isolation_level: Option<&str>) -> PyResult<PyTransaction> {
+        PyTransaction::new(self.inner.clone(), isolation_level)
     }
 
     /// Get database statistics.
@@ -1216,31 +1356,66 @@ pub struct PyTransaction {
     session: parking_lot::Mutex<Option<grafeo_engine::session::Session>>,
     committed: bool,
     rolled_back: bool,
+    isolation_level_name: String,
 }
 
 impl PyTransaction {
-    /// Create a new transaction, starting a Rust transaction internally.
-    fn new(db: Arc<RwLock<GrafeoDB>>) -> PyResult<Self> {
+    /// Create a new transaction with an optional isolation level.
+    fn new(db: Arc<RwLock<GrafeoDB>>, isolation_level: Option<&str>) -> PyResult<Self> {
+        // Parse isolation level string
+        let (level, level_name) = match isolation_level {
+            Some("read_committed") => (
+                Some(grafeo_engine::transaction::IsolationLevel::ReadCommitted),
+                "read_committed",
+            ),
+            Some("serializable") => (
+                Some(grafeo_engine::transaction::IsolationLevel::Serializable),
+                "serializable",
+            ),
+            Some("snapshot") | None => (None, "snapshot"),
+            Some(other) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Unknown isolation level '{}'. Use 'read_committed', 'snapshot', or 'serializable'",
+                    other
+                )));
+            }
+        };
+
         // Create session from db, but drop the read guard before moving db
         let mut session = {
             let db_guard = db.read();
             db_guard.session()
         };
 
-        // Begin the transaction in the Rust session
-        session.begin_tx().map_err(PyGrafeoError::from)?;
+        // Begin the transaction with the specified isolation level
+        if let Some(level) = level {
+            session
+                .begin_tx_with_isolation(level)
+                .map_err(PyGrafeoError::from)?;
+        } else {
+            session.begin_tx().map_err(PyGrafeoError::from)?;
+        }
 
         Ok(Self {
             db,
             session: parking_lot::Mutex::new(Some(session)),
             committed: false,
             rolled_back: false,
+            isolation_level_name: level_name.to_string(),
         })
     }
 }
 
 #[pymethods]
 impl PyTransaction {
+    /// The isolation level of this transaction.
+    ///
+    /// Returns one of: ``"read_committed"``, ``"snapshot"``, ``"serializable"``.
+    #[getter]
+    fn isolation_level(&self) -> &str {
+        &self.isolation_level_name
+    }
+
     /// Commit the transaction.
     ///
     /// Makes all changes permanent. Raises an error if the transaction is
@@ -1308,7 +1483,7 @@ impl PyTransaction {
             let mut param_map = HashMap::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value).map_err(PyGrafeoError::from)?;
+                let val = PyValue::from_py(&value)?;
                 param_map.insert(key_str, val);
             }
             session
@@ -1360,7 +1535,7 @@ impl PyTransaction {
             let mut param_map = HashMap::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value).map_err(PyGrafeoError::from)?;
+                let val = PyValue::from_py(&value)?;
                 param_map.insert(key_str, val);
             }
             session
@@ -1414,7 +1589,7 @@ impl PyTransaction {
             let mut param_map = HashMap::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value).map_err(PyGrafeoError::from)?;
+                let val = PyValue::from_py(&value)?;
                 param_map.insert(key_str, val);
             }
             session
@@ -1475,7 +1650,7 @@ impl PyTransaction {
             let mut param_map = HashMap::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value).map_err(PyGrafeoError::from)?;
+                let val = PyValue::from_py(&value)?;
                 param_map.insert(key_str, val);
             }
             session

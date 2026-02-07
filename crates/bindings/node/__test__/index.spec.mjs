@@ -60,8 +60,8 @@ describe('database lifecycle', () => {
     expect(db2.nodeCount).toBe(1)
     db2.close()
 
-    // Cleanup
-    fs.rmSync(dir, { recursive: true })
+    // Cleanup — best-effort; Windows may hold WAL file locks briefly after close
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
   })
 
   it('should close without error', () => {
@@ -412,6 +412,153 @@ describe('transactions', () => {
   })
 })
 
+// ── QueryResult metadata & entity extraction ────────────────────────
+
+describe('QueryResult metadata', () => {
+  it('should return rowsScanned', async () => {
+    const { db } = seedDb()
+    const result = await db.execute('MATCH (p:Person) RETURN p.name')
+    // rowsScanned may be null or a number depending on the query
+    if (result.rowsScanned !== null) {
+      expect(typeof result.rowsScanned).toBe('number')
+      expect(result.rowsScanned).toBeGreaterThanOrEqual(0)
+    }
+  })
+
+  it('should extract nodes from MATCH result', async () => {
+    const { db } = seedDb()
+    const result = await db.execute('MATCH (p:Person) RETURN p')
+    const nodes = result.nodes()
+    expect(nodes.length).toBe(3)
+    const names = nodes.map((n) => n.get('name'))
+    expect(names).toContain('Alice')
+    expect(names).toContain('Bob')
+    expect(names).toContain('Charlie')
+  })
+
+  it('should return edges() accessor without error', async () => {
+    const { db } = seedDb()
+    const result = await db.execute(
+      'MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, b.name'
+    )
+    // edges() should be callable even when no edge columns are returned
+    const edges = result.edges()
+    expect(Array.isArray(edges)).toBe(true)
+  })
+
+  it('should deduplicate extracted nodes', async () => {
+    const { db } = seedDb()
+    // Query that returns same nodes in multiple rows
+    const result = await db.execute(
+      'MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b'
+    )
+    const nodes = result.nodes()
+    const ids = nodes.map((n) => n.id)
+    const uniqueIds = [...new Set(ids)]
+    expect(ids.length).toBe(uniqueIds.length)
+  })
+
+  it('should return empty nodes/edges for scalar queries', async () => {
+    const db = GrafeoDB.create()
+    await db.execute("INSERT (:Person {name: 'Alice'})")
+    const result = await db.execute('MATCH (p:Person) RETURN p.name')
+    expect(result.nodes().length).toBe(0)
+    expect(result.edges().length).toBe(0)
+  })
+})
+
+// ── Advanced type round-trips ───────────────────────────────────────
+
+describe('advanced type round-trips', () => {
+  let db
+
+  beforeEach(() => {
+    db = GrafeoDB.create()
+  })
+
+  it('should round-trip array/list values', () => {
+    const node = db.createNode(['Test'])
+    db.setNodeProperty(node.id, 'tags', [1, 'two', true])
+    const fetched = db.getNode(node.id)
+    const tags = fetched.get('tags')
+    expect(Array.isArray(tags)).toBe(true)
+    expect(tags).toEqual([1, 'two', true])
+  })
+
+  it('should round-trip nested object/map values', () => {
+    const node = db.createNode(['Test'])
+    db.setNodeProperty(node.id, 'meta', { a: 1, b: 'two' })
+    const fetched = db.getNode(node.id)
+    const meta = fetched.get('meta')
+    expect(typeof meta).toBe('object')
+    expect(meta.a).toBe(1)
+    expect(meta.b).toBe('two')
+  })
+
+  it('should round-trip Date values', () => {
+    const node = db.createNode(['Test'])
+    const date = new Date('2024-01-15T12:00:00.000Z')
+    db.setNodeProperty(node.id, 'created', date)
+    const fetched = db.getNode(node.id)
+    const result = fetched.get('created')
+    expect(result instanceof Date).toBe(true)
+    // Millisecond precision
+    expect(result.getTime()).toBe(date.getTime())
+  })
+
+  it('should round-trip Buffer values', () => {
+    const node = db.createNode(['Test'])
+    const buf = Buffer.from([1, 2, 3, 4, 5])
+    db.setNodeProperty(node.id, 'data', buf)
+    const fetched = db.getNode(node.id)
+    const result = fetched.get('data')
+    expect(Buffer.isBuffer(result)).toBe(true)
+    expect([...result]).toEqual([1, 2, 3, 4, 5])
+  })
+
+  it('should round-trip Float32Array/vector values', () => {
+    const node = db.createNode(['Test'])
+    const vec = new Float32Array([1.0, 2.0, 3.0])
+    db.setNodeProperty(node.id, 'embedding', vec)
+    const fetched = db.getNode(node.id)
+    const result = fetched.get('embedding')
+    // napi-rs returns the vector data as a buffer; reconstruct Float32Array
+    const floats = new Float32Array(
+      result.buffer ?? result,
+      result.byteOffset ?? 0,
+      3
+    )
+    expect(floats.length).toBe(3)
+    expect(floats[0]).toBeCloseTo(1.0)
+    expect(floats[1]).toBeCloseTo(2.0)
+    expect(floats[2]).toBeCloseTo(3.0)
+  })
+
+  it('should round-trip BigInt values', () => {
+    const node = db.createNode(['Test'])
+    db.setNodeProperty(node.id, 'big', 42n)
+    const fetched = db.getNode(node.id)
+    // BigInt gets truncated to i64, returned as number if in safe range
+    expect(fetched.get('big')).toBe(42)
+  })
+
+  it('should handle MAX_SAFE_INTEGER boundary', () => {
+    const node = db.createNode(['Test'])
+    db.setNodeProperty(node.id, 'big', Number.MAX_SAFE_INTEGER)
+    const fetched = db.getNode(node.id)
+    expect(fetched.get('big')).toBe(Number.MAX_SAFE_INTEGER)
+  })
+
+  it('should return edge properties() as object', () => {
+    const a = db.createNode(['A'])
+    const b = db.createNode(['B'])
+    const edge = db.createEdge(a.id, b.id, 'REL', { w: 1.5, tag: 'x' })
+    const props = edge.properties()
+    expect(props.w).toBeCloseTo(1.5)
+    expect(props.tag).toBe('x')
+  })
+})
+
 // ── Cypher queries ───────────────────────────────────────────────────
 
 describe('Cypher queries', () => {
@@ -420,6 +567,82 @@ describe('Cypher queries', () => {
     await db.executeCypher("CREATE (a:Person {name: 'Alice'})")
     const result = await db.executeCypher('MATCH (p:Person) RETURN p.name')
     expect(result.scalar()).toBe('Alice')
+  })
+
+  it('should execute Cypher with parameters', async () => {
+    const db = GrafeoDB.create()
+    await db.executeCypher("CREATE (:Person {name: 'Alice', age: 30})")
+    await db.executeCypher("CREATE (:Person {name: 'Bob', age: 25})")
+    const result = await db.executeCypher(
+      'MATCH (p:Person) WHERE p.age > $min RETURN p.name',
+      { min: 28 }
+    )
+    expect(result.length).toBe(1)
+    expect(result.scalar()).toBe('Alice')
+  })
+})
+
+// ── Gremlin queries ─────────────────────────────────────────────────
+
+describe('Gremlin queries', () => {
+  it('should execute basic Gremlin traversal', async () => {
+    const db = GrafeoDB.create()
+    await db.execute("INSERT (:Person {name: 'Alice'})")
+    await db.execute("INSERT (:Person {name: 'Bob'})")
+    const result = await db.executeGremlin(
+      "g.V().hasLabel('Person').count()"
+    )
+    expect(result.scalar()).toBe(2)
+  })
+})
+
+// ── SPARQL queries ──────────────────────────────────────────────────
+
+describe('SPARQL queries', () => {
+  it('should execute basic SPARQL SELECT', async () => {
+    const db = GrafeoDB.create()
+    // SPARQL works against the RDF triple store
+    const result = await db.executeSparql('SELECT ?x WHERE { ?x ?y ?z }')
+    // Empty triple store returns 0 rows
+    expect(result.length).toBe(0)
+  })
+})
+
+// ── Transaction edge cases ──────────────────────────────────────────
+
+describe('transaction edge cases', () => {
+  it('should error on execute after commit', async () => {
+    const db = GrafeoDB.create()
+    const tx = db.beginTransaction()
+    await tx.execute("INSERT (:Person {name: 'Alice'})")
+    tx.commit()
+    await expect(
+      tx.execute("INSERT (:Person {name: 'Bob'})")
+    ).rejects.toThrow(/no longer active/)
+  })
+
+  it('should error on execute after rollback', async () => {
+    const db = GrafeoDB.create()
+    const tx = db.beginTransaction()
+    tx.rollback()
+    await expect(
+      tx.execute("INSERT (:Person {name: 'Alice'})")
+    ).rejects.toThrow(/no longer active/)
+  })
+
+  it('should error on double rollback', () => {
+    const db = GrafeoDB.create()
+    const tx = db.beginTransaction()
+    tx.rollback()
+    expect(() => tx.rollback()).toThrow(/Already rolled back/)
+  })
+
+  it('should error on rollback after commit', async () => {
+    const db = GrafeoDB.create()
+    const tx = db.beginTransaction()
+    await tx.execute("INSERT (:Person {name: 'Alice'})")
+    tx.commit()
+    expect(() => tx.rollback()).toThrow(/Already committed/)
   })
 })
 
@@ -437,6 +660,14 @@ describe('error handling', () => {
     const result = await db.execute('MATCH (n:NonExistent) RETURN n')
     expect(() => result.scalar()).toThrow()
   })
+
+  it('should throw on invalid params type', async () => {
+    const db = GrafeoDB.create()
+    // Passing a non-object as params
+    await expect(
+      db.execute('MATCH (n) RETURN n', 'not-an-object')
+    ).rejects.toThrow()
+  })
 })
 
 // ── Counts / getters ─────────────────────────────────────────────────
@@ -446,5 +677,169 @@ describe('database getters', () => {
     const { db } = seedDb()
     expect(db.nodeCount).toBe(4) // Alice, Bob, Charlie, Acme
     expect(db.edgeCount).toBe(3) // knows1, knows2, worksAt
+  })
+})
+
+// ── Vector operations ───────────────────────────────────────────────
+
+describe('vector operations', () => {
+  it('should create vector index and search', async () => {
+    const db = GrafeoDB.create()
+    await db.batchCreateNodes('Doc', 'embedding', [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ])
+
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine')
+    const results = await db.vectorSearch('Doc', 'embedding', [1, 0, 0], 3)
+
+    expect(results.length).toBe(3)
+    // Each result is [nodeId, distance]
+    expect(results[0].length).toBe(2)
+    // Closest should have near-zero distance
+    expect(results[0][1]).toBeLessThan(0.01)
+  })
+
+  it('should search with explicit ef parameter', async () => {
+    const db = GrafeoDB.create()
+    await db.batchCreateNodes('Doc', 'embedding', [
+      [1, 0, 0],
+      [0, 1, 0],
+    ])
+
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine')
+    const results = await db.vectorSearch('Doc', 'embedding', [1, 0, 0], 2, 200)
+
+    expect(results.length).toBe(2)
+  })
+
+  it('should create vector index with HNSW tuning params', async () => {
+    const db = GrafeoDB.create()
+    await db.batchCreateNodes('Doc', 'embedding', [[1, 0, 0]])
+
+    // Pass m and ef_construction
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine', 32, 200)
+    const results = await db.vectorSearch('Doc', 'embedding', [1, 0, 0], 1)
+    expect(results.length).toBe(1)
+  })
+
+  it('should create vector index with euclidean metric', async () => {
+    const db = GrafeoDB.create()
+    await db.batchCreateNodes('Doc', 'embedding', [
+      [1, 0, 0],
+      [0, 1, 0],
+    ])
+
+    await db.createVectorIndex('Doc', 'embedding', 3, 'euclidean')
+    const results = await db.vectorSearch('Doc', 'embedding', [1, 0, 0], 2)
+    expect(results.length).toBe(2)
+    // Identical vector should have distance ~0
+    expect(results[0][1]).toBeLessThan(0.01)
+  })
+
+  it('should batch create nodes with vectors', async () => {
+    const db = GrafeoDB.create()
+    const vectors = [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ]
+    const ids = await db.batchCreateNodes('Doc', 'embedding', vectors)
+    expect(ids.length).toBe(3)
+    expect(db.nodeCount).toBe(3)
+    // All unique IDs
+    expect(new Set(ids).size).toBe(3)
+  })
+
+  it('should batch create empty list', async () => {
+    const db = GrafeoDB.create()
+    const ids = await db.batchCreateNodes('Doc', 'embedding', [])
+    expect(ids.length).toBe(0)
+  })
+
+  it('should batch vector search', async () => {
+    const db = GrafeoDB.create()
+    const vectors = [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ]
+    await db.batchCreateNodes('Doc', 'embedding', vectors)
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine')
+
+    const queries = [
+      [1, 0, 0],
+      [0, 1, 0],
+    ]
+    const results = await db.batchVectorSearch('Doc', 'embedding', queries, 2)
+    expect(results.length).toBe(2)
+    for (const result of results) {
+      expect(result.length).toBe(2)
+      // Each result entry is [nodeId, distance]
+      expect(result[0].length).toBe(2)
+    }
+  })
+
+  it('should batch search closest match correctly', async () => {
+    const db = GrafeoDB.create()
+    await db.batchCreateNodes('Doc', 'embedding', [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ])
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine')
+
+    const queries = [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ]
+    const results = await db.batchVectorSearch('Doc', 'embedding', queries, 1)
+    expect(results.length).toBe(3)
+    for (const result of results) {
+      expect(result.length).toBe(1)
+      // Each query matches its vector exactly
+      expect(result[0][1]).toBeLessThan(0.01)
+    }
+  })
+
+  it('should batch search with explicit ef', async () => {
+    const db = GrafeoDB.create()
+    await db.batchCreateNodes('Doc', 'embedding', [
+      [1, 0, 0],
+      [0, 1, 0],
+    ])
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine')
+
+    const results = await db.batchVectorSearch(
+      'Doc',
+      'embedding',
+      [[1, 0, 0]],
+      2,
+      200
+    )
+    expect(results.length).toBe(1)
+    expect(results[0].length).toBe(2)
+  })
+
+  it('should error on vector search without index', async () => {
+    const db = GrafeoDB.create()
+    db.createNode(['Doc'], { embedding: new Float32Array([1, 0, 0]) })
+    await expect(
+      db.vectorSearch('Doc', 'embedding', [1, 0, 0], 1)
+    ).rejects.toThrow()
+  })
+})
+
+// ── GraphQL queries ─────────────────────────────────────────────────
+
+describe('GraphQL queries', () => {
+  it('should execute basic GraphQL query', async () => {
+    const db = GrafeoDB.create()
+    await db.execute("INSERT (:Person {name: 'Alice', age: 30})")
+    await db.execute("INSERT (:Person {name: 'Bob', age: 25})")
+    const result = await db.executeGraphql('{ Person { name } }')
+    expect(result.length).toBeGreaterThanOrEqual(1)
   })
 })

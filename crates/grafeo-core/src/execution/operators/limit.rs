@@ -59,34 +59,34 @@ impl Operator for LimitOperator {
                 // Return entire chunk
                 self.returned += row_count;
                 return Ok(Some(chunk));
-            } else {
-                // Return partial chunk
-                let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, remaining);
+            }
 
-                let mut count = 0;
-                for row in chunk.selected_indices() {
-                    if count >= remaining {
-                        break;
-                    }
+            // Return partial chunk
+            let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, remaining);
 
-                    for col_idx in 0..chunk.column_count() {
-                        if let (Some(src_col), Some(dst_col)) =
-                            (chunk.column(col_idx), builder.column_mut(col_idx))
-                        {
-                            if let Some(value) = src_col.get_value(row) {
-                                dst_col.push_value(value);
-                            } else {
-                                dst_col.push_value(Value::Null);
-                            }
-                        }
-                    }
-                    builder.advance_row();
-                    count += 1;
+            let mut count = 0;
+            for row in chunk.selected_indices() {
+                if count >= remaining {
+                    break;
                 }
 
-                self.returned += count;
-                return Ok(Some(builder.finish()));
+                for col_idx in 0..chunk.column_count() {
+                    if let (Some(src_col), Some(dst_col)) =
+                        (chunk.column(col_idx), builder.column_mut(col_idx))
+                    {
+                        if let Some(value) = src_col.get_value(row) {
+                            dst_col.push_value(value);
+                        } else {
+                            dst_col.push_value(Value::Null);
+                        }
+                    }
+                }
+                builder.advance_row();
+                count += 1;
             }
+
+            self.returned += count;
+            return Ok(Some(builder.finish()));
         }
     }
 

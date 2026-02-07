@@ -37,7 +37,7 @@ impl CypherTranslator {
         match stmt {
             ast::Statement::Query(query) => self.translate_query(query),
             ast::Statement::Create(create) => self.translate_create_statement(create),
-            ast::Statement::Merge(merge) => self.translate_merge_statement(&merge),
+            ast::Statement::Merge(merge) => self.translate_merge_statement(merge),
             ast::Statement::Delete(_) => Err(Error::Internal("DELETE not yet supported".into())),
             ast::Statement::Set(_) => Err(Error::Internal("SET not yet supported".into())),
             ast::Statement::Remove(_) => Err(Error::Internal("REMOVE not yet supported".into())),

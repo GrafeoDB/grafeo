@@ -23,9 +23,12 @@ use grafeo_common::types::{EdgeId, EpochId, HashableValue, NodeId, PropertyKey, 
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use parking_lot::RwLock;
 use std::cmp::Ordering as CmpOrdering;
-#[cfg(feature = "tiered-storage")]
+#[cfg(any(feature = "tiered-storage", feature = "vector-index"))]
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+#[cfg(feature = "vector-index")]
+use crate::index::vector::HnswIndex;
 
 /// Compares two values for ordering (used for range checks).
 fn compare_values_for_range(a: &Value, b: &Value) -> Option<CmpOrdering> {
@@ -179,6 +182,16 @@ pub struct LpgStore {
     edges: RwLock<FxHashMap<EdgeId, VersionChain<EdgeRecord>>>,
 
     // === Tiered Storage Fields (feature-gated) ===
+    //
+    // Lock ordering for arena access:
+    //   version_lock (read/write) → arena read lock (via arena_allocator.arena())
+    //
+    // Rules:
+    // - Acquire arena read lock *after* version locks, never before.
+    // - Multiple threads may call arena.read_at() concurrently (shared refs only).
+    // - Never acquire arena write lock (alloc_new_chunk) while holding version locks.
+    // - freeze_epoch order: node_versions.read() → arena.read_at(),
+    //   then edge_versions.read() → arena.read_at().
     /// Arena allocator for hot data storage.
     /// Data is stored in per-epoch arenas for fast allocation and bulk deallocation.
     #[cfg(feature = "tiered-storage")]
@@ -246,6 +259,13 @@ pub struct LpgStore {
     /// Lock order: 7
     property_indexes: RwLock<FxHashMap<PropertyKey, DashMap<HashableValue, FxHashSet<NodeId>>>>,
 
+    /// Vector indexes: "label:property" -> HNSW index.
+    ///
+    /// Created via [`GrafeoDB::create_vector_index`](grafeo_engine::GrafeoDB::create_vector_index).
+    /// Lock order: 7 (same level as property_indexes, disjoint keys)
+    #[cfg(feature = "vector-index")]
+    vector_indexes: RwLock<FxHashMap<String, Arc<HnswIndex>>>,
+
     /// Next node ID.
     next_node_id: AtomicU64,
 
@@ -258,6 +278,9 @@ pub struct LpgStore {
     /// Statistics for cost-based optimization.
     /// Lock order: 8 (always last)
     statistics: RwLock<Statistics>,
+
+    /// Whether statistics need recomputation after mutations.
+    needs_stats_recompute: AtomicBool,
 }
 
 impl LpgStore {
@@ -300,10 +323,13 @@ impl LpgStore {
             label_index: RwLock::new(Vec::new()),
             node_labels: RwLock::new(FxHashMap::default()),
             property_indexes: RwLock::new(FxHashMap::default()),
+            #[cfg(feature = "vector-index")]
+            vector_indexes: RwLock::new(FxHashMap::default()),
             next_node_id: AtomicU64::new(0),
             next_edge_id: AtomicU64::new(0),
             current_epoch: AtomicU64::new(0),
             statistics: RwLock::new(Statistics::new()),
+            needs_stats_recompute: AtomicBool::new(true),
             config,
         }
     }
@@ -326,6 +352,7 @@ impl LpgStore {
     ///
     /// Uses the system transaction for non-transactional operations.
     pub fn create_node(&self, labels: &[&str]) -> NodeId {
+        self.needs_stats_recompute.store(true, Ordering::Relaxed);
         self.create_node_versioned(labels, self.current_epoch(), TxId::SYSTEM)
     }
 
@@ -613,7 +640,7 @@ impl LpgStore {
                 let arena = self.arena_allocator.arena(hot_ref.epoch);
                 // SAFETY: The offset was returned by alloc_value_with_offset for a NodeRecord
                 let record: &NodeRecord = unsafe { arena.read_at(hot_ref.arena_offset) };
-                Some(record.clone())
+                Some(*record)
             }
             VersionRef::Cold(cold_ref) => {
                 // Read from compressed epoch store
@@ -625,6 +652,7 @@ impl LpgStore {
 
     /// Deletes a node and all its edges (using latest epoch).
     pub fn delete_node(&self, id: NodeId) -> bool {
+        self.needs_stats_recompute.store(true, Ordering::Relaxed);
         self.delete_node_at_epoch(id, self.current_epoch())
     }
 
@@ -1221,6 +1249,21 @@ impl LpgStore {
         self.property_indexes.read().contains_key(&key)
     }
 
+    /// Stores a vector index for a label+property pair.
+    #[cfg(feature = "vector-index")]
+    pub fn add_vector_index(&self, label: &str, property: &str, index: Arc<HnswIndex>) {
+        let key = format!("{label}:{property}");
+        self.vector_indexes.write().insert(key, index);
+    }
+
+    /// Retrieves the vector index for a label+property pair.
+    #[cfg(feature = "vector-index")]
+    #[must_use]
+    pub fn get_vector_index(&self, label: &str, property: &str) -> Option<Arc<HnswIndex>> {
+        let key = format!("{label}:{property}");
+        self.vector_indexes.read().get(&key).cloned()
+    }
+
     /// Finds all nodes that have a specific property value.
     ///
     /// If the property is indexed, this is O(1). Otherwise, it scans all nodes
@@ -1609,6 +1652,7 @@ impl LpgStore {
 
     /// Creates a new edge.
     pub fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> EdgeId {
+        self.needs_stats_recompute.store(true, Ordering::Relaxed);
         self.create_edge_versioned(src, dst, edge_type, self.current_epoch(), TxId::SYSTEM)
     }
 
@@ -1816,7 +1860,7 @@ impl LpgStore {
                 let arena = self.arena_allocator.arena(hot_ref.epoch);
                 // SAFETY: The offset was returned by alloc_value_with_offset for an EdgeRecord
                 let record: &EdgeRecord = unsafe { arena.read_at(hot_ref.arena_offset) };
-                Some(record.clone())
+                Some(*record)
             }
             VersionRef::Cold(cold_ref) => {
                 // Read from compressed epoch store
@@ -1828,6 +1872,7 @@ impl LpgStore {
 
     /// Deletes an edge (using latest epoch).
     pub fn delete_edge(&self, id: EdgeId) -> bool {
+        self.needs_stats_recompute.store(true, Ordering::Relaxed);
         self.delete_edge_at_epoch(id, self.current_epoch())
     }
 
@@ -2027,7 +2072,7 @@ impl LpgStore {
                     let arena = self.arena_allocator.arena(hot_ref.epoch);
                     // SAFETY: The offset was returned by alloc_value_with_offset for a NodeRecord
                     let record: &NodeRecord = unsafe { arena.read_at(hot_ref.arena_offset) };
-                    node_records.push((node_id.as_u64(), record.clone()));
+                    node_records.push((node_id.as_u64(), *record));
                     node_hot_refs.push((*node_id, *hot_ref));
                 }
             }
@@ -2044,7 +2089,7 @@ impl LpgStore {
                     let arena = self.arena_allocator.arena(hot_ref.epoch);
                     // SAFETY: The offset was returned by alloc_value_with_offset for an EdgeRecord
                     let record: &EdgeRecord = unsafe { arena.read_at(hot_ref.arena_offset) };
-                    edge_records.push((edge_id.as_u64(), record.clone()));
+                    edge_records.push((edge_id.as_u64(), *record));
                     edge_hot_refs.push((*edge_id, *hot_ref));
                 }
             }
@@ -2519,6 +2564,16 @@ impl LpgStore {
     #[must_use]
     pub fn statistics(&self) -> Statistics {
         self.statistics.read().clone()
+    }
+
+    /// Recomputes statistics if they are stale (i.e., after mutations).
+    ///
+    /// Call this before reading statistics for query optimization.
+    /// Avoids redundant recomputation if no mutations occurred.
+    pub fn ensure_statistics_fresh(&self) {
+        if self.needs_stats_recompute.swap(false, Ordering::Relaxed) {
+            self.compute_statistics();
+        }
     }
 
     /// Recomputes statistics from current data.

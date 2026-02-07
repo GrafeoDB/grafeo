@@ -102,11 +102,12 @@ impl QueryProcessor {
     /// Creates a new query processor for LPG queries.
     #[must_use]
     pub fn for_lpg(store: Arc<LpgStore>) -> Self {
+        let optimizer = Optimizer::from_store(&store);
         Self {
             lpg_store: store,
             tx_manager: Arc::new(TransactionManager::new()),
             catalog: Arc::new(Catalog::new()),
-            optimizer: Optimizer::new(),
+            optimizer,
             tx_context: None,
             #[cfg(feature = "rdf")]
             rdf_store: None,
@@ -116,11 +117,12 @@ impl QueryProcessor {
     /// Creates a new query processor with a transaction manager.
     #[must_use]
     pub fn for_lpg_with_tx(store: Arc<LpgStore>, tx_manager: Arc<TransactionManager>) -> Self {
+        let optimizer = Optimizer::from_store(&store);
         Self {
             lpg_store: store,
             tx_manager,
             catalog: Arc::new(Catalog::new()),
-            optimizer: Optimizer::new(),
+            optimizer,
             tx_context: None,
             #[cfg(feature = "rdf")]
             rdf_store: None,
@@ -134,11 +136,12 @@ impl QueryProcessor {
         lpg_store: Arc<LpgStore>,
         rdf_store: Arc<grafeo_core::graph::rdf::RdfStore>,
     ) -> Self {
+        let optimizer = Optimizer::from_store(&lpg_store);
         Self {
             lpg_store,
             tx_manager: Arc::new(TransactionManager::new()),
             catalog: Arc::new(Catalog::new()),
-            optimizer: Optimizer::new(),
+            optimizer,
             tx_context: None,
             rdf_store: Some(rdf_store),
         }

@@ -114,7 +114,9 @@ impl FactorizedExpandOperator {
                 // Filter by edge type if specified
                 let type_matches = if let Some(ref filter_type) = self.edge_type {
                     if let Some(edge_type) = self.store.edge_type(*edge_id) {
-                        edge_type.as_str() == filter_type.as_str()
+                        edge_type
+                            .as_str()
+                            .eq_ignore_ascii_case(filter_type.as_str())
                     } else {
                         false
                     }
@@ -606,11 +608,7 @@ impl LazyFactorizedChainOperator {
         // Execute each expand step
         for step in &self.steps {
             chain = chain
-                .expand(
-                    step.source_column,
-                    step.direction.clone(),
-                    step.edge_type.clone(),
-                )
+                .expand(step.source_column, step.direction, step.edge_type.clone())
                 .map_err(|e| {
                     OperatorError::Execution(format!("Factorized expand failed: {}", e))
                 })?;

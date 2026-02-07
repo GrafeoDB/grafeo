@@ -3,7 +3,6 @@
 Tests filter operations and direct lookup APIs with Cypher for setup/verification.
 """
 
-import pytest
 from tests.python.bases.test_filters import BaseFilterAndLookupTest
 
 

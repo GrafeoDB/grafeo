@@ -9,14 +9,14 @@ import pytest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
 
 
 pytestmark = pytest.mark.skipif(
-    not GRAFEO_AVAILABLE,
-    reason="Grafeo Python bindings not installed"
+    not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"
 )
 
 
@@ -30,15 +30,15 @@ class TestGraphQLQueries:
 
     def _setup_test_data(self):
         """Create test data."""
-        self.alice = self.db.create_node(["User"], {
-            "name": "Alice", "email": "alice@example.com", "age": 30
-        })
-        self.bob = self.db.create_node(["User"], {
-            "name": "Bob", "email": "bob@example.com", "age": 25
-        })
-        self.post1 = self.db.create_node(["Post"], {
-            "title": "Hello World", "content": "My first post"
-        })
+        self.alice = self.db.create_node(
+            ["User"], {"name": "Alice", "email": "alice@example.com", "age": 30}
+        )
+        self.bob = self.db.create_node(
+            ["User"], {"name": "Bob", "email": "bob@example.com", "age": 25}
+        )
+        self.post1 = self.db.create_node(
+            ["Post"], {"title": "Hello World", "content": "My first post"}
+        )
         self.db.create_edge(self.alice.id, self.bob.id, "friends", {})
         self.db.create_edge(self.alice.id, self.post1.id, "posts", {})
 
@@ -205,9 +205,11 @@ class TestGraphQLMutations:
     def test_graphql_delete_mutation(self):
         """GraphQL: Delete mutation."""
         # First create a user
-        self.db.create_node(["User"], {"name": "ToDelete", "email": "delete@example.com"})
+        self.db.create_node(
+            ["User"], {"name": "ToDelete", "email": "delete@example.com"}
+        )
 
-        result = self._execute_graphql("""
+        self._execute_graphql("""
             mutation {
                 deleteUser(name: "ToDelete") {
                     success

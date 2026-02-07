@@ -9,14 +9,14 @@ import pytest
 # Try to import grafeo
 try:
     from grafeo import GrafeoDB
+
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
 
 
 pytestmark = pytest.mark.skipif(
-    not GRAFEO_AVAILABLE,
-    reason="Grafeo Python bindings not installed"
+    not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"
 )
 
 
@@ -30,17 +30,15 @@ class TestRDFCrossLanguageConsistency:
 
     def _setup_test_data(self):
         """Create RDF-like test data."""
-        self.alice = self.db.create_node(["Resource", "Person"], {
-            "uri": "http://example.org/person/alice",
-            "name": "Alice",
-            "age": 30
-        })
+        self.alice = self.db.create_node(
+            ["Resource", "Person"],
+            {"uri": "http://example.org/person/alice", "name": "Alice", "age": 30},
+        )
 
-        self.bob = self.db.create_node(["Resource", "Person"], {
-            "uri": "http://example.org/person/bob",
-            "name": "Bob",
-            "age": 25
-        })
+        self.bob = self.db.create_node(
+            ["Resource", "Person"],
+            {"uri": "http://example.org/person/bob", "name": "Bob", "age": 25},
+        )
 
         self.db.create_edge(self.alice.id, self.bob.id, "knows", {})
 
@@ -67,9 +65,7 @@ class TestRDFCrossLanguageConsistency:
     def test_person_count_consistency(self):
         """Both languages should see the same number of persons."""
         # Use GQL as baseline (always available)
-        gql_result = self.db.execute(
-            "MATCH (p:Person) RETURN count(p) AS cnt"
-        )
+        gql_result = self.db.execute("MATCH (p:Person) RETURN count(p) AS cnt")
         gql_count = list(gql_result)[0]["cnt"]
         assert gql_count == 2
 
@@ -111,17 +107,14 @@ class TestRDFTripleModelConsistency:
     def _setup_test_data(self):
         """Create RDF-style data using LPG."""
         # Model triples as: subject node -> predicate edge -> object node
-        self.subject = self.db.create_node(["Resource"], {
-            "uri": "http://example.org/book/1"
-        })
-        self.object = self.db.create_node(["Literal"], {
-            "value": "The Great Gatsby",
-            "datatype": "xsd:string"
-        })
+        self.subject = self.db.create_node(
+            ["Resource"], {"uri": "http://example.org/book/1"}
+        )
+        self.object = self.db.create_node(
+            ["Literal"], {"value": "The Great Gatsby", "datatype": "xsd:string"}
+        )
         self.db.create_edge(
-            self.subject.id, self.object.id,
-            "http://purl.org/dc/elements/1.1/title",
-            {}
+            self.subject.id, self.object.id, "http://purl.org/dc/elements/1.1/title", {}
         )
 
     def test_triple_pattern_query(self):

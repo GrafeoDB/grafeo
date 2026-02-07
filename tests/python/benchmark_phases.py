@@ -24,7 +24,7 @@ def timer(name: str):
     start = time.perf_counter()
     yield
     elapsed = time.perf_counter() - start
-    print(f"  {name}: {elapsed*1000:.2f} ms")
+    print(f"  {name}: {elapsed * 1000:.2f} ms")
 
 
 def measure(func, iterations=10):
@@ -32,7 +32,7 @@ def measure(func, iterations=10):
     times = []
     for _ in range(iterations):
         start = time.perf_counter()
-        result = func()
+        func()
         elapsed = (time.perf_counter() - start) * 1000
         times.append(elapsed)
     return statistics.mean(times), statistics.stdev(times) if len(times) > 1 else 0
@@ -41,7 +41,7 @@ def measure(func, iterations=10):
 def run_benchmark(node_count=100_000, edge_count=500_000, warmup=True):
     """Run comprehensive benchmark suite."""
     print("=" * 60)
-    print(f"GRAPHOS PERFORMANCE BENCHMARK")
+    print("GRAPHOS PERFORMANCE BENCHMARK")
     print(f"Nodes: {node_count:,}  Edges: {edge_count:,}")
     print("=" * 60)
 
@@ -57,22 +57,30 @@ def run_benchmark(node_count=100_000, edge_count=500_000, warmup=True):
     names = [f"person_{i}" for i in range(node_count)]
     ages = [random.randint(18, 80) for _ in range(node_count)]
     salaries = [random.uniform(30000, 150000) for _ in range(node_count)]
-    cities = random.choices(["New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia"], k=node_count)
+    cities = random.choices(
+        ["New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia"],
+        k=node_count,
+    )
 
     start = time.perf_counter()
     nodes = []
     for i in range(node_count):
-        node = db.create_node(["Person"], {
-            "name": names[i],
-            "age": ages[i],
-            "salary": salaries[i],
-            "city": cities[i],
-            "index": i,
-        })
+        node = db.create_node(
+            ["Person"],
+            {
+                "name": names[i],
+                "age": ages[i],
+                "salary": salaries[i],
+                "city": cities[i],
+                "index": i,
+            },
+        )
         nodes.append(node)
     node_insert_time = time.perf_counter() - start
     node_rate = node_count / node_insert_time
-    print(f"  Node insertion: {node_insert_time*1000:.2f} ms ({node_rate:,.0f} nodes/sec)")
+    print(
+        f"  Node insertion: {node_insert_time * 1000:.2f} ms ({node_rate:,.0f} nodes/sec)"
+    )
 
     # Edge insertions
     start = time.perf_counter()
@@ -81,11 +89,18 @@ def run_benchmark(node_count=100_000, edge_count=500_000, warmup=True):
         src = nodes[random.randint(0, node_count - 1)]
         dst = nodes[random.randint(0, node_count - 1)]
         if src.id != dst.id:
-            db.create_edge(src.id, dst.id, "KNOWS", {"since": 2000 + (i % 24), "weight": random.random()})
+            db.create_edge(
+                src.id,
+                dst.id,
+                "KNOWS",
+                {"since": 2000 + (i % 24), "weight": random.random()},
+            )
             edges_created += 1
     edge_insert_time = time.perf_counter() - start
     edge_rate = edges_created / edge_insert_time
-    print(f"  Edge insertion: {edge_insert_time*1000:.2f} ms ({edge_rate:,.0f} edges/sec)")
+    print(
+        f"  Edge insertion: {edge_insert_time * 1000:.2f} ms ({edge_rate:,.0f} edges/sec)"
+    )
 
     # ============================================================
     # 2. WARMUP (if enabled)
@@ -151,14 +166,18 @@ def run_benchmark(node_count=100_000, edge_count=500_000, warmup=True):
 
     # 1-hop traversal
     def one_hop_traversal():
-        return db.execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b LIMIT 1000")
+        return db.execute(
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b LIMIT 1000"
+        )
 
     mean, std = measure(one_hop_traversal, iterations=20)
     print(f"  1-hop traversal LIMIT 1000: {mean:.2f} ms (std: {std:.2f} ms)")
 
     # 1-hop with filter
     def one_hop_filtered():
-        return db.execute("MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.age > 50 RETURN a, b LIMIT 500")
+        return db.execute(
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.age > 50 RETURN a, b LIMIT 500"
+        )
 
     mean, std = measure(one_hop_filtered, iterations=20)
     print(f"  1-hop filtered (age > 50): {mean:.2f} ms (std: {std:.2f} ms)")
@@ -265,11 +284,13 @@ def run_factorized_benchmark(node_count=1_000, avg_degree=15, warmup=True):
         # Spread destinations to create consistent fan-out
         dst_idx = (src_idx + 1 + (i // node_count)) % node_count
         if src_idx != dst_idx:
-            db.create_edge(nodes[src_idx].id, nodes[dst_idx].id, "KNOWS", {"weight": 1.0})
+            db.create_edge(
+                nodes[src_idx].id, nodes[dst_idx].id, "KNOWS", {"weight": 1.0}
+            )
             edges_created += 1
 
     setup_time = time.perf_counter() - start
-    print(f"  Setup: {setup_time*1000:.2f} ms ({edges_created:,} edges)")
+    print(f"  Setup: {setup_time * 1000:.2f} ms ({edges_created:,} edges)")
 
     if warmup:
         print("\n[WARMUP] Running warmup queries...")
@@ -296,7 +317,7 @@ def run_factorized_benchmark(node_count=1_000, avg_degree=15, warmup=True):
 
     mean, std = measure(one_hop_all, iterations=10)
     result = one_hop_all()
-    row_count = len(result) if hasattr(result, '__len__') else 0
+    row_count = len(result) if hasattr(result, "__len__") else 0
     print(f"  1-hop traversal: {mean:.2f} ms (std: {std:.2f}) - {row_count} rows")
 
     # 2-hop - this is where factorization starts to matter
@@ -310,7 +331,7 @@ def run_factorized_benchmark(node_count=1_000, avg_degree=15, warmup=True):
 
     mean, std = measure(two_hop_from_one, iterations=10)
     result = two_hop_from_one()
-    row_count = len(result) if hasattr(result, '__len__') else 0
+    row_count = len(result) if hasattr(result, "__len__") else 0
     print(f"  2-hop from node 0: {mean:.2f} ms (std: {std:.2f}) - {row_count} rows")
 
     def two_hop_limited():
@@ -329,7 +350,7 @@ def run_factorized_benchmark(node_count=1_000, avg_degree=15, warmup=True):
 
     mean, std = measure(two_hop_distinct, iterations=10)
     result = two_hop_distinct()
-    row_count = len(result) if hasattr(result, '__len__') else 0
+    row_count = len(result) if hasattr(result, "__len__") else 0
     print(f"  2-hop DISTINCT c: {mean:.2f} ms (std: {std:.2f}) - {row_count} unique")
 
     # 3-hop - major factorization benefit (O(d^3) vs O(3d))
@@ -344,8 +365,10 @@ def run_factorized_benchmark(node_count=1_000, avg_degree=15, warmup=True):
 
     mean, std = measure(three_hop_from_one, iterations=5)
     result = three_hop_from_one()
-    row_count = len(result) if hasattr(result, '__len__') else 0
-    print(f"  3-hop from node 0 (LIMIT 5000): {mean:.2f} ms (std: {std:.2f}) - {row_count} rows")
+    row_count = len(result) if hasattr(result, "__len__") else 0
+    print(
+        f"  3-hop from node 0 (LIMIT 5000): {mean:.2f} ms (std: {std:.2f}) - {row_count} rows"
+    )
 
     def three_hop_count():
         return db.execute(
@@ -363,8 +386,7 @@ def run_factorized_benchmark(node_count=1_000, avg_degree=15, warmup=True):
 
     def triangle_count():
         return db.execute(
-            "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(a) "
-            "RETURN count(a)"
+            "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(a) RETURN count(a)"
         )
 
     mean, std = measure(triangle_count, iterations=5)

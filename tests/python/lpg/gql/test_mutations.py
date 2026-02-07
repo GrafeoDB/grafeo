@@ -3,7 +3,6 @@
 Tests CRUD operations using GQL (ISO standard) query language.
 """
 
-import pytest
 from tests.python.bases.test_mutations import BaseMutationsTest
 
 
@@ -42,7 +41,9 @@ class TestGQLMutations(BaseMutationsTest):
             value_str = f"'{value}'"
         else:
             value_str = str(value)
-        return f"MATCH (n:{label}) WHERE n.{prop} {op} {value_str} RETURN n.{return_prop}"
+        return (
+            f"MATCH (n:{label}) WHERE n.{prop} {op} {value_str} RETURN n.{return_prop}"
+        )
 
     def delete_node_query(self, label: str, prop: str, value) -> str:
         """GQL: MATCH (n:<label>) WHERE n.<prop> = <value> DELETE n"""
@@ -88,7 +89,9 @@ class TestGQLMutations(BaseMutationsTest):
                 f"CREATE (a)-[r:{edge_type}]->(b) RETURN r"
             )
 
-    def update_node_query(self, label: str, match_prop: str, match_value, set_prop: str, set_value) -> str:
+    def update_node_query(
+        self, label: str, match_prop: str, match_value, set_prop: str, set_value
+    ) -> str:
         """GQL: MATCH (n:<label>) WHERE n.<prop> = <value> SET n.<prop> = <value>"""
         match_val = f"'{match_value}'" if isinstance(match_value, str) else match_value
         set_val = f"'{set_value}'" if isinstance(set_value, str) else set_value
@@ -101,6 +104,7 @@ class TestGQLMutations(BaseMutationsTest):
 # =============================================================================
 # GQL-SPECIFIC MUTATION TESTS
 # =============================================================================
+
 
 class TestGQLSpecificMutations:
     """GQL-specific mutation tests."""
@@ -128,9 +132,7 @@ class TestGQLSpecificMutations:
 
     def test_gql_property_types(self, db):
         """Test various property types in GQL."""
-        db.execute(
-            "INSERT (:Data {str: 'hello', num: 42, flt: 3.14, bool: true})"
-        )
+        db.execute("INSERT (:Data {str: 'hello', num: 42, flt: 3.14, bool: true})")
 
         result = db.execute("MATCH (n:Data) RETURN n.str, n.num, n.flt, n.bool")
         rows = list(result)
@@ -147,7 +149,9 @@ class TestGQLSpecificMutations:
             "SET n.age = 31, n.city = 'LA' RETURN n"
         )
 
-        result = db.execute("MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.age, n.city")
+        result = db.execute(
+            "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.age, n.city"
+        )
         rows = list(result)
         assert len(rows) == 1
         assert rows[0]["n.age"] == 31
@@ -158,10 +162,7 @@ class TestGQLSpecificMutations:
         db.execute("INSERT (:Person {name: 'Bob', age: 25, temp: 'delete_me'})")
 
         # GQL uses SET n.prop = null to remove properties (REMOVE not yet implemented)
-        db.execute(
-            "MATCH (n:Person) WHERE n.name = 'Bob' "
-            "SET n.temp = null RETURN n"
-        )
+        db.execute("MATCH (n:Person) WHERE n.name = 'Bob' SET n.temp = null RETURN n")
 
         result = db.execute("MATCH (n:Person) WHERE n.name = 'Bob' RETURN n.temp")
         rows = list(result)
@@ -176,9 +177,7 @@ class TestGQLSpecificMutations:
         db.create_edge(alice.id, bob.id, "KNOWS", {})
 
         # Delete Alice and her relationships
-        db.execute(
-            "MATCH (n:Person) WHERE n.name = 'Alice' DETACH DELETE n"
-        )
+        db.execute("MATCH (n:Person) WHERE n.name = 'Alice' DETACH DELETE n")
 
         # Verify Alice is deleted
         result = db.execute("MATCH (n:Person) RETURN n.name")
@@ -189,9 +188,7 @@ class TestGQLSpecificMutations:
 
     def test_gql_merge_create(self, db):
         """Test MERGE creates node if not exists."""
-        db.execute(
-            "MERGE (:Person {name: 'MergeTest'})"
-        )
+        db.execute("MERGE (:Person {name: 'MergeTest'})")
 
         result = db.execute("MATCH (n:Person) WHERE n.name = 'MergeTest' RETURN n.name")
         rows = list(result)
@@ -202,15 +199,16 @@ class TestGQLSpecificMutations:
         db.execute("INSERT (:Person {name: 'MergeExisting', age: 30})")
 
         # MERGE should match existing node, not create new
-        db.execute(
-            "MERGE (n:Person {name: 'MergeExisting'}) "
-            "SET n.age = 31 RETURN n"
-        )
+        db.execute("MERGE (n:Person {name: 'MergeExisting'}) SET n.age = 31 RETURN n")
 
-        result = db.execute("MATCH (n:Person) WHERE n.name = 'MergeExisting' RETURN count(n) AS cnt")
+        result = db.execute(
+            "MATCH (n:Person) WHERE n.name = 'MergeExisting' RETURN count(n) AS cnt"
+        )
         rows = list(result)
         assert rows[0]["cnt"] == 1
 
-        result = db.execute("MATCH (n:Person) WHERE n.name = 'MergeExisting' RETURN n.age")
+        result = db.execute(
+            "MATCH (n:Person) WHERE n.name = 'MergeExisting' RETURN n.age"
+        )
         rows = list(result)
         assert rows[0]["n.age"] == 31

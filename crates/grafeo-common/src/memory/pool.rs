@@ -317,6 +317,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))] // parking_lot uses integer-to-pointer casts incompatible with Miri strict provenance
     fn test_pool_thread_safety() {
         use std::sync::Arc;
         use std::thread;

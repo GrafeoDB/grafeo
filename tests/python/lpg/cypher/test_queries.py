@@ -3,7 +3,6 @@
 Tests pattern matching, paths, and aggregations using Cypher query language.
 """
 
-import pytest
 from tests.python.bases.test_queries import BaseQueriesTest
 
 
@@ -22,7 +21,9 @@ class TestCypherQueries(BaseQueriesTest):
         """Set up test data for pattern tests."""
         alice = db.create_node(["Person"], {"name": "Alice", "age": 30, "city": "NYC"})
         bob = db.create_node(["Person"], {"name": "Bob", "age": 25, "city": "LA"})
-        charlie = db.create_node(["Person"], {"name": "Charlie", "age": 35, "city": "NYC"})
+        charlie = db.create_node(
+            ["Person"], {"name": "Charlie", "age": 35, "city": "NYC"}
+        )
 
         acme = db.create_node(["Company"], {"name": "Acme Corp", "founded": 2010})
         globex = db.create_node(["Company"], {"name": "Globex Inc", "founded": 2015})
@@ -35,7 +36,13 @@ class TestCypherQueries(BaseQueriesTest):
         db.create_edge(bob.id, globex.id, "WORKS_AT", {"role": "Manager"})
         db.create_edge(charlie.id, acme.id, "WORKS_AT", {"role": "Director"})
 
-        return {"alice": alice, "bob": bob, "charlie": charlie, "acme": acme, "globex": globex}
+        return {
+            "alice": alice,
+            "bob": bob,
+            "charlie": charlie,
+            "acme": acme,
+            "globex": globex,
+        }
 
     def setup_chain_graph(self, db):
         """Set up a chain graph: a -> b -> c -> d."""
@@ -77,34 +84,82 @@ class TestCypherQueries(BaseQueriesTest):
     def match_label_query(self, label: str, return_prop: str = "name") -> str:
         return f"MATCH (n:{label}) RETURN n.{return_prop}"
 
-    def match_where_query(self, label: str, prop: str, op: str, value, return_prop: str = "name") -> str:
+    def match_where_query(
+        self, label: str, prop: str, op: str, value, return_prop: str = "name"
+    ) -> str:
         value_str = f"'{value}'" if isinstance(value, str) else str(value)
-        return f"MATCH (n:{label}) WHERE n.{prop} {op} {value_str} RETURN n.{return_prop}"
+        return (
+            f"MATCH (n:{label}) WHERE n.{prop} {op} {value_str} RETURN n.{return_prop}"
+        )
 
-    def match_and_query(self, label: str, prop1: str, op1: str, value1, prop2: str, op2: str, value2, return_prop: str = "name") -> str:
+    def match_and_query(
+        self,
+        label: str,
+        prop1: str,
+        op1: str,
+        value1,
+        prop2: str,
+        op2: str,
+        value2,
+        return_prop: str = "name",
+    ) -> str:
         val1 = f"'{value1}'" if isinstance(value1, str) else value1
         val2 = f"'{value2}'" if isinstance(value2, str) else value2
         return f"MATCH (p:{label}) WHERE p.{prop1} {op1} {val1} AND p.{prop2} {op2} {val2} RETURN p.{return_prop}"
 
-    def match_relationship_query(self, from_label: str, rel_type: str, to_label: str, return_from: str = "name", return_to: str = "name") -> str:
+    def match_relationship_query(
+        self,
+        from_label: str,
+        rel_type: str,
+        to_label: str,
+        return_from: str = "name",
+        return_to: str = "name",
+    ) -> str:
         return f"MATCH (a:{from_label})-[r:{rel_type}]->(b:{to_label}) RETURN a.{return_from} AS from_{return_from}, b.{return_to} AS to_{return_to}"
 
-    def match_relationship_with_props_query(self, from_label: str, rel_type: str, to_label: str, rel_prop: str, op: str, value) -> str:
+    def match_relationship_with_props_query(
+        self,
+        from_label: str,
+        rel_type: str,
+        to_label: str,
+        rel_prop: str,
+        op: str,
+        value,
+    ) -> str:
         val = f"'{value}'" if isinstance(value, str) else value
         return f"MATCH (a:{from_label})-[r:{rel_type}]->(b:{to_label}) WHERE r.{rel_prop} {op} {val} RETURN a.name, b.name, r.{rel_prop}"
 
-    def match_multi_hop_query(self, start_label: str, rel_type: str, end_label: str) -> str:
+    def match_multi_hop_query(
+        self, start_label: str, rel_type: str, end_label: str
+    ) -> str:
         return f"MATCH (a:{start_label})-[:{rel_type}]->(b:{start_label})-[:{rel_type}]->(c:{end_label}) RETURN a.name, b.name, c.name"
 
     # =========================================================================
     # PATH QUERIES
     # =========================================================================
 
-    def variable_length_path_query(self, start_label: str, start_prop: str, start_value, rel_type: str, end_label: str, min_hops: int, max_hops: int) -> str:
+    def variable_length_path_query(
+        self,
+        start_label: str,
+        start_prop: str,
+        start_value,
+        rel_type: str,
+        end_label: str,
+        min_hops: int,
+        max_hops: int,
+    ) -> str:
         val = f"'{start_value}'" if isinstance(start_value, str) else start_value
         return f"MATCH (start:{start_label} {{{start_prop}: {val}}})-[:{rel_type}*{min_hops}..{max_hops}]->(end:{end_label}) RETURN end.name"
 
-    def shortest_path_query(self, start_label: str, start_prop: str, start_value, end_label: str, end_prop: str, end_value) -> str:
+    def shortest_path_query(
+        self,
+        start_label: str,
+        start_prop: str,
+        start_value,
+        end_label: str,
+        end_prop: str,
+        end_value,
+    ) -> str:
         start_val = f"'{start_value}'" if isinstance(start_value, str) else start_value
         end_val = f"'{end_value}'" if isinstance(end_value, str) else end_value
         return f"MATCH p = shortestPath((a:{start_label} {{{start_prop}: {start_val}}})-[*]-(d:{end_label} {{{end_prop}: {end_val}}})) RETURN length(p) AS path_length"
@@ -120,7 +175,9 @@ class TestCypherQueries(BaseQueriesTest):
         return f"MATCH (p:{label}) RETURN count(DISTINCT p.{prop}) AS cities"
 
     def sum_avg_query(self, label: str, prop: str) -> str:
-        return f"MATCH (p:{label}) RETURN sum(p.{prop}) AS total, avg(p.{prop}) AS average"
+        return (
+            f"MATCH (p:{label}) RETURN sum(p.{prop}) AS total, avg(p.{prop}) AS average"
+        )
 
     def min_max_query(self, label: str, prop: str) -> str:
         return f"MATCH (p:{label}) RETURN min(p.{prop}) AS minimum, max(p.{prop}) AS maximum"
@@ -133,12 +190,15 @@ class TestCypherQueries(BaseQueriesTest):
 # CYPHER-SPECIFIC TESTS
 # =============================================================================
 
+
 class TestCypherSpecificPatterns:
     """Cypher-specific pattern tests."""
 
     def test_cypher_inline_properties(self, pattern_db):
         """Test Cypher inline property matching."""
-        result = pattern_db.execute_cypher("MATCH (p:Person {city: 'NYC'}) RETURN p.name")
+        result = pattern_db.execute_cypher(
+            "MATCH (p:Person {city: 'NYC'}) RETURN p.name"
+        )
         rows = list(result)
         names = [r["p.name"] for r in rows]
         assert "Alice" in names
@@ -191,7 +251,9 @@ class TestCypherSpecificAggregations:
         db.create_node(["Person"], {"name": "Bob", "city": "NYC"})
         db.create_node(["Person"], {"name": "Charlie", "city": "LA"})
 
-        result = db.execute_cypher("MATCH (p:Person) RETURN collect(DISTINCT p.city) AS cities")
+        result = db.execute_cypher(
+            "MATCH (p:Person) RETURN collect(DISTINCT p.city) AS cities"
+        )
         rows = list(result)
         cities = rows[0]["cities"]
         assert len(cities) == 2
@@ -219,7 +281,9 @@ class TestCypherSpecificAggregations:
 
     def test_cypher_head_tail(self, db):
         """Test Cypher head() and tail() on lists."""
-        result = db.execute_cypher("WITH [1, 2, 3, 4, 5] AS nums RETURN head(nums) AS first, tail(nums) AS rest")
+        result = db.execute_cypher(
+            "WITH [1, 2, 3, 4, 5] AS nums RETURN head(nums) AS first, tail(nums) AS rest"
+        )
         rows = list(result)
         assert rows[0]["first"] == 1
         assert rows[0]["rest"] == [2, 3, 4, 5]

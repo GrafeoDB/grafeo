@@ -176,8 +176,8 @@ mod tests {
         let a = bump.alloc(42u64);
         assert_eq!(*a, 42);
 
-        let b = bump.alloc(String::from("hello"));
-        assert_eq!(b.as_str(), "hello");
+        let b = bump.alloc_str("hello");
+        assert_eq!(b, "hello");
     }
 
     #[test]

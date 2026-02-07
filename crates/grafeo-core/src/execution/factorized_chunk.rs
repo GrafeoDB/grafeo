@@ -1051,21 +1051,30 @@ impl<'a> FactorizedRowIterator<'a> {
         false
     }
 
-    /// Checks if the deepest level has a valid (non-empty) range for its current parent.
+    /// Checks if all levels have valid (non-empty) ranges for their current parent.
+    ///
+    /// This must check ALL levels, not just the deepest, because when an
+    /// intermediate level has an empty range, deeper levels get reset to
+    /// out-of-bounds indices that can alias into unrelated valid ranges.
     fn has_valid_deepest_range(&self) -> bool {
         if self.chunk.levels.len() <= 1 {
             return true; // Single level or empty - always valid
         }
 
-        let deepest_idx = self.chunk.levels.len() - 1;
-        let parent_idx = self.indices[deepest_idx - 1];
-
-        if let Some(col) = self.chunk.levels[deepest_idx].columns.first() {
-            let (start, end) = col.range_for_parent(parent_idx);
-            start < end // Valid if range is non-empty
-        } else {
-            false
+        // Check every unflat level (1..len) has a non-empty range for its parent
+        for level_idx in 1..self.chunk.levels.len() {
+            let parent_idx = self.indices[level_idx - 1];
+            if let Some(col) = self.chunk.levels[level_idx].columns.first() {
+                let (start, end) = col.range_for_parent(parent_idx);
+                if start >= end {
+                    return false;
+                }
+            } else {
+                return false;
+            }
         }
+
+        true
     }
 }
 

@@ -110,7 +110,7 @@ impl MergeableAccumulator {
         // Keep our first (we processed earlier)
         // If we have no first, take theirs
         if self.first.is_none() {
-            self.first = other.first.clone();
+            self.first.clone_from(&other.first);
         }
     }
 
@@ -626,6 +626,23 @@ mod tests {
 
         let total_rows: usize = merged.iter().map(DataChunk::len).sum();
         assert_eq!(total_rows, 4); // 1, 2, 3, 4 (no duplicates)
+    }
+
+    #[test]
+    fn test_hash_row_with_non_primitive_values() {
+        // Exercises the catch-all branch in hash_row for non-primitive Value types
+        let row1 = vec![Value::List(vec![Value::Int64(1)].into())];
+        let row2 = vec![Value::List(vec![Value::Int64(2)].into())];
+        let row3 = vec![Value::Bytes(vec![1, 2, 3].into())];
+
+        // The catch-all hashes all non-primitive types to the same bucket (0u8)
+        let h1 = hash_row(&row1);
+        let h2 = hash_row(&row2);
+        let h3 = hash_row(&row3);
+
+        // All non-primitive types hash identically via the catch-all
+        assert_eq!(h1, h2);
+        assert_eq!(h2, h3);
     }
 
     #[test]

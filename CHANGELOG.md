@@ -2,6 +2,29 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.4.3] - 2026-02-08
+
+_Database Creation Options, Snapshot API & Ecosystem Integration_
+
+### Added
+
+- **Database creation options**: `GraphModel` enum (`Lpg`, `Rdf`) for per-database graph model selection, `DurabilityMode` exposed in config, `schema_constraints` toggle, `Config::validate()` with `ConfigError` enum
+- **Query routing**: Generic `execute()` on an RDF database returns a clear error instead of silently running GQL; explicit language methods (`execute_sparql()`, `execute_cypher()`, etc.) work on any database
+- **Inspection API**: `db.graph_model()` and `db.memory_limit()` for runtime introspection
+- **Snapshot export/import**: `GrafeoDB::export_snapshot()` / `import_snapshot()` for binary database serialization (bincode 2.0), enabling IndexedDB persistence in WASM and backup workflows
+- **WASM API expansion**: `executeWithLanguage()` for multi-language queries, `exportSnapshot()` / `importSnapshot()` for browser persistence, `schema()` for introspection, updated TypeScript definitions
+- 16 snapshot round-trip tests covering edge properties, multi-label nodes, all value types, collections, moderate datasets, version mismatch rejection, deterministic export
+
+### Changed
+
+- Stricter Clippy linting: removed 4 more lint allows (`assigning_clones`, `stable_sort_primitive`, `inefficient_to_string`, `approx_constant`)
+- Re-exported `GraphModel`, `DurabilityMode`, `ConfigError` from umbrella `grafeo` crate
+
+### Fixed
+
+- Go badge on README now uses static shields.io badge (pkg.go.dev badge always showed "Go Reference")
+- Release workflow pings Go module proxy after tagging to ensure pkg.go.dev indexes new versions
+
 ## [0.4.2] - 2026-02-08
 
 _WebAssembly Bindings & Feature-Gated Platform Code_

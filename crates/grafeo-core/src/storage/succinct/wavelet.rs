@@ -477,7 +477,7 @@ mod tests {
         let wt = WaveletTree::new(&seq);
 
         let mut alpha: Vec<u64> = wt.alphabet().collect();
-        alpha.sort();
+        alpha.sort_unstable();
         assert_eq!(alpha, vec![1, 3, 5, 8]);
     }
 

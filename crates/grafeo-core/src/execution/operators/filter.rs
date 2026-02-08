@@ -1636,12 +1636,16 @@ mod tests {
     #[test]
     fn test_comparison_float64() {
         let mut builder = DataChunkBuilder::new(&[LogicalType::Float64]);
-        builder.column_mut(0).unwrap().push_float64(3.14);
+        builder
+            .column_mut(0)
+            .unwrap()
+            .push_float64(std::f64::consts::PI);
         builder.advance_row();
         let chunk = builder.finish();
 
         // Test float equality (within epsilon)
-        let pred_eq = ComparisonPredicate::new(0, CompareOp::Eq, Value::Float64(3.14));
+        let pred_eq =
+            ComparisonPredicate::new(0, CompareOp::Eq, Value::Float64(std::f64::consts::PI));
         assert!(pred_eq.evaluate(&chunk, 0));
 
         let pred_ne = ComparisonPredicate::new(0, CompareOp::Ne, Value::Float64(2.71));
@@ -1650,7 +1654,8 @@ mod tests {
         let pred_lt = ComparisonPredicate::new(0, CompareOp::Lt, Value::Float64(4.0));
         assert!(pred_lt.evaluate(&chunk, 0));
 
-        let pred_ge = ComparisonPredicate::new(0, CompareOp::Ge, Value::Float64(3.14));
+        let pred_ge =
+            ComparisonPredicate::new(0, CompareOp::Ge, Value::Float64(std::f64::consts::PI));
         assert!(pred_ge.evaluate(&chunk, 0));
     }
 

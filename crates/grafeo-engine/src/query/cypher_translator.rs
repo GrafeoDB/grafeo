@@ -1989,10 +1989,10 @@ mod tests {
         ));
 
         let float_lit = translator
-            .translate_literal(&ast::Literal::Float(3.14))
+            .translate_literal(&ast::Literal::Float(std::f64::consts::PI))
             .unwrap();
         if let LogicalExpression::Literal(Value::Float64(f)) = float_lit {
-            assert!((f - 3.14).abs() < 0.001);
+            assert!((f - std::f64::consts::PI).abs() < 0.001);
         } else {
             panic!("Expected Float64");
         }

@@ -981,7 +981,7 @@ mod tests {
             }
         }
 
-        results.sort();
+        results.sort_unstable();
         assert_eq!(results, vec![(2, 2), (3, 3), (4, 4)]);
     }
 
@@ -1047,7 +1047,7 @@ mod tests {
             }
         }
 
-        results.sort();
+        results.sort_unstable();
         assert_eq!(results, vec![(1, 10), (1, 20), (2, 10), (2, 20)]);
     }
 
@@ -1079,7 +1079,7 @@ mod tests {
             }
         }
 
-        results.sort();
+        results.sort_unstable();
         assert_eq!(results, vec![2, 4]);
     }
 
@@ -1110,7 +1110,7 @@ mod tests {
             }
         }
 
-        results.sort();
+        results.sort_unstable();
         assert_eq!(results, vec![1, 3]);
     }
 }

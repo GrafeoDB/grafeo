@@ -48,6 +48,72 @@ export class Database {
   /** Returns the number of edges in the database. */
   edgeCount(): number;
 
+  /**
+   * Executes a query using a specific query language.
+   *
+   * Supported languages: `"gql"`, `"cypher"`, `"sparql"`, `"gremlin"`, `"graphql"`.
+   * Languages require their corresponding feature flag to be enabled at build time.
+   *
+   * @example
+   * ```js
+   * const results = db.executeWithLanguage("MATCH (p:Person) RETURN p.name", "cypher");
+   * ```
+   */
+  executeWithLanguage(
+    query: string,
+    language: "gql" | "cypher" | "sparql" | "gremlin" | "graphql",
+  ): Record<string, unknown>[];
+
+  /**
+   * Exports the database to a binary snapshot.
+   *
+   * Returns a `Uint8Array` that can be stored in IndexedDB, localStorage,
+   * or sent over the network. Restore with `Database.importSnapshot()`.
+   *
+   * @example
+   * ```js
+   * const bytes = db.exportSnapshot();
+   * ```
+   */
+  exportSnapshot(): Uint8Array;
+
+  /**
+   * Creates a database from a binary snapshot.
+   *
+   * @param data - Bytes previously produced by `exportSnapshot()`.
+   *
+   * @example
+   * ```js
+   * const db = Database.importSnapshot(bytes);
+   * ```
+   */
+  static importSnapshot(data: Uint8Array): Database;
+
+  /**
+   * Returns schema information about the database.
+   *
+   * @returns An object describing labels, edge types, and property keys.
+   *
+   * @example
+   * ```js
+   * const schema = db.schema();
+   * // { Lpg: { labels: [{name: "Person", count: 5}], edge_types: [...], property_keys: [...] } }
+   * ```
+   */
+  schema(): {
+    Lpg?: {
+      labels: Array<{ name: string; count: number }>;
+      edge_types: Array<{ name: string; count: number }>;
+      property_keys: string[];
+    };
+    Rdf?: {
+      predicates: Array<{ iri: string; count: number }>;
+      named_graphs: string[];
+      subject_count: number;
+      object_count: number;
+    };
+  };
+
   /** Returns the Grafeo version. */
   static version(): string;
 

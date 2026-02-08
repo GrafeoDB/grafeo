@@ -948,7 +948,7 @@ mod tests {
         map.insert(HashableValue::new(Value::Int64(42)), 1);
         map.insert(HashableValue::new(Value::String("test".into())), 2);
         map.insert(HashableValue::new(Value::Bool(true)), 3);
-        map.insert(HashableValue::new(Value::Float64(3.14)), 4);
+        map.insert(HashableValue::new(Value::Float64(std::f64::consts::PI)), 4);
 
         assert_eq!(map.get(&HashableValue::new(Value::Int64(42))), Some(&1));
         assert_eq!(
@@ -956,7 +956,10 @@ mod tests {
             Some(&2)
         );
         assert_eq!(map.get(&HashableValue::new(Value::Bool(true))), Some(&3));
-        assert_eq!(map.get(&HashableValue::new(Value::Float64(3.14))), Some(&4));
+        assert_eq!(
+            map.get(&HashableValue::new(Value::Float64(std::f64::consts::PI))),
+            Some(&4)
+        );
     }
 
     #[test]
@@ -1016,7 +1019,7 @@ mod tests {
     fn test_orderable_value_try_from() {
         // Supported types
         assert!(OrderableValue::try_from(&Value::Int64(42)).is_some());
-        assert!(OrderableValue::try_from(&Value::Float64(3.14)).is_some());
+        assert!(OrderableValue::try_from(&Value::Float64(std::f64::consts::PI)).is_some());
         assert!(OrderableValue::try_from(&Value::String("test".into())).is_some());
         assert!(OrderableValue::try_from(&Value::Bool(true)).is_some());
         assert!(OrderableValue::try_from(&Value::Timestamp(Timestamp::from_secs(1000))).is_some());
@@ -1072,7 +1075,7 @@ mod tests {
         let back = orderable.into_value();
         assert_eq!(original, back);
 
-        let original = Value::Float64(3.14);
+        let original = Value::Float64(std::f64::consts::PI);
         let orderable = OrderableValue::try_from(&original).unwrap();
         let back = orderable.into_value();
         assert_eq!(original, back);

@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 rust-version = "1.91.1"
 license = "AGPL-3.0-or-later"
@@ -24,11 +24,11 @@ description = "A pure-Rust, high-performance, embeddable graph database"
 
 [workspace.dependencies]
 # Internal crates (default-features = false to allow per-crate control)
-grafeo-common = { path = "crates/grafeo-common", version = "0.4.2" }
-grafeo-core = { path = "crates/grafeo-core", version = "0.4.2", default-features = false }
-grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.4.2", default-features = false }
-grafeo-engine = { path = "crates/grafeo-engine", version = "0.4.2", default-features = false }
-grafeo = { path = "crates/grafeo", version = "0.4.2" }
+grafeo-common = { path = "crates/grafeo-common", version = "0.4.3" }
+grafeo-core = { path = "crates/grafeo-core", version = "0.4.3", default-features = false }
+grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.4.3", default-features = false }
+grafeo-engine = { path = "crates/grafeo-engine", version = "0.4.3", default-features = false }
+grafeo = { path = "crates/grafeo", version = "0.4.3" }
 
 # Error handling
 thiserror = "2.0"
@@ -154,14 +154,11 @@ float_cmp = "allow"
 explicit_auto_deref = "allow"
 should_implement_trait = "allow"
 ref_option = "allow"
-stable_sort_primitive = "allow"
 iter_not_returning_iterator = "allow"
 unnecessary_map_or = "allow"
 while_let_loop = "allow"
-assigning_clones = "allow"
 io_other_error = "allow"
 manual_div_ceil = "allow"
-approx_constant = "allow"
 assertions_on_constants = "allow"
 needless_raw_string_hashes = "allow"
 single_match = "allow"
@@ -172,7 +169,6 @@ manual_clamp = "allow"
 manual_slice_fill = "allow"
 large_enum_variant = "allow"
 implicit_hasher = "allow"
-inefficient_to_string = "allow"
 non_canonical_partial_ord_impl = "allow"
 needless_option_as_deref = "allow"
 mismatching_type_param_order = "allow"

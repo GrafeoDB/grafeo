@@ -160,6 +160,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Trigger Go module proxy
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          # Go proxy requires uppercase letters escaped as !lowercase
+          ESCAPED=$(echo "github.com/GrafeoDB/grafeo/crates/bindings/go" | sed 's/[A-Z]/!\L&/g')
+          curl -sf "https://proxy.golang.org/${ESCAPED}/@v/${VERSION}.info" || echo "Go proxy fetch pending"
+
   # Publish npm packages
   publish-npm:
     name: Publish to npm

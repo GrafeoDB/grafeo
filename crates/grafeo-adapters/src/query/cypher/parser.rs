@@ -1864,7 +1864,7 @@ mod tests {
 
     #[test]
     fn test_parse_literal_float() {
-        let stmt = parse_ok("RETURN 3.14");
+        let stmt = parse_ok("RETURN 2.78");
         if let Statement::Query(Query { clauses, .. }) = stmt
             && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
@@ -1872,7 +1872,7 @@ mod tests {
             }) = &clauses[0]
             && let Expression::Literal(Literal::Float(val)) = &items[0].expression
         {
-            assert!((val - 3.14).abs() < 0.001);
+            assert!((val - 2.78).abs() < 0.001);
         }
     }
 

@@ -13,6 +13,10 @@ _WebAssembly Bindings & Feature-Gated Platform Code_
 - `.cargo/config.toml` for wasm32 getrandom backend configuration
 - `[profile.minimal-size]` WASM build produces 660 KB gzipped binary (target was <800 KB)
 
+### Fixed
+
+- Go module versioning on pkg.go.dev: release workflow now creates subdirectory-prefixed tags (`crates/bindings/go/vX.Y.Z`) required for Go modules in monorepo subdirectories
+
 ### Changed
 
 - Internal crate dependencies use `default-features = false` in workspace root for per-crate feature control

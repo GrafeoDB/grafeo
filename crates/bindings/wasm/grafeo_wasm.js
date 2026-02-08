@@ -1,5 +1,8 @@
+// @grafeo-db/wasm - stub loader
+// This file is replaced by wasm-pack during build.
+// If you see this error, the package needs to be built first:
+//   wasm-pack build crates/bindings/wasm --target web --release
 throw new Error(
-  'grafeo-wasm is pre-alpha and not yet implemented. ' +
-  'Please see https://grafeo.dev for the current status. ' +
-  'For production use, consider the Python bindings: https://pypi.org/project/grafeo/'
+  '@grafeo-db/wasm: WASM binary not found. ' +
+  'Build with: wasm-pack build crates/bindings/wasm --target web --release'
 );

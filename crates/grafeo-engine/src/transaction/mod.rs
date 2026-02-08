@@ -78,11 +78,11 @@
 
 mod manager;
 mod mvcc;
-#[cfg(feature = "block-stm")]
+#[cfg(feature = "parallel")]
 pub mod parallel;
 
 pub use manager::{EntityId, IsolationLevel, TransactionManager, TxInfo, TxState};
 pub use mvcc::{Version, VersionChain, VersionInfo};
 
-#[cfg(feature = "block-stm")]
+#[cfg(feature = "parallel")]
 pub use parallel::{BatchRequest, BatchResult, ExecutionStatus, ParallelExecutor};

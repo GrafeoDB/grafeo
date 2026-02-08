@@ -3,11 +3,14 @@
 use crate::execution::chunk::DataChunk;
 use crate::execution::operators::OperatorError;
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
+#[cfg(feature = "spill")]
 use crate::execution::spill::{PartitionedState, SpillManager};
 use crate::execution::vector::ValueVector;
 use grafeo_common::types::Value;
 use std::collections::HashMap;
+#[cfg(feature = "spill")]
 use std::io::{Read, Write};
+#[cfg(feature = "spill")]
 use std::sync::Arc;
 
 /// Aggregation function type.
@@ -432,9 +435,11 @@ impl PushOperator for AggregatePushOperator {
 }
 
 /// Default spill threshold for aggregates (number of groups).
+#[cfg(feature = "spill")]
 pub const DEFAULT_AGGREGATE_SPILL_THRESHOLD: usize = 50_000;
 
 /// Serializes a GroupState to bytes.
+#[cfg(feature = "spill")]
 fn serialize_group_state(state: &GroupState, w: &mut dyn Write) -> std::io::Result<()> {
     use crate::execution::spill::serialize_value;
 
@@ -476,6 +481,7 @@ fn serialize_group_state(state: &GroupState, w: &mut dyn Write) -> std::io::Resu
 }
 
 /// Deserializes a GroupState from bytes.
+#[cfg(feature = "spill")]
 fn deserialize_group_state(r: &mut dyn Read) -> std::io::Result<GroupState> {
     use crate::execution::spill::deserialize_value;
 
@@ -546,6 +552,7 @@ fn deserialize_group_state(r: &mut dyn Read) -> std::io::Result<GroupState> {
 ///
 /// Uses partitioned hash table that can spill cold partitions to disk
 /// when memory pressure is high.
+#[cfg(feature = "spill")]
 pub struct SpillableAggregatePushOperator {
     /// Columns to group by.
     group_by: Vec<usize>,
@@ -565,6 +572,7 @@ pub struct SpillableAggregatePushOperator {
     using_partitioned: bool,
 }
 
+#[cfg(feature = "spill")]
 impl SpillableAggregatePushOperator {
     /// Create a new spillable aggregate operator.
     pub fn new(group_by: Vec<usize>, aggregates: Vec<AggregateExpr>) -> Self {
@@ -670,6 +678,7 @@ impl SpillableAggregatePushOperator {
     }
 }
 
+#[cfg(feature = "spill")]
 impl PushOperator for SpillableAggregatePushOperator {
     fn push(&mut self, chunk: DataChunk, _sink: &mut dyn Sink) -> Result<bool, OperatorError> {
         if chunk.is_empty() {
@@ -927,6 +936,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "spill")]
     fn test_spillable_aggregate_no_spill() {
         // When threshold is not reached, should work like normal aggregate
         let mut agg = SpillableAggregatePushOperator::new(vec![0], vec![AggregateExpr::sum(1)])
@@ -945,6 +955,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "spill")]
     fn test_spillable_aggregate_with_spilling() {
         use tempfile::TempDir;
 
@@ -986,6 +997,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "spill")]
     fn test_spillable_aggregate_global() {
         // Global aggregation shouldn't be affected by spilling
         let mut agg = SpillableAggregatePushOperator::global(vec![AggregateExpr::count_star()]);
@@ -1004,6 +1016,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "spill")]
     fn test_spillable_aggregate_many_groups() {
         use tempfile::TempDir;
 

@@ -3,10 +3,12 @@
 use crate::execution::chunk::DataChunk;
 use crate::execution::operators::OperatorError;
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
+#[cfg(feature = "spill")]
 use crate::execution::spill::{ExternalSort, SpillManager};
 use crate::execution::vector::ValueVector;
 use grafeo_common::types::Value;
 use std::cmp::Ordering;
+#[cfg(feature = "spill")]
 use std::sync::Arc;
 
 /// Sort direction.
@@ -207,6 +209,7 @@ impl PushOperator for SortPushOperator {
 }
 
 /// Default spill threshold (number of rows before spilling).
+#[cfg(feature = "spill")]
 pub const DEFAULT_SPILL_THRESHOLD: usize = 100_000;
 
 /// Push-based sort operator with spilling support.
@@ -214,6 +217,7 @@ pub const DEFAULT_SPILL_THRESHOLD: usize = 100_000;
 /// This is a pipeline breaker that buffers input and spills to disk
 /// when memory pressure is high. It uses external merge sort for
 /// out-of-core sorting.
+#[cfg(feature = "spill")]
 pub struct SpillableSortPushOperator {
     /// Sort keys.
     keys: Vec<SortKey>,
@@ -229,6 +233,7 @@ pub struct SpillableSortPushOperator {
     spill_threshold: usize,
 }
 
+#[cfg(feature = "spill")]
 impl SpillableSortPushOperator {
     /// Create a new spillable sort operator with the given sort keys.
     pub fn new(keys: Vec<SortKey>) -> Self {
@@ -329,6 +334,7 @@ impl SpillableSortPushOperator {
     }
 }
 
+#[cfg(feature = "spill")]
 impl PushOperator for SpillableSortPushOperator {
     fn push(&mut self, chunk: DataChunk, _sink: &mut dyn Sink) -> Result<bool, OperatorError> {
         if chunk.is_empty() {
@@ -474,6 +480,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "spill")]
     fn test_spillable_sort_no_spill() {
         // When threshold is not reached, should work like normal sort
         let mut sort =
@@ -495,6 +502,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "spill")]
     fn test_spillable_sort_with_spilling() {
         use tempfile::TempDir;
 
@@ -524,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "spill")]
     fn test_spillable_sort_many_runs() {
         use tempfile::TempDir;
 
@@ -556,6 +565,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "spill")]
     fn test_spillable_sort_descending_with_spilling() {
         use tempfile::TempDir;
 

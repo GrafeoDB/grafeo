@@ -710,12 +710,18 @@ impl HnswIndex {
     /// ```
     #[must_use]
     pub fn batch_search(&self, queries: &[Vec<f32>], k: usize) -> Vec<Vec<(NodeId, f32)>> {
-        use rayon::prelude::*;
-
-        queries
-            .par_iter()
-            .map(|query| self.search(query, k))
-            .collect()
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            queries
+                .par_iter()
+                .map(|query| self.search(query, k))
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            queries.iter().map(|query| self.search(query, k)).collect()
+        }
     }
 
     /// Searches for k nearest neighbors for multiple queries in parallel.
@@ -723,12 +729,18 @@ impl HnswIndex {
     /// This variant accepts query vectors as slices.
     #[must_use]
     pub fn batch_search_slices(&self, queries: &[&[f32]], k: usize) -> Vec<Vec<(NodeId, f32)>> {
-        use rayon::prelude::*;
-
-        queries
-            .par_iter()
-            .map(|query| self.search(query, k))
-            .collect()
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            queries
+                .par_iter()
+                .map(|query| self.search(query, k))
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            queries.iter().map(|query| self.search(query, k)).collect()
+        }
     }
 
     /// Searches with custom ef parameter for multiple queries in parallel.
@@ -741,12 +753,21 @@ impl HnswIndex {
         k: usize,
         ef: usize,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        use rayon::prelude::*;
-
-        queries
-            .par_iter()
-            .map(|query| self.search_with_ef(query, k, ef))
-            .collect()
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            queries
+                .par_iter()
+                .map(|query| self.search_with_ef(query, k, ef))
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            queries
+                .iter()
+                .map(|query| self.search_with_ef(query, k, ef))
+                .collect()
+        }
     }
 }
 

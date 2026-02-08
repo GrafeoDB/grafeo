@@ -10,6 +10,7 @@ members = [
     "crates/bindings/python",
     "crates/bindings/node",
     "crates/bindings/c",
+    "crates/bindings/wasm",
 ]
 
 [workspace.package]
@@ -22,11 +23,11 @@ authors = ["S.T. Grond"]
 description = "A pure-Rust, high-performance, embeddable graph database"
 
 [workspace.dependencies]
-# Internal crates
+# Internal crates (default-features = false to allow per-crate control)
 grafeo-common = { path = "crates/grafeo-common", version = "0.4.2" }
-grafeo-core = { path = "crates/grafeo-core", version = "0.4.2" }
-grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.4.2" }
-grafeo-engine = { path = "crates/grafeo-engine", version = "0.4.2" }
+grafeo-core = { path = "crates/grafeo-core", version = "0.4.2", default-features = false }
+grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.4.2", default-features = false }
+grafeo-engine = { path = "crates/grafeo-engine", version = "0.4.2", default-features = false }
 grafeo = { path = "crates/grafeo", version = "0.4.2" }
 
 # Error handling

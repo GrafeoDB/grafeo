@@ -85,7 +85,9 @@ pub use distance::{
     simd_support,
 };
 pub use quantization::{BinaryQuantizer, ProductQuantizer, QuantizationType, ScalarQuantizer};
-pub use storage::{MmapStorage, RamStorage, StorageBackend, VectorStorage};
+#[cfg(feature = "mmap")]
+pub use storage::MmapStorage;
+pub use storage::{RamStorage, StorageBackend, VectorStorage};
 pub use zone_map::VectorZoneMap;
 
 #[cfg(feature = "vector-index")]

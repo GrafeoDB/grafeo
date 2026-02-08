@@ -220,10 +220,16 @@ impl Config {
 
 /// Helper function to get CPU count (fallback implementation).
 mod num_cpus {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn get() -> usize {
         std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn get() -> usize {
+        1
     }
 }
 

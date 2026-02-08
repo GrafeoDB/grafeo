@@ -3,17 +3,22 @@
 //! These algorithms measure how tightly connected the neighbors of each node are.
 //! A high clustering coefficient indicates that neighbors tend to be connected to each other.
 
-use std::sync::{Arc, OnceLock};
+#[cfg(feature = "parallel")]
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use grafeo_common::types::{NodeId, Value};
 use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::lpg::LpgStore;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::{GraphAlgorithm, ParallelGraphAlgorithm};
+use super::traits::GraphAlgorithm;
+#[cfg(feature = "parallel")]
+use super::traits::ParallelGraphAlgorithm;
 
 // ============================================================================
 // Result Types
@@ -298,6 +303,7 @@ pub fn clustering_coefficient(store: &LpgStore) -> ClusteringCoefficientResult {
 /// # Complexity
 ///
 /// O(V * d^2 / threads) where d is the average degree
+#[cfg(feature = "parallel")]
 pub fn clustering_coefficient_parallel(
     store: &LpgStore,
     parallel_threshold: usize,
@@ -407,12 +413,21 @@ impl GraphAlgorithm for ClusteringCoefficientAlgorithm {
     }
 
     fn execute(&self, store: &LpgStore, params: &Parameters) -> Result<AlgorithmResult> {
-        let parallel = params.get_bool("parallel").unwrap_or(true);
-        let threshold = params.get_int("parallel_threshold").unwrap_or(50) as usize;
+        #[cfg(feature = "parallel")]
+        let result = {
+            let parallel = params.get_bool("parallel").unwrap_or(true);
+            let threshold = params.get_int("parallel_threshold").unwrap_or(50) as usize;
 
-        let result = if parallel {
-            clustering_coefficient_parallel(store, threshold)
-        } else {
+            if parallel {
+                clustering_coefficient_parallel(store, threshold)
+            } else {
+                clustering_coefficient(store)
+            }
+        };
+
+        #[cfg(not(feature = "parallel"))]
+        let result = {
+            let _ = params; // suppress unused warning
             clustering_coefficient(store)
         };
 
@@ -435,6 +450,7 @@ impl GraphAlgorithm for ClusteringCoefficientAlgorithm {
     }
 }
 
+#[cfg(feature = "parallel")]
 impl ParallelGraphAlgorithm for ClusteringCoefficientAlgorithm {
     fn parallel_threshold(&self) -> usize {
         50
@@ -684,6 +700,7 @@ mod tests {
         assert_eq!(total, 4);
     }
 
+    #[cfg(feature = "parallel")]
     #[test]
     fn test_parallel_matches_sequential() {
         let store = create_complete_graph(20);
@@ -707,6 +724,7 @@ mod tests {
         assert!((sequential.global_coefficient - parallel.global_coefficient).abs() < 1e-10);
     }
 
+    #[cfg(feature = "parallel")]
     #[test]
     fn test_parallel_threshold_fallback() {
         let store = create_triangle_graph();
@@ -746,6 +764,7 @@ mod tests {
         assert_eq!(result.row_count(), 3);
     }
 
+    #[cfg(feature = "parallel")]
     #[test]
     fn test_parallel_algorithm_trait() {
         let store = create_complete_graph(10);

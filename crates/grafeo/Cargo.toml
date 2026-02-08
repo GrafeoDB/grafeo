@@ -33,6 +33,8 @@ full = ["gql", "cypher", "sparql", "gremlin", "graphql"]
 # Platform capabilities (enabled by default via grafeo-engine defaults)
 parallel = ["grafeo-engine/parallel"]
 wal = ["grafeo-engine/wal"]
+spill = ["grafeo-engine/spill"]
+mmap = ["grafeo-engine/mmap"]
 
 # Enable platform-optimized memory allocator (10-20% faster allocations)
 jemalloc = ["tikv-jemallocator"]

@@ -1932,7 +1932,7 @@ impl QueryResult {
     }
 }
 
-/// Converts a [`Value`](grafeo_common::types::Value) to a concrete Rust type.
+/// Converts a [`Value`] to a concrete Rust type.
 ///
 /// Implemented for common types like `i64`, `f64`, `String`, and `bool`.
 /// Used by [`QueryResult::scalar()`] to extract typed values.

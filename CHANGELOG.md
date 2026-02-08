@@ -2,7 +2,7 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.4.1] - Unreleased
+## [0.4.1] - 2026-02-08
 
 _Go Bindings, C FFI & Coverage Improvements_
 

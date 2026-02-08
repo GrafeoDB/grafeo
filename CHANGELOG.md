@@ -18,6 +18,8 @@ _WebAssembly Bindings & Feature-Gated Platform Code_
 - Internal crate dependencies use `default-features = false` in workspace root for per-crate feature control
 - `grafeo-engine` no longer depends on `tokio` directly (comes via `grafeo-adapters/wal` when needed)
 - SIMD fallback functions annotated `#[allow(dead_code)]` for non-x86/non-aarch64 targets
+- Stricter Clippy linting: removed 6 lint allows, enforcing idiomatic Rust patterns project-wide
+- Added targeted tests for binder validation, translator edge cases, range queries, and cardinality estimation
 
 ## [0.4.1] - 2026-02-08
 

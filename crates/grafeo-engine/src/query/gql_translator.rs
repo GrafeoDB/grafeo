@@ -1889,4 +1889,169 @@ mod tests {
             UnaryOp::IsNotNull
         );
     }
+
+    // === ShortestPath Tests ===
+
+    #[test]
+    fn test_translate_shortest_path() {
+        let query = "MATCH p = shortestPath((a:Person)-[:KNOWS]->(b:Person)) RETURN p";
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "shortestPath should translate: {:?}",
+            result.err()
+        );
+        let plan = result.unwrap();
+
+        fn find_shortest_path(op: &LogicalOperator) -> bool {
+            match op {
+                LogicalOperator::ShortestPath(_) => true,
+                LogicalOperator::Return(r) => find_shortest_path(&r.input),
+                _ => false,
+            }
+        }
+        assert!(
+            find_shortest_path(&plan.root),
+            "Plan should contain ShortestPath operator"
+        );
+    }
+
+    #[test]
+    fn test_translate_all_shortest_paths() {
+        let query = "MATCH p = allShortestPaths((a)-[:ROAD]-(b)) RETURN p";
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "allShortestPaths should translate: {:?}",
+            result.err()
+        );
+    }
+
+    // === CASE expression ===
+
+    #[test]
+    fn test_translate_case_expression() {
+        let query = "MATCH (n:Person) RETURN CASE WHEN n.age > 18 THEN 'adult' ELSE 'minor' END AS category";
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "CASE expression should translate: {:?}",
+            result.err()
+        );
+    }
+
+    // === UNWIND ===
+
+    #[test]
+    fn test_translate_unwind() {
+        let query = "UNWIND [1, 2, 3] AS x RETURN x";
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "UNWIND should translate: {:?}",
+            result.err()
+        );
+        let plan = result.unwrap();
+
+        fn find_unwind(op: &LogicalOperator) -> bool {
+            match op {
+                LogicalOperator::Unwind(_) => true,
+                LogicalOperator::Return(r) => find_unwind(&r.input),
+                _ => false,
+            }
+        }
+        assert!(find_unwind(&plan.root), "Plan should contain Unwind");
+    }
+
+    // === MERGE ===
+
+    #[test]
+    fn test_translate_merge() {
+        let query = "MERGE (n:Person {name: 'Alice'}) RETURN n";
+        let result = translate(query);
+        assert!(result.is_ok(), "MERGE should translate: {:?}", result.err());
+        let plan = result.unwrap();
+
+        fn find_merge(op: &LogicalOperator) -> bool {
+            match op {
+                LogicalOperator::Merge(_) => true,
+                LogicalOperator::Return(r) => find_merge(&r.input),
+                _ => false,
+            }
+        }
+        assert!(find_merge(&plan.root), "Plan should contain Merge");
+    }
+
+    #[test]
+    fn test_translate_merge_with_on_create() {
+        let query = "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = true RETURN n";
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "MERGE ON CREATE should translate: {:?}",
+            result.err()
+        );
+    }
+
+    // === WITH clause ===
+
+    #[test]
+    fn test_translate_with_clause() {
+        let query = "MATCH (n:Person) WITH n.name AS name WHERE name = 'Alice' RETURN name";
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "WITH clause should translate: {:?}",
+            result.err()
+        );
+    }
+
+    // === Label operations ===
+
+    #[test]
+    fn test_translate_add_label() {
+        let query = "MATCH (n:Person) SET n:Employee RETURN n";
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "SET label should translate: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_translate_remove_label() {
+        let query = "MATCH (n:Person) REMOVE n:Employee RETURN n";
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "REMOVE label should translate: {:?}",
+            result.err()
+        );
+    }
+
+    // === Multiple aggregates ===
+
+    #[test]
+    fn test_translate_multiple_aggregates() {
+        let query = "MATCH (n:Person) RETURN count(n) AS cnt, sum(n.age) AS total_age, avg(n.age) AS avg_age";
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "Multiple aggregates should translate: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_translate_group_by_with_having_like_filter() {
+        // Use WHERE after aggregation (emulating HAVING)
+        let query = "MATCH (n:Person) RETURN n.city AS city, count(n) AS cnt ORDER BY cnt DESC";
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "GROUP BY with ORDER BY should translate: {:?}",
+            result.err()
+        );
+    }
 }

@@ -1192,4 +1192,192 @@ mod tests {
         let result = translate(query);
         assert!(result.is_err());
     }
+
+    // ==================== Update Mutation Tests ====================
+
+    #[test]
+    fn test_update_mutation() {
+        let query = r#"mutation { updateUser(id: 123, name: "Alice") { name } }"#;
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "Update mutation should work: {:?}",
+            result.err()
+        );
+        let plan = result.unwrap();
+
+        // Should contain SetProperty
+        fn find_set_property(op: &LogicalOperator) -> bool {
+            match op {
+                LogicalOperator::SetProperty(_) => true,
+                LogicalOperator::Return(r) => find_set_property(&r.input),
+                _ => false,
+            }
+        }
+        assert!(
+            find_set_property(&plan.root),
+            "Update should produce SetProperty"
+        );
+    }
+
+    #[test]
+    fn test_update_mutation_requires_filter_and_property() {
+        // Only one argument - need at least 2 (filter + property to update)
+        let query = r#"mutation { updateUser(name: "Alice") { name } }"#;
+        let result = translate(query);
+        assert!(result.is_err(), "Update with only 1 argument should fail");
+    }
+
+    #[test]
+    fn test_update_mutation_without_selection_set() {
+        // Update without specifying which fields to return
+        let query = r#"mutation { updateUser(id: 1, name: "Bob") }"#;
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "Update without selection set should work: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_update_mutation_property_filter() {
+        // When no id, first argument becomes filter
+        let query = r#"mutation { updateUser(email: "alice@test.com", name: "Alice") { name } }"#;
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "Update with property filter should work: {:?}",
+            result.err()
+        );
+    }
+
+    // ==================== Where Operator Suffix Tests ====================
+
+    #[test]
+    fn test_where_ne() {
+        let query = r#"{ user(where: { status_ne: "deleted" }) { name } }"#;
+        let result = translate(query);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+
+        fn find_filter_op(op: &LogicalOperator) -> Option<BinaryOp> {
+            match op {
+                LogicalOperator::Filter(f) => {
+                    if let LogicalExpression::Binary { op, .. } = &f.predicate {
+                        Some(*op)
+                    } else {
+                        None
+                    }
+                }
+                LogicalOperator::Return(r) => find_filter_op(&r.input),
+                _ => None,
+            }
+        }
+        assert_eq!(find_filter_op(&plan.root), Some(BinaryOp::Ne));
+    }
+
+    #[test]
+    fn test_where_starts_with() {
+        let query = r#"{ user(where: { email_starts_with: "admin" }) { name } }"#;
+        let result = translate(query);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+
+        fn find_filter_op(op: &LogicalOperator) -> Option<BinaryOp> {
+            match op {
+                LogicalOperator::Filter(f) => {
+                    if let LogicalExpression::Binary { op, .. } = &f.predicate {
+                        Some(*op)
+                    } else {
+                        None
+                    }
+                }
+                LogicalOperator::Return(r) => find_filter_op(&r.input),
+                _ => None,
+            }
+        }
+        assert_eq!(find_filter_op(&plan.root), Some(BinaryOp::StartsWith));
+    }
+
+    #[test]
+    fn test_where_ends_with() {
+        let query = r#"{ user(where: { email_ends_with: ".com" }) { name } }"#;
+        let result = translate(query);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+
+        fn find_filter_op(op: &LogicalOperator) -> Option<BinaryOp> {
+            match op {
+                LogicalOperator::Filter(f) => {
+                    if let LogicalExpression::Binary { op, .. } = &f.predicate {
+                        Some(*op)
+                    } else {
+                        None
+                    }
+                }
+                LogicalOperator::Return(r) => find_filter_op(&r.input),
+                _ => None,
+            }
+        }
+        assert_eq!(find_filter_op(&plan.root), Some(BinaryOp::EndsWith));
+    }
+
+    #[test]
+    fn test_where_in() {
+        let query = r#"{ user(where: { status_in: ["active", "pending"] }) { name } }"#;
+        let result = translate(query);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+
+        fn find_filter_op(op: &LogicalOperator) -> Option<BinaryOp> {
+            match op {
+                LogicalOperator::Filter(f) => {
+                    if let LogicalExpression::Binary { op, .. } = &f.predicate {
+                        Some(*op)
+                    } else {
+                        None
+                    }
+                }
+                LogicalOperator::Return(r) => find_filter_op(&r.input),
+                _ => None,
+            }
+        }
+        assert_eq!(find_filter_op(&plan.root), Some(BinaryOp::In));
+    }
+
+    #[test]
+    fn test_where_lt_and_lte() {
+        let query = r#"{ user(where: { age_lt: 18 }) { name } }"#;
+        let result = translate(query);
+        assert!(result.is_ok());
+
+        let query2 = r#"{ user(where: { age_lte: 65 }) { name } }"#;
+        let result2 = translate(query2);
+        assert!(result2.is_ok());
+    }
+
+    // ==================== Pagination + Ordering Combined ====================
+
+    #[test]
+    fn test_pagination_with_order_by() {
+        let query = r#"{ user(first: 10, skip: 5, orderBy: { name: ASC }) { name } }"#;
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "Pagination with order should work: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_order_by_with_multiple_fields() {
+        let query = r#"{ user(orderBy: { name: ASC, age: DESC }) { name age } }"#;
+        let result = translate(query);
+        assert!(
+            result.is_ok(),
+            "Multiple orderBy fields should work: {:?}",
+            result.err()
+        );
+    }
 }

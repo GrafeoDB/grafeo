@@ -1624,4 +1624,241 @@ mod tests {
             panic!("Expected Binary expression");
         }
     }
+
+    // === Predicate edge cases ===
+
+    #[test]
+    fn test_predicate_starting_with() {
+        let expr = LogicalExpression::Variable("x".to_string());
+        let pred = ast::Predicate::StartingWith("foo".to_string());
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
+
+        if let LogicalExpression::Binary { op, right, .. } = result {
+            assert_eq!(op, BinaryOp::StartsWith);
+            // Verify the literal value is preserved
+            if let LogicalExpression::Literal(Value::String(s)) = right.as_ref() {
+                assert_eq!(s.as_str(), "foo");
+            } else {
+                panic!("Expected String literal on the right");
+            }
+        } else {
+            panic!("Expected Binary expression");
+        }
+    }
+
+    #[test]
+    fn test_predicate_ending_with() {
+        let expr = LogicalExpression::Variable("x".to_string());
+        let pred = ast::Predicate::EndingWith(".txt".to_string());
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
+
+        if let LogicalExpression::Binary { op, .. } = result {
+            assert_eq!(op, BinaryOp::EndsWith);
+        } else {
+            panic!("Expected Binary expression");
+        }
+    }
+
+    #[test]
+    fn test_predicate_between_produces_and_of_ge_lt() {
+        // between(10, 20) should produce: x >= 10 AND x < 20
+        let expr = LogicalExpression::Variable("x".to_string());
+        let pred = ast::Predicate::Between(Value::Int64(10), Value::Int64(20));
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
+
+        if let LogicalExpression::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } = result
+        {
+            // Left: x >= 10
+            if let LogicalExpression::Binary { op, .. } = left.as_ref() {
+                assert_eq!(*op, BinaryOp::Ge, "Left side of between should be >=");
+            } else {
+                panic!("Expected Binary expression for left side of between");
+            }
+            // Right: x < 20
+            if let LogicalExpression::Binary { op, .. } = right.as_ref() {
+                assert_eq!(*op, BinaryOp::Lt, "Right side of between should be <");
+            } else {
+                panic!("Expected Binary expression for right side of between");
+            }
+        } else {
+            panic!("Expected AND expression for between");
+        }
+    }
+
+    #[test]
+    fn test_predicate_without_produces_not_in() {
+        // without(1, 2) should produce: NOT (x IN [1, 2])
+        let expr = LogicalExpression::Variable("x".to_string());
+        let pred = ast::Predicate::Without(vec![Value::Int64(1), Value::Int64(2)]);
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
+
+        if let LogicalExpression::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } = result
+        {
+            if let LogicalExpression::Binary { op, .. } = operand.as_ref() {
+                assert_eq!(*op, BinaryOp::In);
+            } else {
+                panic!("Expected IN inside NOT");
+            }
+        } else {
+            panic!("Expected NOT expression for without");
+        }
+    }
+
+    #[test]
+    fn test_predicate_and_combines_multiple() {
+        // P.gt(10).and(P.lt(100)) should produce: (x > 10) AND (x < 100)
+        let expr = LogicalExpression::Variable("x".to_string());
+        let pred = ast::Predicate::And(vec![
+            ast::Predicate::Gt(Value::Int64(10)),
+            ast::Predicate::Lt(Value::Int64(100)),
+        ]);
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
+
+        if let LogicalExpression::Binary {
+            op: BinaryOp::And, ..
+        } = result
+        {
+            // Success - it's an AND
+        } else {
+            panic!("Expected AND expression");
+        }
+    }
+
+    #[test]
+    fn test_predicate_or_combines_multiple() {
+        let expr = LogicalExpression::Variable("x".to_string());
+        let pred = ast::Predicate::Or(vec![
+            ast::Predicate::Eq(Value::Int64(1)),
+            ast::Predicate::Eq(Value::Int64(2)),
+            ast::Predicate::Eq(Value::Int64(3)),
+        ]);
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
+
+        // Should produce nested OR: (x == 1) OR ((x == 2) OR (x == 3))
+        if let LogicalExpression::Binary {
+            op: BinaryOp::Or, ..
+        } = result
+        {
+            // Success
+        } else {
+            panic!("Expected OR expression for 3-way or");
+        }
+    }
+
+    #[test]
+    fn test_predicate_not_wraps_inner() {
+        let expr = LogicalExpression::Variable("x".to_string());
+        let pred = ast::Predicate::Not(Box::new(ast::Predicate::Gt(Value::Int64(100))));
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
+
+        if let LogicalExpression::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } = result
+        {
+            if let LogicalExpression::Binary { op, .. } = operand.as_ref() {
+                assert_eq!(*op, BinaryOp::Gt);
+            } else {
+                panic!("Inner should be a comparison");
+            }
+        } else {
+            panic!("Expected NOT expression");
+        }
+    }
+
+    // === E() source and multi-label tests ===
+
+    #[test]
+    fn test_translate_e_source() {
+        // g.E() - edge scan starting point
+        let result = translate("g.E()");
+        assert!(
+            result.is_ok(),
+            "g.E() should translate successfully: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_translate_has_label_multiple() {
+        // hasLabel with multiple labels should produce OR filter
+        let result = translate("g.V().hasLabel('Person', 'Employee')");
+        assert!(
+            result.is_ok(),
+            "Multi-label hasLabel should work: {:?}",
+            result.err()
+        );
+
+        let plan = result.unwrap();
+
+        // Walk the plan to find the Filter and verify it's an OR
+        fn find_filter(op: &LogicalOperator) -> Option<&FilterOp> {
+            match op {
+                LogicalOperator::Filter(f) => Some(f),
+                LogicalOperator::Return(r) => find_filter(&r.input),
+                _ => None,
+            }
+        }
+
+        let filter = find_filter(&plan.root).expect("Expected Filter for hasLabel");
+        // Multiple labels should produce an OR expression
+        match &filter.predicate {
+            LogicalExpression::Binary {
+                op: BinaryOp::Or, ..
+            } => {} // correct
+            other => panic!("Expected OR for multi-label, got: {:?}", other),
+        }
+    }
+
+    // === Mutation edge cases ===
+
+    #[test]
+    fn test_add_vertex_with_properties() {
+        let result = translate("g.addV('Person').property('name', 'Alice').property('age', 30)");
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+
+        fn find_create_node(op: &LogicalOperator) -> Option<&CreateNodeOp> {
+            match op {
+                LogicalOperator::CreateNode(n) => Some(n),
+                LogicalOperator::Return(r) => find_create_node(&r.input),
+                _ => None,
+            }
+        }
+
+        let node = find_create_node(&plan.root).expect("Expected CreateNode");
+        assert_eq!(node.labels, vec!["Person"]);
+        assert_eq!(node.properties.len(), 2);
+    }
+
+    #[test]
+    fn test_has_not_produces_is_null() {
+        let result = translate("g.V().hasNot('email')");
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+
+        fn find_filter(op: &LogicalOperator) -> Option<&FilterOp> {
+            match op {
+                LogicalOperator::Filter(f) => Some(f),
+                LogicalOperator::Return(r) => find_filter(&r.input),
+                _ => None,
+            }
+        }
+
+        let filter = find_filter(&plan.root).expect("Expected Filter for hasNot");
+        match &filter.predicate {
+            LogicalExpression::Unary {
+                op: UnaryOp::IsNull,
+                ..
+            } => {} // correct
+            other => panic!("hasNot should produce IsNull, got: {:?}", other),
+        }
+    }
 }

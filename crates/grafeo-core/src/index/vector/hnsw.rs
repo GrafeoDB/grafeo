@@ -252,7 +252,7 @@ impl HnswIndex {
 
             // Update the new node's neighbors
             if let Some(new_node) = nodes.get_mut(&id) {
-                new_node.neighbors[lc] = selected.clone();
+                new_node.neighbors[lc].clone_from(&selected);
             }
 
             // Add bidirectional links and collect info for pruning

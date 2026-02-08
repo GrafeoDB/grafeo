@@ -583,7 +583,7 @@ impl GrafeoDB {
         #[cfg(feature = "wal")]
         if let Err(e) = self.log_wal(&WalRecord::CreateNode {
             id,
-            labels: labels.iter().map(|s| s.to_string()).collect(),
+            labels: labels.iter().map(|s| (*s).to_string()).collect(),
         }) {
             tracing::warn!("Failed to log CreateNode to WAL: {}", e);
         }
@@ -622,7 +622,7 @@ impl GrafeoDB {
         {
             if let Err(e) = self.log_wal(&WalRecord::CreateNode {
                 id,
-                labels: labels.iter().map(|s| s.to_string()).collect(),
+                labels: labels.iter().map(|s| (*s).to_string()).collect(),
             }) {
                 tracing::warn!("Failed to log CreateNode to WAL: {}", e);
             }
@@ -1148,7 +1148,7 @@ impl GrafeoDB {
                 {
                     if let Err(e) = self.log_wal(&WalRecord::CreateNode {
                         id,
-                        labels: labels.iter().map(|s| s.to_string()).collect(),
+                        labels: labels.iter().map(|s| (*s).to_string()).collect(),
                     }) {
                         tracing::warn!("Failed to log CreateNode to WAL: {}", e);
                     }

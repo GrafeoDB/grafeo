@@ -791,7 +791,7 @@ mod tests {
             .collect();
 
         // All epochs should be unique (no duplicates)
-        all_epochs.sort();
+        all_epochs.sort_unstable();
         let unique_count = all_epochs.len();
         all_epochs.dedup();
         assert_eq!(

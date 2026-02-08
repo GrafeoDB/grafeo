@@ -436,11 +436,11 @@ mod tests {
 
     #[test]
     fn test_numbers() {
-        let mut lexer = Lexer::new("42 3.14 -7");
+        let mut lexer = Lexer::new("42 2.78 -7");
         let tokens = lexer.tokenize();
 
         assert_eq!(tokens[0].kind, TokenKind::Integer(42));
-        assert_eq!(tokens[1].kind, TokenKind::Float(3.14));
+        assert_eq!(tokens[1].kind, TokenKind::Float(2.78));
         assert_eq!(tokens[2].kind, TokenKind::Integer(-7));
     }
 

@@ -833,7 +833,7 @@ mod tiered_storage_tests {
         let (off_rec, _) = arena.alloc_value_with_offset(Record {
             id: 42,
             flags: 0xFF,
-            weight: 3.14,
+            weight: std::f32::consts::PI,
         });
 
         // Read them all back
@@ -845,7 +845,7 @@ mod tiered_storage_tests {
             let rec: &Record = arena.read_at(off_rec);
             assert_eq!(rec.id, 42);
             assert_eq!(rec.flags, 0xFF);
-            assert!((rec.weight - 3.14).abs() < 0.001);
+            assert!((rec.weight - std::f32::consts::PI).abs() < 0.001);
         }
     }
 }

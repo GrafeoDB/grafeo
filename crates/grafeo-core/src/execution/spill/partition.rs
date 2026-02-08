@@ -697,7 +697,7 @@ mod tests {
 
         // Verify all entries are present
         let mut values: Vec<i64> = entries.iter().map(|(_, v)| *v).collect();
-        values.sort();
+        values.sort_unstable();
         assert_eq!(values, vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
 
         // State should be empty

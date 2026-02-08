@@ -190,14 +190,14 @@ mod tests {
         let record = WalRecord::SetEdgeProperty {
             id: EdgeId::new(7),
             key: "weight".to_string(),
-            value: Value::Float64(3.14),
+            value: Value::Float64(std::f64::consts::PI),
         };
         let parsed = roundtrip(&record);
         match parsed {
             WalRecord::SetEdgeProperty { id, key, value } => {
                 assert_eq!(id, EdgeId::new(7));
                 assert_eq!(key, "weight");
-                assert_eq!(value, Value::Float64(3.14));
+                assert_eq!(value, Value::Float64(std::f64::consts::PI));
             }
             _ => panic!("Wrong variant"),
         }

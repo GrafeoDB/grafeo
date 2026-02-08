@@ -262,7 +262,7 @@ mod tests {
         }
 
         // Should have 3 unique values in column 0
-        results.sort();
+        results.sort_unstable();
         assert_eq!(results, vec![1, 2, 3]);
     }
 
@@ -294,7 +294,7 @@ mod tests {
         }
 
         // Should have 4 unique values: 1, 2, 3, 4
-        results.sort();
+        results.sort_unstable();
         assert_eq!(results, vec![1, 2, 3, 4]);
     }
 }

@@ -110,7 +110,7 @@ impl MergeableAccumulator {
         // Keep our first (we processed earlier)
         // If we have no first, take theirs
         if self.first.is_none() {
-            self.first = other.first.clone();
+            self.first.clone_from(&other.first);
         }
     }
 

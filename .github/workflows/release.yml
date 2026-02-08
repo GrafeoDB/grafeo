@@ -97,48 +97,48 @@ jobs:
           asset_name: grafeo-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
           asset_content_type: ${{ matrix.archive == 'zip' && 'application/zip' || 'application/gzip' }}
 
-  # Publish crates to crates.io
+  # Publish crates to crates.io (in dependency order)
   publish-crates:
     name: Publish to crates.io
     runs-on: ubuntu-latest
     needs: build-binaries
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Publish grafeo-common
-        run: cargo publish -p grafeo-common --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        continue-on-error: true
+      - name: Publish crates in dependency order
+        run: |
+          publish_crate() {
+            local crate=$1
+            local version
+            version=$(cargo metadata --no-deps --format-version 1 -q \
+              | jq -r --arg c "$crate" '.packages[] | select(.name==$c) | .version')
 
-      - name: Wait for crates.io
-        run: sleep 30
+            # Check if already published
+            local published
+            published=$(curl -sf "https://crates.io/api/v1/crates/$crate/$version" \
+              | jq -r '.version.num // empty' 2>/dev/null || true)
 
-      - name: Publish grafeo-core
-        run: cargo publish -p grafeo-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        continue-on-error: true
+            if [ "$published" = "$version" ]; then
+              echo "::notice::$crate@$version already published, skipping"
+              return 0
+            fi
 
-      - name: Wait for crates.io
-        run: sleep 30
+            echo "Publishing $crate@$version..."
+            cargo publish -p "$crate"
+            echo "Waiting for crates.io index..."
+            sleep 30
+          }
 
-      - name: Publish grafeo-adapters
-        run: cargo publish -p grafeo-adapters --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        continue-on-error: true
-
-      - name: Wait for crates.io
-        run: sleep 30
-
-      - name: Publish grafeo-engine
-        run: cargo publish -p grafeo-engine --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        continue-on-error: true
-
-      - name: Wait for crates.io
-        run: sleep 30
-
-      - name: Publish grafeo
-        run: cargo publish -p grafeo --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        continue-on-error: true
+          publish_crate grafeo-common
+          publish_crate grafeo-core
+          publish_crate grafeo-adapters
+          publish_crate grafeo-engine
+          publish_crate grafeo
 
   # Tag Go module (subdirectory modules need prefixed tags)
   tag-go-module:

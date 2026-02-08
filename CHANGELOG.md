@@ -2,7 +2,7 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.4.2] - Unreleased
+## [0.4.2] - 2026-02-08
 
 _WebAssembly Bindings & Feature-Gated Platform Code_
 

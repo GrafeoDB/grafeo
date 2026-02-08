@@ -299,8 +299,6 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "cypher")]
     pub fn execute_cypher(&self, query: &str) -> Result<QueryResult> {
-        self.require_lpg("Cypher")?;
-
         use crate::query::{
             Executor, Planner, binder::Binder, cache::CacheKey, cypher_translator,
             optimizer::Optimizer, processor::QueryLanguage,
@@ -370,8 +368,6 @@ impl Session {
     /// ```
     #[cfg(feature = "gremlin")]
     pub fn execute_gremlin(&self, query: &str) -> Result<QueryResult> {
-        self.require_lpg("Gremlin")?;
-
         use crate::query::{
             Executor, Planner, binder::Binder, gremlin_translator, optimizer::Optimizer,
         };
@@ -416,8 +412,6 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        self.require_lpg("Gremlin")?;
-
         use crate::query::processor::{QueryLanguage, QueryProcessor};
 
         // Get transaction context for MVCC visibility
@@ -459,8 +453,6 @@ impl Session {
     /// ```
     #[cfg(feature = "graphql")]
     pub fn execute_graphql(&self, query: &str) -> Result<QueryResult> {
-        self.require_lpg("GraphQL")?;
-
         use crate::query::{
             Executor, Planner, binder::Binder, graphql_translator, optimizer::Optimizer,
         };
@@ -505,8 +497,6 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        self.require_lpg("GraphQL")?;
-
         use crate::query::processor::{QueryLanguage, QueryProcessor};
 
         // Get transaction context for MVCC visibility
@@ -533,8 +523,6 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(all(feature = "sparql", feature = "rdf"))]
     pub fn execute_sparql(&self, query: &str) -> Result<QueryResult> {
-        self.require_rdf("SPARQL")?;
-
         use crate::query::{
             Executor, optimizer::Optimizer, planner_rdf::RdfPlanner, sparql_translator,
         };
@@ -566,8 +554,6 @@ impl Session {
         query: &str,
         _params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        self.require_rdf("SPARQL")?;
-
         // TODO: Implement parameter substitution for SPARQL
         // For now, just execute the query without parameters
         self.execute_sparql(query)

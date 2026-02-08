@@ -42,15 +42,15 @@ fn rdf_database_executes_sparql() {
 
 #[cfg(all(feature = "sparql", feature = "rdf"))]
 #[test]
-fn lpg_database_rejects_sparql() {
+fn lpg_database_allows_explicit_sparql() {
+    // Explicit execute_sparql() works on any database (both stores are always initialized).
+    // Only the generic execute() enforces graph model routing.
     let db = GrafeoDB::with_config(Config::in_memory().with_graph_model(GraphModel::Lpg)).unwrap();
     let session = db.session();
-    let result = session.execute_sparql("SELECT ?s ?p ?o WHERE { ?s ?p ?o }");
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
+    let result = session.execute_sparql("SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 1");
     assert!(
-        err_msg.contains("LPG database"),
-        "Expected LPG error, got: {err_msg}"
+        result.is_ok(),
+        "Explicit SPARQL should work on LPG db: {result:?}"
     );
 }
 
@@ -66,13 +66,16 @@ fn lpg_database_executes_cypher() {
 
 #[cfg(all(feature = "cypher", feature = "rdf"))]
 #[test]
-fn rdf_database_rejects_cypher() {
+fn rdf_database_allows_explicit_cypher() {
+    // Explicit execute_cypher() works on any database (both stores are always initialized).
+    // Only the generic execute() enforces graph model routing.
     let db = GrafeoDB::with_config(Config::in_memory().with_graph_model(GraphModel::Rdf)).unwrap();
     let session = db.session();
     let result = session.execute_cypher("MATCH (p:Person) RETURN p.name");
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("RDF database"));
+    assert!(
+        result.is_ok(),
+        "Explicit Cypher should work on RDF db: {result:?}"
+    );
 }
 
 // --- Config::validate() tests ---

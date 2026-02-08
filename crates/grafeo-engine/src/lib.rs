@@ -30,6 +30,6 @@ pub use admin::{
     ValidationWarning, WalStatus,
 };
 pub use catalog::{Catalog, CatalogError, IndexDefinition, IndexType};
-pub use config::Config;
+pub use config::{Config, ConfigError, DurabilityMode, GraphModel};
 pub use database::GrafeoDB;
 pub use session::Session;

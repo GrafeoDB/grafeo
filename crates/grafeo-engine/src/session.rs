@@ -13,7 +13,7 @@ use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
 #[cfg(feature = "rdf")]
 use grafeo_core::graph::rdf::RdfStore;
 
-use crate::config::AdaptiveConfig;
+use crate::config::{AdaptiveConfig, GraphModel};
 use crate::database::QueryResult;
 use crate::query::cache::QueryCache;
 use crate::transaction::TransactionManager;
@@ -43,6 +43,8 @@ pub struct Session {
     adaptive_config: AdaptiveConfig,
     /// Whether to use factorized execution for multi-hop queries.
     factorized_execution: bool,
+    /// The graph data model this session operates on.
+    graph_model: GraphModel,
 }
 
 impl Session {
@@ -63,6 +65,7 @@ impl Session {
             auto_commit: true,
             adaptive_config: AdaptiveConfig::default(),
             factorized_execution: true,
+            graph_model: GraphModel::Lpg,
         }
     }
 
@@ -74,6 +77,7 @@ impl Session {
         query_cache: Arc<QueryCache>,
         adaptive_config: AdaptiveConfig,
         factorized_execution: bool,
+        graph_model: GraphModel,
     ) -> Self {
         Self {
             store,
@@ -85,6 +89,7 @@ impl Session {
             auto_commit: true,
             adaptive_config,
             factorized_execution,
+            graph_model,
         }
     }
 
@@ -97,6 +102,7 @@ impl Session {
         query_cache: Arc<QueryCache>,
         adaptive_config: AdaptiveConfig,
         factorized_execution: bool,
+        graph_model: GraphModel,
     ) -> Self {
         Self {
             store,
@@ -107,7 +113,35 @@ impl Session {
             auto_commit: true,
             adaptive_config,
             factorized_execution,
+            graph_model,
         }
+    }
+
+    /// Returns the graph model this session operates on.
+    #[must_use]
+    pub fn graph_model(&self) -> GraphModel {
+        self.graph_model
+    }
+
+    /// Checks that the session's graph model supports LPG operations.
+    fn require_lpg(&self, language: &str) -> Result<()> {
+        if self.graph_model == GraphModel::Rdf {
+            return Err(grafeo_common::utils::error::Error::Internal(format!(
+                "This is an RDF database. {language} queries require an LPG database."
+            )));
+        }
+        Ok(())
+    }
+
+    /// Checks that the session's graph model supports RDF/SPARQL operations.
+    #[allow(dead_code)]
+    fn require_rdf(&self, language: &str) -> Result<()> {
+        if self.graph_model == GraphModel::Lpg {
+            return Err(grafeo_common::utils::error::Error::Internal(format!(
+                "This is an LPG database. {language} queries require an RDF database."
+            )));
+        }
+        Ok(())
     }
 
     /// Executes a GQL query.
@@ -135,6 +169,8 @@ impl Session {
     /// ```
     #[cfg(feature = "gql")]
     pub fn execute(&self, query: &str) -> Result<QueryResult> {
+        self.require_lpg("GQL")?;
+
         use crate::query::{
             Executor, Planner, binder::Binder, cache::CacheKey, gql_translator,
             optimizer::Optimizer, processor::QueryLanguage,
@@ -207,6 +243,8 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
+        self.require_lpg("GQL")?;
+
         use crate::query::processor::{QueryLanguage, QueryProcessor};
 
         // Get transaction context for MVCC visibility
@@ -261,6 +299,8 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "cypher")]
     pub fn execute_cypher(&self, query: &str) -> Result<QueryResult> {
+        self.require_lpg("Cypher")?;
+
         use crate::query::{
             Executor, Planner, binder::Binder, cache::CacheKey, cypher_translator,
             optimizer::Optimizer, processor::QueryLanguage,
@@ -330,6 +370,8 @@ impl Session {
     /// ```
     #[cfg(feature = "gremlin")]
     pub fn execute_gremlin(&self, query: &str) -> Result<QueryResult> {
+        self.require_lpg("Gremlin")?;
+
         use crate::query::{
             Executor, Planner, binder::Binder, gremlin_translator, optimizer::Optimizer,
         };
@@ -374,6 +416,8 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
+        self.require_lpg("Gremlin")?;
+
         use crate::query::processor::{QueryLanguage, QueryProcessor};
 
         // Get transaction context for MVCC visibility
@@ -415,6 +459,8 @@ impl Session {
     /// ```
     #[cfg(feature = "graphql")]
     pub fn execute_graphql(&self, query: &str) -> Result<QueryResult> {
+        self.require_lpg("GraphQL")?;
+
         use crate::query::{
             Executor, Planner, binder::Binder, graphql_translator, optimizer::Optimizer,
         };
@@ -459,6 +505,8 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
+        self.require_lpg("GraphQL")?;
+
         use crate::query::processor::{QueryLanguage, QueryProcessor};
 
         // Get transaction context for MVCC visibility
@@ -485,6 +533,8 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(all(feature = "sparql", feature = "rdf"))]
     pub fn execute_sparql(&self, query: &str) -> Result<QueryResult> {
+        self.require_rdf("SPARQL")?;
+
         use crate::query::{
             Executor, optimizer::Optimizer, planner_rdf::RdfPlanner, sparql_translator,
         };
@@ -516,6 +566,8 @@ impl Session {
         query: &str,
         _params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
+        self.require_rdf("SPARQL")?;
+
         // TODO: Implement parameter substitution for SPARQL
         // For now, just execute the query without parameters
         self.execute_sparql(query)

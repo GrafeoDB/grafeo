@@ -8,7 +8,9 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 #[cfg(feature = "wal")]
-use grafeo_adapters::storage::wal::{WalConfig, WalManager, WalRecord, WalRecovery};
+use grafeo_adapters::storage::wal::{
+    DurabilityMode as WalDurabilityMode, WalConfig, WalManager, WalRecord, WalRecovery,
+};
 use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::lpg::LpgStore;
@@ -131,6 +133,11 @@ impl GrafeoDB {
     /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     pub fn with_config(config: Config) -> Result<Self> {
+        // Validate configuration before proceeding
+        config
+            .validate()
+            .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
+
         let store = Arc::new(LpgStore::new());
         #[cfg(feature = "rdf")]
         let rdf_store = Arc::new(RdfStore::new());
@@ -165,8 +172,25 @@ impl GrafeoDB {
                     Self::apply_wal_records(&store, &records)?;
                 }
 
-                // Open/create WAL manager
-                let wal_config = WalConfig::default();
+                // Open/create WAL manager with configured durability
+                let wal_durability = match config.wal_durability {
+                    crate::config::DurabilityMode::Sync => WalDurabilityMode::Sync,
+                    crate::config::DurabilityMode::Batch {
+                        max_delay_ms,
+                        max_records,
+                    } => WalDurabilityMode::Batch {
+                        max_delay_ms,
+                        max_records,
+                    },
+                    crate::config::DurabilityMode::Adaptive { target_interval_ms } => {
+                        WalDurabilityMode::Adaptive { target_interval_ms }
+                    }
+                    crate::config::DurabilityMode::NoSync => WalDurabilityMode::NoSync,
+                };
+                let wal_config = WalConfig {
+                    durability: wal_durability,
+                    ..WalConfig::default()
+                };
                 let wal_manager = WalManager::with_config(&wal_path, wal_config)?;
                 Some(Arc::new(wal_manager))
             } else {
@@ -268,6 +292,7 @@ impl GrafeoDB {
                 Arc::clone(&self.query_cache),
                 self.config.adaptive.clone(),
                 self.config.factorized_execution,
+                self.config.graph_model,
             )
         }
         #[cfg(not(feature = "rdf"))]
@@ -278,6 +303,7 @@ impl GrafeoDB {
                 Arc::clone(&self.query_cache),
                 self.config.adaptive.clone(),
                 self.config.factorized_execution,
+                self.config.graph_model,
             )
         }
     }

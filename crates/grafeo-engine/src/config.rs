@@ -1,11 +1,106 @@
 //! Database configuration.
 
+use std::fmt;
 use std::path::PathBuf;
+
+/// The graph data model for a database.
+///
+/// Each database uses exactly one model, chosen at creation time and immutable
+/// after that. The engine initializes only the relevant store, saving memory.
+///
+/// Schema variants (OWL, RDFS, JSON Schema) are a server-level concern - from
+/// the engine's perspective those map to either `Lpg` or `Rdf`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum GraphModel {
+    /// Labeled Property Graph (default). Supports GQL, Cypher, Gremlin, GraphQL.
+    #[default]
+    Lpg,
+    /// RDF triple store. Supports SPARQL.
+    Rdf,
+}
+
+impl fmt::Display for GraphModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lpg => write!(f, "LPG"),
+            Self::Rdf => write!(f, "RDF"),
+        }
+    }
+}
+
+/// WAL durability mode controlling the trade-off between safety and speed.
+///
+/// This enum lives in config so that `Config` can always carry the desired
+/// durability regardless of whether the `wal` feature is compiled in. When
+/// WAL is enabled, the engine maps this to the adapter-level durability mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurabilityMode {
+    /// Fsync after every commit. Slowest but safest.
+    Sync,
+    /// Batch fsync periodically. Good balance of performance and durability.
+    Batch {
+        /// Maximum time between syncs in milliseconds.
+        max_delay_ms: u64,
+        /// Maximum records between syncs.
+        max_records: u64,
+    },
+    /// Adaptive sync via a background flusher thread.
+    Adaptive {
+        /// Target interval between flushes in milliseconds.
+        target_interval_ms: u64,
+    },
+    /// No sync - rely on OS buffer flushing. Fastest but may lose recent data.
+    NoSync,
+}
+
+impl Default for DurabilityMode {
+    fn default() -> Self {
+        Self::Batch {
+            max_delay_ms: 100,
+            max_records: 1000,
+        }
+    }
+}
+
+/// Errors from [`Config::validate()`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    /// Memory limit must be greater than zero.
+    ZeroMemoryLimit,
+    /// Thread count must be greater than zero.
+    ZeroThreads,
+    /// WAL flush interval must be greater than zero.
+    ZeroWalFlushInterval,
+    /// RDF graph model requires the `rdf` feature flag.
+    RdfFeatureRequired,
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroMemoryLimit => write!(f, "memory_limit must be greater than zero"),
+            Self::ZeroThreads => write!(f, "threads must be greater than zero"),
+            Self::ZeroWalFlushInterval => {
+                write!(f, "wal_flush_interval_ms must be greater than zero")
+            }
+            Self::RdfFeatureRequired => {
+                write!(
+                    f,
+                    "RDF graph model requires the `rdf` feature flag to be enabled"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
 
 /// Database configuration.
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)] // Config structs naturally have many boolean flags
 pub struct Config {
+    /// Graph data model (LPG or RDF). Immutable after database creation.
+    pub graph_model: GraphModel,
     /// Path to the database directory (None for in-memory only).
     pub path: Option<PathBuf>,
 
@@ -41,6 +136,16 @@ pub struct Config {
     ///
     /// Enabled by default.
     pub factorized_execution: bool,
+
+    /// WAL durability mode. Only used when `wal_enabled` is true.
+    pub wal_durability: DurabilityMode,
+
+    /// Whether to enable catalog schema constraint enforcement.
+    ///
+    /// When true, the catalog enforces label, edge type, and property constraints
+    /// (e.g. required properties, uniqueness). The server sets this for JSON
+    /// Schema databases and populates constraints after creation.
+    pub schema_constraints: bool,
 }
 
 /// Configuration for adaptive query execution.
@@ -113,6 +218,7 @@ impl AdaptiveConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            graph_model: GraphModel::default(),
             path: None,
             memory_limit: None,
             spill_path: None,
@@ -123,6 +229,8 @@ impl Default for Config {
             query_logging: false,
             adaptive: AdaptiveConfig::default(),
             factorized_execution: true,
+            wal_durability: DurabilityMode::default(),
+            schema_constraints: false,
         }
     }
 }
@@ -216,6 +324,57 @@ impl Config {
         self.factorized_execution = false;
         self
     }
+
+    /// Sets the graph data model.
+    #[must_use]
+    pub fn with_graph_model(mut self, model: GraphModel) -> Self {
+        self.graph_model = model;
+        self
+    }
+
+    /// Sets the WAL durability mode.
+    #[must_use]
+    pub fn with_wal_durability(mut self, mode: DurabilityMode) -> Self {
+        self.wal_durability = mode;
+        self
+    }
+
+    /// Enables catalog schema constraint enforcement.
+    #[must_use]
+    pub fn with_schema_constraints(mut self) -> Self {
+        self.schema_constraints = true;
+        self
+    }
+
+    /// Validates the configuration, returning an error for invalid combinations.
+    ///
+    /// Called automatically by [`GrafeoDB::with_config()`](crate::GrafeoDB::with_config).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if any setting is invalid.
+    pub fn validate(&self) -> std::result::Result<(), ConfigError> {
+        if let Some(limit) = self.memory_limit
+            && limit == 0
+        {
+            return Err(ConfigError::ZeroMemoryLimit);
+        }
+
+        if self.threads == 0 {
+            return Err(ConfigError::ZeroThreads);
+        }
+
+        if self.wal_flush_interval_ms == 0 {
+            return Err(ConfigError::ZeroWalFlushInterval);
+        }
+
+        #[cfg(not(feature = "rdf"))]
+        if self.graph_model == GraphModel::Rdf {
+            return Err(ConfigError::RdfFeatureRequired);
+        }
+
+        Ok(())
+    }
 }
 
 /// Helper function to get CPU count (fallback implementation).
@@ -240,6 +399,7 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = Config::default();
+        assert_eq!(config.graph_model, GraphModel::Lpg);
         assert!(config.path.is_none());
         assert!(config.memory_limit.is_none());
         assert!(config.spill_path.is_none());
@@ -249,6 +409,8 @@ mod tests {
         assert!(config.backward_edges);
         assert!(!config.query_logging);
         assert!(config.factorized_execution);
+        assert_eq!(config.wal_durability, DurabilityMode::default());
+        assert!(!config.schema_constraints);
     }
 
     #[test]
@@ -387,5 +549,155 @@ mod tests {
         assert!((config.threshold - 2.0).abs() < f64::EPSILON);
         assert_eq!(config.min_rows, 100);
         assert_eq!(config.max_reoptimizations, 10);
+    }
+
+    // --- GraphModel tests ---
+
+    #[test]
+    fn test_graph_model_default_is_lpg() {
+        assert_eq!(GraphModel::default(), GraphModel::Lpg);
+    }
+
+    #[test]
+    fn test_graph_model_display() {
+        assert_eq!(GraphModel::Lpg.to_string(), "LPG");
+        assert_eq!(GraphModel::Rdf.to_string(), "RDF");
+    }
+
+    #[test]
+    fn test_config_with_graph_model() {
+        let config = Config::in_memory().with_graph_model(GraphModel::Rdf);
+        assert_eq!(config.graph_model, GraphModel::Rdf);
+    }
+
+    // --- DurabilityMode tests ---
+
+    #[test]
+    fn test_durability_mode_default_is_batch() {
+        let mode = DurabilityMode::default();
+        assert_eq!(
+            mode,
+            DurabilityMode::Batch {
+                max_delay_ms: 100,
+                max_records: 1000
+            }
+        );
+    }
+
+    #[test]
+    fn test_config_with_wal_durability() {
+        let config = Config::persistent("/tmp/db").with_wal_durability(DurabilityMode::Sync);
+        assert_eq!(config.wal_durability, DurabilityMode::Sync);
+    }
+
+    #[test]
+    fn test_config_with_wal_durability_nosync() {
+        let config = Config::persistent("/tmp/db").with_wal_durability(DurabilityMode::NoSync);
+        assert_eq!(config.wal_durability, DurabilityMode::NoSync);
+    }
+
+    #[test]
+    fn test_config_with_wal_durability_adaptive() {
+        let config = Config::persistent("/tmp/db").with_wal_durability(DurabilityMode::Adaptive {
+            target_interval_ms: 50,
+        });
+        assert_eq!(
+            config.wal_durability,
+            DurabilityMode::Adaptive {
+                target_interval_ms: 50
+            }
+        );
+    }
+
+    // --- schema_constraints tests ---
+
+    #[test]
+    fn test_config_with_schema_constraints() {
+        let config = Config::in_memory().with_schema_constraints();
+        assert!(config.schema_constraints);
+    }
+
+    // --- validate() tests ---
+
+    #[test]
+    fn test_validate_default_config() {
+        assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_in_memory_config() {
+        assert!(Config::in_memory().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_memory_limit() {
+        let config = Config::in_memory().with_memory_limit(0);
+        assert_eq!(config.validate(), Err(ConfigError::ZeroMemoryLimit));
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_threads() {
+        let config = Config::in_memory().with_threads(0);
+        assert_eq!(config.validate(), Err(ConfigError::ZeroThreads));
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_wal_flush_interval() {
+        let mut config = Config::in_memory();
+        config.wal_flush_interval_ms = 0;
+        assert_eq!(config.validate(), Err(ConfigError::ZeroWalFlushInterval));
+    }
+
+    #[cfg(not(feature = "rdf"))]
+    #[test]
+    fn test_validate_rejects_rdf_without_feature() {
+        let config = Config::in_memory().with_graph_model(GraphModel::Rdf);
+        assert_eq!(config.validate(), Err(ConfigError::RdfFeatureRequired));
+    }
+
+    #[test]
+    fn test_config_error_display() {
+        assert_eq!(
+            ConfigError::ZeroMemoryLimit.to_string(),
+            "memory_limit must be greater than zero"
+        );
+        assert_eq!(
+            ConfigError::ZeroThreads.to_string(),
+            "threads must be greater than zero"
+        );
+        assert_eq!(
+            ConfigError::ZeroWalFlushInterval.to_string(),
+            "wal_flush_interval_ms must be greater than zero"
+        );
+        assert_eq!(
+            ConfigError::RdfFeatureRequired.to_string(),
+            "RDF graph model requires the `rdf` feature flag to be enabled"
+        );
+    }
+
+    // --- Builder chaining with new fields ---
+
+    #[test]
+    fn test_config_full_builder_chaining() {
+        let config = Config::persistent("/tmp/db")
+            .with_graph_model(GraphModel::Lpg)
+            .with_memory_limit(512 * 1024 * 1024)
+            .with_threads(4)
+            .with_query_logging()
+            .with_wal_durability(DurabilityMode::Sync)
+            .with_schema_constraints()
+            .without_backward_edges()
+            .with_spill_path("/tmp/spill");
+
+        assert_eq!(config.graph_model, GraphModel::Lpg);
+        assert!(config.path.is_some());
+        assert_eq!(config.memory_limit, Some(512 * 1024 * 1024));
+        assert_eq!(config.threads, 4);
+        assert!(config.query_logging);
+        assert_eq!(config.wal_durability, DurabilityMode::Sync);
+        assert!(config.schema_constraints);
+        assert!(!config.backward_edges);
+        assert!(config.spill_path.is_some());
+        assert!(config.validate().is_ok());
     }
 }

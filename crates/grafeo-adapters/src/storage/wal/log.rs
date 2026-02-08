@@ -571,8 +571,7 @@ impl WalManager {
         let guard = self.active_log.lock();
         guard
             .as_ref()
-            .map(|l| l.path.clone())
-            .unwrap_or_else(|| self.log_path(0))
+            .map_or_else(|| self.log_path(0), |l| l.path.clone())
     }
 }
 

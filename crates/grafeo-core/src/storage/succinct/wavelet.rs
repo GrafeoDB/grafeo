@@ -268,9 +268,7 @@ impl WaveletTree {
             return None;
         }
 
-        let Some(&code) = self.symbol_to_code.get(&symbol) else {
-            return None;
-        };
+        let &code = self.symbol_to_code.get(&symbol)?;
 
         // Find the range for this symbol at the deepest level
         let mut lo = 0usize;

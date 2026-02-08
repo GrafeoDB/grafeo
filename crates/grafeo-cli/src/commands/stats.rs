@@ -75,8 +75,7 @@ pub fn run(path: &Path, format: OutputFormat, quiet: bool) -> Result<()> {
                     "Disk Usage",
                     output
                         .disk_bytes
-                        .map(format_bytes)
-                        .unwrap_or_else(|| "N/A".to_string()),
+                        .map_or_else(|| "N/A".to_string(), format_bytes),
                 ),
             ];
             output::print_key_value_table(&items, fmt, quiet);

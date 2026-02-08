@@ -198,8 +198,7 @@ impl PyValue {
         let type_name = obj
             .get_type()
             .name()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|_| "<unknown>".to_string());
+            .map_or_else(|_| "<unknown>".to_string(), |s| s.to_string());
         Err(PyGrafeoError::Type(format!(
             "Unsupported Python type: {}",
             type_name
@@ -261,8 +260,7 @@ impl PyValue {
                 // Use utcfromtimestamp for UTC datetime
                 datetime_class
                     .call_method1("utcfromtimestamp", (timestamp_float,))
-                    .map(|dt| dt.unbind().into_any())
-                    .unwrap_or_else(|_| py.None())
+                    .map_or_else(|_| py.None(), |dt| dt.unbind().into_any())
             }
             Value::Vector(v) => {
                 // Convert vector to Python list of floats

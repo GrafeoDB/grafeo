@@ -170,10 +170,7 @@ impl Operator for ProjectOperator {
 
                     for row in input.selected_indices() {
                         let value = if let Some(edge_id) = input_col.get_edge_id(row) {
-                            store
-                                .edge_type(edge_id)
-                                .map(Value::String)
-                                .unwrap_or(Value::Null)
+                            store.edge_type(edge_id).map_or(Value::Null, Value::String)
                         } else {
                             Value::Null
                         };

@@ -817,8 +817,7 @@ impl Binder {
                 // Look up the variable type from context
                 self.context
                     .get(name)
-                    .map(|info| info.data_type.clone())
-                    .unwrap_or(LogicalType::Any)
+                    .map_or(LogicalType::Any, |info| info.data_type.clone())
             }
             LogicalExpression::Property { .. } => LogicalType::Any, // Properties can be any type
             LogicalExpression::Literal(value) => {

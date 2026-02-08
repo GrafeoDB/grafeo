@@ -739,9 +739,8 @@ impl GraphQLTranslator {
         ];
 
         for (suffix, op) in suffixes {
-            if field.ends_with(suffix) {
-                let property = field[..field.len() - suffix.len()].to_string();
-                return (property, op);
+            if let Some(property) = field.strip_suffix(suffix) {
+                return (property.to_string(), op);
             }
         }
 
@@ -1158,10 +1157,7 @@ mod tests {
 
         // Should contain DeleteNode
         fn find_delete(op: &LogicalOperator) -> bool {
-            match op {
-                LogicalOperator::DeleteNode(_) => true,
-                _ => false,
-            }
+            matches!(op, LogicalOperator::DeleteNode(_))
         }
         assert!(find_delete(&plan.root));
     }

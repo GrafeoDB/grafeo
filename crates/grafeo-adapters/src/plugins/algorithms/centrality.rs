@@ -699,7 +699,7 @@ mod tests {
 
         // All normalized values should be between 0 and 1
         for (_, &score) in &result {
-            assert!(score >= 0.0 && score <= 1.0);
+            assert!((0.0..=1.0).contains(&score));
         }
     }
 

@@ -81,8 +81,7 @@ impl MergeOperator {
                 let has_all_props = self.match_properties.iter().all(|(key, expected_value)| {
                     node.properties
                         .get(&PropertyKey::new(key.as_str()))
-                        .map(|v| v == expected_value)
-                        .unwrap_or(false)
+                        .is_some_and(|v| v == expected_value)
                 });
 
                 if has_all_props {

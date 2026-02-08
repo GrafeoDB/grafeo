@@ -1232,10 +1232,7 @@ impl LpgStore {
         for node_id in self.node_ids() {
             if let Some(value) = self.node_properties.get(node_id, &key) {
                 let hv = HashableValue::new(value);
-                index
-                    .entry(hv)
-                    .or_insert_with(FxHashSet::default)
-                    .insert(node_id);
+                index.entry(hv).or_default().insert(node_id);
             }
         }
 
@@ -1446,9 +1443,7 @@ impl LpgStore {
 
         // Add to node_labels map
         let mut node_labels = self.node_labels.write();
-        let label_set = node_labels
-            .entry(node_id)
-            .or_insert_with(FxHashSet::default);
+        let label_set = node_labels.entry(node_id).or_default();
 
         if label_set.contains(&label_id) {
             return false; // Already has this label
@@ -2666,10 +2661,7 @@ impl LpgStore {
         let label_index = self.label_index.read();
 
         for (label_id, label_name) in id_to_label.iter().enumerate() {
-            let node_count = label_index
-                .get(label_id)
-                .map(|set| set.len() as u64)
-                .unwrap_or(0);
+            let node_count = label_index.get(label_id).map_or(0, |set| set.len() as u64);
 
             if node_count > 0 {
                 let avg_out_degree = if stats.total_nodes > 0 {

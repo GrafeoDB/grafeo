@@ -1923,7 +1923,7 @@ mod tests {
 
         // With 100 distinct values, selectivity should be ~1%
         // 1000 * 0.01 = 10
-        assert!(cardinality >= 1.0 && cardinality < 50.0);
+        assert!((1.0..50.0).contains(&cardinality));
     }
 
     #[test]

@@ -625,8 +625,7 @@ impl HnswIndex {
     fn node_distance(&self, nodes: &HashMap<NodeId, HnswNode>, query: &[f32], id: NodeId) -> f32 {
         nodes
             .get(&id)
-            .map(|n| self.vector_distance(query, &n.vector))
-            .unwrap_or(f32::MAX)
+            .map_or(f32::MAX, |n| self.vector_distance(query, &n.vector))
     }
 
     // ========================================================================

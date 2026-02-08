@@ -100,7 +100,7 @@ impl WalRecovery {
         let log_files = self.get_log_files()?;
 
         // Determine the minimum sequence number to process
-        let min_sequence = checkpoint.as_ref().map(|cp| cp.log_sequence).unwrap_or(0);
+        let min_sequence = checkpoint.as_ref().map_or(0, |cp| cp.log_sequence);
 
         if checkpoint.is_some() {
             tracing::info!(

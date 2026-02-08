@@ -69,36 +69,29 @@ impl Statistics {
     pub fn estimate_label_cardinality(&self, label: &str) -> f64 {
         self.labels
             .get(label)
-            .map(|s| s.node_count as f64)
-            .unwrap_or(1000.0) // Default estimate if no statistics
+            .map_or(1000.0, |s| s.node_count as f64) // Default estimate if no statistics
     }
 
     /// Estimates the average degree for an edge type.
     pub fn estimate_avg_degree(&self, edge_type: &str, outgoing: bool) -> f64 {
-        self.edge_types
-            .get(edge_type)
-            .map(|s| {
-                if outgoing {
-                    s.avg_out_degree
-                } else {
-                    s.avg_in_degree
-                }
-            })
-            .unwrap_or(10.0) // Default estimate
+        self.edge_types.get(edge_type).map_or(10.0, |s| {
+            if outgoing {
+                s.avg_out_degree
+            } else {
+                s.avg_in_degree
+            }
+        }) // Default estimate
     }
 
     /// Estimates selectivity of an equality predicate.
     pub fn estimate_equality_selectivity(&self, property: &str, _value: &Value) -> f64 {
-        self.properties
-            .get(property)
-            .map(|s| {
-                if s.distinct_count > 0 {
-                    1.0 / s.distinct_count as f64
-                } else {
-                    0.5
-                }
-            })
-            .unwrap_or(0.5)
+        self.properties.get(property).map_or(0.5, |s| {
+            if s.distinct_count > 0 {
+                1.0 / s.distinct_count as f64
+            } else {
+                0.5
+            }
+        })
     }
 
     /// Estimates selectivity of a range predicate.
@@ -111,8 +104,9 @@ impl Statistics {
         self.properties
             .get(property)
             .and_then(|s| s.histogram.as_ref())
-            .map(|h| h.estimate_range_selectivity(lower, upper, true, true))
-            .unwrap_or(0.33) // Default for range predicates
+            .map_or(0.33, |h| {
+                h.estimate_range_selectivity(lower, upper, true, true)
+            }) // Default for range predicates
     }
 }
 

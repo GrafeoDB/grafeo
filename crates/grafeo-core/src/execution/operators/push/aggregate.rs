@@ -257,8 +257,7 @@ impl GroupKey {
                 chunk
                     .column(col)
                     .and_then(|c| c.get_value(row))
-                    .map(|v| hash_value(&v))
-                    .unwrap_or(0)
+                    .map_or(0, |v| hash_value(&v))
             })
             .collect();
         Self(hashes)

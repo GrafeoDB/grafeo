@@ -438,15 +438,14 @@ impl GqlTranslator {
                     ));
                 };
                 let edge_type = path.edges.first().and_then(|e| e.types.first().cloned());
-                let direction = path
-                    .edges
-                    .first()
-                    .map(|e| match e.direction {
-                        ast::EdgeDirection::Outgoing => ExpandDirection::Outgoing,
-                        ast::EdgeDirection::Incoming => ExpandDirection::Incoming,
-                        ast::EdgeDirection::Undirected => ExpandDirection::Both,
-                    })
-                    .unwrap_or(ExpandDirection::Both);
+                let direction =
+                    path.edges
+                        .first()
+                        .map_or(ExpandDirection::Both, |e| match e.direction {
+                            ast::EdgeDirection::Outgoing => ExpandDirection::Outgoing,
+                            ast::EdgeDirection::Incoming => ExpandDirection::Incoming,
+                            ast::EdgeDirection::Undirected => ExpandDirection::Both,
+                        });
                 (&path.source, target_node, edge_type, direction)
             }
             ast::Pattern::Node(_) => {

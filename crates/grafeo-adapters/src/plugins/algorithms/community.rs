@@ -519,7 +519,7 @@ mod tests {
 
         // Should detect 2 communities (ideally)
         let num_comms = community_count(&communities);
-        assert!(num_comms >= 1 && num_comms <= 8); // May vary due to algorithm randomness
+        assert!((1..=8).contains(&num_comms)); // May vary due to algorithm randomness
     }
 
     #[test]

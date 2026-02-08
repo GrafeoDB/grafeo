@@ -281,9 +281,7 @@ impl<'a> LeapfrogJoin<'a> {
 
     /// Opens the current level and returns iterators for the next level.
     pub fn open(&self) -> Option<Vec<TrieIterator<'a>>> {
-        if self.current_key.is_none() {
-            return None;
-        }
+        self.current_key?;
 
         self.iters.iter().map(|it| it.open()).collect()
     }

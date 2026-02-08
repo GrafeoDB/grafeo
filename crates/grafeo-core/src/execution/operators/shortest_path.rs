@@ -204,8 +204,7 @@ impl Operator for ShortestPathOperator {
             .map(|i| {
                 input_chunk
                     .column(i)
-                    .map(|c| c.data_type().clone())
-                    .unwrap_or(LogicalType::Any)
+                    .map_or(LogicalType::Any, |c| c.data_type().clone())
             })
             .collect();
         output_schema.push(LogicalType::Any); // Path column (stores length as int)

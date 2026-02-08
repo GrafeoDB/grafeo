@@ -321,8 +321,7 @@ impl AdaptiveContext {
         self.checkpoints
             .get(operator_id)
             .filter(|cp| cp.recorded)
-            .map(CardinalityCheckpoint::deviation_ratio)
-            .unwrap_or(1.0)
+            .map_or(1.0, CardinalityCheckpoint::deviation_ratio)
     }
 
     /// Returns summary statistics about the adaptive execution.
@@ -866,8 +865,7 @@ impl AdaptiveExecutionConfig {
             let estimated = self
                 .context
                 .get_checkpoint(checkpoint_id)
-                .map(|cp| cp.estimated)
-                .unwrap_or(0.0);
+                .map_or(0.0, |cp| cp.estimated);
             callback(AdaptiveEvent::CheckpointReached {
                 id: checkpoint_id.to_string(),
                 actual_rows: actual,
@@ -899,8 +897,7 @@ impl AdaptiveExecutionConfig {
                 .context
                 .get_checkpoint(checkpoint_id)
                 .filter(|cp| cp.recorded)
-                .map(|cp| cp.deviation_ratio())
-                .unwrap_or(1.0);
+                .map_or(1.0, |cp| cp.deviation_ratio());
             callback(AdaptiveEvent::ReoptimizationTriggered {
                 checkpoint_id: checkpoint_id.to_string(),
                 deviation_ratio: ratio,

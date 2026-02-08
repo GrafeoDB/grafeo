@@ -133,17 +133,6 @@ impl Session {
         Ok(())
     }
 
-    /// Checks that the session's graph model supports RDF/SPARQL operations.
-    #[allow(dead_code)]
-    fn require_rdf(&self, language: &str) -> Result<()> {
-        if self.graph_model == GraphModel::Lpg {
-            return Err(grafeo_common::utils::error::Error::Internal(format!(
-                "This is an LPG database. {language} queries require an RDF database."
-            )));
-        }
-        Ok(())
-    }
-
     /// Executes a GQL query.
     ///
     /// # Errors

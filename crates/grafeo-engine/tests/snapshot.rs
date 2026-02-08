@@ -304,6 +304,36 @@ fn import_rejects_empty_bytes() {
     assert!(result.is_err());
 }
 
+// --- Snapshot version mismatch ---
+
+#[test]
+fn import_rejects_unsupported_version() {
+    // Export a valid snapshot, then tamper with the version byte to trigger the
+    // "unsupported snapshot version" error path.
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session.execute("INSERT (:Person {name: 'Alice'})").unwrap();
+
+    let mut bytes = db.export_snapshot().unwrap();
+    // The first byte in bincode standard encoding for a struct starting with
+    // a u8 field is the version byte itself.
+    bytes[0] = 99; // Set to invalid version
+
+    let result = GrafeoDB::import_snapshot(&bytes);
+    match result {
+        Ok(_) => panic!("Expected error for tampered snapshot"),
+        Err(e) => {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains("snapshot")
+                    || err_msg.contains("unsupported")
+                    || err_msg.contains("import"),
+                "Expected snapshot error, got: {err_msg}"
+            );
+        }
+    }
+}
+
 // --- Double export produces identical bytes ---
 
 #[test]

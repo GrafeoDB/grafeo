@@ -2,6 +2,23 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.4.2] - Unreleased
+
+_WebAssembly Bindings & Feature-Gated Platform Code_
+
+### Added
+
+- **WebAssembly bindings** (`@grafeo-db/wasm`) via wasm-bindgen: `Database` constructor, `execute()` returning JS objects, `executeRaw()` with columns/rows/metadata, `nodeCount()`, `edgeCount()`, TypeScript definitions
+- **Feature-gated platform subsystems**: `parallel`, `spill`, `mmap`, `wal` are now Cargo features with sequential fallbacks, enabling `wasm32-unknown-unknown` compilation
+- `.cargo/config.toml` for wasm32 getrandom backend configuration
+- `[profile.minimal-size]` WASM build produces 660 KB gzipped binary (target was <800 KB)
+
+### Changed
+
+- Internal crate dependencies use `default-features = false` in workspace root for per-crate feature control
+- `grafeo-engine` no longer depends on `tokio` directly (comes via `grafeo-adapters/wal` when needed)
+- SIMD fallback functions annotated `#[allow(dead_code)]` for non-x86/non-aarch64 targets
+
 ## [0.4.1] - 2026-02-08
 
 _Go Bindings, C FFI & Coverage Improvements_

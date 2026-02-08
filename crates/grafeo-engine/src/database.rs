@@ -486,6 +486,18 @@ impl GrafeoDB {
         &self.config
     }
 
+    /// Returns the graph data model of this database.
+    #[must_use]
+    pub fn graph_model(&self) -> crate::config::GraphModel {
+        self.config.graph_model
+    }
+
+    /// Returns the configured memory limit in bytes, if any.
+    #[must_use]
+    pub fn memory_limit(&self) -> Option<usize> {
+        self.config.memory_limit
+    }
+
     /// Returns the underlying store.
     ///
     /// This provides direct access to the LPG store for algorithm implementations.

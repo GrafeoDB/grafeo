@@ -154,14 +154,12 @@ impl FactorizedAggregate {
                 }
 
                 let deepest_idx = chunk.level_count() - 1;
-                let deepest = match chunk.level(deepest_idx) {
-                    Some(l) => l,
-                    None => return Value::Int64(0),
+                let Some(deepest) = chunk.level(deepest_idx) else {
+                    return Value::Int64(0);
                 };
 
-                let col = match deepest.column(*column_idx) {
-                    Some(c) => c,
-                    None => return Value::Int64(0),
+                let Some(col) = deepest.column(*column_idx) else {
+                    return Value::Int64(0);
                 };
 
                 // Use provided multiplicities or compute them
@@ -176,10 +174,10 @@ impl FactorizedAggregate {
 
                 let mut count: i64 = 0;
                 for (phys_idx, mult) in mults.iter().enumerate() {
-                    if let Some(value) = col.get_physical(phys_idx) {
-                        if !matches!(value, Value::Null) {
-                            count += *mult as i64;
-                        }
+                    if let Some(value) = col.get_physical(phys_idx)
+                        && !matches!(value, Value::Null)
+                    {
+                        count += *mult as i64;
                     }
                 }
 

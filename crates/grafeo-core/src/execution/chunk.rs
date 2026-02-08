@@ -233,9 +233,8 @@ impl DataChunk {
     /// After this operation, selection is None and count equals the
     /// previously selected row count.
     pub fn flatten(&mut self) {
-        let selection = match self.selection.take() {
-            Some(sel) => sel,
-            None => return,
+        let Some(selection) = self.selection.take() else {
+            return;
         };
 
         let selected_count = selection.len();

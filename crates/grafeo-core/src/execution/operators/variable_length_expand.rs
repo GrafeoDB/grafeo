@@ -247,9 +247,8 @@ impl VariableLengthExpandOperator {
 
     /// Fill the output buffer with results from the next input row.
     fn fill_output_buffer(&mut self) {
-        let input_rows = match &self.input_rows {
-            Some(rows) => rows,
-            None => return,
+        let Some(input_rows) = &self.input_rows else {
+            return;
         };
 
         while self.output_buffer.is_empty() && self.current_input_idx < input_rows.len() {
@@ -339,12 +338,12 @@ impl Operator for VariableLengthExpandOperator {
             }
 
             // Add path length column if requested
-            if self.output_path_length {
-                if let Some(col) = chunk.column_mut(num_input_cols + 2) {
-                    col.push_value(grafeo_common::types::Value::Int64(i64::from(
-                        out_row.path_length,
-                    )));
-                }
+            if self.output_path_length
+                && let Some(col) = chunk.column_mut(num_input_cols + 2)
+            {
+                col.push_value(grafeo_common::types::Value::Int64(i64::from(
+                    out_row.path_length,
+                )));
             }
         }
 
@@ -469,5 +468,251 @@ mod tests {
             "a should NOT reach b with min_hops=2"
         );
         assert!(a_targets.contains(&c), "a should reach c");
+    }
+
+    #[test]
+    fn test_variable_length_expand_diamond() {
+        let store = Arc::new(LpgStore::new());
+
+        //     a
+        //    / \
+        //   b   c
+        //    \ /
+        //     d
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
+        let d = store.create_node(&["Node"]);
+
+        store.create_edge(a, b, "EDGE");
+        store.create_edge(a, c, "EDGE");
+        store.create_edge(b, d, "EDGE");
+        store.create_edge(c, d, "EDGE");
+
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Node"));
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store),
+            scan,
+            0,
+            Direction::Outgoing,
+            None,
+            1,
+            2,
+        );
+
+        let mut results = Vec::new();
+        while let Ok(Some(chunk)) = expand.next() {
+            for i in 0..chunk.row_count() {
+                let src = chunk.column(0).unwrap().get_node_id(i).unwrap();
+                let dst = chunk.column(2).unwrap().get_node_id(i).unwrap();
+                results.push((src, dst));
+            }
+        }
+
+        // From 'a': b (1 hop), c (1 hop), d (2 hops via b), d (2 hops via c)
+        let a_targets: Vec<NodeId> = results
+            .iter()
+            .filter(|(s, _)| *s == a)
+            .map(|(_, t)| *t)
+            .collect();
+        assert!(a_targets.contains(&b));
+        assert!(a_targets.contains(&c));
+        assert!(a_targets.contains(&d));
+        // d appears twice (two paths)
+        assert_eq!(a_targets.iter().filter(|&&t| t == d).count(), 2);
+    }
+
+    #[test]
+    fn test_variable_length_expand_no_matching_edges() {
+        let store = Arc::new(LpgStore::new());
+
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        store.create_edge(a, b, "KNOWS");
+
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Node"));
+        // Filter for LIKES edges (which don't exist)
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store),
+            scan,
+            0,
+            Direction::Outgoing,
+            Some("LIKES".to_string()),
+            1,
+            3,
+        );
+
+        let result = expand.next().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_variable_length_expand_single_hop() {
+        let store = Arc::new(LpgStore::new());
+
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        store.create_edge(a, b, "EDGE");
+
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Node"));
+        // Exactly 1 hop
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store),
+            scan,
+            0,
+            Direction::Outgoing,
+            None,
+            1,
+            1,
+        );
+
+        let mut results = Vec::new();
+        while let Ok(Some(chunk)) = expand.next() {
+            for i in 0..chunk.row_count() {
+                let src = chunk.column(0).unwrap().get_node_id(i).unwrap();
+                let dst = chunk.column(2).unwrap().get_node_id(i).unwrap();
+                results.push((src, dst));
+            }
+        }
+
+        // Only a -> b (1 hop)
+        let a_results: Vec<_> = results.iter().filter(|(s, _)| *s == a).collect();
+        assert_eq!(a_results.len(), 1);
+        assert_eq!(a_results[0].1, b);
+    }
+
+    #[test]
+    fn test_variable_length_expand_with_path_length() {
+        let store = Arc::new(LpgStore::new());
+
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
+        store.create_edge(a, b, "EDGE");
+        store.create_edge(b, c, "EDGE");
+
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Node"));
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store),
+            scan,
+            0,
+            Direction::Outgoing,
+            None,
+            1,
+            2,
+        )
+        .with_path_length_output();
+
+        let mut found_path_lengths = false;
+        while let Ok(Some(chunk)) = expand.next() {
+            // With path_length_output, there should be an extra column
+            assert!(chunk.column_count() >= 4); // source, edge, target, path_length
+            found_path_lengths = true;
+        }
+        assert!(found_path_lengths);
+    }
+
+    #[test]
+    fn test_variable_length_expand_reset() {
+        let store = Arc::new(LpgStore::new());
+
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        store.create_edge(a, b, "EDGE");
+
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Node"));
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store),
+            scan,
+            0,
+            Direction::Outgoing,
+            None,
+            1,
+            1,
+        );
+
+        // First pass
+        let mut count1 = 0;
+        while let Ok(Some(chunk)) = expand.next() {
+            count1 += chunk.row_count();
+        }
+
+        expand.reset();
+
+        // Second pass
+        let mut count2 = 0;
+        while let Ok(Some(chunk)) = expand.next() {
+            count2 += chunk.row_count();
+        }
+
+        assert_eq!(count1, count2);
+    }
+
+    #[test]
+    fn test_variable_length_expand_name() {
+        let store = Arc::new(LpgStore::new());
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Node"));
+        let expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store),
+            scan,
+            0,
+            Direction::Outgoing,
+            None,
+            1,
+            3,
+        );
+        assert_eq!(expand.name(), "VariableLengthExpand");
+    }
+
+    #[test]
+    fn test_variable_length_expand_empty_input() {
+        let store = Arc::new(LpgStore::new());
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Nonexistent"));
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store),
+            scan,
+            0,
+            Direction::Outgoing,
+            None,
+            1,
+            3,
+        );
+
+        let result = expand.next().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_variable_length_expand_with_chunk_capacity() {
+        let store = Arc::new(LpgStore::new());
+
+        // Create a star graph: center -> 5 outer nodes
+        let center = store.create_node(&["Node"]);
+        for _ in 0..5 {
+            let outer = store.create_node(&["Node"]);
+            store.create_edge(center, outer, "EDGE");
+        }
+
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Node"));
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store),
+            scan,
+            0,
+            Direction::Outgoing,
+            None,
+            1,
+            1,
+        )
+        .with_chunk_capacity(2);
+
+        let mut total = 0;
+        let mut chunk_count = 0;
+        while let Ok(Some(chunk)) = expand.next() {
+            chunk_count += 1;
+            total += chunk.row_count();
+        }
+
+        assert_eq!(total, 5);
+        assert!(chunk_count >= 2);
     }
 }

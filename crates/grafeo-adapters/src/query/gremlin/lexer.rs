@@ -282,10 +282,10 @@ impl<'a> Lexer<'a> {
                 is_float = true;
                 value.push(c);
                 self.advance();
-                if self.peek_is(|c| c == '+' || c == '-') {
-                    if let Some(sign) = self.advance() {
-                        value.push(sign);
-                    }
+                if self.peek_is(|c| c == '+' || c == '-')
+                    && let Some(sign) = self.advance()
+                {
+                    value.push(sign);
                 }
             } else {
                 break;

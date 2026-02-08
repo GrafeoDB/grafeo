@@ -314,17 +314,14 @@ impl TripleRing {
         if let (Some(s), Some(p), Some(o)) = (&pattern.subject, &pattern.predicate, &pattern.object)
         {
             // Get IDs
-            let s_id = match self.dict.get_id(s) {
-                Some(id) => id,
-                None => return 0,
+            let Some(s_id) = self.dict.get_id(s) else {
+                return 0;
             };
-            let p_id = match self.dict.get_id(p) {
-                Some(id) => id,
-                None => return 0,
+            let Some(p_id) = self.dict.get_id(p) else {
+                return 0;
             };
-            let o_id = match self.dict.get_id(o) {
-                Some(id) => id,
-                None => return 0,
+            let Some(o_id) = self.dict.get_id(o) else {
+                return 0;
             };
 
             // Check if this exact triple exists
@@ -424,10 +421,10 @@ impl Iterator for RingPatternIterator<'_> {
             let idx = self.current;
             self.current += 1;
 
-            if let Some(triple) = self.ring.get_spo(idx) {
-                if self.pattern.matches(&triple) {
-                    return Some(triple);
-                }
+            if let Some(triple) = self.ring.get_spo(idx)
+                && self.pattern.matches(&triple)
+            {
+                return Some(triple);
             }
         }
         None

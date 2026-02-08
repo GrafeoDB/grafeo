@@ -246,10 +246,10 @@ impl<'a> PrecomputedIter<'a> {
         }
 
         // Check if initial position is valid
-        if !Self::is_valid_position(chunk, initial_indices) {
-            if !Self::advance_to_next_valid(chunk, initial_indices) {
-                return; // No valid rows
-            }
+        if !Self::is_valid_position(chunk, initial_indices)
+            && !Self::advance_to_next_valid(chunk, initial_indices)
+        {
+            return; // No valid rows
         }
 
         // Enumerate all rows
@@ -273,9 +273,8 @@ impl<'a> PrecomputedIter<'a> {
 
         for level in 0..level_count {
             if level == 0 {
-                let level_data = match chunk.level(0) {
-                    Some(l) => l,
-                    None => return false,
+                let Some(level_data) = chunk.level(0) else {
+                    return false;
                 };
                 if indices[0] >= level_data.group_count() {
                     return false;
@@ -312,9 +311,8 @@ impl<'a> PrecomputedIter<'a> {
 
             for level in (0..level_count).rev() {
                 let (_start, end) = if level == 0 {
-                    let level_data = match chunk.level(0) {
-                        Some(l) => l,
-                        None => return false,
+                    let Some(level_data) = chunk.level(0) else {
+                        return false;
                     };
                     (0, level_data.group_count())
                 } else {

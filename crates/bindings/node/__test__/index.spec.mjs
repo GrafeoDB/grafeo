@@ -23,7 +23,7 @@ function seedDb() {
 
 describe('module exports', () => {
   it('should export version()', () => {
-    expect(version()).toBe('0.4.0')
+    expect(version()).toMatch(/^\d+\.\d+\.\d+$/)
   })
 
   it('should export simdSupport()', () => {

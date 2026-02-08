@@ -1,0 +1,32 @@
+[package]
+name = "grafeo-c"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "C FFI bindings for Grafeo graph database"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+doc = false
+
+[dependencies]
+grafeo-engine = { path = "../../grafeo-engine" }
+grafeo-core = { path = "../../grafeo-core" }
+grafeo-common = { path = "../../grafeo-common" }
+
+serde_json = "1.0"
+parking_lot.workspace = true
+
+[features]
+default = ["full"]
+gql = ["grafeo-engine/gql"]
+cypher = ["grafeo-engine/cypher"]
+sparql = ["grafeo-engine/sparql", "grafeo-engine/rdf"]
+gremlin = ["grafeo-engine/gremlin"]
+graphql = ["grafeo-engine/graphql"]
+vector-index = ["grafeo-engine/vector-index"]
+full = ["gql", "cypher", "sparql", "gremlin", "graphql", "vector-index"]
+
+[lints]
+workspace = true

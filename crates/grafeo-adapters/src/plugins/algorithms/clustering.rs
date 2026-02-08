@@ -91,10 +91,10 @@ fn count_node_triangles(
             let w = neighbor_list[j];
 
             // Check if u and w are neighbors (completing a triangle)
-            if let Some(u_neighbors) = all_neighbors.get(&u) {
-                if u_neighbors.contains(&w) {
-                    triangles += 1;
-                }
+            if let Some(u_neighbors) = all_neighbors.get(&u)
+                && u_neighbors.contains(&w)
+            {
+                triangles += 1;
             }
         }
     }

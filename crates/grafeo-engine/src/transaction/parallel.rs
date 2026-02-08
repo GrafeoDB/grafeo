@@ -218,10 +218,10 @@ impl WriteTracker {
     /// Checks if an entity was written by an earlier transaction.
     fn was_written_by_earlier(&self, entity: &EntityId, batch_index: usize) -> Option<usize> {
         let writes = self.writes.read();
-        if let Some(&writer) = writes.get(entity) {
-            if writer < batch_index {
-                return Some(writer);
-            }
+        if let Some(&writer) = writes.get(entity)
+            && writer < batch_index
+        {
+            return Some(writer);
         }
         None
     }

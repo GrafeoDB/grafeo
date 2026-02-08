@@ -284,9 +284,8 @@ impl SpillableSortPushOperator {
             return Ok(());
         }
 
-        let manager = match &self.spill_manager {
-            Some(m) => m,
-            None => return Ok(()), // No spilling configured
+        let Some(manager) = &self.spill_manager else {
+            return Ok(()); // No spilling configured
         };
 
         // Sort current buffer

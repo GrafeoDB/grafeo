@@ -247,11 +247,11 @@ impl LeapfrogJoinOperator {
         if let Some(iter) = trie.iter_at(&[key]) {
             let mut iter = iter;
             loop {
-                if let Some(child_key) = iter.key() {
-                    if let Some(edges) = trie.get(&[key, child_key]) {
-                        for &edge_id in edges {
-                            row_ids.push(Self::decode_row_id(edge_id));
-                        }
+                if let Some(child_key) = iter.key()
+                    && let Some(edges) = trie.get(&[key, child_key])
+                {
+                    for &edge_id in edges {
+                        row_ids.push(Self::decode_row_id(edge_id));
                     }
                 }
                 if !iter.next() {

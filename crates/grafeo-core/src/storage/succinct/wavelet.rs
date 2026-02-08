@@ -227,9 +227,8 @@ impl WaveletTree {
             return 0;
         }
 
-        let code = match self.symbol_to_code.get(&symbol) {
-            Some(&c) => c,
-            None => return 0, // Symbol not in alphabet
+        let Some(&code) = self.symbol_to_code.get(&symbol) else {
+            return 0; // Symbol not in alphabet
         };
 
         let i = i.min(self.len);
@@ -269,9 +268,8 @@ impl WaveletTree {
             return None;
         }
 
-        let code = match self.symbol_to_code.get(&symbol) {
-            Some(&c) => c,
-            None => return None,
+        let Some(&code) = self.symbol_to_code.get(&symbol) else {
+            return None;
         };
 
         // Find the range for this symbol at the deepest level

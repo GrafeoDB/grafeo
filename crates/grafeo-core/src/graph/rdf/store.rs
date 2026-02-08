@@ -192,12 +192,12 @@ impl RdfStore {
 
         if self.config.index_objects {
             let mut object_index = self.object_index.write();
-            if let Some(ref mut index) = *object_index {
-                if let Some(vec) = index.get_mut(triple.object()) {
-                    vec.retain(|t| t.as_ref() != triple);
-                    if vec.is_empty() {
-                        index.remove(triple.object());
-                    }
+            if let Some(ref mut index) = *object_index
+                && let Some(vec) = index.get_mut(triple.object())
+            {
+                vec.retain(|t| t.as_ref() != triple);
+                if vec.is_empty() {
+                    index.remove(triple.object());
                 }
             }
         }
@@ -479,10 +479,10 @@ impl RdfStore {
 
                 // Include pending inserts
                 for op in ops {
-                    if let PendingOp::Insert(triple) = op {
-                        if pattern.matches(triple) {
-                            results.push(Arc::new(triple.clone()));
-                        }
+                    if let PendingOp::Insert(triple) = op
+                        && pattern.matches(triple)
+                    {
+                        results.push(Arc::new(triple.clone()));
                     }
                 }
             }

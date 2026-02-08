@@ -395,29 +395,29 @@ impl AggregateState {
             AggregateState::SumFloatDistinct(sum, seen) => {
                 if let Some(ref v) = value {
                     let hashable = HashableValue::from(v);
-                    if seen.insert(hashable) {
-                        if let Some(num) = value_to_f64(v) {
-                            *sum += num;
-                        }
+                    if seen.insert(hashable)
+                        && let Some(num) = value_to_f64(v)
+                    {
+                        *sum += num;
                     }
                 }
             }
             AggregateState::Avg(sum, count) => {
-                if let Some(ref v) = value {
-                    if let Some(num) = value_to_f64(v) {
-                        *sum += num;
-                        *count += 1;
-                    }
+                if let Some(ref v) = value
+                    && let Some(num) = value_to_f64(v)
+                {
+                    *sum += num;
+                    *count += 1;
                 }
             }
             AggregateState::AvgDistinct(sum, count, seen) => {
                 if let Some(ref v) = value {
                     let hashable = HashableValue::from(v);
-                    if seen.insert(hashable) {
-                        if let Some(num) = value_to_f64(v) {
-                            *sum += num;
-                            *count += 1;
-                        }
+                    if seen.insert(hashable)
+                        && let Some(num) = value_to_f64(v)
+                    {
+                        *sum += num;
+                        *count += 1;
                     }
                 }
             }
@@ -471,22 +471,22 @@ impl AggregateState {
             // Statistical functions using Welford's online algorithm
             AggregateState::StdDev { count, mean, m2 }
             | AggregateState::StdDevPop { count, mean, m2 } => {
-                if let Some(ref v) = value {
-                    if let Some(x) = value_to_f64(v) {
-                        *count += 1;
-                        let delta = x - *mean;
-                        *mean += delta / *count as f64;
-                        let delta2 = x - *mean;
-                        *m2 += delta * delta2;
-                    }
+                if let Some(ref v) = value
+                    && let Some(x) = value_to_f64(v)
+                {
+                    *count += 1;
+                    let delta = x - *mean;
+                    *mean += delta / *count as f64;
+                    let delta2 = x - *mean;
+                    *m2 += delta * delta2;
                 }
             }
             AggregateState::PercentileDisc { values, .. }
             | AggregateState::PercentileCont { values, .. } => {
-                if let Some(ref v) = value {
-                    if let Some(x) = value_to_f64(v) {
-                        values.push(x);
-                    }
+                if let Some(ref v) = value
+                    && let Some(x) = value_to_f64(v)
+                {
+                    values.push(x);
                 }
             }
         }
@@ -790,9 +790,8 @@ impl Operator for HashAggregateOperator {
             return Ok(Some(builder.finish()));
         }
 
-        let results = match &mut self.results {
-            Some(r) => r,
-            None => return Ok(None),
+        let Some(results) = &mut self.results else {
+            return Ok(None);
         };
 
         let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);

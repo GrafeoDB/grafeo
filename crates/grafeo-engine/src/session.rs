@@ -1183,9 +1183,8 @@ mod tests {
 
             // Should fail with semantic error
             assert!(result.is_err());
-            let err = match result {
-                Err(e) => e,
-                Ok(_) => panic!("Expected error"),
+            let Err(err) = result else {
+                panic!("Expected error")
             };
             assert!(
                 err.to_string().contains("Undefined variable"),

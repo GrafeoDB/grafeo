@@ -457,7 +457,11 @@ impl LpgStore {
         let id = self.create_node_versioned(labels, epoch, tx_id);
 
         for (key, value) in properties {
-            self.node_properties.set(id, key.into(), value.into());
+            let prop_key: PropertyKey = key.into();
+            let prop_value: Value = value.into();
+            // Update property index before setting the property
+            self.update_property_index_on_set(id, &prop_key, &prop_value);
+            self.node_properties.set(id, prop_key, prop_value);
         }
 
         // Update props_count in record
@@ -484,7 +488,11 @@ impl LpgStore {
         let id = self.create_node_versioned(labels, epoch, tx_id);
 
         for (key, value) in properties {
-            self.node_properties.set(id, key.into(), value.into());
+            let prop_key: PropertyKey = key.into();
+            let prop_value: Value = value.into();
+            // Update property index before setting the property
+            self.update_property_index_on_set(id, &prop_key, &prop_value);
+            self.node_properties.set(id, prop_key, prop_value);
         }
 
         // Note: props_count in record is not updated for tiered storage.
@@ -2120,17 +2128,17 @@ impl LpgStore {
         {
             let mut versions = self.node_versions.write();
             for (node_id, hot_ref) in &node_hot_refs {
-                if let Some(index) = versions.get_mut(node_id) {
-                    if let Some(&(offset, length)) = node_entry_map.get(&node_id.as_u64()) {
-                        let cold_ref = ColdVersionRef {
-                            epoch,
-                            block_offset: offset,
-                            length,
-                            created_by: hot_ref.created_by,
-                            deleted_epoch: hot_ref.deleted_epoch,
-                        };
-                        index.freeze_epoch(epoch, std::iter::once(cold_ref));
-                    }
+                if let Some(index) = versions.get_mut(node_id)
+                    && let Some(&(offset, length)) = node_entry_map.get(&node_id.as_u64())
+                {
+                    let cold_ref = ColdVersionRef {
+                        epoch,
+                        block_offset: offset,
+                        length,
+                        created_by: hot_ref.created_by,
+                        deleted_epoch: hot_ref.deleted_epoch,
+                    };
+                    index.freeze_epoch(epoch, std::iter::once(cold_ref));
                 }
             }
         }
@@ -2138,17 +2146,17 @@ impl LpgStore {
         {
             let mut versions = self.edge_versions.write();
             for (edge_id, hot_ref) in &edge_hot_refs {
-                if let Some(index) = versions.get_mut(edge_id) {
-                    if let Some(&(offset, length)) = edge_entry_map.get(&edge_id.as_u64()) {
-                        let cold_ref = ColdVersionRef {
-                            epoch,
-                            block_offset: offset,
-                            length,
-                            created_by: hot_ref.created_by,
-                            deleted_epoch: hot_ref.deleted_epoch,
-                        };
-                        index.freeze_epoch(epoch, std::iter::once(cold_ref));
-                    }
+                if let Some(index) = versions.get_mut(edge_id)
+                    && let Some(&(offset, length)) = edge_entry_map.get(&edge_id.as_u64())
+                {
+                    let cold_ref = ColdVersionRef {
+                        epoch,
+                        block_offset: offset,
+                        length,
+                        created_by: hot_ref.created_by,
+                        deleted_epoch: hot_ref.deleted_epoch,
+                    };
+                    index.freeze_epoch(epoch, std::iter::once(cold_ref));
                 }
             }
         }
@@ -2684,12 +2692,11 @@ impl LpgStore {
 
         let mut edge_type_counts: FxHashMap<u32, u64> = FxHashMap::default();
         for index in versions.values() {
-            if let Some(vref) = index.visible_at(epoch) {
-                if let Some(record) = self.read_edge_record(&vref) {
-                    if !record.is_deleted() {
-                        *edge_type_counts.entry(record.type_id).or_default() += 1;
-                    }
-                }
+            if let Some(vref) = index.visible_at(epoch)
+                && let Some(record) = self.read_edge_record(&vref)
+                && !record.is_deleted()
+            {
+                *edge_type_counts.entry(record.type_id).or_default() += 1;
             }
         }
 

@@ -1257,15 +1257,15 @@ mod tests {
     #[test]
     fn test_parse_match_with_multiple_labels() {
         let stmt = parse_ok("MATCH (n:Person:Employee) RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] {
-                if let Pattern::Node(node) = &patterns[0] {
-                    assert_eq!(node.labels.len(), 2);
-                    assert_eq!(node.labels[0], "Person");
-                    assert_eq!(node.labels[1], "Employee");
-                } else {
-                    panic!("Expected Node pattern");
-                }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Match(MatchClause { patterns, .. }) = &clauses[0]
+        {
+            if let Pattern::Node(node) = &patterns[0] {
+                assert_eq!(node.labels.len(), 2);
+                assert_eq!(node.labels[0], "Person");
+                assert_eq!(node.labels[1], "Employee");
+            } else {
+                panic!("Expected Node pattern");
             }
         }
     }
@@ -1273,15 +1273,15 @@ mod tests {
     #[test]
     fn test_parse_match_with_properties() {
         let stmt = parse_ok("MATCH (n:Person {name: 'Alice', age: 30}) RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] {
-                if let Pattern::Node(node) = &patterns[0] {
-                    assert_eq!(node.properties.len(), 2);
-                    assert_eq!(node.properties[0].0, "name");
-                    assert_eq!(node.properties[1].0, "age");
-                } else {
-                    panic!("Expected Node pattern");
-                }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Match(MatchClause { patterns, .. }) = &clauses[0]
+        {
+            if let Pattern::Node(node) = &patterns[0] {
+                assert_eq!(node.properties.len(), 2);
+                assert_eq!(node.properties[0].0, "name");
+                assert_eq!(node.properties[1].0, "age");
+            } else {
+                panic!("Expected Node pattern");
             }
         }
     }
@@ -1289,13 +1289,13 @@ mod tests {
     #[test]
     fn test_parse_match_with_variable() {
         let stmt = parse_ok("MATCH (person:Person) RETURN person");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] {
-                if let Pattern::Node(node) = &patterns[0] {
-                    assert_eq!(node.variable, Some("person".to_string()));
-                } else {
-                    panic!("Expected Node pattern");
-                }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Match(MatchClause { patterns, .. }) = &clauses[0]
+        {
+            if let Pattern::Node(node) = &patterns[0] {
+                assert_eq!(node.variable, Some("person".to_string()));
+            } else {
+                panic!("Expected Node pattern");
             }
         }
     }
@@ -1305,15 +1305,15 @@ mod tests {
     #[test]
     fn test_parse_outgoing_edge() {
         let stmt = parse_ok("MATCH (a)-[:KNOWS]->(b) RETURN a, b");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] {
-                if let Pattern::Path(path) = &patterns[0] {
-                    assert_eq!(path.chain.len(), 1);
-                    assert_eq!(path.chain[0].direction, Direction::Outgoing);
-                    assert_eq!(path.chain[0].types, vec!["KNOWS"]);
-                } else {
-                    panic!("Expected Path pattern");
-                }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Match(MatchClause { patterns, .. }) = &clauses[0]
+        {
+            if let Pattern::Path(path) = &patterns[0] {
+                assert_eq!(path.chain.len(), 1);
+                assert_eq!(path.chain[0].direction, Direction::Outgoing);
+                assert_eq!(path.chain[0].types, vec!["KNOWS"]);
+            } else {
+                panic!("Expected Path pattern");
             }
         }
     }
@@ -1321,13 +1321,13 @@ mod tests {
     #[test]
     fn test_parse_incoming_edge() {
         let stmt = parse_ok("MATCH (a)<-[:KNOWS]-(b) RETURN a, b");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] {
-                if let Pattern::Path(path) = &patterns[0] {
-                    assert_eq!(path.chain[0].direction, Direction::Incoming);
-                } else {
-                    panic!("Expected Path pattern");
-                }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Match(MatchClause { patterns, .. }) = &clauses[0]
+        {
+            if let Pattern::Path(path) = &patterns[0] {
+                assert_eq!(path.chain[0].direction, Direction::Incoming);
+            } else {
+                panic!("Expected Path pattern");
             }
         }
     }
@@ -1335,13 +1335,13 @@ mod tests {
     #[test]
     fn test_parse_undirected_edge() {
         let stmt = parse_ok("MATCH (a)-[:KNOWS]-(b) RETURN a, b");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] {
-                if let Pattern::Path(path) = &patterns[0] {
-                    assert_eq!(path.chain[0].direction, Direction::Undirected);
-                } else {
-                    panic!("Expected Path pattern");
-                }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Match(MatchClause { patterns, .. }) = &clauses[0]
+        {
+            if let Pattern::Path(path) = &patterns[0] {
+                assert_eq!(path.chain[0].direction, Direction::Undirected);
+            } else {
+                panic!("Expected Path pattern");
             }
         }
     }
@@ -1349,15 +1349,15 @@ mod tests {
     #[test]
     fn test_parse_variable_length_edge() {
         let stmt = parse_ok("MATCH (a)-[:KNOWS*1..3]->(b) RETURN a, b");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] {
-                if let Pattern::Path(path) = &patterns[0] {
-                    let length = path.chain[0].length.as_ref().unwrap();
-                    assert_eq!(length.min, Some(1));
-                    assert_eq!(length.max, Some(3));
-                } else {
-                    panic!("Expected Path pattern");
-                }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Match(MatchClause { patterns, .. }) = &clauses[0]
+        {
+            if let Pattern::Path(path) = &patterns[0] {
+                let length = path.chain[0].length.as_ref().unwrap();
+                assert_eq!(length.min, Some(1));
+                assert_eq!(length.max, Some(3));
+            } else {
+                panic!("Expected Path pattern");
             }
         }
     }
@@ -1365,15 +1365,15 @@ mod tests {
     #[test]
     fn test_parse_variable_length_unbounded() {
         let stmt = parse_ok("MATCH (a)-[:KNOWS*]->(b) RETURN a, b");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] {
-                if let Pattern::Path(path) = &patterns[0] {
-                    let length = path.chain[0].length.as_ref().unwrap();
-                    assert_eq!(length.min, None);
-                    assert_eq!(length.max, None);
-                } else {
-                    panic!("Expected Path pattern");
-                }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Match(MatchClause { patterns, .. }) = &clauses[0]
+        {
+            if let Pattern::Path(path) = &patterns[0] {
+                let length = path.chain[0].length.as_ref().unwrap();
+                assert_eq!(length.min, None);
+                assert_eq!(length.max, None);
+            } else {
+                panic!("Expected Path pattern");
             }
         }
     }
@@ -1381,13 +1381,13 @@ mod tests {
     #[test]
     fn test_parse_multiple_edge_types() {
         let stmt = parse_ok("MATCH (a)-[:KNOWS|LIKES|FOLLOWS]->(b) RETURN a, b");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] {
-                if let Pattern::Path(path) = &patterns[0] {
-                    assert_eq!(path.chain[0].types.len(), 3);
-                } else {
-                    panic!("Expected Path pattern");
-                }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Match(MatchClause { patterns, .. }) = &clauses[0]
+        {
+            if let Pattern::Path(path) = &patterns[0] {
+                assert_eq!(path.chain[0].types.len(), 3);
+            } else {
+                panic!("Expected Path pattern");
             }
         }
     }
@@ -1395,13 +1395,13 @@ mod tests {
     #[test]
     fn test_parse_chain_pattern() {
         let stmt = parse_ok("MATCH (a)-[:KNOWS]->(b)-[:WORKS_AT]->(c) RETURN a, c");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] {
-                if let Pattern::Path(path) = &patterns[0] {
-                    assert_eq!(path.chain.len(), 2);
-                } else {
-                    panic!("Expected Path pattern");
-                }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Match(MatchClause { patterns, .. }) = &clauses[0]
+        {
+            if let Pattern::Path(path) = &patterns[0] {
+                assert_eq!(path.chain.len(), 2);
+            } else {
+                panic!("Expected Path pattern");
             }
         }
     }
@@ -1419,144 +1419,144 @@ mod tests {
     #[test]
     fn test_parse_where_and() {
         let stmt = parse_ok("MATCH (n) WHERE n.age > 30 AND n.name = 'Alice' RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Where(WhereClause { predicate, .. }) = &clauses[1] {
-                assert!(matches!(
-                    predicate,
-                    Expression::Binary {
-                        op: BinaryOp::And,
-                        ..
-                    }
-                ));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Where(WhereClause { predicate, .. }) = &clauses[1]
+        {
+            assert!(matches!(
+                predicate,
+                Expression::Binary {
+                    op: BinaryOp::And,
+                    ..
+                }
+            ));
         }
     }
 
     #[test]
     fn test_parse_where_or() {
         let stmt = parse_ok("MATCH (n) WHERE n.age < 20 OR n.age > 60 RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Where(WhereClause { predicate, .. }) = &clauses[1] {
-                assert!(matches!(
-                    predicate,
-                    Expression::Binary {
-                        op: BinaryOp::Or,
-                        ..
-                    }
-                ));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Where(WhereClause { predicate, .. }) = &clauses[1]
+        {
+            assert!(matches!(
+                predicate,
+                Expression::Binary {
+                    op: BinaryOp::Or,
+                    ..
+                }
+            ));
         }
     }
 
     #[test]
     fn test_parse_where_not() {
         let stmt = parse_ok("MATCH (n) WHERE NOT n.active RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Where(WhereClause { predicate, .. }) = &clauses[1] {
-                assert!(matches!(
-                    predicate,
-                    Expression::Unary {
-                        op: UnaryOp::Not,
-                        ..
-                    }
-                ));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Where(WhereClause { predicate, .. }) = &clauses[1]
+        {
+            assert!(matches!(
+                predicate,
+                Expression::Unary {
+                    op: UnaryOp::Not,
+                    ..
+                }
+            ));
         }
     }
 
     #[test]
     fn test_parse_where_is_null() {
         let stmt = parse_ok("MATCH (n) WHERE n.email IS NULL RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Where(WhereClause { predicate, .. }) = &clauses[1] {
-                assert!(matches!(
-                    predicate,
-                    Expression::Unary {
-                        op: UnaryOp::IsNull,
-                        ..
-                    }
-                ));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Where(WhereClause { predicate, .. }) = &clauses[1]
+        {
+            assert!(matches!(
+                predicate,
+                Expression::Unary {
+                    op: UnaryOp::IsNull,
+                    ..
+                }
+            ));
         }
     }
 
     #[test]
     fn test_parse_where_is_not_null() {
         let stmt = parse_ok("MATCH (n) WHERE n.email IS NOT NULL RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Where(WhereClause { predicate, .. }) = &clauses[1] {
-                assert!(matches!(
-                    predicate,
-                    Expression::Unary {
-                        op: UnaryOp::IsNotNull,
-                        ..
-                    }
-                ));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Where(WhereClause { predicate, .. }) = &clauses[1]
+        {
+            assert!(matches!(
+                predicate,
+                Expression::Unary {
+                    op: UnaryOp::IsNotNull,
+                    ..
+                }
+            ));
         }
     }
 
     #[test]
     fn test_parse_where_in() {
         let stmt = parse_ok("MATCH (n) WHERE n.status IN ['active', 'pending'] RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Where(WhereClause { predicate, .. }) = &clauses[1] {
-                assert!(matches!(
-                    predicate,
-                    Expression::Binary {
-                        op: BinaryOp::In,
-                        ..
-                    }
-                ));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Where(WhereClause { predicate, .. }) = &clauses[1]
+        {
+            assert!(matches!(
+                predicate,
+                Expression::Binary {
+                    op: BinaryOp::In,
+                    ..
+                }
+            ));
         }
     }
 
     #[test]
     fn test_parse_where_starts_with() {
         let stmt = parse_ok("MATCH (n) WHERE n.name STARTS WITH 'A' RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Where(WhereClause { predicate, .. }) = &clauses[1] {
-                assert!(matches!(
-                    predicate,
-                    Expression::Binary {
-                        op: BinaryOp::StartsWith,
-                        ..
-                    }
-                ));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Where(WhereClause { predicate, .. }) = &clauses[1]
+        {
+            assert!(matches!(
+                predicate,
+                Expression::Binary {
+                    op: BinaryOp::StartsWith,
+                    ..
+                }
+            ));
         }
     }
 
     #[test]
     fn test_parse_where_ends_with() {
         let stmt = parse_ok("MATCH (n) WHERE n.email ENDS WITH '.com' RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Where(WhereClause { predicate, .. }) = &clauses[1] {
-                assert!(matches!(
-                    predicate,
-                    Expression::Binary {
-                        op: BinaryOp::EndsWith,
-                        ..
-                    }
-                ));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Where(WhereClause { predicate, .. }) = &clauses[1]
+        {
+            assert!(matches!(
+                predicate,
+                Expression::Binary {
+                    op: BinaryOp::EndsWith,
+                    ..
+                }
+            ));
         }
     }
 
     #[test]
     fn test_parse_where_contains() {
         let stmt = parse_ok("MATCH (n) WHERE n.bio CONTAINS 'engineer' RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Where(WhereClause { predicate, .. }) = &clauses[1] {
-                assert!(matches!(
-                    predicate,
-                    Expression::Binary {
-                        op: BinaryOp::Contains,
-                        ..
-                    }
-                ));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Where(WhereClause { predicate, .. }) = &clauses[1]
+        {
+            assert!(matches!(
+                predicate,
+                Expression::Binary {
+                    op: BinaryOp::Contains,
+                    ..
+                }
+            ));
         }
     }
 
@@ -1565,34 +1565,33 @@ mod tests {
     #[test]
     fn test_parse_return_all() {
         let stmt = parse_ok("MATCH (n) RETURN *");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause { items, .. }) = &clauses[1] {
-                assert!(matches!(items, ReturnItems::All));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause { items, .. }) = &clauses[1]
+        {
+            assert!(matches!(items, ReturnItems::All));
         }
     }
 
     #[test]
     fn test_parse_return_distinct() {
         let stmt = parse_ok("MATCH (n) RETURN DISTINCT n.name");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause { distinct, .. }) = &clauses[1] {
-                assert!(*distinct);
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause { distinct, .. }) = &clauses[1]
+        {
+            assert!(*distinct);
         }
     }
 
     #[test]
     fn test_parse_return_with_alias() {
         let stmt = parse_ok("MATCH (n) RETURN n.name AS name");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[1]
-            {
-                assert_eq!(items[0].alias, Some("name".to_string()));
-            }
+        {
+            assert_eq!(items[0].alias, Some("name".to_string()));
         }
     }
 
@@ -1628,20 +1627,20 @@ mod tests {
     fn test_parse_merge_on_create() {
         let stmt =
             parse_ok("MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = timestamp()");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Merge(MergeClause { on_create, .. }) = &clauses[0] {
-                assert!(on_create.is_some());
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Merge(MergeClause { on_create, .. }) = &clauses[0]
+        {
+            assert!(on_create.is_some());
         }
     }
 
     #[test]
     fn test_parse_merge_on_match() {
         let stmt = parse_ok("MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.seen = true");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Merge(MergeClause { on_match, .. }) = &clauses[0] {
-                assert!(on_match.is_some());
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Merge(MergeClause { on_match, .. }) = &clauses[0]
+        {
+            assert!(on_match.is_some());
         }
     }
 
@@ -1650,20 +1649,20 @@ mod tests {
     #[test]
     fn test_parse_delete() {
         let stmt = parse_ok("MATCH (n) DELETE n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Delete(DeleteClause { detach, .. }) = &clauses[1] {
-                assert!(!*detach);
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Delete(DeleteClause { detach, .. }) = &clauses[1]
+        {
+            assert!(!*detach);
         }
     }
 
     #[test]
     fn test_parse_detach_delete() {
         let stmt = parse_ok("MATCH (n) DETACH DELETE n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Delete(DeleteClause { detach, .. }) = &clauses[1] {
-                assert!(*detach);
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Delete(DeleteClause { detach, .. }) = &clauses[1]
+        {
+            assert!(*detach);
         }
     }
 
@@ -1672,42 +1671,41 @@ mod tests {
     #[test]
     fn test_parse_set_property() {
         let stmt = parse_ok("MATCH (n) SET n.name = 'Bob'");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Set(SetClause { items, .. }) = &clauses[1] {
-                assert!(matches!(&items[0], SetItem::Property { .. }));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Set(SetClause { items, .. }) = &clauses[1]
+        {
+            assert!(matches!(&items[0], SetItem::Property { .. }));
         }
     }
 
     #[test]
     fn test_parse_set_labels() {
         let stmt = parse_ok("MATCH (n) SET n:Admin:Manager");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Set(SetClause { items, .. }) = &clauses[1] {
-                if let SetItem::Labels { labels, .. } = &items[0] {
-                    assert_eq!(labels.len(), 2);
-                }
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Set(SetClause { items, .. }) = &clauses[1]
+            && let SetItem::Labels { labels, .. } = &items[0]
+        {
+            assert_eq!(labels.len(), 2);
         }
     }
 
     #[test]
     fn test_parse_set_all_properties() {
         let stmt = parse_ok("MATCH (n) SET n = {name: 'Alice', age: 30}");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Set(SetClause { items, .. }) = &clauses[1] {
-                assert!(matches!(&items[0], SetItem::AllProperties { .. }));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Set(SetClause { items, .. }) = &clauses[1]
+        {
+            assert!(matches!(&items[0], SetItem::AllProperties { .. }));
         }
     }
 
     #[test]
     fn test_parse_set_merge_properties() {
         let stmt = parse_ok("MATCH (n) SET n += {updated: true}");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Set(SetClause { items, .. }) = &clauses[1] {
-                assert!(matches!(&items[0], SetItem::MergeProperties { .. }));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Set(SetClause { items, .. }) = &clauses[1]
+        {
+            assert!(matches!(&items[0], SetItem::MergeProperties { .. }));
         }
     }
 
@@ -1716,22 +1714,21 @@ mod tests {
     #[test]
     fn test_parse_remove_property() {
         let stmt = parse_ok("MATCH (n) REMOVE n.temp");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Remove(RemoveClause { items, .. }) = &clauses[1] {
-                assert!(matches!(&items[0], RemoveItem::Property { .. }));
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Remove(RemoveClause { items, .. }) = &clauses[1]
+        {
+            assert!(matches!(&items[0], RemoveItem::Property { .. }));
         }
     }
 
     #[test]
     fn test_parse_remove_labels() {
         let stmt = parse_ok("MATCH (n) REMOVE n:Temp:Staging");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Remove(RemoveClause { items, .. }) = &clauses[1] {
-                if let RemoveItem::Labels { labels, .. } = &items[0] {
-                    assert_eq!(labels.len(), 2);
-                }
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Remove(RemoveClause { items, .. }) = &clauses[1]
+            && let RemoveItem::Labels { labels, .. } = &items[0]
+        {
+            assert_eq!(labels.len(), 2);
         }
     }
 
@@ -1748,20 +1745,20 @@ mod tests {
     #[test]
     fn test_parse_with_distinct() {
         let stmt = parse_ok("MATCH (n) WITH DISTINCT n.city AS city RETURN city");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::With(WithClause { distinct, .. }) = &clauses[1] {
-                assert!(*distinct);
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::With(WithClause { distinct, .. }) = &clauses[1]
+        {
+            assert!(*distinct);
         }
     }
 
     #[test]
     fn test_parse_with_where() {
         let stmt = parse_ok("MATCH (n) WITH n WHERE n.age > 30 RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::With(WithClause { where_clause, .. }) = &clauses[1] {
-                assert!(where_clause.is_some());
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::With(WithClause { where_clause, .. }) = &clauses[1]
+        {
+            assert!(where_clause.is_some());
         }
     }
 
@@ -1781,10 +1778,10 @@ mod tests {
     #[test]
     fn test_parse_unwind() {
         let stmt = parse_ok("UNWIND [1, 2, 3] AS x RETURN x");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Unwind(UnwindClause { variable, .. }) = &clauses[0] {
-                assert_eq!(variable, "x");
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Unwind(UnwindClause { variable, .. }) = &clauses[0]
+        {
+            assert_eq!(variable, "x");
         }
     }
 
@@ -1793,30 +1790,30 @@ mod tests {
     #[test]
     fn test_parse_order_by_asc() {
         let stmt = parse_ok("MATCH (n) RETURN n ORDER BY n.name ASC");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::OrderBy(OrderByClause { items, .. }) = &clauses[2] {
-                assert_eq!(items[0].direction, SortDirection::Asc);
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::OrderBy(OrderByClause { items, .. }) = &clauses[2]
+        {
+            assert_eq!(items[0].direction, SortDirection::Asc);
         }
     }
 
     #[test]
     fn test_parse_order_by_desc() {
         let stmt = parse_ok("MATCH (n) RETURN n ORDER BY n.age DESC");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::OrderBy(OrderByClause { items, .. }) = &clauses[2] {
-                assert_eq!(items[0].direction, SortDirection::Desc);
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::OrderBy(OrderByClause { items, .. }) = &clauses[2]
+        {
+            assert_eq!(items[0].direction, SortDirection::Desc);
         }
     }
 
     #[test]
     fn test_parse_order_by_multiple() {
         let stmt = parse_ok("MATCH (n) RETURN n ORDER BY n.name, n.age DESC");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::OrderBy(OrderByClause { items, .. }) = &clauses[2] {
-                assert_eq!(items.len(), 2);
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::OrderBy(OrderByClause { items, .. }) = &clauses[2]
+        {
+            assert_eq!(items.len(), 2);
         }
     }
 
@@ -1852,165 +1849,148 @@ mod tests {
     #[test]
     fn test_parse_literal_integer() {
         let stmt = parse_ok("RETURN 42");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[0]
-            {
-                assert!(matches!(
-                    &items[0].expression,
-                    Expression::Literal(Literal::Integer(42))
-                ));
-            }
+        {
+            assert!(matches!(
+                &items[0].expression,
+                Expression::Literal(Literal::Integer(42))
+            ));
         }
     }
 
     #[test]
     fn test_parse_literal_float() {
         let stmt = parse_ok("RETURN 3.14");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[0]
-            {
-                if let Expression::Literal(Literal::Float(val)) = &items[0].expression {
-                    assert!((val - 3.14).abs() < 0.001);
-                }
-            }
+            && let Expression::Literal(Literal::Float(val)) = &items[0].expression
+        {
+            assert!((val - 3.14).abs() < 0.001);
         }
     }
 
     #[test]
     fn test_parse_literal_string() {
         let stmt = parse_ok("RETURN 'hello'");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[0]
-            {
-                if let Expression::Literal(Literal::String(s)) = &items[0].expression {
-                    assert_eq!(s, "hello");
-                }
-            }
+            && let Expression::Literal(Literal::String(s)) = &items[0].expression
+        {
+            assert_eq!(s, "hello");
         }
     }
 
     #[test]
     fn test_parse_literal_bool() {
         let stmt = parse_ok("RETURN true, false");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[0]
-            {
-                assert!(matches!(
-                    &items[0].expression,
-                    Expression::Literal(Literal::Bool(true))
-                ));
-                assert!(matches!(
-                    &items[1].expression,
-                    Expression::Literal(Literal::Bool(false))
-                ));
-            }
+        {
+            assert!(matches!(
+                &items[0].expression,
+                Expression::Literal(Literal::Bool(true))
+            ));
+            assert!(matches!(
+                &items[1].expression,
+                Expression::Literal(Literal::Bool(false))
+            ));
         }
     }
 
     #[test]
     fn test_parse_literal_null() {
         let stmt = parse_ok("RETURN null");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[0]
-            {
-                assert!(matches!(
-                    &items[0].expression,
-                    Expression::Literal(Literal::Null)
-                ));
-            }
+        {
+            assert!(matches!(
+                &items[0].expression,
+                Expression::Literal(Literal::Null)
+            ));
         }
     }
 
     #[test]
     fn test_parse_list_literal() {
         let stmt = parse_ok("RETURN [1, 2, 3]");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[0]
-            {
-                if let Expression::List(list) = &items[0].expression {
-                    assert_eq!(list.len(), 3);
-                }
-            }
+            && let Expression::List(list) = &items[0].expression
+        {
+            assert_eq!(list.len(), 3);
         }
     }
 
     #[test]
     fn test_parse_map_literal() {
         let stmt = parse_ok("RETURN {name: 'Alice', age: 30}");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[0]
-            {
-                if let Expression::Map(map) = &items[0].expression {
-                    assert_eq!(map.len(), 2);
-                }
-            }
+            && let Expression::Map(map) = &items[0].expression
+        {
+            assert_eq!(map.len(), 2);
         }
     }
 
     #[test]
     fn test_parse_parameter() {
         let stmt = parse_ok("MATCH (n) WHERE n.id = $id RETURN n");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Where(WhereClause { predicate, .. }) = &clauses[1] {
-                if let Expression::Binary { right, .. } = predicate {
-                    if let Expression::Parameter(name) = right.as_ref() {
-                        assert_eq!(name, "id");
-                    }
-                }
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Where(WhereClause { predicate, .. }) = &clauses[1]
+            && let Expression::Binary { right, .. } = predicate
+            && let Expression::Parameter(name) = right.as_ref()
+        {
+            assert_eq!(name, "id");
         }
     }
 
     #[test]
     fn test_parse_function_call() {
         let stmt = parse_ok("RETURN count(n)");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[0]
-            {
-                if let Expression::FunctionCall { name, .. } = &items[0].expression {
-                    assert_eq!(name, "count");
-                }
-            }
+            && let Expression::FunctionCall { name, .. } = &items[0].expression
+        {
+            assert_eq!(name, "count");
         }
     }
 
     #[test]
     fn test_parse_function_call_distinct() {
         let stmt = parse_ok("RETURN count(DISTINCT n)");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[0]
-            {
-                if let Expression::FunctionCall { distinct, .. } = &items[0].expression {
-                    assert!(*distinct);
-                }
-            }
+            && let Expression::FunctionCall { distinct, .. } = &items[0].expression
+        {
+            assert!(*distinct);
         }
     }
 
@@ -2023,34 +2003,32 @@ mod tests {
     #[test]
     fn test_parse_property_access() {
         let stmt = parse_ok("MATCH (n) RETURN n.name");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[1]
-            {
-                assert!(matches!(
-                    &items[0].expression,
-                    Expression::PropertyAccess { .. }
-                ));
-            }
+        {
+            assert!(matches!(
+                &items[0].expression,
+                Expression::PropertyAccess { .. }
+            ));
         }
     }
 
     #[test]
     fn test_parse_index_access() {
         let stmt = parse_ok("RETURN list[0]");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[0]
-            {
-                assert!(matches!(
-                    &items[0].expression,
-                    Expression::IndexAccess { .. }
-                ));
-            }
+        {
+            assert!(matches!(
+                &items[0].expression,
+                Expression::IndexAccess { .. }
+            ));
         }
     }
 
@@ -2059,23 +2037,20 @@ mod tests {
     #[test]
     fn test_parse_case_simple() {
         let stmt = parse_ok("RETURN CASE n.status WHEN 'active' THEN 1 ELSE 0 END");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[0]
-            {
-                if let Expression::Case {
-                    input,
-                    whens,
-                    else_clause,
-                } = &items[0].expression
-                {
-                    assert!(input.is_some());
-                    assert_eq!(whens.len(), 1);
-                    assert!(else_clause.is_some());
-                }
-            }
+            && let Expression::Case {
+                input,
+                whens,
+                else_clause,
+            } = &items[0].expression
+        {
+            assert!(input.is_some());
+            assert_eq!(whens.len(), 1);
+            assert!(else_clause.is_some());
         }
     }
 
@@ -2084,17 +2059,15 @@ mod tests {
         let stmt = parse_ok(
             "RETURN CASE WHEN n.age < 18 THEN 'minor' WHEN n.age < 65 THEN 'adult' ELSE 'senior' END",
         );
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Return(ReturnClause {
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Return(ReturnClause {
                 items: ReturnItems::Explicit(items),
                 ..
             }) = &clauses[0]
-            {
-                if let Expression::Case { input, whens, .. } = &items[0].expression {
-                    assert!(input.is_none());
-                    assert_eq!(whens.len(), 2);
-                }
-            }
+            && let Expression::Case { input, whens, .. } = &items[0].expression
+        {
+            assert!(input.is_none());
+            assert_eq!(whens.len(), 2);
         }
     }
 
@@ -2103,24 +2076,22 @@ mod tests {
     #[test]
     fn test_parse_named_path() {
         let stmt = parse_ok("MATCH p = (a)-[:KNOWS]->(b) RETURN p");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] {
-                if let Pattern::NamedPath { name, .. } = &patterns[0] {
-                    assert_eq!(name, "p");
-                }
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Match(MatchClause { patterns, .. }) = &clauses[0]
+            && let Pattern::NamedPath { name, .. } = &patterns[0]
+        {
+            assert_eq!(name, "p");
         }
     }
 
     #[test]
     fn test_parse_shortest_path() {
         let stmt = parse_ok("MATCH p = shortestPath((a)-[:KNOWS*]->(b)) RETURN p");
-        if let Statement::Query(Query { clauses, .. }) = stmt {
-            if let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] {
-                if let Pattern::NamedPath { path_function, .. } = &patterns[0] {
-                    assert_eq!(*path_function, Some(PathFunction::ShortestPath));
-                }
-            }
+        if let Statement::Query(Query { clauses, .. }) = stmt
+            && let Clause::Match(MatchClause { patterns, .. }) = &clauses[0]
+            && let Pattern::NamedPath { path_function, .. } = &patterns[0]
+        {
+            assert_eq!(*path_function, Some(PathFunction::ShortestPath));
         }
     }
 

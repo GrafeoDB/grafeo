@@ -198,10 +198,10 @@ impl AdjacencyList {
 
     fn add_edge(&mut self, dst: NodeId, edge_id: EdgeId) {
         // Try to add to the last hot chunk
-        if let Some(last) = self.hot_chunks.last_mut() {
-            if last.push(dst, edge_id) {
-                return;
-            }
+        if let Some(last) = self.hot_chunks.last_mut()
+            && last.push(dst, edge_id)
+        {
+            return;
         }
 
         // Add to delta buffer

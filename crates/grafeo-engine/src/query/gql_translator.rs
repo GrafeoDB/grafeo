@@ -243,23 +243,23 @@ impl GqlTranslator {
         }
 
         // Apply SKIP
-        if let Some(skip_expr) = &query.return_clause.skip {
-            if let ast::Expression::Literal(ast::Literal::Integer(n)) = skip_expr {
-                plan = LogicalOperator::Skip(SkipOp {
-                    count: *n as usize,
-                    input: Box::new(plan),
-                });
-            }
+        if let Some(skip_expr) = &query.return_clause.skip
+            && let ast::Expression::Literal(ast::Literal::Integer(n)) = skip_expr
+        {
+            plan = LogicalOperator::Skip(SkipOp {
+                count: *n as usize,
+                input: Box::new(plan),
+            });
         }
 
         // Apply LIMIT
-        if let Some(limit_expr) = &query.return_clause.limit {
-            if let ast::Expression::Literal(ast::Literal::Integer(n)) = limit_expr {
-                plan = LogicalOperator::Limit(LimitOp {
-                    count: *n as usize,
-                    input: Box::new(plan),
-                });
-            }
+        if let Some(limit_expr) = &query.return_clause.limit
+            && let ast::Expression::Literal(ast::Literal::Integer(n)) = limit_expr
+        {
+            plan = LogicalOperator::Limit(LimitOp {
+                count: *n as usize,
+                input: Box::new(plan),
+            });
         }
 
         // Check if RETURN contains aggregate functions
@@ -773,14 +773,14 @@ impl GqlTranslator {
             });
 
             // Add filter for edge properties
-            if !edge.properties.is_empty() {
-                if let Some(ref ev) = edge_var_for_filter {
-                    let predicate = self.build_property_predicate(ev, &edge.properties)?;
-                    plan = LogicalOperator::Filter(FilterOp {
-                        predicate,
-                        input: Box::new(plan),
-                    });
-                }
+            if !edge.properties.is_empty()
+                && let Some(ref ev) = edge_var_for_filter
+            {
+                let predicate = self.build_property_predicate(ev, &edge.properties)?;
+                plan = LogicalOperator::Filter(FilterOp {
+                    predicate,
+                    input: Box::new(plan),
+                });
             }
 
             // Add filter for target node properties
@@ -991,15 +991,16 @@ impl GqlTranslator {
                 // Special handling for length() on path variables
                 // When length(p) is called where p is a path alias, we convert it
                 // to a variable reference to the path length column
-                if name.to_lowercase() == "length" && args.len() == 1 {
-                    if let ast::Expression::Variable(var_name) = &args[0] {
-                        // Check if this looks like a path variable
-                        // Path lengths are stored in columns named _path_length_{alias}
-                        return Ok(LogicalExpression::Variable(format!(
-                            "_path_length_{}",
-                            var_name
-                        )));
-                    }
+                if name.to_lowercase() == "length"
+                    && args.len() == 1
+                    && let ast::Expression::Variable(var_name) = &args[0]
+                {
+                    // Check if this looks like a path variable
+                    // Path lengths are stored in columns named _path_length_{alias}
+                    return Ok(LogicalExpression::Variable(format!(
+                        "_path_length_{}",
+                        var_name
+                    )));
                 }
 
                 let args = args

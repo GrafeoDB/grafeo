@@ -96,9 +96,8 @@ impl DistinctOperator {
 impl Operator for DistinctOperator {
     fn next(&mut self) -> OperatorResult {
         loop {
-            let chunk = match self.child.next()? {
-                Some(c) => c,
-                None => return Ok(None),
+            let Some(chunk) = self.child.next()? else {
+                return Ok(None);
             };
 
             let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);

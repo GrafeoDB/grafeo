@@ -2078,10 +2078,10 @@ mod tests {
                 result.err()
             );
 
-            if let Statement::Query(q) = result.unwrap() {
-                if let Pattern::Node(node) = &q.match_clauses[0].patterns[0].pattern {
-                    assert_eq!(node.variable, Some(expected_var.to_string()));
-                }
+            if let Statement::Query(q) = result.unwrap()
+                && let Pattern::Node(node) = &q.match_clauses[0].patterns[0].pattern
+            {
+                assert_eq!(node.variable, Some(expected_var.to_string()));
             }
         }
     }

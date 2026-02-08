@@ -1917,19 +1917,19 @@ impl<'a> Parser<'a> {
                         'u' => {
                             // Unicode escape \uXXXX
                             let hex: String = chars.by_ref().take(4).collect();
-                            if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                                if let Some(ch) = char::from_u32(code) {
-                                    result.push(ch);
-                                }
+                            if let Ok(code) = u32::from_str_radix(&hex, 16)
+                                && let Some(ch) = char::from_u32(code)
+                            {
+                                result.push(ch);
                             }
                         }
                         'U' => {
                             // Unicode escape \UXXXXXXXX
                             let hex: String = chars.by_ref().take(8).collect();
-                            if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                                if let Some(ch) = char::from_u32(code) {
-                                    result.push(ch);
-                                }
+                            if let Ok(code) = u32::from_str_radix(&hex, 16)
+                                && let Some(ch) = char::from_u32(code)
+                            {
+                                result.push(ch);
                             }
                         }
                         _ => {

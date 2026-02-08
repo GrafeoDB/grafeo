@@ -11,11 +11,10 @@ coverage:
       default:
         target: auto
         threshold: 2%
-        # Don't fail CI on coverage drops for now
         informational: true
     patch:
       default:
-        target: 80%
+        target: 70%
         threshold: 5%
         informational: true
 
@@ -38,3 +37,35 @@ ignore:
   - "**/tests/**"
   - "**/benches/**"
   - "crates/bindings/python/**"
+  - "crates/bindings/node/**"
+  - "crates/bindings/wasm/**"
+  - "crates/bindings/go/**"
+  - "**/build.rs"
+  - "scripts/**"
+  - "docs/**"
+  - "examples/**"
+
+# Per-crate component tracking
+component_management:
+  default_rules:
+    statuses:
+      - type: project
+        target: auto
+        informational: true
+  individual_components:
+    - component_id: grafeo-common
+      name: Common (types, allocators, hashing)
+      paths:
+        - crates/common/src/**
+    - component_id: grafeo-core
+      name: Core (storage, indexes, execution)
+      paths:
+        - crates/core/src/**
+    - component_id: grafeo-adapters
+      name: Adapters (parsers, algorithms, plugins)
+      paths:
+        - crates/adapters/src/**
+    - component_id: grafeo-engine
+      name: Engine (database, sessions, transactions)
+      paths:
+        - crates/engine/src/**

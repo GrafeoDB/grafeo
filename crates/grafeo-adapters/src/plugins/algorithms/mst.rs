@@ -22,16 +22,15 @@ use super::traits::{GraphAlgorithm, MinScored};
 
 /// Extracts edge weight from a property value.
 fn extract_weight(store: &LpgStore, edge_id: EdgeId, weight_prop: Option<&str>) -> f64 {
-    if let Some(prop_name) = weight_prop {
-        if let Some(edge) = store.get_edge(edge_id) {
-            if let Some(value) = edge.get_property(prop_name) {
-                return match value {
-                    Value::Int64(i) => *i as f64,
-                    Value::Float64(f) => *f,
-                    _ => 1.0,
-                };
-            }
-        }
+    if let Some(prop_name) = weight_prop
+        && let Some(edge) = store.get_edge(edge_id)
+        && let Some(value) = edge.get_property(prop_name)
+    {
+        return match value {
+            Value::Int64(i) => *i as f64,
+            Value::Float64(f) => *f,
+            _ => 1.0,
+        };
     }
     1.0
 }

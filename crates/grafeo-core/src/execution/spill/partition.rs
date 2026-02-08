@@ -228,9 +228,8 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
     /// Returns an error if writing to disk fails.
     pub fn spill_partition(&mut self, partition_idx: usize) -> std::io::Result<usize> {
         // Get partition data
-        let partition = match self.partitions[partition_idx].take() {
-            Some(p) => p,
-            None => return Ok(0), // Already spilled
+        let Some(partition) = self.partitions[partition_idx].take() else {
+            return Ok(0); // Already spilled
         };
 
         if partition.is_empty() {
@@ -410,7 +409,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         }
 
         // Clean up any remaining spill files
-        for spill_file in self.spill_files.iter_mut() {
+        for spill_file in &mut self.spill_files {
             if let Some(file) = spill_file.take() {
                 let bytes = file.bytes_written();
                 let _ = file.delete();

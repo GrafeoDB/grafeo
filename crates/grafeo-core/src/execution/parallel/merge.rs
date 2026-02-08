@@ -94,17 +94,17 @@ impl MergeableAccumulator {
         self.sum_squared += other.sum_squared;
 
         // Merge min
-        if let Some(ref other_min) = other.min {
-            if compare_for_min(&self.min, other_min) {
-                self.min = Some(other_min.clone());
-            }
+        if let Some(ref other_min) = other.min
+            && compare_for_min(&self.min, other_min)
+        {
+            self.min = Some(other_min.clone());
         }
 
         // Merge max
-        if let Some(ref other_max) = other.max {
-            if compare_for_max(&self.max, other_max) {
-                self.max = Some(other_max.clone());
-            }
+        if let Some(ref other_max) = other.max
+            && compare_for_max(&self.max, other_max)
+        {
+            self.max = Some(other_max.clone());
         }
 
         // Keep our first (we processed earlier)

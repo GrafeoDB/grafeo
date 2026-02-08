@@ -478,18 +478,18 @@ impl FactorizedChunk {
 
             for phys_idx in start..end {
                 // Check if this value passes the filter
-                if let Some(value) = filter_col.get_physical(phys_idx) {
-                    if predicate(&value) {
-                        // Copy all columns for this row
-                        for col_idx in 0..deepest.column_count() {
-                            if let Some(col) = deepest.column(col_idx) {
-                                if let Some(v) = col.get_physical(phys_idx) {
-                                    new_columns[col_idx].push_value(v);
-                                }
-                            }
+                if let Some(value) = filter_col.get_physical(phys_idx)
+                    && predicate(&value)
+                {
+                    // Copy all columns for this row
+                    for col_idx in 0..deepest.column_count() {
+                        if let Some(col) = deepest.column(col_idx)
+                            && let Some(v) = col.get_physical(phys_idx)
+                        {
+                            new_columns[col_idx].push_value(v);
                         }
-                        new_multiplicities[parent_idx] += 1;
                     }
+                    new_multiplicities[parent_idx] += 1;
                 }
             }
 
@@ -570,10 +570,10 @@ impl FactorizedChunk {
                 // Collect values from all columns
                 row_values.clear();
                 for col_idx in 0..col_count {
-                    if let Some(col) = deepest.column(col_idx) {
-                        if let Some(v) = col.get_physical(phys_idx) {
-                            row_values.push(v);
-                        }
+                    if let Some(col) = deepest.column(col_idx)
+                        && let Some(v) = col.get_physical(phys_idx)
+                    {
+                        row_values.push(v);
                     }
                 }
 
@@ -1656,10 +1656,10 @@ mod tests {
 
         // Filter based on both columns
         let filtered = chunk.filter_deepest_multi(|values| {
-            if values.len() == 2 {
-                if let (Value::Int64(a), Value::Int64(b)) = (&values[0], &values[1]) {
-                    return *a + *b > 15;
-                }
+            if values.len() == 2
+                && let (Value::Int64(a), Value::Int64(b)) = (&values[0], &values[1])
+            {
+                return *a + *b > 15;
             }
             false
         });

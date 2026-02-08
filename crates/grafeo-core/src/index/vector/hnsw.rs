@@ -260,14 +260,14 @@ impl HnswIndex {
             let mut needs_pruning: Vec<NodeId> = Vec::new();
 
             for &neighbor_id in &selected {
-                if let Some(neighbor) = nodes.get_mut(&neighbor_id) {
-                    if neighbor.neighbors.len() > lc {
-                        neighbor.neighbors[lc].push(id);
+                if let Some(neighbor) = nodes.get_mut(&neighbor_id)
+                    && neighbor.neighbors.len() > lc
+                {
+                    neighbor.neighbors[lc].push(id);
 
-                        // Mark for pruning if too many neighbors
-                        if neighbor.neighbors[lc].len() > m_max {
-                            needs_pruning.push(neighbor_id);
-                        }
+                    // Mark for pruning if too many neighbors
+                    if neighbor.neighbors[lc].len() > m_max {
+                        needs_pruning.push(neighbor_id);
                     }
                 }
             }
@@ -275,28 +275,28 @@ impl HnswIndex {
             // Second pass: compute distances for pruning (immutable borrow)
             let mut prune_data: Vec<(NodeId, Vec<(NodeId, f32)>)> = Vec::new();
             for neighbor_id in &needs_pruning {
-                if let Some(neighbor) = nodes.get(neighbor_id) {
-                    if neighbor.neighbors.len() > lc {
-                        let base_vec = &neighbor.vector;
-                        let distances: Vec<(NodeId, f32)> = neighbor.neighbors[lc]
-                            .iter()
-                            .map(|&nid| (nid, self.node_distance(&nodes, base_vec, nid)))
-                            .collect();
-                        prune_data.push((*neighbor_id, distances));
-                    }
+                if let Some(neighbor) = nodes.get(neighbor_id)
+                    && neighbor.neighbors.len() > lc
+                {
+                    let base_vec = &neighbor.vector;
+                    let distances: Vec<(NodeId, f32)> = neighbor.neighbors[lc]
+                        .iter()
+                        .map(|&nid| (nid, self.node_distance(&nodes, base_vec, nid)))
+                        .collect();
+                    prune_data.push((*neighbor_id, distances));
                 }
             }
 
             // Third pass: apply pruning (mutable borrow)
             for (neighbor_id, distances) in prune_data {
-                if let Some(neighbor) = nodes.get_mut(&neighbor_id) {
-                    if neighbor.neighbors.len() > lc {
-                        Self::prune_neighbors_with_distances(
-                            &mut neighbor.neighbors[lc],
-                            &distances,
-                            m_max,
-                        );
-                    }
+                if let Some(neighbor) = nodes.get_mut(&neighbor_id)
+                    && neighbor.neighbors.len() > lc
+                {
+                    Self::prune_neighbors_with_distances(
+                        &mut neighbor.neighbors[lc],
+                        &distances,
+                        m_max,
+                    );
                 }
             }
 
@@ -446,15 +446,15 @@ impl HnswIndex {
         loop {
             let mut changed = false;
 
-            if let Some(node) = nodes.get(&current) {
-                if layer < node.neighbors.len() {
-                    for &neighbor in &node.neighbors[layer] {
-                        let dist = self.node_distance(nodes, query, neighbor);
-                        if dist < current_dist {
-                            current = neighbor;
-                            current_dist = dist;
-                            changed = true;
-                        }
+            if let Some(node) = nodes.get(&current)
+                && layer < node.neighbors.len()
+            {
+                for &neighbor in &node.neighbors[layer] {
+                    let dist = self.node_distance(nodes, query, neighbor);
+                    if dist < current_dist {
+                        current = neighbor;
+                        current_dist = dist;
+                        changed = true;
                     }
                 }
             }
@@ -498,41 +498,42 @@ impl HnswIndex {
 
         while let Some(current) = candidates.pop() {
             // If the closest candidate is further than the furthest result, stop
-            if let Some(furthest) = results.peek() {
-                if current.distance > furthest.distance && results.len() >= ef {
-                    break;
-                }
+            if let Some(furthest) = results.peek()
+                && current.distance > furthest.distance
+                && results.len() >= ef
+            {
+                break;
             }
 
             // Explore neighbors
-            if let Some(node) = nodes.get(&current.id) {
-                if layer < node.neighbors.len() {
-                    for &neighbor in &node.neighbors[layer] {
-                        if visited.contains(&neighbor) {
-                            continue;
-                        }
-                        visited.insert(neighbor);
+            if let Some(node) = nodes.get(&current.id)
+                && layer < node.neighbors.len()
+            {
+                for &neighbor in &node.neighbors[layer] {
+                    if visited.contains(&neighbor) {
+                        continue;
+                    }
+                    visited.insert(neighbor);
 
-                        let dist = self.node_distance(nodes, query, neighbor);
+                    let dist = self.node_distance(nodes, query, neighbor);
 
-                        // Add to results if closer than furthest, or if we have room
-                        let should_add = results.len() < ef
-                            || results.peek().map_or(true, |f| dist < f.distance);
+                    // Add to results if closer than furthest, or if we have room
+                    let should_add =
+                        results.len() < ef || results.peek().map_or(true, |f| dist < f.distance);
 
-                        if should_add {
-                            candidates.push(Neighbor {
-                                id: neighbor,
-                                distance: dist,
-                            });
-                            results.push(FurthestCandidate {
-                                id: neighbor,
-                                distance: dist,
-                            });
+                    if should_add {
+                        candidates.push(Neighbor {
+                            id: neighbor,
+                            distance: dist,
+                        });
+                        results.push(FurthestCandidate {
+                            id: neighbor,
+                            distance: dist,
+                        });
 
-                            // Keep only ef results
-                            while results.len() > ef {
-                                results.pop();
-                            }
+                        // Keep only ef results
+                        while results.len() > ef {
+                            results.pop();
                         }
                     }
                 }

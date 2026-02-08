@@ -335,10 +335,10 @@ impl PushOperator for AggregatePushOperator {
                 if let Some(ref mut accumulators) = self.global_state {
                     for (acc, expr) in accumulators.iter_mut().zip(&self.aggregates) {
                         if let Some(col) = expr.column {
-                            if let Some(c) = chunk.column(col) {
-                                if let Some(val) = c.get_value(row) {
-                                    acc.add(&val);
-                                }
+                            if let Some(c) = chunk.column(col)
+                                && let Some(val) = c.get_value(row)
+                            {
+                                acc.add(&val);
                             }
                         } else {
                             // COUNT(*)
@@ -370,10 +370,10 @@ impl PushOperator for AggregatePushOperator {
 
                 for (acc, expr) in state.accumulators.iter_mut().zip(&self.aggregates) {
                     if let Some(col) = expr.column {
-                        if let Some(c) = chunk.column(col) {
-                            if let Some(val) = c.get_value(row) {
-                                acc.add(&val);
-                            }
+                        if let Some(c) = chunk.column(col)
+                            && let Some(val) = c.get_value(row)
+                        {
+                            acc.add(&val);
                         }
                     } else {
                         // COUNT(*)
@@ -682,10 +682,10 @@ impl PushOperator for SpillableAggregatePushOperator {
                 if let Some(ref mut accumulators) = self.global_state {
                     for (acc, expr) in accumulators.iter_mut().zip(&self.aggregates) {
                         if let Some(col) = expr.column {
-                            if let Some(c) = chunk.column(col) {
-                                if let Some(val) = c.get_value(row) {
-                                    acc.add(&val);
-                                }
+                            if let Some(c) = chunk.column(col)
+                                && let Some(val) = c.get_value(row)
+                            {
+                                acc.add(&val);
                             }
                         } else {
                             acc.count += 1;
@@ -716,10 +716,10 @@ impl PushOperator for SpillableAggregatePushOperator {
 
                     for (acc, expr) in state.accumulators.iter_mut().zip(&self.aggregates) {
                         if let Some(col) = expr.column {
-                            if let Some(c) = chunk.column(col) {
-                                if let Some(val) = c.get_value(row) {
-                                    acc.add(&val);
-                                }
+                            if let Some(c) = chunk.column(col)
+                                && let Some(val) = c.get_value(row)
+                            {
+                                acc.add(&val);
                             }
                         } else {
                             acc.count += 1;
@@ -750,10 +750,10 @@ impl PushOperator for SpillableAggregatePushOperator {
 
                 for (acc, expr) in state.accumulators.iter_mut().zip(&self.aggregates) {
                     if let Some(col) = expr.column {
-                        if let Some(c) = chunk.column(col) {
-                            if let Some(val) = c.get_value(row) {
-                                acc.add(&val);
-                            }
+                        if let Some(c) = chunk.column(col)
+                            && let Some(val) = c.get_value(row)
+                        {
+                            acc.add(&val);
                         }
                     } else {
                         acc.count += 1;

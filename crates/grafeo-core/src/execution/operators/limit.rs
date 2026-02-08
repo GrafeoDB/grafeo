@@ -45,9 +45,8 @@ impl Operator for LimitOperator {
         let remaining = self.limit - self.returned;
 
         loop {
-            let chunk = match self.child.next()? {
-                Some(c) => c,
-                None => return Ok(None),
+            let Some(chunk) = self.child.next()? else {
+                return Ok(None);
             };
 
             let row_count = chunk.row_count();
@@ -130,9 +129,8 @@ impl Operator for SkipOperator {
     fn next(&mut self) -> OperatorResult {
         // Skip rows until we've skipped enough
         while self.skipped < self.skip {
-            let chunk = match self.child.next()? {
-                Some(c) => c,
-                None => return Ok(None),
+            let Some(chunk) = self.child.next()? else {
+                return Ok(None);
             };
 
             let row_count = chunk.row_count();
@@ -228,9 +226,8 @@ impl Operator for LimitSkipOperator {
         }
 
         loop {
-            let chunk = match self.child.next()? {
-                Some(c) => c,
-                None => return Ok(None),
+            let Some(chunk) = self.child.next()? else {
+                return Ok(None);
             };
 
             let row_count = chunk.row_count();

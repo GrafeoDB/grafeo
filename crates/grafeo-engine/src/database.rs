@@ -644,10 +644,8 @@ impl GrafeoDB {
     pub fn delete_node(&self, id: grafeo_common::types::NodeId) -> bool {
         let result = self.store.delete_node(id);
 
-        if result {
-            if let Err(e) = self.log_wal(&WalRecord::DeleteNode { id }) {
-                tracing::warn!("Failed to log DeleteNode to WAL: {}", e);
-            }
+        if result && let Err(e) = self.log_wal(&WalRecord::DeleteNode { id }) {
+            tracing::warn!("Failed to log DeleteNode to WAL: {}", e);
         }
 
         result
@@ -873,10 +871,8 @@ impl GrafeoDB {
     pub fn delete_edge(&self, id: grafeo_common::types::EdgeId) -> bool {
         let result = self.store.delete_edge(id);
 
-        if result {
-            if let Err(e) = self.log_wal(&WalRecord::DeleteEdge { id }) {
-                tracing::warn!("Failed to log DeleteEdge to WAL: {}", e);
-            }
+        if result && let Err(e) = self.log_wal(&WalRecord::DeleteEdge { id }) {
+            tracing::warn!("Failed to log DeleteEdge to WAL: {}", e);
         }
 
         result

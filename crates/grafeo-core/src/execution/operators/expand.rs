@@ -103,9 +103,8 @@ impl ExpandOperator {
 
     /// Loads edges for the current row.
     fn load_edges_for_current_row(&mut self) -> Result<bool, OperatorError> {
-        let chunk = match &self.current_input {
-            Some(c) => c,
-            None => return Ok(false),
+        let Some(chunk) = &self.current_input else {
+            return Ok(false);
         };
 
         if self.current_row >= chunk.row_count() {
@@ -233,11 +232,11 @@ impl Operator for ExpandOperator {
             // Copy all input columns to output
             let input = self.current_input.as_ref().unwrap();
             for col_idx in 0..input_col_count {
-                if let Some(input_col) = input.column(col_idx) {
-                    if let Some(output_col) = chunk.column_mut(col_idx) {
-                        // Use copy_row_to which preserves NodeId/EdgeId types
-                        input_col.copy_row_to(self.current_row, output_col);
-                    }
+                if let Some(input_col) = input.column(col_idx)
+                    && let Some(output_col) = chunk.column_mut(col_idx)
+                {
+                    // Use copy_row_to which preserves NodeId/EdgeId types
+                    input_col.copy_row_to(self.current_row, output_col);
                 }
             }
 
@@ -403,6 +402,140 @@ mod tests {
 
         let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Person"));
 
+        let mut expand =
+            ExpandOperator::new(Arc::clone(&store), scan, 0, Direction::Outgoing, None);
+
+        let result = expand.next().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_expand_reset() {
+        let store = Arc::new(LpgStore::new());
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        store.create_edge(a, b, "KNOWS");
+
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Person"));
+        let mut expand =
+            ExpandOperator::new(Arc::clone(&store), scan, 0, Direction::Outgoing, None);
+
+        // First pass
+        let mut count1 = 0;
+        while let Ok(Some(chunk)) = expand.next() {
+            count1 += chunk.row_count();
+        }
+
+        // Reset and run again
+        expand.reset();
+        let mut count2 = 0;
+        while let Ok(Some(chunk)) = expand.next() {
+            count2 += chunk.row_count();
+        }
+
+        assert_eq!(count1, count2);
+        assert_eq!(count1, 1);
+    }
+
+    #[test]
+    fn test_expand_name() {
+        let store = Arc::new(LpgStore::new());
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Person"));
+        let expand = ExpandOperator::new(Arc::clone(&store), scan, 0, Direction::Outgoing, None);
+        assert_eq!(expand.name(), "Expand");
+    }
+
+    #[test]
+    fn test_expand_with_chunk_capacity() {
+        let store = Arc::new(LpgStore::new());
+
+        let a = store.create_node(&["Person"]);
+        for _ in 0..5 {
+            let b = store.create_node(&["Person"]);
+            store.create_edge(a, b, "KNOWS");
+        }
+
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Person"));
+        let mut expand =
+            ExpandOperator::new(Arc::clone(&store), scan, 0, Direction::Outgoing, None)
+                .with_chunk_capacity(2);
+
+        // With capacity 2 and 5 edges from node a, we should get multiple chunks
+        let mut total = 0;
+        let mut chunk_count = 0;
+        while let Ok(Some(chunk)) = expand.next() {
+            chunk_count += 1;
+            total += chunk.row_count();
+        }
+
+        assert_eq!(total, 5);
+        assert!(
+            chunk_count >= 2,
+            "Expected multiple chunks with small capacity"
+        );
+    }
+
+    #[test]
+    fn test_expand_edge_type_case_insensitive() {
+        let store = Arc::new(LpgStore::new());
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        store.create_edge(a, b, "KNOWS");
+
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Person"));
+        let mut expand = ExpandOperator::new(
+            Arc::clone(&store),
+            scan,
+            0,
+            Direction::Outgoing,
+            Some("knows".to_string()), // lowercase
+        );
+
+        let mut count = 0;
+        while let Ok(Some(chunk)) = expand.next() {
+            count += chunk.row_count();
+        }
+
+        // Should match case-insensitively
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_expand_multiple_source_nodes() {
+        let store = Arc::new(LpgStore::new());
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let c = store.create_node(&["Person"]);
+
+        store.create_edge(a, c, "KNOWS");
+        store.create_edge(b, c, "KNOWS");
+
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Person"));
+        let mut expand =
+            ExpandOperator::new(Arc::clone(&store), scan, 0, Direction::Outgoing, None);
+
+        let mut results = Vec::new();
+        while let Ok(Some(chunk)) = expand.next() {
+            for i in 0..chunk.row_count() {
+                let src = chunk.column(0).unwrap().get_node_id(i).unwrap();
+                let dst = chunk.column(2).unwrap().get_node_id(i).unwrap();
+                results.push((src, dst));
+            }
+        }
+
+        // Both a->c and b->c
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_expand_empty_input() {
+        let store = Arc::new(LpgStore::new());
+
+        // No nodes with this label
+        let scan = Box::new(ScanOperator::with_label(Arc::clone(&store), "Nonexistent"));
         let mut expand =
             ExpandOperator::new(Arc::clone(&store), scan, 0, Direction::Outgoing, None);
 

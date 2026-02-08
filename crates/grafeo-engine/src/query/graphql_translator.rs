@@ -780,18 +780,18 @@ impl GraphQLTranslator {
         let mut return_items = Vec::new();
 
         for selection in &frag.selection_set.selections {
-            if let ast::Selection::Field(field) = selection {
-                if field.selection_set.is_none() {
-                    // Scalar field
-                    let alias = field.alias.clone().unwrap_or(field.name.clone());
-                    return_items.push(ReturnItem {
-                        expression: LogicalExpression::Property {
-                            variable: current_var.to_string(),
-                            property: field.name.clone(),
-                        },
-                        alias: Some(alias),
-                    });
-                }
+            if let ast::Selection::Field(field) = selection
+                && field.selection_set.is_none()
+            {
+                // Scalar field
+                let alias = field.alias.clone().unwrap_or(field.name.clone());
+                return_items.push(ReturnItem {
+                    expression: LogicalExpression::Property {
+                        variable: current_var.to_string(),
+                        property: field.name.clone(),
+                    },
+                    alias: Some(alias),
+                });
             }
         }
 
@@ -807,17 +807,17 @@ impl GraphQLTranslator {
         let mut return_items = Vec::new();
 
         for selection in &selection_set.selections {
-            if let ast::Selection::Field(field) = selection {
-                if field.selection_set.is_none() {
-                    let alias = field.alias.clone().unwrap_or(field.name.clone());
-                    return_items.push(ReturnItem {
-                        expression: LogicalExpression::Property {
-                            variable: current_var.to_string(),
-                            property: field.name.clone(),
-                        },
-                        alias: Some(alias),
-                    });
-                }
+            if let ast::Selection::Field(field) = selection
+                && field.selection_set.is_none()
+            {
+                let alias = field.alias.clone().unwrap_or(field.name.clone());
+                return_items.push(ReturnItem {
+                    expression: LogicalExpression::Property {
+                        variable: current_var.to_string(),
+                        property: field.name.clone(),
+                    },
+                    alias: Some(alias),
+                });
             }
         }
 

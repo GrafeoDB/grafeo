@@ -75,15 +75,13 @@ impl AsyncWalManager {
         let mut max_sequence = 0u64;
         let mut entries = fs::read_dir(&dir).await?;
         while let Some(entry) = entries.next_entry().await? {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Some(seq_str) = name
+            if let Some(name) = entry.file_name().to_str()
+                && let Some(seq_str) = name
                     .strip_prefix("wal_")
                     .and_then(|s| s.strip_suffix(".log"))
-                {
-                    if let Ok(seq) = seq_str.parse::<u64>() {
-                        max_sequence = max_sequence.max(seq);
-                    }
-                }
+                && let Ok(seq) = seq_str.parse::<u64>()
+            {
+                max_sequence = max_sequence.max(seq);
             }
         }
 
@@ -418,9 +416,8 @@ impl AsyncWalManager {
     }
 
     async fn truncate_old_logs(&self) -> Result<()> {
-        let checkpoint = match *self.checkpoint_epoch.lock().await {
-            Some(e) => e,
-            None => return Ok(()),
+        let Some(checkpoint) = *self.checkpoint_epoch.lock().await else {
+            return Ok(());
         };
 
         // Keep logs that might still be needed

@@ -9,10 +9,11 @@ members = [
     "crates/grafeo-cli",
     "crates/bindings/python",
     "crates/bindings/node",
+    "crates/bindings/c",
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.91.1"
 license = "AGPL-3.0-or-later"
@@ -22,11 +23,11 @@ description = "A pure-Rust, high-performance, embeddable graph database"
 
 [workspace.dependencies]
 # Internal crates
-grafeo-common = { path = "crates/grafeo-common", version = "0.4.0" }
-grafeo-core = { path = "crates/grafeo-core", version = "0.4.0" }
-grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.4.0" }
-grafeo-engine = { path = "crates/grafeo-engine", version = "0.4.0" }
-grafeo = { path = "crates/grafeo", version = "0.4.0" }
+grafeo-common = { path = "crates/grafeo-common", version = "0.4.1" }
+grafeo-core = { path = "crates/grafeo-core", version = "0.4.1" }
+grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.4.1" }
+grafeo-engine = { path = "crates/grafeo-engine", version = "0.4.1" }
+grafeo = { path = "crates/grafeo", version = "0.4.1" }
 
 # Error handling
 thiserror = "2.0"
@@ -131,8 +132,6 @@ single_match_else = "allow"
 return_self_not_must_use = "allow"
 unnecessary_wraps = "allow"
 unused_self = "allow"
-explicit_iter_loop = "allow"
-manual_let_else = "allow"
 needless_continue = "allow"
 comparison_chain = "allow"
 derivable_impls = "allow"
@@ -144,8 +143,6 @@ manual_slice_size_calculation = "allow"
 # Additional pedantic allows
 needless_range_loop = "allow"
 default_trait_access = "allow"
-collapsible_match = "allow"
-collapsible_if = "allow"
 unnested_or_patterns = "allow"
 used_underscore_binding = "allow"
 pub_underscore_fields = "allow"

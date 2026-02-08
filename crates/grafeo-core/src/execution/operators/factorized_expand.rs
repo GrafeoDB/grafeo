@@ -414,13 +414,10 @@ impl FactorizedExpandChain {
         // Check if the source column exists in this level
         // If not, it means the previous expansion produced no edges (no level 1 was added)
         // In that case, there's nothing to expand further
-        let source_col = match level.column(source_column) {
-            Some(col) => col,
-            None => {
-                // No source column means previous expand had no results
-                // This is valid - just means no paths exist through this expansion
-                return Ok(());
-            }
+        let Some(source_col) = level.column(source_column) else {
+            // No source column means previous expand had no results
+            // This is valid - just means no paths exist through this expansion
+            return Ok(());
         };
 
         // Collect all edges for all source nodes in the deepest level
@@ -593,9 +590,8 @@ impl LazyFactorizedChainOperator {
     /// factorized chunk without flattening, allowing O(n) aggregation instead
     /// of O(n²) or worse.
     fn execute_factorized(&mut self) -> Result<Option<FactorizedChunk>, OperatorError> {
-        let source = match self.source.take() {
-            Some(s) => s,
-            None => return Ok(None),
+        let Some(source) = self.source.take() else {
+            return Ok(None);
         };
 
         // Build and execute the chain

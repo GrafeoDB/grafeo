@@ -63,11 +63,11 @@ impl UnwindOperator {
     fn advance(&mut self) -> OperatorResult {
         loop {
             // If we have a current list, try to get the next element
-            if let Some(list) = &self.current_list {
-                if self.current_list_idx < list.len() {
-                    // Still have elements in the current list
-                    return Ok(Some(self.emit_row()?));
-                }
+            if let Some(list) = &self.current_list
+                && self.current_list_idx < list.len()
+            {
+                // Still have elements in the current list
+                return Ok(Some(self.emit_row()?));
             }
 
             // Need to move to the next row
@@ -87,16 +87,15 @@ impl UnwindOperator {
 
             // Find the next row with a list value
             while self.current_row < chunk.row_count() {
-                if let Some(col) = chunk.column(self.list_col_idx) {
-                    if let Some(value) = col.get_value(self.current_row) {
-                        if let Value::List(list_arc) = value {
-                            // Found a list - store it and return first element
-                            let list: Vec<Value> = list_arc.iter().cloned().collect();
-                            if !list.is_empty() {
-                                self.current_list = Some(list);
-                                return Ok(Some(self.emit_row()?));
-                            }
-                        }
+                if let Some(col) = chunk.column(self.list_col_idx)
+                    && let Some(value) = col.get_value(self.current_row)
+                    && let Value::List(list_arc) = value
+                {
+                    // Found a list - store it and return first element
+                    let list: Vec<Value> = list_arc.iter().cloned().collect();
+                    if !list.is_empty() {
+                        self.current_list = Some(list);
+                        return Ok(Some(self.emit_row()?));
                     }
                 }
                 self.current_row += 1;
@@ -121,12 +120,11 @@ impl UnwindOperator {
             if col_idx == self.list_col_idx {
                 continue; // Skip the list column
             }
-            if let Some(col) = chunk.column(col_idx) {
-                if let Some(value) = col.get_value(self.current_row) {
-                    if let Some(out_col) = builder.column_mut(col_idx) {
-                        out_col.push_value(value);
-                    }
-                }
+            if let Some(col) = chunk.column(col_idx)
+                && let Some(value) = col.get_value(self.current_row)
+                && let Some(out_col) = builder.column_mut(col_idx)
+            {
+                out_col.push_value(value);
             }
         }
 

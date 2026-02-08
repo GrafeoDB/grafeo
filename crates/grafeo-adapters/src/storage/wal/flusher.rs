@@ -194,10 +194,10 @@ impl AdaptiveFlusher {
 
 impl Drop for AdaptiveFlusher {
     fn drop(&mut self) {
-        if self.shutdown_tx.is_some() {
-            if let Err(e) = self.shutdown() {
-                tracing::warn!("Error during flusher drop: {e}");
-            }
+        if self.shutdown_tx.is_some()
+            && let Err(e) = self.shutdown()
+        {
+            tracing::warn!("Error during flusher drop: {e}");
         }
     }
 }

@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bincode",
  "byteorder",
@@ -647,6 +647,7 @@ dependencies = [
  "proptest",
  "rayon",
  "serde",
+ "serde_json",
  "smallvec",
  "tempfile",
  "thiserror",
@@ -655,8 +656,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "grafeo-c"
+version = "0.4.1"
+dependencies = [
+ "grafeo-common",
+ "grafeo-core",
+ "grafeo-engine",
+ "parking_lot",
+ "serde_json",
+]
+
+[[package]]
 name = "grafeo-cli"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -674,7 +686,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ahash",
  "arcstr",
@@ -697,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ahash",
  "arcstr",
@@ -725,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "criterion",
@@ -739,6 +751,7 @@ dependencies = [
  "rayon",
  "regex",
  "serde",
+ "serde_json",
  "smallvec",
  "tempfile",
  "thiserror",
@@ -748,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-node"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",
@@ -765,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-python"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",

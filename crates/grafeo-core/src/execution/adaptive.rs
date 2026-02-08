@@ -1090,11 +1090,12 @@ impl AdaptivePipelineExecutor {
             }
 
             // Periodically check for reoptimization need
-            if total_rows >= check_interval && total_rows.is_multiple_of(check_interval) {
-                if self.context.should_reoptimize() {
-                    // Log or emit event that reoptimization would be triggered
-                    // Full re-planning would happen at a higher level
-                }
+            if total_rows >= check_interval
+                && total_rows.is_multiple_of(check_interval)
+                && self.context.should_reoptimize()
+            {
+                // Log or emit event that reoptimization would be triggered
+                // Full re-planning would happen at a higher level
             }
         }
 

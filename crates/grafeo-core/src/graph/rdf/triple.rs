@@ -245,20 +245,20 @@ impl TriplePattern {
 
     /// Checks if a triple matches this pattern.
     pub fn matches(&self, triple: &Triple) -> bool {
-        if let Some(ref s) = self.subject {
-            if s != triple.subject() {
-                return false;
-            }
+        if let Some(ref s) = self.subject
+            && s != triple.subject()
+        {
+            return false;
         }
-        if let Some(ref p) = self.predicate {
-            if p != triple.predicate() {
-                return false;
-            }
+        if let Some(ref p) = self.predicate
+            && p != triple.predicate()
+        {
+            return false;
         }
-        if let Some(ref o) = self.object {
-            if o != triple.object() {
-                return false;
-            }
+        if let Some(ref o) = self.object
+            && o != triple.object()
+        {
+            return false;
         }
         true
     }

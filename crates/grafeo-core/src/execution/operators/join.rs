@@ -416,19 +416,17 @@ impl Operator for HashJoinOperator {
 
         loop {
             // Get current probe chunk or fetch new one
-            if self.current_probe_chunk.is_none() {
-                if !self.get_next_probe_chunk()? {
-                    // No more probe data
-                    if matches!(self.join_type, JoinType::Right | JoinType::Full) {
-                        self.emitting_unmatched = true;
-                        return self.emit_unmatched_build();
-                    }
-                    return if builder.row_count() > 0 {
-                        Ok(Some(builder.finish()))
-                    } else {
-                        Ok(None)
-                    };
+            if self.current_probe_chunk.is_none() && !self.get_next_probe_chunk()? {
+                // No more probe data
+                if matches!(self.join_type, JoinType::Right | JoinType::Full) {
+                    self.emitting_unmatched = true;
+                    return self.emit_unmatched_build();
                 }
+                return if builder.row_count() > 0 {
+                    Ok(Some(builder.finish()))
+                } else {
+                    Ok(None)
+                };
             }
 
             // Invariant: current_probe_chunk is Some here - the guard at line 396 either
@@ -454,10 +452,9 @@ impl Operator for HashJoinOperator {
                                 for col_idx in 0..probe_chunk.column_count() {
                                     if let (Some(src_col), Some(dst_col)) =
                                         (probe_chunk.column(col_idx), builder.column_mut(col_idx))
+                                        && let Some(value) = src_col.get_value(probe_row)
                                     {
-                                        if let Some(value) = src_col.get_value(probe_row) {
-                                            dst_col.push_value(value);
-                                        }
+                                        dst_col.push_value(value);
                                     }
                                 }
                                 builder.advance_row();
@@ -471,10 +468,9 @@ impl Operator for HashJoinOperator {
                                 for col_idx in 0..probe_chunk.column_count() {
                                     if let (Some(src_col), Some(dst_col)) =
                                         (probe_chunk.column(col_idx), builder.column_mut(col_idx))
+                                        && let Some(value) = src_col.get_value(probe_row)
                                     {
-                                        if let Some(value) = src_col.get_value(probe_row) {
-                                            dst_col.push_value(value);
-                                        }
+                                        dst_col.push_value(value);
                                     }
                                 }
                                 builder.advance_row();
@@ -505,17 +501,16 @@ impl Operator for HashJoinOperator {
                         let build_chunk = &self.build_chunks[build_chunk_idx];
 
                         // Mark as matched for outer joins
-                        if matches!(self.join_type, JoinType::Left | JoinType::Full) {
-                            if probe_row < self.probe_matched.len() {
-                                self.probe_matched[probe_row] = true;
-                            }
+                        if matches!(self.join_type, JoinType::Left | JoinType::Full)
+                            && probe_row < self.probe_matched.len()
+                        {
+                            self.probe_matched[probe_row] = true;
                         }
-                        if matches!(self.join_type, JoinType::Right | JoinType::Full) {
-                            if build_chunk_idx < self.build_matched.len()
-                                && build_row < self.build_matched[build_chunk_idx].len()
-                            {
-                                self.build_matched[build_chunk_idx][build_row] = true;
-                            }
+                        if matches!(self.join_type, JoinType::Right | JoinType::Full)
+                            && build_chunk_idx < self.build_matched.len()
+                            && build_row < self.build_matched[build_chunk_idx].len()
+                        {
+                            self.build_matched[build_chunk_idx][build_row] = true;
                         }
 
                         self.produce_output_row(

@@ -495,10 +495,10 @@ mod tests {
 
             let mut filtered = ValueVector::new();
             for i in 0..chunk.len() {
-                if let Some(Value::Int64(v)) = col.get(i) {
-                    if v % 2 == 0 {
-                        filtered.push(Value::Int64(v));
-                    }
+                if let Some(Value::Int64(v)) = col.get(i)
+                    && v % 2 == 0
+                {
+                    filtered.push(Value::Int64(v));
                 }
             }
 

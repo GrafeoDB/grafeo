@@ -27,16 +27,15 @@ fn extract_weight(
     edge_id: grafeo_common::types::EdgeId,
     weight_prop: Option<&str>,
 ) -> f64 {
-    if let Some(prop_name) = weight_prop {
-        if let Some(edge) = store.get_edge(edge_id) {
-            if let Some(value) = edge.get_property(prop_name) {
-                return match value {
-                    Value::Int64(i) => *i as f64,
-                    Value::Float64(f) => *f,
-                    _ => 1.0,
-                };
-            }
-        }
+    if let Some(prop_name) = weight_prop
+        && let Some(edge) = store.get_edge(edge_id)
+        && let Some(value) = edge.get_property(prop_name)
+    {
+        return match value {
+            Value::Int64(i) => *i as f64,
+            Value::Float64(f) => *f,
+            _ => 1.0,
+        };
     }
     1.0
 }
@@ -115,10 +114,10 @@ pub fn dijkstra(store: &LpgStore, source: NodeId, weight_property: Option<&str>)
 
     while let Some(MinScored(dist, node)) = heap.pop() {
         // Skip if we've found a better path
-        if let Some(&best) = distances.get(&node) {
-            if dist > best {
-                continue;
-            }
+        if let Some(&best) = distances.get(&node)
+            && dist > best
+        {
+            continue;
         }
 
         // Explore neighbors
@@ -181,10 +180,10 @@ pub fn dijkstra_path(
         }
 
         // Skip if we've found a better path
-        if let Some(&best) = distances.get(&node) {
-            if dist > best {
-                continue;
-            }
+        if let Some(&best) = distances.get(&node)
+            && dist > best
+        {
+            continue;
         }
 
         // Explore neighbors
@@ -407,11 +406,11 @@ pub fn bellman_ford(
     for &(u, v, edge_id) in &edges {
         if let Some(&dist_u) = distances.get(&u) {
             let weight = extract_weight(store, edge_id, weight_property);
-            if let Some(&dist_v) = distances.get(&v) {
-                if dist_u + weight < dist_v {
-                    has_negative_cycle = true;
-                    break;
-                }
+            if let Some(&dist_v) = distances.get(&v)
+                && dist_u + weight < dist_v
+            {
+                has_negative_cycle = true;
+                break;
             }
         }
     }

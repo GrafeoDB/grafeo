@@ -276,3 +276,307 @@ pub struct DumpMetadata {
     #[serde(default)]
     pub extra: HashMap<String, String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- DatabaseMode ----
+
+    #[test]
+    fn test_database_mode_display() {
+        assert_eq!(DatabaseMode::Lpg.to_string(), "lpg");
+        assert_eq!(DatabaseMode::Rdf.to_string(), "rdf");
+    }
+
+    #[test]
+    fn test_database_mode_serde_roundtrip() {
+        let json = serde_json::to_string(&DatabaseMode::Lpg).unwrap();
+        let mode: DatabaseMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(mode, DatabaseMode::Lpg);
+
+        let json = serde_json::to_string(&DatabaseMode::Rdf).unwrap();
+        let mode: DatabaseMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(mode, DatabaseMode::Rdf);
+    }
+
+    #[test]
+    fn test_database_mode_equality() {
+        assert_eq!(DatabaseMode::Lpg, DatabaseMode::Lpg);
+        assert_ne!(DatabaseMode::Lpg, DatabaseMode::Rdf);
+    }
+
+    // ---- DumpFormat ----
+
+    #[test]
+    fn test_dump_format_default() {
+        assert_eq!(DumpFormat::default(), DumpFormat::Parquet);
+    }
+
+    #[test]
+    fn test_dump_format_display() {
+        assert_eq!(DumpFormat::Parquet.to_string(), "parquet");
+        assert_eq!(DumpFormat::Turtle.to_string(), "turtle");
+        assert_eq!(DumpFormat::Json.to_string(), "json");
+    }
+
+    #[test]
+    fn test_dump_format_from_str() {
+        assert_eq!(
+            "parquet".parse::<DumpFormat>().unwrap(),
+            DumpFormat::Parquet
+        );
+        assert_eq!("turtle".parse::<DumpFormat>().unwrap(), DumpFormat::Turtle);
+        assert_eq!("ttl".parse::<DumpFormat>().unwrap(), DumpFormat::Turtle);
+        assert_eq!("json".parse::<DumpFormat>().unwrap(), DumpFormat::Json);
+        assert_eq!("jsonl".parse::<DumpFormat>().unwrap(), DumpFormat::Json);
+        assert_eq!(
+            "PARQUET".parse::<DumpFormat>().unwrap(),
+            DumpFormat::Parquet
+        );
+    }
+
+    #[test]
+    fn test_dump_format_from_str_invalid() {
+        let result = "xml".parse::<DumpFormat>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown dump format"));
+    }
+
+    #[test]
+    fn test_dump_format_serde_roundtrip() {
+        for format in [DumpFormat::Parquet, DumpFormat::Turtle, DumpFormat::Json] {
+            let json = serde_json::to_string(&format).unwrap();
+            let parsed: DumpFormat = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, format);
+        }
+    }
+
+    // ---- ValidationResult ----
+
+    #[test]
+    fn test_validation_result_default_is_valid() {
+        let result = ValidationResult::default();
+        assert!(result.is_valid());
+        assert!(result.errors.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_validation_result_with_errors() {
+        let result = ValidationResult {
+            errors: vec![ValidationError {
+                code: "E001".to_string(),
+                message: "Orphaned edge".to_string(),
+                context: Some("edge_42".to_string()),
+            }],
+            warnings: Vec::new(),
+        };
+        assert!(!result.is_valid());
+    }
+
+    #[test]
+    fn test_validation_result_with_warnings_still_valid() {
+        let result = ValidationResult {
+            errors: Vec::new(),
+            warnings: vec![ValidationWarning {
+                code: "W001".to_string(),
+                message: "Unused index".to_string(),
+                context: None,
+            }],
+        };
+        assert!(result.is_valid());
+    }
+
+    // ---- Serde roundtrips for complex types ----
+
+    #[test]
+    fn test_database_info_serde() {
+        let info = DatabaseInfo {
+            mode: DatabaseMode::Lpg,
+            node_count: 100,
+            edge_count: 200,
+            is_persistent: true,
+            path: Some(PathBuf::from("/tmp/db")),
+            wal_enabled: true,
+            version: "0.4.1".to_string(),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: DatabaseInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.node_count, 100);
+        assert_eq!(parsed.edge_count, 200);
+        assert!(parsed.is_persistent);
+    }
+
+    #[test]
+    fn test_database_stats_serde() {
+        let stats = DatabaseStats {
+            node_count: 50,
+            edge_count: 75,
+            label_count: 3,
+            edge_type_count: 2,
+            property_key_count: 10,
+            index_count: 4,
+            memory_bytes: 1024,
+            disk_bytes: Some(2048),
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let parsed: DatabaseStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.node_count, 50);
+        assert_eq!(parsed.disk_bytes, Some(2048));
+    }
+
+    #[test]
+    fn test_schema_info_lpg_serde() {
+        let schema = SchemaInfo::Lpg(LpgSchemaInfo {
+            labels: vec![LabelInfo {
+                name: "Person".to_string(),
+                count: 10,
+            }],
+            edge_types: vec![EdgeTypeInfo {
+                name: "KNOWS".to_string(),
+                count: 20,
+            }],
+            property_keys: vec!["name".to_string(), "age".to_string()],
+        });
+        let json = serde_json::to_string(&schema).unwrap();
+        let parsed: SchemaInfo = serde_json::from_str(&json).unwrap();
+        match parsed {
+            SchemaInfo::Lpg(lpg) => {
+                assert_eq!(lpg.labels.len(), 1);
+                assert_eq!(lpg.labels[0].name, "Person");
+                assert_eq!(lpg.edge_types[0].count, 20);
+            }
+            SchemaInfo::Rdf(_) => panic!("Expected LPG schema"),
+        }
+    }
+
+    #[test]
+    fn test_schema_info_rdf_serde() {
+        let schema = SchemaInfo::Rdf(RdfSchemaInfo {
+            predicates: vec![PredicateInfo {
+                iri: "http://xmlns.com/foaf/0.1/knows".to_string(),
+                count: 5,
+            }],
+            named_graphs: vec!["default".to_string()],
+            subject_count: 10,
+            object_count: 15,
+        });
+        let json = serde_json::to_string(&schema).unwrap();
+        let parsed: SchemaInfo = serde_json::from_str(&json).unwrap();
+        match parsed {
+            SchemaInfo::Rdf(rdf) => {
+                assert_eq!(rdf.predicates.len(), 1);
+                assert_eq!(rdf.subject_count, 10);
+            }
+            SchemaInfo::Lpg(_) => panic!("Expected RDF schema"),
+        }
+    }
+
+    #[test]
+    fn test_index_info_serde() {
+        let info = IndexInfo {
+            name: "idx_person_name".to_string(),
+            index_type: "btree".to_string(),
+            target: "Person:name".to_string(),
+            unique: true,
+            cardinality: Some(1000),
+            size_bytes: Some(4096),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: IndexInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "idx_person_name");
+        assert!(parsed.unique);
+    }
+
+    #[test]
+    fn test_wal_status_serde() {
+        let status = WalStatus {
+            enabled: true,
+            path: Some(PathBuf::from("/tmp/wal")),
+            size_bytes: 8192,
+            record_count: 42,
+            last_checkpoint: Some(1700000000),
+            current_epoch: 100,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let parsed: WalStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.record_count, 42);
+        assert_eq!(parsed.current_epoch, 100);
+    }
+
+    #[test]
+    fn test_compaction_stats_serde() {
+        let stats = CompactionStats {
+            bytes_reclaimed: 1024,
+            nodes_compacted: 10,
+            edges_compacted: 20,
+            duration_ms: 150,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let parsed: CompactionStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.bytes_reclaimed, 1024);
+        assert_eq!(parsed.duration_ms, 150);
+    }
+
+    #[test]
+    fn test_dump_metadata_serde() {
+        let metadata = DumpMetadata {
+            version: "0.4.1".to_string(),
+            mode: DatabaseMode::Lpg,
+            format: DumpFormat::Parquet,
+            node_count: 1000,
+            edge_count: 5000,
+            created_at: "2025-01-15T12:00:00Z".to_string(),
+            extra: HashMap::new(),
+        };
+        let json = serde_json::to_string(&metadata).unwrap();
+        let parsed: DumpMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.node_count, 1000);
+        assert_eq!(parsed.format, DumpFormat::Parquet);
+    }
+
+    #[test]
+    fn test_dump_metadata_with_extra() {
+        let mut extra = HashMap::new();
+        extra.insert("compression".to_string(), "zstd".to_string());
+        let metadata = DumpMetadata {
+            version: "0.4.1".to_string(),
+            mode: DatabaseMode::Rdf,
+            format: DumpFormat::Turtle,
+            node_count: 0,
+            edge_count: 0,
+            created_at: "2025-01-15T12:00:00Z".to_string(),
+            extra,
+        };
+        let json = serde_json::to_string(&metadata).unwrap();
+        let parsed: DumpMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.extra.get("compression").unwrap(), "zstd");
+    }
+
+    #[test]
+    fn test_validation_error_serde() {
+        let error = ValidationError {
+            code: "E001".to_string(),
+            message: "Broken reference".to_string(),
+            context: Some("node_id=42".to_string()),
+        };
+        let json = serde_json::to_string(&error).unwrap();
+        let parsed: ValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.code, "E001");
+        assert_eq!(parsed.context, Some("node_id=42".to_string()));
+    }
+
+    #[test]
+    fn test_validation_warning_serde() {
+        let warning = ValidationWarning {
+            code: "W001".to_string(),
+            message: "High memory usage".to_string(),
+            context: None,
+        };
+        let json = serde_json::to_string(&warning).unwrap();
+        let parsed: ValidationWarning = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.code, "W001");
+        assert!(parsed.context.is_none());
+    }
+}

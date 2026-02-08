@@ -248,12 +248,12 @@ fn estimate_bucket_overlap(
     // This is a rough estimate but works well for numeric values
 
     // If range fully contains bucket, return 1.0
-    let range_contains_lower = range_lower
-        .map(|l| compare_values(bucket_lower, l) != Some(Ordering::Less))
-        .unwrap_or(true);
-    let range_contains_upper = range_upper
-        .map(|u| compare_values(bucket_upper, u) != Some(Ordering::Greater))
-        .unwrap_or(true);
+    let range_contains_lower = range_lower.map_or(true, |l| {
+        compare_values(bucket_lower, l) != Some(Ordering::Less)
+    });
+    let range_contains_upper = range_upper.map_or(true, |u| {
+        compare_values(bucket_upper, u) != Some(Ordering::Greater)
+    });
 
     if range_contains_lower && range_contains_upper {
         return 1.0;
@@ -391,7 +391,7 @@ mod tests {
             true,
             true,
         );
-        assert!(sel >= 0.3 && sel <= 0.7);
+        assert!((0.3..=0.7).contains(&sel));
 
         // Range 1-10 should be 100%
         let sel_full = hist.estimate_range_selectivity(

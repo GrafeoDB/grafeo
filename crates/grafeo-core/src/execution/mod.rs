@@ -29,11 +29,13 @@ pub mod factorized_iter;
 pub mod factorized_vector;
 pub mod memory;
 pub mod operators;
+#[cfg(feature = "parallel")]
 pub mod parallel;
 pub mod pipeline;
 pub mod selection;
 pub mod sink;
 pub mod source;
+#[cfg(feature = "spill")]
 pub mod spill;
 pub mod vector;
 
@@ -50,6 +52,7 @@ pub use collector::{
     PartitionCollector, StatsCollector,
 };
 pub use memory::{ExecutionMemoryContext, ExecutionMemoryContextBuilder};
+#[cfg(feature = "parallel")]
 pub use parallel::{
     CloneableOperatorFactory, MorselScheduler, ParallelPipeline, ParallelPipelineConfig,
     ParallelSource, RangeSource,
@@ -58,6 +61,7 @@ pub use pipeline::{ChunkCollector, ChunkSizeHint, Pipeline, PushOperator, Sink, 
 pub use selection::SelectionVector;
 pub use sink::{CollectorSink, CountingSink, LimitingSink, MaterializingSink, NullSink};
 pub use source::{ChunkSource, EmptySource, GeneratorSource, OperatorSource, VectorSource};
+#[cfg(feature = "spill")]
 pub use spill::{SpillFile, SpillFileReader, SpillManager};
 pub use vector::ValueVector;
 

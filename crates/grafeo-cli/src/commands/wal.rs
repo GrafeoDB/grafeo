@@ -68,13 +68,13 @@ pub fn run(cmd: WalCommands, format: OutputFormat, quiet: bool) -> Result<()> {
                         ("Records", output.record_count.to_string()),
                         (
                             "Last Checkpoint",
-                            output
-                                .last_checkpoint
-                                .map(|ts| {
+                            output.last_checkpoint.map_or_else(
+                                || "Never".to_string(),
+                                |ts| {
                                     // Format timestamp
                                     format!("{ts}")
-                                })
-                                .unwrap_or_else(|| "Never".to_string()),
+                                },
+                            ),
                         ),
                         ("Current Epoch", output.current_epoch.to_string()),
                     ];

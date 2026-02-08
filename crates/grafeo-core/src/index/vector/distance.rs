@@ -389,7 +389,7 @@ mod tests {
         let euc = euclidean_distance(&a, &b);
 
         // Just verify they produce reasonable values
-        assert!(cos >= 0.0 && cos <= 2.0);
+        assert!((0.0..=2.0).contains(&cos));
         assert!(euc >= 0.0);
     }
 
@@ -471,7 +471,7 @@ mod tests {
         let a = [0.3f32, 0.7, -0.2];
         let b = [0.6f32, -0.1, 0.9];
         let d = cosine_distance(&a, &b);
-        assert!(d >= 0.0 - EPSILON && d <= 2.0 + EPSILON);
+        assert!((0.0 - EPSILON..=2.0 + EPSILON).contains(&d));
     }
 
     #[test]

@@ -70,9 +70,11 @@ pub use centrality::{
 };
 
 // Clustering algorithms
+#[cfg(feature = "parallel")]
+pub use clustering::clustering_coefficient_parallel;
 pub use clustering::{
-    ClusteringCoefficientResult, clustering_coefficient, clustering_coefficient_parallel,
-    global_clustering_coefficient, local_clustering_coefficient, total_triangles, triangle_count,
+    ClusteringCoefficientResult, clustering_coefficient, global_clustering_coefficient,
+    local_clustering_coefficient, total_triangles, triangle_count,
 };
 
 // Community detection algorithms

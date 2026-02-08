@@ -360,11 +360,7 @@ impl RdfStore {
             subject_count: self.subject_index.read().len(),
             predicate_count: self.predicate_index.read().len(),
             object_count: if self.config.index_objects {
-                self.object_index
-                    .read()
-                    .as_ref()
-                    .map(|i| i.len())
-                    .unwrap_or(0)
+                self.object_index.read().as_ref().map_or(0, |i| i.len())
             } else {
                 0
             },
@@ -429,11 +425,7 @@ impl RdfStore {
     /// Returns the number of operations discarded.
     pub fn rollback_tx(&self, tx_id: TxId) -> usize {
         let mut buffer = self.tx_buffer.write();
-        buffer
-            .buffers
-            .remove(&tx_id)
-            .map(|ops| ops.len())
-            .unwrap_or(0)
+        buffer.buffers.remove(&tx_id).map_or(0, |ops| ops.len())
     }
 
     /// Checks if a transaction has pending operations.
@@ -443,8 +435,7 @@ impl RdfStore {
         buffer
             .buffers
             .get(&tx_id)
-            .map(|ops| !ops.is_empty())
-            .unwrap_or(false)
+            .is_some_and(|ops| !ops.is_empty())
     }
 
     /// Returns triples matching the given pattern, including pending inserts

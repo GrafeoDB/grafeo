@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+#[cfg(feature = "wal")]
 use grafeo_adapters::storage::wal::{WalConfig, WalManager, WalRecord, WalRecovery};
 use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
 use grafeo_common::utils::error::Result;
@@ -54,6 +55,7 @@ pub struct GrafeoDB {
     /// Unified buffer manager.
     buffer_manager: Arc<BufferManager>,
     /// Write-ahead log manager (if durability is enabled).
+    #[cfg(feature = "wal")]
     wal: Option<Arc<WalManager>>,
     /// Query cache for parsed and optimized plans.
     query_cache: Arc<QueryCache>,
@@ -100,6 +102,7 @@ impl GrafeoDB {
     /// let db = GrafeoDB::open("./my_social_network")?;
     /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
+    #[cfg(feature = "wal")]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::with_config(Config::persistent(path.as_ref()))
     }
@@ -147,6 +150,7 @@ impl GrafeoDB {
         let buffer_manager = BufferManager::new(buffer_config);
 
         // Initialize WAL if persistence is enabled
+        #[cfg(feature = "wal")]
         let wal = if config.wal_enabled {
             if let Some(ref db_path) = config.path {
                 // Create database directory if it doesn't exist
@@ -182,6 +186,7 @@ impl GrafeoDB {
             rdf_store,
             tx_manager,
             buffer_manager,
+            #[cfg(feature = "wal")]
             wal,
             query_cache,
             is_open: RwLock::new(true),
@@ -189,6 +194,7 @@ impl GrafeoDB {
     }
 
     /// Applies WAL records to restore the database state.
+    #[cfg(feature = "wal")]
     fn apply_wal_records(store: &LpgStore, records: &[WalRecord]) -> Result<()> {
         for record in records {
             match record {
@@ -484,6 +490,7 @@ impl GrafeoDB {
         }
 
         // Commit and checkpoint WAL
+        #[cfg(feature = "wal")]
         if let Some(ref wal) = self.wal {
             let epoch = self.store.current_epoch();
 
@@ -508,12 +515,14 @@ impl GrafeoDB {
     }
 
     /// Returns the WAL manager if available.
+    #[cfg(feature = "wal")]
     #[must_use]
     pub fn wal(&self) -> Option<&Arc<WalManager>> {
         self.wal.as_ref()
     }
 
     /// Logs a WAL record if WAL is enabled.
+    #[cfg(feature = "wal")]
     fn log_wal(&self, record: &WalRecord) -> Result<()> {
         if let Some(ref wal) = self.wal {
             wal.log(record)?;
@@ -571,6 +580,7 @@ impl GrafeoDB {
         let id = self.store.create_node(labels);
 
         // Log to WAL if enabled
+        #[cfg(feature = "wal")]
         if let Err(e) = self.log_wal(&WalRecord::CreateNode {
             id,
             labels: labels.iter().map(|s| s.to_string()).collect(),
@@ -608,21 +618,24 @@ impl GrafeoDB {
             .create_node_with_props(labels, props.iter().map(|(k, v)| (k.clone(), v.clone())));
 
         // Log node creation to WAL
-        if let Err(e) = self.log_wal(&WalRecord::CreateNode {
-            id,
-            labels: labels.iter().map(|s| s.to_string()).collect(),
-        }) {
-            tracing::warn!("Failed to log CreateNode to WAL: {}", e);
-        }
-
-        // Log each property to WAL for full durability
-        for (key, value) in props {
-            if let Err(e) = self.log_wal(&WalRecord::SetNodeProperty {
+        #[cfg(feature = "wal")]
+        {
+            if let Err(e) = self.log_wal(&WalRecord::CreateNode {
                 id,
-                key: key.to_string(),
-                value,
+                labels: labels.iter().map(|s| s.to_string()).collect(),
             }) {
-                tracing::warn!("Failed to log SetNodeProperty to WAL: {}", e);
+                tracing::warn!("Failed to log CreateNode to WAL: {}", e);
+            }
+
+            // Log each property to WAL for full durability
+            for (key, value) in props {
+                if let Err(e) = self.log_wal(&WalRecord::SetNodeProperty {
+                    id,
+                    key: key.to_string(),
+                    value,
+                }) {
+                    tracing::warn!("Failed to log SetNodeProperty to WAL: {}", e);
+                }
             }
         }
 
@@ -644,6 +657,7 @@ impl GrafeoDB {
     pub fn delete_node(&self, id: grafeo_common::types::NodeId) -> bool {
         let result = self.store.delete_node(id);
 
+        #[cfg(feature = "wal")]
         if result && let Err(e) = self.log_wal(&WalRecord::DeleteNode { id }) {
             tracing::warn!("Failed to log DeleteNode to WAL: {}", e);
         }
@@ -661,6 +675,7 @@ impl GrafeoDB {
         value: grafeo_common::types::Value,
     ) {
         // Log to WAL first
+        #[cfg(feature = "wal")]
         if let Err(e) = self.log_wal(&WalRecord::SetNodeProperty {
             id,
             key: key.to_string(),
@@ -692,6 +707,7 @@ impl GrafeoDB {
     pub fn add_node_label(&self, id: grafeo_common::types::NodeId, label: &str) -> bool {
         let result = self.store.add_label(id, label);
 
+        #[cfg(feature = "wal")]
         if result {
             // Log to WAL if enabled
             if let Err(e) = self.log_wal(&WalRecord::AddNodeLabel {
@@ -725,6 +741,7 @@ impl GrafeoDB {
     pub fn remove_node_label(&self, id: grafeo_common::types::NodeId, label: &str) -> bool {
         let result = self.store.remove_label(id, label);
 
+        #[cfg(feature = "wal")]
         if result {
             // Log to WAL if enabled
             if let Err(e) = self.log_wal(&WalRecord::RemoveNodeLabel {
@@ -789,6 +806,7 @@ impl GrafeoDB {
         let id = self.store.create_edge(src, dst, edge_type);
 
         // Log to WAL if enabled
+        #[cfg(feature = "wal")]
         if let Err(e) = self.log_wal(&WalRecord::CreateEdge {
             id,
             src,
@@ -833,23 +851,26 @@ impl GrafeoDB {
         );
 
         // Log edge creation to WAL
-        if let Err(e) = self.log_wal(&WalRecord::CreateEdge {
-            id,
-            src,
-            dst,
-            edge_type: edge_type.to_string(),
-        }) {
-            tracing::warn!("Failed to log CreateEdge to WAL: {}", e);
-        }
-
-        // Log each property to WAL for full durability
-        for (key, value) in props {
-            if let Err(e) = self.log_wal(&WalRecord::SetEdgeProperty {
+        #[cfg(feature = "wal")]
+        {
+            if let Err(e) = self.log_wal(&WalRecord::CreateEdge {
                 id,
-                key: key.to_string(),
-                value,
+                src,
+                dst,
+                edge_type: edge_type.to_string(),
             }) {
-                tracing::warn!("Failed to log SetEdgeProperty to WAL: {}", e);
+                tracing::warn!("Failed to log CreateEdge to WAL: {}", e);
+            }
+
+            // Log each property to WAL for full durability
+            for (key, value) in props {
+                if let Err(e) = self.log_wal(&WalRecord::SetEdgeProperty {
+                    id,
+                    key: key.to_string(),
+                    value,
+                }) {
+                    tracing::warn!("Failed to log SetEdgeProperty to WAL: {}", e);
+                }
             }
         }
 
@@ -871,6 +892,7 @@ impl GrafeoDB {
     pub fn delete_edge(&self, id: grafeo_common::types::EdgeId) -> bool {
         let result = self.store.delete_edge(id);
 
+        #[cfg(feature = "wal")]
         if result && let Err(e) = self.log_wal(&WalRecord::DeleteEdge { id }) {
             tracing::warn!("Failed to log DeleteEdge to WAL: {}", e);
         }
@@ -888,6 +910,7 @@ impl GrafeoDB {
         value: grafeo_common::types::Value,
     ) {
         // Log to WAL first
+        #[cfg(feature = "wal")]
         if let Err(e) = self.log_wal(&WalRecord::SetEdgeProperty {
             id,
             key: key.to_string(),
@@ -1121,18 +1144,21 @@ impl GrafeoDB {
                 );
 
                 // Log to WAL
-                if let Err(e) = self.log_wal(&WalRecord::CreateNode {
-                    id,
-                    labels: labels.iter().map(|s| s.to_string()).collect(),
-                }) {
-                    tracing::warn!("Failed to log CreateNode to WAL: {}", e);
-                }
-                if let Err(e) = self.log_wal(&WalRecord::SetNodeProperty {
-                    id,
-                    key: property.to_string(),
-                    value,
-                }) {
-                    tracing::warn!("Failed to log SetNodeProperty to WAL: {}", e);
+                #[cfg(feature = "wal")]
+                {
+                    if let Err(e) = self.log_wal(&WalRecord::CreateNode {
+                        id,
+                        labels: labels.iter().map(|s| s.to_string()).collect(),
+                    }) {
+                        tracing::warn!("Failed to log CreateNode to WAL: {}", e);
+                    }
+                    if let Err(e) = self.log_wal(&WalRecord::SetNodeProperty {
+                        id,
+                        key: property.to_string(),
+                        value,
+                    }) {
+                        tracing::warn!("Failed to log SetNodeProperty to WAL: {}", e);
+                    }
                 }
 
                 id
@@ -1251,6 +1277,7 @@ impl GrafeoDB {
     /// Includes counts, memory usage, and index information.
     #[must_use]
     pub fn detailed_stats(&self) -> crate::admin::DatabaseStats {
+        #[cfg(feature = "wal")]
         let disk_bytes = self.config.path.as_ref().and_then(|p| {
             if p.exists() {
                 Self::calculate_disk_usage(p).ok()
@@ -1258,6 +1285,8 @@ impl GrafeoDB {
                 None
             }
         });
+        #[cfg(not(feature = "wal"))]
+        let disk_bytes: Option<usize> = None;
 
         crate::admin::DatabaseStats {
             node_count: self.store.node_count(),
@@ -1272,6 +1301,7 @@ impl GrafeoDB {
     }
 
     /// Calculates total disk usage for the database directory.
+    #[cfg(feature = "wal")]
     fn calculate_disk_usage(path: &Path) -> Result<usize> {
         let mut total = 0usize;
         if path.is_dir() {
@@ -1404,24 +1434,25 @@ impl GrafeoDB {
     /// Returns None if WAL is not enabled.
     #[must_use]
     pub fn wal_status(&self) -> crate::admin::WalStatus {
+        #[cfg(feature = "wal")]
         if let Some(ref wal) = self.wal {
-            crate::admin::WalStatus {
+            return crate::admin::WalStatus {
                 enabled: true,
                 path: self.config.path.as_ref().map(|p| p.join("wal")),
                 size_bytes: wal.size_bytes(),
                 record_count: wal.record_count() as usize,
                 last_checkpoint: wal.last_checkpoint_timestamp(),
                 current_epoch: self.store.current_epoch().as_u64(),
-            }
-        } else {
-            crate::admin::WalStatus {
-                enabled: false,
-                path: None,
-                size_bytes: 0,
-                record_count: 0,
-                last_checkpoint: None,
-                current_epoch: self.store.current_epoch().as_u64(),
-            }
+            };
+        }
+
+        crate::admin::WalStatus {
+            enabled: false,
+            path: None,
+            size_bytes: 0,
+            record_count: 0,
+            last_checkpoint: None,
+            current_epoch: self.store.current_epoch().as_u64(),
         }
     }
 
@@ -1433,6 +1464,7 @@ impl GrafeoDB {
     ///
     /// Returns an error if the checkpoint fails.
     pub fn wal_checkpoint(&self) -> Result<()> {
+        #[cfg(feature = "wal")]
         if let Some(ref wal) = self.wal {
             let epoch = self.store.current_epoch();
             let tx_id = self
@@ -1459,6 +1491,9 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the save operation fails.
+    ///
+    /// Requires the `wal` feature for persistence support.
+    #[cfg(feature = "wal")]
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
 
@@ -1571,6 +1606,7 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the file can't be opened or loaded.
+    #[cfg(feature = "wal")]
     pub fn open_in_memory(path: impl AsRef<Path>) -> Result<Self> {
         // Open the source database (triggers WAL recovery)
         let source = Self::open(path)?;
@@ -1819,6 +1855,7 @@ mod tests {
         // Session should be created successfully
     }
 
+    #[cfg(feature = "wal")]
     #[test]
     fn test_persistent_database_recovery() {
         use grafeo_common::types::Value;
@@ -1859,6 +1896,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "wal")]
     #[test]
     fn test_wal_logging() {
         use tempfile::tempdir;
@@ -1880,6 +1918,7 @@ mod tests {
         db.close().unwrap();
     }
 
+    #[cfg(feature = "wal")]
     #[test]
     fn test_wal_recovery_multiple_sessions() {
         // Tests that WAL recovery works correctly across multiple open/close cycles
@@ -1920,6 +1959,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "wal")]
     #[test]
     fn test_database_consistency_after_mutations() {
         // Tests that database remains consistent after a series of create/delete operations
@@ -1971,6 +2011,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "wal")]
     #[test]
     fn test_close_is_idempotent() {
         // Calling close() multiple times should not cause errors

@@ -10,8 +10,8 @@ description = "Query engine and database management for Grafeo"
 
 [dependencies]
 grafeo-common.workspace = true
-grafeo-core.workspace = true
-grafeo-adapters.workspace = true
+grafeo-core = { workspace = true, default-features = false }
+grafeo-adapters = { workspace = true, default-features = false }
 
 # Error handling
 thiserror.workspace = true
@@ -24,11 +24,8 @@ indexmap.workspace = true
 
 # Concurrency
 parking_lot.workspace = true
-crossbeam.workspace = true
-rayon.workspace = true
-
-# Async
-tokio.workspace = true
+crossbeam = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 
 # Serialization
 serde.workspace = true
@@ -43,16 +40,21 @@ tracing.workspace = true
 criterion.workspace = true
 tempfile.workspace = true
 serde_json = "1"
+tokio.workspace = true
 
 [features]
-default = ["gql"]
+default = ["gql", "parallel", "wal", "spill", "mmap"]
 gql = ["grafeo-adapters/gql"]
 cypher = ["grafeo-adapters/cypher"]
 sparql = ["grafeo-adapters/sparql"]
 gremlin = ["grafeo-adapters/gremlin"]
 graphql = ["grafeo-adapters/graphql"]
 rdf = ["grafeo-core/rdf", "grafeo-adapters/rdf"]  # RDF graph model and planner
-full = ["gql", "cypher", "sparql", "gremlin", "graphql", "rdf"]
+parallel = ["rayon", "crossbeam", "grafeo-core/parallel", "grafeo-adapters/parallel"]  # Parallel execution
+wal = ["grafeo-adapters/wal"]  # Write-ahead log storage
+spill = ["grafeo-core/spill"]  # Disk spilling for out-of-core execution
+mmap = ["grafeo-core/mmap"]  # File-backed vector storage
+full = ["gql", "cypher", "sparql", "gremlin", "graphql", "rdf", "parallel", "wal", "spill", "mmap"]
 vector-index = ["grafeo-core/vector-index"]  # HNSW vector index for k-NN search
 block-stm = []  # Block-STM parallel transaction execution
 

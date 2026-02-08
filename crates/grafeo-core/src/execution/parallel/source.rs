@@ -211,7 +211,7 @@ impl ParallelChunkSource {
             cumulative_rows.push(sum);
         }
 
-        let num_columns = chunks.first().map(|c| c.num_columns()).unwrap_or(0);
+        let num_columns = chunks.first().map_or(0, |c| c.num_columns());
 
         Self {
             chunks: Arc::new(chunks),

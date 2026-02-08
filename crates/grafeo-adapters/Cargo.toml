@@ -19,13 +19,13 @@ thiserror.workspace = true
 smallvec.workspace = true
 hashbrown.workspace = true
 
-# Memory & I/O
-memmap2.workspace = true
+# Memory & I/O (optional - used by WAL)
+memmap2 = { workspace = true, optional = true }
 bytes.workspace = true
 byteorder.workspace = true
 
-# Checksums
-crc32fast.workspace = true
+# Checksums (optional - used by WAL)
+crc32fast = { workspace = true, optional = true }
 
 # Serialization
 serde.workspace = true
@@ -33,11 +33,11 @@ bincode.workspace = true
 
 # Concurrency
 parking_lot.workspace = true
-crossbeam.workspace = true
-rayon.workspace = true
+crossbeam = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 
-# Async
-tokio.workspace = true
+# Async (optional - used by WAL async log)
+tokio = { workspace = true, optional = true }
 
 # Tracing
 tracing.workspace = true
@@ -48,14 +48,16 @@ tempfile.workspace = true
 serde_json = "1"
 
 [features]
-default = ["gql"]
+default = ["gql", "wal", "parallel"]
 gql = []                      # GQL parser (ISO/IEC 39075:2024)
 cypher = []                   # Cypher parser (openCypher 9.0)
 sparql = []                   # SPARQL parser (W3C SPARQL 1.1)
 gremlin = []                  # Gremlin parser (Apache TinkerPop)
 graphql = []                  # GraphQL parser (spec-compliant)
 rdf = ["grafeo-core/rdf"]    # RDF graph model support
-full = ["gql", "cypher", "sparql", "gremlin", "graphql", "rdf"]
+wal = ["memmap2", "crc32fast", "tokio", "crossbeam"]  # Write-ahead log storage (requires filesystem)
+parallel = ["rayon", "grafeo-core/parallel"]  # Parallel algorithms (rayon)
+full = ["gql", "cypher", "sparql", "gremlin", "graphql", "rdf", "wal", "parallel"]
 
 [lints]
 workspace = true

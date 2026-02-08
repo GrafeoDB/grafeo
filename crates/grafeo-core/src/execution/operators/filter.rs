@@ -532,10 +532,10 @@ impl ExpressionPredicate {
                     let passes_filter = if let Some(filter) = filter_expr {
                         // Simplified: evaluate filter with item as context
                         // This works for simple cases like x > 5
-                        match self.eval_comprehension_expr(filter, item, variable) {
-                            Some(Value::Bool(true)) => true,
-                            _ => false,
-                        }
+                        matches!(
+                            self.eval_comprehension_expr(filter, item, variable),
+                            Some(Value::Bool(true))
+                        )
                     } else {
                         true
                     };

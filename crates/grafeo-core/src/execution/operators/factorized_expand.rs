@@ -363,8 +363,7 @@ impl FactorizedExpandChain {
             .map(|i| {
                 let col_type = first
                     .column(i)
-                    .map(|c| c.data_type())
-                    .unwrap_or(&LogicalType::Any)
+                    .map_or(&LogicalType::Any, |c| c.data_type())
                     .clone();
                 ValueVector::with_type(col_type)
             })

@@ -391,8 +391,7 @@ impl<Id: EntityId> PropertyStorage<Id> {
         let columns = self.columns.read();
         columns
             .get(key)
-            .map(|col| col.might_match(op, value))
-            .unwrap_or(true) // No column = assume might match (conservative)
+            .map_or(true, |col| col.might_match(op, value)) // No column = assume might match (conservative)
     }
 
     /// Gets the zone map for a property column.
@@ -416,13 +415,10 @@ impl<Id: EntityId> PropertyStorage<Id> {
         max_inclusive: bool,
     ) -> bool {
         let columns = self.columns.read();
-        columns
-            .get(key)
-            .map(|col| {
-                col.zone_map()
-                    .might_contain_range(min, max, min_inclusive, max_inclusive)
-            })
-            .unwrap_or(true) // No column = assume might match (conservative)
+        columns.get(key).map_or(true, |col| {
+            col.zone_map()
+                .might_contain_range(min, max, min_inclusive, max_inclusive)
+        }) // No column = assume might match (conservative)
     }
 
     /// Rebuilds zone maps for all columns (call after bulk removes).

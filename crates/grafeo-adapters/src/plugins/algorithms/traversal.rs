@@ -64,9 +64,7 @@ where
     let mut queue: VecDeque<NodeId> = VecDeque::new();
 
     // Check if start node exists
-    if store.get_node(start).is_none() {
-        return None;
-    }
+    store.get_node(start)?;
 
     // Discover the start node
     discovered.insert(start);
@@ -232,9 +230,7 @@ where
     let mut stack: Vec<(NodeId, Vec<(NodeId, grafeo_common::types::EdgeId)>, usize)> = Vec::new();
 
     // Check if start node exists
-    if store.get_node(start).is_none() {
-        return None;
-    }
+    store.get_node(start)?;
 
     // Discover start node
     color.insert(start, NodeColor::Gray);

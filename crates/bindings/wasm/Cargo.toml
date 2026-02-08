@@ -1,0 +1,42 @@
+[package]
+name = "grafeo-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "WebAssembly bindings for Grafeo graph database"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+grafeo-engine = { workspace = true, features = ["gql"] }
+grafeo-common.workspace = true
+
+# WASM bindings
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+
+# Better panic messages in browser console
+console_error_panic_hook = "0.1"
+
+# Serialization (for snapshot export/import)
+serde.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[features]
+default = ["gql"]
+gql = ["grafeo-engine/gql"]
+cypher = ["grafeo-engine/cypher"]
+sparql = ["grafeo-engine/sparql", "grafeo-engine/rdf"]
+gremlin = ["grafeo-engine/gremlin"]
+graphql = ["grafeo-engine/graphql"]
+full = ["gql", "cypher", "sparql", "gremlin", "graphql"]
+
+[lints]
+workspace = true

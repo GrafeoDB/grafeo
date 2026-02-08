@@ -32,11 +32,11 @@ bincode = { workspace = true, optional = true }
 
 # Concurrency
 parking_lot.workspace = true
-crossbeam.workspace = true
-rayon.workspace = true
+crossbeam = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 
-# Async
-tokio.workspace = true
+# Async (optional - used by spill module)
+tokio = { workspace = true, optional = true }
 
 # Regex
 regex.workspace = true
@@ -51,7 +51,10 @@ criterion.workspace = true
 tempfile.workspace = true
 
 [features]
-default = []
+default = ["parallel", "spill", "mmap"]
+parallel = ["rayon", "crossbeam"]  # Morsel-driven parallelism (rayon, crossbeam work-stealing)
+spill = ["tokio"]                  # Disk spilling for out-of-core execution
+mmap = []                          # File-backed vector storage (MmapStorage)
 rdf = []  # Enable RDF graph model
 tiered-storage = ["grafeo-common/tiered-storage", "bincode"]  # Enable tiered hot/cold storage
 succinct-indexes = []  # Enable succinct data structures (rank/select bitvectors, Elias-Fano, wavelet trees)

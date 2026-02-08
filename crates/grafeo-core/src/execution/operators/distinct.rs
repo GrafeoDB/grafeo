@@ -32,7 +32,7 @@ impl RowKey {
                 chunk
                     .column(col_idx)
                     .and_then(|col| col.get_value(row))
-                    .map(|v| match v {
+                    .map_or(KeyPart::Null, |v| match v {
                         Value::Null => KeyPart::Null,
                         Value::Bool(b) => KeyPart::Bool(b),
                         Value::Int64(i) => KeyPart::Int64(i),
@@ -40,7 +40,6 @@ impl RowKey {
                         Value::String(s) => KeyPart::String(s.to_string()),
                         _ => KeyPart::String(format!("{v:?}")),
                     })
-                    .unwrap_or(KeyPart::Null)
             })
             .collect();
         RowKey(parts)

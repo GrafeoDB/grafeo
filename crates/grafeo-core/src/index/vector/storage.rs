@@ -26,8 +26,12 @@
 use grafeo_common::types::NodeId;
 use parking_lot::RwLock;
 use std::collections::HashMap;
+#[cfg(feature = "mmap")]
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io;
+#[cfg(feature = "mmap")]
+use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(feature = "mmap")]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -41,6 +45,7 @@ pub enum StorageBackend {
     /// In-memory storage (fastest, highest memory usage).
     Ram,
     /// Memory-mapped file storage (low memory, fast access).
+    #[cfg(feature = "mmap")]
     Mmap {
         /// Path to the storage file.
         path: PathBuf,
@@ -180,13 +185,16 @@ impl VectorStorage for RamStorage {
 }
 
 // ============================================================================
-// Memory-Mapped Storage
+// Memory-Mapped Storage (requires filesystem - not available in WASM)
 // ============================================================================
 
+#[cfg(feature = "mmap")]
 /// File header for mmap storage.
 const MMAP_HEADER_SIZE: usize = 64;
+#[cfg(feature = "mmap")]
 const MMAP_MAGIC: [u8; 8] = *b"GRAFVEC1";
 
+#[cfg(feature = "mmap")]
 /// Memory-mapped vector storage backed by a file.
 ///
 /// Vectors are stored in a binary file format:
@@ -213,6 +221,7 @@ pub struct MmapStorage {
     cache_limit: usize,
 }
 
+#[cfg(feature = "mmap")]
 impl MmapStorage {
     /// Creates a new memory-mapped storage file.
     ///
@@ -332,6 +341,7 @@ impl MmapStorage {
     }
 }
 
+#[cfg(feature = "mmap")]
 impl VectorStorage for MmapStorage {
     fn insert(&self, id: NodeId, vector: &[f32]) -> io::Result<()> {
         debug_assert_eq!(
@@ -444,6 +454,7 @@ impl VectorStorage for MmapStorage {
     }
 }
 
+#[cfg(feature = "mmap")]
 impl std::fmt::Debug for MmapStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MmapStorage")

@@ -51,21 +51,24 @@ pub fn has_neon() -> bool {
     true // NEON is mandatory on aarch64
 }
 
-// Fallback for other architectures
+// Fallback for other architectures (wasm32, riscv, etc.)
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[inline]
+#[allow(dead_code)]
 pub fn has_avx2() -> bool {
     false
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[inline]
+#[allow(dead_code)]
 pub fn has_sse() -> bool {
     false
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[inline]
+#[allow(dead_code)]
 pub fn has_neon() -> bool {
     false
 }

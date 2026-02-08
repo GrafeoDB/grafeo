@@ -33,8 +33,8 @@ bytes.workspace = true
 # Concurrency
 parking_lot.workspace = true
 
-# Async
-tokio.workspace = true
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [features]
 default = []

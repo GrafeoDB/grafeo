@@ -140,6 +140,26 @@ jobs:
         run: cargo publish -p grafeo --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         continue-on-error: true
 
+  # Tag Go module (subdirectory modules need prefixed tags)
+  tag-go-module:
+    name: Tag Go Module
+    runs-on: ubuntu-latest
+    needs: create-release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Go module tag
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          GO_TAG="crates/bindings/go/${VERSION}"
+          COMMIT_SHA="${{ github.sha }}"
+          # Create tag via GitHub API (avoids git config/auth issues)
+          gh api "repos/${{ github.repository }}/git/refs" \
+            -f "ref=refs/tags/${GO_TAG}" \
+            -f "sha=${COMMIT_SHA}" || echo "Go tag ${GO_TAG} may already exist"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # Publish npm packages
   publish-npm:
     name: Publish to npm

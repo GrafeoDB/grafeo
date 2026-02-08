@@ -76,8 +76,10 @@ pub use project::{ProjectExpr, ProjectOperator};
 pub use push::{
     AggregatePushOperator, DistinctMaterializingOperator, DistinctPushOperator, FilterPushOperator,
     LimitPushOperator, ProjectPushOperator, SkipLimitPushOperator, SkipPushOperator,
-    SortPushOperator, SpillableAggregatePushOperator, SpillableSortPushOperator,
+    SortPushOperator,
 };
+#[cfg(feature = "spill")]
+pub use push::{SpillableAggregatePushOperator, SpillableSortPushOperator};
 pub use scan::ScanOperator;
 pub use scan_vector::VectorScanOperator;
 pub use shortest_path::ShortestPathOperator;

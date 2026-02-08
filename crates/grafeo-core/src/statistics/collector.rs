@@ -69,36 +69,29 @@ impl Statistics {
     pub fn estimate_label_cardinality(&self, label: &str) -> f64 {
         self.labels
             .get(label)
-            .map(|s| s.node_count as f64)
-            .unwrap_or(1000.0) // Default estimate if no statistics
+            .map_or(1000.0, |s| s.node_count as f64) // Default estimate if no statistics
     }
 
     /// Estimates the average degree for an edge type.
     pub fn estimate_avg_degree(&self, edge_type: &str, outgoing: bool) -> f64 {
-        self.edge_types
-            .get(edge_type)
-            .map(|s| {
-                if outgoing {
-                    s.avg_out_degree
-                } else {
-                    s.avg_in_degree
-                }
-            })
-            .unwrap_or(10.0) // Default estimate
+        self.edge_types.get(edge_type).map_or(10.0, |s| {
+            if outgoing {
+                s.avg_out_degree
+            } else {
+                s.avg_in_degree
+            }
+        }) // Default estimate
     }
 
     /// Estimates selectivity of an equality predicate.
     pub fn estimate_equality_selectivity(&self, property: &str, _value: &Value) -> f64 {
-        self.properties
-            .get(property)
-            .map(|s| {
-                if s.distinct_count > 0 {
-                    1.0 / s.distinct_count as f64
-                } else {
-                    0.5
-                }
-            })
-            .unwrap_or(0.5)
+        self.properties.get(property).map_or(0.5, |s| {
+            if s.distinct_count > 0 {
+                1.0 / s.distinct_count as f64
+            } else {
+                0.5
+            }
+        })
     }
 
     /// Estimates selectivity of a range predicate.
@@ -111,8 +104,9 @@ impl Statistics {
         self.properties
             .get(property)
             .and_then(|s| s.histogram.as_ref())
-            .map(|h| h.estimate_range_selectivity(lower, upper, true, true))
-            .unwrap_or(0.33) // Default for range predicates
+            .map_or(0.33, |h| {
+                h.estimate_range_selectivity(lower, upper, true, true)
+            }) // Default for range predicates
     }
 }
 
@@ -582,6 +576,59 @@ mod tests {
         assert_eq!(stats.node_count, 1000);
         assert_eq!(stats.avg_out_degree, 5.0);
         assert!(stats.properties.contains_key("age"));
+    }
+
+    #[test]
+    fn test_statistics_min_max_updates() {
+        // Values in decreasing then increasing order to exercise both min and max updates
+        let mut collector = StatisticsCollector::new();
+
+        collector.add(Value::Int64(50));
+        collector.add(Value::Int64(10)); // new min
+        collector.add(Value::Int64(90)); // new max
+        collector.add(Value::Int64(5)); // new min again
+        collector.add(Value::Int64(95)); // new max again
+
+        let stats = collector.build(2, 3);
+
+        assert_eq!(stats.min_value, Some(Value::Int64(5)));
+        assert_eq!(stats.max_value, Some(Value::Int64(95)));
+    }
+
+    #[test]
+    fn test_statistics_most_common_values() {
+        let mut collector = StatisticsCollector::new();
+
+        // Add values with known frequencies so MCVs are populated
+        for _ in 0..50 {
+            collector.add(Value::Int64(42));
+        }
+        for _ in 0..30 {
+            collector.add(Value::Int64(7));
+        }
+        for _ in 0..20 {
+            collector.add(Value::String("hello".into()));
+        }
+
+        let stats = collector.build(5, 3);
+
+        // Should have most_common populated with parsed Int64 and String values
+        assert!(
+            !stats.most_common.is_empty(),
+            "MCV list should be populated"
+        );
+
+        // The most frequent value should be Int64(42) at freq 0.5
+        let (top_val, top_freq) = &stats.most_common[0];
+        assert_eq!(*top_val, Value::Int64(42));
+        assert!((top_freq - 0.5).abs() < 0.01, "42 appears 50/100 = 0.5");
+
+        // Check that String values were also parsed back
+        let has_string = stats
+            .most_common
+            .iter()
+            .any(|(v, _)| matches!(v, Value::String(_)));
+        assert!(has_string, "String MCVs should be parsed back");
     }
 
     #[test]

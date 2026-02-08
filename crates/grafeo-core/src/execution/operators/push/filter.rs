@@ -141,8 +141,7 @@ impl FilterPredicate for NotNullPredicate {
         chunk
             .column(self.column)
             .and_then(|c| c.get_value(row))
-            .map(|v| !matches!(v, Value::Null))
-            .unwrap_or(false)
+            .is_some_and(|v| !matches!(v, Value::Null))
     }
 }
 

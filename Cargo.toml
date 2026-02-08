@@ -10,10 +10,11 @@ members = [
     "crates/bindings/python",
     "crates/bindings/node",
     "crates/bindings/c",
+    "crates/bindings/wasm",
 ]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.91.1"
 license = "AGPL-3.0-or-later"
@@ -22,12 +23,12 @@ authors = ["S.T. Grond"]
 description = "A pure-Rust, high-performance, embeddable graph database"
 
 [workspace.dependencies]
-# Internal crates
-grafeo-common = { path = "crates/grafeo-common", version = "0.4.1" }
-grafeo-core = { path = "crates/grafeo-core", version = "0.4.1" }
-grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.4.1" }
-grafeo-engine = { path = "crates/grafeo-engine", version = "0.4.1" }
-grafeo = { path = "crates/grafeo", version = "0.4.1" }
+# Internal crates (default-features = false to allow per-crate control)
+grafeo-common = { path = "crates/grafeo-common", version = "0.4.2" }
+grafeo-core = { path = "crates/grafeo-core", version = "0.4.2", default-features = false }
+grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.4.2", default-features = false }
+grafeo-engine = { path = "crates/grafeo-engine", version = "0.4.2", default-features = false }
+grafeo = { path = "crates/grafeo", version = "0.4.2" }
 
 # Error handling
 thiserror = "2.0"
@@ -148,9 +149,6 @@ used_underscore_binding = "allow"
 pub_underscore_fields = "allow"
 elidable_lifetime_names = "allow"
 doc_link_with_quotes = "allow"
-match_like_matches_macro = "allow"
-map_unwrap_or = "allow"
-manual_range_contains = "allow"
 manual_map = "allow"
 float_cmp = "allow"
 explicit_auto_deref = "allow"
@@ -160,8 +158,6 @@ stable_sort_primitive = "allow"
 iter_not_returning_iterator = "allow"
 unnecessary_map_or = "allow"
 while_let_loop = "allow"
-unwrap_or_default = "allow"
-question_mark = "allow"
 assigning_clones = "allow"
 io_other_error = "allow"
 manual_div_ceil = "allow"
@@ -172,7 +168,6 @@ single_match = "allow"
 match_wildcard_for_single_variants = "allow"
 map_entry = "allow"
 map_identity = "allow"
-manual_strip = "allow"
 manual_clamp = "allow"
 manual_slice_fill = "allow"
 large_enum_variant = "allow"

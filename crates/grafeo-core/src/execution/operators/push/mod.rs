@@ -21,10 +21,9 @@ mod limit;
 mod project;
 mod sort;
 
-pub use aggregate::{
-    AggregateExpr, AggregateFunction, AggregatePushOperator, DEFAULT_AGGREGATE_SPILL_THRESHOLD,
-    SpillableAggregatePushOperator,
-};
+pub use aggregate::{AggregateExpr, AggregateFunction, AggregatePushOperator};
+#[cfg(feature = "spill")]
+pub use aggregate::{DEFAULT_AGGREGATE_SPILL_THRESHOLD, SpillableAggregatePushOperator};
 pub use distinct::{DistinctMaterializingOperator, DistinctPushOperator};
 pub use filter::{
     AndPredicate, ColumnPredicate, CompareOp, FilterPredicate, FilterPushOperator,
@@ -34,7 +33,6 @@ pub use limit::{LimitPushOperator, SkipLimitPushOperator, SkipPushOperator};
 pub use project::{
     ArithOp, BinaryExpr, ColumnExpr, ConstantExpr, ProjectExpression, ProjectPushOperator,
 };
-pub use sort::{
-    DEFAULT_SPILL_THRESHOLD, NullOrder, SortDirection, SortKey, SortPushOperator,
-    SpillableSortPushOperator,
-};
+#[cfg(feature = "spill")]
+pub use sort::{DEFAULT_SPILL_THRESHOLD, SpillableSortPushOperator};
+pub use sort::{NullOrder, SortDirection, SortKey, SortPushOperator};

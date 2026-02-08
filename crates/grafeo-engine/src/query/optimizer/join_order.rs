@@ -394,11 +394,9 @@ impl<'a> DPccp<'a> {
                 let new_plan = self.build_join_plan(plan1.clone(), plan2.clone(), conditions);
 
                 // Update memo if this is a better plan
-                let should_update = self
-                    .memo
-                    .get(&s)
-                    .map(|existing| new_plan.cost.total() < existing.cost.total())
-                    .unwrap_or(true);
+                let should_update = self.memo.get(&s).map_or(true, |existing| {
+                    new_plan.cost.total() < existing.cost.total()
+                });
 
                 if should_update {
                     self.memo.insert(s, new_plan);

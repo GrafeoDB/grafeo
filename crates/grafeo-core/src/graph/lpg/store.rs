@@ -1232,10 +1232,7 @@ impl LpgStore {
         for node_id in self.node_ids() {
             if let Some(value) = self.node_properties.get(node_id, &key) {
                 let hv = HashableValue::new(value);
-                index
-                    .entry(hv)
-                    .or_insert_with(FxHashSet::default)
-                    .insert(node_id);
+                index.entry(hv).or_default().insert(node_id);
             }
         }
 
@@ -1446,9 +1443,7 @@ impl LpgStore {
 
         // Add to node_labels map
         let mut node_labels = self.node_labels.write();
-        let label_set = node_labels
-            .entry(node_id)
-            .or_insert_with(FxHashSet::default);
+        let label_set = node_labels.entry(node_id).or_default();
 
         if label_set.contains(&label_id) {
             return false; // Already has this label
@@ -2666,10 +2661,7 @@ impl LpgStore {
         let label_index = self.label_index.read();
 
         for (label_id, label_name) in id_to_label.iter().enumerate() {
-            let node_count = label_index
-                .get(label_id)
-                .map(|set| set.len() as u64)
-                .unwrap_or(0);
+            let node_count = label_index.get(label_id).map_or(0, |set| set.len() as u64);
 
             if node_count > 0 {
                 let avg_out_degree = if stats.total_nodes > 0 {
@@ -4059,5 +4051,269 @@ mod tests {
             props[0].get(&PropertyKey::new("name")),
             Some(&Value::from("Alice"))
         );
+    }
+
+    // === Range Query Tests ===
+
+    #[test]
+    fn test_find_nodes_in_range_inclusive() {
+        let store = LpgStore::new();
+
+        let n1 = store.create_node_with_props(&["Person"], [("age", Value::from(20i64))]);
+        let n2 = store.create_node_with_props(&["Person"], [("age", Value::from(30i64))]);
+        let n3 = store.create_node_with_props(&["Person"], [("age", Value::from(40i64))]);
+        let _n4 = store.create_node_with_props(&["Person"], [("age", Value::from(50i64))]);
+
+        // age >= 20 AND age <= 40 (inclusive both sides)
+        let result = store.find_nodes_in_range(
+            "age",
+            Some(&Value::from(20i64)),
+            Some(&Value::from(40i64)),
+            true,
+            true,
+        );
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&n1));
+        assert!(result.contains(&n2));
+        assert!(result.contains(&n3));
+    }
+
+    #[test]
+    fn test_find_nodes_in_range_exclusive() {
+        let store = LpgStore::new();
+
+        store.create_node_with_props(&["Person"], [("age", Value::from(20i64))]);
+        let n2 = store.create_node_with_props(&["Person"], [("age", Value::from(30i64))]);
+        store.create_node_with_props(&["Person"], [("age", Value::from(40i64))]);
+
+        // age > 20 AND age < 40 (exclusive both sides)
+        let result = store.find_nodes_in_range(
+            "age",
+            Some(&Value::from(20i64)),
+            Some(&Value::from(40i64)),
+            false,
+            false,
+        );
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&n2));
+    }
+
+    #[test]
+    fn test_find_nodes_in_range_open_ended() {
+        let store = LpgStore::new();
+
+        store.create_node_with_props(&["Person"], [("age", Value::from(20i64))]);
+        store.create_node_with_props(&["Person"], [("age", Value::from(30i64))]);
+        let n3 = store.create_node_with_props(&["Person"], [("age", Value::from(40i64))]);
+        let n4 = store.create_node_with_props(&["Person"], [("age", Value::from(50i64))]);
+
+        // age >= 35 (no upper bound)
+        let result = store.find_nodes_in_range("age", Some(&Value::from(35i64)), None, true, true);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&n3));
+        assert!(result.contains(&n4));
+
+        // age <= 25 (no lower bound)
+        let result = store.find_nodes_in_range("age", None, Some(&Value::from(25i64)), true, true);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_find_nodes_in_range_empty_result() {
+        let store = LpgStore::new();
+
+        store.create_node_with_props(&["Person"], [("age", Value::from(20i64))]);
+
+        // Range that doesn't match anything
+        let result = store.find_nodes_in_range(
+            "age",
+            Some(&Value::from(100i64)),
+            Some(&Value::from(200i64)),
+            true,
+            true,
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_find_nodes_in_range_nonexistent_property() {
+        let store = LpgStore::new();
+
+        store.create_node_with_props(&["Person"], [("age", Value::from(20i64))]);
+
+        let result = store.find_nodes_in_range(
+            "weight",
+            Some(&Value::from(50i64)),
+            Some(&Value::from(100i64)),
+            true,
+            true,
+        );
+        assert!(result.is_empty());
+    }
+
+    // === Multi-Property Query Tests ===
+
+    #[test]
+    fn test_find_nodes_by_properties_multiple_conditions() {
+        let store = LpgStore::new();
+
+        let alice = store.create_node_with_props(
+            &["Person"],
+            [("name", Value::from("Alice")), ("city", Value::from("NYC"))],
+        );
+        store.create_node_with_props(
+            &["Person"],
+            [("name", Value::from("Bob")), ("city", Value::from("NYC"))],
+        );
+        store.create_node_with_props(
+            &["Person"],
+            [("name", Value::from("Alice")), ("city", Value::from("LA"))],
+        );
+
+        // Match name="Alice" AND city="NYC"
+        let result = store.find_nodes_by_properties(&[
+            ("name", Value::from("Alice")),
+            ("city", Value::from("NYC")),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&alice));
+    }
+
+    #[test]
+    fn test_find_nodes_by_properties_empty_conditions() {
+        let store = LpgStore::new();
+
+        store.create_node(&["Person"]);
+        store.create_node(&["Person"]);
+
+        // Empty conditions should return all nodes
+        let result = store.find_nodes_by_properties(&[]);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_find_nodes_by_properties_no_match() {
+        let store = LpgStore::new();
+
+        store.create_node_with_props(&["Person"], [("name", Value::from("Alice"))]);
+
+        let result = store.find_nodes_by_properties(&[("name", Value::from("Nobody"))]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_find_nodes_by_properties_with_index() {
+        let store = LpgStore::new();
+
+        // Create index on name
+        store.create_property_index("name");
+
+        let alice = store.create_node_with_props(
+            &["Person"],
+            [("name", Value::from("Alice")), ("age", Value::from(30i64))],
+        );
+        store.create_node_with_props(
+            &["Person"],
+            [("name", Value::from("Bob")), ("age", Value::from(30i64))],
+        );
+
+        // Index should accelerate the lookup
+        let result = store.find_nodes_by_properties(&[
+            ("name", Value::from("Alice")),
+            ("age", Value::from(30i64)),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&alice));
+    }
+
+    // === Cardinality Estimation Tests ===
+
+    #[test]
+    fn test_estimate_label_cardinality() {
+        let store = LpgStore::new();
+
+        store.create_node(&["Person"]);
+        store.create_node(&["Person"]);
+        store.create_node(&["Animal"]);
+
+        store.ensure_statistics_fresh();
+
+        let person_est = store.estimate_label_cardinality("Person");
+        let animal_est = store.estimate_label_cardinality("Animal");
+        let unknown_est = store.estimate_label_cardinality("Unknown");
+
+        assert!(
+            person_est >= 1.0,
+            "Person should have cardinality >= 1, got {person_est}"
+        );
+        assert!(
+            animal_est >= 1.0,
+            "Animal should have cardinality >= 1, got {animal_est}"
+        );
+        // Unknown label should return some default (not panic)
+        assert!(unknown_est >= 0.0);
+    }
+
+    #[test]
+    fn test_estimate_avg_degree() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let c = store.create_node(&["Person"]);
+
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(a, c, "KNOWS");
+        store.create_edge(b, c, "KNOWS");
+
+        store.ensure_statistics_fresh();
+
+        let outgoing = store.estimate_avg_degree("KNOWS", true);
+        let incoming = store.estimate_avg_degree("KNOWS", false);
+
+        assert!(
+            outgoing > 0.0,
+            "Outgoing degree should be > 0, got {outgoing}"
+        );
+        assert!(
+            incoming > 0.0,
+            "Incoming degree should be > 0, got {incoming}"
+        );
+    }
+
+    // === Delete operations ===
+
+    #[test]
+    fn test_delete_node_does_not_cascade() {
+        let store = LpgStore::new();
+
+        let a = store.create_node(&["A"]);
+        let b = store.create_node(&["B"]);
+        let e = store.create_edge(a, b, "KNOWS");
+
+        assert!(store.delete_node(a));
+        assert!(store.get_node(a).is_none());
+
+        // Edges are NOT automatically deleted (non-detach delete)
+        assert!(
+            store.get_edge(e).is_some(),
+            "Edge should survive non-detach node delete"
+        );
+    }
+
+    #[test]
+    fn test_delete_already_deleted_node() {
+        let store = LpgStore::new();
+        let a = store.create_node(&["A"]);
+
+        assert!(store.delete_node(a));
+        // Second delete should return false (already deleted)
+        assert!(!store.delete_node(a));
+    }
+
+    #[test]
+    fn test_delete_nonexistent_node() {
+        let store = LpgStore::new();
+        assert!(!store.delete_node(NodeId::new(999)));
     }
 }

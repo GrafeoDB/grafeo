@@ -119,8 +119,7 @@ impl Executor {
         for col_idx in 0..col_count {
             let col_type = chunk
                 .column(col_idx)
-                .map(|col| col.data_type().clone())
-                .unwrap_or(LogicalType::Any);
+                .map_or(LogicalType::Any, |col| col.data_type().clone());
             result.column_types.push(col_type);
         }
     }

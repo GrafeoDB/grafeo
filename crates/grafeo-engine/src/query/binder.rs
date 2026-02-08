@@ -817,8 +817,7 @@ impl Binder {
                 // Look up the variable type from context
                 self.context
                     .get(name)
-                    .map(|info| info.data_type.clone())
-                    .unwrap_or(LogicalType::Any)
+                    .map_or(LogicalType::Any, |info| info.data_type.clone())
             }
             LogicalExpression::Property { .. } => LogicalType::Any, // Properties can be any type
             LogicalExpression::Literal(value) => {
@@ -1276,5 +1275,777 @@ mod tests {
         // This test documents current behavior
         // If binding fails, that's fine; if it passes, execution will handle it
         let _ = result; // We're just testing it doesn't panic
+    }
+
+    // --- Mutation operator validation ---
+
+    #[test]
+    fn test_create_edge_rejects_undefined_source() {
+        use crate::query::plan::CreateEdgeOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::CreateEdge(CreateEdgeOp {
+            variable: Some("e".to_string()),
+            from_variable: "ghost".to_string(), // not defined!
+            to_variable: "b".to_string(),
+            edge_type: "KNOWS".to_string(),
+            properties: vec![],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "b".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(
+            err.to_string().contains("Undefined variable 'ghost'"),
+            "Should reject undefined source variable, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_create_edge_rejects_undefined_target() {
+        use crate::query::plan::CreateEdgeOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::CreateEdge(CreateEdgeOp {
+            variable: None,
+            from_variable: "a".to_string(),
+            to_variable: "missing".to_string(), // not defined!
+            edge_type: "KNOWS".to_string(),
+            properties: vec![],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "a".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(
+            err.to_string().contains("Undefined variable 'missing'"),
+            "Should reject undefined target variable, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_create_edge_validates_property_expressions() {
+        use crate::query::plan::CreateEdgeOp;
+
+        // Source and target defined, but property references undefined variable
+        let plan = LogicalPlan::new(LogicalOperator::CreateEdge(CreateEdgeOp {
+            variable: Some("e".to_string()),
+            from_variable: "a".to_string(),
+            to_variable: "b".to_string(),
+            edge_type: "KNOWS".to_string(),
+            properties: vec![(
+                "since".to_string(),
+                LogicalExpression::Property {
+                    variable: "x".to_string(), // undefined!
+                    property: "year".to_string(),
+                },
+            )],
+            input: Box::new(LogicalOperator::Join(crate::query::plan::JoinOp {
+                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "b".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                join_type: crate::query::plan::JoinType::Inner,
+                conditions: vec![],
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(err.to_string().contains("Undefined variable 'x'"));
+    }
+
+    #[test]
+    fn test_set_property_rejects_undefined_variable() {
+        use crate::query::plan::SetPropertyOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::SetProperty(SetPropertyOp {
+            variable: "ghost".to_string(),
+            properties: vec![(
+                "name".to_string(),
+                LogicalExpression::Literal(grafeo_common::types::Value::String("Alice".into())),
+            )],
+            replace: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(
+            err.to_string().contains("in SET"),
+            "Error should indicate SET context, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_delete_node_rejects_undefined_variable() {
+        use crate::query::plan::DeleteNodeOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::DeleteNode(DeleteNodeOp {
+            variable: "phantom".to_string(),
+            detach: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(err.to_string().contains("Undefined variable 'phantom'"));
+    }
+
+    #[test]
+    fn test_delete_edge_rejects_undefined_variable() {
+        use crate::query::plan::DeleteEdgeOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::DeleteEdge(DeleteEdgeOp {
+            variable: "gone".to_string(),
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(err.to_string().contains("Undefined variable 'gone'"));
+    }
+
+    // --- WITH/Project clause ---
+
+    #[test]
+    fn test_project_alias_becomes_available_downstream() {
+        use crate::query::plan::{ProjectOp, Projection};
+
+        // WITH n.name AS person_name RETURN person_name
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("person_name".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Project(ProjectOp {
+                projections: vec![Projection {
+                    expression: LogicalExpression::Property {
+                        variable: "n".to_string(),
+                        property: "name".to_string(),
+                    },
+                    alias: Some("person_name".to_string()),
+                }],
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(
+            ctx.contains("person_name"),
+            "WITH alias should be available to RETURN"
+        );
+    }
+
+    #[test]
+    fn test_project_rejects_undefined_expression() {
+        use crate::query::plan::{ProjectOp, Projection};
+
+        let plan = LogicalPlan::new(LogicalOperator::Project(ProjectOp {
+            projections: vec![Projection {
+                expression: LogicalExpression::Variable("nope".to_string()),
+                alias: Some("x".to_string()),
+            }],
+            input: Box::new(LogicalOperator::Empty),
+        }));
+
+        let mut binder = Binder::new();
+        let result = binder.bind(&plan);
+        assert!(result.is_err(), "WITH on undefined variable should fail");
+    }
+
+    // --- UNWIND ---
+
+    #[test]
+    fn test_unwind_adds_element_variable() {
+        use crate::query::plan::UnwindOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("item".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Unwind(UnwindOp {
+                expression: LogicalExpression::List(vec![
+                    LogicalExpression::Literal(grafeo_common::types::Value::Int64(1)),
+                    LogicalExpression::Literal(grafeo_common::types::Value::Int64(2)),
+                ]),
+                variable: "item".to_string(),
+                input: Box::new(LogicalOperator::Empty),
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("item"), "UNWIND variable should be in scope");
+        let info = ctx.get("item").unwrap();
+        assert!(
+            !info.is_node && !info.is_edge,
+            "UNWIND variable is not a graph element"
+        );
+    }
+
+    // --- MERGE ---
+
+    #[test]
+    fn test_merge_adds_variable_and_validates_properties() {
+        use crate::query::plan::MergeOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("m".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Merge(MergeOp {
+                variable: "m".to_string(),
+                labels: vec!["Person".to_string()],
+                match_properties: vec![(
+                    "name".to_string(),
+                    LogicalExpression::Literal(grafeo_common::types::Value::String("Alice".into())),
+                )],
+                on_create: vec![(
+                    "created".to_string(),
+                    LogicalExpression::Literal(grafeo_common::types::Value::Bool(true)),
+                )],
+                on_match: vec![(
+                    "updated".to_string(),
+                    LogicalExpression::Literal(grafeo_common::types::Value::Bool(true)),
+                )],
+                input: Box::new(LogicalOperator::Empty),
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("m"));
+        assert!(
+            ctx.get("m").unwrap().is_node,
+            "MERGE variable should be a node"
+        );
+    }
+
+    #[test]
+    fn test_merge_rejects_undefined_in_on_create() {
+        use crate::query::plan::MergeOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::Merge(MergeOp {
+            variable: "m".to_string(),
+            labels: vec![],
+            match_properties: vec![],
+            on_create: vec![(
+                "name".to_string(),
+                LogicalExpression::Property {
+                    variable: "other".to_string(), // undefined!
+                    property: "name".to_string(),
+                },
+            )],
+            on_match: vec![],
+            input: Box::new(LogicalOperator::Empty),
+        }));
+
+        let mut binder = Binder::new();
+        let result = binder.bind(&plan);
+        assert!(
+            result.is_err(),
+            "ON CREATE referencing undefined variable should fail"
+        );
+    }
+
+    // --- ShortestPath ---
+
+    #[test]
+    fn test_shortest_path_rejects_undefined_source() {
+        use crate::query::plan::{ExpandDirection, ShortestPathOp};
+
+        let plan = LogicalPlan::new(LogicalOperator::ShortestPath(ShortestPathOp {
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "b".to_string(),
+                label: None,
+                input: None,
+            })),
+            source_var: "missing".to_string(), // not defined
+            target_var: "b".to_string(),
+            edge_type: None,
+            direction: ExpandDirection::Both,
+            path_alias: "p".to_string(),
+            all_paths: false,
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(
+            err.to_string().contains("source in shortestPath"),
+            "Error should mention shortestPath source context, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_shortest_path_adds_path_and_length_variables() {
+        use crate::query::plan::{ExpandDirection, JoinOp, JoinType, ShortestPathOp};
+
+        let plan = LogicalPlan::new(LogicalOperator::ShortestPath(ShortestPathOp {
+            input: Box::new(LogicalOperator::Join(JoinOp {
+                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "b".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                join_type: JoinType::Cross,
+                conditions: vec![],
+            })),
+            source_var: "a".to_string(),
+            target_var: "b".to_string(),
+            edge_type: Some("ROAD".to_string()),
+            direction: ExpandDirection::Outgoing,
+            path_alias: "p".to_string(),
+            all_paths: false,
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("p"), "Path alias should be bound");
+        assert!(
+            ctx.contains("_path_length_p"),
+            "Path length variable should be auto-created"
+        );
+    }
+
+    // --- Expression validation edge cases ---
+
+    #[test]
+    fn test_case_expression_validates_all_branches() {
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Case {
+                    operand: None,
+                    when_clauses: vec![
+                        (
+                            LogicalExpression::Binary {
+                                left: Box::new(LogicalExpression::Property {
+                                    variable: "n".to_string(),
+                                    property: "age".to_string(),
+                                }),
+                                op: BinaryOp::Gt,
+                                right: Box::new(LogicalExpression::Literal(
+                                    grafeo_common::types::Value::Int64(18),
+                                )),
+                            },
+                            LogicalExpression::Literal(grafeo_common::types::Value::String(
+                                "adult".into(),
+                            )),
+                        ),
+                        (
+                            // This branch references undefined variable
+                            LogicalExpression::Property {
+                                variable: "ghost".to_string(),
+                                property: "flag".to_string(),
+                            },
+                            LogicalExpression::Literal(grafeo_common::types::Value::String(
+                                "flagged".into(),
+                            )),
+                        ),
+                    ],
+                    else_clause: Some(Box::new(LogicalExpression::Literal(
+                        grafeo_common::types::Value::String("other".into()),
+                    ))),
+                },
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(
+            err.to_string().contains("ghost"),
+            "CASE should validate all when-clause conditions"
+        );
+    }
+
+    #[test]
+    fn test_case_expression_validates_else_clause() {
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Case {
+                    operand: None,
+                    when_clauses: vec![(
+                        LogicalExpression::Literal(grafeo_common::types::Value::Bool(true)),
+                        LogicalExpression::Literal(grafeo_common::types::Value::Int64(1)),
+                    )],
+                    else_clause: Some(Box::new(LogicalExpression::Property {
+                        variable: "missing".to_string(),
+                        property: "x".to_string(),
+                    })),
+                },
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(
+            err.to_string().contains("missing"),
+            "CASE ELSE should validate its expression too"
+        );
+    }
+
+    #[test]
+    fn test_slice_access_validates_expressions() {
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::SliceAccess {
+                    base: Box::new(LogicalExpression::Variable("n".to_string())),
+                    start: Some(Box::new(LogicalExpression::Variable(
+                        "undefined_start".to_string(),
+                    ))),
+                    end: None,
+                },
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(err.to_string().contains("undefined_start"));
+    }
+
+    #[test]
+    fn test_list_comprehension_validates_list_source() {
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::ListComprehension {
+                    variable: "x".to_string(),
+                    list_expr: Box::new(LogicalExpression::Variable("not_defined".to_string())),
+                    filter_expr: None,
+                    map_expr: Box::new(LogicalExpression::Variable("x".to_string())),
+                },
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(
+            err.to_string().contains("not_defined"),
+            "List comprehension should validate source list expression"
+        );
+    }
+
+    #[test]
+    fn test_labels_type_id_reject_undefined() {
+        // labels(x) where x is not defined
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Labels("x".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+
+        let mut binder = Binder::new();
+        assert!(
+            binder.bind(&plan).is_err(),
+            "labels(x) on undefined x should fail"
+        );
+
+        // type(e) where e is not defined
+        let plan2 = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Type("e".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+
+        let mut binder2 = Binder::new();
+        assert!(
+            binder2.bind(&plan2).is_err(),
+            "type(e) on undefined e should fail"
+        );
+
+        // id(n) where n is not defined
+        let plan3 = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Id("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+
+        let mut binder3 = Binder::new();
+        assert!(
+            binder3.bind(&plan3).is_err(),
+            "id(n) on undefined n should fail"
+        );
+    }
+
+    #[test]
+    fn test_expand_rejects_non_node_source() {
+        use crate::query::plan::{ExpandDirection, ExpandOp, UnwindOp};
+
+        // UNWIND [1,2] AS x  -- x is not a node
+        // MATCH (x)-[:E]->(b)  -- should fail: x isn't a node
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("b".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Expand(ExpandOp {
+                from_variable: "x".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_type: None,
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(LogicalOperator::Unwind(UnwindOp {
+                    expression: LogicalExpression::List(vec![]),
+                    variable: "x".to_string(),
+                    input: Box::new(LogicalOperator::Empty),
+                })),
+                path_alias: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(
+            err.to_string().contains("not a node"),
+            "Expanding from non-node should fail, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_add_label_rejects_undefined_variable() {
+        use crate::query::plan::AddLabelOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::AddLabel(AddLabelOp {
+            variable: "missing".to_string(),
+            labels: vec!["Admin".to_string()],
+            input: Box::new(LogicalOperator::Empty),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(err.to_string().contains("SET labels"));
+    }
+
+    #[test]
+    fn test_remove_label_rejects_undefined_variable() {
+        use crate::query::plan::RemoveLabelOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::RemoveLabel(RemoveLabelOp {
+            variable: "missing".to_string(),
+            labels: vec!["Admin".to_string()],
+            input: Box::new(LogicalOperator::Empty),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(err.to_string().contains("REMOVE labels"));
+    }
+
+    #[test]
+    fn test_sort_validates_key_expressions() {
+        use crate::query::plan::{SortKey, SortOp, SortOrder};
+
+        let plan = LogicalPlan::new(LogicalOperator::Sort(SortOp {
+            keys: vec![SortKey {
+                expression: LogicalExpression::Property {
+                    variable: "missing".to_string(),
+                    property: "name".to_string(),
+                },
+                order: SortOrder::Ascending,
+            }],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        assert!(
+            binder.bind(&plan).is_err(),
+            "ORDER BY on undefined variable should fail"
+        );
+    }
+
+    #[test]
+    fn test_create_node_adds_variable_before_property_validation() {
+        use crate::query::plan::CreateNodeOp;
+
+        // CREATE (n:Person {friend: n.name}) - referencing the node being created
+        // The variable should be available for property expressions (self-reference)
+        let plan = LogicalPlan::new(LogicalOperator::CreateNode(CreateNodeOp {
+            variable: "n".to_string(),
+            labels: vec!["Person".to_string()],
+            properties: vec![(
+                "self_ref".to_string(),
+                LogicalExpression::Property {
+                    variable: "n".to_string(),
+                    property: "name".to_string(),
+                },
+            )],
+            input: None,
+        }));
+
+        let mut binder = Binder::new();
+        // This should succeed because CreateNode adds the variable before validating properties
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.get("n").unwrap().is_node);
+    }
+
+    #[test]
+    fn test_undefined_variable_suggests_similar() {
+        // 'person' is defined, user types 'persn' - should get a suggestion
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("persn".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "person".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        let msg = err.to_string();
+        // The error should contain the variable name at minimum
+        assert!(
+            msg.contains("persn"),
+            "Error should mention the undefined variable"
+        );
+    }
+
+    #[test]
+    fn test_anon_variables_skip_validation() {
+        // Variables starting with _anon_ are anonymous and should be silently accepted
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("_anon_42".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+
+        let mut binder = Binder::new();
+        let result = binder.bind(&plan);
+        assert!(
+            result.is_ok(),
+            "Anonymous variables should bypass validation"
+        );
+    }
+
+    #[test]
+    fn test_map_expression_validates_values() {
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Map(vec![(
+                    "key".to_string(),
+                    LogicalExpression::Variable("undefined".to_string()),
+                )]),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+
+        let mut binder = Binder::new();
+        assert!(
+            binder.bind(&plan).is_err(),
+            "Map values should be validated"
+        );
+    }
+
+    #[test]
+    fn test_vector_scan_validates_query_vector() {
+        use crate::query::plan::VectorScanOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::VectorScan(VectorScanOp {
+            variable: "result".to_string(),
+            index_name: None,
+            property: "embedding".to_string(),
+            label: Some("Doc".to_string()),
+            query_vector: LogicalExpression::Variable("undefined_vec".to_string()),
+            k: 10,
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            input: None,
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        assert!(err.to_string().contains("undefined_vec"));
     }
 }

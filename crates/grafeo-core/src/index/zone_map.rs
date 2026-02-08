@@ -371,8 +371,7 @@ impl ZoneMapIndex {
         chunk_ids.filter(move |&id| {
             self.entries
                 .get(&id)
-                .map(|e| e.might_contain_equal(value))
-                .unwrap_or(true) // No zone map = assume might contain
+                .map_or(true, |e| e.might_contain_equal(value)) // No zone map = assume might contain
         })
     }
 
@@ -386,10 +385,9 @@ impl ZoneMapIndex {
         chunk_ids: impl Iterator<Item = u64> + 'a,
     ) -> impl Iterator<Item = u64> + 'a {
         chunk_ids.filter(move |&id| {
-            self.entries
-                .get(&id)
-                .map(|e| e.might_contain_range(lower, upper, lower_inclusive, upper_inclusive))
-                .unwrap_or(true)
+            self.entries.get(&id).map_or(true, |e| {
+                e.might_contain_range(lower, upper, lower_inclusive, upper_inclusive)
+            })
         })
     }
 

@@ -630,7 +630,7 @@ impl GroupKey {
                 chunk
                     .column(col_idx)
                     .and_then(|col| col.get_value(row))
-                    .map(|v| match v {
+                    .map_or(GroupKeyPart::Null, |v| match v {
                         Value::Null => GroupKeyPart::Null,
                         Value::Bool(b) => GroupKeyPart::Bool(b),
                         Value::Int64(i) => GroupKeyPart::Int64(i),
@@ -638,7 +638,6 @@ impl GroupKey {
                         Value::String(s) => GroupKeyPart::String(s.to_string()),
                         _ => GroupKeyPart::String(format!("{v:?}")),
                     })
-                    .unwrap_or(GroupKeyPart::Null)
             })
             .collect();
         GroupKey(parts)

@@ -33,9 +33,6 @@ bytes.workspace = true
 # Concurrency
 parking_lot.workspace = true
 
-# Async
-tokio.workspace = true
-
 [features]
 default = []
 tiered-storage = []

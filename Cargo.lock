@@ -704,7 +704,6 @@ dependencies = [
  "serde",
  "smallvec",
  "thiserror",
- "tokio",
 ]
 
 [[package]]

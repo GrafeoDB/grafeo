@@ -30,6 +30,10 @@ gremlin = ["grafeo-engine/gremlin"]
 graphql = ["grafeo-engine/graphql"]
 full = ["gql", "cypher", "sparql", "gremlin", "graphql"]
 
+# Platform capabilities (enabled by default via grafeo-engine defaults)
+parallel = ["grafeo-engine/parallel"]
+wal = ["grafeo-engine/wal"]
+
 # Enable platform-optimized memory allocator (10-20% faster allocations)
 jemalloc = ["tikv-jemallocator"]
 mimalloc-allocator = ["mimalloc"]

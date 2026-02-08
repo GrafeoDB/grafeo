@@ -466,10 +466,10 @@ impl LpgStore {
 
         // Update props_count in record
         let count = self.node_properties.get_all(id).len() as u16;
-        if let Some(chain) = self.nodes.write().get_mut(&id) {
-            if let Some(record) = chain.latest_mut() {
-                record.props_count = count;
-            }
+        if let Some(chain) = self.nodes.write().get_mut(&id)
+            && let Some(record) = chain.latest_mut()
+        {
+            record.props_count = count;
         }
 
         id
@@ -854,10 +854,10 @@ impl LpgStore {
 
         // Update props_count in record
         let count = self.node_properties.get_all(id).len() as u16;
-        if let Some(chain) = self.nodes.write().get_mut(&id) {
-            if let Some(record) = chain.latest_mut() {
-                record.props_count = count;
-            }
+        if let Some(chain) = self.nodes.write().get_mut(&id)
+            && let Some(record) = chain.latest_mut()
+        {
+            record.props_count = count;
         }
     }
 
@@ -895,10 +895,10 @@ impl LpgStore {
 
         // Update props_count in record
         let count = self.node_properties.get_all(id).len() as u16;
-        if let Some(chain) = self.nodes.write().get_mut(&id) {
-            if let Some(record) = chain.latest_mut() {
-                record.props_count = count;
-            }
+        if let Some(chain) = self.nodes.write().get_mut(&id)
+            && let Some(record) = chain.latest_mut()
+        {
+            record.props_count = count;
         }
 
         result
@@ -1384,9 +1384,7 @@ impl LpgStore {
 
         // Add to node_labels map
         let mut node_labels = self.node_labels.write();
-        let label_set = node_labels
-            .entry(node_id)
-            .or_insert_with(FxHashSet::default);
+        let label_set = node_labels.entry(node_id).or_default();
 
         if label_set.contains(&label_id) {
             return false; // Already has this label
@@ -1403,11 +1401,11 @@ impl LpgStore {
         index[label_id as usize].insert(node_id, ());
 
         // Update label count in node record
-        if let Some(chain) = self.nodes.write().get_mut(&node_id) {
-            if let Some(record) = chain.latest_mut() {
-                let count = self.node_labels.read().get(&node_id).map_or(0, |s| s.len());
-                record.set_label_count(count as u16);
-            }
+        if let Some(chain) = self.nodes.write().get_mut(&node_id)
+            && let Some(record) = chain.latest_mut()
+        {
+            let count = self.node_labels.read().get(&node_id).map_or(0, |s| s.len());
+            record.set_label_count(count as u16);
         }
 
         true
@@ -1511,11 +1509,11 @@ impl LpgStore {
         }
 
         // Update label count in node record
-        if let Some(chain) = self.nodes.write().get_mut(&node_id) {
-            if let Some(record) = chain.latest_mut() {
-                let count = self.node_labels.read().get(&node_id).map_or(0, |s| s.len());
-                record.set_label_count(count as u16);
-            }
+        if let Some(chain) = self.nodes.write().get_mut(&node_id)
+            && let Some(record) = chain.latest_mut()
+        {
+            let count = self.node_labels.read().get(&node_id).map_or(0, |s| s.len());
+            record.set_label_count(count as u16);
         }
 
         true
@@ -2596,10 +2594,7 @@ impl LpgStore {
         let label_index = self.label_index.read();
 
         for (label_id, label_name) in id_to_label.iter().enumerate() {
-            let node_count = label_index
-                .get(label_id)
-                .map(|set| set.len() as u64)
-                .unwrap_or(0);
+            let node_count = label_index.get(label_id).map_or(0, |set| set.len() as u64);
 
             if node_count > 0 {
                 // Estimate average degree
@@ -2623,10 +2618,10 @@ impl LpgStore {
 
         let mut edge_type_counts: FxHashMap<u32, u64> = FxHashMap::default();
         for chain in edges.values() {
-            if let Some(record) = chain.visible_at(epoch) {
-                if !record.is_deleted() {
-                    *edge_type_counts.entry(record.type_id).or_default() += 1;
-                }
+            if let Some(record) = chain.visible_at(epoch)
+                && !record.is_deleted()
+            {
+                *edge_type_counts.entry(record.type_id).or_default() += 1;
             }
         }
 

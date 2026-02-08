@@ -1,6 +1,6 @@
 ---
 title: Crate Structure
-description: The seven crates that make up Grafeo.
+description: The crates that make up Grafeo.
 tags:
   - architecture
   - crates
@@ -8,7 +8,7 @@ tags:
 
 # Crate Structure
 
-Grafeo is organized into seven crates with clear responsibilities.
+Grafeo is organized into core library crates and language binding crates.
 
 ## Dependency Graph
 
@@ -20,6 +20,9 @@ graph BT
     ENGINE[grafeo-engine]
     GRAFEO[grafeo]
     PYTHON[grafeo-python]
+    NODE[grafeo-node]
+    CFFI[grafeo-c]
+    WASM[grafeo-wasm]
     CLI[grafeo-cli]
 
     CORE --> COMMON
@@ -30,6 +33,9 @@ graph BT
     ENGINE --> ADAPTERS
     GRAFEO --> ENGINE
     PYTHON --> ENGINE
+    NODE --> ENGINE
+    CFFI --> ENGINE
+    WASM --> ENGINE
     CLI --> ENGINE
 ```
 

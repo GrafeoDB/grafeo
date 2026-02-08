@@ -117,11 +117,11 @@ CREATE VECTOR INDEX movie_embeddings ON :Movie(embedding)
 
 *Reach more developers*
 
-### New Bindings (Experimental)
+### New Bindings
 
-- **Node.js / TypeScript** (`@grafeo-db/js`) - native bindings with full type definitions
-- **WebAssembly** (`@grafeo-db/wasm`) - raw WASM binary for edge runtimes
-- **Go** - CGO bindings for cloud-native applications
+- **Node.js / TypeScript** (`@grafeo-db/js`) - native bindings via napi-rs with full type definitions (0.4.0)
+- **Go** (`github.com/GrafeoDB/grafeo/crates/bindings/go`) - CGO bindings with C FFI layer for cloud-native applications (0.4.1)
+- **WebAssembly** (`@grafeo-db/wasm`) - feature-gated platform code, wasm-bindgen bindings, 660 KB gzipped (0.4.2)
 
 ### Ecosystem Integration
 

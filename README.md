@@ -3,6 +3,8 @@
 [![codecov](https://codecov.io/gh/GrafeoDB/grafeo/graph/badge.svg)](https://codecov.io/gh/GrafeoDB/grafeo)
 [![Crates.io](https://img.shields.io/crates/v/grafeo.svg)](https://crates.io/crates/grafeo)
 [![PyPI](https://img.shields.io/pypi/v/grafeo.svg)](https://pypi.org/project/grafeo/)
+[![npm](https://img.shields.io/npm/v/@grafeo-db/js.svg)](https://www.npmjs.com/package/@grafeo-db/js)
+[![Go Reference](https://pkg.go.dev/badge/github.com/GrafeoDB/grafeo/crates/bindings/go.svg)](https://pkg.go.dev/github.com/GrafeoDB/grafeo/crates/bindings/go)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.91.1-blue)](https://www.rust-lang.org)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
@@ -18,7 +20,7 @@ Grafeo is a pure-Rust, high-performance graph database that can be embedded as a
 - **Dual data model support**: LPG and RDF with optimized storage for each
 - **Multi-language queries**: GQL, Cypher, Gremlin, GraphQL, and SPARQL
 - Embeddable with zero external dependencies
-- Python bindings via PyO3, Node.js/TypeScript bindings via napi-rs
+- **Multi-language bindings**: Python (PyO3), Node.js/TypeScript (napi-rs), Go (CGO), WebAssembly (wasm-bindgen)
 - In-memory and persistent storage modes
 - MVCC transactions with snapshot isolation
 
@@ -86,6 +88,18 @@ cargo add grafeo --no-default-features --features gql,cypher
 
 ```bash
 npm install @grafeo-db/js
+```
+
+### Go
+
+```bash
+go get github.com/GrafeoDB/grafeo/crates/bindings/go
+```
+
+### WebAssembly
+
+```bash
+npm install @grafeo-db/wasm
 ```
 
 ### Python

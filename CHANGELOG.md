@@ -56,7 +56,7 @@ _Node.js/TypeScript Bindings, Vector Support & Code Quality_
 
 - **Node.js/TypeScript bindings** (`@grafeo-db/js`) via napi-rs: full CRUD, async queries (GQL/Cypher/Gremlin/GraphQL/SPARQL), transactions, type mapping, TypeScript definitions, 67 integration tests
 - **Python vector support**: `list[float]` auto-converts to native vectors; `grafeo.vector()` constructor; `cosine_similarity()`, `euclidean_distance()`, `dot_product()`, `manhattan_distance()` in GQL; `create_vector_index()` with HNSW tuning params (m, ef_construction); `vector_search()` for programmatic k-NN
-- **Python transaction isolation**: `begin_transaction()` accepts `isolation_level` parameter — `"read_committed"`, `"snapshot"` (default), or `"serializable"`
+- **Python transaction isolation**: `begin_transaction()` accepts `isolation_level` parameter: `"read_committed"`, `"snapshot"` (default), or `"serializable"`
 - **Batch vector APIs**: `batch_create_nodes()` and `batch_vector_search()` for Python and Node.js
 - **Node.js vector APIs**: `createVectorIndex()`, `vectorSearch()`, `batchCreateNodes()`, `batchVectorSearch()` for full vector parity with Python
 - Node.js CI testing across 3 OS × 3 Node.js versions (18, 20, 22)

@@ -5,7 +5,7 @@ A pure-Rust, high-performance, embeddable graph database supporting both **Label
 - **Dual data model support**: LPG and RDF with optimized storage for each
 - **Multi-language queries**: GQL, Cypher, Gremlin, GraphQL, and SPARQL (all enabled by default)
 - Embeddable with zero external dependencies
-- Python bindings via PyO3
+- Multi-language bindings: Python (PyO3), Node.js (napi-rs), Go (CGO), WebAssembly (wasm-bindgen)
 - In-memory and persistent storage modes
 - MVCC transactions with snapshot isolation
 

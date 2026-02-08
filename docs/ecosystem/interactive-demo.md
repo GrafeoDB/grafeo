@@ -28,7 +28,7 @@ await micropip.install(["anywidget-graph", "anywidget-vector"])
 
 The [anywidget-graph](anywidget-graph.md) widget renders interactive graph visualizations powered by **Sigma.js**. Nodes are laid out automatically and you can pan, zoom, and click to inspect them.
 
-The example below builds a small social network with people and companies, connected by `KNOWS` and `WORKS_AT` relationships -- the same dataset used in Grafeo's [graph visualization example](https://github.com/GrafeoDB/grafeo/blob/main/examples/graph_visualization.py).
+The example below builds a small social network with people and companies, connected by `KNOWS` and `WORKS_AT` relationships, the same dataset used in Grafeo's [graph visualization example](https://github.com/GrafeoDB/grafeo/blob/main/examples/graph_visualization.py).
 
 Drag to pan, scroll to zoom, click a node to select it.
 
@@ -103,7 +103,7 @@ graph_widget
 
 ## Vector Widget
 
-The [anywidget-vector](anywidget-vector.md) widget provides interactive **3D point cloud** visualization powered by **Three.js**. Orbit, pan, and zoom to explore vector spaces -- useful for exploring embeddings, search results, and high-dimensional data.
+The [anywidget-vector](anywidget-vector.md) widget provides interactive **3D point cloud** visualization powered by **Three.js**. Orbit, pan, and zoom to explore vector spaces, useful for exploring embeddings, search results, and high-dimensional data.
 
 The example below shows clustered vectors that you might get from a vector similarity search, with three distinct groups colored by category.
 
@@ -175,4 +175,4 @@ vector_widget
 These demos use the [mkdocs-marimo](https://github.com/marimo-team/mkdocs-marimo) plugin.
 Each `python {marimo}` code block is executed client-side via [Pyodide](https://pyodide.org) (Python compiled to WebAssembly). The anywidget framework bridges the Python widget state to the JavaScript renderers (Sigma.js / Three.js) that run natively in the browser.
 
-Since everything runs in your browser, there is **no backend server** -- making it ideal for static documentation sites hosted on GitHub Pages.
+Since everything runs in your browser, there is **no backend server**, making it ideal for static documentation sites hosted on GitHub Pages.

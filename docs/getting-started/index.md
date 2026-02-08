@@ -15,7 +15,7 @@ Welcome to Grafeo! This guide will help you get started with the high-performanc
 
     ---
 
-    Install Grafeo for Python or Rust in your project.
+    Install Grafeo for Python, Node.js, Go, Rust, or WebAssembly.
 
     [:octicons-arrow-right-24: Installation Guide](installation.md)
 
@@ -52,9 +52,19 @@ Welcome to Grafeo! This guide will help you get started with the high-performanc
 - Python 3.12 or later
 - uv (or pip) package manager
 
+### For Node.js Users
+
+- Node.js 20 or later
+- npm package manager
+
+### For Go Users
+
+- Go 1.22 or later
+- C compiler (for CGO)
+
 ### For Rust Users
 
-- Rust 1.85.0 or later
+- Rust 1.91.1 or later
 - Cargo package manager
 
 ## What's Next?

@@ -9,7 +9,7 @@ tags:
 
 # Command-Line Interface
 
-Grafeo provides command-line tools for database administration. The CLI is designed for operators and DevOps — use the Python API for application logic, CLI for inspection and maintenance.
+Grafeo provides command-line tools for database administration. The CLI is designed for operators and DevOps: use the Python API for application logic, CLI for inspection and maintenance.
 
 ## Two CLI Options
 

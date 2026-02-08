@@ -1,11 +1,11 @@
 ---
 title: Installation
-description: Install Grafeo for Python or Rust.
+description: Install Grafeo for Python, Node.js, Go, Rust, or WebAssembly.
 ---
 
 # Installation
 
-Grafeo can be used from both Python and Rust. Choose the installation method for your preferred language.
+Grafeo supports Python, Node.js/TypeScript, Go, Rust, and WebAssembly. Choose the installation method for your preferred language.
 
 ## Python
 
@@ -46,6 +46,61 @@ print("Grafeo installed successfully!")
 | macOS    | arm64 (M1/M2)| :material-check: Full |
 | Windows  | x86_64       | :material-check: Full |
 
+## Node.js / TypeScript
+
+```bash
+npm install @grafeo-db/js
+```
+
+### Verify Installation
+
+```js
+const { GrafeoDB } = require('@grafeo-db/js');
+
+const db = await GrafeoDB.create();
+console.log('Grafeo installed successfully!');
+await db.close();
+```
+
+## Go
+
+```bash
+go get github.com/GrafeoDB/grafeo/crates/bindings/go
+```
+
+### Verify Installation
+
+```go
+package main
+
+import (
+    "fmt"
+    grafeo "github.com/GrafeoDB/grafeo/crates/bindings/go"
+)
+
+func main() {
+    db, _ := grafeo.OpenInMemory()
+    defer db.Close()
+    fmt.Println("Grafeo installed successfully!")
+}
+```
+
+## WebAssembly
+
+```bash
+npm install @grafeo-db/wasm
+```
+
+### Verify Installation
+
+```js
+import init, { Database } from '@grafeo-db/wasm';
+
+await init();
+const db = new Database();
+console.log('Grafeo WASM installed successfully!');
+```
+
 ## Rust
 
 ### Using Cargo
@@ -60,7 +115,7 @@ Or add it manually to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-grafeo = "0.2"
+grafeo = "0.4"
 ```
 
 ### Feature Flags
@@ -70,10 +125,10 @@ All query languages are enabled by default. To use a minimal build:
 ```toml
 [dependencies]
 # Default: all query languages enabled
-grafeo = "0.2"
+grafeo = "0.4"
 
 # Minimal: only specific languages
-grafeo = { version = "0.1", default-features = false, features = ["gql"] }
+grafeo = { version = "0.4", default-features = false, features = ["gql"] }
 ```
 
 | Feature | Description |
@@ -118,6 +173,20 @@ cargo build --workspace --release
 cd crates/bindings/python
 uv add maturin
 maturin develop --release
+```
+
+### Build Node.js Package
+
+```bash
+cd crates/bindings/node
+npm install
+npm run build
+```
+
+### Build WASM Package
+
+```bash
+wasm-pack build crates/bindings/wasm --target web --release
 ```
 
 ## Next Steps

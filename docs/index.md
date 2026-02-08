@@ -1,6 +1,6 @@
 ---
 title: Grafeo - High-Performance Graph Database
-description: A pure-Rust, embeddable graph database with Python bindings using GQL (ISO standard) query language.
+description: A pure-Rust, embeddable graph database with Python, Node.js, Go, and WebAssembly bindings using GQL (ISO standard) query language.
 hide:
   - navigation
   - toc
@@ -71,11 +71,11 @@ hide:
 
     Full ACID compliance with MVCC-based snapshot isolation. Reliable transactions for production workloads.
 
--   :fontawesome-brands-python:{ .lg .middle } **Python Bindings**
+-   :material-language-python:{ .lg .middle } **Multi-Language Bindings**
 
     ---
 
-    First-class Python support via PyO3. Use Grafeo from Python with a Pythonic API that feels natural.
+    Python (PyO3), Node.js/TypeScript (napi-rs), Go (CGO), and WebAssembly (wasm-bindgen). Use Grafeo from your language of choice.
 
 -   :material-notebook:{ .lg .middle } **Notebook Widgets**
 
@@ -259,17 +259,28 @@ Choose the query language that fits your needs:
     uv add grafeo
     ```
 
+=== "Node.js"
+
+    ```bash
+    npm install @grafeo-db/js
+    ```
+
+=== "Go"
+
+    ```bash
+    go get github.com/GrafeoDB/grafeo/crates/bindings/go
+    ```
+
 === "Rust"
 
     ```bash
     cargo add grafeo
     ```
 
-    Or add to your `Cargo.toml`:
+=== "WASM"
 
-    ```toml
-    [dependencies]
-    grafeo = "0.2"
+    ```bash
+    npm install @grafeo-db/wasm
     ```
 
 ---

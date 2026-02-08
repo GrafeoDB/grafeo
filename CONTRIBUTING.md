@@ -53,11 +53,13 @@ See [ARCHITECTURE.md](.claude/ARCHITECTURE.md) for the full picture. The short v
 | `grafeo-engine` | Database facade, sessions, transactions |
 | `grafeo-python` | Python bindings (PyO3) |
 | `grafeo-node` | Node.js bindings (napi-rs) |
+| `grafeo-c` | C FFI layer for Go bindings |
+| `grafeo-wasm` | WebAssembly bindings (wasm-bindgen) |
 | `grafeo-cli` | CLI tool |
 
 ## Code Style
 
-- Standard Rust conventions — `rustfmt` and `clippy` are enforced in CI
+- Standard Rust conventions: `rustfmt` and `clippy` are enforced in CI
 - Use `thiserror` for error types
 - Tests go in the same file under `#[cfg(test)]`
 - Descriptive test names: `test_<function>_<scenario>`

@@ -92,7 +92,7 @@ rustc-hash = "2.1"
 
 # Vector index support
 ordered-float = "5.0"
-rand = "0.9"
+rand = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

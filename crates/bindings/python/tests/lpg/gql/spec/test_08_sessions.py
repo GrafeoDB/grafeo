@@ -136,7 +136,7 @@ class TestSessionManagement:
 
     def test_session_set_schema(self, db):
         """SESSION SET SCHEMA name via db.execute."""
-        db.execute("CREATE SCHEMA my_ns")
+        db.execute("CREATE GRAPH my_ns")
         db.execute("SESSION SET SCHEMA my_ns")
 
     def test_session_set_parameter(self, db):

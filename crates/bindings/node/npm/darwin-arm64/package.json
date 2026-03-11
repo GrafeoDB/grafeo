@@ -1,6 +1,6 @@
 {
   "name": "@grafeo-db/js-darwin-arm64",
-  "version": "0.5.21",
+  "version": "0.5.20",
   "os": [
     "darwin"
   ],

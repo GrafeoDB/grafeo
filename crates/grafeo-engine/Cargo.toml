@@ -77,6 +77,7 @@ grafeo-file = ["grafeo-adapters/grafeo-file"]  # Single-file .grafeo format
 spill = ["grafeo-core/spill"]  # Disk spilling for out-of-core execution
 mmap = ["grafeo-core/mmap"]  # File-backed vector storage
 temporal = ["grafeo-core/temporal"]  # Append-only versioned properties
+compact-store = ["grafeo-core/compact-store"]  # CompactStore — columnar graph for read-only workloads
 # Convenience groups
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]  # All query language parsers
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]  # All AI/RAG features

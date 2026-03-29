@@ -66,6 +66,7 @@ rdf = []  # Enable RDF graph model
 tiered-storage = ["grafeo-common/tiered-storage", "bincode"]  # Enable tiered hot/cold storage
 temporal = ["grafeo-common/temporal"]  # Enable append-only versioned properties
 succinct-indexes = []  # Enable succinct data structures (rank/select bitvectors, Elias-Fano, wavelet trees)
+compact-store = ["succinct-indexes"]  # CompactStore — columnar graph for read-only workloads
 ring-index = ["succinct-indexes", "rdf"]  # Ring Index for RDF (3x space reduction, requires succinct-indexes and rdf)
 vector-index = ["ordered-float", "rand"]  # HNSW vector index for approximate nearest neighbor search
 text-index = []  # BM25 inverted index for full-text search
@@ -87,3 +88,8 @@ workspace = true
 [[bench]]
 name = "index_bench"
 harness = false
+
+[[bench]]
+name = "compact_vs_lpg"
+harness = false
+required-features = ["compact-store"]

@@ -5,6 +5,7 @@
 //! | Model | When to use | Example use case |
 //! | ----- | ----------- | ---------------- |
 //! | [`lpg`] | Most apps (default) | Social networks, fraud detection |
+//! | [`compact`] | Read-heavy / embedded (feature-gated: `compact-store`) | WASM, edge workers, static snapshots |
 //! | [`rdf`] | Knowledge graphs | Ontologies, linked data (feature-gated) |
 //!
 //! These are separate implementations with no abstraction overhead - you get
@@ -12,6 +13,9 @@
 
 pub mod lpg;
 pub mod traits;
+
+#[cfg(feature = "compact-store")]
+pub mod compact;
 
 #[cfg(feature = "rdf")]
 pub mod rdf;

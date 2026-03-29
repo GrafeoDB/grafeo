@@ -91,3 +91,7 @@ harness = false
 [[bench]]
 name = "storage_primitives_bench"
 harness = false
+
+[[bench]]
+name = "storage_baseline_bench"
+harness = false

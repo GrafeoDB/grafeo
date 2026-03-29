@@ -275,6 +275,9 @@ impl BitPackedInts {
     }
 }
 
+/// Number of values between skip index samples for O(1) random access.
+const SKIP_INTERVAL: usize = 64;
+
 /// The best compression for sorted integers - delta encoding plus bit-packing.
 ///
 /// Stores the first value, then packs the differences between consecutive values.
@@ -286,9 +289,28 @@ pub struct DeltaBitPacked {
     base: u64,
     /// Bit-packed deltas.
     deltas: BitPackedInts,
+    /// Sampled prefix sums at every `SKIP_INTERVAL` positions for O(1) random access.
+    skip_index: Vec<u64>,
 }
 
 impl DeltaBitPacked {
+    /// Builds the skip index from the base value and packed deltas.
+    ///
+    /// The skip index stores the actual reconstructed value at every
+    /// `SKIP_INTERVAL`'th position, enabling O(1) random access.
+    fn build_skip_index(base: u64, deltas: &BitPackedInts) -> Vec<u64> {
+        let mut skip_index = Vec::new();
+        let mut current = base;
+        skip_index.push(current); // index 0
+        for i in 0..deltas.len() {
+            current = current.wrapping_add(deltas.get(i).unwrap_or(0));
+            if (i + 1) % SKIP_INTERVAL == 0 {
+                skip_index.push(current);
+            }
+        }
+        skip_index
+    }
+
     /// Encodes sorted values using delta + bit-packing.
     #[must_use]
     pub fn encode(values: &[u64]) -> Self {
@@ -296,6 +318,7 @@ impl DeltaBitPacked {
             return Self {
                 base: 0,
                 deltas: BitPackedInts::pack(&[]),
+                skip_index: Vec::new(),
             };
         }
 
@@ -306,8 +329,9 @@ impl DeltaBitPacked {
             .collect();
 
         let deltas = BitPackedInts::pack(&delta_values);
+        let skip_index = Self::build_skip_index(base, &deltas);
 
-        Self { base, deltas }
+        Self { base, deltas, skip_index }
     }
 
     /// Decodes back to the original values.
@@ -328,6 +352,28 @@ impl DeltaBitPacked {
         }
 
         result
+    }
+
+    /// Returns the value at the given index using the skip index for O(1) access.
+    ///
+    /// Jumps to the nearest skip sample, then sums at most `SKIP_INTERVAL` deltas.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<u64> {
+        if index >= self.len() {
+            return None;
+        }
+
+        let sample_idx = index / SKIP_INTERVAL;
+        let sample_pos = sample_idx * SKIP_INTERVAL;
+        let mut current = self.skip_index.get(sample_idx).copied()?;
+
+        // Sum deltas from sample_pos to index.
+        // deltas[i] = values[i+1] - values[i], so
+        // values[index] = values[sample_pos] + sum(deltas[sample_pos..index])
+        for di in sample_pos..index {
+            current = current.wrapping_add(self.deltas.get(di)?);
+        }
+        Some(current)
     }
 
     /// Returns the number of values.
@@ -396,8 +442,9 @@ impl DeltaBitPacked {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
         );
         let deltas = BitPackedInts::from_bytes(&bytes[8..])?;
+        let skip_index = Self::build_skip_index(base, &deltas);
 
-        Ok(Self { base, deltas })
+        Ok(Self { base, deltas, skip_index })
     }
 }
 
@@ -541,5 +588,44 @@ mod tests {
         assert_eq!(BitPackedInts::bits_needed(255), 8);
         assert_eq!(BitPackedInts::bits_needed(256), 9);
         assert_eq!(BitPackedInts::bits_needed(u64::MAX), 64);
+    }
+
+    #[test]
+    fn test_delta_bitpacked_random_access() {
+        let values: Vec<u64> = (0..500).map(|i| i * 100 + 50).collect();
+        let dbp = DeltaBitPacked::encode(&values);
+        for (i, &expected) in values.iter().enumerate() {
+            assert_eq!(dbp.get(i), Some(expected), "mismatch at index {i}");
+        }
+        assert_eq!(dbp.get(500), None);
+    }
+
+    #[test]
+    fn test_delta_bitpacked_random_access_across_skip_boundaries() {
+        // Test values that span multiple skip intervals (SKIP_INTERVAL = 64)
+        let values: Vec<u64> = (0..200).map(|i| i * 7 + 3).collect();
+        let dbp = DeltaBitPacked::encode(&values);
+
+        // Check values at skip boundaries
+        assert_eq!(dbp.get(0), Some(3));
+        assert_eq!(dbp.get(64), Some(64 * 7 + 3));
+        assert_eq!(dbp.get(128), Some(128 * 7 + 3));
+
+        // Check all values
+        for (i, &expected) in values.iter().enumerate() {
+            assert_eq!(dbp.get(i), Some(expected), "mismatch at index {i}");
+        }
+    }
+
+    #[test]
+    fn test_delta_bitpacked_random_access_after_serialization() {
+        let values: Vec<u64> = (0..300).map(|i| i * 42).collect();
+        let dbp = DeltaBitPacked::encode(&values);
+        let bytes = dbp.to_bytes();
+        let restored = DeltaBitPacked::from_bytes(&bytes).unwrap();
+
+        for (i, &expected) in values.iter().enumerate() {
+            assert_eq!(restored.get(i), Some(expected), "mismatch at index {i} after deserialization");
+        }
     }
 }

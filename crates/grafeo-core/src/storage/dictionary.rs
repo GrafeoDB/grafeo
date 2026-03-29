@@ -171,6 +171,132 @@ impl DictionaryEncoding {
             })
             .collect()
     }
+
+    /// Serializes the dictionary encoding to bytes.
+    ///
+    /// Format:
+    ///   - dict_count: u32 (number of unique strings)
+    ///   - for each string: len: u32, bytes: \[u8; len\]
+    ///   - code_count: u32 (number of values)
+    ///   - codes: \[u32; code_count\]
+    ///   - has_nulls: u8 (0 or 1)
+    ///   - if has_nulls: null_bitmap_words: u32, bitmap: \[u64; words\]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // Dictionary
+        buf.extend_from_slice(&(self.dictionary.len() as u32).to_le_bytes());
+        for s in self.dictionary.iter() {
+            let s_bytes = s.as_bytes();
+            buf.extend_from_slice(&(s_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(s_bytes);
+        }
+
+        // Codes
+        buf.extend_from_slice(&(self.codes.len() as u32).to_le_bytes());
+        for &code in &self.codes {
+            buf.extend_from_slice(&code.to_le_bytes());
+        }
+
+        // Null bitmap
+        match &self.null_bitmap {
+            Some(bitmap) => {
+                buf.push(1);
+                buf.extend_from_slice(&(bitmap.len() as u32).to_le_bytes());
+                for &word in bitmap {
+                    buf.extend_from_slice(&word.to_le_bytes());
+                }
+            }
+            None => {
+                buf.push(0);
+            }
+        }
+
+        buf
+    }
+
+    /// Deserializes a dictionary encoding from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut pos = 0;
+
+        // Dictionary count
+        if bytes.len() < pos + 4 {
+            return None;
+        }
+        let dict_count = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
+
+        // Dictionary entries
+        let mut dictionary = Vec::with_capacity(dict_count);
+        for _ in 0..dict_count {
+            if bytes.len() < pos + 4 {
+                return None;
+            }
+            let str_len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
+            pos += 4;
+
+            if bytes.len() < pos + str_len {
+                return None;
+            }
+            let s = std::str::from_utf8(&bytes[pos..pos + str_len]).ok()?;
+            dictionary.push(Arc::from(s));
+            pos += str_len;
+        }
+
+        // Code count
+        if bytes.len() < pos + 4 {
+            return None;
+        }
+        let code_count = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
+
+        // Codes
+        if bytes.len() < pos + code_count * 4 {
+            return None;
+        }
+        let mut codes = Vec::with_capacity(code_count);
+        for _ in 0..code_count {
+            let code = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?);
+            codes.push(code);
+            pos += 4;
+        }
+
+        // Null bitmap
+        if bytes.len() < pos + 1 {
+            return None;
+        }
+        let has_nulls = bytes[pos];
+        pos += 1;
+
+        let null_bitmap = if has_nulls != 0 {
+            if bytes.len() < pos + 4 {
+                return None;
+            }
+            let word_count =
+                u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
+            pos += 4;
+
+            if bytes.len() < pos + word_count * 8 {
+                return None;
+            }
+            let mut bitmap = Vec::with_capacity(word_count);
+            for _ in 0..word_count {
+                let word = u64::from_le_bytes(bytes[pos..pos + 8].try_into().ok()?);
+                bitmap.push(word);
+                pos += 8;
+            }
+            Some(bitmap)
+        } else {
+            None
+        };
+
+        let dict: Arc<[Arc<str>]> = dictionary.into();
+        let mut encoding = Self::new(dict, codes);
+        if let Some(bitmap) = null_bitmap {
+            encoding = encoding.with_nulls(bitmap);
+        }
+        Some(encoding)
+    }
 }
 
 /// Builds a dictionary encoding by streaming values through.
@@ -481,5 +607,55 @@ mod tests {
         assert_eq!(dict.len(), 10);
         assert_eq!(dict.dictionary_size(), 1);
         assert!(dict.codes().iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn test_dictionary_serialization_round_trip() {
+        let mut builder = DictionaryBuilder::new();
+        builder.add("hello");
+        builder.add("world");
+        builder.add("hello");
+        let dict = builder.build();
+
+        let bytes = dict.to_bytes();
+        let restored = DictionaryEncoding::from_bytes(&bytes).unwrap();
+
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored.dictionary_size(), 2);
+        assert_eq!(restored.get(0), Some("hello"));
+        assert_eq!(restored.get(1), Some("world"));
+        assert_eq!(restored.get(2), Some("hello"));
+    }
+
+    #[test]
+    fn test_dictionary_serialization_with_nulls() {
+        let mut builder = DictionaryBuilder::new();
+        builder.add("a");
+        builder.add_null();
+        builder.add("b");
+        builder.add_null();
+        let dict = builder.build();
+
+        let bytes = dict.to_bytes();
+        let restored = DictionaryEncoding::from_bytes(&bytes).unwrap();
+
+        assert_eq!(restored.len(), 4);
+        assert_eq!(restored.get(0), Some("a"));
+        assert_eq!(restored.get(1), None);
+        assert!(restored.is_null(1));
+        assert_eq!(restored.get(2), Some("b"));
+        assert!(restored.is_null(3));
+    }
+
+    #[test]
+    fn test_dictionary_serialization_empty() {
+        let builder = DictionaryBuilder::new();
+        let dict = builder.build();
+
+        let bytes = dict.to_bytes();
+        let restored = DictionaryEncoding::from_bytes(&bytes).unwrap();
+
+        assert!(restored.is_empty());
+        assert_eq!(restored.dictionary_size(), 0);
     }
 }

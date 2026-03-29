@@ -56,6 +56,8 @@ pub struct RunLengthEncoding {
     runs: Vec<Run<u64>>,
     /// Total number of values (sum of all run lengths).
     total_count: usize,
+    /// Cumulative run lengths for O(log n) random access via binary search.
+    prefix_sums: Vec<usize>,
 }
 
 impl<'a> IntoIterator for &'a RunLengthEncoding {
@@ -83,6 +85,7 @@ impl RunLengthEncoding {
             return Self {
                 runs: Vec::new(),
                 total_count: 0,
+                prefix_sums: Vec::new(),
             };
         }
 
@@ -103,9 +106,18 @@ impl RunLengthEncoding {
         // Don't forget the last run
         runs.push(Run::new(current_value, current_length));
 
+        let prefix_sums: Vec<usize> = runs
+            .iter()
+            .scan(0usize, |acc, run| {
+                *acc += run.length as usize;
+                Some(*acc)
+            })
+            .collect();
+
         Self {
             runs,
             total_count: values.len(),
+            prefix_sums,
         }
     }
 
@@ -113,7 +125,18 @@ impl RunLengthEncoding {
     #[must_use]
     pub fn from_runs(runs: Vec<Run<u64>>) -> Self {
         let total_count = runs.iter().map(|r| r.length as usize).sum();
-        Self { runs, total_count }
+        let prefix_sums: Vec<usize> = runs
+            .iter()
+            .scan(0usize, |acc, run| {
+                *acc += run.length as usize;
+                Some(*acc)
+            })
+            .collect();
+        Self {
+            runs,
+            total_count,
+            prefix_sums,
+        }
     }
 
     /// Decodes back to the original values.
@@ -238,17 +261,9 @@ impl RunLengthEncoding {
         if index >= self.total_count {
             return None;
         }
-
-        let mut offset = 0usize;
-        for run in &self.runs {
-            let run_end = offset + run.length as usize;
-            if index < run_end {
-                return Some(run.value);
-            }
-            offset = run_end;
-        }
-
-        None
+        // Binary search: find the first prefix_sum > index
+        let run_idx = self.prefix_sums.partition_point(|&sum| sum <= index);
+        self.runs.get(run_idx).map(|run| run.value)
     }
 
     /// Returns an iterator over the decoded values.
@@ -606,5 +621,26 @@ mod tests {
         assert_eq!(encoded.run_count(), 3);
         assert_eq!(encoded.total_count(), 10);
         assert_eq!(encoded.decode(), vec![1, 1, 1, 2, 2, 3, 3, 3, 3, 3]);
+    }
+
+    #[test]
+    fn test_rle_random_access_binary_search() {
+        // Build RLE with known structure: runs of length 1,2,3,...,50
+        let mut values = Vec::new();
+        for i in 0..50u64 {
+            for _ in 0..=i {
+                values.push(i);
+            }
+        }
+        let rle = RunLengthEncoding::encode(&values);
+
+        // Verify every position
+        let decoded = rle.decode();
+        for i in 0..decoded.len() {
+            assert_eq!(rle.get(i), Some(decoded[i]), "mismatch at index {i}");
+        }
+
+        // Out of bounds
+        assert_eq!(rle.get(decoded.len()), None);
     }
 }

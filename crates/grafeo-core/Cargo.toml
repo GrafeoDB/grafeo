@@ -87,3 +87,7 @@ workspace = true
 [[bench]]
 name = "index_bench"
 harness = false
+
+[[bench]]
+name = "storage_primitives_bench"
+harness = false

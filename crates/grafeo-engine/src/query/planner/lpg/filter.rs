@@ -8,15 +8,6 @@ use super::{
     UnionOperator, Value, convert_binary_op, convert_filter_expression,
 };
 
-/// Cross-type equality comparison with Int64/Float64 coercion.
-fn values_equal_coerced(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64 - b).abs() < f64::EPSILON,
-        (Value::Float64(a), Value::Int64(b)) => (a - *b as f64).abs() < f64::EPSILON,
-        _ => a == b,
-    }
-}
-
 impl super::Planner {
     /// Plans a filter operator.
     ///
@@ -863,30 +854,19 @@ impl super::Planner {
             }
             nodes
         } else {
-            // No index but we have a label: scan label first, then check properties.
-            // This is more efficient than ScanOperator → DataChunk → FilterOperator
-            // because it avoids DataChunk materialization and expression evaluation.
+            // No index but we have a label: use find_nodes_by_properties for
+            // typed codec-native scans (avoids per-row Value allocation), then
+            // intersect with the label set. MVCC visibility is handled below.
             let label = scan_label.as_ref().expect("label checked above");
-            let label_nodes = self.store.nodes_by_label(label);
-            let epoch = self.viewing_epoch;
-            let tx_id = self.transaction_id;
-            label_nodes
-                .into_iter()
-                .filter(|&node_id| {
-                    // Use versioned/epoch-aware node access for correct properties
-                    let node = if let Some(tx) = tx_id {
-                        self.store.get_node_versioned(node_id, epoch, tx)
-                    } else {
-                        self.store.get_node_at_epoch(node_id, epoch)
-                    };
-                    node.is_some_and(|n| {
-                        conditions.iter().all(|(prop, val)| {
-                            n.get_property(prop)
-                                .is_some_and(|v| values_equal_coerced(v, val))
-                        })
-                    })
-                })
-                .collect()
+            let label_nodes: std::collections::HashSet<_> =
+                self.store.nodes_by_label(label).into_iter().collect();
+            let conditions_ref: Vec<(&str, Value)> = conditions
+                .iter()
+                .map(|(p, v)| (p.as_str(), v.clone()))
+                .collect();
+            let mut nodes = self.store.find_nodes_by_properties(&conditions_ref);
+            nodes.retain(|n| label_nodes.contains(n));
+            nodes
         };
 
         // MVCC visibility: filter out nodes not visible at the current epoch/tx.

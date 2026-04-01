@@ -93,3 +93,8 @@ harness = false
 name = "compressed_eval_bench"
 harness = false
 required-features = ["compact-store"]
+
+[[bench]]
+name = "planner_path_bench"
+harness = false
+required-features = ["compact-store"]

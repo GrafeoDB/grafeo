@@ -214,7 +214,7 @@ impl CompactStore {
     }
 
     /// Checks if a value falls within a range.
-    fn value_in_range(
+    pub(super) fn value_in_range(
         val: &Value,
         min: Option<&Value>,
         max: Option<&Value>,

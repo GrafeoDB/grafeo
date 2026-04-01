@@ -232,12 +232,8 @@ impl GraphStore for CompactStore {
             }
             if let Some(col) = nt.column(&key) {
                 let table_id = nt.table_id();
-                for offset in 0..col.len() {
-                    if let Some(v) = col.get(offset)
-                        && &v == value
-                    {
-                        results.push(encode_node_id(table_id, offset as u64));
-                    }
+                for offset in col.find_eq(value) {
+                    results.push(encode_node_id(table_id, offset as u64));
                 }
             }
         }
@@ -307,12 +303,8 @@ impl GraphStore for CompactStore {
             }
             if let Some(col) = nt.column(&key) {
                 let table_id = nt.table_id();
-                for offset in 0..col.len() {
-                    if let Some(v) = col.get(offset)
-                        && Self::value_in_range(&v, min, max, min_inclusive, max_inclusive)
-                    {
-                        results.push(encode_node_id(table_id, offset as u64));
-                    }
+                for offset in col.find_in_range(min, max, min_inclusive, max_inclusive) {
+                    results.push(encode_node_id(table_id, offset as u64));
                 }
             }
         }

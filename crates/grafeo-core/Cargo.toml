@@ -88,3 +88,8 @@ workspace = true
 [[bench]]
 name = "index_bench"
 harness = false
+
+[[bench]]
+name = "compressed_eval_bench"
+harness = false
+required-features = ["compact-store"]

@@ -126,6 +126,155 @@ impl ColumnCodec {
         self.len() == 0
     }
 
+    /// Returns the offsets of all rows whose value equals `target`.
+    ///
+    /// Operates in the codec's native domain to avoid per-row `Value` allocation:
+    /// - [`BitPacked`](Self::BitPacked): compares raw `u64` values
+    /// - [`Dict`](Self::Dict): resolves the target string to a dictionary code
+    ///   once, then scans integer codes
+    /// - [`Bitmap`](Self::Bitmap): checks bits directly
+    ///
+    /// Falls back to [`get`](Self::get)-based comparison for type mismatches.
+    pub fn find_eq(&self, target: &Value) -> Vec<usize> {
+        match (self, target) {
+            (Self::BitPacked(bp), &Value::Int64(v)) => {
+                if v < 0 {
+                    return Vec::new(); // BitPacked stores unsigned values
+                }
+                let target_u64 = v as u64;
+                let len = bp.len();
+                let bits = bp.bits_per_value() as usize;
+                if bits == 0 {
+                    return if target_u64 == 0 {
+                        (0..len).collect()
+                    } else {
+                        Vec::new()
+                    };
+                }
+                let values_per_word = 64 / bits;
+                let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+                if target_u64 > mask {
+                    return Vec::new(); // Value exceeds column's bit width
+                }
+                let data = bp.data();
+                let mut results = Vec::new();
+                for i in 0..len {
+                    let word_idx = i / values_per_word;
+                    let bit_offset = (i % values_per_word) * bits;
+                    if (data[word_idx] >> bit_offset) & mask == target_u64 {
+                        results.push(i);
+                    }
+                }
+                results
+            }
+            (Self::Dict(dict), Value::String(s)) => {
+                if let Some(code) = dict.encode(s.as_str()) {
+                    dict.codes()
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &c)| c == code)
+                        .map(|(i, _)| i)
+                        .collect()
+                } else {
+                    Vec::new() // Target not in dictionary — no matches
+                }
+            }
+            (Self::Bitmap(bv), &Value::Bool(target_bool)) => {
+                (0..bv.len())
+                    .filter(|&i| bv.get(i) == Some(target_bool))
+                    .collect()
+            }
+            // Type mismatch or Int8Vector — fall back to Value comparison.
+            _ => (0..self.len())
+                .filter(|&i| self.get(i).as_ref() == Some(target))
+                .collect(),
+        }
+    }
+
+    /// Returns the offsets of all rows whose value falls within `[min, max]`.
+    ///
+    /// Like [`find_eq`](Self::find_eq), operates in the codec's native domain
+    /// to avoid per-row `Value` allocation for integer columns.
+    pub fn find_in_range(
+        &self,
+        min: Option<&Value>,
+        max: Option<&Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+    ) -> Vec<usize> {
+        // For BitPacked columns with integer bounds, compare raw u64 values.
+        if let Self::BitPacked(bp) = self {
+            let min_u64 = match min {
+                Some(&Value::Int64(v)) if v >= 0 => Some(v as u64),
+                Some(&Value::Int64(_)) => Some(0), // negative min → effectively 0 for unsigned
+                None => None,
+                _ => return self.find_in_range_fallback(min, max, min_inclusive, max_inclusive),
+            };
+            let max_u64 = match max {
+                Some(&Value::Int64(v)) if v >= 0 => Some(v as u64),
+                Some(&Value::Int64(v)) if v < 0 => return Vec::new(), // negative max → no unsigned matches
+                None => None,
+                _ => return self.find_in_range_fallback(min, max, min_inclusive, max_inclusive),
+            };
+
+            let len = bp.len();
+            let bits = bp.bits_per_value() as usize;
+            if bits == 0 {
+                let zero_matches = match (min_u64, max_u64) {
+                    (Some(lo), _) if lo > 0 => false,
+                    (Some(0), _) if !min_inclusive => false,
+                    (_, Some(hi)) if hi == 0 && !max_inclusive => false,
+                    _ => true,
+                };
+                return if zero_matches { (0..len).collect() } else { Vec::new() };
+            }
+            let values_per_word = 64 / bits;
+            let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+            let data = bp.data();
+            let mut results = Vec::new();
+            for i in 0..len {
+                let word_idx = i / values_per_word;
+                let bit_offset = (i % values_per_word) * bits;
+                let v = (data[word_idx] >> bit_offset) & mask;
+                let above_min = match min_u64 {
+                    Some(lo) if min_inclusive => v >= lo,
+                    Some(lo) => v > lo,
+                    None => true,
+                };
+                let below_max = match max_u64 {
+                    Some(hi) if max_inclusive => v <= hi,
+                    Some(hi) => v < hi,
+                    None => true,
+                };
+                if above_min && below_max {
+                    results.push(i);
+                }
+            }
+            return results;
+        }
+
+        self.find_in_range_fallback(min, max, min_inclusive, max_inclusive)
+    }
+
+    /// Fallback range scan via per-row `Value` decode.
+    fn find_in_range_fallback(
+        &self,
+        min: Option<&Value>,
+        max: Option<&Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+    ) -> Vec<usize> {
+        (0..self.len())
+            .filter(|&i| {
+                if let Some(v) = self.get(i) {
+                    super::CompactStore::value_in_range(&v, min, max, min_inclusive, max_inclusive)
+                } else {
+                    false
+                }
+            })
+            .collect()
+    }
+
     /// Returns an estimate of heap memory used by this column in bytes.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {

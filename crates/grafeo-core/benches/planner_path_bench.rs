@@ -84,7 +84,13 @@ fn bench_dict_equality(c: &mut Criterion) {
         // Verify both paths produce the same results.
         let a = planner_label_first_path(&store, "Item", "name", &target);
         let b = planner_find_nodes_direct(&store, "Item", "name", &target);
-        assert_eq!(a.len(), b.len(), "mismatch at n={n}: {} vs {}", a.len(), b.len());
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "mismatch at n={n}: {} vs {}",
+            a.len(),
+            b.len()
+        );
 
         group.bench_function(format!("label_first_get_node/{n}"), |bench| {
             bench.iter(|| {
@@ -112,7 +118,13 @@ fn bench_int_equality(c: &mut Criterion) {
 
         let a = planner_label_first_path(&store, "Item", "score", &target);
         let b = planner_find_nodes_direct(&store, "Item", "score", &target);
-        assert_eq!(a.len(), b.len(), "mismatch at n={n}: {} vs {}", a.len(), b.len());
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "mismatch at n={n}: {} vs {}",
+            a.len(),
+            b.len()
+        );
 
         group.bench_function(format!("label_first_get_node/{n}"), |bench| {
             bench.iter(|| {

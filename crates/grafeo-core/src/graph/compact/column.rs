@@ -152,7 +152,11 @@ impl ColumnCodec {
                     };
                 }
                 let values_per_word = 64 / bits;
-                let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+                let mask = if bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << bits) - 1
+                };
                 if target_u64 > mask {
                     return Vec::new(); // Value exceeds column's bit width
                 }
@@ -179,11 +183,9 @@ impl ColumnCodec {
                     Vec::new() // Target not in dictionary — no matches
                 }
             }
-            (Self::Bitmap(bv), &Value::Bool(target_bool)) => {
-                (0..bv.len())
-                    .filter(|&i| bv.get(i) == Some(target_bool))
-                    .collect()
-            }
+            (Self::Bitmap(bv), &Value::Bool(target_bool)) => (0..bv.len())
+                .filter(|&i| bv.get(i) == Some(target_bool))
+                .collect(),
             // Type mismatch or Int8Vector — fall back to Value comparison.
             _ => (0..self.len())
                 .filter(|&i| self.get(i).as_ref() == Some(target))
@@ -226,10 +228,18 @@ impl ColumnCodec {
                     (_, Some(hi)) if hi == 0 && !max_inclusive => false,
                     _ => true,
                 };
-                return if zero_matches { (0..len).collect() } else { Vec::new() };
+                return if zero_matches {
+                    (0..len).collect()
+                } else {
+                    Vec::new()
+                };
             }
             let values_per_word = 64 / bits;
-            let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+            let mask = if bits >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << bits) - 1
+            };
             let data = bp.data();
             let mut results = Vec::new();
             for i in 0..len {

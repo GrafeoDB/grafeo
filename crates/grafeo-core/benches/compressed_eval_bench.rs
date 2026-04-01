@@ -10,9 +10,9 @@ use std::hint::black_box;
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use grafeo_common::types::Value;
+use grafeo_core::graph::compact::CompactStore;
 use grafeo_core::graph::compact::builder::CompactStoreBuilder;
 use grafeo_core::graph::compact::column::ColumnCodec;
-use grafeo_core::graph::compact::CompactStore;
 use grafeo_core::graph::traits::GraphStore;
 use grafeo_core::storage::bitpack::BitPackedInts;
 use grafeo_core::storage::dictionary::DictionaryBuilder;
@@ -100,13 +100,8 @@ fn bench_find_in_range(c: &mut Criterion) {
         // score > 7 (20% selectivity)
         group.bench_function(format!("score_gt_7/{n}"), |b| {
             b.iter(|| {
-                let results = store.find_nodes_in_range(
-                    "score",
-                    Some(&Value::Int64(7)),
-                    None,
-                    false,
-                    false,
-                );
+                let results =
+                    store.find_nodes_in_range("score", Some(&Value::Int64(7)), None, false, false);
                 black_box(results.len())
             });
         });

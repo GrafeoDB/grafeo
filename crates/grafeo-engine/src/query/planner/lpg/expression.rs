@@ -113,8 +113,8 @@ impl super::Planner {
                     end: end_expr,
                 })
             }
-            LogicalExpression::Parameter(_) => Err(Error::Internal(
-                "Parameters not yet supported in filters".to_string(),
+            LogicalExpression::Parameter(name) => Err(Error::Internal(
+                format!("Unresolved parameter ${name} in filter — substitution should have replaced this before planning"),
             )),
             LogicalExpression::Labels(var) => Ok(FilterExpression::Labels(var.clone())),
             LogicalExpression::Type(var) => Ok(FilterExpression::Type(var.clone())),

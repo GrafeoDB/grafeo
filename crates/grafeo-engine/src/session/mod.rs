@@ -96,6 +96,14 @@ pub(crate) struct SessionConfig {
             std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
         >,
     >,
+    /// For hybrid stores: the overlay `LpgStore` that should receive MVCC
+    /// finalization on commit (finalize_version_epochs, sync_epoch).
+    ///
+    /// When `Some`, `resolve_store` returns this store instead of a fresh
+    /// empty one, ensuring that mutations committed via an external write
+    /// store (HybridStore) become visible to subsequent read-only sessions.
+    #[cfg(all(feature = "lpg", feature = "compact-store"))]
+    pub hybrid_overlay: Option<Arc<LpgStore>>,
 }
 
 /// Your handle to the database - execute queries and manage transactions.
@@ -339,9 +347,17 @@ impl Session {
         write_store: Option<Arc<dyn GraphStoreMut>>,
         cfg: SessionConfig,
     ) -> Result<Self> {
+        #[cfg(all(feature = "lpg", feature = "compact-store"))]
+        let store = if let Some(overlay) = cfg.hybrid_overlay {
+            overlay
+        } else {
+            Arc::new(LpgStore::new()?)
+        };
+        #[cfg(all(feature = "lpg", not(feature = "compact-store")))]
+        let store = Arc::new(LpgStore::new()?);
         Ok(Self {
             #[cfg(feature = "lpg")]
-            store: Arc::new(LpgStore::new()?),
+            store,
             graph_store: read_store,
             graph_store_mut: write_store,
             catalog: cfg.catalog,

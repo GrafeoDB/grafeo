@@ -1108,10 +1108,10 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &QueryParams) 
             substitute_in_expression(list_expr, params)?;
             substitute_in_expression(predicate, params)?;
         }
-        LogicalExpression::ExistsSubquery(_)
-        | LogicalExpression::CountSubquery(_)
-        | LogicalExpression::ValueSubquery(_) => {
-            // Subqueries would need recursive parameter substitution
+        LogicalExpression::ExistsSubquery(subplan)
+        | LogicalExpression::CountSubquery(subplan)
+        | LogicalExpression::ValueSubquery(subplan) => {
+            substitute_in_operator(subplan, params)?;
         }
         LogicalExpression::PatternComprehension { projection, .. } => {
             substitute_in_expression(projection, params)?;
@@ -1401,5 +1401,37 @@ mod tests {
 
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0][0], Value::String("beta".into()));
+    }
+
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn test_params_in_exists_subquery() {
+        // Tests parameter substitution inside NOT EXISTS { ... } subquery.
+        // This is a common Cypher pattern for anti-joins, e.g. "users not followed by viewer".
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alice = store.create_node_with_props(&["Person"], [("name", Value::String("alice".into()))]);
+        let bob = store.create_node_with_props(&["Person"], [("name", Value::String("bob".into()))]);
+        let _charlie = store.create_node_with_props(&["Person"], [("name", Value::String("charlie".into()))]);
+
+        // alice follows bob (but not charlie)
+        store.create_edge(alice, bob, "FOLLOWS");
+
+        let processor = QueryProcessor::for_lpg(store);
+
+        // Find people NOT followed by the viewer ($viewer_name)
+        let mut params = HashMap::new();
+        params.insert("viewer_name".to_string(), Value::String("alice".into()));
+
+        let result = processor
+            .process(
+                "MATCH (p:Person) WHERE p.name <> $viewer_name AND NOT EXISTS { MATCH (v:Person)-[:FOLLOWS]->(p) WHERE v.name = $viewer_name } RETURN p.name ORDER BY p.name",
+                QueryLanguage::Cypher,
+                Some(&params),
+            )
+            .unwrap();
+
+        // alice follows bob, so only charlie should be returned
+        assert_eq!(result.row_count(), 1);
+        assert_eq!(result.rows[0][0], Value::String("charlie".into()));
     }
 }

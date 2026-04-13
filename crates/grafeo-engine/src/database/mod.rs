@@ -160,6 +160,11 @@ pub struct GrafeoDB {
     /// External writable graph store (when using with_store()).
     /// None for read-only databases created via with_read_store().
     pub(super) external_write_store: Option<Arc<dyn GraphStoreMut>>,
+    /// For hybrid stores: the overlay LpgStore that should receive MVCC finalization
+    /// on commit (finalize_version_epochs, sync_epoch). Sessions use this as their
+    /// internal store so that auto-committed writes become visible across sessions.
+    #[cfg(all(feature = "lpg", feature = "compact-store"))]
+    pub(super) hybrid_overlay: Option<Arc<LpgStore>>,
     /// Metrics registry shared across all sessions.
     #[cfg(feature = "metrics")]
     pub(crate) metrics: Option<Arc<crate::metrics::MetricsRegistry>>,
@@ -570,6 +575,8 @@ impl GrafeoDB {
             vector_spill_storages: None,
             external_read_store: None,
             external_write_store: None,
+            #[cfg(all(feature = "lpg", feature = "compact-store"))]
+            hybrid_overlay: None,
             #[cfg(feature = "metrics")]
             metrics: Some(Arc::new(crate::metrics::MetricsRegistry::new())),
             current_graph: RwLock::new(None),
@@ -704,6 +711,8 @@ impl GrafeoDB {
             vector_spill_storages: None,
             external_read_store: Some(Arc::clone(&store) as Arc<dyn GraphStore>),
             external_write_store: Some(store),
+            #[cfg(all(feature = "lpg", feature = "compact-store"))]
+            hybrid_overlay: None,
             #[cfg(feature = "metrics")]
             metrics: Some(Arc::new(crate::metrics::MetricsRegistry::new())),
             current_graph: RwLock::new(None),
@@ -788,6 +797,8 @@ impl GrafeoDB {
             vector_spill_storages: None,
             external_read_store: Some(store),
             external_write_store: None,
+            #[cfg(all(feature = "lpg", feature = "compact-store"))]
+            hybrid_overlay: None,
             #[cfg(feature = "metrics")]
             metrics: Some(Arc::new(crate::metrics::MetricsRegistry::new())),
             current_graph: RwLock::new(None),
@@ -827,6 +838,15 @@ impl GrafeoDB {
         #[cfg(feature = "lpg")]
         {
             self.store = None;
+        }
+        // Clear any hybrid overlay from a prior compact_to_hybrid() call.  The
+        // overlay Arc held here is the only owner keeping the old HybridStore
+        // overlay alive after the external stores are replaced; not clearing it
+        // would leak that LpgStore and cause new sessions to receive a stale
+        // overlay reference that has no corresponding write store.
+        #[cfg(all(feature = "lpg", feature = "compact-store"))]
+        {
+            self.hybrid_overlay = None;
         }
         self.read_only = true;
         self.query_cache = Arc::new(QueryCache::default());
@@ -1421,6 +1441,8 @@ impl GrafeoDB {
             identity: identity.clone(),
             #[cfg(feature = "lpg")]
             projections: Arc::clone(&self.projections),
+            #[cfg(all(feature = "lpg", feature = "compact-store"))]
+            hybrid_overlay: self.hybrid_overlay.as_ref().map(Arc::clone),
         };
 
         if let Some(ref ext_read) = self.external_read_store {
@@ -2657,6 +2679,103 @@ impl FromValue for bool {
                 expected: "BOOL".to_string(),
                 found: value.type_name().to_string(),
             })
+    }
+}
+
+// =============================================================================
+// HybridStore integration
+// =============================================================================
+
+#[cfg(feature = "compact-store")]
+impl GrafeoDB {
+    /// Creates a database in hybrid mode from a frozen [`CompactStore`].
+    ///
+    /// The [`HybridStore`] combines a read-only columnar base (the supplied
+    /// `compact`) with a mutable MVCC overlay. Reads merge both layers
+    /// transparently; writes go to the overlay only. The compact base is
+    /// never mutated after construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if config validation fails or the overlay store
+    /// cannot be allocated.
+    ///
+    /// [`CompactStore`]: grafeo_core::graph::compact::CompactStore
+    /// [`HybridStore`]: grafeo_core::graph::hybrid::HybridStore
+    pub fn with_hybrid(
+        compact: grafeo_core::graph::compact::CompactStore,
+        config: Config,
+    ) -> Result<Self> {
+        use grafeo_core::graph::hybrid::HybridStore;
+
+        let hybrid_store = HybridStore::open(compact)
+            .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
+
+        // Extract the overlay before wrapping in Arc so we can pass it to
+        // sessions for MVCC finalization (finalize_version_epochs, sync_epoch).
+        let overlay = Arc::clone(hybrid_store.overlay());
+
+        let hybrid = Arc::new(hybrid_store);
+
+        // HybridStore implements both GraphStore and GraphStoreMut, so we can
+        // delegate directly to with_store().
+        let mut db = Self::with_store(hybrid, config)?;
+
+        // Store the overlay so sessions can call finalize_version_epochs on
+        // commit, making auto-committed writes visible across sessions.
+        db.hybrid_overlay = Some(overlay);
+
+        Ok(db)
+    }
+
+    /// Freezes the current store data into a [`CompactStore`] and switches
+    /// to hybrid mode.
+    ///
+    /// Takes a snapshot of all nodes and edges from the current store,
+    /// builds a columnar [`CompactStore`], wraps it in a [`HybridStore`],
+    /// and replaces the active stores. After this call the database accepts
+    /// both read and write queries. The original store is dropped to free
+    /// memory.
+    ///
+    /// This is the read-write counterpart to [`compact()`](Self::compact),
+    /// which produces a read-only store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the conversion fails (e.g. more than 32,767
+    /// distinct labels or edge types) or the new overlay cannot be allocated.
+    ///
+    /// [`CompactStore`]: grafeo_core::graph::compact::CompactStore
+    /// [`HybridStore`]: grafeo_core::graph::hybrid::HybridStore
+    pub fn compact_to_hybrid(&mut self) -> Result<()> {
+        use grafeo_core::graph::compact::from_graph_store;
+        use grafeo_core::graph::hybrid::HybridStore;
+
+        let current_store = self.graph_store();
+        let compact = from_graph_store(current_store.as_ref())
+            .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
+
+        let hybrid_store = HybridStore::open(compact)
+            .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
+
+        // Capture overlay for MVCC finalization in sessions.
+        let overlay = Arc::clone(hybrid_store.overlay());
+        let hybrid = Arc::new(hybrid_store);
+
+        self.external_read_store = Some(Arc::clone(&hybrid) as Arc<dyn GraphStore>);
+        self.external_write_store = Some(hybrid as Arc<dyn GraphStoreMut>);
+        self.hybrid_overlay = Some(overlay);
+        #[cfg(feature = "lpg")]
+        {
+            self.store = None;
+        }
+        self.read_only = false;
+        self.query_cache = Arc::new(QueryCache::default());
+        // Projections hold Arc refs to the old store: clear them so they don't
+        // serve stale data or prevent the old store's memory from being freed.
+        self.projections.write().clear();
+
+        Ok(())
     }
 }
 

@@ -18,6 +18,17 @@ impl LpgStore {
         self.create_node_versioned(labels, self.current_epoch(), TransactionId::SYSTEM)
     }
 
+    /// Inserts a pre-built shadow node record for hybrid store structural mutations.
+    ///
+    /// If a record for this ID already exists, this is a no-op (`or_insert`).
+    /// The shadow record allows the MVCC machinery to track deletions and
+    /// label changes for compact-store entities that don't natively live in
+    /// the overlay.
+    #[cfg(not(feature = "tiered-storage"))]
+    pub(crate) fn insert_shadow_node(&self, id: NodeId, chain: VersionChain<NodeRecord>) {
+        self.nodes.write().entry(id).or_insert(chain);
+    }
+
     /// Registers labels for a node: builds the label ID set, updates the
     /// label index (single lock acquisition), and stores the node-to-labels
     /// mapping.

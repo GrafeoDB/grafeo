@@ -13,7 +13,7 @@ use grafeo_common::types::Value;
 /// A zone map tracks the range of values in a column so the query engine can
 /// eliminate entire tables without scanning rows. If [`might_match`](Self::might_match)
 /// returns `false`, the predicate is guaranteed to have zero matching rows.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ZoneMap {
     /// Minimum value in the column, or `None` if the column has no non-null values.
     pub min: Option<Value>,

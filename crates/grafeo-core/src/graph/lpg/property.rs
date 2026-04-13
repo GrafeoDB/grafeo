@@ -298,6 +298,23 @@ impl<Id: EntityId> PropertyStorage<Id> {
         }
     }
 
+    /// Returns all entity IDs that have a value in the given column matching `predicate`.
+    ///
+    /// Used by HybridStore to discover compact nodes with overlay property
+    /// overrides that match a scan predicate (avoiding false negatives).
+    #[must_use]
+    pub fn ids_matching(
+        &self,
+        key: &PropertyKey,
+        predicate: impl Fn(&Value) -> bool,
+    ) -> Vec<Id> {
+        let columns = self.columns.read();
+        let Some(col) = columns.get(key) else {
+            return Vec::new();
+        };
+        col.ids_matching(predicate)
+    }
+
     /// Gets all properties for an entity.
     #[must_use]
     pub fn get_all(&self, id: Id) -> FxHashMap<PropertyKey, Value> {
@@ -928,6 +945,16 @@ impl<Id: EntityId> PropertyColumn<Id> {
         None
     }
 
+    /// Returns all entity IDs whose value satisfies `predicate`.
+    #[must_use]
+    pub fn ids_matching(&self, predicate: impl Fn(&Value) -> bool) -> Vec<Id> {
+        self.values
+            .iter()
+            .filter(|(_, v)| predicate(v))
+            .map(|(&id, _)| id)
+            .collect()
+    }
+
     /// Removes a value for an entity.
     pub fn remove(&mut self, id: Id) -> Option<Value> {
         let removed = self.values.remove(&id);
@@ -1465,6 +1492,19 @@ impl<Id: EntityId> PropertyColumn<Id> {
             .and_then(|log| log.latest())
             .filter(|v| !v.is_null())
             .cloned()
+    }
+
+    /// Returns all entity IDs whose latest value satisfies `predicate`.
+    #[must_use]
+    pub fn ids_matching(&self, predicate: impl Fn(&Value) -> bool) -> Vec<Id> {
+        self.values
+            .iter()
+            .filter_map(|(&id, log)| {
+                log.latest()
+                    .filter(|v| !v.is_null() && predicate(v))
+                    .map(|_| id)
+            })
+            .collect()
     }
 
     /// Removes a value by appending a tombstone (Null) at the given epoch.

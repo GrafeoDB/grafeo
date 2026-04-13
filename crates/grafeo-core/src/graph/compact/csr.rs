@@ -8,7 +8,7 @@
 /// Stores a directed graph in two flat arrays: `offsets` (one per node + 1
 /// sentinel) and `targets` (concatenated neighbor lists). This layout is
 /// cache-friendly for forward traversal and has O(1) neighbor access.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CsrAdjacency {
     /// One entry per node plus a trailing sentinel.
     /// `offsets[i]..offsets[i+1]` is the range in `targets` for node `i`.

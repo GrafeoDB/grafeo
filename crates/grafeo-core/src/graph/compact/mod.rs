@@ -20,12 +20,14 @@ pub mod node_table;
 pub mod rel_table;
 /// Schema definitions for node tables and edge schemas.
 pub mod schema;
+/// Serialization and deserialization for CompactStore.
+pub mod serialize;
 #[cfg(test)]
 mod tests;
 /// Zone maps for skip-pruning predicate evaluation.
 pub mod zone_map;
 
-pub use builder::{CompactStoreBuilder, from_graph_store};
+pub use builder::{CompactStoreBuilder, from_graph_store, from_graph_store_incremental};
 
 use std::sync::Arc;
 
@@ -171,6 +173,15 @@ impl CompactStore {
         self.table_id_to_label.get(table_id as usize)
     }
 
+    /// Returns the ordered slice of node table labels, indexed by table ID.
+    ///
+    /// Position `i` in the slice corresponds to `table_id = i`. Used by
+    /// HybridStore to enumerate all tables when computing ID boundaries.
+    #[must_use]
+    pub fn table_id_to_label(&self) -> &[ArcStr] {
+        &self.table_id_to_label
+    }
+
     /// Returns the edge type for a given rel table ID, if valid.
     #[must_use]
     pub fn edge_type_for_rel_table_id(&self, rel_table_id: u16) -> Option<&ArcStr> {
@@ -208,6 +219,36 @@ impl CompactStore {
         }
 
         results
+    }
+
+    /// Returns the node tables indexed by table_id.
+    #[must_use]
+    pub(crate) fn node_tables_by_id(&self) -> &[NodeTable] {
+        &self.node_tables_by_id
+    }
+
+    /// Returns the relationship tables indexed by rel_table_id.
+    #[must_use]
+    pub(crate) fn rel_tables_by_id(&self) -> &[RelTable] {
+        &self.rel_tables_by_id
+    }
+
+    /// Returns the label-to-table-id map.
+    #[must_use]
+    pub(crate) fn label_to_table_id_map(&self) -> &FxHashMap<ArcStr, u16> {
+        &self.label_to_table_id
+    }
+
+    /// Returns the edge-type-to-rel-id map.
+    #[must_use]
+    pub(crate) fn edge_type_to_rel_id_map(&self) -> &FxHashMap<ArcStr, Vec<u16>> {
+        &self.edge_type_to_rel_id
+    }
+
+    /// Returns the rel_table_id-to-type lookup.
+    #[must_use]
+    pub(crate) fn rel_table_id_to_type_slice(&self) -> &[ArcStr] {
+        &self.rel_table_id_to_type
     }
 
     /// Returns a rough estimate of heap memory used by the snapshot data

@@ -26,7 +26,7 @@ use std::io;
 ///
 /// Pass your values to [`pack()`](Self::pack) and we'll figure out the optimal
 /// bit width automatically. Random access via [`get()`](Self::get) is O(1).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BitPackedInts {
     /// Packed data.
     data: Vec<u64>,

@@ -10,7 +10,7 @@ use arcstr::ArcStr;
 /// Each variant describes both the logical type and the physical encoding
 /// used in the columnar storage. This lets the query engine pick the right
 /// decoder without any runtime dispatch.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum ColumnType {
     /// Unsigned integer with a fixed bit width (1, 8, 16, 32, or 64).
@@ -33,7 +33,7 @@ pub enum ColumnType {
 ///
 /// Pairs a column name with its [`ColumnType`]. The name is used for property
 /// lookups; the type tells the storage layer how to encode/decode values.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ColumnDef {
     /// Column name (matches the property key in queries).
     pub name: ArcStr,
@@ -57,7 +57,7 @@ impl ColumnDef {
 /// All nodes with a given label share the same columnar layout defined here.
 /// The `table_id` is encoded into [`NodeId`](grafeo_common::types::NodeId)
 /// values via [`encode_node_id`](super::id::encode_node_id).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TableSchema {
     /// The node label this table stores (e.g. "Person", "Movie").
     pub label: ArcStr,
@@ -97,7 +97,7 @@ impl TableSchema {
 /// columns stored on the edges. The `rel_table_id` is encoded into
 /// [`EdgeId`](grafeo_common::types::EdgeId) values via
 /// [`encode_edge_id`](super::id::encode_edge_id).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EdgeSchema {
     /// The edge type this table stores (e.g. "KNOWS", "ACTED_IN").
     pub edge_type: ArcStr,

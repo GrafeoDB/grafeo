@@ -889,6 +889,635 @@ pub fn from_graph_store(
     builder.build()
 }
 
+/// Incrementally converts a [`GraphStore`](crate::graph::traits::GraphStore)
+/// into a [`CompactStore`], reusing unchanged tables from a previous snapshot.
+///
+/// For node tables listed in `unchanged_node_tables`, the previous `NodeTable`
+/// is cloned directly and the `id_map` is populated from the old compact store.
+/// For all other node tables the function falls back to the same encoding path
+/// used by [`from_graph_store`].
+///
+/// For rel tables listed in `unchanged_rel_tables` the previous `RelTable` is
+/// cloned.  All other rel tables are rebuilt from the merged `GraphStore` view.
+///
+/// # Errors
+///
+/// Propagates any [`CompactStoreError`] from the underlying builder.
+#[allow(clippy::too_many_lines)]
+pub fn from_graph_store_incremental(
+    store: &dyn crate::graph::traits::GraphStore,
+    old_compact: &CompactStore,
+    unchanged_node_tables: &FxHashSet<u16>,
+    unchanged_rel_tables: &FxHashSet<u16>,
+) -> Result<CompactStore, CompactStoreError> {
+    use super::id::encode_node_id;
+
+    let labels = store.all_labels();
+    if labels.is_empty() {
+        return CompactStoreBuilder::new().build();
+    }
+
+    // old_node_id -> (label_key, offset_within_label)
+    let mut id_map: FxHashMap<grafeo_common::types::NodeId, (ArcStr, u32)> =
+        FxHashMap::default();
+
+    // label_key -> (ordered node IDs, property_key -> Vec<Value>)
+    let mut label_data: Vec<(
+        ArcStr,
+        Vec<grafeo_common::types::NodeId>,
+        FxHashMap<PropertyKey, Vec<Value>>,
+    )> = Vec::new();
+
+    let mut seen_node_ids: FxHashSet<grafeo_common::types::NodeId> = FxHashSet::default();
+    let mut label_key_index: FxHashMap<ArcStr, usize> = FxHashMap::default();
+
+    // Step 1: Populate id_map for unchanged tables directly from old compact.
+    // For unchanged tables we skip the expensive per-entity property scan.
+    for (table_id, label) in old_compact.table_id_to_label().iter().enumerate() {
+        let tid = table_id as u16;
+        if !unchanged_node_tables.contains(&tid) {
+            continue;
+        }
+        let Some(nt) = old_compact.node_table(label.as_str()) else {
+            continue;
+        };
+        let node_count = nt.len();
+        let label_key = label.clone();
+
+        // Ensure the label_data entry exists (with empty props — we'll clone the table).
+        if !label_key_index.contains_key(&label_key) {
+            let idx = label_data.len();
+            label_key_index.insert(label_key.clone(), idx);
+            label_data.push((label_key.clone(), Vec::new(), FxHashMap::default()));
+        }
+        let entry_idx = label_key_index[&label_key];
+        let (_, ref mut node_ids_vec, _) = label_data[entry_idx];
+
+        for offset in 0..node_count {
+            let nid = encode_node_id(tid, offset as u64);
+            node_ids_vec.push(nid);
+            seen_node_ids.insert(nid);
+            id_map.insert(nid, (label_key.clone(), offset as u32));
+        }
+    }
+
+    // Step 2: Collect changed tables from the GraphStore (same as from_graph_store).
+    for label in &labels {
+        let node_ids = store.nodes_by_label(label);
+        for &nid in &node_ids {
+            if !seen_node_ids.insert(nid) {
+                continue;
+            }
+
+            let Some(node) = store.get_node(nid) else {
+                continue;
+            };
+
+            let label_key: ArcStr = if node.labels.len() <= 1 {
+                ArcStr::from(label.as_str())
+            } else {
+                let mut sorted: Vec<&str> = node.labels.iter().map(|l| l.as_str()).collect();
+                sorted.sort_unstable();
+                ArcStr::from(sorted.join("|"))
+            };
+
+            let entry_idx = if let Some(&idx) = label_key_index.get(&label_key) {
+                idx
+            } else {
+                let idx = label_data.len();
+                label_key_index.insert(label_key.clone(), idx);
+                label_data.push((label_key.clone(), Vec::new(), FxHashMap::default()));
+                idx
+            };
+
+            let (_, ref mut node_ids_vec, ref mut props_map) = label_data[entry_idx];
+            let offset = node_ids_vec.len() as u32;
+            node_ids_vec.push(nid);
+            id_map.insert(nid, (label_key, offset));
+
+            for (key, value) in node.properties.iter() {
+                let col = props_map
+                    .entry(key.clone())
+                    .or_insert_with(|| vec![Value::Null; offset as usize]);
+                while col.len() < offset as usize {
+                    col.push(Value::Null);
+                }
+                col.push(value.clone());
+            }
+
+            let expected_len = offset as usize + 1;
+            for col in props_map.values_mut() {
+                while col.len() < expected_len {
+                    col.push(Value::Null);
+                }
+            }
+        }
+    }
+
+    // Step 3: Build the CompactStore combining cloned and rebuilt node tables.
+    //
+    // We need to maintain the same table_id ordering as the old compact store
+    // for unchanged tables, while appending new labels at the end.  To do this
+    // we build the final ordered label list in two passes:
+    //   a) Old labels in their original order (unchanged cloned, changed rebuilt).
+    //   b) Brand-new labels that did not exist in old_compact.
+
+    // Map: label_key -> Option<(old_table_id, NodeTable to clone)>
+    // We decide per label whether to clone or rebuild.
+    let old_label_order: Vec<ArcStr> = old_compact.table_id_to_label().to_vec();
+
+    // Build the final ordered Vec of (label_key, whether_unchanged) pairs.
+    let mut ordered_labels: Vec<(ArcStr, bool)> = Vec::new();
+    for label in &old_label_order {
+        let old_tid = old_compact
+            .label_to_table_id_map()
+            .get(label.as_str())
+            .copied();
+        let unchanged = old_tid.is_some_and(|tid| unchanged_node_tables.contains(&tid));
+        ordered_labels.push((label.clone(), unchanged));
+    }
+    // Append brand-new labels (present in label_data but not in old compact).
+    for (label_key, _, _) in &label_data {
+        if !old_compact.label_to_table_id_map().contains_key(label_key.as_str()) {
+            ordered_labels.push((label_key.clone(), false));
+        }
+    }
+
+    // Assign new table IDs sequentially.
+    let mut label_to_table_id: FxHashMap<ArcStr, u16> = FxHashMap::default();
+    let mut table_id_to_label: Vec<ArcStr> = Vec::new();
+    for (idx, (label_key, _)) in ordered_labels.iter().enumerate() {
+        label_to_table_id.insert(label_key.clone(), idx as u16);
+        table_id_to_label.push(label_key.clone());
+    }
+
+    // Build NodeTables in order.
+    let mut node_tables_by_id: Vec<NodeTable> = Vec::with_capacity(ordered_labels.len());
+
+    for (label_key, is_unchanged) in &ordered_labels {
+        if *is_unchanged {
+            // Clone the NodeTable from old compact, but update its schema table_id
+            // to the new position (it may differ if new labels were inserted before it).
+            let new_tid = label_to_table_id[label_key];
+            if let Some(old_nt) = old_compact.node_table(label_key.as_str()) {
+                let mut cloned = old_nt.clone();
+                cloned.set_table_id(new_tid);
+                node_tables_by_id.push(cloned);
+            }
+        } else {
+            // Rebuild from collected data.
+            let Some(&entry_idx) = label_key_index.get(label_key) else {
+                // Label exists in old compact but has no nodes and wasn't rebuilt —
+                // create an empty table.
+                let new_tid = label_to_table_id[label_key];
+                use super::schema::TableSchema;
+                let schema = TableSchema::new(label_key.as_str(), new_tid, vec![]);
+                node_tables_by_id.push(NodeTable::from_columns(
+                    schema,
+                    FxHashMap::default(),
+                    FxHashMap::default(),
+                    0,
+                ));
+                continue;
+            };
+            let (_, node_ids_for_label, props_map) = &label_data[entry_idx];
+            let node_count = node_ids_for_label.len();
+            let new_tid = label_to_table_id[label_key];
+
+            let mut col_defs = Vec::new();
+            let mut columns: FxHashMap<PropertyKey, ColumnCodec> = FxHashMap::default();
+            let mut zone_maps: FxHashMap<PropertyKey, ZoneMap> = FxHashMap::default();
+
+            // Ensure row count is set even when there are no properties by
+            // initialising the len from node_count directly.
+            for (key, values) in props_map {
+                let inferred = infer_type_from_values(values);
+                let col_type;
+                match inferred {
+                    InferredType::BitPacked => {
+                        let u64_values: Vec<u64> = values
+                            .iter()
+                            .map(|v| match v {
+                                Value::Int64(n) => *n as u64,
+                                _ => 0,
+                            })
+                            .collect();
+                        let bp = BitPackedInts::pack(&u64_values);
+                        let zm = compute_zone_map_u64(&u64_values);
+                        col_type = infer_column_type(&ColumnCodec::BitPacked(bp.clone()));
+                        zone_maps.insert(key.clone(), zm);
+                        columns.insert(key.clone(), ColumnCodec::BitPacked(bp));
+                    }
+                    InferredType::Bitmap => {
+                        let bool_values: Vec<bool> = values
+                            .iter()
+                            .map(|v| matches!(v, Value::Bool(true)))
+                            .collect();
+                        let bv = BitVector::from_bools(&bool_values);
+                        let zm = compute_zone_map_bool(&bool_values);
+                        col_type = infer_column_type(&ColumnCodec::Bitmap(bv.clone()));
+                        zone_maps.insert(key.clone(), zm);
+                        columns.insert(key.clone(), ColumnCodec::Bitmap(bv));
+                    }
+                    InferredType::Dict => {
+                        let str_values: Vec<String> = values
+                            .iter()
+                            .map(|v| match v {
+                                Value::Null => String::new(),
+                                Value::String(s) => s.to_string(),
+                                other => format!("{other}"),
+                            })
+                            .collect();
+                        let str_refs: Vec<&str> = str_values.iter().map(String::as_str).collect();
+                        let mut dict_builder = DictionaryBuilder::new();
+                        for s in &str_refs {
+                            dict_builder.add(s);
+                        }
+                        let dict = dict_builder.build();
+                        let zm = compute_zone_map_strings(&str_refs);
+                        col_type = infer_column_type(&ColumnCodec::Dict(dict.clone()));
+                        zone_maps.insert(key.clone(), zm);
+                        columns.insert(key.clone(), ColumnCodec::Dict(dict));
+                    }
+                }
+                col_defs.push(super::schema::ColumnDef::new(key.as_str(), col_type));
+            }
+
+            use super::schema::TableSchema;
+            let schema = TableSchema::new(label_key.as_str(), new_tid, col_defs);
+            node_tables_by_id.push(NodeTable::from_columns(schema, columns, zone_maps, node_count));
+        }
+    }
+
+    // Step 4: Rebuild the id_map offsets to reflect the new table_ids.
+    // Unchanged entries already use old NodeIds (encoded with old table_ids).
+    // After assigning new table_ids above, the compact IDs for unchanged tables
+    // must be re-encoded with the new table_id.  We rebuild the id_map entirely
+    // using the new table_ids so edge collection below gets correct offsets.
+    let mut new_id_map: FxHashMap<grafeo_common::types::NodeId, (ArcStr, u32)> =
+        FxHashMap::default();
+    for (old_nid, (label_key, offset)) in &id_map {
+        let new_tid = label_to_table_id[label_key];
+        let new_nid = encode_node_id(new_tid, u64::from(*offset));
+        new_id_map.insert(*old_nid, (label_key.clone(), *offset));
+        // Also insert the new NodeId (in case it differs from old).
+        if *old_nid != new_nid {
+            new_id_map.insert(new_nid, (label_key.clone(), *offset));
+        }
+    }
+    // Replace id_map with the updated version for edge collection.
+    let id_map = new_id_map;
+
+    // Step 5: Collect edges — clone unchanged rel tables, rebuild changed ones.
+    type EdgeGroupKey = (ArcStr, ArcStr, ArcStr);
+    let mut edge_groups: FxHashMap<EdgeGroupKey, Vec<(u32, u32)>> = FxHashMap::default();
+    let mut edge_props_groups: FxHashMap<EdgeGroupKey, FxHashMap<PropertyKey, Vec<Value>>> =
+        FxHashMap::default();
+
+    // Collect edges only for label groups that belong to changed rel tables.
+    // We iterate all nodes but only process edges for tables that need rebuilding.
+    for (_label_key, node_ids, _) in &label_data {
+        for &nid in node_ids {
+            let outgoing = store.edges_from(nid, crate::graph::Direction::Outgoing);
+            for (_target_nid, edge_id) in outgoing {
+                let Some(edge) = store.get_edge(edge_id) else {
+                    continue;
+                };
+
+                let Some((src_label, src_offset)) = id_map.get(&edge.src) else {
+                    continue;
+                };
+                let Some((dst_label, dst_offset)) = id_map.get(&edge.dst) else {
+                    continue;
+                };
+
+                let group_key: EdgeGroupKey =
+                    (edge.edge_type.clone(), src_label.clone(), dst_label.clone());
+
+                let edges_vec = edge_groups.entry(group_key.clone()).or_default();
+                let edge_idx = edges_vec.len();
+                edges_vec.push((*src_offset, *dst_offset));
+
+                if !edge.properties.is_empty() {
+                    let props = edge_props_groups.entry(group_key).or_default();
+                    for (key, value) in edge.properties.iter() {
+                        let col = props
+                            .entry(key.clone())
+                            .or_insert_with(|| vec![Value::Null; edge_idx]);
+                        while col.len() < edge_idx {
+                            col.push(Value::Null);
+                        }
+                        col.push(value.clone());
+                    }
+                    let expected_len = edge_idx + 1;
+                    for col in props.values_mut() {
+                        while col.len() < expected_len {
+                            col.push(Value::Null);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 6: Build RelTables, mixing cloned (unchanged) and rebuilt (changed).
+    //
+    // We iterate old rel tables first (preserving rel_table_id ordering where
+    // possible), then append any brand-new edge types collected from the store.
+    let old_rel_count = old_compact.rel_tables_by_id().len();
+    let mut rel_tables_by_id: Vec<RelTable> = Vec::new();
+    let mut edge_type_to_rel_id: FxHashMap<ArcStr, Vec<u16>> = FxHashMap::default();
+    let mut rel_table_id_to_type: Vec<ArcStr> = Vec::new();
+
+    // Track which (edge_type, src_label, dst_label) groups we have handled so
+    // we can append any new groups at the end.
+    let mut handled_groups: FxHashSet<EdgeGroupKey> = FxHashSet::default();
+
+    for old_rid in 0..old_rel_count {
+        let old_rid_u16 = old_rid as u16;
+        let Some(old_rt) = old_compact.rel_tables_by_id().get(old_rid) else {
+            continue;
+        };
+        let edge_type = old_compact
+            .edge_type_for_rel_table_id(old_rid_u16)
+            .cloned()
+            .unwrap_or_else(|| old_rt.edge_type().clone());
+
+        let src_label = old_compact
+            .label_for_table_id(old_rt.src_table_id())
+            .cloned();
+        let dst_label = old_compact
+            .label_for_table_id(old_rt.dst_table_id())
+            .cloned();
+
+        let (Some(src_label), Some(dst_label)) = (src_label, dst_label) else {
+            continue; // schema inconsistency, skip
+        };
+
+        let group_key: EdgeGroupKey = (edge_type.clone(), src_label.clone(), dst_label.clone());
+        handled_groups.insert(group_key.clone());
+
+        let new_rel_id = rel_tables_by_id.len() as u16;
+        rel_table_id_to_type.push(edge_type.clone());
+
+        if unchanged_rel_tables.contains(&old_rid_u16) {
+            // Clone from old compact, updating only the rel_table_id in the schema.
+            let mut cloned = old_rt.clone();
+            cloned.set_rel_table_id(new_rel_id);
+            // Also update src/dst table_ids to reflect any new node table ordering.
+            let new_src_tid = label_to_table_id
+                .get(&src_label)
+                .copied()
+                .unwrap_or(old_rt.src_table_id());
+            let new_dst_tid = label_to_table_id
+                .get(&dst_label)
+                .copied()
+                .unwrap_or(old_rt.dst_table_id());
+            cloned.set_src_table_id(new_src_tid);
+            cloned.set_dst_table_id(new_dst_tid);
+            edge_type_to_rel_id
+                .entry(edge_type)
+                .or_default()
+                .push(new_rel_id);
+            rel_tables_by_id.push(cloned);
+        } else {
+            // Rebuild this rel table from the collected edges.
+            let edges = edge_groups.get(&group_key).cloned().unwrap_or_default();
+            let edge_props = edge_props_groups.get(&group_key);
+
+            let new_src_tid = label_to_table_id
+                .get(&src_label)
+                .copied()
+                .unwrap_or(old_rt.src_table_id());
+            let new_dst_tid = label_to_table_id
+                .get(&dst_label)
+                .copied()
+                .unwrap_or(old_rt.dst_table_id());
+
+            let src_node_count = node_tables_by_id
+                .get(new_src_tid as usize)
+                .map_or(0, |t| t.len());
+            let dst_node_count = node_tables_by_id
+                .get(new_dst_tid as usize)
+                .map_or(0, |t| t.len());
+
+            let rt = build_rel_table(
+                new_rel_id,
+                &edge_type,
+                &src_label,
+                &dst_label,
+                new_src_tid,
+                new_dst_tid,
+                src_node_count,
+                dst_node_count,
+                &edges,
+                edge_props,
+            )?;
+            edge_type_to_rel_id
+                .entry(edge_type)
+                .or_default()
+                .push(new_rel_id);
+            rel_tables_by_id.push(rt);
+        }
+    }
+
+    // Append brand-new rel tables (edge types/label-pairs not in old compact).
+    for (group_key, edges) in &edge_groups {
+        if handled_groups.contains(group_key) {
+            continue;
+        }
+        let (edge_type, src_label, dst_label) = group_key;
+        let new_rel_id = rel_tables_by_id.len() as u16;
+
+        let Some(&new_src_tid) = label_to_table_id.get(src_label.as_str()) else {
+            continue; // src label not found, skip
+        };
+        let Some(&new_dst_tid) = label_to_table_id.get(dst_label.as_str()) else {
+            continue; // dst label not found, skip
+        };
+
+        let src_node_count = node_tables_by_id
+            .get(new_src_tid as usize)
+            .map_or(0, |t| t.len());
+        let dst_node_count = node_tables_by_id
+            .get(new_dst_tid as usize)
+            .map_or(0, |t| t.len());
+
+        let edge_props = edge_props_groups.get(group_key);
+        let rt = build_rel_table(
+            new_rel_id,
+            edge_type,
+            src_label,
+            dst_label,
+            new_src_tid,
+            new_dst_tid,
+            src_node_count,
+            dst_node_count,
+            edges,
+            edge_props,
+        )?;
+        rel_table_id_to_type.push(edge_type.clone());
+        edge_type_to_rel_id
+            .entry(edge_type.clone())
+            .or_default()
+            .push(new_rel_id);
+        rel_tables_by_id.push(rt);
+    }
+
+    // Step 7: Compute statistics.
+    let mut stats = crate::statistics::Statistics::new();
+    let mut total_nodes: u64 = 0;
+    let mut total_edges: u64 = 0;
+
+    for (idx, nt) in node_tables_by_id.iter().enumerate() {
+        let count = nt.len() as u64;
+        total_nodes += count;
+        let label = &table_id_to_label[idx];
+        stats.update_label(
+            label.as_str(),
+            crate::statistics::LabelStatistics::new(count),
+        );
+    }
+
+    let mut edge_type_counts: FxHashMap<&str, u64> = FxHashMap::default();
+    for (idx, rt) in rel_tables_by_id.iter().enumerate() {
+        let count = rt.num_edges() as u64;
+        total_edges += count;
+        let edge_type = &rel_table_id_to_type[idx];
+        *edge_type_counts.entry(edge_type.as_str()).or_default() += count;
+    }
+    for (edge_type, count) in edge_type_counts {
+        stats.update_edge_type(
+            edge_type,
+            crate::statistics::EdgeTypeStatistics::new(count, 0.0, 0.0),
+        );
+    }
+    stats.total_nodes = total_nodes;
+    stats.total_edges = total_edges;
+
+    Ok(CompactStore::new(
+        node_tables_by_id,
+        label_to_table_id,
+        rel_tables_by_id,
+        edge_type_to_rel_id,
+        table_id_to_label,
+        rel_table_id_to_type,
+        stats,
+    ))
+}
+
+/// Builds a single [`RelTable`] from edges and optional property data.
+///
+/// Used internally by [`from_graph_store_incremental`] for rel tables that need
+/// to be rebuilt (as opposed to cloned from an old snapshot).
+#[allow(clippy::too_many_arguments)]
+fn build_rel_table(
+    rel_table_id: u16,
+    edge_type: &ArcStr,
+    src_label: &ArcStr,
+    dst_label: &ArcStr,
+    src_table_id: u16,
+    dst_table_id: u16,
+    src_node_count: usize,
+    dst_node_count: usize,
+    edges: &[(u32, u32)],
+    edge_props: Option<&FxHashMap<PropertyKey, Vec<Value>>>,
+) -> Result<RelTable, CompactStoreError> {
+    use super::csr::CsrAdjacency;
+    use super::schema::EdgeSchema;
+
+    let mut fwd_edges = edges.to_vec();
+    fwd_edges.sort_by_key(|&(src, _)| src);
+    let fwd = CsrAdjacency::from_sorted_edges(src_node_count, &fwd_edges);
+
+    let mut bwd_edges: Vec<(u32, u32)> =
+        edges.iter().map(|&(src, dst)| (dst, src)).collect();
+    bwd_edges.sort_by_key(|&(dst, _)| dst);
+    let mut bwd_csr = CsrAdjacency::from_sorted_edges(dst_node_count, &bwd_edges);
+
+    let mut mapping = Vec::with_capacity(bwd_edges.len());
+    for &(dst, src) in &bwd_edges {
+        let fwd_neighbors = fwd.neighbors(src);
+        let fwd_start = fwd.offset_of(src);
+        let local_idx = fwd_neighbors.iter().position(|&t| t == dst).ok_or_else(|| {
+            CompactStoreError::InconsistentEdgeData(format!(
+                "backward edge ({dst}->{src}) has no corresponding forward edge"
+            ))
+        })?;
+        mapping.push(fwd_start + local_idx as u32);
+    }
+    bwd_csr.set_edge_data(mapping);
+
+    let mut property_col_defs = Vec::new();
+    let mut properties: FxHashMap<PropertyKey, ColumnCodec> = FxHashMap::default();
+
+    if let Some(props) = edge_props {
+        for (key, values) in props {
+            let inferred = infer_type_from_values(values);
+            let col_type;
+            match inferred {
+                InferredType::BitPacked => {
+                    let u64_values: Vec<u64> = values
+                        .iter()
+                        .map(|v| match v {
+                            Value::Int64(n) => *n as u64,
+                            _ => 0,
+                        })
+                        .collect();
+                    let bp = BitPackedInts::pack(&u64_values);
+                    col_type = infer_column_type(&ColumnCodec::BitPacked(bp.clone()));
+                    properties.insert(key.clone(), ColumnCodec::BitPacked(bp));
+                }
+                InferredType::Bitmap => {
+                    let bool_values: Vec<bool> = values
+                        .iter()
+                        .map(|v| matches!(v, Value::Bool(true)))
+                        .collect();
+                    let bv = BitVector::from_bools(&bool_values);
+                    col_type = infer_column_type(&ColumnCodec::Bitmap(bv.clone()));
+                    properties.insert(key.clone(), ColumnCodec::Bitmap(bv));
+                }
+                InferredType::Dict => {
+                    let str_values: Vec<String> = values
+                        .iter()
+                        .map(|v| match v {
+                            Value::Null => String::new(),
+                            Value::String(s) => s.to_string(),
+                            other => format!("{other}"),
+                        })
+                        .collect();
+                    let str_refs: Vec<&str> = str_values.iter().map(String::as_str).collect();
+                    let mut dict_builder = DictionaryBuilder::new();
+                    for s in &str_refs {
+                        dict_builder.add(s);
+                    }
+                    let dict = dict_builder.build();
+                    col_type = infer_column_type(&ColumnCodec::Dict(dict.clone()));
+                    properties.insert(key.clone(), ColumnCodec::Dict(dict));
+                }
+            }
+            property_col_defs.push(super::schema::ColumnDef::new(key.as_str(), col_type));
+        }
+    }
+
+    let schema = EdgeSchema::new(
+        edge_type.as_str(),
+        rel_table_id,
+        src_label.as_str(),
+        dst_label.as_str(),
+        property_col_defs,
+    );
+
+    Ok(RelTable::new(
+        schema,
+        fwd,
+        Some(bwd_csr),
+        properties,
+        src_table_id,
+        dst_table_id,
+    ))
+}
+
 /// Infers the columnar encoding type from a slice of [`Value`]s.
 ///
 /// Rules:

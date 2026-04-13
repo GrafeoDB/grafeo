@@ -32,3 +32,5 @@ pub use property::{CompareOp, PropertyStorage};
 pub use section::LpgStoreSection;
 #[cfg(feature = "lpg")]
 pub use store::{LpgStore, PropertyUndoEntry};
+#[cfg(feature = "lpg")]
+pub(crate) use store::value_in_range;

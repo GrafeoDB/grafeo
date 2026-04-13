@@ -29,7 +29,7 @@ use std::sync::Arc;
 /// Each unique string appears once in the dictionary. Values are stored as u32
 /// indices pointing into that dictionary. Great for labels, categories, and
 /// other low-cardinality string columns.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DictionaryEncoding {
     /// The dictionary of unique strings.
     dictionary: Arc<[Arc<str>]>,

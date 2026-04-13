@@ -16,7 +16,7 @@ use super::zone_map::ZoneMap;
 /// All nodes sharing a label are stored in a single `NodeTable` with one
 /// [`ColumnCodec`] per property. Row offsets are combined with the table ID
 /// via [`encode_node_id`] to produce globally unique [`NodeId`] values.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NodeTable {
     /// Schema describing the label, table ID, and column definitions.
     schema: TableSchema,
@@ -148,6 +148,32 @@ impl NodeTable {
     #[must_use]
     pub fn memory_bytes(&self) -> usize {
         self.columns.values().map(|c| c.heap_bytes()).sum()
+    }
+
+    /// Updates the table ID embedded in the schema.
+    ///
+    /// Used by incremental compaction when tables are re-indexed after
+    /// cloning from an old compact store.
+    pub(crate) fn set_table_id(&mut self, table_id: u16) {
+        self.schema.table_id = table_id;
+    }
+
+    /// Returns the schema for this table.
+    #[must_use]
+    pub(crate) fn schema(&self) -> &TableSchema {
+        &self.schema
+    }
+
+    /// Returns the columns map for this table.
+    #[must_use]
+    pub(crate) fn columns(&self) -> &FxHashMap<PropertyKey, ColumnCodec> {
+        &self.columns
+    }
+
+    /// Returns the zone maps for this table.
+    #[must_use]
+    pub(crate) fn zone_maps(&self) -> &FxHashMap<PropertyKey, ZoneMap> {
+        &self.zone_maps
     }
 }
 

@@ -310,6 +310,34 @@ impl LpgStore {
         self.edge_properties.get_selective_batch(ids, keys)
     }
 
+    /// Returns all property overrides for a node ID from PropertyStorage.
+    ///
+    /// Does not check the nodes map -- works for compact entity IDs that only
+    /// have overlay property overrides stored in [`PropertyStorage`].
+    pub(crate) fn get_node_properties_all(&self, id: NodeId) -> FxHashMap<PropertyKey, Value> {
+        self.node_properties.get_all(id)
+    }
+
+    /// Returns all property overrides for an edge ID from PropertyStorage.
+    ///
+    /// Does not check the edges map -- works for compact entity IDs.
+    pub(crate) fn get_edge_properties_all(&self, id: EdgeId) -> FxHashMap<PropertyKey, Value> {
+        self.edge_properties.get_all(id)
+    }
+
+    /// Returns all node IDs with a property override matching `predicate`.
+    ///
+    /// Scans the overlay's PropertyStorage column for `key`, returning IDs
+    /// whose overridden value satisfies the predicate. Used by HybridStore
+    /// to find compact nodes with overlay overrides matching scan criteria.
+    pub(crate) fn node_ids_with_property_matching(
+        &self,
+        key: &PropertyKey,
+        predicate: impl Fn(&Value) -> bool,
+    ) -> Vec<NodeId> {
+        self.node_properties.ids_matching(key, predicate)
+    }
+
     // === Versioned Property Operations (with undo log) ===
 
     /// Sets a node property within a transaction, recording the previous value
@@ -516,6 +544,9 @@ impl LpgStore {
                 }
             }
         }
+        if let Some(ref hook) = *self.on_rollback_hook.lock() {
+            hook(transaction_id);
+        }
     }
 
     /// Rolls back property/label changes by removing PENDING entries from
@@ -636,6 +667,9 @@ impl LpgStore {
                 }
             }
         }
+        if let Some(ref hook) = *self.on_rollback_hook.lock() {
+            hook(transaction_id);
+        }
     }
 
     /// Discards the undo log entries for a committed transaction.
@@ -644,6 +678,9 @@ impl LpgStore {
     /// clean up the log.
     pub fn commit_transaction_properties(&self, transaction_id: TransactionId) {
         self.property_undo_log.write().remove(&transaction_id);
+        if let Some(ref hook) = *self.on_commit_hook.lock() {
+            hook(transaction_id);
+        }
     }
 
     /// Returns the current number of undo log entries for a transaction.

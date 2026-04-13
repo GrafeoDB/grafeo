@@ -18,6 +18,9 @@ pub mod traits;
 #[cfg(feature = "compact-store")]
 pub mod compact;
 
+#[cfg(feature = "compact-store")]
+pub mod hybrid;
+
 #[cfg(feature = "triple-store")]
 pub mod rdf;
 

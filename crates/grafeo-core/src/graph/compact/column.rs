@@ -17,7 +17,7 @@ use crate::codec::{BitPackedInts, BitVector, DictionaryEncoding};
 /// primitives themselves are never modified. Use [`get`](Self::get) for
 /// `Value`-typed access and the specialised accessors when you know the
 /// underlying codec.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum ColumnCodec {
     /// Fixed-width bit-packed unsigned integers.

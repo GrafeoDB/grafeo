@@ -134,7 +134,7 @@ pub(super) fn compare_values_for_range(a: &Value, b: &Value) -> Option<CmpOrderi
 }
 
 /// Checks if a value is within a range.
-pub(super) fn value_in_range(
+pub(crate) fn value_in_range(
     value: &Value,
     min: Option<&Value>,
     max: Option<&Value>,
@@ -465,6 +465,11 @@ pub struct LpgStore {
     /// simply discarded.
     /// Lock order: 10 (after named_graphs, independent of other locks)
     property_undo_log: RwLock<FxHashMap<TransactionId, Vec<PropertyUndoEntry>>>,
+
+    /// Optional callback fired after rollback_transaction_properties completes.
+    pub(crate) on_rollback_hook: parking_lot::Mutex<Option<Box<dyn Fn(TransactionId) + Send + Sync>>>,
+    /// Optional callback fired after commit_transaction_properties completes.
+    pub(crate) on_commit_hook: parking_lot::Mutex<Option<Box<dyn Fn(TransactionId) + Send + Sync>>>,
 }
 
 impl LpgStore {
@@ -528,6 +533,8 @@ impl LpgStore {
             needs_stats_recompute: AtomicBool::new(false),
             named_graphs: RwLock::new(FxHashMap::default()),
             property_undo_log: RwLock::new(FxHashMap::default()),
+            on_rollback_hook: parking_lot::Mutex::new(None),
+            on_commit_hook: parking_lot::Mutex::new(None),
         })
     }
 
@@ -766,5 +773,31 @@ impl LpgStore {
         if type_id < counts.len() as u32 {
             counts[type_id as usize] -= 1;
         }
+    }
+
+    /// Sets the next node ID counter.
+    ///
+    /// Used by `HybridStore::open` to ensure overlay IDs do not collide with
+    /// compact-store IDs.
+    pub(crate) fn set_next_node_id(&self, id: u64) {
+        self.next_node_id.store(id, Ordering::Release);
+    }
+
+    /// Sets the next edge ID counter.
+    ///
+    /// Used by `HybridStore::open` to ensure overlay IDs do not collide with
+    /// compact-store IDs.
+    pub(crate) fn set_next_edge_id(&self, id: u64) {
+        self.next_edge_id.store(id, Ordering::Release);
+    }
+
+    /// Registers a callback that fires after `rollback_transaction_properties`.
+    pub(crate) fn set_on_rollback_hook(&self, hook: Box<dyn Fn(TransactionId) + Send + Sync>) {
+        *self.on_rollback_hook.lock() = Some(hook);
+    }
+
+    /// Registers a callback that fires after `commit_transaction_properties`.
+    pub(crate) fn set_on_commit_hook(&self, hook: Box<dyn Fn(TransactionId) + Send + Sync>) {
+        *self.on_commit_hook.lock() = Some(hook);
     }
 }

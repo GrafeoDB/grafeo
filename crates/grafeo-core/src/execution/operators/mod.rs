@@ -41,6 +41,8 @@ mod project;
 pub mod push;
 mod scan;
 mod scan_vector;
+#[cfg(feature = "text-index")]
+mod scan_text;
 mod set_ops;
 mod shortest_path;
 pub mod single_row;
@@ -96,6 +98,8 @@ pub use push::{
 pub use push::{SpillableAggregatePushOperator, SpillableSortPushOperator};
 pub use scan::ScanOperator;
 pub use scan_vector::VectorScanOperator;
+#[cfg(feature = "text-index")]
+pub use scan_text::TextScanOperator;
 pub use set_ops::{ExceptOperator, IntersectOperator, OtherwiseOperator};
 pub use shortest_path::ShortestPathOperator;
 pub use single_row::{EmptyOperator, NodeListOperator, SingleRowOperator};

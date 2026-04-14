@@ -203,6 +203,17 @@ impl VectorScanOperator {
         self
     }
 
+    /// Overrides the distance metric.
+    ///
+    /// When using `with_index`, the default metric is Cosine. Use this to
+    /// match the HNSW index's actual metric so that threshold comparisons
+    /// (min_similarity, max_distance) use the correct distance scale.
+    #[must_use]
+    pub fn with_metric(mut self, metric: DistanceMetric) -> Self {
+        self.metric = metric;
+        self
+    }
+
     /// Sets the chunk capacity for output batches.
     #[must_use]
     pub fn with_chunk_capacity(mut self, capacity: usize) -> Self {

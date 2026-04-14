@@ -21,8 +21,10 @@ use crate::query::plan::{
     HorizontalAggregateOp, IntersectOp, JoinOp, JoinType, LeftJoinOp, LimitOp, LogicalExpression,
     LogicalOperator, LogicalPlan, MapCollectOp, MergeOp, MergeRelationshipOp, MultiWayJoinOp,
     NodeScanOp, OtherwiseOp, PathMode, RemoveLabelOp, ReturnOp, SetPropertyOp, ShortestPathOp,
-    SkipOp, SortOp, SortOrder, UnaryOp, UnionOp, UnwindOp,
+    SkipOp, SortOp, SortOrder, TextScanOp, UnaryOp, UnionOp, UnwindOp,
 };
+#[cfg(feature = "vector-index")]
+use crate::query::plan::{VectorMetric, VectorScanOp};
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{EpochId, TransactionId};
 use grafeo_common::types::{LogicalType, Value};
@@ -656,11 +658,20 @@ impl Planner {
                 Ok((operator, vec![load.variable.clone()]))
             }
             LogicalOperator::Empty => Err(Error::Internal("Empty plan".to_string())),
+            #[cfg(feature = "vector-index")]
+            LogicalOperator::VectorScan(scan) => self.plan_vector_scan(scan),
+            #[cfg(not(feature = "vector-index"))]
             LogicalOperator::VectorScan(_) => Err(Error::Internal(
                 "VectorScan requires vector-index feature".to_string(),
             )),
             LogicalOperator::VectorJoin(_) => Err(Error::Internal(
                 "VectorJoin requires vector-index feature".to_string(),
+            )),
+            #[cfg(feature = "text-index")]
+            LogicalOperator::TextScan(scan) => self.plan_text_scan(scan),
+            #[cfg(not(feature = "text-index"))]
+            LogicalOperator::TextScan(_) => Err(Error::Internal(
+                "TextScan requires text-index feature".to_string(),
             )),
             _ => Err(Error::Internal(format!(
                 "Unsupported operator: {:?}",
@@ -737,6 +748,169 @@ impl Planner {
         let operator = Box::new(MapCollectOperator::new(child_op, key_idx, value_idx));
         self.scalar_columns.borrow_mut().insert(mc.alias.clone());
         Ok((operator, vec![mc.alias.clone()]))
+    }
+
+    /// Plans a text search scan operator using BM25 inverted index.
+    #[cfg(feature = "text-index")]
+    fn plan_text_scan(&self, scan: &TextScanOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        use grafeo_core::execution::operators::TextScanOperator;
+
+        let query_string = match &scan.query {
+            LogicalExpression::Literal(Value::String(s)) => s.to_string(),
+            LogicalExpression::Parameter(name) => {
+                return Err(Error::Internal(format!(
+                    "TextScan query parameter ${} not resolved",
+                    name
+                )));
+            }
+            _ => {
+                return Err(Error::Internal(
+                    "TextScan query must be a string literal or parameter".to_string(),
+                ))
+            }
+        };
+
+        let operator: Box<dyn Operator> = if let Some(k) = scan.k {
+            Box::new(TextScanOperator::top_k(
+                Arc::clone(&self.store),
+                &scan.label,
+                &scan.property,
+                &query_string,
+                k,
+            ))
+        } else if let Some(threshold) = scan.threshold {
+            Box::new(TextScanOperator::with_threshold(
+                Arc::clone(&self.store),
+                &scan.label,
+                &scan.property,
+                &query_string,
+                threshold,
+            ))
+        } else {
+            Box::new(TextScanOperator::top_k(
+                Arc::clone(&self.store),
+                &scan.label,
+                &scan.property,
+                &query_string,
+                100,
+            ))
+        };
+
+        let mut columns = vec![scan.variable.clone()];
+        if let Some(ref score_col) = scan.score_column {
+            columns.push(score_col.clone());
+        }
+
+        Ok((operator, columns))
+    }
+
+    /// Plans a VectorScan logical operator into a physical VectorScanOperator.
+    #[cfg(feature = "vector-index")]
+    pub(super) fn plan_vector_scan(
+        &self,
+        scan: &VectorScanOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        use grafeo_core::execution::operators::VectorScanOperator;
+        use grafeo_core::index::vector::DistanceMetric;
+
+        // Resolve the query vector expression to Vec<f32>
+        let query_vec = self.resolve_vector_literal(&scan.query_vector)?;
+
+        // Map VectorMetric to DistanceMetric
+        let metric = match scan.metric {
+            Some(VectorMetric::Cosine) | None => DistanceMetric::Cosine,
+            Some(VectorMetric::Euclidean) => DistanceMetric::Euclidean,
+            Some(VectorMetric::DotProduct) => DistanceMetric::DotProduct,
+            Some(VectorMetric::Manhattan) => DistanceMetric::Manhattan,
+        };
+
+        let k = scan.k.unwrap_or(usize::MAX);
+
+        // Try HNSW-accelerated path when an index handle is available.
+        // The with_metric() builder ensures threshold comparisons use the
+        // correct distance scale regardless of with_index()'s default.
+        let mut operator = if let Some(ref label) = scan.label {
+            if let Some(handle) = self.store.get_vector_index_handle(label, &scan.property) {
+                use grafeo_core::index::vector::VectorIndexKind;
+                if let Ok(index) = handle.downcast::<VectorIndexKind>() {
+                    VectorScanOperator::with_index(
+                        Arc::clone(&self.store),
+                        index,
+                        query_vec.clone(),
+                        k,
+                    )
+                    .with_property(&scan.property)
+                    .with_label(label)
+                    .with_metric(metric)
+                } else {
+                    VectorScanOperator::brute_force(
+                        Arc::clone(&self.store), &scan.property, query_vec.clone(), k, metric,
+                    ).with_label(label)
+                }
+            } else {
+                VectorScanOperator::brute_force(
+                    Arc::clone(&self.store), &scan.property, query_vec.clone(), k, metric,
+                ).with_label(label)
+            }
+        } else {
+            VectorScanOperator::brute_force(
+                Arc::clone(&self.store), &scan.property, query_vec, k, metric,
+            )
+        };
+
+        if let Some(sim) = scan.min_similarity {
+            operator = operator.with_min_similarity(sim);
+        }
+        if let Some(dist) = scan.max_distance {
+            operator = operator.with_max_distance(dist);
+        }
+
+        let mut columns = vec![scan.variable.clone()];
+        // VectorScan always projects a score column
+        columns.push(format!("_vscore_{}", scan.variable));
+
+        Ok((Box::new(operator), columns))
+    }
+
+    /// Resolves a LogicalExpression to a Vec<f32> for vector operations.
+    #[cfg(feature = "vector-index")]
+    pub(super) fn resolve_vector_literal(&self, expr: &LogicalExpression) -> Result<Vec<f32>> {
+        match expr {
+            LogicalExpression::Literal(Value::Vector(v)) => Ok(v.to_vec()),
+            LogicalExpression::Literal(Value::List(list)) => {
+                let mut vec = Vec::with_capacity(list.len());
+                for item in list.iter() {
+                    match item {
+                        Value::Float64(f) => vec.push(*f as f32),
+                        Value::Int64(i) => vec.push(*i as f32),
+                        _ => {
+                            return Err(Error::Internal(
+                                "Vector elements must be numeric".to_string(),
+                            ))
+                        }
+                    }
+                }
+                Ok(vec)
+            }
+            // GQL/Cypher parser produces List([Literal(Float64), ...]) for inline vectors like
+            // [0.9, 0.1, 0.0] — handle this form by recursively resolving each element.
+            LogicalExpression::List(items) => {
+                let mut vec = Vec::with_capacity(items.len());
+                for item in items {
+                    match item {
+                        LogicalExpression::Literal(Value::Float64(f)) => vec.push(*f as f32),
+                        LogicalExpression::Literal(Value::Int64(i)) => vec.push(*i as f32),
+                        _ => {
+                            return Err(Error::Internal(
+                                "Vector elements must be numeric literals".to_string(),
+                            ))
+                        }
+                    }
+                }
+                Ok(vec)
+            }
+            _ => Err(Error::Internal("Expected vector literal".to_string())),
+        }
     }
 }
 

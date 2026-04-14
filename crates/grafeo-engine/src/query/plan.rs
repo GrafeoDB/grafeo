@@ -271,6 +271,9 @@ pub enum LogicalOperator {
     /// - Combining multiple vector sources with graph structure
     VectorJoin(VectorJoinOp),
 
+    /// Scan using full-text search with BM25 scoring.
+    TextScan(TextScanOp),
+
     // ==================== Set Operations ====================
     /// Set difference: rows in left that are not in right.
     Except(ExceptOp),
@@ -347,7 +350,7 @@ impl LogicalOperator {
             Self::MapCollect(op) => op.input.has_mutations(),
             Self::Return(op) => op.input.has_mutations(),
             Self::HorizontalAggregate(op) => op.input.has_mutations(),
-            Self::VectorScan(_) | Self::VectorJoin(_) => false,
+            Self::VectorScan(_) | Self::VectorJoin(_) | Self::TextScan(_) => false,
 
             // Operators with two children
             Self::Join(op) => op.left.has_mutations() || op.right.has_mutations(),
@@ -444,7 +447,8 @@ impl LogicalOperator {
             | Self::MoveGraph(_)
             | Self::AddGraph(_)
             | Self::CreatePropertyGraph(_)
-            | Self::LoadData(_) => vec![],
+            | Self::LoadData(_)
+            | Self::TextScan(_) => vec![],
         }
     }
 
@@ -579,6 +583,7 @@ impl LogicalOperator {
             Self::Apply(_) => String::new(),
             Self::VectorScan(op) => op.variable.clone(),
             Self::VectorJoin(op) => op.right_variable.clone(),
+            Self::TextScan(op) => format!("{}:{}", op.variable, op.label),
             _ => String::new(),
         }
     }
@@ -925,6 +930,42 @@ impl LogicalOperator {
                 if let Some(input) = &op.input {
                     input.fmt_tree(out, depth + 1);
                 }
+            }
+            Self::VectorScan(op) => {
+                let metric = op.metric.map_or("default", |m| match m {
+                    VectorMetric::Cosine => "cosine",
+                    VectorMetric::Euclidean => "euclidean",
+                    VectorMetric::DotProduct => "dot_product",
+                    VectorMetric::Manhattan => "manhattan",
+                });
+                let mode = match op.k {
+                    Some(k) => format!("top-{k}"),
+                    None => "threshold".to_string(),
+                };
+                let _ = writeln!(
+                    out,
+                    "{indent}VectorScan ({var}:{label}.{prop}, {metric}, {mode})",
+                    var = op.variable,
+                    label = op.label.as_deref().unwrap_or("*"),
+                    prop = op.property,
+                );
+                if let Some(input) = &op.input {
+                    input.fmt_tree(out, depth + 1);
+                }
+            }
+            Self::TextScan(op) => {
+                let mode = match op.k {
+                    Some(k) => format!("top-{k}"),
+                    None => "threshold".to_string(),
+                };
+                let query = fmt_expr(&op.query);
+                let _ = writeln!(
+                    out,
+                    "{indent}TextScan ({var}:{label}.{prop}, query={query}, {mode})",
+                    var = op.variable,
+                    label = op.label,
+                    prop = op.property,
+                );
             }
             Self::Empty => {
                 let _ = writeln!(out, "{indent}Empty");
@@ -1872,8 +1913,8 @@ pub struct VectorScanOp {
     pub label: Option<String>,
     /// The query vector expression.
     pub query_vector: LogicalExpression,
-    /// Number of nearest neighbors to return.
-    pub k: usize,
+    /// Number of nearest neighbors to return (None = threshold mode only).
+    pub k: Option<usize>,
     /// Distance metric (None = use index default, typically cosine).
     pub metric: Option<VectorMetric>,
     /// Minimum similarity threshold (filters results below this).
@@ -1948,6 +1989,25 @@ pub struct VectorJoinOp {
     pub max_distance: Option<f32>,
     /// Variable to bind the distance/similarity score.
     pub score_variable: Option<String>,
+}
+
+/// Text search scan using BM25 inverted index.
+#[derive(Debug, Clone)]
+pub struct TextScanOp {
+    /// Variable to bind matched nodes.
+    pub variable: String,
+    /// Label of nodes to search.
+    pub label: String,
+    /// Property holding the text to search.
+    pub property: String,
+    /// The search query expression (must resolve to a string).
+    pub query: LogicalExpression,
+    /// Top-k limit (None = threshold mode or default 100).
+    pub k: Option<usize>,
+    /// Minimum score threshold (None = top-k mode).
+    pub threshold: Option<f64>,
+    /// Optional column name to bind the BM25 score.
+    pub score_column: Option<String>,
 }
 
 /// Return results (terminal operator).

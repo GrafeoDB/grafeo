@@ -945,6 +945,9 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
             substitute_in_expression(&mut join.query_vector, params)?;
             substitute_in_operator(&mut join.input, params)?;
         }
+        LogicalOperator::TextScan(scan) => {
+            substitute_in_expression(&mut scan.query, params)?;
+        }
         LogicalOperator::Except(except) => {
             substitute_in_operator(&mut except.left, params)?;
             substitute_in_operator(&mut except.right, params)?;

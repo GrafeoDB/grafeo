@@ -738,6 +738,33 @@ impl Binder {
                 Ok(())
             }
             LogicalOperator::Construct(construct) => self.bind_operator(&construct.input),
+            LogicalOperator::TextScan(scan) => {
+                // Register the node variable
+                self.context.add_variable(
+                    scan.variable.clone(),
+                    VariableInfo {
+                        name: scan.variable.clone(),
+                        data_type: LogicalType::Node,
+                        is_node: true,
+                        is_edge: false,
+                    },
+                );
+                // Optionally register the score column
+                if let Some(ref score_col) = scan.score_column {
+                    self.context.add_variable(
+                        score_col.clone(),
+                        VariableInfo {
+                            name: score_col.clone(),
+                            data_type: LogicalType::Float64,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
+                }
+                // Validate the query expression
+                self.validate_expression(&scan.query)?;
+                Ok(())
+            }
         }
     }
 

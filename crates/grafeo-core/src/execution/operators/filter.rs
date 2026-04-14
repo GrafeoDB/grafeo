@@ -1664,6 +1664,7 @@ impl ExpressionPredicate {
             .or_else(|| self.eval_temporal_fn(name, args, chunk, row))
             .or_else(|| self.eval_path_fn(name, args, chunk, row))
             .or_else(|| self.eval_vector_fn(name, args, chunk, row))
+            .or_else(|| self.eval_text_fn(name, args, chunk, row))
             .or_else(|| self.eval_session_fn(name, args, chunk, row))
     }
 
@@ -3385,6 +3386,28 @@ impl ExpressionPredicate {
         }
     }
 
+    /// Coerces a `Value` to a borrowed or owned float slice for vector math.
+    ///
+    /// Handles both `Value::Vector` (native) and `Value::List` (GQL inline literal
+    /// form `[0.9, 0.1, 0.0]` which the parser translates to a list of Float64/Int64).
+    fn coerce_to_float_vec(val: &Value) -> Option<std::borrow::Cow<[f32]>> {
+        match val {
+            Value::Vector(v) => Some(std::borrow::Cow::Borrowed(v.as_ref())),
+            Value::List(list) => {
+                let mut vec = Vec::with_capacity(list.len());
+                for item in list.iter() {
+                    match item {
+                        Value::Float64(f) => vec.push(*f as f32),
+                        Value::Int64(i) => vec.push(*i as f32),
+                        _ => return None,
+                    }
+                }
+                Some(std::borrow::Cow::Owned(vec))
+            }
+            _ => None,
+        }
+    }
+
     fn eval_vector_fn(
         &self,
         name: &str,
@@ -3399,13 +3422,13 @@ impl ExpressionPredicate {
                 }
                 let a_val = self.eval_expr(&args[0], chunk, row)?;
                 let b_val = self.eval_expr(&args[1], chunk, row)?;
-                let a = a_val.as_vector()?;
-                let b = b_val.as_vector()?;
+                let a = Self::coerce_to_float_vec(&a_val)?;
+                let b = Self::coerce_to_float_vec(&b_val)?;
                 if a.len() != b.len() {
                     return None;
                 }
                 Some(Value::Float64(
-                    crate::index::vector::cosine_similarity(a, b) as f64,
+                    crate::index::vector::cosine_similarity(&a, &b) as f64,
                 ))
             }
             "euclidean_distance" => {
@@ -3414,13 +3437,13 @@ impl ExpressionPredicate {
                 }
                 let a_val = self.eval_expr(&args[0], chunk, row)?;
                 let b_val = self.eval_expr(&args[1], chunk, row)?;
-                let a = a_val.as_vector()?;
-                let b = b_val.as_vector()?;
+                let a = Self::coerce_to_float_vec(&a_val)?;
+                let b = Self::coerce_to_float_vec(&b_val)?;
                 if a.len() != b.len() {
                     return None;
                 }
                 Some(Value::Float64(
-                    crate::index::vector::euclidean_distance(a, b) as f64,
+                    crate::index::vector::euclidean_distance(&a, &b) as f64,
                 ))
             }
             "dot_product" => {
@@ -3429,13 +3452,13 @@ impl ExpressionPredicate {
                 }
                 let a_val = self.eval_expr(&args[0], chunk, row)?;
                 let b_val = self.eval_expr(&args[1], chunk, row)?;
-                let a = a_val.as_vector()?;
-                let b = b_val.as_vector()?;
+                let a = Self::coerce_to_float_vec(&a_val)?;
+                let b = Self::coerce_to_float_vec(&b_val)?;
                 if a.len() != b.len() {
                     return None;
                 }
                 Some(Value::Float64(
-                    crate::index::vector::dot_product(a, b) as f64
+                    crate::index::vector::dot_product(&a, &b) as f64
                 ))
             }
             "manhattan_distance" => {
@@ -3444,17 +3467,75 @@ impl ExpressionPredicate {
                 }
                 let a_val = self.eval_expr(&args[0], chunk, row)?;
                 let b_val = self.eval_expr(&args[1], chunk, row)?;
-                let a = a_val.as_vector()?;
-                let b = b_val.as_vector()?;
+                let a = Self::coerce_to_float_vec(&a_val)?;
+                let b = Self::coerce_to_float_vec(&b_val)?;
                 if a.len() != b.len() {
                     return None;
                 }
                 Some(Value::Float64(
-                    crate::index::vector::manhattan_distance(a, b) as f64,
+                    crate::index::vector::manhattan_distance(&a, &b) as f64,
                 ))
             }
             _ => None,
         }
+    }
+
+    #[cfg(feature = "text-index")]
+    fn eval_text_fn(
+        &self,
+        name: &str,
+        args: &[FilterExpression],
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<Value> {
+        match name {
+            "text_score" | "text_match" => {
+                if args.len() != 2 {
+                    return None;
+                }
+
+                // First arg must be a property access (e.g., n.body)
+                let FilterExpression::Property { variable, property } = &args[0] else {
+                    return None;
+                };
+
+                // Get node_id from the chunk
+                let col_idx = *self.variable_columns.get(variable.as_str())?;
+                let col = chunk.column(col_idx)?;
+                let node_id = col.get_node_id(row)?;
+
+                // Second arg: query string
+                let query_val = self.eval_expr(&args[1], chunk, row)?;
+                let Value::String(query_str) = &query_val else {
+                    return None;
+                };
+
+                // Get the node's labels to look up the text index
+                let node = self.resolve_node(node_id)?;
+                let label = node.labels.first()?;
+
+                // Score using the store's text index
+                let score = self.store.score_text(node_id, label, property, query_str)?;
+
+                if name == "text_match" {
+                    Some(Value::Bool(score > 0.0))
+                } else {
+                    Some(Value::Float64(score))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(not(feature = "text-index"))]
+    fn eval_text_fn(
+        &self,
+        _name: &str,
+        _args: &[FilterExpression],
+        _chunk: &DataChunk,
+        _row: usize,
+    ) -> Option<Value> {
+        None
     }
 
     fn eval_session_fn(
@@ -6460,5 +6541,167 @@ mod tests {
         let op = FilterOperator::new(Box::new(mock), Box::new(predicate));
         let (mut child, _predicate) = op.into_parts();
         assert!(child.next().unwrap().is_none());
+    }
+}
+
+#[cfg(all(test, feature = "text-index", feature = "lpg"))]
+mod text_fn_tests {
+    use super::*;
+    use crate::execution::chunk::DataChunkBuilder;
+    use crate::graph::GraphStore;
+    use crate::graph::lpg::LpgStore;
+    use crate::index::text::{BM25Config, InvertedIndex};
+    use grafeo_common::types::LogicalType;
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn setup_store_with_text_index() -> (Arc<LpgStore>, grafeo_common::types::NodeId, grafeo_common::types::NodeId) {
+        let store = Arc::new(LpgStore::new().unwrap());
+
+        // Create nodes with text properties
+        let n1 = store.create_node(&["Article"]);
+        store.set_node_property(n1, "body", Value::String("rust graph database engine".into()));
+        let n2 = store.create_node(&["Article"]);
+        store.set_node_property(n2, "body", Value::String("python web framework".into()));
+
+        // Create and populate text index
+        let mut index = InvertedIndex::new(BM25Config::default());
+        index.insert(n1, "rust graph database engine");
+        index.insert(n2, "python web framework");
+        store.add_text_index("Article", "body", Arc::new(RwLock::new(index)));
+
+        (store, n1, n2)
+    }
+
+    #[test]
+    fn test_text_score_function() {
+        let (store, n1, n2) = setup_store_with_text_index();
+
+        // Build a chunk with two rows: n1 in row 0, n2 in row 1
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node]);
+        builder.column_mut(0).unwrap().push_node_id(n1);
+        builder.advance_row();
+        builder.column_mut(0).unwrap().push_node_id(n2);
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        let mut variable_columns = HashMap::new();
+        variable_columns.insert("doc".to_string(), 0);
+
+        // text_score(doc.body, "rust database") > 0.0
+        let predicate = ExpressionPredicate::new(
+            FilterExpression::Binary {
+                left: Box::new(FilterExpression::FunctionCall {
+                    name: "text_score".to_string(),
+                    args: vec![
+                        FilterExpression::Property {
+                            variable: "doc".to_string(),
+                            property: "body".to_string(),
+                        },
+                        FilterExpression::Literal(Value::String("rust database".into())),
+                    ],
+                }),
+                op: BinaryFilterOp::Gt,
+                right: Box::new(FilterExpression::Literal(Value::Float64(0.0))),
+            },
+            variable_columns,
+            store as Arc<dyn GraphStore>,
+        );
+
+        // n1 matches "rust database" — should pass
+        assert!(predicate.evaluate(&chunk, 0), "n1 should score > 0 for 'rust database'");
+        // n2 does not match — should fail
+        assert!(!predicate.evaluate(&chunk, 1), "n2 should score 0 for 'rust database'");
+    }
+
+    #[test]
+    fn test_text_match_function() {
+        let (store, n1, n2) = setup_store_with_text_index();
+
+        // Build a chunk with two rows
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node]);
+        builder.column_mut(0).unwrap().push_node_id(n1);
+        builder.advance_row();
+        builder.column_mut(0).unwrap().push_node_id(n2);
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        let mut variable_columns = HashMap::new();
+        variable_columns.insert("doc".to_string(), 0);
+
+        // text_match(doc.body, "rust") = true/false
+        let predicate = ExpressionPredicate::new(
+            FilterExpression::FunctionCall {
+                name: "text_match".to_string(),
+                args: vec![
+                    FilterExpression::Property {
+                        variable: "doc".to_string(),
+                        property: "body".to_string(),
+                    },
+                    FilterExpression::Literal(Value::String("rust".into())),
+                ],
+            },
+            variable_columns,
+            store as Arc<dyn GraphStore>,
+        );
+
+        // n1 contains "rust" — text_match should return Bool(true) → evaluates to true
+        assert!(predicate.evaluate(&chunk, 0), "n1 should match 'rust'");
+        // n2 does not contain "rust" — text_match should return Bool(false)
+        assert!(!predicate.evaluate(&chunk, 1), "n2 should not match 'rust'");
+    }
+
+    #[test]
+    fn test_text_score_wrong_arg_count_returns_none() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let builder = DataChunkBuilder::new(&[LogicalType::Node]);
+        let chunk = builder.finish();
+        let variable_columns = HashMap::new();
+
+        // text_score with wrong number of args should return None (evaluate = false)
+        let predicate = ExpressionPredicate::new(
+            FilterExpression::FunctionCall {
+                name: "text_score".to_string(),
+                args: vec![FilterExpression::Literal(Value::String("only_one".into()))],
+            },
+            variable_columns,
+            store as Arc<dyn GraphStore>,
+        );
+        assert!(!predicate.evaluate(&chunk, 0));
+    }
+
+    #[test]
+    fn test_text_score_no_index_returns_none() {
+        // Node has a label but no text index for that label+property
+        let store = Arc::new(LpgStore::new().unwrap());
+        let n1 = store.create_node(&["Article"]);
+        store.set_node_property(n1, "body", Value::String("rust graph database".into()));
+        // No text index added
+
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node]);
+        builder.column_mut(0).unwrap().push_node_id(n1);
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        let mut variable_columns = HashMap::new();
+        variable_columns.insert("doc".to_string(), 0);
+
+        let predicate = ExpressionPredicate::new(
+            FilterExpression::FunctionCall {
+                name: "text_score".to_string(),
+                args: vec![
+                    FilterExpression::Property {
+                        variable: "doc".to_string(),
+                        property: "body".to_string(),
+                    },
+                    FilterExpression::Literal(Value::String("rust".into())),
+                ],
+            },
+            variable_columns,
+            store as Arc<dyn GraphStore>,
+        );
+        // No index → score_text returns None → eval returns None → evaluate returns false
+        assert!(!predicate.evaluate(&chunk, 0));
     }
 }

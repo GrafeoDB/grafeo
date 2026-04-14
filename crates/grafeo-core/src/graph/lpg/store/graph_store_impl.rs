@@ -250,6 +250,58 @@ impl GraphStore for LpgStore {
     fn get_edge_history(&self, id: EdgeId) -> Vec<(EpochId, Option<EpochId>, Edge)> {
         LpgStore::get_edge_history(self, id)
     }
+
+    #[cfg(feature = "text-index")]
+    fn score_text(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        property: &str,
+        query: &str,
+    ) -> Option<f64> {
+        let index = self.get_text_index(label, property)?;
+        let guard = index.read();
+        let score = guard.score_document(node_id, query);
+        Some(score)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn text_search(&self, label: &str, property: &str, query: &str, k: usize) -> Vec<(NodeId, f64)> {
+        if let Some(index) = self.get_text_index(label, property) {
+            index.read().search(query, k)
+        } else {
+            Vec::new()
+        }
+    }
+
+    #[cfg(feature = "text-index")]
+    fn text_search_with_threshold(&self, label: &str, property: &str, query: &str, threshold: f64) -> Vec<(NodeId, f64)> {
+        if let Some(index) = self.get_text_index(label, property) {
+            index.read().search_with_threshold(query, threshold)
+        } else {
+            Vec::new()
+        }
+    }
+
+    #[cfg(feature = "text-index")]
+    fn has_text_index(&self, label: &str, property: &str) -> bool {
+        self.get_text_index(label, property).is_some()
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn has_vector_index(&self, label: &str, property: &str) -> bool {
+        self.get_vector_index(label, property).is_some()
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn get_vector_index_handle(
+        &self,
+        label: &str,
+        property: &str,
+    ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        let index = self.get_vector_index(label, property)?;
+        Some(index as Arc<dyn std::any::Any + Send + Sync>)
+    }
 }
 
 impl GraphStoreMut for LpgStore {

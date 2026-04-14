@@ -330,6 +330,62 @@ pub trait GraphStore: Send + Sync {
     fn get_edge_history(&self, _id: EdgeId) -> Vec<(EpochId, Option<EpochId>, Edge)> {
         Vec::new()
     }
+
+    // --- Text search (for per-row BM25 evaluation) ---
+
+    /// Scores a document against a text query using the store's text index.
+    ///
+    /// Returns `None` if no text index exists for the given (label, property) pair.
+    /// Used by filter evaluation for per-row BM25 scoring when planner pushdown
+    /// doesn't fire.
+    fn score_text(
+        &self,
+        _node_id: NodeId,
+        _label: &str,
+        _property: &str,
+        _query: &str,
+    ) -> Option<f64> {
+        None
+    }
+
+    /// Performs a full-text search using the store's text index, returning top-k results.
+    ///
+    /// Results are sorted by BM25 score descending.
+    /// Returns empty vec if no text index exists for the (label, property) pair.
+    fn text_search(&self, _label: &str, _property: &str, _query: &str, _k: usize) -> Vec<(NodeId, f64)> {
+        Vec::new()
+    }
+
+    /// Performs a full-text search returning all results above a threshold.
+    ///
+    /// Results are sorted by BM25 score descending.
+    /// Returns empty vec if no text index exists.
+    fn text_search_with_threshold(&self, _label: &str, _property: &str, _query: &str, _threshold: f64) -> Vec<(NodeId, f64)> {
+        Vec::new()
+    }
+
+    /// Returns true if a text index exists for the given (label, property).
+    fn has_text_index(&self, _label: &str, _property: &str) -> bool {
+        false
+    }
+
+    /// Returns true if a vector index exists for the given (label, property).
+    fn has_vector_index(&self, _label: &str, _property: &str) -> bool {
+        false
+    }
+
+    /// Returns a type-erased handle to the vector index for a (label, property) pair.
+    ///
+    /// The returned `Arc<dyn Any>` can be downcast to `Arc<VectorIndexKind>` when
+    /// the `vector-index` feature is enabled. This allows the planner to use
+    /// HNSW-accelerated search without leaking feature-gated types into the trait.
+    fn get_vector_index_handle(
+        &self,
+        _label: &str,
+        _property: &str,
+    ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        None
+    }
 }
 
 /// Write operations for graph mutation.

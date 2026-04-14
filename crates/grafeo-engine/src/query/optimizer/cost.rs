@@ -5,7 +5,7 @@
 use crate::query::plan::{
     AggregateOp, DistinctOp, ExpandDirection, ExpandOp, FilterOp, JoinOp, JoinType, LeftJoinOp,
     LimitOp, LogicalOperator, MultiWayJoinOp, NodeScanOp, ProjectOp, ReturnOp, SkipOp, SortOp,
-    VectorJoinOp, VectorScanOp,
+    TextScanOp, VectorJoinOp, VectorScanOp,
 };
 use std::collections::HashMap;
 
@@ -233,6 +233,7 @@ impl CostModel {
                 let right_card = self.estimate_child_cardinality(&lj.right);
                 self.left_join_cost(lj, cardinality, left_card, right_card)
             }
+            LogicalOperator::TextScan(scan) => self.text_scan_cost(scan, cardinality),
             _ => Cost::cpu(cardinality * self.cpu_tuple_cost),
         }
     }
@@ -466,25 +467,40 @@ impl CostModel {
     /// HNSW index search is O(log N) per query, while brute-force is O(N).
     /// This estimates the HNSW case with ef search parameter.
     fn vector_scan_cost(&self, scan: &VectorScanOp, cardinality: f64) -> Cost {
-        // k determines output cardinality
-        let k = scan.k as f64;
+        let k = scan.k.unwrap_or(0) as f64;
+        let n = cardinality.max(1.0);
 
         // HNSW search cost: O(ef * log(N)) distance computations
-        // Assume ef = 64 (default), N = cardinality
+        // Brute-force: O(N) distance computations
         let ef = 64.0;
-        let n = cardinality.max(1.0);
         let search_cost = if scan.index_name.is_some() {
-            // HNSW: O(ef * log N)
-            ef * n.ln() * self.cpu_tuple_cost * 10.0 // Distance computation is ~10x regular tuple
+            ef * n.ln() * self.cpu_tuple_cost * 10.0
         } else {
-            // Brute-force: O(N)
             n * self.cpu_tuple_cost * 10.0
         };
 
-        // Memory for candidate heap
-        let memory = k * self.avg_tuple_size * 2.0;
+        // Memory for candidate heap (threshold mode uses cardinality estimate)
+        let output_rows = if k > 0.0 { k } else { cardinality };
+        let memory = output_rows * self.avg_tuple_size * 2.0;
 
         Cost::cpu(search_cost).with_memory(memory)
+    }
+
+    /// Estimates the cost of a text scan operation.
+    ///
+    /// BM25 scoring requires iterating over postings lists proportional to the
+    /// corpus size, with scoring being ~5x more expensive than a plain tuple
+    /// comparison. The index is in-memory so I/O cost is zero.
+    fn text_scan_cost(&self, scan: &TextScanOp, cardinality: f64) -> Cost {
+        // Use actual label row count for corpus size (BM25 scans the postings).
+        let corpus_size = self
+            .label_cardinalities
+            .get(&scan.label)
+            .copied()
+            .map_or(cardinality, |c| c as f64);
+        // BM25 scoring is ~5x a simple tuple comparison
+        let cpu = corpus_size * self.cpu_tuple_cost * 5.0;
+        Cost::cpu(cpu).with_memory(cardinality * self.avg_tuple_size)
     }
 
     /// Estimates the cost of a vector join operation.

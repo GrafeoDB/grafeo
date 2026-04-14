@@ -17,7 +17,7 @@
 use crate::query::plan::{
     AggregateOp, BinaryOp, DistinctOp, ExpandOp, FilterOp, JoinOp, JoinType, LeftJoinOp, LimitOp,
     LogicalExpression, LogicalOperator, MultiWayJoinOp, NodeScanOp, ProjectOp, SkipOp, SortOp,
-    TripleComponent, TripleScanOp, UnaryOp, VectorJoinOp, VectorScanOp,
+    TextScanOp, TripleComponent, TripleScanOp, UnaryOp, VectorJoinOp, VectorScanOp,
 };
 use std::collections::HashMap;
 
@@ -705,6 +705,7 @@ impl CardinalityEstimator {
             LogicalOperator::MultiWayJoin(mwj) => self.estimate_multi_way_join(mwj),
             LogicalOperator::LeftJoin(lj) => self.estimate_left_join(lj),
             LogicalOperator::TripleScan(scan) => self.estimate_triple_scan(scan),
+            LogicalOperator::TextScan(scan) => self.estimate_text_scan(scan),
             _ => self.default_row_count as f64,
         }
     }
@@ -951,17 +952,42 @@ impl CardinalityEstimator {
     /// Vector scan returns at most k results (the k nearest neighbors).
     /// With similarity/distance filters, it may return fewer.
     fn estimate_vector_scan(&self, scan: &VectorScanOp) -> f64 {
-        let base_k = scan.k as f64;
-
-        // Apply filter selectivity if thresholds are specified
-        let selectivity = if scan.min_similarity.is_some() || scan.max_distance.is_some() {
-            // Assume 70% of results pass threshold filters
-            0.7
+        if let Some(k) = scan.k {
+            // Top-k mode: at most k results, reduced by filter selectivity
+            let selectivity = if scan.min_similarity.is_some() || scan.max_distance.is_some() {
+                0.7 // Assume 70% of results pass threshold filters
+            } else {
+                1.0
+            };
+            (k as f64 * selectivity).max(1.0)
         } else {
-            1.0
-        };
+            // Threshold-only mode: estimate 20% of indexed nodes match
+            let base = scan
+                .label
+                .as_deref()
+                .and_then(|l| self.table_stats.get(l))
+                .map_or(self.default_row_count as f64, |s| s.row_count as f64);
+            (base * 0.2).max(1.0)
+        }
+    }
 
-        (base_k * selectivity).max(1.0)
+    /// Estimates text scan cardinality using BM25 index.
+    ///
+    /// In top-k mode, returns at most k results. In threshold mode, assumes
+    /// 10% of the label's documents match the query.
+    fn estimate_text_scan(&self, scan: &TextScanOp) -> f64 {
+        if let Some(k) = scan.k {
+            // Top-k mode: at most k results
+            return k as f64;
+        }
+        // Threshold mode: estimate 10% of indexed documents match
+        let default_selectivity = 0.1;
+        let base = if let Some(stats) = self.table_stats.get(&scan.label) {
+            stats.row_count as f64
+        } else {
+            self.default_row_count as f64
+        };
+        (base * default_selectivity).max(1.0)
     }
 
     /// Estimates vector join cardinality.

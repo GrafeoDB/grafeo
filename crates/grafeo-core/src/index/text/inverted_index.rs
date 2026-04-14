@@ -153,6 +153,19 @@ impl InvertedIndex {
         true
     }
 
+    /// BM25 term score: IDF * TF-component for a single term occurrence.
+    ///
+    /// `df` is the document frequency (number of documents containing the term),
+    /// `tf` is the term frequency in this document, `dl` is the document length,
+    /// `n` is the corpus size, and `avg_dl` is the average document length.
+    #[inline]
+    fn bm25_term_score(&self, df: f64, tf: f64, dl: f64, n: f64, avg_dl: f64) -> f64 {
+        let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+        let tf_component = (tf * (self.config.k1 + 1.0))
+            / (tf + self.config.k1 * (1.0 - self.config.b + self.config.b * dl / avg_dl));
+        idf * tf_component
+    }
+
     /// Searches the index using BM25 scoring.
     ///
     /// Returns up to `k` results sorted by descending BM25 score.
@@ -164,34 +177,95 @@ impl InvertedIndex {
 
         let n = self.doc_lengths.len() as f64;
         let avg_dl = self.total_length as f64 / n;
-
         let mut scores: HashMap<NodeId, f64> = HashMap::new();
 
         for token in &query_tokens {
             let Some(posting_list) = self.postings.get(token.as_str()) else {
                 continue;
             };
-
-            // IDF: log((N - df + 0.5) / (df + 0.5) + 1)
             let df = posting_list.postings.len() as f64;
-            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-
             for posting in &posting_list.postings {
                 let tf = f64::from(posting.term_freq);
                 let dl = f64::from(self.doc_lengths.get(&posting.node_id).copied().unwrap_or(0));
-
-                // BM25: IDF * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl))
-                let tf_component = (tf * (self.config.k1 + 1.0))
-                    / (tf + self.config.k1 * (1.0 - self.config.b + self.config.b * dl / avg_dl));
-
-                *scores.entry(posting.node_id).or_insert(0.0) += idf * tf_component;
+                *scores.entry(posting.node_id).or_insert(0.0) +=
+                    self.bm25_term_score(df, tf, dl, n, avg_dl);
             }
         }
 
-        // Sort by score descending, take top k
         let mut results: Vec<(NodeId, f64)> = scores.into_iter().collect();
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
+        results
+    }
+
+    /// Scores a single document against a query using BM25.
+    ///
+    /// Looks up each query term in its posting list, finds the entry for the
+    /// given node ID, and computes BM25 with corpus statistics. Returns `0.0`
+    /// if the document has no matching terms or doesn't exist.
+    ///
+    /// This is O(query_terms) per call and is intended for per-row evaluation.
+    #[must_use]
+    pub fn score_document(&self, id: NodeId, query: &str) -> f64 {
+        let query_tokens = self.tokenizer.tokenize(query);
+        if query_tokens.is_empty() || self.doc_lengths.is_empty() {
+            return 0.0;
+        }
+        let Some(&doc_len) = self.doc_lengths.get(&id) else {
+            return 0.0;
+        };
+        let n = self.doc_lengths.len() as f64;
+        let avg_dl = self.total_length as f64 / n;
+        let dl = f64::from(doc_len);
+        let mut score = 0.0;
+        for token in &query_tokens {
+            let Some(posting_list) = self.postings.get(token.as_str()) else {
+                continue;
+            };
+            let df = posting_list.postings.len() as f64;
+            let tf = posting_list
+                .postings
+                .iter()
+                .find(|p| p.node_id == id)
+                .map_or(0.0, |p| f64::from(p.term_freq));
+            if tf > 0.0 {
+                score += self.bm25_term_score(df, tf, dl, n, avg_dl);
+            }
+        }
+        score
+    }
+
+    /// Returns all documents scoring at or above `threshold` using BM25.
+    ///
+    /// Unlike [`search()`] (top-k), this returns every document above the
+    /// threshold, sorted by score descending. Intended for index-accelerated
+    /// text search with WHERE predicates.
+    #[must_use]
+    pub fn search_with_threshold(&self, query: &str, threshold: f64) -> Vec<(NodeId, f64)> {
+        let query_tokens = self.tokenizer.tokenize(query);
+        if query_tokens.is_empty() || self.doc_lengths.is_empty() {
+            return Vec::new();
+        }
+        let n = self.doc_lengths.len() as f64;
+        let avg_dl = self.total_length as f64 / n;
+        let mut scores: HashMap<NodeId, f64> = HashMap::new();
+        for token in &query_tokens {
+            let Some(posting_list) = self.postings.get(token.as_str()) else {
+                continue;
+            };
+            let df = posting_list.postings.len() as f64;
+            for posting in &posting_list.postings {
+                let tf = f64::from(posting.term_freq);
+                let dl = f64::from(self.doc_lengths.get(&posting.node_id).copied().unwrap_or(0));
+                *scores.entry(posting.node_id).or_insert(0.0) +=
+                    self.bm25_term_score(df, tf, dl, n, avg_dl);
+            }
+        }
+        let mut results: Vec<(NodeId, f64)> = scores
+            .into_iter()
+            .filter(|(_, score)| *score >= threshold)
+            .collect();
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results
     }
 
@@ -449,5 +523,96 @@ mod tests {
         // "common" matches all three
         let results = index.search("common", 10);
         assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_score_document_matches_search() {
+        let mut index = InvertedIndex::new(BM25Config::default());
+        index.insert(NodeId::new(1), "the quick brown fox jumps over the lazy dog");
+        index.insert(NodeId::new(2), "a fast red car drives on the highway");
+        index.insert(NodeId::new(3), "the brown dog sleeps all day");
+
+        let query = "brown dog";
+        let search_results = index.search(query, 10);
+
+        // Verify score_document returns the same score as search() for matching docs
+        for (node_id, search_score) in &search_results {
+            let doc_score = index.score_document(*node_id, query);
+            assert!(
+                (doc_score - search_score).abs() < 1e-10,
+                "score_document({:?}) = {doc_score} but search gave {search_score}",
+                node_id
+            );
+        }
+
+        // Node 2 has no matching terms — should score 0.0
+        let no_match_score = index.score_document(NodeId::new(2), query);
+        assert_eq!(no_match_score, 0.0, "non-matching doc should score 0.0");
+
+        // Non-existent doc should score 0.0
+        let nonexistent_score = index.score_document(NodeId::new(999), query);
+        assert_eq!(nonexistent_score, 0.0, "non-existent doc should score 0.0");
+    }
+
+    #[test]
+    fn test_search_with_threshold() {
+        let mut index = InvertedIndex::new(BM25Config::default());
+        index.insert(NodeId::new(1), "rust graph database query engine");
+        index.insert(NodeId::new(2), "python web framework django flask");
+        index.insert(NodeId::new(3), "rust systems programming language");
+        index.insert(NodeId::new(4), "graph theory algorithms data structures");
+        index.insert(NodeId::new(5), "database indexing storage engine optimization");
+
+        let query = "rust graph database";
+
+        // Get search results to calibrate the threshold
+        let search_results = index.search(query, 10);
+        assert!(search_results.len() >= 2, "need at least 2 matching docs for this test");
+
+        // Use the score of the second-highest result as our mid threshold
+        let mid_threshold = search_results[1].1;
+
+        // threshold=0 should return all matching docs (same set as search with no k limit)
+        let all_results = index.search_with_threshold(query, 0.0);
+        assert_eq!(
+            all_results.len(),
+            search_results.len(),
+            "threshold=0 should return all matching docs"
+        );
+
+        // Results should be sorted descending by score
+        for i in 1..all_results.len() {
+            assert!(
+                all_results[i - 1].1 >= all_results[i].1,
+                "results should be sorted descending"
+            );
+        }
+
+        // mid_threshold should filter out lower-scoring docs
+        let filtered = index.search_with_threshold(query, mid_threshold);
+        assert!(
+            filtered.len() <= search_results.len(),
+            "mid-threshold should not exceed total matches"
+        );
+        for (_, score) in &filtered {
+            assert!(
+                *score >= mid_threshold,
+                "all returned docs should score >= threshold"
+            );
+        }
+
+        // Very high threshold should return nothing
+        let empty_results = index.search_with_threshold(query, 1_000_000.0);
+        assert!(
+            empty_results.is_empty(),
+            "very high threshold should return no results"
+        );
+
+        // Empty query should return nothing
+        let empty_query_results = index.search_with_threshold("", 0.0);
+        assert!(
+            empty_query_results.is_empty(),
+            "empty query should return no results"
+        );
     }
 }

@@ -227,14 +227,32 @@ impl super::Planner {
                                     )));
                                 }
                             }
-                            // For other functions (head, tail, size, etc.), use expression evaluation
+                            // For other functions (head, tail, size, etc.), use expression evaluation.
+                            // As a special case, if this is a vector/text score function and the
+                            // scan already projected a score column, reference that column directly
+                            // instead of recomputing the distance/score.
                             _ => {
-                                let filter_expr = self.convert_expression(&item.expression)?;
-                                projections.push(ProjectExpr::Expression {
-                                    expr: filter_expr,
-                                    variable_columns: variable_columns.clone(),
-                                });
-                                output_types.push(LogicalType::Any);
+                                if let Some(score_col) = self
+                                    .find_projected_score(&item.expression, &input_columns)
+                                {
+                                    let col_idx =
+                                        *variable_columns.get(&score_col).ok_or_else(|| {
+                                            Error::Internal(format!(
+                                                "Score column '{}' not found in input",
+                                                score_col
+                                            ))
+                                        })?;
+                                    projections.push(ProjectExpr::Column(col_idx));
+                                    output_types.push(LogicalType::Any);
+                                } else {
+                                    let filter_expr =
+                                        self.convert_expression(&item.expression)?;
+                                    projections.push(ProjectExpr::Expression {
+                                        expr: filter_expr,
+                                        variable_columns: variable_columns.clone(),
+                                    });
+                                    output_types.push(LogicalType::Any);
+                                }
                             }
                         }
                     }
@@ -503,6 +521,12 @@ impl super::Planner {
     /// that case we inject a property projection BEFORE the Return so the sort
     /// key is available in the output columns.
     pub(super) fn plan_sort(&self, sort: &SortOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Top-K optimization: Sort(fn) + Limit(k) + NodeScan
+        // can be rewritten to VectorScan(k) or TextScan(k)
+        if let Some(result) = self.try_topk_rewrite(sort)? {
+            return Ok(result);
+        }
+
         // Collect variable references from an expression tree (e.g., `n` in `labels(n)[0]`).
         fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
             match expr {
@@ -698,16 +722,30 @@ impl super::Planner {
                 }
                 _ => {
                     // Complex expression (Labels, Type, FunctionCall, IndexAccess, etc.)
-                    let col_name = format!("__expr_{:?}", key.expression);
-                    if !variable_columns.contains_key(&col_name) {
-                        let filter_expr = self.convert_expression(&key.expression)?;
-                        extra_projections.push(SortExtraProjection::Expression {
-                            filter_expr,
-                            col_name: col_name.clone(),
-                        });
-                        variable_columns.insert(col_name, next_col_idx);
-                        next_col_idx += 1;
-                        expr_extra_count += 1;
+                    // If this is a vector/text score function and the scan already projected
+                    // a score column, register a direct alias so resolve_sort_expression
+                    // picks it up without injecting a new projection.
+                    if let Some(score_col) =
+                        self.find_projected_score(&key.expression, &input_columns)
+                    {
+                        let col_name = format!("__expr_{:?}", key.expression);
+                        if !variable_columns.contains_key(&col_name) {
+                            if let Some(&existing_idx) = variable_columns.get(&score_col) {
+                                variable_columns.insert(col_name, existing_idx);
+                            }
+                        }
+                    } else {
+                        let col_name = format!("__expr_{:?}", key.expression);
+                        if !variable_columns.contains_key(&col_name) {
+                            let filter_expr = self.convert_expression(&key.expression)?;
+                            extra_projections.push(SortExtraProjection::Expression {
+                                filter_expr,
+                                col_name: col_name.clone(),
+                            });
+                            variable_columns.insert(col_name, next_col_idx);
+                            next_col_idx += 1;
+                            expr_extra_count += 1;
+                        }
                     }
                 }
             }
@@ -856,5 +894,216 @@ impl super::Planner {
                 }
             })
             .collect()
+    }
+
+    /// Attempts to rewrite Sort+Limit on a vector/text function into
+    /// a direct index scan that returns results in order.
+    fn try_topk_rewrite(
+        &self,
+        sort: &SortOp,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        // Must have exactly one sort key
+        if sort.keys.len() != 1 {
+            return Ok(None);
+        }
+        let sort_key = &sort.keys[0];
+
+        // Input must be Limit (Sort wraps Limit in the AST)
+        let LogicalOperator::Limit(limit) = sort.input.as_ref() else {
+            return Ok(None);
+        };
+        // Parameter-based limits can't be used for top-K rewrite at plan time
+        let crate::query::plan::CountExpr::Literal(k) = &limit.count else {
+            return Ok(None); // Non-constant limit
+        };
+        let k = *k;
+
+        // Walk through the Limit's input to find a NodeScan
+        let Some((scan_var, scan_label)) = self.find_node_scan(&limit.input) else {
+            return Ok(None);
+        };
+        let Some(ref label) = scan_label else {
+            return Ok(None); // No label → can't look up index
+        };
+
+        // Sort key must be a vector or text function call
+        match &sort_key.expression {
+            LogicalExpression::FunctionCall { name, args, .. } => {
+                match name.as_str() {
+                    #[cfg(feature = "vector-index")]
+                    "cosine_similarity" | "euclidean_distance" | "dot_product"
+                    | "manhattan_distance" => {
+                        self.try_vector_topk(name, args, k, &scan_var, label, sort_key)
+                    }
+                    #[cfg(feature = "text-index")]
+                    "text_score" => {
+                        self.try_text_topk(args, k, &scan_var, label, sort_key)
+                    }
+                    _ => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Walks through Return/Project operators to find the underlying NodeScan.
+    fn find_node_scan(&self, op: &LogicalOperator) -> Option<(String, Option<String>)> {
+        match op {
+            LogicalOperator::NodeScan(scan) => Some((scan.variable.clone(), scan.label.clone())),
+            LogicalOperator::Return(ret) => self.find_node_scan(&ret.input),
+            LogicalOperator::Project(proj) => self.find_node_scan(&proj.input),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn try_vector_topk(
+        &self,
+        fn_name: &str,
+        args: &[LogicalExpression],
+        k: usize,
+        scan_var: &str,
+        label: &str,
+        sort_key: &crate::query::plan::SortKey,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        if args.len() != 2 {
+            return Ok(None);
+        }
+
+        // Determine metric and expected sort direction
+        let (metric, is_similarity) = match fn_name {
+            "cosine_similarity" => (super::VectorMetric::Cosine, true),
+            "dot_product" => (super::VectorMetric::DotProduct, true),
+            "euclidean_distance" => (super::VectorMetric::Euclidean, false),
+            "manhattan_distance" => (super::VectorMetric::Manhattan, false),
+            _ => return Ok(None),
+        };
+
+        // Similarity needs DESC, distance needs ASC
+        let expected_order = if is_similarity {
+            SortOrder::Descending
+        } else {
+            SortOrder::Ascending
+        };
+        if sort_key.order != expected_order {
+            return Ok(None); // Wrong direction — can't use index
+        }
+
+        // Extract property and query vector
+        let (property, query_vector) =
+            if let LogicalExpression::Property { variable, property } = &args[0] {
+                if variable != scan_var {
+                    return Ok(None);
+                }
+                (property.clone(), args[1].clone())
+            } else if let LogicalExpression::Property { variable, property } = &args[1] {
+                if variable != scan_var {
+                    return Ok(None);
+                }
+                (property.clone(), args[0].clone())
+            } else {
+                return Ok(None);
+            };
+
+        // Check for vector index
+        if !self.store.has_vector_index(label, &property) {
+            return Ok(None);
+        }
+
+        let vector_scan = super::VectorScanOp {
+            variable: scan_var.to_string(),
+            index_name: Some(format!("{}:{}", label, property)),
+            property,
+            label: Some(label.to_string()),
+            query_vector,
+            k: Some(k),
+            metric: Some(metric),
+            min_similarity: None,
+            max_distance: None,
+            input: None,
+        };
+
+        self.plan_operator(&LogicalOperator::VectorScan(vector_scan))
+            .map(Some)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn try_text_topk(
+        &self,
+        args: &[LogicalExpression],
+        k: usize,
+        scan_var: &str,
+        label: &str,
+        sort_key: &crate::query::plan::SortKey,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        if args.len() != 2 {
+            return Ok(None);
+        }
+
+        // text_score needs DESC order
+        if sort_key.order != SortOrder::Descending {
+            return Ok(None);
+        }
+
+        // First arg must be property access on the scan variable
+        let LogicalExpression::Property { variable, property } = &args[0] else {
+            return Ok(None);
+        };
+        if variable != scan_var {
+            return Ok(None);
+        }
+
+        // Check for text index (required)
+        if !self.store.has_text_index(label, property) {
+            return Ok(None); // Silently skip — error will come from text pushdown if used
+        }
+
+        let text_scan = super::TextScanOp {
+            variable: scan_var.to_string(),
+            property: property.clone(),
+            label: label.to_string(),
+            query: args[1].clone(),
+            k: Some(k),
+            threshold: None,
+            score_column: Some(format!("_tscore_{}", scan_var)),
+        };
+
+        self.plan_operator(&LogicalOperator::TextScan(text_scan))
+            .map(Some)
+    }
+
+    /// Checks if a logical expression matches a projected score column.
+    ///
+    /// When `VectorScan` or `TextScan` already computed a score and projected it
+    /// as `_vscore_{var}` / `_tscore_{var}`, downstream expressions that call the
+    /// same function can reference the projected column instead of recomputing the
+    /// distance or BM25 score.
+    ///
+    /// Returns the column name to reference, or `None` if no reuse is possible.
+    pub(super) fn find_projected_score(
+        &self,
+        expr: &LogicalExpression,
+        columns: &[String],
+    ) -> Option<String> {
+        if let LogicalExpression::FunctionCall { name, args, .. } = expr {
+            let is_vector_fn = matches!(
+                name.as_str(),
+                "cosine_similarity" | "euclidean_distance" | "dot_product" | "manhattan_distance"
+            );
+            let is_text_fn = name == "text_score";
+
+            if is_vector_fn || is_text_fn {
+                let prefix = if is_vector_fn { "_vscore_" } else { "_tscore_" };
+                // The first arg is the property access n.prop; variable is the
+                // node variable whose score column was projected by the scan.
+                if let Some(LogicalExpression::Property { variable, .. }) = args.first() {
+                    let score_col = format!("{}{}", prefix, variable);
+                    if columns.contains(&score_col) {
+                        return Some(score_col);
+                    }
+                }
+            }
+        }
+        None
     }
 }

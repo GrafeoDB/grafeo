@@ -179,6 +179,10 @@ impl Operator for TextScanOperator {
     fn name(&self) -> &'static str {
         "TextScan(BM25)"
     }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
 }
 
 #[cfg(all(test, feature = "text-index", feature = "lpg"))]

@@ -2529,7 +2529,7 @@ mod tests {
             property: "embedding".to_string(),
             label: Some("Doc".to_string()),
             query_vector: LogicalExpression::Variable("undefined_vec".to_string()),
-            k: 10,
+            k: Some(10),
             metric: None,
             min_similarity: None,
             max_distance: None,

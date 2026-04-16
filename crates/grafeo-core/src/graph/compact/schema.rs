@@ -27,6 +27,8 @@ pub enum ColumnType {
         /// Number of dimensions in each vector.
         dimensions: u16,
     },
+    /// IEEE 754 double-precision floating-point values.
+    Float64,
 }
 
 /// A single column within a table schema.

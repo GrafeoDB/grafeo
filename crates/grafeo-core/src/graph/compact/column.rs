@@ -33,6 +33,8 @@ pub enum ColumnCodec {
         /// Number of dimensions per vector.
         dimensions: u16,
     },
+    /// Native IEEE 754 double-precision floats.
+    Float64(Vec<f64>),
 }
 
 impl ColumnCodec {
@@ -42,6 +44,7 @@ impl ColumnCodec {
     /// - [`Dict`](Self::Dict) → `Value::String(ArcStr::from(s))`
     /// - [`Bitmap`](Self::Bitmap) → `Value::Bool(b)`
     /// - [`Int8Vector`](Self::Int8Vector) → `Value::List(...)` of `Int64` values
+    /// - [`Float64`](Self::Float64) → `Value::Float64(f)`
     ///
     /// Returns `None` when `index` is out of bounds.
     #[inline]
@@ -74,6 +77,7 @@ impl ColumnCodec {
                     .collect();
                 Some(Value::List(Arc::from(values)))
             }
+            Self::Float64(vec) => vec.get(index).copied().map(Value::Float64),
         }
     }
 
@@ -124,6 +128,7 @@ impl ColumnCodec {
                 let dims = *dimensions as usize;
                 data.len().checked_div(dims).unwrap_or(0)
             }
+            Self::Float64(vec) => vec.len(),
         }
     }
 
@@ -164,6 +169,12 @@ impl ColumnCodec {
             },
             (Self::Bitmap(bv), &Value::Bool(target_bool)) => (0..bv.len())
                 .filter(|&i| bv.get(i) == Some(target_bool))
+                .collect(),
+            (Self::Float64(vec), &Value::Float64(target)) => vec
+                .iter()
+                .enumerate()
+                .filter(|&(_, v)| *v == target)
+                .map(|(i, _)| i)
                 .collect(),
             _ => (0..self.len())
                 .filter(|&i| self.get(i).as_ref() == Some(target))
@@ -309,6 +320,13 @@ impl ColumnCodec {
                     buf.push(v.to_le_bytes()[0]);
                 }
             }
+            Self::Float64(vec) => {
+                buf.push(4); // discriminant
+                write_usize_as_u32(buf, vec.len());
+                for &v in vec {
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+            }
         }
     }
 
@@ -388,6 +406,15 @@ impl ColumnCodec {
                     dimensions,
                 })
             }
+            4 => {
+                // Float64
+                let count = read_u32_le(data, pos)? as usize;
+                let mut vec = Vec::with_capacity(count);
+                for _ in 0..count {
+                    vec.push(read_f64_le(data, pos)?);
+                }
+                Ok(Self::Float64(vec))
+            }
             _ => Err("unknown codec discriminant"),
         }
     }
@@ -404,6 +431,7 @@ impl ColumnCodec {
             }
             Self::Bitmap(bv) => bv.data().len() * std::mem::size_of::<u64>(),
             Self::Int8Vector { data, .. } => data.len(),
+            Self::Float64(vec) => vec.len() * std::mem::size_of::<f64>(),
         }
     }
 }
@@ -439,6 +467,15 @@ fn read_u64_le(data: &[u8], pos: &mut usize) -> Result<u64, &'static str> {
         return Err("truncated u64");
     }
     let v = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+    *pos += 8;
+    Ok(v)
+}
+
+fn read_f64_le(data: &[u8], pos: &mut usize) -> Result<f64, &'static str> {
+    if *pos + 8 > data.len() {
+        return Err("truncated f64");
+    }
+    let v = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
     *pos += 8;
     Ok(v)
 }

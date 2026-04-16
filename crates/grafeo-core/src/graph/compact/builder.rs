@@ -578,6 +578,7 @@ fn infer_column_type(codec: &ColumnCodec) -> ColumnType {
         ColumnCodec::Int8Vector { dimensions, .. } => ColumnType::Int8Vector {
             dimensions: *dimensions,
         },
+        ColumnCodec::Float64(_) => ColumnType::Float64,
     }
 }
 
@@ -649,6 +650,8 @@ fn compute_zone_map_bool(values: &[bool]) -> ZoneMap {
 enum InferredType {
     /// All non-null values are `Value::Int64` with value >= 0.
     BitPacked,
+    /// All non-null values are `Value::Float64`, or mixed `Int64`+`Float64`.
+    Float64,
     /// All non-null values are `Value::Bool`.
     Bitmap,
     /// All non-null values are `Value::String`, or mixed/unsupported types.
@@ -789,6 +792,19 @@ pub fn from_graph_store(
                         t.columns.push((key.clone(), ColumnCodec::BitPacked(bp)));
                         t.record_len(u64_values.len());
                     }
+                    InferredType::Float64 => {
+                        let f64_values: Vec<f64> = values
+                            .iter()
+                            .map(|v| match v {
+                                Value::Float64(f) => *f,
+                                Value::Int64(n) => *n as f64,
+                                _ => 0.0,
+                            })
+                            .collect();
+                        t.columns
+                            .push((key.clone(), ColumnCodec::Float64(f64_values)));
+                        t.record_len(values.len());
+                    }
                     InferredType::Bitmap => {
                         let bool_values: Vec<bool> = values
                             .iter()
@@ -908,6 +924,18 @@ pub fn from_graph_store(
                                     .collect();
                                 let bp = BitPackedInts::pack(&u64_values);
                                 r.properties.push((key.clone(), ColumnCodec::BitPacked(bp)));
+                            }
+                            InferredType::Float64 => {
+                                let f64_values: Vec<f64> = values
+                                    .iter()
+                                    .map(|v| match v {
+                                        Value::Float64(f) => *f,
+                                        Value::Int64(n) => *n as f64,
+                                        _ => 0.0,
+                                    })
+                                    .collect();
+                                r.properties
+                                    .push((key.clone(), ColumnCodec::Float64(f64_values)));
                             }
                             InferredType::Bitmap => {
                                 let bool_values: Vec<bool> = values
@@ -1102,6 +1130,7 @@ pub fn from_graph_store_preserving_ids(
 /// - Otherwise returns `Dict` (string fallback).
 fn infer_type_from_values(values: &[Value]) -> InferredType {
     let mut saw_int = false;
+    let mut saw_float = false;
     let mut saw_bool = false;
     let mut saw_other = false;
 
@@ -1109,13 +1138,17 @@ fn infer_type_from_values(values: &[Value]) -> InferredType {
         match v {
             Value::Null => {} // skip nulls
             Value::Int64(n) if *n >= 0 => saw_int = true,
+            Value::Float64(_) => saw_float = true,
             Value::Bool(_) => saw_bool = true,
             _ => saw_other = true,
         }
     }
 
-    if saw_other || (saw_int && saw_bool) {
+    // Mixed Int64+Float64 coalesces to Float64.
+    if saw_other || ((saw_int || saw_float) && saw_bool) {
         InferredType::Dict
+    } else if saw_float {
+        InferredType::Float64
     } else if saw_int {
         InferredType::BitPacked
     } else if saw_bool {
@@ -1421,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_graph_store_float_falls_back_to_dict() {
+    fn test_from_graph_store_float64_column() {
         use crate::graph::lpg::LpgStore;
 
         let store = LpgStore::new().unwrap();
@@ -1434,14 +1467,11 @@ mod tests {
         let ids = compact.nodes_by_label("Sensor");
         assert_eq!(ids.len(), 1);
 
-        // Float64 falls back to Dict, serialized as string.
+        // Float64 values are stored natively.
         let val = compact
             .get_node_property(ids[0], &PropertyKey::new("reading"))
             .unwrap();
-        match val {
-            Value::String(s) => assert!(s.contains("98.6"), "expected '98.6' in '{s}'"),
-            other => panic!("expected String (Dict fallback), got {other:?}"),
-        }
+        assert_eq!(val, Value::Float64(98.6));
     }
 
     #[test]
@@ -1616,7 +1646,15 @@ mod tests {
     fn test_infer_type_float() {
         assert_eq!(
             infer_type_from_values(&[Value::Float64(1.5)]),
-            InferredType::Dict
+            InferredType::Float64
+        );
+    }
+
+    #[test]
+    fn test_infer_type_mixed_int_float_coalesces_to_float() {
+        assert_eq!(
+            infer_type_from_values(&[Value::Int64(1), Value::Float64(2.5)]),
+            InferredType::Float64
         );
     }
 

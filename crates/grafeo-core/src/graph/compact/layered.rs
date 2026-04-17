@@ -683,17 +683,27 @@ impl GraphStore for LayeredStore {
         property: &str,
         query: &str,
     ) -> Option<f64> {
+        if self.is_node_deleted_from_base(node_id) {
+            return None;
+        }
         self.overlay.score_text(node_id, label, property, query)
     }
 
     #[cfg(feature = "text-index")]
     fn text_search(&self, label: &str, property: &str, query: &str, k: usize) -> Vec<(NodeId, f64)> {
-        self.overlay.text_search(label, property, query, k)
+        let deleted = self.deleted_from_base_nodes.read();
+        let mut results = self.overlay.text_search(label, property, query, k + deleted.len());
+        results.retain(|(id, _)| !deleted.contains(id));
+        results.truncate(k);
+        results
     }
 
     #[cfg(feature = "text-index")]
     fn text_search_with_threshold(&self, label: &str, property: &str, query: &str, threshold: f64) -> Vec<(NodeId, f64)> {
-        self.overlay.text_search_with_threshold(label, property, query, threshold)
+        let deleted = self.deleted_from_base_nodes.read();
+        let mut results = self.overlay.text_search_with_threshold(label, property, query, threshold);
+        results.retain(|(id, _)| !deleted.contains(id));
+        results
     }
 
     #[cfg(feature = "text-index")]

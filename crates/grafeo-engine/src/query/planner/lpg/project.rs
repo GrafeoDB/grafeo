@@ -1093,11 +1093,21 @@ impl super::Planner {
             let is_text_fn = name == "text_score";
 
             if is_vector_fn || is_text_fn {
-                let prefix = if is_vector_fn { "_vscore_" } else { "_tscore_" };
                 // The first arg is the property access n.prop; variable is the
                 // node variable whose score column was projected by the scan.
-                if let Some(LogicalExpression::Property { variable, .. }) = args.first() {
-                    let score_col = format!("{}{}", prefix, variable);
+                if let Some(LogicalExpression::Property { variable, property, .. }) = args.first() {
+                    let score_col = if is_vector_fn {
+                        let metric_tag = match name.as_str() {
+                            "cosine_similarity" => "cos",
+                            "euclidean_distance" => "euc",
+                            "dot_product" => "dot",
+                            "manhattan_distance" => "man",
+                            _ => "cos",
+                        };
+                        format!("_vscore_{}_{}_{}", metric_tag, property, variable)
+                    } else {
+                        format!("_tscore_{}", variable)
+                    };
                     if columns.contains(&score_col) {
                         return Some(score_col);
                     }

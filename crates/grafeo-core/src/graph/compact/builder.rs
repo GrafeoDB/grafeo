@@ -1176,8 +1176,10 @@ fn infer_type_from_values(values: &[Value]) -> InferredType {
             Value::Bool(_) => saw_bool = true,
             Value::Vector(vec) => {
                 saw_vector = true;
-                #[allow(clippy::cast_possible_truncation)]
-                let dims = vec.len() as u16;
+                let Ok(dims) = u16::try_from(vec.len()) else {
+                    saw_other = true; // too many dimensions for columnar storage
+                    continue;
+                };
                 if let Some(prev) = vector_dims {
                     if prev != dims {
                         saw_other = true; // mixed dimensions → fallback
@@ -1198,7 +1200,8 @@ fn infer_type_from_values(values: &[Value]) -> InferredType {
     }
 
     // Mixed Int64+Float64 coalesces to Float64.
-    if saw_other || ((saw_int || saw_float) && saw_bool) {
+    // Vectors mixed with any other type fall back to Dict.
+    if saw_other || saw_vector || ((saw_int || saw_float) && saw_bool) {
         InferredType::Dict
     } else if saw_float {
         InferredType::Float64

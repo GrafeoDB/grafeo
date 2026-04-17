@@ -625,6 +625,7 @@ impl CostModel {
                 children_cost + self.multi_way_join_cost(mwj, cardinality)
             }
             LogicalOperator::Empty => Cost::zero(),
+            LogicalOperator::TextScan(scan) => self.text_scan_cost(scan, cardinality),
             _ => Cost::cpu(cardinality * self.cpu_tuple_cost),
         }
     }

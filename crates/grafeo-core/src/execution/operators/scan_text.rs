@@ -102,7 +102,7 @@ impl TextScanOperator {
     /// Sets the chunk capacity (rows per output batch).
     #[must_use]
     pub fn with_chunk_capacity(mut self, capacity: usize) -> Self {
-        self.chunk_capacity = capacity;
+        self.chunk_capacity = capacity.max(1);
         self
     }
 

@@ -824,24 +824,31 @@ impl Planner {
             Some(VectorMetric::Manhattan) => DistanceMetric::Manhattan,
         };
 
+        // Top-k mode uses HNSW index when available; threshold/unbounded
+        // mode always uses brute-force scan since HNSW is designed for
+        // bounded k and passing huge k degrades to a full traversal anyway.
         let k = scan.k.unwrap_or(usize::MAX);
+        let use_index = scan.k.is_some();
 
-        // Try HNSW-accelerated path when an index handle is available.
-        // The with_metric() builder ensures threshold comparisons use the
-        // correct distance scale regardless of with_index()'s default.
         let mut operator = if let Some(ref label) = scan.label {
-            if let Some(handle) = self.store.get_vector_index_handle(label, &scan.property) {
-                use grafeo_core::index::vector::VectorIndexKind;
-                if let Ok(index) = handle.downcast::<VectorIndexKind>() {
-                    VectorScanOperator::with_index(
-                        Arc::clone(&self.store),
-                        index,
-                        query_vec.clone(),
-                        k,
-                    )
-                    .with_property(&scan.property)
-                    .with_label(label)
-                    .with_metric(metric)
+            if use_index {
+                if let Some(handle) = self.store.get_vector_index_handle(label, &scan.property) {
+                    use grafeo_core::index::vector::VectorIndexKind;
+                    if let Ok(index) = handle.downcast::<VectorIndexKind>() {
+                        VectorScanOperator::with_index(
+                            Arc::clone(&self.store),
+                            index,
+                            query_vec.clone(),
+                            k,
+                        )
+                        .with_property(&scan.property)
+                        .with_label(label)
+                        .with_metric(metric)
+                    } else {
+                        VectorScanOperator::brute_force(
+                            Arc::clone(&self.store), &scan.property, query_vec.clone(), k, metric,
+                        ).with_label(label)
+                    }
                 } else {
                     VectorScanOperator::brute_force(
                         Arc::clone(&self.store), &scan.property, query_vec.clone(), k, metric,
@@ -866,8 +873,14 @@ impl Planner {
         }
 
         let mut columns = vec![scan.variable.clone()];
-        // VectorScan always projects a score column
-        columns.push(format!("_vscore_{}", scan.variable));
+        // VectorScan always projects a score column keyed by metric+property
+        let metric_tag = match scan.metric {
+            Some(VectorMetric::Cosine) | None => "cos",
+            Some(VectorMetric::Euclidean) => "euc",
+            Some(VectorMetric::DotProduct) => "dot",
+            Some(VectorMetric::Manhattan) => "man",
+        };
+        columns.push(format!("_vscore_{}_{}_{}", metric_tag, scan.property, scan.variable));
 
         Ok((Box::new(operator), columns))
     }

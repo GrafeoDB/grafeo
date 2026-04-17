@@ -217,7 +217,7 @@ impl VectorScanOperator {
     /// Sets the chunk capacity for output batches.
     #[must_use]
     pub fn with_chunk_capacity(mut self, capacity: usize) -> Self {
-        self.chunk_capacity = capacity;
+        self.chunk_capacity = capacity.max(1);
         self
     }
 

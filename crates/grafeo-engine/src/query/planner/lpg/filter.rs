@@ -1919,6 +1919,20 @@ impl super::Planner {
                     (None, None) => None,
                 }
             }
+            LogicalExpression::Binary {
+                left,
+                op: BinaryOp::Or,
+                right,
+            } => {
+                // If both sides of OR are index predicates, the full-join
+                // already computes the union — no scalar filter needed.
+                let left_remaining = self.extract_scalar_remaining(left);
+                let right_remaining = self.extract_scalar_remaining(right);
+                match (left_remaining, right_remaining) {
+                    (None, None) => None,
+                    _ => Some(expr.clone()),
+                }
+            }
             // Leaf node: check if it's a vector or text predicate
             other => {
                 let is_vector = self.extract_vector_predicate(other).is_some();

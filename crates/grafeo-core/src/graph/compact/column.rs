@@ -450,6 +450,10 @@ impl ColumnCodec {
                 // Float32Vector
                 let dimensions = read_u16_le(data, pos)?;
                 let data_len = read_u32_le(data, pos)? as usize;
+                let byte_need = data_len.checked_mul(4).ok_or("Float32Vector length overflow")?;
+                if *pos + byte_need > data.len() {
+                    return Err("truncated Float32Vector data");
+                }
                 let mut f32_data = Vec::with_capacity(data_len);
                 for _ in 0..data_len {
                     f32_data.push(read_f32_le(data, pos)?);

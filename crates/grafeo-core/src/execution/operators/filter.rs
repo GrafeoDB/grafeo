@@ -3510,12 +3510,12 @@ impl ExpressionPredicate {
                     return None;
                 };
 
-                // Get the node's labels to look up the text index
+                // Get the node's labels and try each for a text index match
                 let node = self.resolve_node(node_id)?;
-                let label = node.labels.first()?;
-
-                // Score using the store's text index
-                let score = self.store.score_text(node_id, label, property, query_str)?;
+                let score = node
+                    .labels
+                    .iter()
+                    .find_map(|label| self.store.score_text(node_id, label, property, query_str))?;
 
                 if name == "text_match" {
                     Some(Value::Bool(score > 0.0))

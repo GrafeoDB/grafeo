@@ -399,7 +399,7 @@ impl QuantizedHnswIndex {
         // Get candidates using HNSW (with full precision distances for now)
         // In a production system, you'd modify HNSW to use quantized distances
         let num_candidates = if self.rescore {
-            k * self.rescore_factor
+            k.saturating_mul(self.rescore_factor)
         } else {
             k
         };
@@ -436,7 +436,7 @@ impl QuantizedHnswIndex {
 
         // Get candidates - use more candidates for binary (less accurate)
         let num_candidates = if self.rescore {
-            k * self.rescore_factor * 2 // Binary needs more candidates
+            k.saturating_mul(self.rescore_factor).saturating_mul(2) // Binary needs more candidates
         } else {
             k
         };
@@ -486,7 +486,7 @@ impl QuantizedHnswIndex {
 
         // Get candidates using HNSW
         let num_candidates = if self.rescore {
-            k * self.rescore_factor
+            k.saturating_mul(self.rescore_factor)
         } else {
             k
         };

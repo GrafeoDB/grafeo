@@ -980,14 +980,18 @@ impl CardinalityEstimator {
             // Top-k mode: at most k results
             return k as f64;
         }
-        // Threshold mode: estimate 10% of indexed documents match
-        let default_selectivity = 0.1;
-        let base = if let Some(stats) = self.table_stats.get(&scan.label) {
-            stats.row_count as f64
-        } else {
-            self.default_row_count as f64
-        };
-        (base * default_selectivity).max(1.0)
+        if scan.threshold.is_some() {
+            // Threshold mode: estimate 10% of indexed documents match
+            let default_selectivity = 0.1;
+            let base = if let Some(stats) = self.table_stats.get(&scan.label) {
+                stats.row_count as f64
+            } else {
+                self.default_row_count as f64
+            };
+            return (base * default_selectivity).max(1.0);
+        }
+        // Default top-k(100) — matches executor fallback
+        100.0
     }
 
     /// Estimates vector join cardinality.

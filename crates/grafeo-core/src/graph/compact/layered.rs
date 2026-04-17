@@ -674,6 +674,46 @@ impl GraphStore for LayeredStore {
         }
         Vec::new()
     }
+
+    #[cfg(feature = "text-index")]
+    fn score_text(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        property: &str,
+        query: &str,
+    ) -> Option<f64> {
+        self.overlay.score_text(node_id, label, property, query)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn text_search(&self, label: &str, property: &str, query: &str, k: usize) -> Vec<(NodeId, f64)> {
+        self.overlay.text_search(label, property, query, k)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn text_search_with_threshold(&self, label: &str, property: &str, query: &str, threshold: f64) -> Vec<(NodeId, f64)> {
+        self.overlay.text_search_with_threshold(label, property, query, threshold)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn has_text_index(&self, label: &str, property: &str) -> bool {
+        self.overlay.has_text_index(label, property)
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn has_vector_index(&self, label: &str, property: &str) -> bool {
+        self.overlay.has_vector_index(label, property)
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn get_vector_index_handle(
+        &self,
+        label: &str,
+        property: &str,
+    ) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
+        self.overlay.get_vector_index_handle(label, property)
+    }
 }
 
 // ── GraphStoreMut implementation ───────────────────────────────────

@@ -35,6 +35,13 @@ pub enum ColumnCodec {
     },
     /// Native IEEE 754 double-precision floats.
     Float64(Vec<f64>),
+    /// Float32 vectors (flat array with stride), for embedding / vector search.
+    Float32Vector {
+        /// Flat array of f32 components.
+        data: Vec<f32>,
+        /// Number of dimensions per vector.
+        dimensions: u16,
+    },
 }
 
 impl ColumnCodec {
@@ -78,6 +85,18 @@ impl ColumnCodec {
                 Some(Value::List(Arc::from(values)))
             }
             Self::Float64(vec) => vec.get(index).copied().map(Value::Float64),
+            Self::Float32Vector { data, dimensions } => {
+                let dims = *dimensions as usize;
+                if dims == 0 {
+                    return None;
+                }
+                let start = index.checked_mul(dims)?;
+                let end = start.checked_add(dims)?;
+                if end > data.len() {
+                    return None;
+                }
+                Some(Value::Vector(Arc::from(&data[start..end])))
+            }
         }
     }
 
@@ -129,6 +148,10 @@ impl ColumnCodec {
                 data.len().checked_div(dims).unwrap_or(0)
             }
             Self::Float64(vec) => vec.len(),
+            Self::Float32Vector { data, dimensions } => {
+                let dims = *dimensions as usize;
+                if dims == 0 { 0 } else { data.len() / dims }
+            }
         }
     }
 
@@ -327,6 +350,14 @@ impl ColumnCodec {
                     buf.extend_from_slice(&v.to_le_bytes());
                 }
             }
+            Self::Float32Vector { data, dimensions } => {
+                buf.push(5); // discriminant
+                buf.extend_from_slice(&dimensions.to_le_bytes());
+                write_usize_as_u32(buf, data.len());
+                for &v in data {
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+            }
         }
     }
 
@@ -415,6 +446,19 @@ impl ColumnCodec {
                 }
                 Ok(Self::Float64(vec))
             }
+            5 => {
+                // Float32Vector
+                let dimensions = read_u16_le(data, pos)?;
+                let data_len = read_u32_le(data, pos)? as usize;
+                let mut f32_data = Vec::with_capacity(data_len);
+                for _ in 0..data_len {
+                    f32_data.push(read_f32_le(data, pos)?);
+                }
+                Ok(Self::Float32Vector {
+                    data: f32_data,
+                    dimensions,
+                })
+            }
             _ => Err("unknown codec discriminant"),
         }
     }
@@ -432,6 +476,7 @@ impl ColumnCodec {
             Self::Bitmap(bv) => bv.data().len() * std::mem::size_of::<u64>(),
             Self::Int8Vector { data, .. } => data.len(),
             Self::Float64(vec) => vec.len() * std::mem::size_of::<f64>(),
+            Self::Float32Vector { data, .. } => data.len() * std::mem::size_of::<f32>(),
         }
     }
 }
@@ -477,6 +522,15 @@ fn read_f64_le(data: &[u8], pos: &mut usize) -> Result<f64, &'static str> {
     }
     let v = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
     *pos += 8;
+    Ok(v)
+}
+
+fn read_f32_le(data: &[u8], pos: &mut usize) -> Result<f32, &'static str> {
+    if *pos + 4 > data.len() {
+        return Err("truncated f32");
+    }
+    let v = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+    *pos += 4;
     Ok(v)
 }
 

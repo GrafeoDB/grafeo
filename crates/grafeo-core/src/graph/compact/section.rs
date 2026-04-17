@@ -552,6 +552,9 @@ fn infer_column_type_from_codec(codec: &ColumnCodec) -> ColumnType {
             dimensions: *dimensions,
         },
         ColumnCodec::Float64(_) => ColumnType::Float64,
+        ColumnCodec::Float32Vector { dimensions, .. } => ColumnType::Float32Vector {
+            dimensions: *dimensions,
+        },
     }
 }
 

@@ -137,15 +137,16 @@ impl super::GrafeoDB {
         #[cfg(feature = "vector-index")]
         let mut vectors: Vec<(grafeo_common::types::NodeId, Vec<f32>)> = Vec::new();
 
-        for node in self.lpg_store().nodes_with_label(label) {
-            if let Some(Value::Vector(v)) = node.properties.get(&prop_key) {
+        let graph = self.graph_store();
+        for node_id in graph.nodes_by_label(label) {
+            if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key) {
                 if let Some(expected) = found_dims {
                     if v.len() != expected {
                         return Err(grafeo_common::utils::error::Error::Internal(format!(
                             "Vector dimension mismatch: expected {}, found {} on node {}",
                             expected,
                             v.len(),
-                            node.id.0
+                            node_id.0
                         )));
                     }
                 } else {
@@ -153,7 +154,7 @@ impl super::GrafeoDB {
                 }
                 vector_count += 1;
                 #[cfg(feature = "vector-index")]
-                vectors.push((node.id, v.to_vec()));
+                vectors.push((node_id, v.to_vec()));
             }
         }
 
@@ -204,8 +205,9 @@ impl super::GrafeoDB {
 
             match &index {
                 VectorIndexKind::Hnsw(_) => {
+                    let graph = self.graph_store();
                     let accessor = grafeo_core::index::vector::PropertyVectorAccessor::new(
-                        &**self.lpg_store(),
+                        &*graph,
                         property,
                     );
                     for (node_id, vec) in &vectors {
@@ -381,10 +383,11 @@ impl super::GrafeoDB {
         let prop_key = PropertyKey::new(property);
 
         // Index all existing nodes with this label + property
-        let nodes = self.lpg_store().nodes_by_label(label);
+        let graph = self.graph_store();
+        let nodes = graph.nodes_by_label(label);
         for node_id in nodes {
             if let Some(Value::String(text)) =
-                self.lpg_store().get_node_property(node_id, &prop_key)
+                graph.get_node_property(node_id, &prop_key)
             {
                 index.insert(node_id, text.as_str());
             }

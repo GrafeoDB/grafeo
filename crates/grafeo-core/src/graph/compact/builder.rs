@@ -579,6 +579,9 @@ fn infer_column_type(codec: &ColumnCodec) -> ColumnType {
             dimensions: *dimensions,
         },
         ColumnCodec::Float64(_) => ColumnType::Float64,
+        ColumnCodec::Float32Vector { dimensions, .. } => ColumnType::Float32Vector {
+            dimensions: *dimensions,
+        },
     }
 }
 
@@ -654,6 +657,8 @@ enum InferredType {
     Float64,
     /// All non-null values are `Value::Bool`.
     Bitmap,
+    /// All non-null values are `Value::Vector` with consistent dimensions.
+    Float32Vector { dimensions: u16 },
     /// All non-null values are `Value::String`, or mixed/unsupported types.
     Dict,
 }
@@ -805,6 +810,20 @@ pub fn from_graph_store(
                             .push((key.clone(), ColumnCodec::Float64(f64_values)));
                         t.record_len(values.len());
                     }
+                    InferredType::Float32Vector { dimensions } => {
+                        let mut flat: Vec<f32> = Vec::with_capacity(values.len() * dimensions as usize);
+                        for v in values {
+                            match v {
+                                Value::Vector(vec) => flat.extend_from_slice(vec),
+                                _ => flat.extend(std::iter::repeat(0.0f32).take(dimensions as usize)),
+                            }
+                        }
+                        t.columns.push((
+                            key.clone(),
+                            ColumnCodec::Float32Vector { data: flat, dimensions },
+                        ));
+                        t.record_len(values.len());
+                    }
                     InferredType::Bitmap => {
                         let bool_values: Vec<bool> = values
                             .iter()
@@ -936,6 +955,19 @@ pub fn from_graph_store(
                                     .collect();
                                 r.properties
                                     .push((key.clone(), ColumnCodec::Float64(f64_values)));
+                            }
+                            InferredType::Float32Vector { dimensions } => {
+                                let mut flat: Vec<f32> = Vec::with_capacity(values.len() * dimensions as usize);
+                                for v in values {
+                                    match v {
+                                        Value::Vector(vec) => flat.extend_from_slice(vec),
+                                        _ => flat.extend(std::iter::repeat(0.0f32).take(dimensions as usize)),
+                                    }
+                                }
+                                r.properties.push((
+                                    key.clone(),
+                                    ColumnCodec::Float32Vector { data: flat, dimensions },
+                                ));
                             }
                             InferredType::Bitmap => {
                                 let bool_values: Vec<bool> = values
@@ -1132,7 +1164,9 @@ fn infer_type_from_values(values: &[Value]) -> InferredType {
     let mut saw_int = false;
     let mut saw_float = false;
     let mut saw_bool = false;
+    let mut saw_vector = false;
     let mut saw_other = false;
+    let mut vector_dims: Option<u16> = None;
 
     for v in values {
         match v {
@@ -1140,7 +1174,26 @@ fn infer_type_from_values(values: &[Value]) -> InferredType {
             Value::Int64(n) if *n >= 0 => saw_int = true,
             Value::Float64(_) => saw_float = true,
             Value::Bool(_) => saw_bool = true,
+            Value::Vector(vec) => {
+                saw_vector = true;
+                #[allow(clippy::cast_possible_truncation)]
+                let dims = vec.len() as u16;
+                if let Some(prev) = vector_dims {
+                    if prev != dims {
+                        saw_other = true; // mixed dimensions → fallback
+                    }
+                } else {
+                    vector_dims = Some(dims);
+                }
+            }
             _ => saw_other = true,
+        }
+    }
+
+    // Vectors are exclusive — mixed with other types falls back to Dict.
+    if saw_vector && !saw_other && !saw_int && !saw_float && !saw_bool {
+        if let Some(dims) = vector_dims {
+            return InferredType::Float32Vector { dimensions: dims };
         }
     }
 

@@ -32,7 +32,7 @@ impl super::GrafeoDB {
             if let Some(storage) = map.get(&key) {
                 return grafeo_core::index::vector::VectorAccessorKind::Spilled(
                     grafeo_core::index::vector::SpillableVectorAccessor::new(
-                        &**self.lpg_store(),
+                        self.graph_store_ref(),
                         property,
                         std::sync::Arc::clone(storage)
                             as std::sync::Arc<dyn grafeo_core::index::vector::VectorStorage>,
@@ -41,7 +41,7 @@ impl super::GrafeoDB {
             }
         }
         grafeo_core::index::vector::VectorAccessorKind::Property(
-            grafeo_core::index::vector::PropertyVectorAccessor::new(&**self.lpg_store(), property),
+            grafeo_core::index::vector::PropertyVectorAccessor::new(self.graph_store_ref(), property),
         )
     }
 
@@ -54,7 +54,7 @@ impl super::GrafeoDB {
         property: &str,
     ) -> grafeo_core::index::vector::VectorAccessorKind<'a> {
         grafeo_core::index::vector::VectorAccessorKind::Property(
-            grafeo_core::index::vector::PropertyVectorAccessor::new(&**self.lpg_store(), property),
+            grafeo_core::index::vector::PropertyVectorAccessor::new(self.graph_store_ref(), property),
         )
     }
 
@@ -73,9 +73,11 @@ impl super::GrafeoDB {
     ) -> Option<std::collections::HashSet<NodeId>> {
         let filters = filters.filter(|f| !f.is_empty())?;
 
+        let graph = self.graph_store_ref();
+
         // Start with all nodes for this label
         let label_nodes: std::collections::HashSet<NodeId> =
-            self.lpg_store().nodes_by_label(label).into_iter().collect();
+            graph.nodes_by_label(label).into_iter().collect();
 
         let mut allowlist = label_nodes;
 
@@ -88,14 +90,13 @@ impl super::GrafeoDB {
                 // This is much faster when a prior filter has already narrowed the set.
                 let prop_key = grafeo_common::types::PropertyKey::new(key);
                 allowlist.retain(|&node_id| {
-                    self.lpg_store()
+                    graph
                         .get_node_property(node_id, &prop_key)
                         .is_some_and(|v| grafeo_core::LpgStore::matches_filter(&v, filter_value))
                 });
             } else {
                 // Equality filter: use indexed lookup when available
-                let matching: std::collections::HashSet<NodeId> = self
-                    .lpg_store()
+                let matching: std::collections::HashSet<NodeId> = graph
                     .find_nodes_by_property(key, filter_value)
                     .into_iter()
                     .collect();

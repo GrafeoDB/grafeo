@@ -198,6 +198,24 @@ impl GrafeoDB {
         )
     }
 
+    /// Returns a borrowed reference to the active graph store.
+    ///
+    /// In layered mode (after [`compact()`](Self::compact)), returns the
+    /// `LayeredStore` which merges the columnar base with the overlay.
+    /// Otherwise, returns the built-in `LpgStore`.
+    ///
+    /// Unlike [`graph_store()`](Self::graph_store) (which clones an `Arc`),
+    /// this borrows from `self` — suitable for constructing accessors that
+    /// need `&'a dyn GraphStore` tied to the database lifetime.
+    #[cfg(feature = "lpg")]
+    fn graph_store_ref(&self) -> &dyn grafeo_core::graph::GraphStore {
+        if let Some(ref ext_read) = self.external_read_store {
+            ext_read.as_ref()
+        } else {
+            &**self.lpg_store()
+        }
+    }
+
     /// Returns whether CDC is active (runtime check).
     #[cfg(feature = "cdc")]
     #[inline]
@@ -875,8 +893,8 @@ impl GrafeoDB {
 
         self.external_read_store = Some(Arc::clone(&layered) as Arc<dyn GraphStore>);
         self.external_write_store = Some(Arc::clone(&layered) as Arc<dyn GraphStoreMut>);
+        self.store = Some(Arc::clone(layered.overlay_store()));
         self.layered_store = Some(layered);
-        self.store = None;
         self.read_only = false;
         self.query_cache = Arc::new(QueryCache::default());
         self.projections.write().clear();
@@ -925,6 +943,7 @@ impl GrafeoDB {
 
         self.external_read_store = Some(Arc::clone(&new_layered) as Arc<dyn GraphStore>);
         self.external_write_store = Some(Arc::clone(&new_layered) as Arc<dyn GraphStoreMut>);
+        self.store = Some(Arc::clone(new_layered.overlay_store()));
         self.layered_store = Some(new_layered);
         self.query_cache = Arc::new(QueryCache::default());
 

@@ -731,6 +731,18 @@ impl GraphStore for LayeredStore {
             .or_else(|| self.overlay.load().edge_type(id))
     }
 
+    fn has_property_index(&self, property: &str) -> bool {
+        // Property indexes only live on the overlay LpgStore — the columnar
+        // base has no equivalent — so delegating to the overlay is correct.
+        // Without this override the trait default returns false, and the
+        // planner's property-index fast path silently disables itself in
+        // any database that has been compacted (which includes every
+        // snapshot-loaded production database). The fast path falls back
+        // to a label-first scan, so queries still return the right rows
+        // — just much slower than they should.
+        self.overlay.has_property_index(property)
+    }
+
     fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
         let deleted = self.deleted_from_base_nodes.read();
         let dirty = self.dirty_node_ids.read();

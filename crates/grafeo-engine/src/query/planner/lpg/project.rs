@@ -631,7 +631,33 @@ impl super::Planner {
             let mut seen = std::collections::HashSet::new();
             for key in &sort.keys {
                 match &key.expression {
-                    LogicalExpression::Variable(_) => continue,
+                    LogicalExpression::Variable(variable) => {
+                        // ORDER BY referencing a WITH-clause alias that the
+                        // outer RETURN drops: e.g. `WITH x AS s ... RETURN x
+                        // ORDER BY s`. The Variable is in inner_vars (Return's
+                        // input columns) but not in ret.items, so without a
+                        // passthrough Sort sees a missing column at runtime.
+                        if !inner_vars.contains_key(variable) {
+                            continue;
+                        }
+                        let already_in_return = ret.items.iter().any(|item| {
+                            item.alias.as_deref() == Some(variable.as_str())
+                                || matches!(
+                                    &item.expression,
+                                    LogicalExpression::Variable(v) if v == variable
+                                )
+                        });
+                        if already_in_return {
+                            continue;
+                        }
+                        if seen.insert(variable.clone()) {
+                            augmented_items.push(crate::query::plan::ReturnItem {
+                                expression: key.expression.clone(),
+                                alias: Some(variable.clone()),
+                            });
+                            extra_columns.push(variable.clone());
+                        }
+                    }
                     LogicalExpression::Property { variable, property } => {
                         if !inner_vars.contains_key(variable) {
                             continue;

@@ -92,6 +92,15 @@ impl super::Planner {
             return Ok(result);
         }
 
+        // Try to use property index for `var.prop IN [literals]` predicates,
+        // unioning per-value index lookups instead of falling back to a full
+        // scan + filter. Empirically this is the difference between ~10ms
+        // and multiple seconds on a few thousand reviews when an `id` index
+        // exists.
+        if let Some(result) = self.try_plan_filter_with_in_list_index(filter)? {
+            return Ok(result);
+        }
+
         // Try to use range optimization for range predicates (>, <, >=, <=)
         if let Some(result) = self.try_plan_filter_with_range_index(filter)? {
             return Ok(result);
@@ -971,6 +980,114 @@ impl super::Planner {
         } else {
             Ok(Some((node_list_op, columns)))
         }
+    }
+
+    /// Tries to optimize a filter shaped as `var.prop IN [literals]` using
+    /// the property index. For each literal, calls `find_nodes_by_property`
+    /// and unions the results. Returns `Ok(None)` when not applicable —
+    /// e.g. the input isn't a simple NodeScan, the right side isn't a list
+    /// of literals, the property is unindexed, or the predicate is part of
+    /// a more complex expression we don't yet decompose.
+    ///
+    /// Compound `prop IN [...] AND label-or-other` is currently left to
+    /// the slow path. Pure `IN` is the common shape (`WHERE r.id IN $ids`).
+    pub(super) fn try_plan_filter_with_in_list_index(
+        &self,
+        filter: &FilterOp,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        // Only optimize if input is a simple NodeScan (not nested).
+        let (scan_variable, scan_label) = match filter.input.as_ref() {
+            LogicalOperator::NodeScan(scan) if scan.input.is_none() => {
+                (scan.variable.clone(), scan.label.clone())
+            }
+            _ => return Ok(None),
+        };
+
+        // Predicate must be a single `var.prop IN [literal, ...]`.
+        let LogicalExpression::Binary {
+            left,
+            op: BinaryOp::In,
+            right,
+        } = &filter.predicate
+        else {
+            return Ok(None);
+        };
+        let LogicalExpression::Property { variable, property } = left.as_ref() else {
+            return Ok(None);
+        };
+        if variable != &scan_variable {
+            return Ok(None);
+        }
+        if !self.store.has_property_index(property) {
+            return Ok(None);
+        }
+
+        // Right side: List of literal expressions, or a Literal containing a Value::List.
+        let values: Vec<Value> = match right.as_ref() {
+            LogicalExpression::List(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    match item {
+                        LogicalExpression::Literal(v) if !v.is_null() => out.push(v.clone()),
+                        // A non-literal element (parameter, expression) means
+                        // we can't enumerate at plan time — bail to slow path.
+                        _ => return Ok(None),
+                    }
+                }
+                out
+            }
+            LogicalExpression::Literal(Value::List(items)) => items
+                .iter()
+                .filter(|v| !v.is_null())
+                .cloned()
+                .collect(),
+            _ => return Ok(None),
+        };
+        if values.is_empty() {
+            // `prop IN []` is always false — return an empty result without
+            // touching the store.
+            self.record_absorbed_scan_entry(&filter.input);
+            let columns = vec![scan_variable];
+            let empty = Box::new(NodeListOperator::new(Vec::new(), 2048));
+            return Ok(Some((empty, columns)));
+        }
+
+        // Per-value index lookup, deduplicate (the same node could match
+        // duplicate values, and we don't want to emit it twice).
+        let mut seen = std::collections::HashSet::new();
+        let mut matching_nodes = Vec::new();
+        for value in &values {
+            for node_id in self.store.find_nodes_by_property(property, value) {
+                if seen.insert(node_id) {
+                    matching_nodes.push(node_id);
+                }
+            }
+        }
+
+        // Intersect with the label constraint, if any.
+        if let Some(label) = &scan_label {
+            let label_nodes: std::collections::HashSet<_> =
+                self.store.nodes_by_label(label).into_iter().collect();
+            matching_nodes.retain(|n| label_nodes.contains(n));
+        }
+
+        // MVCC visibility: drop nodes that aren't visible at the current
+        // epoch/tx, matching the equality fast path's semantics.
+        let epoch = self.viewing_epoch;
+        if let Some(tx) = self.transaction_id {
+            matching_nodes.retain(|id| self.store.get_node_versioned(*id, epoch, tx).is_some());
+        } else {
+            matching_nodes.retain(|id| self.store.get_node_at_epoch(*id, epoch).is_some());
+        }
+
+        // Index optimization absorbs the child NodeScan — emit a synthetic
+        // profile entry so build_profile_tree's strict logical-op:entry 1:1
+        // mapping holds. See `record_absorbed_scan_entry` for full reasoning.
+        self.record_absorbed_scan_entry(&filter.input);
+
+        let columns = vec![scan_variable];
+        let node_list_op: Box<dyn Operator> = Box::new(NodeListOperator::new(matching_nodes, 2048));
+        Ok(Some((node_list_op, columns)))
     }
 
     /// Extracts the remaining predicate after removing pushed-down equality conditions.

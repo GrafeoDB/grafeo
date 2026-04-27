@@ -230,6 +230,12 @@ impl Optimizer {
 
         // Apply optimization rules
         if self.enable_filter_pushdown {
+            // Propagate filters across LeftJoin shared variables BEFORE
+            // pushdown, so OPTIONAL MATCH right-side subtrees pick up
+            // the same WHERE constraints the main MATCH applies.
+            // Otherwise pushdown rewrites the left subtree and the
+            // chance is gone.
+            root = self.propagate_join_predicates(root);
             root = self.push_filters_down(root);
         }
 
@@ -768,6 +774,183 @@ impl Optimizer {
         let plan = dpccp.optimize()?;
 
         Some(plan.operator)
+    }
+
+    /// Propagates filter predicates across LeftJoin boundaries when the
+    /// predicate references variables bound on both sides of the join.
+    ///
+    /// OPTIONAL MATCH compiles to `LeftJoin(left, right)` where the right
+    /// subtree binds the same variable as the left (typically via its own
+    /// NodeScan), so the right side independently scans the full table even
+    /// when the left side is bound to a tiny set. After regular pushdown
+    /// rewrites `Filter(P, MainMatch)` into something like
+    /// `Expand(NodeList(P))`, the original filter is gone and we can no
+    /// longer detect the constraint to mirror to the right. This pass runs
+    /// BEFORE pushdown: for every `LeftJoin(Filter(P, X), Y)` where P's
+    /// variables are bound in both X and Y, wrap Y with the same Filter.
+    ///
+    /// Safe by LeftJoin semantics: matched pairs satisfy left.v = right.v
+    /// for shared variable v, so a right row that fails P also fails P
+    /// when joined to its matching left row, which already failed P. And
+    /// OPTIONAL left rows with no right match are unaffected — we only
+    /// constrain the right side's enumeration.
+    fn propagate_join_predicates(&self, op: LogicalOperator) -> LogicalOperator {
+        match op {
+            LogicalOperator::LeftJoin(mut left_join) => {
+                // Recurse into both sides first so nested OPTIONAL MATCHes
+                // benefit too.
+                left_join.left = Box::new(self.propagate_join_predicates(*left_join.left));
+                left_join.right = Box::new(self.propagate_join_predicates(*left_join.right));
+
+                // Collect variables bound on both sides — these are the
+                // implicit join keys (a single shared variable like `c`,
+                // typically). Predicates referencing only these variables
+                // are safe to mirror.
+                let left_vars = self.collect_output_variables(&left_join.left);
+                let right_vars = self.collect_output_variables(&left_join.right);
+                let shared_vars: HashSet<String> = left_vars
+                    .intersection(&right_vars)
+                    .cloned()
+                    .collect();
+
+                if !shared_vars.is_empty() {
+                    let mut shared_filters = Vec::new();
+                    self.collect_shared_var_filters(
+                        &left_join.left,
+                        &shared_vars,
+                        &mut shared_filters,
+                    );
+                    for predicate in shared_filters {
+                        left_join.right = Box::new(LogicalOperator::Filter(FilterOp {
+                            predicate,
+                            pushdown_hint: None,
+                            input: left_join.right,
+                        }));
+                    }
+                }
+
+                LogicalOperator::LeftJoin(left_join)
+            }
+            // Recurse through everything else (single-child and multi-child
+            // operators) so we can find LeftJoins anywhere in the tree.
+            LogicalOperator::Filter(mut f) => {
+                f.input = Box::new(self.propagate_join_predicates(*f.input));
+                LogicalOperator::Filter(f)
+            }
+            LogicalOperator::Project(mut p) => {
+                p.input = Box::new(self.propagate_join_predicates(*p.input));
+                LogicalOperator::Project(p)
+            }
+            LogicalOperator::Return(mut r) => {
+                r.input = Box::new(self.propagate_join_predicates(*r.input));
+                LogicalOperator::Return(r)
+            }
+            LogicalOperator::Limit(mut l) => {
+                l.input = Box::new(self.propagate_join_predicates(*l.input));
+                LogicalOperator::Limit(l)
+            }
+            LogicalOperator::Skip(mut s) => {
+                s.input = Box::new(self.propagate_join_predicates(*s.input));
+                LogicalOperator::Skip(s)
+            }
+            LogicalOperator::Sort(mut s) => {
+                s.input = Box::new(self.propagate_join_predicates(*s.input));
+                LogicalOperator::Sort(s)
+            }
+            LogicalOperator::Distinct(mut d) => {
+                d.input = Box::new(self.propagate_join_predicates(*d.input));
+                LogicalOperator::Distinct(d)
+            }
+            LogicalOperator::Expand(mut e) => {
+                e.input = Box::new(self.propagate_join_predicates(*e.input));
+                LogicalOperator::Expand(e)
+            }
+            LogicalOperator::Aggregate(mut a) => {
+                a.input = Box::new(self.propagate_join_predicates(*a.input));
+                LogicalOperator::Aggregate(a)
+            }
+            LogicalOperator::Join(mut j) => {
+                j.left = Box::new(self.propagate_join_predicates(*j.left));
+                j.right = Box::new(self.propagate_join_predicates(*j.right));
+                LogicalOperator::Join(j)
+            }
+            LogicalOperator::AntiJoin(mut a) => {
+                a.left = Box::new(self.propagate_join_predicates(*a.left));
+                a.right = Box::new(self.propagate_join_predicates(*a.right));
+                LogicalOperator::AntiJoin(a)
+            }
+            LogicalOperator::Apply(mut a) => {
+                a.input = Box::new(self.propagate_join_predicates(*a.input));
+                a.subplan = Box::new(self.propagate_join_predicates(*a.subplan));
+                LogicalOperator::Apply(a)
+            }
+            LogicalOperator::Union(mut u) => {
+                u.inputs = u
+                    .inputs
+                    .into_iter()
+                    .map(|input| self.propagate_join_predicates(input))
+                    .collect();
+                LogicalOperator::Union(u)
+            }
+            LogicalOperator::Unwind(mut u) => {
+                u.input = Box::new(self.propagate_join_predicates(*u.input));
+                LogicalOperator::Unwind(u)
+            }
+            other => other,
+        }
+    }
+
+    /// Walks a (sub)tree collecting filter predicates that reference only
+    /// the given shared variables — these are safe to mirror across a
+    /// LeftJoin to the right subtree.
+    fn collect_shared_var_filters(
+        &self,
+        op: &LogicalOperator,
+        shared_vars: &HashSet<String>,
+        out: &mut Vec<LogicalExpression>,
+    ) {
+        match op {
+            LogicalOperator::Filter(f) => {
+                let predicate_vars = self.extract_variables(&f.predicate);
+                if !predicate_vars.is_empty()
+                    && predicate_vars.iter().all(|v| shared_vars.contains(v))
+                {
+                    out.push(f.predicate.clone());
+                }
+                self.collect_shared_var_filters(&f.input, shared_vars, out);
+            }
+            // Don't descend through operators that change row semantics
+            // (Aggregate, Limit, Skip, Sort, Distinct) — predicates above
+            // them aren't safe to extract because they apply to a
+            // post-aggregation/limit world. Project / Return / Expand are
+            // row-preserving so we can keep walking.
+            LogicalOperator::Project(p) => {
+                self.collect_shared_var_filters(&p.input, shared_vars, out);
+            }
+            LogicalOperator::Return(r) => {
+                self.collect_shared_var_filters(&r.input, shared_vars, out);
+            }
+            LogicalOperator::Expand(e) => {
+                self.collect_shared_var_filters(&e.input, shared_vars, out);
+            }
+            // For nested LeftJoins (chained OPTIONAL MATCH), the LEFT side
+            // is the row-driving subtree — its surviving rows feed the
+            // outer join. Filters anywhere in that left subtree are
+            // implicitly applied to every output row, so they're safe to
+            // mirror across the outer join. The right side is optional
+            // and may contribute NULL-padded rows that don't satisfy
+            // those filters, so we deliberately don't walk into it.
+            LogicalOperator::LeftJoin(j) => {
+                self.collect_shared_var_filters(&j.left, shared_vars, out);
+            }
+            LogicalOperator::Join(j) => {
+                self.collect_shared_var_filters(&j.left, shared_vars, out);
+                self.collect_shared_var_filters(&j.right, shared_vars, out);
+            }
+            // Stop at Apply / Aggregate / Limit / Skip / etc. — too risky
+            // to pull predicates across those boundaries.
+            _ => {}
+        }
     }
 
     /// Pushes filters down the operator tree.

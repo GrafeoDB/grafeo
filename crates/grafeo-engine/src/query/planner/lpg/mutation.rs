@@ -336,6 +336,17 @@ impl super::Planner {
                     .with_session_context(self.session_context.clone()),
                 );
 
+                // The logical tree still contains Unwind(Empty), so under
+                // PROFILE, build_profile_tree will walk into Empty and expect
+                // an entry. plan_operator(&Empty) returns Err and is bypassed
+                // here, so push a synthetic entry attributed to Empty.
+                if self.profiling.get() {
+                    let (entry, _stats) = crate::query::profile::ProfileEntry::new(
+                        "Empty",
+                        LogicalOperator::Empty.display_label(),
+                    );
+                    self.profile_entries.borrow_mut().push(entry);
+                }
                 (project_op, vec!["__list__".to_string()])
             } else {
                 self.plan_operator(&unwind.input)?

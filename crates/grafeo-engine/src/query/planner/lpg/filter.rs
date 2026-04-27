@@ -942,6 +942,12 @@ impl super::Planner {
         let columns = vec![scan_variable.clone()];
         let node_list_op: Box<dyn Operator> = Box::new(NodeListOperator::new(matching_nodes, 2048));
 
+        // Index optimization absorbs the child NodeScan — emit a
+        // synthetic profile entry so build_profile_tree's strict
+        // logical-op:entry 1:1 mapping holds. See
+        // `record_absorbed_scan_entry` for full reasoning.
+        self.record_absorbed_scan_entry(&filter.input);
+
         // Check for remaining predicate parts that weren't pushed down
         // (e.g., range conditions in a compound predicate like `n.name = 'Alix' AND n.age > 30`)
         if let Some(remaining) =
@@ -1104,6 +1110,32 @@ impl super::Planner {
     ///
     /// Returns `Ok(Some((operator, columns)))` if optimization was applied,
     /// `Ok(None)` if not applicable, or `Err` on error.
+    /// When a `Filter` plan_* fast path absorbs its child NodeScan into
+    /// a single physical operator (NodeListOperator), the NodeScan
+    /// logical operator never gets planned via `plan_operator` — so no
+    /// `ProfileEntry` is recorded for it. `build_profile_tree` then
+    /// panics with "profile entry count must match logical operator
+    /// count" because it walks the logical plan in post-order and
+    /// expects 1 entry per logical operator. This helper pushes a
+    /// synthetic entry for the absorbed scan so the mapping holds.
+    ///
+    /// Stats stay empty — the actual scan-and-filter work is
+    /// attributed to the wrapping operator's entry, recorded by the
+    /// outer `maybe_profile` once the Filter logical op finishes
+    /// planning. Slight cosmetic quirk in PROFILE output (NodeScan
+    /// shows 0 rows / 0 ns) but no panic and no perf impact.
+    pub(super) fn record_absorbed_scan_entry(&self, absorbed: &LogicalOperator) {
+        if !self.profiling.get() {
+            return;
+        }
+        let label = match absorbed {
+            LogicalOperator::NodeScan(_) => absorbed.display_label(),
+            _ => String::from("NodeScan(absorbed)"),
+        };
+        let (entry, _stats) = crate::query::profile::ProfileEntry::new("NodeScan", label);
+        self.profile_entries.borrow_mut().push(entry);
+    }
+
     pub(super) fn try_plan_filter_with_range_index(
         &self,
         filter: &FilterOp,
@@ -1121,6 +1153,7 @@ impl super::Planner {
             self.extract_between_predicate(&filter.predicate)
             && variable == scan_variable
         {
+            self.record_absorbed_scan_entry(&filter.input);
             return self.plan_range_filter(
                 &scan_variable,
                 &scan_label,
@@ -1146,6 +1179,7 @@ impl super::Planner {
                 BinaryOp::Ge => (Some(value), None, true, false),
                 _ => return Ok(None),
             };
+            self.record_absorbed_scan_entry(&filter.input);
             return self.plan_range_filter(
                 &scan_variable,
                 &scan_label,

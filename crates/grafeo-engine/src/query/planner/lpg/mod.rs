@@ -706,12 +706,24 @@ impl Planner {
         let result = match op {
             LogicalOperator::NodeScan(scan) => self.plan_node_scan(scan),
             LogicalOperator::Expand(expand) => {
-                // Factorized chain kicks in only when it actually helps:
-                // chain_len >= 2 means at least two consecutive Expands, where
-                // separate plans would Cartesian-product per hop. For a single
-                // hop, the plain `plan_expand` path is cheaper and integrates
-                // more naturally with adjacent operators.
-                if self.factorized_execution {
+                // Factorized chain fuses N Expand logical operators into a
+                // single LazyFactorizedChainOperator. It kicks in only when
+                // it actually helps: chain_len >= 2 means at least two
+                // consecutive Expands, where separate plans would
+                // Cartesian-product per hop. For a single hop, the plain
+                // `plan_expand` path is cheaper and integrates more naturally
+                // with adjacent operators.
+                //
+                // Disable under PROFILE for the same reason as
+                // `try_topk_rewrite` in plan_limit: PROFILE's
+                // `build_profile_tree` walks the logical plan expecting one
+                // ProfileEntry per logical operator, and a fused chain only
+                // emits one entry for the whole chain. The result is a count
+                // mismatch and a panic at
+                // `crates/grafeo-engine/src/query/profile.rs:75`. Run the
+                // unfused per-Expand path under PROFILE so each Expand gets
+                // its own entry.
+                if self.factorized_execution && !self.profiling.get() {
                     let (chain_len, _base) = Self::count_expand_chain(op);
                     if chain_len >= 2 {
                         return self.maybe_profile(self.plan_expand_chain(op), op);

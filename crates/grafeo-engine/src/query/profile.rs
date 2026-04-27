@@ -71,9 +71,15 @@ pub fn build_profile_tree(
         .collect();
 
     // Consume the entry for this node
-    let entry = entries
-        .next()
-        .expect("profile entry count must match logical operator count");
+    let entry = entries.next().unwrap_or_else(|| {
+        panic!(
+            "profile entry count must match logical operator count — \
+             ran out of entries while building tree node for logical \
+             operator: {:?} (label='{}')",
+            std::mem::discriminant(logical),
+            logical.display_label(),
+        )
+    });
 
     ProfileNode {
         name: entry.name,

@@ -680,9 +680,16 @@ impl super::Planner {
                 input: ret.input.clone(),
             };
 
-            // Plan the augmented Return with the original inner operator
-            let (op, columns) =
-                self.plan_return_with_input(&augmented_ret, inner_op, inner_columns)?;
+            // Plan the augmented Return with the original inner operator.
+            // Route through `maybe_profile` so that under PROFILE, this fused
+            // physical op contributes a ProfileEntry attributed to the
+            // logical `Return` node — `build_profile_tree` walks the logical
+            // tree and otherwise panics with a count mismatch at the
+            // ancestor (typically Limit) once entries run out.
+            let (op, columns) = self.maybe_profile(
+                self.plan_return_with_input(&augmented_ret, inner_op, inner_columns),
+                sort.input.as_ref(),
+            )?;
             sort_extra_count = extra_columns.len();
             (op, columns)
         } else {

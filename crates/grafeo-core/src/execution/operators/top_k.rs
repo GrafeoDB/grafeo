@@ -69,6 +69,44 @@ impl TopKOperator {
     ///
     /// Equivalent in output to `LimitOperator(SortOperator(child, sort_keys), limit)`,
     /// including stability on ties.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use grafeo_core::execution::DataChunk;
+    /// use grafeo_core::execution::chunk::DataChunkBuilder;
+    /// use grafeo_core::execution::operators::{Operator, OperatorResult, SortKey, TopKOperator};
+    /// use grafeo_common::types::LogicalType;
+    ///
+    /// struct Source { chunk: Option<DataChunk> }
+    /// impl Operator for Source {
+    ///     fn next(&mut self) -> OperatorResult { Ok(self.chunk.take()) }
+    ///     fn reset(&mut self) {}
+    ///     fn name(&self) -> &'static str { "Source" }
+    ///     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> { self }
+    /// }
+    ///
+    /// let mut b = DataChunkBuilder::new(&[LogicalType::Int64]);
+    /// for v in [10i64, 50, 30, 20, 40] {
+    ///     b.column_mut(0).unwrap().push_int64(v);
+    ///     b.advance_row();
+    /// }
+    /// let source = Source { chunk: Some(b.finish()) };
+    ///
+    /// let mut top_k = TopKOperator::new(
+    ///     Box::new(source),
+    ///     vec![SortKey::descending(0)],
+    ///     3,
+    ///     vec![LogicalType::Int64],
+    /// );
+    ///
+    /// let chunk = top_k.next().unwrap().unwrap();
+    /// let mut out = vec![];
+    /// for row in chunk.selected_indices() {
+    ///     out.push(chunk.column(0).unwrap().get_int64(row).unwrap());
+    /// }
+    /// assert_eq!(out, vec![50, 40, 30]);
+    /// ```
     pub fn new(
         child: Box<dyn Operator>,
         sort_keys: Vec<SortKey>,

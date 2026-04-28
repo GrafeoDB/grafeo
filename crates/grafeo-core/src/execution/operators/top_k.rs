@@ -124,9 +124,18 @@ impl Operator for TopKOperator {
                         sort_keys: Arc::clone(&self.sort_keys),
                     };
                     next_insertion_id += 1;
-                    heap.push(entry);
-                    if heap.len() > self.limit {
-                        heap.pop();
+                    if heap.len() < self.limit {
+                        heap.push(entry);
+                    } else {
+                        // Heap is full and the new entry beat the worst; replace
+                        // the heap's max in place. One sift-down vs push+pop's
+                        // two reheapifies — significant for large N.
+                        // peek_mut is None only for empty heap; we know
+                        // heap.len() == self.limit > 0 here (limit==0 is
+                        // filtered above by should_push=false).
+                        if let Some(mut top) = heap.peek_mut() {
+                            *top = entry;
+                        }
                     }
                 }
             }

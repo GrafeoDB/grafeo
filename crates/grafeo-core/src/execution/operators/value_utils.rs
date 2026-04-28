@@ -73,6 +73,32 @@ pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
     }
 }
 
+use super::sort::NullOrder;
+
+/// Compares two optional values with null handling.
+///
+/// Used by sort and top-K operators to handle the `NULLS FIRST` / `NULLS LAST`
+/// directive uniformly. Both `None` and `Some(Value::Null)` are treated as null.
+pub fn compare_values_with_nulls(
+    a: &Option<Value>,
+    b: &Option<Value>,
+    null_order: NullOrder,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (None, None) | (Some(Value::Null), Some(Value::Null)) => Ordering::Equal,
+        (None, _) | (Some(Value::Null), _) => match null_order {
+            NullOrder::NullsFirst => Ordering::Less,
+            NullOrder::NullsLast => Ordering::Greater,
+        },
+        (_, None) | (_, Some(Value::Null)) => match null_order {
+            NullOrder::NullsFirst => Ordering::Greater,
+            NullOrder::NullsLast => Ordering::Less,
+        },
+        (Some(a), Some(b)) => compare_values_total(a, b),
+    }
+}
+
 /// Returns `true` if `new` is less than `current` (for MIN aggregation).
 ///
 /// Returns `true` when `current` is `None` (first value always wins).

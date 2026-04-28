@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 
 use grafeo_common::types::{LogicalType, Value};
 
-use super::value_utils::compare_values_total;
+use super::value_utils::compare_values_with_nulls;
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::execution::chunk::DataChunkBuilder;
@@ -170,25 +170,6 @@ impl SortOperator {
     }
 }
 
-/// Compares two optional values with null handling.
-fn compare_values_with_nulls(
-    a: &Option<Value>,
-    b: &Option<Value>,
-    null_order: NullOrder,
-) -> Ordering {
-    match (a, b) {
-        (None, None) | (Some(Value::Null), Some(Value::Null)) => Ordering::Equal,
-        (None, _) | (Some(Value::Null), _) => match null_order {
-            NullOrder::NullsFirst => Ordering::Less,
-            NullOrder::NullsLast => Ordering::Greater,
-        },
-        (_, None) | (_, Some(Value::Null)) => match null_order {
-            NullOrder::NullsFirst => Ordering::Greater,
-            NullOrder::NullsLast => Ordering::Less,
-        },
-        (Some(a), Some(b)) => compare_values_total(a, b),
-    }
-}
 
 impl Operator for SortOperator {
     fn next(&mut self) -> OperatorResult {

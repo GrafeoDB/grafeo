@@ -1,0 +1,346 @@
+//! Streaming bounded-heap top-K operator.
+//!
+//! Subsumes `Limit ← Sort` for the `LIMIT k ORDER BY ...` pattern: instead of
+//! materializing every input row, sorting them all, and discarding all but the
+//! first k, this operator maintains a max-heap of size k keyed by the user's
+//! sort tuple (with the comparator inverted so `peek()` returns the worst-by-
+//! user-order). For input cardinality N, memory is O(k) and comparisons are
+//! O(N log k). The heap is drained in user-requested order via
+//! `BinaryHeap::into_sorted_vec`; no separate sort step is needed.
+//!
+//! Stability matches `Vec::sort_by`: rows tied on every sort key are output in
+//! input order, achieved with a monotonic insertion-id tiebreaker.
+//!
+//! See `plan_limit` in `grafeo-engine` for the dispatch point that builds this
+//! operator. PROFILE-mode plans bypass the rewrite (entry-count parity with the
+//! logical tree); `LimitOperator(SortOperator(...))` runs instead.
+
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+use std::sync::Arc;
+
+use grafeo_common::types::{LogicalType, Value};
+
+use super::sort::SortKey;
+use super::value_utils::compare_values_with_nulls;
+use super::{Operator, OperatorResult};
+use crate::execution::DataChunk;
+use crate::execution::chunk::DataChunkBuilder;
+
+/// Streaming bounded top-K operator. See module docs.
+pub struct TopKOperator {
+    child: Box<dyn Operator>,
+    /// Shared with every HeapEntry via Arc so HeapEntry::Ord can compare
+    /// without raw pointers (`unsafe_code = "deny"` workspace-wide). The Arc
+    /// is allocated once in `new` and refcount-bumped per heap insertion;
+    /// the marginal cost is negligible at k=50, N=1M.
+    sort_keys: Arc<Vec<SortKey>>,
+    limit: usize,
+    output_schema: Vec<LogicalType>,
+    state: TopKState,
+}
+
+enum TopKState {
+    Building {
+        heap: BinaryHeap<HeapEntry>,
+        next_insertion_id: u64,
+    },
+    Draining {
+        rows: Vec<HeapEntry>,
+        position: usize,
+    },
+    Done,
+}
+
+struct HeapEntry {
+    sort_values: Vec<Option<Value>>,
+    row_values: Vec<Option<Value>>,
+    insertion_id: u64,
+    /// Shared with the owning operator. Refcount-bumped per insertion.
+    sort_keys: Arc<Vec<SortKey>>,
+}
+
+impl TopKOperator {
+    /// Constructs a streaming bounded top-k operator that yields the first
+    /// `limit` rows of `child` in `sort_keys` order, using O(limit) memory
+    /// regardless of `child`'s cardinality.
+    ///
+    /// Equivalent in output to `LimitOperator(SortOperator(child, sort_keys), limit)`,
+    /// including stability on ties.
+    pub fn new(
+        child: Box<dyn Operator>,
+        sort_keys: Vec<SortKey>,
+        limit: usize,
+        output_schema: Vec<LogicalType>,
+    ) -> Self {
+        Self {
+            child,
+            sort_keys: Arc::new(sort_keys),
+            limit,
+            output_schema,
+            state: TopKState::Building {
+                heap: BinaryHeap::new(),
+                next_insertion_id: 0,
+            },
+        }
+    }
+}
+
+impl Operator for TopKOperator {
+    fn next(&mut self) -> OperatorResult {
+        // Phase 1: build the heap by draining the child once.
+        if matches!(self.state, TopKState::Building { .. }) {
+            let TopKState::Building { mut heap, mut next_insertion_id } =
+                std::mem::replace(&mut self.state, TopKState::Done)
+            else {
+                unreachable!()
+            };
+
+            while let Some(chunk) = self.child.next()? {
+                for row_idx in chunk.selected_indices() {
+                    let new_sort_values =
+                        extract_sort_values(&chunk, row_idx, self.sort_keys.as_slice());
+
+                    let should_push = if heap.len() < self.limit {
+                        true
+                    } else if let Some(top) = heap.peek() {
+                        row_beats_heap_top(&new_sort_values, top, self.sort_keys.as_slice())
+                    } else {
+                        // limit == 0 — heap stays empty, never push.
+                        false
+                    };
+
+                    if !should_push {
+                        continue;
+                    }
+
+                    let row_values =
+                        extract_row_values(&chunk, row_idx, self.output_schema.len());
+                    // Materialization counter wired in Task 4.
+                    let entry = HeapEntry {
+                        sort_values: new_sort_values,
+                        row_values,
+                        insertion_id: next_insertion_id,
+                        sort_keys: Arc::clone(&self.sort_keys),
+                    };
+                    next_insertion_id += 1;
+                    heap.push(entry);
+                    if heap.len() > self.limit {
+                        heap.pop();
+                    }
+                }
+            }
+
+            let rows = heap.into_sorted_vec();
+            self.state = TopKState::Draining { rows, position: 0 };
+        }
+
+        // Phase 2: drain — one DataChunk per call.
+        if let TopKState::Draining { rows, position } = &mut self.state {
+            if *position < rows.len() {
+                let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);
+                while *position < rows.len() && !builder.is_full() {
+                    let entry = &rows[*position];
+                    for col_idx in 0..self.output_schema.len() {
+                        if let Some(dst_col) = builder.column_mut(col_idx) {
+                            let val = entry
+                                .row_values
+                                .get(col_idx)
+                                .and_then(|v| v.clone())
+                                .unwrap_or(Value::Null);
+                            dst_col.push_value(val);
+                        }
+                    }
+                    builder.advance_row();
+                    *position += 1;
+                }
+                if builder.row_count() > 0 {
+                    return Ok(Some(builder.finish()));
+                }
+            }
+            // Drain exhausted (or rows was empty for k=0). Transition to Done.
+            self.state = TopKState::Done;
+        }
+
+        // Phase 3: done.
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.child.reset();
+        self.state = TopKState::Building {
+            heap: BinaryHeap::new(),
+            next_insertion_id: 0,
+        };
+    }
+
+    fn name(&self) -> &'static str {
+        "TopK"
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+fn extract_sort_values(
+    chunk: &DataChunk,
+    row_idx: usize,
+    sort_keys: &[SortKey],
+) -> Vec<Option<Value>> {
+    sort_keys
+        .iter()
+        .map(|k| chunk.column(k.column).and_then(|c| c.get_value(row_idx)))
+        .collect()
+}
+
+fn extract_row_values(chunk: &DataChunk, row_idx: usize, n_cols: usize) -> Vec<Option<Value>> {
+    (0..n_cols)
+        .map(|i| chunk.column(i).and_then(|c| c.get_value(row_idx)))
+        .collect()
+}
+
+/// Strict better-than test: does `new` beat the current heap top per user-requested order?
+/// Inserting a new row that ties on every key must NOT displace the existing top
+/// (stability — the existing top arrived first and wins ties).
+fn row_beats_heap_top(
+    new: &[Option<Value>],
+    top: &HeapEntry,
+    keys: &[SortKey],
+) -> bool {
+    use super::sort::SortDirection;
+    for (i, key) in keys.iter().enumerate() {
+        let cmp = compare_values_with_nulls(&new[i], &top.sort_values[i], key.null_order);
+        let user_cmp = match key.direction {
+            SortDirection::Ascending => cmp,
+            SortDirection::Descending => cmp.reverse(),
+        };
+        match user_cmp {
+            Ordering::Less => return true,   // new is strictly better
+            Ordering::Greater => return false, // new is strictly worse
+            Ordering::Equal => continue,
+        }
+    }
+    false // every key tied — keep existing
+}
+
+impl PartialEq for HeapEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.insertion_id == other.insertion_id
+    }
+}
+
+impl Eq for HeapEntry {}
+
+impl PartialOrd for HeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HeapEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        use super::sort::SortDirection;
+        // Both entries share the same Arc<Vec<SortKey>> (one per
+        // TopKOperator); use self's view.
+        //
+        // Goal: BinaryHeap is a max-heap; peek() must return the
+        // worst-by-user-order so we evict it on overflow.
+        //   - User ASC: worst = largest value. peek wants largest →
+        //     Ord must say "larger is greater" → heap_cmp = cmp (no reverse).
+        //   - User DESC: worst = smallest value. peek wants smallest →
+        //     Ord must say "smaller is greater" → heap_cmp = cmp.reverse().
+        for (i, key) in self.sort_keys.iter().enumerate() {
+            let cmp = compare_values_with_nulls(
+                &self.sort_values[i],
+                &other.sort_values[i],
+                key.null_order,
+            );
+            let heap_cmp = match key.direction {
+                SortDirection::Ascending => cmp,
+                SortDirection::Descending => cmp.reverse(),
+            };
+            if heap_cmp != Ordering::Equal {
+                return heap_cmp;
+            }
+        }
+        // Tiebreak: larger insertion_id is "greater" so newer ties bubble to
+        // peek and pop() evicts them first. into_sorted_vec then yields
+        // older-first = input order, preserving stability.
+        self.insertion_id.cmp(&other.insertion_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execution::DataChunk;
+    use crate::execution::chunk::DataChunkBuilder;
+
+    struct MockOperator {
+        chunks: Vec<DataChunk>,
+        position: usize,
+    }
+
+    impl MockOperator {
+        fn new(chunks: Vec<DataChunk>) -> Self {
+            Self { chunks, position: 0 }
+        }
+    }
+
+    impl Operator for MockOperator {
+        fn next(&mut self) -> OperatorResult {
+            if self.position < self.chunks.len() {
+                let chunk = std::mem::replace(&mut self.chunks[self.position], DataChunk::empty());
+                self.position += 1;
+                Ok(Some(chunk))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn reset(&mut self) {
+            self.position = 0;
+        }
+
+        fn name(&self) -> &'static str {
+            "Mock"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    fn chunk_int64(values: &[i64]) -> DataChunk {
+        let mut b = DataChunkBuilder::new(&[LogicalType::Int64]);
+        for &v in values {
+            b.column_mut(0).unwrap().push_int64(v);
+            b.advance_row();
+        }
+        b.finish()
+    }
+
+    fn collect_int64_col(op: &mut dyn Operator) -> Vec<i64> {
+        let mut out = Vec::new();
+        while let Some(chunk) = op.next().unwrap() {
+            for row in chunk.selected_indices() {
+                out.push(chunk.column(0).unwrap().get_int64(row).unwrap());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn top_k_returns_top_k_descending() {
+        let mock = MockOperator::new(vec![chunk_int64(&[10, 50, 30, 20, 40])]);
+        let mut top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::descending(0)],
+            3,
+            vec![LogicalType::Int64],
+        );
+        let out = collect_int64_col(&mut top_k);
+        assert_eq!(out, vec![50, 40, 30]);
+    }
+}

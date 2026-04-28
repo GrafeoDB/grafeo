@@ -352,4 +352,53 @@ mod tests {
         let out = collect_int64_col(&mut top_k);
         assert_eq!(out, vec![50, 40, 30]);
     }
+
+    fn chunk_int_str(rows: &[(i64, &str)]) -> DataChunk {
+        let mut b = DataChunkBuilder::new(&[LogicalType::Int64, LogicalType::String]);
+        for (n, s) in rows {
+            b.column_mut(0).unwrap().push_int64(*n);
+            b.column_mut(1).unwrap().push_string(*s);
+            b.advance_row();
+        }
+        b.finish()
+    }
+
+    fn collect_int_str(op: &mut dyn Operator) -> Vec<(i64, String)> {
+        let mut out = Vec::new();
+        while let Some(chunk) = op.next().unwrap() {
+            for row in chunk.selected_indices() {
+                let n = chunk.column(0).unwrap().get_int64(row).unwrap();
+                let s = chunk.column(1).unwrap().get_string(row).unwrap().to_string();
+                out.push((n, s));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn top_k_is_stable_on_ties_descending() {
+        // Tied on key=2 across two inputs; stability says first arrival wins.
+        let mock = MockOperator::new(vec![chunk_int_str(&[(1, "a"), (2, "b"), (1, "c"), (2, "d")])]);
+        let mut top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::descending(0)],
+            2,
+            vec![LogicalType::Int64, LogicalType::String],
+        );
+        let out = collect_int_str(&mut top_k);
+        assert_eq!(out, vec![(2, "b".into()), (2, "d".into())]);
+    }
+
+    #[test]
+    fn top_k_is_stable_on_ties_ascending() {
+        let mock = MockOperator::new(vec![chunk_int_str(&[(3, "a"), (1, "b"), (3, "c"), (1, "d")])]);
+        let mut top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::ascending(0)],
+            2,
+            vec![LogicalType::Int64, LogicalType::String],
+        );
+        let out = collect_int_str(&mut top_k);
+        assert_eq!(out, vec![(1, "b".into()), (1, "d".into())]);
+    }
 }

@@ -536,4 +536,69 @@ mod tests {
             vec![Some(Value::Int64(1)), Some(Value::Int64(2)), Some(Value::Int64(5))]
         );
     }
+
+    #[test]
+    fn top_k_empty_input() {
+        let mock = MockOperator::new(vec![]);
+        let mut top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::descending(0)],
+            5,
+            vec![LogicalType::Int64],
+        );
+        assert_eq!(collect_int64_col(&mut top_k), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn top_k_k_zero_returns_no_rows() {
+        let mock = MockOperator::new(vec![chunk_int64(&[1, 2, 3])]);
+        let mut top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::descending(0)],
+            0,
+            vec![LogicalType::Int64],
+        );
+        assert_eq!(collect_int64_col(&mut top_k), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn top_k_k_greater_than_n() {
+        let mock = MockOperator::new(vec![chunk_int64(&[10, 20, 30])]);
+        let mut top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::descending(0)],
+            10,
+            vec![LogicalType::Int64],
+        );
+        // All 3 rows in DESC order.
+        assert_eq!(collect_int64_col(&mut top_k), vec![30, 20, 10]);
+    }
+
+    #[test]
+    fn top_k_returns_top_k_ascending() {
+        let mock = MockOperator::new(vec![chunk_int64(&[10, 50, 30, 20, 40])]);
+        let mut top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::ascending(0)],
+            3,
+            vec![LogicalType::Int64],
+        );
+        assert_eq!(collect_int64_col(&mut top_k), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn top_k_spans_multiple_input_chunks() {
+        let mock = MockOperator::new(vec![
+            chunk_int64(&[10, 50]),
+            chunk_int64(&[30, 20]),
+            chunk_int64(&[40, 60]),
+        ]);
+        let mut top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::descending(0)],
+            3,
+            vec![LogicalType::Int64],
+        );
+        assert_eq!(collect_int64_col(&mut top_k), vec![60, 50, 40]);
+    }
 }

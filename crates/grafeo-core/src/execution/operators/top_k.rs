@@ -38,6 +38,8 @@ pub struct TopKOperator {
     limit: usize,
     output_schema: Vec<LogicalType>,
     state: TopKState,
+    #[cfg(test)]
+    materialized_rows: std::sync::atomic::AtomicUsize,
 }
 
 enum TopKState {
@@ -82,6 +84,8 @@ impl TopKOperator {
                 heap: BinaryHeap::new(),
                 next_insertion_id: 0,
             },
+            #[cfg(test)]
+            materialized_rows: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -116,7 +120,8 @@ impl Operator for TopKOperator {
 
                     let row_values =
                         extract_row_values(&chunk, row_idx, self.output_schema.len());
-                    // Materialization counter wired in Task 4.
+                    #[cfg(test)]
+                    self.materialized_rows.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let entry = HeapEntry {
                         sort_values: new_sort_values,
                         row_values,
@@ -181,6 +186,8 @@ impl Operator for TopKOperator {
             heap: BinaryHeap::new(),
             next_insertion_id: 0,
         };
+        #[cfg(test)]
+        self.materialized_rows.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn name(&self) -> &'static str {
@@ -189,6 +196,13 @@ impl Operator for TopKOperator {
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
+    }
+}
+
+#[cfg(test)]
+impl TopKOperator {
+    pub(crate) fn materialized_rows(&self) -> usize {
+        self.materialized_rows.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -400,5 +414,38 @@ mod tests {
         );
         let out = collect_int_str(&mut top_k);
         assert_eq!(out, vec![(1, "b".into()), (1, "d".into())]);
+    }
+
+    #[test]
+    fn top_k_skips_materialization_for_losers() {
+        // 1000 inputs forming a permutation of 0..1000 via i*31 mod 1000
+        // (gcd(31,1000)=1, so this is a true permutation, no duplicates).
+        // k=5 ASC: after the heap fills with the first 5 inputs, each
+        // subsequent winner causes one peek_mut replace (1 materialization).
+        // Total materializations should be far below 1000.
+        let values: Vec<i64> = (0..1000)
+            .map(|i| ((i * 31 + 7) % 1000) as i64)
+            .collect();
+        let mock = MockOperator::new(vec![chunk_int64(&values)]);
+        let mut top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::ascending(0)],
+            5,
+            vec![LogicalType::Int64],
+        );
+
+        // Drain output to drive the build phase to completion.
+        let out = collect_int64_col(&mut top_k);
+        assert_eq!(out.len(), 5);
+
+        // Pessimistic upper bound: every distinct min seen along the way could
+        // be a materialization. For an unbiased permutation, the expected
+        // number of new minima in 1000 draws is H(1000) ≈ 7.5; allow 50 for
+        // slack against the specific permutation above.
+        let materialized = top_k.materialized_rows();
+        assert!(
+            materialized < 50,
+            "expected < 50 materializations for k=5 over 1000 inputs, got {materialized}"
+        );
     }
 }

@@ -448,4 +448,92 @@ mod tests {
             "expected < 50 materializations for k=5 over 1000 inputs, got {materialized}"
         );
     }
+
+    #[test]
+    fn top_k_multi_key_mixed_directions() {
+        // ORDER BY x DESC, y ASC. With k=2, the top 2 by (x DESC, y ASC):
+        // input (3,5), (3,2), (1,9), (3,5b) → top 2 are (3,2) then (3,5)
+        // (the second (3,5b) is dropped — it's strictly worse than (3,5) on
+        // ASC string order).
+        let mock = MockOperator::new(vec![
+            chunk_int_str(&[(3, "5"), (3, "2"), (1, "9"), (3, "5b")]),
+        ]);
+        let mut top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::descending(0), SortKey::ascending(1)],
+            2,
+            vec![LogicalType::Int64, LogicalType::String],
+        );
+        let out = collect_int_str(&mut top_k);
+        // x=3 wins over x=1; among x=3: y="2" < y="5" by ASC string order.
+        assert_eq!(out, vec![(3, "2".into()), (3, "5".into())]);
+    }
+
+    #[test]
+    fn top_k_handles_nulls_first_ascending() {
+        use super::super::sort::NullOrder;
+        let mut b = DataChunkBuilder::new(&[LogicalType::Int64]);
+        for v in [Some(2i64), None, Some(5), None, Some(1)] {
+            match v {
+                Some(n) => b.column_mut(0).unwrap().push_int64(n),
+                None => b.column_mut(0).unwrap().push_value(Value::Null),
+            }
+            b.advance_row();
+        }
+        let chunk = b.finish();
+        let mock = MockOperator::new(vec![chunk]);
+
+        let mut top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::ascending(0).with_null_order(NullOrder::NullsFirst)],
+            3,
+            vec![LogicalType::Int64],
+        );
+
+        // ORDER BY x ASC NULLS FIRST → [Null, Null, 1, 2, 5]; LIMIT 3 = [Null, Null, 1].
+        let mut out = Vec::new();
+        while let Some(chunk) = top_k.next().unwrap() {
+            for row in chunk.selected_indices() {
+                out.push(chunk.column(0).unwrap().get_value(row));
+            }
+        }
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[0], Some(Value::Null)));
+        assert!(matches!(out[1], Some(Value::Null)));
+        assert_eq!(out[2], Some(Value::Int64(1)));
+    }
+
+    #[test]
+    fn top_k_handles_nulls_last_ascending() {
+        use super::super::sort::NullOrder;
+        let mut b = DataChunkBuilder::new(&[LogicalType::Int64]);
+        for v in [Some(2i64), None, Some(5), None, Some(1)] {
+            match v {
+                Some(n) => b.column_mut(0).unwrap().push_int64(n),
+                None => b.column_mut(0).unwrap().push_value(Value::Null),
+            }
+            b.advance_row();
+        }
+        let chunk = b.finish();
+        let mock = MockOperator::new(vec![chunk]);
+
+        let mut top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::ascending(0).with_null_order(NullOrder::NullsLast)],
+            3,
+            vec![LogicalType::Int64],
+        );
+
+        // ORDER BY x ASC NULLS LAST → [1, 2, 5, Null, Null]; LIMIT 3 = [1, 2, 5].
+        let mut out = Vec::new();
+        while let Some(chunk) = top_k.next().unwrap() {
+            for row in chunk.selected_indices() {
+                out.push(chunk.column(0).unwrap().get_value(row));
+            }
+        }
+        assert_eq!(
+            out,
+            vec![Some(Value::Int64(1)), Some(Value::Int64(2)), Some(Value::Int64(5))]
+        );
+    }
 }

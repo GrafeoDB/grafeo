@@ -37,6 +37,8 @@ benchmarks = [
     "rdf_*",
     "regression_repeat_*",
     "regression_edge_filter_*",
+    "top_k_vs_sort_limit_time/*",
+    "top_k_drain/*",
 ]
 
 [categories.multihop]

@@ -92,3 +92,7 @@ workspace = true
 name = "index_bench"
 harness = false
 required-features = ["vector-index"]
+
+[[bench]]
+name = "top_k"
+harness = false

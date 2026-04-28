@@ -88,6 +88,23 @@ impl TopKOperator {
             materialized_rows: std::sync::atomic::AtomicUsize::new(0),
         }
     }
+
+    /// Decomposes this operator into its child, sort keys, and limit for
+    /// future push-based pipeline conversion. Mirrors
+    /// `SortOperator::into_parts` and `LimitOperator::into_parts`.
+    ///
+    /// `pipeline_convert.rs` does not currently call this — TopK has no
+    /// push variant in Phase 1 — but exposing the decomposition keeps the
+    /// API surface uniform for future work.
+    pub fn into_parts(self) -> (Box<dyn Operator>, Vec<SortKey>, usize) {
+        // Arc::try_unwrap succeeds when no HeapEntry holds a clone (which is
+        // the case when the operator hasn't been pulled, or after
+        // into_sorted_vec drained the heap into Done). Defensive fallback
+        // clones the contents if any entry happens to outlive (it shouldn't).
+        let sort_keys = Arc::try_unwrap(self.sort_keys)
+            .unwrap_or_else(|arc| (*arc).clone());
+        (self.child, sort_keys, self.limit)
+    }
 }
 
 impl Operator for TopKOperator {
@@ -600,5 +617,47 @@ mod tests {
             vec![LogicalType::Int64],
         );
         assert_eq!(collect_int64_col(&mut top_k), vec![60, 50, 40]);
+    }
+
+    #[test]
+    fn top_k_into_parts_round_trip() {
+        let mock = MockOperator::new(vec![chunk_int64(&[1, 2, 3])]);
+        let top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::descending(0)],
+            5,
+            vec![LogicalType::Int64],
+        );
+        let (mut child, sort_keys, limit) = top_k.into_parts();
+        assert_eq!(sort_keys.len(), 1);
+        assert_eq!(limit, 5);
+        // Child should still be drainable.
+        let chunk = child.next().unwrap().expect("mock yields one chunk");
+        assert_eq!(chunk.row_count(), 3);
+    }
+
+    #[test]
+    fn top_k_name() {
+        let mock = MockOperator::new(vec![]);
+        let top_k = TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::descending(0)],
+            5,
+            vec![LogicalType::Int64],
+        );
+        assert_eq!(top_k.name(), "TopK");
+    }
+
+    #[test]
+    fn top_k_into_any_downcasts() {
+        let mock = MockOperator::new(vec![]);
+        let op: Box<dyn Operator> = Box::new(TopKOperator::new(
+            Box::new(mock),
+            vec![SortKey::descending(0)],
+            5,
+            vec![LogicalType::Int64],
+        ));
+        let any = op.into_any();
+        assert!(any.downcast::<TopKOperator>().is_ok());
     }
 }

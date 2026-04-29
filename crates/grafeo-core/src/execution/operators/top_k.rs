@@ -135,10 +135,10 @@ impl TopKOperator {
     /// push variant in Phase 1 — but exposing the decomposition keeps the
     /// API surface uniform for future work.
     pub fn into_parts(self) -> (Box<dyn Operator>, Vec<SortKey>, usize) {
-        // Arc::try_unwrap succeeds when no HeapEntry holds a clone (which is
-        // the case when the operator hasn't been pulled, or after
-        // into_sorted_vec drained the heap into Done). Defensive fallback
-        // clones the contents if any entry happens to outlive (it shouldn't).
+        // Arc::try_unwrap succeeds when no HeapEntry holds a clone — i.e.
+        // before the operator is first pulled, or once it has reached
+        // TopKState::Done (Draining still keeps Arc clones alive in its
+        // rows Vec). Defensive fallback clones if any entry outlives.
         let sort_keys = Arc::try_unwrap(self.sort_keys)
             .unwrap_or_else(|arc| (*arc).clone());
         (self.child, sort_keys, self.limit)
@@ -190,12 +190,12 @@ impl Operator for TopKOperator {
                         // Heap is full and the new entry beat the worst; replace
                         // the heap's max in place. One sift-down vs push+pop's
                         // two reheapifies — significant for large N.
-                        // peek_mut is None only for empty heap; we know
-                        // heap.len() == self.limit > 0 here (limit==0 is
-                        // filtered above by should_push=false).
-                        if let Some(mut top) = heap.peek_mut() {
-                            *top = entry;
-                        }
+                        // peek_mut is None only on empty heap; should_push
+                        // filters limit==0 above, so heap.len() == limit > 0.
+                        let mut top = heap
+                            .peek_mut()
+                            .expect("heap.len() == limit > 0");
+                        *top = entry;
                     }
                 }
             }
@@ -212,10 +212,8 @@ impl Operator for TopKOperator {
                     let entry = &rows[*position];
                     for col_idx in 0..self.output_schema.len() {
                         if let Some(dst_col) = builder.column_mut(col_idx) {
-                            let val = entry
-                                .row_values
-                                .get(col_idx)
-                                .and_then(|v| v.clone())
+                            let val = entry.row_values[col_idx]
+                                .clone()
                                 .unwrap_or(Value::Null);
                             dst_col.push_value(val);
                         }

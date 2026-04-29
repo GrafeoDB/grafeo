@@ -315,6 +315,13 @@ impl GrafeoFileManager {
             return Ok(Vec::new());
         }
 
+        // v2 files store sections rather than a v1 snapshot blob. They set
+        // snapshot_length == 0 and put the directory CRC in the checksum field.
+        // Reading 0 bytes here would CRC to 0 and mismatch the directory CRC.
+        if active_header.snapshot_length == 0 {
+            return Ok(Vec::new());
+        }
+
         // reason: snapshot_length is the size of serialized in-memory data, fits in usize on 64-bit targets;
         // on 32-bit targets the database would OOM long before reaching 4 GiB
         // reason: value bounded by collection size, fits usize
@@ -889,6 +896,36 @@ mod tests {
         let manager = GrafeoFileManager::create(&path).unwrap();
         let data = manager.read_snapshot().unwrap();
         assert!(data.is_empty());
+    }
+
+    #[test]
+    fn read_snapshot_returns_empty_on_v2_header() {
+        // After write_sections, snapshot_length == 0 in the active header and the
+        // checksum field holds the section-directory CRC. The pre-fix v1 reader
+        // would read 0 bytes, CRC empty data to 0, and mismatch the directory CRC.
+        // The fix early-returns Ok(Vec::new()) when snapshot_length == 0.
+        use grafeo_common::storage::SectionType;
+
+        let dir = test_dir();
+        let path = dir.path().join("v2.grafeo");
+
+        let mut manager = GrafeoFileManager::create(&path).unwrap();
+        manager
+            .write_sections(&[(SectionType::LpgStore, b"section payload")], 1, 1, 0, 0)
+            .unwrap();
+
+        // Pre-fix: this returned Err("snapshot checksum mismatch").
+        // Post-fix: returns Ok(Vec::new()), letting engine fall through to v2 dispatch.
+        let data = manager.read_snapshot().unwrap();
+        assert!(
+            data.is_empty(),
+            "v2 file should produce empty snapshot vec, not an error"
+        );
+
+        // Sanity: header confirms this is a v2 file (snapshot_length == 0 with non-zero checksum).
+        let header = manager.active_header();
+        assert_eq!(header.snapshot_length, 0);
+        assert!(!header.is_empty());
     }
 
     #[test]

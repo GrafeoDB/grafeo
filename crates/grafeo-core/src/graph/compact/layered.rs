@@ -740,7 +740,7 @@ impl GraphStore for LayeredStore {
         // snapshot-loaded production database). The fast path falls back
         // to a label-first scan, so queries still return the right rows
         // — just much slower than they should.
-        self.overlay.has_property_index(property)
+        self.overlay.load().has_property_index(property)
     }
 
     fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {

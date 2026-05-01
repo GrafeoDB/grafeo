@@ -3786,4 +3786,21 @@ mod tests {
             "live overlay is empty post-reset"
         );
     }
+
+    #[test]
+    fn test_has_property_index_false_when_no_index() {
+        let layered = build_test_layered();
+        assert!(!layered.has_property_index("name"));
+    }
+
+    #[test]
+    fn test_has_property_index_true_when_overlay_has_index() {
+        // Regression test: LayeredStore::has_property_index must call
+        // self.overlay.load().has_property_index(), not
+        // self.overlay.has_property_index() — ArcSwap does not impl GraphStore.
+        let layered = build_test_layered();
+        layered.overlay_store().create_property_index("name");
+        assert!(layered.has_property_index("name"));
+        assert!(!layered.has_property_index("age"));
+    }
 }

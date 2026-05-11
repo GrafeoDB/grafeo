@@ -1480,11 +1480,7 @@ fn test_has_property_not_containing() {
     let result = db
         .execute_gremlin("g.V().hasLabel('Person').has('city', notContaining('er'))")
         .unwrap();
-    assert_eq!(
-        result.row_count(),
-        1,
-        "Only Paris does not contain 'er'"
-    );
+    assert_eq!(result.row_count(), 1, "Only Paris does not contain 'er'");
 }
 
 #[test]

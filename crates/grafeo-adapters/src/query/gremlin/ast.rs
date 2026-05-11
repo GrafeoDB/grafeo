@@ -211,6 +211,12 @@ pub enum Predicate {
     Regex(String),
     /// P.notRegex(pattern)
     NotRegex(String),
+    /// P.notContaining(substring)
+    NotContaining(String),
+    /// P.notStartingWith(prefix)
+    NotStartingWith(String),
+    /// P.notEndingWith(suffix)
+    NotEndingWith(String),
     /// P.and(predicates...)
     And(Vec<Predicate>),
     /// P.or(predicates...)

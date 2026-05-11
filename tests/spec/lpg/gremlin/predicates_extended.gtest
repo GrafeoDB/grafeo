@@ -168,6 +168,30 @@ tests:
         - [1]
 
   # ---------------------------------------------------------------------------
+  # notContaining() / notStartingWith() / notEndingWith() predicates
+  # ---------------------------------------------------------------------------
+
+  - name: not_containing
+    query: "g.V().hasLabel('Person').has('city', notContaining('er')).count()"
+    expect:
+      rows:
+        - [1]
+
+  - name: not_starting_with
+    query: "g.V().hasLabel('Person').has('city', notStartingWith('Am')).values('name')"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: not_ending_with
+    query: "g.V().hasLabel('Person').has('city', notEndingWith('is')).values('name')"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  # ---------------------------------------------------------------------------
   # Compound predicates P.and(), P.or(), P.not()
   # ---------------------------------------------------------------------------
 

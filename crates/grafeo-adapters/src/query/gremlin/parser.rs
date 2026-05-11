@@ -634,6 +634,9 @@ impl<'a> Parser<'a> {
             Some(TokenKind::EndingWith) => Some(TokenKind::EndingWith),
             Some(TokenKind::Regex) => Some(TokenKind::Regex),
             Some(TokenKind::NotRegex) => Some(TokenKind::NotRegex),
+            Some(TokenKind::NotContaining) => Some(TokenKind::NotContaining),
+            Some(TokenKind::NotStartingWith) => Some(TokenKind::NotStartingWith),
+            Some(TokenKind::NotEndingWith) => Some(TokenKind::NotEndingWith),
             _ => None,
         };
 
@@ -714,6 +717,18 @@ impl<'a> Parser<'a> {
             TokenKind::NotRegex => {
                 let s = self.parse_string()?;
                 Predicate::NotRegex(s)
+            }
+            TokenKind::NotContaining => {
+                let s = self.parse_string()?;
+                Predicate::NotContaining(s)
+            }
+            TokenKind::NotStartingWith => {
+                let s = self.parse_string()?;
+                Predicate::NotStartingWith(s)
+            }
+            TokenKind::NotEndingWith => {
+                let s = self.parse_string()?;
+                Predicate::NotEndingWith(s)
             }
             _ => return Err(self.error("Unknown predicate")),
         };

@@ -1471,6 +1471,45 @@ fn test_has_property_not_regex_substring_match() {
 }
 
 // ============================================================================
+// Text Predicates: notContaining(), notStartingWith(), notEndingWith()
+// ============================================================================
+
+#[test]
+fn test_has_property_not_containing() {
+    let db = create_social_network();
+    let result = db
+        .execute_gremlin("g.V().hasLabel('Person').has('city', notContaining('er'))")
+        .unwrap();
+    assert_eq!(result.row_count(), 1, "Only Paris does not contain 'er'");
+}
+
+#[test]
+fn test_has_property_not_starting_with() {
+    let db = create_social_network();
+    let result = db
+        .execute_gremlin("g.V().hasLabel('Person').has('city', notStartingWith('Am'))")
+        .unwrap();
+    assert_eq!(
+        result.row_count(),
+        2,
+        "Berlin and Paris do not start with 'Am'"
+    );
+}
+
+#[test]
+fn test_has_property_not_ending_with() {
+    let db = create_social_network();
+    let result = db
+        .execute_gremlin("g.V().hasLabel('Person').has('city', notEndingWith('is'))")
+        .unwrap();
+    assert_eq!(
+        result.row_count(),
+        2,
+        "Amsterdam and Berlin do not end with 'is'"
+    );
+}
+
+// ============================================================================
 // Dedup with Keys
 // ============================================================================
 

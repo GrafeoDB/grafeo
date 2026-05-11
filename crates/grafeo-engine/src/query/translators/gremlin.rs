@@ -2917,19 +2917,16 @@ mod tests {
         let pred = ast::Predicate::NotContaining("test".to_string());
         let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
 
-        if let LogicalExpression::Unary {
-            op: UnaryOp::Not,
-            operand,
-        } = result
-        {
-            if let LogicalExpression::Binary { op, .. } = operand.as_ref() {
-                assert_eq!(*op, BinaryOp::Contains);
-            } else {
-                panic!("Expected Binary expression inside Not");
-            }
-        } else {
-            panic!("Expected Unary Not expression");
-        }
+        assert!(matches!(
+            &result,
+            LogicalExpression::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } if matches!(
+                operand.as_ref(),
+                LogicalExpression::Binary { op: BinaryOp::Contains, .. }
+            )
+        ));
     }
 
     #[test]
@@ -2938,24 +2935,23 @@ mod tests {
         let pred = ast::Predicate::NotStartingWith("foo".to_string());
         let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
 
-        if let LogicalExpression::Unary {
-            op: UnaryOp::Not,
-            operand,
-        } = result
-        {
-            if let LogicalExpression::Binary { op, right, .. } = operand.as_ref() {
-                assert_eq!(*op, BinaryOp::StartsWith);
-                if let LogicalExpression::Literal(Value::String(s)) = right.as_ref() {
-                    assert_eq!(s.as_str(), "foo");
-                } else {
-                    panic!("Expected String literal on the right");
-                }
-            } else {
-                panic!("Expected Binary expression inside Not");
-            }
-        } else {
-            panic!("Expected Unary Not expression");
-        }
+        assert!(matches!(
+            &result,
+            LogicalExpression::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } if matches!(
+                operand.as_ref(),
+                LogicalExpression::Binary {
+                    op: BinaryOp::StartsWith,
+                    right,
+                    ..
+                } if matches!(
+                    right.as_ref(),
+                    LogicalExpression::Literal(Value::String(s)) if s.as_str() == "foo"
+                )
+            )
+        ));
     }
 
     #[test]
@@ -2964,19 +2960,16 @@ mod tests {
         let pred = ast::Predicate::NotEndingWith(".txt".to_string());
         let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
 
-        if let LogicalExpression::Unary {
-            op: UnaryOp::Not,
-            operand,
-        } = result
-        {
-            if let LogicalExpression::Binary { op, .. } = operand.as_ref() {
-                assert_eq!(*op, BinaryOp::EndsWith);
-            } else {
-                panic!("Expected Binary expression inside Not");
-            }
-        } else {
-            panic!("Expected Unary Not expression");
-        }
+        assert!(matches!(
+            &result,
+            LogicalExpression::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } if matches!(
+                operand.as_ref(),
+                LogicalExpression::Binary { op: BinaryOp::EndsWith, .. }
+            )
+        ));
     }
 
     #[test]

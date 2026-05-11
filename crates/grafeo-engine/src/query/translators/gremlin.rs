@@ -2121,6 +2121,36 @@ impl GremlinTranslator {
                     ))),
                 }),
             }),
+            ast::Predicate::NotContaining(s) => Ok(LogicalExpression::Unary {
+                op: UnaryOp::Not,
+                operand: Box::new(LogicalExpression::Binary {
+                    left: Box::new(expr),
+                    op: BinaryOp::Contains,
+                    right: Box::new(LogicalExpression::Literal(Value::String(
+                        s.clone().into(),
+                    ))),
+                }),
+            }),
+            ast::Predicate::NotStartingWith(s) => Ok(LogicalExpression::Unary {
+                op: UnaryOp::Not,
+                operand: Box::new(LogicalExpression::Binary {
+                    left: Box::new(expr),
+                    op: BinaryOp::StartsWith,
+                    right: Box::new(LogicalExpression::Literal(Value::String(
+                        s.clone().into(),
+                    ))),
+                }),
+            }),
+            ast::Predicate::NotEndingWith(s) => Ok(LogicalExpression::Unary {
+                op: UnaryOp::Not,
+                operand: Box::new(LogicalExpression::Binary {
+                    left: Box::new(expr),
+                    op: BinaryOp::EndsWith,
+                    right: Box::new(LogicalExpression::Literal(Value::String(
+                        s.clone().into(),
+                    ))),
+                }),
+            }),
         }
     }
 
@@ -2884,6 +2914,74 @@ mod tests {
             assert_eq!(op, BinaryOp::EndsWith);
         } else {
             panic!("Expected Binary expression");
+        }
+    }
+
+    #[test]
+    fn test_predicate_not_containing() {
+        let expr = LogicalExpression::Variable("x".to_string());
+        let pred = ast::Predicate::NotContaining("test".to_string());
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
+
+        if let LogicalExpression::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } = result
+        {
+            if let LogicalExpression::Binary { op, .. } = operand.as_ref() {
+                assert_eq!(*op, BinaryOp::Contains);
+            } else {
+                panic!("Expected Binary expression inside Not");
+            }
+        } else {
+            panic!("Expected Unary Not expression");
+        }
+    }
+
+    #[test]
+    fn test_predicate_not_starting_with() {
+        let expr = LogicalExpression::Variable("x".to_string());
+        let pred = ast::Predicate::NotStartingWith("foo".to_string());
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
+
+        if let LogicalExpression::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } = result
+        {
+            if let LogicalExpression::Binary { op, right, .. } = operand.as_ref() {
+                assert_eq!(*op, BinaryOp::StartsWith);
+                if let LogicalExpression::Literal(Value::String(s)) = right.as_ref() {
+                    assert_eq!(s.as_str(), "foo");
+                } else {
+                    panic!("Expected String literal on the right");
+                }
+            } else {
+                panic!("Expected Binary expression inside Not");
+            }
+        } else {
+            panic!("Expected Unary Not expression");
+        }
+    }
+
+    #[test]
+    fn test_predicate_not_ending_with() {
+        let expr = LogicalExpression::Variable("x".to_string());
+        let pred = ast::Predicate::NotEndingWith(".txt".to_string());
+        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
+
+        if let LogicalExpression::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } = result
+        {
+            if let LogicalExpression::Binary { op, .. } = operand.as_ref() {
+                assert_eq!(*op, BinaryOp::EndsWith);
+            } else {
+                panic!("Expected Binary expression inside Not");
+            }
+        } else {
+            panic!("Expected Unary Not expression");
         }
     }
 

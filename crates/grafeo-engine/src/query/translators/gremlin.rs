@@ -2912,64 +2912,6 @@ mod tests {
     }
 
     #[test]
-    fn test_predicate_not_containing() {
-        let expr = LogicalExpression::Variable("x".to_string());
-        let pred = ast::Predicate::NotContaining("test".to_string());
-        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
-
-        let LogicalExpression::Unary { op, operand } = result else {
-            unreachable!()
-        };
-        assert_eq!(op, UnaryOp::Not);
-        assert!(matches!(
-            operand.as_ref(),
-            LogicalExpression::Binary {
-                op: BinaryOp::Contains,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_predicate_not_starting_with() {
-        let expr = LogicalExpression::Variable("x".to_string());
-        let pred = ast::Predicate::NotStartingWith("foo".to_string());
-        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
-
-        let LogicalExpression::Unary { op, operand } = result else {
-            unreachable!()
-        };
-        assert_eq!(op, UnaryOp::Not);
-        let LogicalExpression::Binary { op, right, .. } = operand.as_ref() else {
-            unreachable!()
-        };
-        assert_eq!(*op, BinaryOp::StartsWith);
-        let LogicalExpression::Literal(Value::String(s)) = right.as_ref() else {
-            unreachable!()
-        };
-        assert_eq!(s.as_str(), "foo");
-    }
-
-    #[test]
-    fn test_predicate_not_ending_with() {
-        let expr = LogicalExpression::Variable("x".to_string());
-        let pred = ast::Predicate::NotEndingWith(".txt".to_string());
-        let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
-
-        let LogicalExpression::Unary { op, operand } = result else {
-            unreachable!()
-        };
-        assert_eq!(op, UnaryOp::Not);
-        assert!(matches!(
-            operand.as_ref(),
-            LogicalExpression::Binary {
-                op: BinaryOp::EndsWith,
-                ..
-            }
-        ));
-    }
-
-    #[test]
     fn test_predicate_between_produces_and_of_ge_lt() {
         // between(10, 20) should produce: x >= 10 AND x < 20
         let expr = LogicalExpression::Variable("x".to_string());

@@ -2917,15 +2917,16 @@ mod tests {
         let pred = ast::Predicate::NotContaining("test".to_string());
         let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
 
+        let LogicalExpression::Unary { op, operand } = result else {
+            unreachable!()
+        };
+        assert_eq!(op, UnaryOp::Not);
         assert!(matches!(
-            &result,
-            LogicalExpression::Unary {
-                op: UnaryOp::Not,
-                operand,
-            } if matches!(
-                operand.as_ref(),
-                LogicalExpression::Binary { op: BinaryOp::Contains, .. }
-            )
+            operand.as_ref(),
+            LogicalExpression::Binary {
+                op: BinaryOp::Contains,
+                ..
+            }
         ));
     }
 
@@ -2935,23 +2936,18 @@ mod tests {
         let pred = ast::Predicate::NotStartingWith("foo".to_string());
         let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
 
-        assert!(matches!(
-            &result,
-            LogicalExpression::Unary {
-                op: UnaryOp::Not,
-                operand,
-            } if matches!(
-                operand.as_ref(),
-                LogicalExpression::Binary {
-                    op: BinaryOp::StartsWith,
-                    right,
-                    ..
-                } if matches!(
-                    right.as_ref(),
-                    LogicalExpression::Literal(Value::String(s)) if s.as_str() == "foo"
-                )
-            )
-        ));
+        let LogicalExpression::Unary { op, operand } = result else {
+            unreachable!()
+        };
+        assert_eq!(op, UnaryOp::Not);
+        let LogicalExpression::Binary { op, right, .. } = operand.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(*op, BinaryOp::StartsWith);
+        let LogicalExpression::Literal(Value::String(s)) = right.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(s.as_str(), "foo");
     }
 
     #[test]
@@ -2960,15 +2956,16 @@ mod tests {
         let pred = ast::Predicate::NotEndingWith(".txt".to_string());
         let result = GremlinTranslator::translate_predicate(&pred, expr).unwrap();
 
+        let LogicalExpression::Unary { op, operand } = result else {
+            unreachable!()
+        };
+        assert_eq!(op, UnaryOp::Not);
         assert!(matches!(
-            &result,
-            LogicalExpression::Unary {
-                op: UnaryOp::Not,
-                operand,
-            } if matches!(
-                operand.as_ref(),
-                LogicalExpression::Binary { op: BinaryOp::EndsWith, .. }
-            )
+            operand.as_ref(),
+            LogicalExpression::Binary {
+                op: BinaryOp::EndsWith,
+                ..
+            }
         ));
     }
 

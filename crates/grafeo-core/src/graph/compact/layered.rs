@@ -579,8 +579,15 @@ impl GraphStore for LayeredStore {
 
         let mut results = Vec::new();
 
-        // Base neighbors (minus deleted).
-        if !deleted_nodes.contains(&node) && !self.is_node_dirty(node) {
+        // Base neighbors (minus deleted). `is_node_dirty` is not a reason
+        // to skip the base: `ensure_in_overlay` promotes a node's labels
+        // and properties but never copies its adjacency, so base edges
+        // remain authoritative for any dirty node that originated in the
+        // snapshot. Per-edge deletions are still respected via
+        // `deleted_from_base_edges` inside `edges_from`-style call sites,
+        // and `dedup` below collapses any overlap with promoted overlay
+        // adjacency.
+        if !deleted_nodes.contains(&node) {
             for nid in self.base.load().neighbors(node, direction) {
                 if !deleted_nodes.contains(&nid) {
                     results.push(nid);
@@ -610,8 +617,16 @@ impl GraphStore for LayeredStore {
 
         let mut results = Vec::new();
 
-        // Base edges (minus deleted).
-        if !deleted_nodes.contains(&node) && !self.is_node_dirty(node) {
+        // Base edges (minus deleted). The base layer must be consulted
+        // even when the source node is dirty: `ensure_in_overlay` copies
+        // labels and properties into the overlay but leaves adjacency in
+        // the base, so a property write — or merely being the endpoint
+        // of a freshly created overlay edge — must not erase the node's
+        // pre-existing snapshot edges. Promoted edges (those in both
+        // tiers because their properties were modified) live at the same
+        // `EdgeId` in base and overlay and are folded together by the
+        // dedup-by-eid pass below.
+        if !deleted_nodes.contains(&node) {
             for (target, eid) in self.base.load().edges_from(node, direction) {
                 if !deleted_nodes.contains(&target) && !deleted_edges.contains(&eid) {
                     results.push((target, eid));
@@ -2919,13 +2934,26 @@ mod tests {
         layered.set_node_property(paris, "name", Value::from("Paris"));
         let _ = layered.create_edge(first, paris, "VISITS");
 
-        // Neighbors should include BOTH the original Amsterdam and the new Paris.
-        // Once the node is dirty, base neighbors are not re-read (ensure_in_overlay
-        // copied them), so both endpoints come from the overlay.
+        // Neighbors should include BOTH the original Amsterdam (a base edge
+        // that pre-dates promotion) and the new Paris (an overlay edge added
+        // after promotion). `ensure_in_overlay` only copies the node's labels
+        // and properties — never its adjacency — so the base layer remains
+        // authoritative for pre-promotion edges and must be merged with the
+        // overlay's post-promotion edges.
         let outgoing = layered.neighbors(first, Direction::Outgoing);
         assert!(
             outgoing.contains(&paris),
             "overlay-created edge target should appear in neighbors"
+        );
+        let cities = layered.nodes_by_label("City");
+        let amsterdam = cities
+            .iter()
+            .copied()
+            .find(|&c| c != paris)
+            .expect("base City Amsterdam should still be present");
+        assert!(
+            outgoing.contains(&amsterdam),
+            "base edge target should still appear in neighbors after promotion"
         );
     }
 
@@ -3489,19 +3517,108 @@ mod tests {
         let persons = layered.nodes_by_label("Person");
         let first = persons[0];
 
-        // Promote first to the overlay and add a new outgoing overlay edge.
+        // Capture the base-tier outgoing edges before any promotion.
+        let base_outgoing: Vec<(NodeId, EdgeId)> =
+            layered.edges_from(first, Direction::Outgoing);
+        assert!(
+            !base_outgoing.is_empty(),
+            "test fixture should give the first Person a base edge"
+        );
+
+        // Promote `first` into the overlay (ensure_in_overlay copies labels and
+        // properties only — never adjacency) and add a fresh overlay-only edge.
         layered.set_node_property(first, "city", Value::from("Berlin"));
         let prague = layered.create_node(&["City"]);
         layered.create_edge(first, prague, "VISITS");
 
         let outgoing = layered.edges_from(first, Direction::Outgoing);
-        // Original base edge was promoted during ensure_in_overlay? No: only the
-        // node is promoted, so the base edge is still served by base. But because
-        // the source is now dirty, the base-edge branch is skipped in edges_from.
-        // Only the overlay edge is returned.
+
+        // The new overlay edge must be visible …
         assert!(
             outgoing.iter().any(|(target, _)| *target == prague),
             "new overlay edge should appear in edges_from"
+        );
+
+        // … and every pre-promotion base edge must remain visible. ensure_in_overlay
+        // only promotes the node; base adjacency is still authoritative for edges
+        // that pre-date the promotion, and must not silently disappear once the
+        // source node becomes dirty.
+        for (target, eid) in &base_outgoing {
+            assert!(
+                outgoing
+                    .iter()
+                    .any(|(t, e)| t == target && e == eid),
+                "base edge {eid:?} (→ {target:?}) must remain visible after promotion"
+            );
+        }
+    }
+
+    /// Regression for property-anchored edge lookups across the snapshot
+    /// boundary: when a base node is promoted into the overlay (e.g. by
+    /// `set_node_property` or by becoming the endpoint of a new overlay
+    /// edge), its pre-existing base-tier edges must remain reachable via
+    /// `neighbors` and `edges_from` in BOTH directions. Otherwise GQL
+    /// patterns like `MATCH (a {id: $x})-[:T]->(b {id: $y})` start
+    /// returning zero rows once any overlay write has touched either
+    /// endpoint, which the planner uses to walk the edge from.
+    #[test]
+    fn test_base_edge_visible_from_promoted_endpoint() {
+        let layered = build_test_layered();
+        let persons = layered.nodes_by_label("Person");
+        let cities = layered.nodes_by_label("City");
+        let alix = persons[0];
+        let amsterdam = cities[0];
+
+        // Sanity: the base edge alix -LIVES_IN-> amsterdam exists pre-promotion.
+        let pre_out = layered.edges_from(alix, Direction::Outgoing);
+        let pre_in = layered.edges_from(amsterdam, Direction::Incoming);
+        let pre_neigh_out = layered.neighbors(alix, Direction::Outgoing);
+        let pre_neigh_in = layered.neighbors(amsterdam, Direction::Incoming);
+        assert!(pre_out.iter().any(|(t, _)| *t == amsterdam));
+        assert!(pre_in.iter().any(|(t, _)| *t == alix));
+        assert!(pre_neigh_out.contains(&amsterdam));
+        assert!(pre_neigh_in.contains(&alix));
+
+        // Promote BOTH endpoints into the overlay by way of an unrelated
+        // overlay write. The new edge intentionally points at a brand-new
+        // overlay node so the LIVES_IN edge between alix and amsterdam is
+        // not touched in any way.
+        let oslo = layered.create_node(&["City"]);
+        layered.create_edge(alix, oslo, "VISITS"); // promotes alix
+        layered.set_node_property(amsterdam, "touched", Value::Bool(true)); // promotes amsterdam
+
+        // Both endpoints are now dirty.
+        assert!(layered.is_node_dirty(alix));
+        assert!(layered.is_node_dirty(amsterdam));
+
+        // The pre-existing base edge must still be reachable from either side,
+        // both as an edge (with its original EdgeId) and as a neighbor.
+        let post_out = layered.edges_from(alix, Direction::Outgoing);
+        let post_in = layered.edges_from(amsterdam, Direction::Incoming);
+        let post_neigh_out = layered.neighbors(alix, Direction::Outgoing);
+        let post_neigh_in = layered.neighbors(amsterdam, Direction::Incoming);
+
+        let base_eid = pre_out
+            .iter()
+            .find(|(t, _)| *t == amsterdam)
+            .map(|(_, e)| *e)
+            .expect("pre-promotion fixture has a base LIVES_IN edge");
+
+        assert!(
+            post_out.iter().any(|(t, e)| *t == amsterdam && *e == base_eid),
+            "base LIVES_IN edge must remain visible via edges_from(src, Outgoing) after src is promoted"
+        );
+        assert!(
+            post_in.iter().any(|(t, e)| *t == alix && *e == base_eid),
+            "base LIVES_IN edge must remain visible via edges_from(dst, Incoming) after dst is promoted"
+        );
+        assert!(
+            post_neigh_out.contains(&amsterdam),
+            "base neighbor must remain visible via neighbors(src, Outgoing) after src is promoted"
+        );
+        assert!(
+            post_neigh_in.contains(&alix),
+            "base neighbor must remain visible via neighbors(dst, Incoming) after dst is promoted"
         );
     }
 

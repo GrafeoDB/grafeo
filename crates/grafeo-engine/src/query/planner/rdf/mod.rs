@@ -445,11 +445,7 @@ impl RdfPlanner {
         let columns: Vec<String> = ret
             .items
             .iter()
-            .map(|item| {
-                item.alias
-                    .clone()
-                    .unwrap_or_else(|| expression_to_string(&item.expression))
-            })
+            .map(|item| output_column_name(item.alias.as_deref(), &item.expression))
             .collect();
 
         Ok((input_op, columns, input_types))
@@ -609,7 +605,7 @@ impl RdfPlanner {
             match &key.expression {
                 LogicalExpression::Variable(_) => {}
                 _ => {
-                    let col_name = format!("__expr_{:?}", key.expression);
+                    let col_name = resolved_column_name(&key.expression);
                     if !variable_columns.contains_key(&col_name) {
                         let filter_expr = convert_filter_expression(&key.expression)?;
                         expression_projections.push((filter_expr, col_name.clone()));
@@ -825,7 +821,7 @@ impl RdfPlanner {
             match expr {
                 LogicalExpression::Variable(_) => {}
                 _ => {
-                    let col_name = format!("__expr_{:?}", expr);
+                    let col_name = resolved_column_name(expr);
                     if !variable_columns.contains_key(&col_name) {
                         let filter_expr = convert_filter_expression(expr)?;
                         expression_projections.push((filter_expr, col_name.clone()));
@@ -843,7 +839,7 @@ impl RdfPlanner {
                 match expr {
                     LogicalExpression::Variable(_) => {}
                     _ => {
-                        let col_name = format!("__expr_{:?}", expr);
+                        let col_name = resolved_column_name(expr);
                         if !variable_columns.contains_key(&col_name) {
                             let filter_expr = convert_filter_expression(expr)?;
                             expression_projections.push((filter_expr, col_name.clone()));
@@ -5313,7 +5309,7 @@ fn resolve_expression(
 }
 
 // expression_to_string is now in planner/common.rs
-use crate::query::planner::common::expression_to_string;
+use crate::query::planner::common::{expression_to_string, output_column_name, resolved_column_name};
 
 /// Converts a value to its string representation.
 fn value_to_string(value: &Value) -> String {

@@ -140,7 +140,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::query::planner::common;
-use crate::query::planner::common::expression_to_string;
+use crate::query::planner::common::{expression_to_string, output_column_name, resolved_column_name};
 use crate::query::planner::{
     PhysicalPlan, convert_aggregate_function, convert_binary_op, convert_filter_expression,
     convert_unary_op, value_to_logical_type,

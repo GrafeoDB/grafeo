@@ -2321,3 +2321,82 @@ fn edge_variable_multi_hop_returns_map() {
         rows[0][3]
     );
 }
+
+// ============================================================================
+// Column naming for un-aliased complex expressions in RETURN
+// ============================================================================
+
+// `expression_to_string` fills in the column name when a Return/Project item
+// has no explicit alias. It used to collapse Binary/Unary/Case/Id/Labels/Type
+// (and others) to the literal string "expr", so any two such items in one
+// RETURN clause produced two columns with identical names — and result-by-name
+// lookups silently shadowed.
+//
+// These tests pin the naming for the common shapes a user is likely to type.
+// They don't assert exact strings (those are implementation-leaky); they
+// assert pairwise distinctness, which is what callers depend on.
+
+#[test]
+fn return_two_unaliased_binary_expressions_have_distinct_column_names() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute("INSERT (:Item {a: 1, b: 2, c: 3, d: 4})")
+        .unwrap();
+
+    let result = session
+        .execute("MATCH (n:Item) RETURN n.a + n.b, n.c + n.d")
+        .unwrap();
+
+    assert_eq!(result.columns.len(), 2);
+    assert_ne!(
+        result.columns[0], result.columns[1],
+        "two distinct binary expressions must get distinct column names, got: {:?}",
+        result.columns
+    );
+}
+
+#[test]
+fn return_two_unaliased_id_calls_have_distinct_column_names() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        .unwrap();
+
+    let result = session
+        .execute("MATCH (a)-[r]->(b) RETURN id(a), id(b)")
+        .unwrap();
+
+    assert_eq!(result.columns.len(), 2);
+    assert_ne!(
+        result.columns[0], result.columns[1],
+        "id(a) and id(b) must get distinct column names, got: {:?}",
+        result.columns
+    );
+}
+
+#[test]
+fn return_mixed_scalar_intrinsics_have_distinct_column_names() {
+    // labels(n), type(r), and id(n) used to all collapse to "expr".
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        .unwrap();
+
+    let result = session
+        .execute("MATCH (a)-[r]->(b) RETURN labels(a), type(r), id(a)")
+        .unwrap();
+
+    assert_eq!(result.columns.len(), 3);
+    let mut sorted = result.columns.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        result.columns.len(),
+        "labels/type/id must each get a distinct column name, got: {:?}",
+        result.columns
+    );
+}

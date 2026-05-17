@@ -5,7 +5,7 @@
 //! Each function takes already-planned input operators and column lists,
 //! plus a schema derivation function to handle LPG vs RDF type differences.
 
-use crate::query::plan::LogicalExpression;
+use crate::query::plan::{BinaryOp, LogicalExpression, UnaryOp};
 use grafeo_common::types::LogicalType;
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
@@ -408,6 +408,21 @@ pub(crate) fn resolve_expression_to_column(
 }
 
 /// Converts a logical expression to a human-readable string for column naming.
+///
+/// Used by `output_column_name` as the fallback when a Return/Project item
+/// has no explicit alias. The goal is two-fold:
+///
+/// 1. The string should look like the source expression (users see it as a
+///    column header).
+/// 2. Two structurally distinct expressions should produce distinct strings,
+///    so `RETURN n.a + n.b, n.c + n.d` doesn't yield two columns named the
+///    same thing — downstream lookups by name would silently shadow.
+///
+/// We can't fully meet (2) without sacrificing (1); heavy expressions
+/// (CASE / subqueries / comprehensions) collapse to a short generic label.
+/// Two such expressions in one Return without aliases will still collide —
+/// the right answer there is to alias them. This function covers every
+/// arithmetic/logical/scalar shape users commonly write inline.
 pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
     match expr {
         LogicalExpression::Variable(name) => name.clone(),
@@ -415,7 +430,17 @@ pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
             format!("{variable}.{property}")
         }
         LogicalExpression::Literal(value) => format!("{value:?}"),
-        LogicalExpression::FunctionCall { name, .. } => format!("{name}(...)"),
+        LogicalExpression::Parameter(name) => format!("${name}"),
+        LogicalExpression::FunctionCall { name, args, .. } => {
+            // Include argument signatures so `count(n)` and `count(m)` don't
+            // collapse to the same column. Empty arg lists keep the "()" form.
+            let inner = args
+                .iter()
+                .map(expression_to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{name}({inner})")
+        }
         LogicalExpression::IndexAccess { base, index } => {
             format!(
                 "{}[{}]",
@@ -423,7 +448,87 @@ pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
                 expression_to_string(index)
             )
         }
-        _ => "expr".to_string(),
+        LogicalExpression::SliceAccess { base, start, end } => {
+            let s = start
+                .as_deref()
+                .map(expression_to_string)
+                .unwrap_or_default();
+            let e = end.as_deref().map(expression_to_string).unwrap_or_default();
+            format!("{}[{s}..{e}]", expression_to_string(base))
+        }
+        LogicalExpression::Binary { op, left, right } => {
+            format!(
+                "({} {} {})",
+                expression_to_string(left),
+                binary_op_symbol(*op),
+                expression_to_string(right)
+            )
+        }
+        LogicalExpression::Unary { op, operand } => match op {
+            UnaryOp::IsNull => format!("({} IS NULL)", expression_to_string(operand)),
+            UnaryOp::IsNotNull => format!("({} IS NOT NULL)", expression_to_string(operand)),
+            UnaryOp::Not => format!("(NOT {})", expression_to_string(operand)),
+            UnaryOp::Neg => format!("(-{})", expression_to_string(operand)),
+        },
+        LogicalExpression::Labels(v) => format!("labels({v})"),
+        LogicalExpression::Type(v) => format!("type({v})"),
+        LogicalExpression::Id(v) => format!("id({v})"),
+        LogicalExpression::List(items) => {
+            let inner = items
+                .iter()
+                .map(expression_to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{inner}]")
+        }
+        LogicalExpression::Map(entries) => {
+            let inner = entries
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", expression_to_string(v)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{inner}}}")
+        }
+        LogicalExpression::MapProjection { base, .. } => format!("{base}{{...}}"),
+        // Heavy expressions — short generic labels. Two unaliased instances
+        // in the same Return still collide; the user should alias them.
+        LogicalExpression::Case { .. } => "case".to_string(),
+        LogicalExpression::ExistsSubquery(_) => "exists".to_string(),
+        LogicalExpression::CountSubquery(_) => "count".to_string(),
+        LogicalExpression::ValueSubquery(_) => "subquery".to_string(),
+        LogicalExpression::Reduce { .. } => "reduce".to_string(),
+        LogicalExpression::ListComprehension { .. } => "list_comprehension".to_string(),
+        LogicalExpression::ListPredicate { kind, .. } => format!("{kind:?}").to_lowercase(),
+        LogicalExpression::PatternComprehension { .. } => "pattern_comprehension".to_string(),
+    }
+}
+
+/// Cypher-style symbol for a `BinaryOp`. Used by `expression_to_string` so
+/// auto-generated column names read like the source expression.
+fn binary_op_symbol(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Eq => "=",
+        BinaryOp::Ne => "<>",
+        BinaryOp::Lt => "<",
+        BinaryOp::Le => "<=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Ge => ">=",
+        BinaryOp::And => "AND",
+        BinaryOp::Or => "OR",
+        BinaryOp::Xor => "XOR",
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Mod => "%",
+        BinaryOp::Concat => "||",
+        BinaryOp::StartsWith => "STARTS WITH",
+        BinaryOp::EndsWith => "ENDS WITH",
+        BinaryOp::Contains => "CONTAINS",
+        BinaryOp::In => "IN",
+        BinaryOp::Like => "LIKE",
+        BinaryOp::Regex => "=~",
+        BinaryOp::Pow => "^",
     }
 }
 

@@ -263,3 +263,42 @@ fn cypher_order_by_limit_uses_topk() {
     let actual_top5: Vec<Value> = result.rows().iter().map(|row| row[0].clone()).collect();
     assert_eq!(actual_top5, expected_top5);
 }
+
+// Regression test for issue #335: ORDER BY + LIMIT on a full-node RETURN
+// was returning raw NodeIds instead of resolved maps. The heap top-K probe
+// inside try_heap_topk_rewrite mutated scalar_columns as a side effect,
+// causing the unfused re-plan of the same Return subtree to skip NodeResolve.
+#[test]
+fn order_by_limit_node_return_yields_map() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute("INSERT (:Article {title: 'A1', body: 'rust database internals'})")
+        .unwrap();
+
+    // Each variant must return Value::Map, not a raw integer NodeId.
+    let result = session.execute("MATCH (n:Article) RETURN n").unwrap();
+    assert!(result.rows()[0][0].as_map().is_some(), "bare RETURN n");
+
+    let result = session
+        .execute("MATCH (n:Article) RETURN n LIMIT 50")
+        .unwrap();
+    assert!(result.rows()[0][0].as_map().is_some(), "RETURN n LIMIT 50");
+
+    let result = session
+        .execute("MATCH (n:Article) RETURN n ORDER BY n.title")
+        .unwrap();
+    assert!(
+        result.rows()[0][0].as_map().is_some(),
+        "RETURN n ORDER BY n.title"
+    );
+
+    let result = session
+        .execute("MATCH (n:Article) RETURN n ORDER BY n.title LIMIT 50")
+        .unwrap();
+    assert!(
+        result.rows()[0][0].as_map().is_some(),
+        "RETURN n ORDER BY n.title LIMIT 50: col 0 = {:?}",
+        result.rows()[0][0]
+    );
+}

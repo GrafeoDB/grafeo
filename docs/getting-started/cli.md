@@ -97,7 +97,7 @@ grafeo shell ./mydb
 ```
 
 ```
-Grafeo 0.5.42 - Lpg mode, 42 nodes, 87 edges
+Grafeo 0.5.43 - Lpg mode, 42 nodes, 87 edges
 Type :help for commands, :quit to exit.
 
 grafeo> MATCH (n:Person) RETURN n.name, n.age
@@ -231,7 +231,7 @@ grafeo completions powershell >> $PROFILE
 
 ```bash
 $ grafeo version
-grafeo 0.5.42
+grafeo 0.5.43
 
 Build:
   rustc:    1.91.1

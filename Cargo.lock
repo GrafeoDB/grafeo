@@ -195,7 +195,7 @@ dependencies = [
  "arrow-schema",
  "chrono",
  "half",
- "hashbrown 0.17.0",
+ "hashbrown 0.17.1",
  "num-complex",
  "num-integer",
  "num-traits",
@@ -507,9 +507,9 @@ dependencies = [
 
 [[package]]
 name = "clap_complete"
-version = "4.6.3"
+version = "4.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "660c0520455b1013b9bcb0393d5f643d7e4454fb69c915b8d6d2aa0e9a45acc3"
+checksum = "e3e962dae2b1e5007fe9e3db363ddc43a8bf25546d279f7a8a4401204690e80c"
 dependencies = [
  "clap",
 ]
@@ -1397,7 +1397,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "grafeo"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",
@@ -1409,12 +1409,12 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "bincode",
  "grafeo-common",
  "grafeo-core",
- "hashbrown 0.17.0",
+ "hashbrown 0.17.1",
  "parking_lot",
  "rayon",
  "serde",
@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-bindings-common"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "grafeo-common",
  "grafeo-engine",
@@ -1436,7 +1436,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-c"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "grafeo-bindings-common",
  "grafeo-common",
@@ -1448,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-cli"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "anyhow",
  "clap",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "aes-gcm",
  "arcstr",
@@ -1481,7 +1481,7 @@ dependencies = [
  "codspeed-criterion-compat",
  "dashmap",
  "foldhash 0.2.0",
- "hashbrown 0.17.0",
+ "hashbrown 0.17.1",
  "hkdf",
  "indexmap",
  "parking_lot",
@@ -1496,7 +1496,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -1509,7 +1509,7 @@ dependencies = [
  "dashmap",
  "foldhash 0.2.0",
  "grafeo-common",
- "hashbrown 0.17.0",
+ "hashbrown 0.17.1",
  "indexmap",
  "ordered-float 5.3.0",
  "parking_lot",
@@ -1528,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "arcstr",
  "arrow-array",
@@ -1543,7 +1543,7 @@ dependencies = [
  "grafeo-common",
  "grafeo-core",
  "grafeo-storage",
- "hashbrown 0.17.0",
+ "hashbrown 0.17.1",
  "hf-hub",
  "indexmap",
  "md5",
@@ -1568,14 +1568,14 @@ dependencies = [
 
 [[package]]
 name = "grafeo-examples"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "grafeo",
 ]
 
 [[package]]
 name = "grafeo-node"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "grafeo-adapters",
  "grafeo-bindings-common",
@@ -1593,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-python"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "grafeo-adapters",
  "grafeo-bindings-common",
@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-spec-tests"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "grafeo-common",
  "grafeo-engine",
@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-storage"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-wasm"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.4.2",
@@ -1708,9 +1708,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.17.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "allocator-api2",
  "equivalent",
@@ -2053,7 +2053,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
- "hashbrown 0.17.0",
+ "hashbrown 0.17.1",
  "serde",
  "serde_core",
 ]
@@ -2738,7 +2738,7 @@ dependencies = [
  "bytes",
  "chrono",
  "half",
- "hashbrown 0.17.0",
+ "hashbrown 0.17.1",
  "num-bigint",
  "num-integer",
  "num-traits",
@@ -3830,9 +3830,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.52.1"
+version = "1.52.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b67dee974fe86fd92cc45b7a95fdd2f99a36a6d7b0d431a231178d3d670bbcc6"
+checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
 dependencies = [
  "bytes",
  "libc",

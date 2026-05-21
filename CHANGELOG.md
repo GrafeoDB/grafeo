@@ -2,6 +2,22 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.5.43] - Unreleased
+
+Gremlin `notRegex()` predicate plus a planner fix for `ORDER BY` + `LIMIT` over full-node `RETURN`.
+
+### Added
+
+- **Gremlin `notRegex()` text predicate**: negated regex match in `has()` filters, e.g. `g.V().has('name', notRegex('^A.*'))`. Lexer/parser/AST symmetrical with the existing `regex()`; translator emits `Not(Regex)` so the engine reuses the existing primitive. Cross-binding spec coverage in `predicates_extended.gtest`. ([#336](https://github.com/GrafeoDB/grafeo/pull/336), [@jakeboone02](https://github.com/jakeboone02))
+
+### Fixed
+
+- **`MATCH (n) RETURN n ORDER BY n.p LIMIT k` returned a raw NodeId instead of a resolved map** ([#335](https://github.com/GrafeoDB/grafeo/issues/335)): `sort_needs_augmenting_projection` checked whether the variable `n` appeared in `RETURN`, not whether the specific property column was materialised. The TopK probe then mutated `scalar_columns` as a side effect, causing the unfused re-plan to skip `NodeResolve` and emit raw `Int64` NodeIds. The predicate now requires `Property{v,p}` sort keys to find that exact property in `RETURN`, and `collect_vars` recurses into `Case` so CASE-wrapped property references are visible too (otherwise queries like `ORDER BY CASE c.tier ... END` silently route through the non-augmenting path). Diagnosis and initial fix by [@temporaryfix](https://github.com/temporaryfix) ([#337](https://github.com/GrafeoDB/grafeo/pull/337)).
+
+---
+
+Thanks to [@jakeboone02](https://github.com/jakeboone02) for the `notRegex()` predicate, and to [@temporaryfix](https://github.com/temporaryfix) for the precise root-cause analysis on [#335](https://github.com/GrafeoDB/grafeo/issues/335) — the side-effect interaction between `try_heap_topk_rewrite`'s probe and `plan_return_projection` was subtle, and the write-up made the follow-up extension to `collect_vars` straightforward.
+
 ## [0.5.42] - 2026-05-04
 
 End-to-end tiered storage: section data (LPG, RDF Ring, vector topology) can spill to mmap-backed disk under memory pressure or explicit configuration, with per-section tier overrides, introspection, and reload. Plus per-block columnar zone maps for selective range scans, paged HNSW topology, packed RDF Ring on disk, a WAL overlay for mutating mmap'd compact stores and a streaming top-K operator that fuses `ORDER BY ... LIMIT` into a single bounded-heap pass.

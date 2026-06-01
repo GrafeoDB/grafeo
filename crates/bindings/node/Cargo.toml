@@ -20,7 +20,7 @@ grafeo-adapters = { path = "../../grafeo-adapters" }
 grafeo-bindings-common = { path = "../common" }
 
 napi = { version = "3", default-features = false, features = ["napi9", "async", "serde-json", "error_anyhow"] }
-napi-derive = "3.5.5"
+napi-derive = "3.5.6"
 parking_lot.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

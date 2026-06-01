@@ -106,7 +106,7 @@ criterion = { package = "codspeed-criterion-compat", version = "4" }
 tempfile = "3"
 
 # Allocators (platform-optimized)
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.7"
 mimalloc = "0.1"
 
 # Vector index support

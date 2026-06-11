@@ -1904,8 +1904,11 @@ impl SparqlTranslator {
 
     /// Translates a `OneOrMore` property path (`path+`) using bounded expansion.
     ///
-    /// Expands to a `Union` of sequences from depth 1 to `MAX_DEPTH`, wrapped
-    /// in `Distinct` to deduplicate rows that appear at multiple depths.
+    /// Expands to a `Union` of fixed-depth sequences from depth 1 to
+    /// `MAX_DEPTH`, each projected to its endpoint columns so every branch
+    /// shares a schema, wrapped in `Distinct` to deduplicate the transitive
+    /// closure across depths. Unlike `ZeroOrMore`, no reflexive 0-hop branch is
+    /// added: `path+` excludes the zero-length path (SPARQL 1.1 sec 9.1).
     fn translate_one_or_more_path(
         &mut self,
         triple: &ast::TriplePattern,
@@ -1922,7 +1925,13 @@ impl SparqlTranslator {
         for depth in 1..=MAX_DEPTH {
             let branch =
                 self.translate_fixed_depth_path(inner_path, &subject, &object, &graph, depth)?;
-            branches.push(branch);
+            // Project every depth branch to its endpoint columns before the
+            // Union, exactly as `ZeroOrMore` and `ZeroOrOne` do. Depth-N
+            // branches carry intermediate-hop columns of differing widths;
+            // without this projection the heterogeneous branches reach `Union`
+            // and `Distinct` unnormalized and the visible object column ends up
+            // holding the first intermediate hop instead of the true endpoint.
+            branches.push(self.project_path_endpoints(&subject, &object, branch));
         }
 
         let union = LogicalOperator::Union(UnionOp { inputs: branches });
@@ -2839,7 +2848,7 @@ mod tests {
         }
         let branch_count = count_union_branches(&plan.root)
             .expect("Expected Union inside Distinct for ZeroOrMore path");
-        // ZeroOrMore has 2 reflexive branches + MAX_DEPTH (10) depth branches = 12
+        // ZeroOrMore has 2 reflexive branches + MAX_DEPTH (50) depth branches = 52
         assert!(
             branch_count > 10,
             "ZeroOrMore should have reflexive branches plus depth branches, got {}",

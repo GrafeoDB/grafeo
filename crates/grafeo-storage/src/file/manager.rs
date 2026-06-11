@@ -21,8 +21,10 @@ use super::header;
 ///
 /// 1. [`create`](Self::create) or [`open`](Self::open)
 /// 2. Mutations flow through a sidecar WAL (managed externally by the engine)
-/// 3. [`write_snapshot`](Self::write_snapshot) checkpoints memory to the file
-/// 4. After a successful checkpoint, call [`remove_sidecar_wal`](Self::remove_sidecar_wal)
+/// 3. [`write_snapshot`](Self::write_snapshot) checkpoints memory to the file;
+///    periodic checkpoints retain the sidecar WAL
+/// 4. On a clean shutdown, after the final checkpoint, call
+///    [`remove_sidecar_wal`](Self::remove_sidecar_wal) to discard the sidecar
 /// 5. [`close`](Self::close) (or drop) releases the file handle
 pub struct GrafeoFileManager {
     /// Path to the `.grafeo` file.
@@ -363,7 +365,10 @@ impl GrafeoFileManager {
         self.sidecar_wal_path().exists()
     }
 
-    /// Removes the sidecar WAL directory after a successful checkpoint.
+    /// Removes the sidecar WAL directory after the final checkpoint on a clean
+    /// shutdown. Periodic checkpoints retain the sidecar so an unexpected
+    /// restart can still recover in-flight mutations; only an orderly `close()`
+    /// discards it.
     ///
     /// # Errors
     ///

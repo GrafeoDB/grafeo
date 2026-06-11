@@ -2,8 +2,9 @@
 //!
 //! This module implements a portable, crash-safe, single-file storage format.
 //! At rest, only the `.grafeo` file exists. During operation a sidecar
-//! WAL directory (`<path>.wal/`) captures in-flight mutations and is
-//! removed after each checkpoint.
+//! WAL directory (`<path>.wal/`) captures in-flight mutations. Checkpoints
+//! fold those mutations into the `.grafeo` file but retain the sidecar; it
+//! is removed only on a clean `close()`.
 //!
 //! ## File layout
 //!

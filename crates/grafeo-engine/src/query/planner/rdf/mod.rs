@@ -1628,6 +1628,8 @@ impl RdfPlanner {
             modify.delete_templates.clone(),
             modify.insert_templates.clone(),
             column_map,
+            #[cfg(feature = "wal")]
+            self.wal.clone(),
             #[cfg(feature = "cdc")]
             self.cdc_log.clone(),
             #[cfg(feature = "cdc")]
@@ -2641,6 +2643,8 @@ struct RdfModifyOperator {
     insert_templates: Vec<TripleTemplate>,
     column_map: HashMap<String, usize>,
     done: bool,
+    #[cfg(feature = "wal")]
+    wal: Option<Arc<RdfWal>>,
     #[cfg(feature = "cdc")]
     cdc_log: Option<Arc<crate::cdc::CdcLog>>,
     #[cfg(feature = "cdc")]
@@ -2648,12 +2652,16 @@ struct RdfModifyOperator {
 }
 
 impl RdfModifyOperator {
+    // The WAL and CDC sinks are independent cfg-gated arguments; with both
+    // enabled this constructor exceeds the default threshold by one.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         store: Arc<RdfStore>,
         input: Box<dyn Operator>,
         delete_templates: Vec<TripleTemplate>,
         insert_templates: Vec<TripleTemplate>,
         column_map: HashMap<String, usize>,
+        #[cfg(feature = "wal")] wal: Option<Arc<RdfWal>>,
         #[cfg(feature = "cdc")] cdc_log: Option<Arc<crate::cdc::CdcLog>>,
         #[cfg(feature = "cdc")] cdc_epoch: grafeo_common::types::EpochId,
     ) -> Self {
@@ -2664,6 +2672,8 @@ impl RdfModifyOperator {
             insert_templates,
             column_map,
             done: false,
+            #[cfg(feature = "wal")]
+            wal,
             #[cfg(feature = "cdc")]
             cdc_log,
             #[cfg(feature = "cdc")]
@@ -2801,6 +2811,16 @@ impl Operator for RdfModifyOperator {
                                 })
                                 .collect();
                             for matched in matching {
+                                #[cfg(feature = "wal")]
+                                log_rdf_wal(
+                                    &self.wal,
+                                    &grafeo_storage::wal::WalRecord::DeleteRdfTriple {
+                                        subject: term_to_wal(matched.subject()),
+                                        predicate: term_to_wal(matched.predicate()),
+                                        object: term_to_wal(matched.object()),
+                                        graph: template.graph.clone(),
+                                    },
+                                );
                                 #[cfg(feature = "cdc")]
                                 record_cdc_triple_delete(
                                     &self.cdc_log,
@@ -2815,6 +2835,16 @@ impl Operator for RdfModifyOperator {
                             continue;
                         }
                     }
+                    #[cfg(feature = "wal")]
+                    log_rdf_wal(
+                        &self.wal,
+                        &grafeo_storage::wal::WalRecord::DeleteRdfTriple {
+                            subject: term_to_wal(triple.subject()),
+                            predicate: term_to_wal(triple.predicate()),
+                            object: term_to_wal(triple.object()),
+                            graph: template.graph.clone(),
+                        },
+                    );
                     #[cfg(feature = "cdc")]
                     record_cdc_triple_delete(
                         &self.cdc_log,
@@ -2841,6 +2871,16 @@ impl Operator for RdfModifyOperator {
 
                 if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
                     let triple = Triple::new(s, p, o);
+                    #[cfg(feature = "wal")]
+                    log_rdf_wal(
+                        &self.wal,
+                        &grafeo_storage::wal::WalRecord::InsertRdfTriple {
+                            subject: term_to_wal(triple.subject()),
+                            predicate: term_to_wal(triple.predicate()),
+                            object: term_to_wal(triple.object()),
+                            graph: template.graph.clone(),
+                        },
+                    );
                     #[cfg(feature = "cdc")]
                     record_cdc_triple_insert(
                         &self.cdc_log,
@@ -7242,6 +7282,8 @@ mod tests {
             vec![],
             vec![],
             HashMap::new(),
+            #[cfg(feature = "wal")]
+            None,
             #[cfg(feature = "cdc")]
             None,
             #[cfg(feature = "cdc")]

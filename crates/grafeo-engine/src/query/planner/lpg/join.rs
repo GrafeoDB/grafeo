@@ -3,7 +3,7 @@
 use super::{
     ApplyOp, ApplyOperator, DistinctOp, Error, ExceptOp, HashJoinOperator, IntersectOp, JoinOp,
     JoinType, LeapfrogJoinOperator, LogicalExpression, MultiWayJoinOp, Operator, OtherwiseOp,
-    PhysicalJoinType, ProjectExpr, ProjectOperator, Result, UnionOp, common,
+    PhysicalJoinType, ProjectExpr, ProjectOperator, Result, UnionOp, Value, common,
 };
 
 impl super::Planner {
@@ -204,20 +204,73 @@ impl super::Planner {
     }
 
     /// Plans a UNION operator.
+    ///
+    /// Cypher / GQL UNION aligns branches by column POSITION (the output column
+    /// names come from the first branch that reaches each position), so the
+    /// output arity must be the MAXIMUM branch arity. The historical
+    /// branch-0-only seed used the first branch's arity instead, which silently
+    /// TRUNCATED a UNION whose later branch is WIDER: the extra trailing columns
+    /// were dropped with no error, because Cypher projects inside each branch
+    /// below the union, leaving no node above it to fail. Each narrower branch
+    /// is now null-padded to the maximum width so the core `UnionOperator`
+    /// forwards uniform-width chunks and no column is lost.
+    ///
+    /// This is the LPG-side counterpart to the RDF/SPARQL fix in the RDF
+    /// planner, but the reconciliation differs: SPARQL UNION is over solution
+    /// mappings keyed by variable NAME (so the RDF leg unions branch variable
+    /// SETS), whereas Cypher/GQL UNION is POSITIONAL. The legs also fail
+    /// differently -- the RDF leg crashes (X001/V001), this leg silently
+    /// truncates -- so they are verified by different oracles. Cypher-level
+    /// union-compatibility validation (requiring matching column names) is out
+    /// of scope; this fix targets only the drop mechanism.
     pub(super) fn plan_union(&self, union: &UnionOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let mut inputs = Vec::with_capacity(union.inputs.len());
-        let mut columns = Vec::new();
-
-        for (i, input) in union.inputs.iter().enumerate() {
-            let (op, cols) = self.plan_operator(input)?;
-            if i == 0 {
-                columns = cols;
-            }
-            inputs.push(op);
+        let mut planned = Vec::with_capacity(union.inputs.len());
+        for input in &union.inputs {
+            planned.push(self.plan_operator(input)?);
         }
 
-        let schema = self.derive_schema_from_columns(&columns);
-        common::build_union(inputs, columns, schema)
+        // Positional column domain: position i is named by the first branch
+        // that reaches it; the output arity is the maximum branch arity.
+        let mut unified_columns: Vec<String> = Vec::new();
+        for (_, cols) in &planned {
+            for (i, col) in cols.iter().enumerate() {
+                if i == unified_columns.len() {
+                    unified_columns.push(col.clone());
+                }
+            }
+        }
+
+        let unified_schema = self.derive_schema_from_columns(&unified_columns);
+        let width = unified_columns.len();
+
+        // Null-pad each narrower branch's trailing positions so the core
+        // UnionOperator never forwards a short chunk. A full-width branch passes
+        // through unwrapped (positional union keeps its values in place; the
+        // output column names are taken from `unified_columns`).
+        let inputs: Vec<Box<dyn Operator>> = planned
+            .into_iter()
+            .map(|(op, cols)| {
+                if cols.len() == width {
+                    return op;
+                }
+                let projections: Vec<ProjectExpr> = (0..width)
+                    .map(|i| {
+                        if i < cols.len() {
+                            ProjectExpr::Column(i)
+                        } else {
+                            ProjectExpr::Constant(Value::Null)
+                        }
+                    })
+                    .collect();
+                Box::new(ProjectOperator::new(
+                    op,
+                    projections,
+                    unified_schema.clone(),
+                )) as Box<dyn Operator>
+            })
+            .collect();
+
+        common::build_union(inputs, unified_columns, unified_schema)
     }
 
     /// Plans a DISTINCT operator.

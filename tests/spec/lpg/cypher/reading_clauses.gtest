@@ -241,6 +241,34 @@ tests:
     expect:
       count: 2
 
+  # Positive-correctness oracle for the UNION output-arity fix (LPG leg).
+  # Cypher / GQL UNION aligns columns by POSITION, with the output arity equal
+  # to the WIDEST branch. When the second branch is wider, its trailing column
+  # must be preserved (null-padded into the narrower first branch), NOT silently
+  # dropped. Cypher projects inside each branch (below the union), so the pre-fix
+  # branch-0-only arity dropped the extra column with no error -- silent
+  # truncation, distinct from the SPARQL leg's crash.
+  - name: union_wider_second_branch_no_truncation
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 30})"
+    query: "MATCH (p:Person) RETURN p.name AS name UNION ALL MATCH (q:Person) RETURN q.name AS name, q.age AS age"
+    expect:
+      columns: [name, age]
+      rows:
+        - [Alix, null]
+        - [Alix, 30]
+
+  - name: union_wider_first_branch_pads_second
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 30})"
+      - "CREATE (:City {name: 'Amsterdam'})"
+    query: "MATCH (p:Person) RETURN p.name AS name, p.age AS age UNION ALL MATCH (c:City) RETURN c.name AS name"
+    expect:
+      columns: [name, age]
+      rows:
+        - [Alix, 30]
+        - [Amsterdam, null]
+
   # ---------------------------------------------------------------------------
   # CALL procedure
   # ---------------------------------------------------------------------------

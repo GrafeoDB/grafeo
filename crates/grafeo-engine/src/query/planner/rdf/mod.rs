@@ -1268,6 +1268,22 @@ impl RdfPlanner {
     }
 
     /// Plans a UNION operator.
+    ///
+    /// The output schema is the UNION of every branch's variable set, not the
+    /// first branch alone. Per SPARQL 1.1 (sec 18.2.1, the result variable
+    /// domain is the union of the branches' in-scope variables; sec 18.5, the
+    /// multiset union of the partial solution mappings), a variable bound in
+    /// only some branches is present-with-UNBOUND in the others, never dropped.
+    ///
+    /// Seeding the schema from branch 0 alone (the historical behavior) dropped
+    /// later-branch-only variables, which surfaced three ways: GRAFEO-X001
+    /// ("Variable not found") when a projection / ORDER BY / aggregate above the
+    /// UNION referenced such a variable at plan time; GRAFEO-V001 ("Column not
+    /// found") at run time when a narrower branch chunk was indexed against the
+    /// wider first-branch width; and, most dangerously, silent corruption for
+    /// SELECT * (a later branch's values surfaced under the first branch's
+    /// variable names, with no error). Each branch is now null-padded to the
+    /// unified width so every emitted chunk shares one physical schema.
     fn plan_union(
         &self,
         union: &crate::query::plan::UnionOp,
@@ -1276,34 +1292,53 @@ impl RdfPlanner {
             return Err(Error::Internal("Empty UNION".to_string()));
         }
 
-        // For INSERT operations, we execute all operators in sequence
-        let mut operators: Vec<Box<dyn Operator>> = Vec::new();
-        let mut columns = Vec::new();
-        let mut types = Vec::new();
+        // Plan every branch, keeping each branch's own (columns, types) so the
+        // unified domain can be computed across all of them.
+        let mut planned: Vec<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> =
+            Vec::with_capacity(union.inputs.len());
+        for input in &union.inputs {
+            planned.push(self.plan_operator(input)?);
+        }
 
-        for (i, input) in union.inputs.iter().enumerate() {
-            let (op, cols, tys) = self.plan_operator(input)?;
-            operators.push(op);
-            if i == 0 {
-                columns = cols;
-                types = tys;
+        // Single-branch UNION: the unified domain equals branch 0, so return it
+        // verbatim with no reconciliation (fast path).
+        if planned.len() == 1 {
+            let (op, cols, tys) = planned.into_iter().next().expect("single-element vector");
+            return Ok((op, cols, tys));
+        }
+
+        // Unified, first-seen-ordered column domain with a parallel type vector:
+        // each column's type comes from the first branch that binds it, falling
+        // back to LogicalType::Any when two branches bind it with different
+        // types (the conservative widening precedent of plan_project). This
+        // mirrors the widen + first-seen-dedup idiom of common::build_left_join.
+        let mut unified_columns: Vec<String> = Vec::new();
+        let mut unified_types: Vec<LogicalType> = Vec::new();
+        for (_, cols, tys) in &planned {
+            for (col, ty) in cols.iter().zip(tys.iter()) {
+                if let Some(existing) = unified_columns.iter().position(|c| c == col) {
+                    if unified_types[existing] != *ty {
+                        unified_types[existing] = LogicalType::Any;
+                    }
+                } else {
+                    unified_columns.push(col.clone());
+                    unified_types.push(ty.clone());
+                }
             }
         }
 
-        if operators.len() == 1 {
-            return Ok((
-                operators
-                    .into_iter()
-                    .next()
-                    .expect("single-element iterator"),
-                columns,
-                types,
-            ));
-        }
+        // Null-pad each branch to the unified width. The padding must be a
+        // genuine per-chunk-width copy (not merely a wider declared schema):
+        // DISTINCT and ORDER BY copy at each chunk's own column count against a
+        // fixed-width builder, so a narrow chunk under a wide declared schema
+        // would commit short / misaligned rows.
+        let operators: Vec<Box<dyn Operator>> = planned
+            .into_iter()
+            .map(|(op, cols, _)| pad_union_branch(op, &cols, &unified_columns, &unified_types))
+            .collect();
 
-        // Create a chain operator that executes all operators in sequence
-        let operator = Box::new(RdfUnionOperator::new(operators));
-        Ok((operator, columns, types))
+        let operator = Box::new(RdfUnionOperator::new(operators, unified_columns.len()));
+        Ok((operator, unified_columns, unified_types))
     }
 
     /// Plans an INSERT TRIPLE operator.
@@ -2817,18 +2852,25 @@ impl Operator for RdfModifyOperator {
 // RDF Union Operator
 // ============================================================================
 
-/// Operator that executes multiple operators in sequence.
-/// Used for UNION of INSERT operations.
+/// Sequences the already-planned branches of a SPARQL UNION, emitting each
+/// branch's `DataChunk`s in turn (a multiset union with no de-duplication; see
+/// SPARQL 1.1 sec 18.5). `plan_union` widens every branch to the unified column
+/// domain upstream, so this operator forwards chunks verbatim and only asserts
+/// that each one matches the uniform width.
 struct RdfUnionOperator {
     operators: Vec<Box<dyn Operator>>,
     current_idx: usize,
+    /// Unified output width (the number of columns in the union variable
+    /// domain). Every branch is null-padded to this width by `plan_union`.
+    expected_width: usize,
 }
 
 impl RdfUnionOperator {
-    fn new(operators: Vec<Box<dyn Operator>>) -> Self {
+    fn new(operators: Vec<Box<dyn Operator>>, expected_width: usize) -> Self {
         Self {
             operators,
             current_idx: 0,
+            expected_width,
         }
     }
 }
@@ -2839,7 +2881,19 @@ impl Operator for RdfUnionOperator {
         while self.current_idx < self.operators.len() {
             let op = &mut self.operators[self.current_idx];
             match op.next()? {
-                Some(chunk) => return Ok(Some(chunk)),
+                Some(chunk) => {
+                    debug_assert_eq!(
+                        chunk.column_count(),
+                        self.expected_width,
+                        "RdfUnion branch {} emitted a {}-column chunk but the unified \
+                         UNION schema is {} columns wide; branches must be null-padded \
+                         to a uniform width for DISTINCT / ORDER BY correctness",
+                        self.current_idx,
+                        chunk.column_count(),
+                        self.expected_width,
+                    );
+                    return Ok(Some(chunk));
+                }
                 None => self.current_idx += 1,
             }
         }
@@ -5101,6 +5155,47 @@ fn strip_internal_columns(
     (stripped, output_columns)
 }
 
+/// Null-pads a single UNION branch onto the unified column domain.
+///
+/// Maps each unified column to the branch's local column when the branch binds
+/// it, or to a `Value::Null` constant when it does not, and reorders to the
+/// unified order. The wrap reuses `RdfProjectOperator`, so the branch emits a
+/// `DataChunk` genuinely padded to the unified width (a per-chunk-width copy,
+/// not a merely-declared schema) — what DISTINCT / ORDER BY require downstream.
+///
+/// A branch whose columns already equal the unified domain in order is returned
+/// unwrapped (this also covers branch 0 when no later branch adds a variable).
+fn pad_union_branch(
+    branch: Box<dyn Operator>,
+    branch_columns: &[String],
+    unified_columns: &[String],
+    unified_types: &[LogicalType],
+) -> Box<dyn Operator> {
+    if branch_columns == unified_columns {
+        return branch;
+    }
+
+    let local_index: HashMap<&str, usize> = branch_columns
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.as_str(), i))
+        .collect();
+
+    let projections: Vec<RdfProjectExpr> = unified_columns
+        .iter()
+        .map(|name| match local_index.get(name.as_str()) {
+            Some(&idx) => RdfProjectExpr::Column(idx),
+            None => RdfProjectExpr::Constant(Value::Null),
+        })
+        .collect();
+
+    Box::new(RdfProjectOperator::new(
+        branch,
+        projections,
+        unified_types.to_vec(),
+    ))
+}
+
 /// Converts an RDF Term to a string for IRI/blank node representation.
 fn term_to_string(term: &Term) -> String {
     match term {
@@ -6510,6 +6605,93 @@ mod tests {
         assert_eq!(rows, 2);
     }
 
+    /// White-box guard for the UNION output-arity fix: when a later branch
+    /// binds a variable absent from branch 0, `plan_union` must advertise the
+    /// UNION of the branch variable sets and every emitted chunk must be
+    /// null-padded to that unified width (not the branch-0 width). This is the
+    /// planner-level counterpart to the gtest oracles; a regression here is the
+    /// branch-0-only seed returning, which surfaces downstream as GRAFEO-X001 /
+    /// GRAFEO-V001 / silent SELECT-star corruption.
+    #[test]
+    fn test_plan_union_heterogeneous_pads_to_union_domain() {
+        let store = Arc::new(RdfStore::new());
+        // Branch 0 (?s <p> ?a) binds {s, a}; branch 1 (?s <q> ?b) binds {s, b}.
+        store.insert(Triple::new(
+            Term::iri("http://example.org/x"),
+            Term::iri("http://example.org/p"),
+            Term::literal("PVAL"),
+        ));
+        store.insert(Triple::new(
+            Term::iri("http://example.org/y"),
+            Term::iri("http://example.org/q"),
+            Term::literal("QVAL"),
+        ));
+        let planner = RdfPlanner::new(Arc::clone(&store));
+        let scan1 = LogicalOperator::TripleScan(TripleScanOp {
+            subject: TripleComponent::Variable("s".to_string()),
+            predicate: TripleComponent::Iri("http://example.org/p".to_string()),
+            object: TripleComponent::Variable("a".to_string()),
+            graph: None,
+            input: None,
+            dataset: None,
+        });
+        let scan2 = LogicalOperator::TripleScan(TripleScanOp {
+            subject: TripleComponent::Variable("s".to_string()),
+            predicate: TripleComponent::Iri("http://example.org/q".to_string()),
+            object: TripleComponent::Variable("b".to_string()),
+            graph: None,
+            input: None,
+            dataset: None,
+        });
+        let union = LogicalOperator::Union(crate::query::plan::UnionOp {
+            inputs: vec![scan1, scan2],
+        });
+        let physical = planner.plan(&LogicalPlan::new(union)).unwrap();
+
+        // The advertised schema is the UNION of the branch variable sets.
+        assert_eq!(physical.columns.len(), 3, "expected the union of {{s,a,b}}");
+        for v in ["s", "a", "b"] {
+            assert!(
+                physical.columns.iter().any(|c| c == v),
+                "unified UNION schema is missing variable '{v}': {:?}",
+                physical.columns
+            );
+        }
+        let a_idx = physical.columns.iter().position(|c| c == "a").unwrap();
+        let b_idx = physical.columns.iter().position(|c| c == "b").unwrap();
+
+        let mut op = physical.operator;
+        let mut rows = 0;
+        let mut saw_a_only = false;
+        let mut saw_b_only = false;
+        while let Ok(Some(chunk)) = op.next() {
+            // Every branch chunk is genuinely padded to the unified width.
+            assert_eq!(
+                chunk.column_count(),
+                3,
+                "branch chunk was not null-padded to the unified width"
+            );
+            for row in chunk.selected_indices() {
+                let a = chunk.column(a_idx).unwrap().get_value(row);
+                let b = chunk.column(b_idx).unwrap().get_value(row);
+                let a_null = matches!(a, None | Some(Value::Null));
+                let b_null = matches!(b, None | Some(Value::Null));
+                // Disjoint branches: exactly one of {a, b} is bound per row, and
+                // the absent branch's variable is UNBOUND (Null), never dropped.
+                assert!(
+                    a_null ^ b_null,
+                    "each row binds exactly one branch variable; got a={a:?}, b={b:?}"
+                );
+                saw_a_only |= b_null;
+                saw_b_only |= a_null;
+                rows += 1;
+            }
+        }
+        assert_eq!(rows, 2, "expected one row from each branch");
+        assert!(saw_a_only, "branch 0 row (a bound, b UNBOUND) missing");
+        assert!(saw_b_only, "branch 1 row (b bound, a UNBOUND) missing");
+    }
+
     #[test]
     fn test_plan_construct() {
         let store = Arc::new(RdfStore::new());
@@ -7191,7 +7373,7 @@ mod tests {
 
     #[test]
     fn test_into_any_rdf_union_operator() {
-        let op: Box<dyn Operator> = Box::new(RdfUnionOperator::new(vec![]));
+        let op: Box<dyn Operator> = Box::new(RdfUnionOperator::new(vec![], 0));
         let any = op.into_any();
         assert!(any.downcast::<RdfUnionOperator>().is_ok());
     }

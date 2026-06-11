@@ -507,6 +507,22 @@ pub(super) fn do_restore_to_epoch(
     target_epoch: EpochId,
     output_path: &Path,
 ) -> Result<()> {
+    // Refuse to restore on top of an existing database. The `std::fs::copy`
+    // below overwrites `output_path` unconditionally, and the sidecar handling
+    // further down deletes an existing `<output_path>.wal/` directory. Pointing
+    // a restore at a live database would therefore clobber the `.grafeo` file
+    // and silently destroy its sidecar WAL -- exactly the data an operator may
+    // be trying to recover. Restores must target a fresh path; callers that
+    // intend to replace a database should move or remove it first.
+    let sidecar_dir = format!("{}.wal", output_path.display());
+    if output_path.exists() || Path::new(&sidecar_dir).exists() {
+        return Err(Error::InvalidValue(format!(
+            "restore output path already exists: {} (restore must target a fresh path; \
+             move or remove the existing database and its {sidecar_dir} sidecar first)",
+            output_path.display(),
+        )));
+    }
+
     let manifest = read_manifest(backup_dir)?
         .ok_or_else(|| Error::Internal("no backup manifest found".to_string()))?;
 
@@ -760,5 +776,54 @@ mod tests {
         let (parsed, _): (BackupKind, _) =
             bincode::serde::decode_from_slice(&encoded, config).unwrap();
         assert_eq!(parsed, BackupKind::Full);
+    }
+
+    #[test]
+    fn test_do_restore_to_epoch_refuses_existing_output() {
+        let dir = TempDir::new().unwrap();
+        let backup_dir = dir.path().join("backup");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+
+        // A pre-existing database file at the restore target must be refused
+        // before any copy/overwrite happens (the guard fires ahead of manifest
+        // reading, so no real backup chain is needed for this case).
+        let output_path = dir.path().join("live.grafeo");
+        std::fs::write(&output_path, b"existing database -- must not be clobbered").unwrap();
+
+        let err = do_restore_to_epoch(&backup_dir, EpochId::new(0), &output_path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("already exists"),
+            "expected refuse-if-exists error, got: {msg}"
+        );
+
+        // The existing file must be left untouched by the refused restore.
+        assert_eq!(
+            std::fs::read(&output_path).unwrap(),
+            b"existing database -- must not be clobbered"
+        );
+    }
+
+    #[test]
+    fn test_do_restore_to_epoch_refuses_existing_sidecar() {
+        let dir = TempDir::new().unwrap();
+        let backup_dir = dir.path().join("backup");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+
+        // No `.grafeo` file, but a leftover sidecar WAL at the target is still a
+        // non-fresh path: restoring would delete it.
+        let output_path = dir.path().join("live.grafeo");
+        let sidecar = dir.path().join("live.grafeo.wal");
+        std::fs::create_dir_all(&sidecar).unwrap();
+
+        let err = do_restore_to_epoch(&backup_dir, EpochId::new(0), &output_path).unwrap_err();
+        assert!(
+            err.to_string().contains("already exists"),
+            "expected refuse-if-exists error for leftover sidecar, got: {err}"
+        );
+        assert!(
+            sidecar.exists(),
+            "refused restore must leave the sidecar in place"
+        );
     }
 }

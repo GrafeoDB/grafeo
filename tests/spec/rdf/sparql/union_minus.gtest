@@ -87,6 +87,207 @@ tests:
         - [Alix]
 
   # ---------------------------------------------------------------------------
+  # Heterogeneous-arity UNION (output-arity fix)
+  #
+  # Per SPARQL 1.1 sec 18.2.1 the result variable domain is the UNION of the
+  # branches' in-scope variables; a variable bound in only some branches is
+  # present-with-UNBOUND (null) elsewhere, never dropped. These cases cover the
+  # three manifestations of the prior branch-0-only schema: GRAFEO-X001 at plan
+  # time (explicit SELECT of a later-branch-only variable), GRAFEO-V001 at run
+  # time (a narrower branch indexed against a wider first branch), and the
+  # silent SELECT-star corruption (a later branch's values surfacing under the
+  # first branch's variable names). The existing UNION cases above all share
+  # branch-0 width, so this is the heterogeneous coverage that was missing.
+  # ---------------------------------------------------------------------------
+
+  - name: union_heterogeneous_vars_explicit
+    # GRAFEO-X001 repro: ?y lives only in the second branch. Before the fix the
+    # projection above the UNION raised "Variable not found"; now ?y is UNBOUND
+    # in the first branch.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/a> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT ?x ?y WHERE {
+        { ?s <http://ex.org/p> ?x }
+        UNION
+        { ?s <http://ex.org/q> ?y }
+      }
+    expect:
+      columns: [x, y]
+      rows:
+        - [http://ex.org/b, null]
+        - [null, http://ex.org/z]
+
+  - name: union_heterogeneous_vars_reversed
+    # The branch that defines a variable must not change the outcome: here the
+    # first-listed branch binds ?y and the second binds ?x.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/a> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT ?y ?x WHERE {
+        { ?s <http://ex.org/q> ?y }
+        UNION
+        { ?s <http://ex.org/p> ?x }
+      }
+    expect:
+      columns: [y, x]
+      rows:
+        - [http://ex.org/z, null]
+        - [null, http://ex.org/b]
+
+  - name: union_three_branches_heterogeneous
+    # Each branch contributes a distinct variable; the result domain is the
+    # union of all three, with the two absent variables UNBOUND per row.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/a> <http://ex.org/q> <http://ex.org/z> .
+          <http://ex.org/a> <http://ex.org/r> <http://ex.org/w> .
+        }
+    query: |
+      SELECT ?x ?y ?z WHERE {
+        { ?s <http://ex.org/p> ?x }
+        UNION
+        { ?s <http://ex.org/q> ?y }
+        UNION
+        { ?s <http://ex.org/r> ?z }
+      }
+    expect:
+      columns: [x, y, z]
+      rows:
+        - [http://ex.org/b, null, null]
+        - [null, http://ex.org/z, null]
+        - [null, null, http://ex.org/w]
+
+  - name: union_bind_misaligned_v001
+    # GRAFEO-V001 repro (heterogeneous-variable UNION shape): the first branch is
+    # WIDER (it adds ?o plus a BIND ?dir) and binds ?dir at a different physical
+    # column than the narrower second branch. Before the fix the second branch's
+    # chunk was indexed against the first branch's width, raising "Column not
+    # found"; now each branch is reordered and padded to the unified domain.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/c> <http://ex.org/q> <http://ex.org/d> .
+        }
+    query: |
+      SELECT ?s ?dir WHERE {
+        { ?s <http://ex.org/p> ?o . BIND("out" AS ?dir) }
+        UNION
+        { ?s <http://ex.org/q> ?dir }
+      }
+    expect:
+      columns: [s, dir]
+      rows:
+        - [http://ex.org/a, out]
+        - [http://ex.org/c, http://ex.org/d]
+
+  - name: union_select_star_no_corruption
+    # Guards against silent column mislabeling. A SELECT * over heterogeneous-name
+    # branches must NEVER surface a later branch's values under the first
+    # branch's variable names. Before the fix the Wildcard projection skipped
+    # the by-name guard, the schema was the first branch's [s, x], and the
+    # second branch's object value appeared under ?x with ?y dropped and no
+    # error. The fix advertises the full domain [s, x, y] with null padding.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/a> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT * WHERE {
+        { ?s <http://ex.org/p> ?x }
+        UNION
+        { ?s <http://ex.org/q> ?y }
+      }
+    expect:
+      columns: [s, x, y]
+      rows:
+        - [http://ex.org/a, http://ex.org/b, null]
+        - [http://ex.org/a, null, http://ex.org/z]
+
+  - name: union_same_arity_control
+    # Control: homogeneous-name branches keep their pre-fix behavior exactly.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/a> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT ?x WHERE {
+        { ?s <http://ex.org/p> ?x }
+        UNION
+        { ?s <http://ex.org/q> ?x }
+      }
+    expect:
+      columns: [x]
+      rows:
+        - [http://ex.org/b]
+        - [http://ex.org/z]
+
+  - name: union_distinct_over_null
+    # DISTINCT after a heterogeneous UNION must dedup over UNBOUND (KeyPart::Null)
+    # as well as over concrete values. This depends on every branch chunk being
+    # genuinely null-padded to a uniform width (DISTINCT copies at per-chunk
+    # column count against a fixed-width builder).
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/m> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/n> .
+          <http://ex.org/c> <http://ex.org/q> <http://ex.org/z> .
+          <http://ex.org/d> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT DISTINCT ?y WHERE {
+        { ?s <http://ex.org/p> ?x }
+        UNION
+        { ?s <http://ex.org/q> ?y }
+      }
+    expect:
+      columns: [y]
+      rows:
+        - [null]
+        - [http://ex.org/z]
+
+  - name: union_order_by_nulls_last
+    # ORDER BY over a heterogeneous UNION column places UNBOUND (null) last and
+    # requires the same uniform branch-chunk width as DISTINCT.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/m> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/n> .
+          <http://ex.org/c> <http://ex.org/q> <http://ex.org/z> .
+          <http://ex.org/d> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT DISTINCT ?y WHERE {
+        { ?s <http://ex.org/p> ?x }
+        UNION
+        { ?s <http://ex.org/q> ?y }
+      }
+      ORDER BY ?y
+    expect:
+      ordered: true
+      columns: [y]
+      rows:
+        - [http://ex.org/z]
+        - [null]
+
+  # ---------------------------------------------------------------------------
   # MINUS
   # ---------------------------------------------------------------------------
 

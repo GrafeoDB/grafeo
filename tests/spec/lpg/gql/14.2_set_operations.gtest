@@ -39,6 +39,24 @@ tests:
         - [Alix]
         - [Amsterdam]
 
+  # Positional alignment: GQL UNION combines branches by column POSITION and
+  # names each output column from the FIRST branch. union_distinct_deduplicates
+  # cannot distinguish this -- both of its branches name the column identically,
+  # so positional and by-name alignment look the same. Here the two branches
+  # alias the same position to DIFFERENT names ('name' vs 'city'); positional
+  # alignment yields a single column carrying both values under the first
+  # branch's name, whereas a by-name implementation would split or reject them.
+  - name: union_all_aligns_by_position_with_first_branch_name
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:City {city: 'Amsterdam'})"
+    query: MATCH (n:Person) RETURN n.name AS name UNION ALL MATCH (c:City) RETURN c.city AS city
+    expect:
+      columns: [name]
+      rows:
+        - [Alix]
+        - [Amsterdam]
+
   - name: except_set_difference
     setup:
       - "INSERT (:N {v: 1})"

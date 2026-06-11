@@ -64,21 +64,34 @@ pub struct ResultStream<'session> {
 }
 
 impl<'s> ResultStream<'s> {
+    /// Opens a streaming result, failing closed if the schema is not unique.
+    ///
+    /// The streaming FFI surfaces (PyO3 `PyResultStream`, C `grafeo_stream_open`)
+    /// build each row keyed by column name, so a duplicate name would silently
+    /// drop data per row. Validating once here — at stream-open, before the first
+    /// row — keeps the result-column uniqueness invariant on the streaming path
+    /// as well as the eager path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryErrorKind::Semantic`](grafeo_common::utils::error::QueryErrorKind)
+    /// if `columns` contains a repeated column name.
     pub(crate) fn new(
         operator: Box<dyn Operator>,
         columns: Vec<String>,
         deadline: Option<Instant>,
         guard: StreamGuard<'s>,
-    ) -> Self {
+    ) -> Result<Self> {
+        QueryResult::validate_unique_columns(&columns)?;
         let len = columns.len();
-        Self {
+        Ok(Self {
             operator,
             columns,
             column_types: vec![LogicalType::Any; len],
             deadline,
             exhausted: false,
             _guard: guard,
-        }
+        })
     }
 
     /// Column names in the order they appear in each row.
@@ -138,7 +151,7 @@ impl<'s> ResultStream<'s> {
     ///
     /// Propagates operator errors and deadline timeouts.
     pub fn collect(mut self) -> Result<QueryResult> {
-        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone());
+        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         while let Some(chunk) = self.next_chunk()? {
             append_chunk(&chunk, &mut result);
         }
@@ -228,19 +241,27 @@ impl std::fmt::Debug for OwnedResultStream {
 }
 
 impl OwnedResultStream {
+    /// Opens an owned streaming result, failing closed if the schema is not
+    /// unique (see [`ResultStream::new`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryErrorKind::Semantic`](grafeo_common::utils::error::QueryErrorKind)
+    /// if `columns` contains a repeated column name.
     pub(crate) fn new(
         operator: Box<dyn Operator>,
         columns: Vec<String>,
         deadline: Option<Instant>,
-    ) -> Self {
+    ) -> Result<Self> {
+        QueryResult::validate_unique_columns(&columns)?;
         let len = columns.len();
-        Self {
+        Ok(Self {
             operator,
             columns,
             column_types: vec![LogicalType::Any; len],
             deadline,
             exhausted: false,
-        }
+        })
     }
 
     /// Column names in the order they appear in each row.
@@ -294,7 +315,7 @@ impl OwnedResultStream {
     ///
     /// Propagates operator errors and deadline timeouts.
     pub fn collect(mut self) -> Result<QueryResult> {
-        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone());
+        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         while let Some(chunk) = self.next_chunk()? {
             append_chunk(&chunk, &mut result);
         }

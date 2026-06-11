@@ -104,7 +104,7 @@ impl Executor {
     /// Returns an error if operator execution fails or the query timeout is exceeded.
     pub fn execute(&self, operator: &mut dyn Operator) -> Result<QueryResult> {
         let _span = grafeo_debug_span!("grafeo::query::execute");
-        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone());
+        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
 
         loop {
@@ -166,7 +166,7 @@ impl Executor {
             .expect("sink should be ChunkCollector");
         let chunks = collector.into_chunks();
 
-        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone());
+        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
 
         for chunk in &chunks {
@@ -190,7 +190,7 @@ impl Executor {
         operator: &mut dyn Operator,
         limit: usize,
     ) -> Result<QueryResult> {
-        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone());
+        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         let mut collected = 0;
         let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
 
@@ -338,7 +338,7 @@ impl Executor {
         let mut wrapped = CardinalityTrackingWrapper::new(operator, "root", shared_ctx.clone());
 
         // Execute with tracking
-        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone());
+        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
         let mut total_rows: u64 = 0;
         let check_interval = config.min_rows;

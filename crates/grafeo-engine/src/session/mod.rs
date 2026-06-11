@@ -2867,7 +2867,7 @@ impl Session {
 
         let (source, columns, deadline) = self.build_streaming_plan(query)?;
         let guard = StreamGuard::new(&self.active_streams);
-        Ok(ResultStream::new(source, columns, deadline, guard))
+        ResultStream::new(source, columns, deadline, guard)
     }
 
     /// Builds a pull-based physical pipeline for streaming, returning the

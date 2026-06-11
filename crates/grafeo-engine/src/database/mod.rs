@@ -2941,6 +2941,41 @@ pub struct QueryResult {
 }
 
 impl QueryResult {
+    /// Validates that a result schema carries no repeated column name.
+    ///
+    /// A [`QueryResult`] addresses its rows positionally, but every FFI binding
+    /// consumes them *by column name* (the PyO3 dict, the Node and C JSON
+    /// objects, or any binding that keys rows into a structure forbidding
+    /// duplicate keys). A repeated name there loses data silently —
+    /// last-write-wins in some bindings, a dropped whole row in others. Rather
+    /// than emit a result that cannot represent its own schema, the engine fails
+    /// closed here with a structured error that names the duplicate. This is the
+    /// leg-agnostic backstop: every column-bearing constructor and the streaming
+    /// open path route their schema through this check, so the invariant holds on
+    /// both the eager and the streaming result paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueryErrorKind::Semantic`] if any column name appears more than
+    /// once in `columns`.
+    pub(crate) fn validate_unique_columns(columns: &[String]) -> Result<()> {
+        // Column lists are tiny; a simple scan avoids an allocation and reports
+        // the first duplicate deterministically (in column order).
+        for (idx, name) in columns.iter().enumerate() {
+            if columns[..idx].contains(name) {
+                return Err(Error::Query(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    format!(
+                        "duplicate column name '{name}' in query result: a result cannot carry \
+                         two columns with the same name because name-addressed consumers would \
+                         silently drop one; give the projections distinct aliases (e.g. `AS {name}_2`)"
+                    ),
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Creates a fully empty query result (no columns, no rows).
     #[must_use]
     pub fn empty() -> Self {
@@ -2970,10 +3005,15 @@ impl QueryResult {
     }
 
     /// Creates a new empty query result.
-    #[must_use]
-    pub fn new(columns: Vec<String>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `columns` contains a repeated column name (see
+    /// [`validate_unique_columns`](Self::validate_unique_columns)).
+    pub fn new(columns: Vec<String>) -> Result<Self> {
+        Self::validate_unique_columns(&columns)?;
         let len = columns.len();
-        Self {
+        Ok(Self {
             columns,
             column_types: vec![grafeo_common::types::LogicalType::Any; len],
             rows: Vec::new(),
@@ -2981,16 +3021,21 @@ impl QueryResult {
             rows_scanned: None,
             status_message: None,
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
-        }
+        })
     }
 
     /// Creates a new empty query result with column types.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `columns` contains a repeated column name (see
+    /// [`validate_unique_columns`](Self::validate_unique_columns)).
     pub fn with_types(
         columns: Vec<String>,
         column_types: Vec<grafeo_common::types::LogicalType>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Self::validate_unique_columns(&columns)?;
+        Ok(Self {
             columns,
             column_types,
             rows: Vec::new(),
@@ -2998,14 +3043,22 @@ impl QueryResult {
             rows_scanned: None,
             status_message: None,
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
-        }
+        })
     }
 
     /// Creates a query result with pre-populated rows.
-    #[must_use]
-    pub fn from_rows(columns: Vec<String>, rows: Vec<Vec<grafeo_common::types::Value>>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `columns` contains a repeated column name (see
+    /// [`validate_unique_columns`](Self::validate_unique_columns)).
+    pub fn from_rows(
+        columns: Vec<String>,
+        rows: Vec<Vec<grafeo_common::types::Value>>,
+    ) -> Result<Self> {
+        Self::validate_unique_columns(&columns)?;
         let len = columns.len();
-        Self {
+        Ok(Self {
             columns,
             column_types: vec![grafeo_common::types::LogicalType::Any; len],
             rows,
@@ -3013,7 +3066,7 @@ impl QueryResult {
             rows_scanned: None,
             status_message: None,
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
-        }
+        })
     }
 
     /// Appends a row to this result.
@@ -3724,7 +3777,7 @@ mod tests {
 
     #[test]
     fn test_query_result_new_with_columns() {
-        let result = QueryResult::new(vec!["name".into(), "age".into()]);
+        let result = QueryResult::new(vec!["name".into(), "age".into()]).unwrap();
         assert_eq!(result.column_count(), 2);
         assert_eq!(result.row_count(), 0);
         assert!(result.is_empty());
@@ -3744,15 +3797,53 @@ mod tests {
         let result = QueryResult::with_types(
             vec!["name".into(), "age".into()],
             vec![LogicalType::String, LogicalType::Int64],
-        );
+        )
+        .unwrap();
         assert_eq!(result.column_count(), 2);
         assert_eq!(result.column_types[0], LogicalType::String);
         assert_eq!(result.column_types[1], LogicalType::Int64);
     }
 
     #[test]
+    fn test_query_result_rejects_duplicate_columns() {
+        // The fail-closed result-column uniqueness invariant. A result must
+        // never carry two columns with the same name (name-addressed FFI
+        // consumers would silently drop one), so the column-bearing constructors
+        // fail closed with a structured error that names the duplicate.
+        let dup_new = QueryResult::new(vec!["x".into(), "x".into()]);
+        assert!(dup_new.is_err());
+        assert!(
+            dup_new
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("duplicate column"),
+            "error should name the duplicate column"
+        );
+
+        use grafeo_common::types::LogicalType;
+        assert!(
+            QueryResult::with_types(
+                vec!["a".into(), "a".into()],
+                vec![LogicalType::Any, LogicalType::Any],
+            )
+            .is_err()
+        );
+        assert!(QueryResult::from_rows(vec!["c".into(), "c".into()], vec![]).is_err());
+
+        // Distinct column names still construct successfully.
+        assert!(QueryResult::new(vec!["a".into(), "b".into()]).is_ok());
+        assert!(QueryResult::from_rows(vec!["a".into(), "b".into()], vec![]).is_ok());
+        // The zero/one-column cases are trivially unique.
+        assert!(QueryResult::new(vec![]).is_ok());
+        assert!(QueryResult::new(vec!["only".into()]).is_ok());
+    }
+
+    #[test]
     fn test_query_result_with_metrics() {
-        let result = QueryResult::new(vec!["x".into()]).with_metrics(42.5, 100);
+        let result = QueryResult::new(vec!["x".into()])
+            .unwrap()
+            .with_metrics(42.5, 100);
         assert_eq!(result.execution_time_ms(), Some(42.5));
         assert_eq!(result.rows_scanned(), Some(100));
     }
@@ -3760,7 +3851,7 @@ mod tests {
     #[test]
     fn test_query_result_scalar_success() {
         use grafeo_common::types::Value;
-        let mut result = QueryResult::new(vec!["count".into()]);
+        let mut result = QueryResult::new(vec!["count".into()]).unwrap();
         result.rows.push(vec![Value::Int64(42)]);
 
         let val: i64 = result.scalar().unwrap();
@@ -3771,25 +3862,25 @@ mod tests {
     fn test_query_result_scalar_wrong_shape() {
         use grafeo_common::types::Value;
         // Multiple rows
-        let mut result = QueryResult::new(vec!["x".into()]);
+        let mut result = QueryResult::new(vec!["x".into()]).unwrap();
         result.rows.push(vec![Value::Int64(1)]);
         result.rows.push(vec![Value::Int64(2)]);
         assert!(result.scalar::<i64>().is_err());
 
         // Multiple columns
-        let mut result2 = QueryResult::new(vec!["a".into(), "b".into()]);
+        let mut result2 = QueryResult::new(vec!["a".into(), "b".into()]).unwrap();
         result2.rows.push(vec![Value::Int64(1), Value::Int64(2)]);
         assert!(result2.scalar::<i64>().is_err());
 
         // Empty
-        let result3 = QueryResult::new(vec!["x".into()]);
+        let result3 = QueryResult::new(vec!["x".into()]).unwrap();
         assert!(result3.scalar::<i64>().is_err());
     }
 
     #[test]
     fn test_query_result_iter() {
         use grafeo_common::types::Value;
-        let mut result = QueryResult::new(vec!["x".into()]);
+        let mut result = QueryResult::new(vec!["x".into()]).unwrap();
         result.rows.push(vec![Value::Int64(1)]);
         result.rows.push(vec![Value::Int64(2)]);
 
@@ -3800,7 +3891,7 @@ mod tests {
     #[test]
     fn test_query_result_display() {
         use grafeo_common::types::Value;
-        let mut result = QueryResult::new(vec!["name".into()]);
+        let mut result = QueryResult::new(vec!["name".into()]).unwrap();
         result.rows.push(vec![Value::from("Alix")]);
         let display = result.to_string();
         assert!(display.contains("name"));

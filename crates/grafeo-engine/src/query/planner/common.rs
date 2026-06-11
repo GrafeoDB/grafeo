@@ -5,7 +5,7 @@
 //! Each function takes already-planned input operators and column lists,
 //! plus a schema derivation function to handle LPG vs RDF type differences.
 
-use crate::query::plan::LogicalExpression;
+use crate::query::plan::{BinaryOp, LogicalExpression, UnaryOp};
 use grafeo_common::types::LogicalType;
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
@@ -408,6 +408,19 @@ pub(crate) fn resolve_expression_to_column(
 }
 
 /// Converts a logical expression to a human-readable string for column naming.
+///
+/// The rendering follows the surface syntax of the expression so that two
+/// distinct un-aliased projections receive two distinct column names — e.g.
+/// `id(s)` and `id(t)` rather than a collapsed `id(...)`. openCypher 9 names an
+/// un-aliased RETURN item by its expression text, so rendering a function call's
+/// arguments (rather than discarding them) keeps that contract and stops
+/// distinct expressions from sharing a name. Any residual collisions from the
+/// variants that still fall through to the generic name are caught fail-closed
+/// by the result-column uniqueness invariant
+/// (`QueryResult::validate_unique_columns`).
+///
+/// Aggregate function headers are produced by a separate code path
+/// (`planner/lpg/aggregate.rs`) and are intentionally not rendered here.
 pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
     match expr {
         LogicalExpression::Variable(name) => name.clone(),
@@ -415,7 +428,22 @@ pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
             format!("{variable}.{property}")
         }
         LogicalExpression::Literal(value) => format!("{value:?}"),
-        LogicalExpression::FunctionCall { name, .. } => format!("{name}(...)"),
+        LogicalExpression::FunctionCall {
+            name,
+            args,
+            distinct,
+        } => {
+            let rendered_args = args
+                .iter()
+                .map(expression_to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            if *distinct {
+                format!("{name}(DISTINCT {rendered_args})")
+            } else {
+                format!("{name}({rendered_args})")
+            }
+        }
         LogicalExpression::IndexAccess { base, index } => {
             format!(
                 "{}[{}]",
@@ -423,7 +451,67 @@ pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
                 expression_to_string(index)
             )
         }
+        LogicalExpression::Binary { left, op, right } => {
+            format!(
+                "{} {} {}",
+                expression_to_string(left),
+                binary_op_symbol(*op),
+                expression_to_string(right)
+            )
+        }
+        LogicalExpression::Unary { op, operand } => {
+            let inner = expression_to_string(operand);
+            match op {
+                UnaryOp::Not => format!("NOT {inner}"),
+                UnaryOp::Neg => format!("-{inner}"),
+                UnaryOp::IsNull => format!("{inner} IS NULL"),
+                UnaryOp::IsNotNull => format!("{inner} IS NOT NULL"),
+            }
+        }
+        LogicalExpression::List(items) => {
+            format!(
+                "[{}]",
+                items
+                    .iter()
+                    .map(expression_to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        LogicalExpression::Parameter(name) => format!("${name}"),
+        LogicalExpression::Labels(variable) => format!("labels({variable})"),
+        LogicalExpression::Type(variable) => format!("type({variable})"),
+        LogicalExpression::Id(variable) => format!("id({variable})"),
         _ => "expr".to_string(),
+    }
+}
+
+/// Renders a binary operator as its openCypher/GQL surface symbol for column
+/// naming (see [`expression_to_string`]).
+fn binary_op_symbol(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Eq => "=",
+        BinaryOp::Ne => "<>",
+        BinaryOp::Lt => "<",
+        BinaryOp::Le => "<=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Ge => ">=",
+        BinaryOp::And => "AND",
+        BinaryOp::Or => "OR",
+        BinaryOp::Xor => "XOR",
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Mod => "%",
+        BinaryOp::Concat => "||",
+        BinaryOp::StartsWith => "STARTS WITH",
+        BinaryOp::EndsWith => "ENDS WITH",
+        BinaryOp::Contains => "CONTAINS",
+        BinaryOp::In => "IN",
+        BinaryOp::Like => "LIKE",
+        BinaryOp::Regex => "=~",
+        BinaryOp::Pow => "^",
     }
 }
 

@@ -576,6 +576,35 @@ impl<'a> Parser<'a> {
             return Err(self.error("expected '*' or variable list in SELECT"));
         }
 
+        // Within-projection duplicate-alias guard (SPARQL 1.1 sec 18.2.4.4: the
+        // target variable of `(expr AS ?v)` must be a fresh variable). This cheap
+        // check over the projection rejects `(?s AS ?x) (?o AS ?x)` and an alias
+        // that shadows another projected name, at parse time. Full visible-scope
+        // validation (against the WHERE-bound variables, which are parsed after
+        // the projection) is a disclosed follow-up; bare duplicate variables
+        // (`SELECT ?s ?s`) are left to the engine's leg-agnostic result-column
+        // uniqueness invariant.
+        {
+            let mut seen: Vec<(&str, bool)> = Vec::with_capacity(variables.len());
+            for var in &variables {
+                let (name, is_alias): (&str, bool) = match (&var.alias, &var.expression) {
+                    (Some(alias), _) => (alias.as_str(), true),
+                    (None, Expression::Variable(name)) => (name.as_str(), false),
+                    (None, _) => continue,
+                };
+                let collides = seen.iter().any(|&(prev_name, prev_is_alias)| {
+                    prev_name == name && (prev_is_alias || is_alias)
+                });
+                if collides {
+                    return Err(self.error(&format!(
+                        "duplicate projection variable '?{name}' in SELECT: the target of AS \
+                         must be a fresh variable (SPARQL 1.1 sec 18.2.4.4)"
+                    )));
+                }
+                seen.push((name, is_alias));
+            }
+        }
+
         Ok(Projection::Variables(variables))
     }
 
@@ -2646,6 +2675,51 @@ mod tests {
     fn test_parse_invalid_keyword_fails() {
         let result = parse("SELECTX ?x WHERE { ?x ?y ?z }");
         assert!(result.is_err(), "Invalid keyword should fail");
+    }
+
+    // --- within-projection duplicate-alias rejection (SPARQL 18.2.4.4) ---
+
+    #[test]
+    fn test_projection_duplicate_alias_fails() {
+        // `(expr AS ?v)` must bind a fresh variable; reusing ?x is a syntax error.
+        let result = parse("SELECT (?s AS ?x) (?o AS ?x) WHERE { ?s ?p ?o }");
+        assert!(result.is_err(), "Duplicate projection alias should fail");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("duplicate projection variable"),
+            "error should flag the duplicate projection variable"
+        );
+    }
+
+    #[test]
+    fn test_projection_alias_shadowing_bare_var_fails() {
+        // An alias that shadows an already-projected variable is also rejected.
+        let result = parse("SELECT ?x (?o AS ?x) WHERE { ?x ?p ?o }");
+        assert!(
+            result.is_err(),
+            "Alias shadowing a bare variable should fail"
+        );
+    }
+
+    #[test]
+    fn test_projection_distinct_aliases_ok() {
+        let result = parse("SELECT (?s AS ?a) (?o AS ?b) WHERE { ?s ?p ?o }");
+        assert!(result.is_ok(), "Distinct aliases must still parse");
+    }
+
+    #[test]
+    fn test_projection_bare_duplicate_variable_parses() {
+        // `SELECT ?s ?s` is NOT rejected at parse time — that degenerate case is
+        // caught fail-closed by the engine's leg-agnostic result-column
+        // uniqueness invariant, not by this cheap within-projection alias check.
+        let result = parse("SELECT ?s ?s WHERE { ?s ?p ?o }");
+        assert!(
+            result.is_ok(),
+            "Bare duplicate variables parse; rejection is deferred to the engine"
+        );
     }
 
     // ==================== Recursion depth limit tests ====================

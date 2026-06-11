@@ -2,6 +2,17 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [Unreleased]
+
+### Fixed
+
+- **Silent data loss from duplicate output-column names**: a query whose projection produced two columns with the same name built a `QueryResult` whose schema could not represent itself, and name-addressed consumers then dropped data silently — the PyO3 `to_list()` dict via last-write-wins, and bindings that key rows into duplicate-key-rejecting structures via whole-row loss. The most common trigger needed no duplicate intent: distinct bare calls like `id(s)`, `id(t)`, `id(r)` all collapsed to the header `id(...)`. `QueryResult`'s column-bearing constructors (`new`/`with_types`/`from_rows`) and the streaming open path now enforce a fail-closed uniqueness invariant — a structured semantic error that names the duplicate — so the guarantee holds on both the eager and the streaming result paths and across every language leg.
+
+### Changed
+
+- **Un-aliased function-call columns now render their arguments**: openCypher 9 names an un-aliased `RETURN` item by its expression text, but `expression_to_string` rendered every `FunctionCall` as `name(...)` (discarding arguments) and several expression kinds as the constant `expr`, so distinct bare expressions collapsed to one name. They now render faithfully — `id(s)`, `id(t)`, `id(r)`, `a.age + 1`, `-a.age` — so the common case needs no alias. This is a column-naming contract change for previously-collapsed headers; aggregate headers are produced by a separate path and are unchanged. The `QueryResult` column-bearing constructors now return `Result` (they validate column-name uniqueness).
+- **SPARQL rejects duplicate projection aliases at parse time** (SPARQL 1.1 §18.2.4.4): `SELECT (?s AS ?x) (?o AS ?x)`, and an alias shadowing another projected variable, are now syntax errors. The degenerate `SELECT ?s ?s` is caught by the engine's result-column uniqueness invariant. Full visible-scope validation against `WHERE`-bound variables remains future work.
+
 ## [0.5.42] - 2026-05-04
 
 End-to-end tiered storage: section data (LPG, RDF Ring, vector topology) can spill to mmap-backed disk under memory pressure or explicit configuration, with per-section tier overrides, introspection, and reload. Plus per-block columnar zone maps for selective range scans, paged HNSW topology, packed RDF Ring on disk, a WAL overlay for mutating mmap'd compact stores and a streaming top-K operator that fuses `ORDER BY ... LIMIT` into a single bounded-heap pass.

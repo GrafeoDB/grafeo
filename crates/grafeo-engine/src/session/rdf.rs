@@ -195,7 +195,18 @@ impl Session {
         result
     }
 
-    /// Executes a SPARQL query.
+    /// Executes a SPARQL query or update against this session.
+    ///
+    /// # Atomicity (transaction handle)
+    ///
+    /// A single SPARQL Update statement is applied atomically. A *sequence* of
+    /// updates is atomic only when run inside one explicit transaction on this
+    /// same session handle: call `begin_transaction` before the sequence and
+    /// `commit` after it. Statements executed without an open transaction
+    /// auto-commit individually, so a failure partway through a multi-statement
+    /// sequence leaves the earlier statements applied. Updates issued through a
+    /// different handle than the one holding the open transaction are not
+    /// enlisted in that transaction.
     ///
     /// # Errors
     ///

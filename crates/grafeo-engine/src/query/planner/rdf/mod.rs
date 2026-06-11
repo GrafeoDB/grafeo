@@ -109,6 +109,33 @@ struct TripleOperands {
     predicate: TripleComponent,
     object: TripleComponent,
     column_map: HashMap<String, usize>,
+    /// Named graph to mutate (`None` = default graph).
+    graph: Option<String>,
+}
+
+/// Resolves the target sub-store for a pattern/template graph mutation,
+/// failing closed on an unresolved variable graph.
+///
+/// `create` selects insert semantics (`graph_or_create`, which materialises the
+/// named graph) versus delete semantics (non-creating `graph`, so a zero-match
+/// named delete never leaves an empty sub-store behind). A graph name
+/// beginning with `?` is an unbound `GRAPH ?var` target that the executor cannot
+/// route to a concrete graph; it is rejected loudly rather than silently
+/// misrouted or degraded to a no-op.
+fn resolve_mutation_graph(
+    store: &Arc<RdfStore>,
+    graph_name: Option<&str>,
+    create: bool,
+) -> std::result::Result<Option<Arc<RdfStore>>, OperatorError> {
+    match graph_name {
+        None => Ok(Some(Arc::clone(store))),
+        Some(name) if name.starts_with('?') => Err(OperatorError::Execution(format!(
+            "SPARQL Update cannot target a variable graph ({name}); \
+             use a concrete graph IRI or a WITH clause"
+        ))),
+        Some(name) if create => Ok(Some(store.graph_or_create(name))),
+        Some(name) => Ok(store.graph(name)),
+    }
 }
 
 /// Converts logical plans with RDF operators to physical operators.
@@ -1338,6 +1365,7 @@ impl RdfPlanner {
                         predicate: insert.predicate.clone(),
                         object: insert.object.clone(),
                         column_map,
+                        graph: insert.graph.clone(),
                     },
                     #[cfg(feature = "wal")]
                     self.wal.clone(),
@@ -1451,6 +1479,7 @@ impl RdfPlanner {
                         predicate: delete.predicate.clone(),
                         object: delete.object.clone(),
                         column_map,
+                        graph: delete.graph.clone(),
                     },
                     #[cfg(feature = "wal")]
                     self.wal.clone(),
@@ -1726,6 +1755,8 @@ struct RdfInsertPatternOperator {
     predicate: TripleComponent,
     object: TripleComponent,
     column_map: HashMap<String, usize>,
+    /// Named graph to insert into (`None` = default graph).
+    graph_name: Option<String>,
     done: bool,
     #[cfg(feature = "wal")]
     wal: Option<Arc<RdfWal>>,
@@ -1751,6 +1782,7 @@ impl RdfInsertPatternOperator {
             predicate: operands.predicate,
             object: operands.object,
             column_map: operands.column_map,
+            graph_name: operands.graph,
             done: false,
             #[cfg(feature = "wal")]
             wal,
@@ -1830,6 +1862,12 @@ impl Operator for RdfInsertPatternOperator {
             return Ok(None);
         }
 
+        // Resolve the named-graph target up front so an unsupported variable
+        // graph fails closed even when the pattern binds no rows. INSERT
+        // materialises the target graph if it does not yet exist.
+        let target = resolve_mutation_graph(&self.store, self.graph_name.as_deref(), true)?
+            .expect("insert target is always present when create=true");
+
         // Collect all triples to insert
         let mut triples_to_insert = Vec::new();
 
@@ -1845,9 +1883,9 @@ impl Operator for RdfInsertPatternOperator {
             }
         }
 
-        // Insert all collected triples
+        // Insert all collected triples into the resolved graph
         for triple in &triples_to_insert {
-            self.store.insert(triple.clone());
+            target.insert(triple.clone());
         }
 
         #[cfg(feature = "wal")]
@@ -1858,7 +1896,7 @@ impl Operator for RdfInsertPatternOperator {
                     subject: term_to_wal(triple.subject()),
                     predicate: term_to_wal(triple.predicate()),
                     object: term_to_wal(triple.object()),
-                    graph: None,
+                    graph: self.graph_name.clone(),
                 },
             );
         }
@@ -1870,7 +1908,7 @@ impl Operator for RdfInsertPatternOperator {
                 triple.subject(),
                 triple.predicate(),
                 triple.object(),
-                None,
+                self.graph_name.as_deref(),
                 self.cdc_epoch,
             );
         }
@@ -2010,6 +2048,8 @@ struct RdfDeletePatternOperator {
     predicate: TripleComponent,
     object: TripleComponent,
     column_map: HashMap<String, usize>,
+    /// Named graph to delete from (`None` = default graph).
+    graph_name: Option<String>,
     done: bool,
     #[cfg(feature = "wal")]
     wal: Option<Arc<RdfWal>>,
@@ -2035,6 +2075,7 @@ impl RdfDeletePatternOperator {
             predicate: operands.predicate,
             object: operands.object,
             column_map: operands.column_map,
+            graph_name: operands.graph,
             done: false,
             #[cfg(feature = "wal")]
             wal,
@@ -2114,6 +2155,11 @@ impl Operator for RdfDeletePatternOperator {
             return Ok(None);
         }
 
+        // Resolve the named-graph target up front: a variable graph fails closed,
+        // and a missing named graph is a clean no-op that does not materialise an
+        // empty sub-store (non-creating).
+        let target = resolve_mutation_graph(&self.store, self.graph_name.as_deref(), false)?;
+
         // Collect all triples to delete
         let mut triples_to_delete = Vec::new();
 
@@ -2129,34 +2175,37 @@ impl Operator for RdfDeletePatternOperator {
             }
         }
 
-        // Delete all collected triples
-        for triple in &triples_to_delete {
-            self.store.remove(triple);
-        }
+        // Delete all collected triples from the resolved graph. A missing named
+        // graph leaves nothing to remove (and was not created above).
+        if let Some(target) = target {
+            for triple in &triples_to_delete {
+                target.remove(triple);
+            }
 
-        #[cfg(feature = "wal")]
-        for triple in &triples_to_delete {
-            log_rdf_wal(
-                &self.wal,
-                &grafeo_storage::wal::WalRecord::DeleteRdfTriple {
-                    subject: term_to_wal(triple.subject()),
-                    predicate: term_to_wal(triple.predicate()),
-                    object: term_to_wal(triple.object()),
-                    graph: None,
-                },
-            );
-        }
+            #[cfg(feature = "wal")]
+            for triple in &triples_to_delete {
+                log_rdf_wal(
+                    &self.wal,
+                    &grafeo_storage::wal::WalRecord::DeleteRdfTriple {
+                        subject: term_to_wal(triple.subject()),
+                        predicate: term_to_wal(triple.predicate()),
+                        object: term_to_wal(triple.object()),
+                        graph: self.graph_name.clone(),
+                    },
+                );
+            }
 
-        #[cfg(feature = "cdc")]
-        for triple in &triples_to_delete {
-            record_cdc_triple_delete(
-                &self.cdc_log,
-                triple.subject(),
-                triple.predicate(),
-                triple.object(),
-                None,
-                self.cdc_epoch,
-            );
+            #[cfg(feature = "cdc")]
+            for triple in &triples_to_delete {
+                record_cdc_triple_delete(
+                    &self.cdc_log,
+                    triple.subject(),
+                    triple.predicate(),
+                    triple.object(),
+                    self.graph_name.as_deref(),
+                    self.cdc_epoch,
+                );
+            }
         }
 
         self.done = true;
@@ -2710,6 +2759,14 @@ impl Operator for RdfModifyOperator {
         // matches the bound string. This handles the type mismatch without
         // changing the column type system.
         for template in &self.delete_templates {
+            // Resolve the delete target up front (non-creating). A variable
+            // graph fails closed even when no rows bind; a missing named graph
+            // leaves nothing to delete.
+            let Some(target) =
+                resolve_mutation_graph(&self.store, template.graph.as_deref(), false)?
+            else {
+                continue;
+            };
             for (chunk, row) in &bindings {
                 let subject = self.resolve_component(&template.subject, chunk, *row);
                 let predicate = self.resolve_component(&template.predicate, chunk, *row);
@@ -2717,7 +2774,7 @@ impl Operator for RdfModifyOperator {
 
                 if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
                     let triple = Triple::new(s.clone(), p.clone(), o.clone());
-                    if !self.store.remove(&triple) {
+                    if !target.remove(&triple) {
                         // Exact match failed: the object may be a plain string
                         // whose stored form is a typed literal (e.g. "1" vs
                         // xsd:integer "1"). Query by subject+predicate and
@@ -2728,8 +2785,7 @@ impl Operator for RdfModifyOperator {
                                 predicate: Some(p.clone()),
                                 object: None,
                             };
-                            let matching: Vec<_> = self
-                                .store
+                            let matching: Vec<_> = target
                                 .find(&pattern)
                                 .into_iter()
                                 .filter(|t| {
@@ -2751,10 +2807,10 @@ impl Operator for RdfModifyOperator {
                                     matched.subject(),
                                     matched.predicate(),
                                     matched.object(),
-                                    None,
+                                    template.graph.as_deref(),
                                     self.cdc_epoch,
                                 );
-                                self.store.remove(&matched);
+                                target.remove(&matched);
                             }
                             continue;
                         }
@@ -2765,7 +2821,7 @@ impl Operator for RdfModifyOperator {
                         triple.subject(),
                         triple.predicate(),
                         triple.object(),
-                        None,
+                        template.graph.as_deref(),
                         self.cdc_epoch,
                     );
                 }
@@ -2774,6 +2830,10 @@ impl Operator for RdfModifyOperator {
 
         // Step 3: Apply INSERT templates using the SAME bindings
         for template in &self.insert_templates {
+            // Resolve the insert target up front; a variable graph fails closed.
+            // INSERT materialises the target graph if it does not yet exist.
+            let target = resolve_mutation_graph(&self.store, template.graph.as_deref(), true)?
+                .expect("insert target is always present when create=true");
             for (chunk, row) in &bindings {
                 let subject = self.resolve_component(&template.subject, chunk, *row);
                 let predicate = self.resolve_component(&template.predicate, chunk, *row);
@@ -2787,10 +2847,10 @@ impl Operator for RdfModifyOperator {
                         triple.subject(),
                         triple.predicate(),
                         triple.object(),
-                        None,
+                        template.graph.as_deref(),
                         self.cdc_epoch,
                     );
-                    self.store.insert(triple);
+                    target.insert(triple);
                 }
             }
         }
@@ -7024,6 +7084,7 @@ mod tests {
             predicate: TripleComponent::Iri("http://example.org/p".to_string()),
             object: TripleComponent::Literal(Value::String("o".into())),
             column_map: HashMap::new(),
+            graph: None,
         };
         let op: Box<dyn Operator> = Box::new(RdfInsertPatternOperator::new(
             store,
@@ -7073,6 +7134,7 @@ mod tests {
             predicate: TripleComponent::Iri("http://example.org/p".to_string()),
             object: TripleComponent::Literal(Value::String("o".into())),
             column_map: HashMap::new(),
+            graph: None,
         };
         let op: Box<dyn Operator> = Box::new(RdfDeletePatternOperator::new(
             store,

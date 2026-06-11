@@ -331,9 +331,15 @@ impl SparqlTranslator {
                 with_graph,
                 delete_template,
                 insert_template,
-                using_clauses: _,
+                using_clauses,
                 where_clause,
-            } => self.translate_modify(with_graph, delete_template, insert_template, where_clause),
+            } => self.translate_modify(
+                with_graph,
+                delete_template,
+                insert_template,
+                using_clauses,
+                where_clause,
+            ),
             ast::UpdateOperation::Load {
                 silent,
                 source,
@@ -457,16 +463,20 @@ impl SparqlTranslator {
 
         // Build delete operators with the match plan as input
         let mut ops = Vec::new();
-        for triple in &triples {
+        for (triple, graph) in &triples {
             let subject = self.translate_triple_term(&triple.subject)?;
             let predicate = self.translate_property_path(&triple.predicate)?;
             let object = self.translate_triple_term(&triple.object)?;
+            // A GRAPH-wrapped DELETE WHERE deletes from the named graph; a
+            // variable graph (`GRAPH ?g`) resolves to a "?"-prefixed name that
+            // the executor rejects loudly (fail-closed).
+            let graph = graph.as_ref().map(|g| self.resolve_variable_or_iri(g));
 
             ops.push(LogicalOperator::DeleteTriple(DeleteTripleOp {
                 subject,
                 predicate,
                 object,
-                graph: None, // Default graph
+                graph,
                 input: Some(Box::new(match_plan.clone())),
             }));
         }
@@ -484,13 +494,34 @@ impl SparqlTranslator {
         }
     }
 
-    fn extract_triples_from_pattern(pattern: &ast::GraphPattern) -> Vec<ast::TriplePattern> {
+    /// Extracts the triple templates from a DELETE WHERE pattern, tagging each
+    /// with its enclosing named graph (if any) so the delete routes to the
+    /// correct sub-store. Descends into GRAPH blocks via the `NamedGraph` arm;
+    /// dropping that arm is what made a GRAPH-wrapped DELETE WHERE a silent
+    /// no-op (the template came back empty).
+    fn extract_triples_from_pattern(
+        pattern: &ast::GraphPattern,
+    ) -> Vec<(ast::TriplePattern, Option<ast::VariableOrIri>)> {
+        Self::extract_triples_with_graph(pattern, None)
+    }
+
+    fn extract_triples_with_graph(
+        pattern: &ast::GraphPattern,
+        graph: Option<&ast::VariableOrIri>,
+    ) -> Vec<(ast::TriplePattern, Option<ast::VariableOrIri>)> {
         match pattern {
-            ast::GraphPattern::Basic(triples) => triples.clone(),
+            ast::GraphPattern::Basic(triples) => triples
+                .iter()
+                .map(|t| (t.clone(), graph.cloned()))
+                .collect(),
             ast::GraphPattern::Group(patterns) => patterns
                 .iter()
-                .flat_map(Self::extract_triples_from_pattern)
+                .flat_map(|p| Self::extract_triples_with_graph(p, graph))
                 .collect(),
+            ast::GraphPattern::NamedGraph {
+                graph: inner_graph,
+                pattern: inner_pattern,
+            } => Self::extract_triples_with_graph(inner_pattern, Some(inner_graph)),
             _ => Vec::new(),
         }
     }
@@ -500,12 +531,40 @@ impl SparqlTranslator {
         with_graph: &Option<ast::Iri>,
         delete_template: &Option<Vec<ast::QuadPattern>>,
         insert_template: &Option<Vec<ast::QuadPattern>>,
+        using_clauses: &[ast::UsingClause],
         where_clause: &ast::GraphPattern,
     ) -> Result<LogicalPlan> {
+        // USING / USING NAMED is parsed but not yet honoured by the executor.
+        // Fail closed rather than silently dropping the clause and mis-scoping
+        // the WHERE evaluation against the wrong dataset.
+        if !using_clauses.is_empty() {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                "SPARQL Update USING / USING NAMED is not yet supported",
+            )));
+        }
+
+        let default_graph = with_graph.as_ref().map(|g| self.resolve_iri(g));
+
+        // The WITH clause redefines the WHERE clause's default graph as <g>
+        // (SPARQL 1.1 Update, DELETE/INSERT): an unqualified WHERE pattern must
+        // bind rows from the named graph, not the empty default graph. Redirect
+        // the dataset before building the WHERE plan (mirroring translate_select)
+        // so a WITH-scoped Modify does not silently no-op for lack of bindings.
+        // A GRAPH-wrapped WHERE still binds via the graph context stack and is
+        // unaffected.
+        if let Some(ref graph) = default_graph {
+            self.dataset = Some(DatasetRestriction {
+                default_graphs: vec![graph.clone()],
+                named_graphs: Vec::new(),
+            });
+        }
+
         // Translate the WHERE clause - this will be evaluated once and shared
         let where_plan = self.translate_graph_pattern(where_clause)?;
 
-        let default_graph = with_graph.as_ref().map(|g| self.resolve_iri(g));
+        // Clear the dataset redirect after translating the WHERE clause
+        self.dataset = None;
 
         // Build DELETE templates
         let mut delete_templates = Vec::new();

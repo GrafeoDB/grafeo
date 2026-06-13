@@ -428,6 +428,13 @@ impl HnswIndex {
             vector.len()
         );
 
+        // `set_node_property` uses insert for both first writes and updates.
+        // Replacing the topology entry directly would leave reciprocal links
+        // pointing at a node whose own neighbor lists were reset. Remove the
+        // previous entry and reconnect its former neighbors before indexing the
+        // replacement vector.
+        self.remove_for_replacement(id, accessor);
+
         let level = self.random_level();
 
         // Create the new node (topology only)
@@ -573,6 +580,98 @@ impl HnswIndex {
         if level > current_max_level {
             *entry_point = Some(id);
             *max_level = level;
+        }
+    }
+
+    /// Remove an existing node before replacing its vector, preserving paths
+    /// between the node's former neighbors.
+    fn remove_for_replacement(&self, id: NodeId, accessor: &impl VectorAccessor) {
+        let mut nodes = self.nodes.write();
+        let mut entry_point = self.entry_point.write();
+        let nodes_map = nodes.as_heap_mut();
+
+        let Some(removed) = nodes_map.remove(&id) else {
+            return;
+        };
+
+        for node in nodes_map.values_mut() {
+            for neighbors in &mut node.neighbors {
+                neighbors.retain(|&neighbor| neighbor != id);
+            }
+        }
+
+        // Removing a bridge and immediately reinserting it can otherwise leave
+        // its former neighborhoods disconnected. Connect those neighborhoods
+        // at each shared level, then prune them back to the configured degree.
+        for (level, former_neighbors) in removed.neighbors.iter().enumerate() {
+            let existing: Vec<NodeId> = former_neighbors
+                .iter()
+                .copied()
+                .filter(|neighbor| {
+                    nodes_map
+                        .get(neighbor)
+                        .is_some_and(|node| node.neighbors.len() > level)
+                })
+                .collect();
+
+            for &left in &existing {
+                if let Some(node) = nodes_map.get_mut(&left) {
+                    for &right in &existing {
+                        if left != right && !node.neighbors[level].contains(&right) {
+                            node.neighbors[level].push(right);
+                        }
+                    }
+                }
+            }
+
+            let max_neighbors = if level == 0 {
+                self.config.m_max
+            } else {
+                self.config.m
+            };
+            let mut prune_data: Vec<(NodeId, Vec<(NodeId, f32)>)> = Vec::new();
+            for &neighbor_id in &existing {
+                let Some(node) = nodes_map.get(&neighbor_id) else {
+                    continue;
+                };
+                if node.neighbors[level].len() <= max_neighbors {
+                    continue;
+                }
+                let Some(base_vector) = accessor.get_vector(neighbor_id) else {
+                    continue;
+                };
+                let distances: Vec<(NodeId, f32)> = node.neighbors[level]
+                    .iter()
+                    .map(|&candidate| {
+                        let distance = accessor.get_vector(candidate).map_or(f32::MAX, |vector| {
+                            self.vector_distance(&base_vector, &vector)
+                        });
+                        (candidate, distance)
+                    })
+                    .collect();
+                prune_data.push((neighbor_id, distances));
+            }
+
+            for (neighbor_id, distances) in prune_data {
+                if let Some(node) = nodes_map.get_mut(&neighbor_id) {
+                    Self::prune_neighbors_with_distances(
+                        &mut node.neighbors[level],
+                        &distances,
+                        max_neighbors,
+                    );
+                }
+            }
+        }
+
+        if *entry_point == Some(id) {
+            *entry_point = removed
+                .neighbors
+                .iter()
+                .rev()
+                .flatten()
+                .find(|neighbor| nodes_map.contains_key(neighbor))
+                .copied()
+                .or_else(|| nodes_map.keys().next().copied());
         }
     }
 

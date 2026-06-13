@@ -1,6 +1,6 @@
 //! Node and edge CRUD operations for GrafeoDB.
 
-#[cfg(feature = "wal")]
+#[cfg(any(feature = "wal", feature = "vector-index"))]
 use grafeo_common::grafeo_warn;
 use grafeo_common::utils::error::Result;
 #[cfg(feature = "wal")]

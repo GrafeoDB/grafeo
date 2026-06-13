@@ -41,13 +41,15 @@ fn alix_force_disk_on_vector_only_does_not_spill_lpg() {
     // ONLY the VectorStore consumer, not the LpgStore consumer.
     let dim = 8;
     for i in 1..=5 {
-        let id = db.create_node(&["Item"]);
-        db.set_node_property(id, "name", Value::from(format!("item_{i}")));
+        let id = db.create_node(&["Item"]).unwrap();
+        db.set_node_property(id, "name", Value::from(format!("item_{i}")))
+            .unwrap();
         db.set_node_property(
             id,
             "embedding",
             Value::Vector(make_embedding(i, dim).into()),
-        );
+        )
+        .unwrap();
     }
     db.create_vector_index("Item", "embedding", Some(dim), None, None, None, None)
         .unwrap();
@@ -95,12 +97,13 @@ fn gus_no_force_disk_overrides_means_no_auto_spill() {
     // Build LPG content + a vector index, all with the default Auto tier.
     let dim = 8;
     for i in 1..=5 {
-        let id = db.create_node(&["Item"]);
+        let id = db.create_node(&["Item"]).unwrap();
         db.set_node_property(
             id,
             "embedding",
             Value::Vector(make_embedding(i, dim).into()),
-        );
+        )
+        .unwrap();
     }
     db.create_vector_index("Item", "embedding", Some(dim), None, None, None, None)
         .unwrap();
@@ -170,12 +173,13 @@ fn hans_force_ram_skips_explicit_spill_request() {
 
     let dim = 8;
     for i in 1..=5 {
-        let id = db.create_node(&["Item"]);
+        let id = db.create_node(&["Item"]).unwrap();
         db.set_node_property(
             id,
             "embedding",
             Value::Vector(make_embedding(i, dim).into()),
-        );
+        )
+        .unwrap();
     }
     db.create_vector_index("Item", "embedding", Some(dim), None, None, None, None)
         .unwrap();
@@ -218,12 +222,13 @@ fn django_force_ram_survives_spill_all() {
 
     let dim = 8;
     for i in 1..=5 {
-        let id = db.create_node(&["Item"]);
+        let id = db.create_node(&["Item"]).unwrap();
         db.set_node_property(
             id,
             "embedding",
             Value::Vector(make_embedding(i, dim).into()),
-        );
+        )
+        .unwrap();
     }
     db.create_vector_index("Item", "embedding", Some(dim), None, None, None, None)
         .unwrap();
@@ -263,12 +268,13 @@ fn shosanna_reload_eligible_brings_spilled_vectors_back_to_ram() {
 
     let dim = 8;
     for i in 1..=5 {
-        let id = db.create_node(&["Item"]);
+        let id = db.create_node(&["Item"]).unwrap();
         db.set_node_property(
             id,
             "embedding",
             Value::Vector(make_embedding(i, dim).into()),
-        );
+        )
+        .unwrap();
     }
     db.create_vector_index("Item", "embedding", Some(dim), None, None, None, None)
         .unwrap();
@@ -315,7 +321,7 @@ fn mia_storage_tiers_lists_only_section_consumers() {
     let db = GrafeoDB::with_config(config).unwrap();
 
     // Add some content so LpgStore has nonzero memory.
-    let _id = db.create_node(&["X"]);
+    let _id = db.create_node(&["X"]).unwrap();
 
     let tiers = db.storage_tiers();
 

@@ -10,13 +10,16 @@ use grafeo_engine::GrafeoDB;
 /// Creates 3 Person nodes (Alix, Gus, Harm) with 2 KNOWS edges.
 fn setup_graph() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
-    let alix = db.create_node(&["Person"]);
-    let gus = db.create_node(&["Person"]);
-    let harm = db.create_node(&["Person"]);
+    let alix = db.create_node(&["Person"]).unwrap();
+    let gus = db.create_node(&["Person"]).unwrap();
+    let harm = db.create_node(&["Person"]).unwrap();
 
-    db.set_node_property(alix, "name", Value::from("Alix"));
-    db.set_node_property(gus, "name", Value::from("Gus"));
-    db.set_node_property(harm, "name", Value::from("Harm"));
+    db.set_node_property(alix, "name", Value::from("Alix"))
+        .unwrap();
+    db.set_node_property(gus, "name", Value::from("Gus"))
+        .unwrap();
+    db.set_node_property(harm, "name", Value::from("Harm"))
+        .unwrap();
 
     db.create_edge(alix, gus, "KNOWS");
     db.create_edge(gus, harm, "KNOWS");
@@ -400,10 +403,10 @@ fn test_call_bfs_with_invalid_source() {
 fn test_call_shortest_path_disconnected() {
     let db = GrafeoDB::new_in_memory();
     // Create two disconnected components
-    let a = db.create_node(&["Node"]);
-    let b = db.create_node(&["Node"]);
-    db.set_node_property(a, "name", Value::from("A"));
-    db.set_node_property(b, "name", Value::from("B"));
+    let a = db.create_node(&["Node"]).unwrap();
+    let b = db.create_node(&["Node"]).unwrap();
+    db.set_node_property(a, "name", Value::from("A")).unwrap();
+    db.set_node_property(b, "name", Value::from("B")).unwrap();
     // No edge between them
 
     let session = db.session();
@@ -422,7 +425,7 @@ fn test_call_shortest_path_disconnected() {
 #[test]
 fn test_call_pagerank_single_node() {
     let db = GrafeoDB::new_in_memory();
-    db.create_node(&["Isolated"]);
+    db.create_node(&["Isolated"]).unwrap();
 
     let session = db.session();
     let result = session.execute("CALL grafeo.pagerank()").unwrap();

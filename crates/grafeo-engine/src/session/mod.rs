@@ -177,6 +177,12 @@ pub struct Session {
     /// Flushed to `cdc_log` on commit, discarded on rollback.
     #[cfg(feature = "cdc")]
     cdc_pending_events: Option<Arc<parking_lot::Mutex<Vec<crate::cdc::ChangeEvent>>>>,
+    /// Transaction-local vector index intents.
+    ///
+    /// HNSW is not MVCC-aware, so direct session writes defer vector index
+    /// synchronization until commit has made graph changes visible.
+    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    vector_index_intents: parking_lot::Mutex<Vec<VectorIndexIntent>>,
     /// Current graph name (for multi-graph USE GRAPH support). None = default graph.
     current_graph: parking_lot::Mutex<Option<String>>,
     /// Current schema name (ISO/IEC 39075 Section 4.7.3: independent from session graph).
@@ -241,6 +247,21 @@ struct GraphSavepoint {
     undo_log_position: usize,
 }
 
+/// Deferred HNSW update captured by direct session writes inside a transaction.
+#[cfg(all(feature = "lpg", feature = "vector-index"))]
+#[derive(Clone)]
+enum VectorIndexIntent {
+    Upsert {
+        graph_name: Option<String>,
+        node_id: NodeId,
+        property: String,
+    },
+    Delete {
+        graph_name: Option<String>,
+        node_id: NodeId,
+    },
+}
+
 /// Savepoint state: name + per-graph snapshots + the graph that was active.
 #[derive(Clone)]
 struct SavepointState {
@@ -254,6 +275,9 @@ struct SavepointState {
     /// On rollback-to-savepoint, the buffer is truncated to this position.
     #[cfg(feature = "cdc")]
     cdc_event_position: usize,
+    /// Vector intent buffer position at savepoint creation.
+    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    vector_intent_position: usize,
 }
 
 impl Session {
@@ -296,6 +320,8 @@ impl Session {
             cdc_log: Arc::new(crate::cdc::CdcLog::new()),
             #[cfg(feature = "cdc")]
             cdc_pending_events: None,
+            #[cfg(all(feature = "lpg", feature = "vector-index"))]
+            vector_index_intents: parking_lot::Mutex::new(Vec::new()),
             current_graph: parking_lot::Mutex::new(None),
             current_schema: parking_lot::Mutex::new(None),
             time_zone: parking_lot::Mutex::new(None),
@@ -441,6 +467,8 @@ impl Session {
             cdc_log: Arc::new(crate::cdc::CdcLog::new()),
             #[cfg(feature = "cdc")]
             cdc_pending_events: None,
+            #[cfg(all(feature = "lpg", feature = "vector-index"))]
+            vector_index_intents: parking_lot::Mutex::new(Vec::new()),
             current_graph: parking_lot::Mutex::new(None),
             current_schema: parking_lot::Mutex::new(None),
             time_zone: parking_lot::Mutex::new(None),
@@ -4023,6 +4051,8 @@ impl Session {
                 if let Some(ref pending) = self.cdc_pending_events {
                     pending.lock().clear();
                 }
+                #[cfg(all(feature = "lpg", feature = "vector-index"))]
+                self.clear_vector_intents();
                 *self.read_only_tx.lock() = self.db_read_only;
                 self.savepoints.lock().clear();
                 self.touched_graphs.lock().clear();
@@ -4095,6 +4125,9 @@ impl Session {
             let store = self.resolve_store(graph_name);
             store.sync_epoch(current_epoch);
         }
+
+        #[cfg(all(feature = "lpg", feature = "vector-index"))]
+        self.apply_buffered_vector_intents()?;
 
         // Reset read-only flag and clear savepoints.
         // touched_graphs was already emptied by mem::take above.
@@ -4216,6 +4249,8 @@ impl Session {
         if let Some(ref pending) = self.cdc_pending_events {
             pending.lock().clear();
         }
+        #[cfg(all(feature = "lpg", feature = "vector-index"))]
+        self.clear_vector_intents();
 
         // Clear savepoints and touched graphs
         self.savepoints.lock().clear();
@@ -4294,6 +4329,8 @@ impl Session {
                 .cdc_pending_events
                 .as_ref()
                 .map_or(0, |p| p.lock().len()),
+            #[cfg(all(feature = "lpg", feature = "vector-index"))]
+            vector_intent_position: self.vector_index_intents.lock().len(),
         });
         Ok(())
     }
@@ -4379,6 +4416,8 @@ impl Session {
         if let Some(ref pending) = self.cdc_pending_events {
             pending.lock().truncate(sp_state.cdc_event_position);
         }
+        #[cfg(all(feature = "lpg", feature = "vector-index"))]
+        self.truncate_vector_intents(sp_state.vector_intent_position);
 
         // Restore touched_graphs to only the graphs that were known at savepoint time.
         let mut touched = self.touched_graphs.lock();
@@ -4730,6 +4769,92 @@ impl Session {
         }
     }
 
+    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    fn push_vector_intent(&self, intent: VectorIndexIntent) -> Result<()> {
+        if self.current_transaction.lock().is_some() {
+            self.vector_index_intents.lock().push(intent);
+            Ok(())
+        } else {
+            self.apply_vector_intent(&intent)
+        }
+    }
+
+    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    fn clear_vector_intents(&self) {
+        self.vector_index_intents.lock().clear();
+    }
+
+    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    fn truncate_vector_intents(&self, position: usize) {
+        self.vector_index_intents.lock().truncate(position);
+    }
+
+    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    fn apply_buffered_vector_intents(&self) -> Result<()> {
+        let intents: Vec<VectorIndexIntent> = self.vector_index_intents.lock().drain(..).collect();
+        for intent in intents {
+            self.apply_vector_intent(&intent)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    fn apply_vector_intent(&self, intent: &VectorIndexIntent) -> Result<()> {
+        match intent {
+            VectorIndexIntent::Upsert {
+                graph_name,
+                node_id,
+                property,
+            } => {
+                let store = self.resolve_store(graph_name);
+                let Some(node) = store.get_node(*node_id) else {
+                    return Ok(());
+                };
+                let prop_key = grafeo_common::types::PropertyKey::new(property);
+                let vector = node
+                    .properties
+                    .get(&prop_key)
+                    .and_then(|value| match value {
+                        Value::Vector(vector) => Some(vector),
+                        _ => None,
+                    });
+                for label in &node.labels {
+                    if let Some(index) = store.get_vector_index(label.as_str(), property) {
+                        index.remove(*node_id);
+                        let Some(vector) = vector else {
+                            continue;
+                        };
+                        if vector.len() != index.config().dimensions {
+                            return Err(grafeo_common::utils::error::Error::Internal(format!(
+                                "Vector dimension mismatch for :{}({}): expected {}, found {} on node {}",
+                                label,
+                                property,
+                                index.config().dimensions,
+                                vector.len(),
+                                node_id.0
+                            )));
+                        }
+                        let accessor = grafeo_core::index::vector::PropertyVectorAccessor::new(
+                            &*store,
+                            property.as_str(),
+                        );
+                        index.insert(*node_id, vector, &accessor);
+                    }
+                }
+            }
+            VectorIndexIntent::Delete {
+                graph_name,
+                node_id,
+            } => {
+                let store = self.resolve_store(graph_name);
+                for (_key, index) in store.vector_index_entries() {
+                    index.remove(*node_id);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Creates a planner with transaction context and constraint validator.
     ///
     /// The `store` parameter is the graph store to plan against (use
@@ -4900,14 +5025,26 @@ impl Session {
             .iter()
             .map(|(k, v)| ((*k).to_string(), v.clone()))
             .collect();
+        #[cfg(feature = "vector-index")]
+        let vector_props: Vec<String> = props
+            .iter()
+            .filter_map(|(key, value)| match value {
+                Value::Vector(_) => Some((*key).to_string()),
+                _ => None,
+            })
+            .collect();
 
         let (epoch, transaction_id) = self.get_transaction_context();
+        let graph_name = self.active_graph_storage_key();
         let id = self.active_lpg_store().create_node_with_props_versioned(
             labels,
             props,
             epoch,
             transaction_id.unwrap_or(TransactionId::SYSTEM),
         );
+        if let Some(tid) = transaction_id {
+            self.transaction_manager.record_write(tid, id)?;
+        }
 
         #[cfg(feature = "wal")]
         {
@@ -4922,6 +5059,15 @@ impl Session {
                     value,
                 });
             }
+        }
+
+        #[cfg(feature = "vector-index")]
+        for property in vector_props {
+            self.push_vector_intent(VectorIndexIntent::Upsert {
+                graph_name: graph_name.clone(),
+                node_id: id,
+                property,
+            })?;
         }
 
         Ok(id)
@@ -5015,8 +5161,11 @@ impl Session {
 
         #[cfg(feature = "wal")]
         let value_for_wal = value.clone();
+        #[cfg(feature = "vector-index")]
+        let vector_intent = self.active_graph_storage_key();
 
         if let Some(tid) = transaction_id {
+            self.transaction_manager.record_write(tid, id)?;
             self.active_lpg_store()
                 .set_node_property_versioned(id, key, value, tid);
         } else {
@@ -5029,6 +5178,13 @@ impl Session {
             key: key.to_string(),
             value: value_for_wal,
         });
+
+        #[cfg(feature = "vector-index")]
+        self.push_vector_intent(VectorIndexIntent::Upsert {
+            graph_name: vector_intent,
+            node_id: id,
+            property: key.to_string(),
+        })?;
 
         Ok(())
     }
@@ -5082,6 +5238,14 @@ impl Session {
         #[cfg(feature = "wal")]
         if deleted {
             self.log_wal_record(&grafeo_storage::wal::WalRecord::DeleteNode { id });
+        }
+
+        #[cfg(feature = "vector-index")]
+        if deleted {
+            let _ = self.push_vector_intent(VectorIndexIntent::Delete {
+                graph_name: self.active_graph_storage_key(),
+                node_id: id,
+            });
         }
 
         deleted
@@ -5577,7 +5741,7 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
 
         // Create a node outside of any transaction
-        let node_before = db.create_node(&["Person"]);
+        let node_before = db.create_node(&["Person"]).unwrap();
         assert!(node_before.is_valid());
         assert_eq!(db.node_count(), 1, "Should have 1 node before transaction");
 
@@ -5624,7 +5788,7 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
 
         // Create a node outside of any transaction
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
         assert_eq!(db.node_count(), 1, "Should have 1 node before transaction");
 
         // Start a transaction and create a node with properties
@@ -6847,6 +7011,115 @@ mod tests {
             let result = session.execute("SHOW GRAPH TYPE social").unwrap();
             assert_eq!(result.rows.len(), 1);
             assert_eq!(result.rows[0][0], Value::from("social"));
+        }
+
+        #[cfg(feature = "vector-index")]
+        fn vector_hits(db: &GrafeoDB, query: &[f32]) -> Vec<grafeo_common::types::NodeId> {
+            db.vector_search("Doc", "embedding", query, 10, None, None)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        }
+
+        #[cfg(feature = "vector-index")]
+        #[test]
+        fn test_transaction_vector_create_rolls_back_without_hnsw_insert() {
+            let db = GrafeoDB::new_in_memory();
+            db.create_vector_index("Doc", "embedding", Some(2), None, None, None, None)
+                .unwrap();
+
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            let node = session
+                .create_node_with_props(
+                    &["Doc"],
+                    [("embedding", Value::Vector(vec![1.0, 0.0].into()))],
+                )
+                .unwrap();
+            session.rollback().unwrap();
+
+            assert!(!vector_hits(&db, &[1.0, 0.0]).contains(&node));
+        }
+
+        #[cfg(feature = "vector-index")]
+        #[test]
+        fn test_transaction_vector_create_commit_updates_hnsw() {
+            let db = GrafeoDB::new_in_memory();
+            db.create_vector_index("Doc", "embedding", Some(2), None, None, None, None)
+                .unwrap();
+
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            let node = session
+                .create_node_with_props(
+                    &["Doc"],
+                    [("embedding", Value::Vector(vec![1.0, 0.0].into()))],
+                )
+                .unwrap();
+            session.commit().unwrap();
+
+            assert!(vector_hits(&db, &[1.0, 0.0]).contains(&node));
+        }
+
+        #[cfg(feature = "vector-index")]
+        #[test]
+        fn test_transaction_vector_update_commit_replaces_hnsw_entry() {
+            let db = GrafeoDB::new_in_memory();
+            let node = db.create_node(&["Doc"]).unwrap();
+            db.set_node_property(node, "embedding", Value::Vector(vec![1.0, 0.0].into()))
+                .unwrap();
+            db.create_vector_index("Doc", "embedding", Some(2), None, None, None, None)
+                .unwrap();
+
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session
+                .set_node_property(node, "embedding", Value::Vector(vec![0.0, 1.0].into()))
+                .unwrap();
+            session.commit().unwrap();
+
+            assert_eq!(vector_hits(&db, &[0.0, 1.0]).first().copied(), Some(node));
+        }
+
+        #[cfg(feature = "vector-index")]
+        #[test]
+        fn test_transaction_vector_delete_commit_removes_hnsw_entry() {
+            let db = GrafeoDB::new_in_memory();
+            let node = db.create_node(&["Doc"]).unwrap();
+            db.set_node_property(node, "embedding", Value::Vector(vec![1.0, 0.0].into()))
+                .unwrap();
+            db.create_vector_index("Doc", "embedding", Some(2), None, None, None, None)
+                .unwrap();
+
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            assert!(session.delete_node(node));
+            session.commit().unwrap();
+
+            assert!(!vector_hits(&db, &[1.0, 0.0]).contains(&node));
+        }
+
+        #[cfg(feature = "vector-index")]
+        #[test]
+        fn test_savepoint_rollback_discards_later_vector_intents() {
+            let db = GrafeoDB::new_in_memory();
+            db.create_vector_index("Doc", "embedding", Some(2), None, None, None, None)
+                .unwrap();
+
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session.savepoint("before_vector").unwrap();
+            let node = session
+                .create_node_with_props(
+                    &["Doc"],
+                    [("embedding", Value::Vector(vec![1.0, 0.0].into()))],
+                )
+                .unwrap();
+            session.rollback_to_savepoint("before_vector").unwrap();
+            session.commit().unwrap();
+
+            assert!(!vector_hits(&db, &[1.0, 0.0]).contains(&node));
         }
     }
 }

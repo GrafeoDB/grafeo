@@ -140,13 +140,13 @@ fn test_get_node_at_epoch_deleted_node() {
     // Bump epoch so the node is created at epoch > 0
     bump_epoch(&mut session);
 
-    let id = db.create_node(&["Person"]);
+    let id = db.create_node(&["Person"]).unwrap();
     let epoch_after_insert = db.current_epoch();
 
     // Bump epoch before delete
     bump_epoch(&mut session);
 
-    db.delete_node(id);
+    db.delete_node(id).unwrap();
 
     // Node should be visible at the epoch after insert (before deletion)
     let node = db.get_node_at_epoch(id, epoch_after_insert);
@@ -273,8 +273,9 @@ fn test_get_node_at_epoch() {
     // Advance epoch first so nodes are created at epoch > 0
     bump_epoch(&mut session);
 
-    let id = db.create_node(&["Person"]);
-    db.set_node_property(id, "name", Value::String("Alix".into()));
+    let id = db.create_node(&["Person"]).unwrap();
+    db.set_node_property(id, "name", Value::String("Alix".into()))
+        .unwrap();
     let epoch_after = db.current_epoch();
 
     // Node should exist at this epoch
@@ -294,8 +295,8 @@ fn test_get_edge_at_epoch() {
     // Advance epoch first
     bump_epoch(&mut session);
 
-    let src = db.create_node(&["Person"]);
-    let dst = db.create_node(&["Person"]);
+    let src = db.create_node(&["Person"]).unwrap();
+    let dst = db.create_node(&["Person"]).unwrap();
     let edge_id = db.create_edge(src, dst, "KNOWS");
     let epoch_after = db.current_epoch();
 
@@ -314,8 +315,9 @@ fn test_get_edge_at_epoch() {
 fn test_node_history_single_version() {
     let db = setup_db();
 
-    let id = db.create_node(&["Person"]);
-    db.set_node_property(id, "name", Value::String("Alix".into()));
+    let id = db.create_node(&["Person"]).unwrap();
+    db.set_node_property(id, "name", Value::String("Alix".into()))
+        .unwrap();
 
     let history = db.get_node_history(id);
     assert_eq!(history.len(), 1);
@@ -330,8 +332,8 @@ fn test_node_history_single_version() {
 fn test_node_history_deleted() {
     let db = setup_db();
 
-    let id = db.create_node(&["Person"]);
-    db.delete_node(id);
+    let id = db.create_node(&["Person"]).unwrap();
+    db.delete_node(id).unwrap();
 
     let history = db.get_node_history(id);
     // Version chain should still exist with a deleted marker
@@ -353,8 +355,8 @@ fn test_node_history_nonexistent() {
 fn test_edge_history_single_version() {
     let db = setup_db();
 
-    let src = db.create_node(&["Person"]);
-    let dst = db.create_node(&["Person"]);
+    let src = db.create_node(&["Person"]).unwrap();
+    let dst = db.create_node(&["Person"]).unwrap();
     let edge_id = db.create_edge(src, dst, "KNOWS");
 
     let history = db.get_edge_history(edge_id);

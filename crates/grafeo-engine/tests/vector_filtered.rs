@@ -20,31 +20,42 @@ fn setup_db() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
 
     // user_id=1: nodes near [1, 0, 0]
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0));
-    db.set_node_property(n1, "user_id", Value::Int64(1));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0))
+        .unwrap();
+    db.set_node_property(n1, "user_id", Value::Int64(1))
+        .unwrap();
 
-    let n2 = db.create_node(&["Doc"]);
-    db.set_node_property(n2, "emb", vec3(0.95, 0.05, 0.0));
-    db.set_node_property(n2, "user_id", Value::Int64(1));
+    let n2 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n2, "emb", vec3(0.95, 0.05, 0.0))
+        .unwrap();
+    db.set_node_property(n2, "user_id", Value::Int64(1))
+        .unwrap();
 
     // user_id=2: nodes near [0, 1, 0]
-    let n3 = db.create_node(&["Doc"]);
-    db.set_node_property(n3, "emb", vec3(0.0, 1.0, 0.0));
-    db.set_node_property(n3, "user_id", Value::Int64(2));
+    let n3 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n3, "emb", vec3(0.0, 1.0, 0.0))
+        .unwrap();
+    db.set_node_property(n3, "user_id", Value::Int64(2))
+        .unwrap();
 
-    let n4 = db.create_node(&["Doc"]);
-    db.set_node_property(n4, "emb", vec3(0.05, 0.95, 0.0));
-    db.set_node_property(n4, "user_id", Value::Int64(2));
+    let n4 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n4, "emb", vec3(0.05, 0.95, 0.0))
+        .unwrap();
+    db.set_node_property(n4, "user_id", Value::Int64(2))
+        .unwrap();
 
     // user_id=3: node near [0, 0, 1]
-    let n5 = db.create_node(&["Doc"]);
-    db.set_node_property(n5, "emb", vec3(0.0, 0.0, 1.0));
-    db.set_node_property(n5, "user_id", Value::Int64(3));
+    let n5 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n5, "emb", vec3(0.0, 0.0, 1.0))
+        .unwrap();
+    db.set_node_property(n5, "user_id", Value::Int64(3))
+        .unwrap();
 
     // No user_id property
-    let n6 = db.create_node(&["Doc"]);
-    db.set_node_property(n6, "emb", vec3(0.5, 0.5, 0.0));
+    let n6 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n6, "emb", vec3(0.5, 0.5, 0.0))
+        .unwrap();
 
     // Create property index for fast lookups
     db.create_property_index("user_id");
@@ -202,7 +213,8 @@ fn test_filtered_search_non_indexed_property() {
 
     // Set "category" on first 2 nodes only
     for (id, _) in results_all.iter().take(2) {
-        db.set_node_property(*id, "category", Value::String("science".into()));
+        db.set_node_property(*id, "category", Value::String("science".into()))
+            .unwrap();
     }
 
     // No property index for "category": should still work (scan fallback)
@@ -234,8 +246,9 @@ fn test_create_vector_index_with_dims_no_data_succeeds() {
         .expect("should create empty index with explicit dimensions");
 
     // Insert a node with vector after index creation, auto-insert should work
-    let id = db.create_node(&["Doc"]);
-    db.set_node_property(id, "emb", Value::Vector(vec![1.0, 0.0, 0.0, 0.0].into()));
+    let id = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(id, "emb", Value::Vector(vec![1.0, 0.0, 0.0, 0.0].into()))
+        .unwrap();
 
     let results = db
         .vector_search("Doc", "emb", &[1.0, 0.0, 0.0, 0.0], 5, None, None)
@@ -264,23 +277,26 @@ fn test_grafeo_memory_pattern() {
     // Create nodes with properties at creation time (grafeo-memory pattern)
     for i in 0..10 {
         let user = if i < 5 { "alix" } else { "gus" };
-        let id = db.create_node_with_props(
-            &["Memory"],
-            vec![
-                (
-                    grafeo_common::types::PropertyKey::new("text"),
-                    Value::String(format!("memory {i}").into()),
-                ),
-                (
-                    grafeo_common::types::PropertyKey::new("user_id"),
-                    Value::String(user.into()),
-                ),
-            ],
-        );
+        let id = db
+            .create_node_with_props(
+                &["Memory"],
+                vec![
+                    (
+                        grafeo_common::types::PropertyKey::new("text"),
+                        Value::String(format!("memory {i}").into()),
+                    ),
+                    (
+                        grafeo_common::types::PropertyKey::new("user_id"),
+                        Value::String(user.into()),
+                    ),
+                ],
+            )
+            .unwrap();
 
         // Set embedding separately (grafeo-memory calls set_node_property for vectors)
         let emb = vec![(i as f32) / 10.0, 1.0 - (i as f32) / 10.0, 0.1, 0.1];
-        db.set_node_property(id, "embedding", Value::Vector(emb.into()));
+        db.set_node_property(id, "embedding", Value::Vector(emb.into()))
+            .unwrap();
     }
 
     // Search WITHOUT filters first: should work
@@ -333,20 +349,23 @@ fn setup_operator_db() -> GrafeoDB {
             1 => "fact",
             _ => "event",
         };
-        let id = db.create_node_with_props(
-            &["Item"],
-            vec![
-                (PropertyKey::new("score"), Value::Float64((i as f64) * 0.1)),
-                (PropertyKey::new("rank"), Value::Int64(i)),
-                (PropertyKey::new("category"), Value::String(category.into())),
-                (
-                    PropertyKey::new("text"),
-                    Value::String(format!("item number {i} is great").into()),
-                ),
-            ],
-        );
+        let id = db
+            .create_node_with_props(
+                &["Item"],
+                vec![
+                    (PropertyKey::new("score"), Value::Float64((i as f64) * 0.1)),
+                    (PropertyKey::new("rank"), Value::Int64(i)),
+                    (PropertyKey::new("category"), Value::String(category.into())),
+                    (
+                        PropertyKey::new("text"),
+                        Value::String(format!("item number {i} is great").into()),
+                    ),
+                ],
+            )
+            .unwrap();
         let emb = vec![(i as f32) / 10.0, 1.0 - (i as f32) / 10.0, 0.5];
-        db.set_node_property(id, "emb", Value::Vector(emb.into()));
+        db.set_node_property(id, "emb", Value::Vector(emb.into()))
+            .unwrap();
     }
     db
 }
@@ -603,18 +622,23 @@ fn test_filter_ne_excludes_nodes_missing_property() {
     let db = GrafeoDB::new_in_memory();
 
     // 3 nodes: two with color, one without
-    let n1 = db.create_node(&["Item"]);
-    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0));
-    db.set_node_property(n1, "color", Value::String("red".into()));
+    let n1 = db.create_node(&["Item"]).unwrap();
+    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0))
+        .unwrap();
+    db.set_node_property(n1, "color", Value::String("red".into()))
+        .unwrap();
     db.create_vector_index("Item", "emb", Some(3), None, None, None, None)
         .unwrap();
 
-    let n2 = db.create_node(&["Item"]);
-    db.set_node_property(n2, "emb", vec3(0.0, 1.0, 0.0));
-    db.set_node_property(n2, "color", Value::String("blue".into()));
+    let n2 = db.create_node(&["Item"]).unwrap();
+    db.set_node_property(n2, "emb", vec3(0.0, 1.0, 0.0))
+        .unwrap();
+    db.set_node_property(n2, "color", Value::String("blue".into()))
+        .unwrap();
 
-    let n3 = db.create_node(&["Item"]);
-    db.set_node_property(n3, "emb", vec3(0.0, 0.0, 1.0));
+    let n3 = db.create_node(&["Item"]).unwrap();
+    db.set_node_property(n3, "emb", vec3(0.0, 0.0, 1.0))
+        .unwrap();
     // n3 has no "color" property
 
     // $ne: "red" should match n2 (blue) but NOT n3 (no color)

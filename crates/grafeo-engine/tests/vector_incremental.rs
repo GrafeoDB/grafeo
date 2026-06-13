@@ -18,17 +18,20 @@ fn test_incremental_insert_via_set_property() {
     let db = GrafeoDB::new_in_memory();
 
     // Create initial nodes and build index
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0));
-    let n2 = db.create_node(&["Doc"]);
-    db.set_node_property(n2, "emb", vec3(0.0, 1.0, 0.0));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0))
+        .unwrap();
+    let n2 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n2, "emb", vec3(0.0, 1.0, 0.0))
+        .unwrap();
 
     db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
         .expect("create index");
 
     // Add a new node AFTER index creation
-    let n3 = db.create_node(&["Doc"]);
-    db.set_node_property(n3, "emb", vec3(0.9, 0.1, 0.0));
+    let n3 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n3, "emb", vec3(0.9, 0.1, 0.0))
+        .unwrap();
 
     // Search should find the new node (closest to [1, 0, 0])
     let results = db
@@ -51,8 +54,9 @@ fn test_repeated_vector_update_preserves_hnsw_reachability() {
         let mut nodes = Vec::with_capacity(NODE_COUNT);
 
         for offset in 0..NODE_COUNT {
-            let node = db.create_node(&["Doc"]);
-            db.set_node_property(node, "emb", vec3(0.5 + offset as f32 * 0.01, 0.0, 0.0));
+            let node = db.create_node(&["Doc"]).unwrap();
+            db.set_node_property(node, "emb", vec3(0.5 + offset as f32 * 0.01, 0.0, 0.0))
+                .unwrap();
             nodes.push(node);
         }
 
@@ -61,7 +65,8 @@ fn test_repeated_vector_update_preserves_hnsw_reachability() {
 
         let target = nodes[NODE_COUNT / 2];
         for _ in 0..5 {
-            db.set_node_property(target, "emb", vec3(0.53, 0.0, 0.0));
+            db.set_node_property(target, "emb", vec3(0.53, 0.0, 0.0))
+                .unwrap();
         }
 
         let results = db
@@ -80,17 +85,21 @@ fn test_repeated_vector_update_preserves_hnsw_reachability() {
 fn test_vector_replacement_moves_node_without_losing_neighbors() {
     let db = GrafeoDB::new_in_memory();
 
-    let left = db.create_node(&["Doc"]);
-    db.set_node_property(left, "emb", vec3(1.0, 0.0, 0.0));
-    let moving = db.create_node(&["Doc"]);
-    db.set_node_property(moving, "emb", vec3(0.9, 0.1, 0.0));
-    let right = db.create_node(&["Doc"]);
-    db.set_node_property(right, "emb", vec3(0.0, 1.0, 0.0));
+    let left = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(left, "emb", vec3(1.0, 0.0, 0.0))
+        .unwrap();
+    let moving = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(moving, "emb", vec3(0.9, 0.1, 0.0))
+        .unwrap();
+    let right = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(right, "emb", vec3(0.0, 1.0, 0.0))
+        .unwrap();
 
     db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
         .expect("create index");
 
-    db.set_node_property(moving, "emb", vec3(0.0, 0.99, 0.01));
+    db.set_node_property(moving, "emb", vec3(0.0, 0.99, 0.01))
+        .unwrap();
 
     let results = db
         .vector_search("Doc", "emb", &[0.0, 1.0, 0.0], 3, None, None)
@@ -122,8 +131,9 @@ fn test_incremental_batch_create_after_index() {
     let db = GrafeoDB::new_in_memory();
 
     // Create initial node and build index
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0))
+        .unwrap();
 
     db.create_vector_index("Doc", "emb", Some(3), Some("euclidean"), None, None, None)
         .expect("create index");
@@ -146,18 +156,21 @@ fn test_incremental_batch_create_after_index() {
 fn test_delete_removes_from_index() {
     let db = GrafeoDB::new_in_memory();
 
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0));
-    let n2 = db.create_node(&["Doc"]);
-    db.set_node_property(n2, "emb", vec3(0.0, 1.0, 0.0));
-    let n3 = db.create_node(&["Doc"]);
-    db.set_node_property(n3, "emb", vec3(0.0, 0.0, 1.0));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0))
+        .unwrap();
+    let n2 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n2, "emb", vec3(0.0, 1.0, 0.0))
+        .unwrap();
+    let n3 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n3, "emb", vec3(0.0, 0.0, 1.0))
+        .unwrap();
 
     db.create_vector_index("Doc", "emb", Some(3), Some("euclidean"), None, None, None)
         .expect("create index");
 
     // Delete n2
-    assert!(db.delete_node(n2));
+    assert!(db.delete_node(n2).unwrap());
 
     // Search should NOT return n2
     let results = db
@@ -177,15 +190,17 @@ fn test_label_after_vector_triggers_index() {
     let db = GrafeoDB::new_in_memory();
 
     // Build index on "Doc:emb" with an initial node
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0))
+        .unwrap();
 
     db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
         .expect("create index");
 
     // Create a node WITHOUT the "Doc" label, set vector, THEN add label
-    let n2 = db.create_node(&["Other"]);
-    db.set_node_property(n2, "emb", vec3(0.0, 1.0, 0.0));
+    let n2 = db.create_node(&["Other"]).unwrap();
+    db.set_node_property(n2, "emb", vec3(0.0, 1.0, 0.0))
+        .unwrap();
     // At this point n2 has label "Other", not "Doc": no index match
     db.add_node_label(n2, "Doc");
     // Now n2 has "Doc" label, should trigger auto-insert
@@ -205,8 +220,9 @@ fn test_label_after_vector_triggers_index() {
 fn test_drop_vector_index() {
     let db = GrafeoDB::new_in_memory();
 
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0))
+        .unwrap();
 
     db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
         .expect("create index");
@@ -232,17 +248,20 @@ fn test_drop_vector_index() {
 fn test_rebuild_vector_index() {
     let db = GrafeoDB::new_in_memory();
 
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0))
+        .unwrap();
 
     db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
         .expect("create index");
 
     // Add more nodes
-    let n2 = db.create_node(&["Doc"]);
-    db.set_node_property(n2, "emb", vec3(0.0, 1.0, 0.0));
-    let n3 = db.create_node(&["Doc"]);
-    db.set_node_property(n3, "emb", vec3(0.0, 0.0, 1.0));
+    let n2 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n2, "emb", vec3(0.0, 1.0, 0.0))
+        .unwrap();
+    let n3 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n3, "emb", vec3(0.0, 0.0, 1.0))
+        .unwrap();
 
     // Rebuild rescans all nodes
     db.rebuild_vector_index("Doc", "emb").expect("rebuild");
@@ -265,8 +284,9 @@ fn test_set_vector_without_index_is_noop() {
     let db = GrafeoDB::new_in_memory();
 
     // No vector index exists: setting a vector property should not crash
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0))
+        .unwrap();
 
     // Node should exist with the property
     let node = db.get_node(n1);

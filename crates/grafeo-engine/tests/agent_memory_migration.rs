@@ -92,15 +92,19 @@ fn test_incremental_growth_with_persistence() {
     {
         let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
         for i in 0..batch_size {
-            let node = db.create_node(&["Memory"]);
-            db.set_node_property(node, "text", Value::String(format!("fact_{i}").into()));
-            db.set_node_property(node, "timestamp", Value::Int64(1_700_000_000 + i));
-            db.set_node_property(node, "confidence", Value::Float64(0.5 + (i as f64) * 0.001));
+            let node = db.create_node(&["Memory"]).unwrap();
+            db.set_node_property(node, "text", Value::String(format!("fact_{i}").into()))
+                .unwrap();
+            db.set_node_property(node, "timestamp", Value::Int64(1_700_000_000 + i))
+                .unwrap();
+            db.set_node_property(node, "confidence", Value::Float64(0.5 + (i as f64) * 0.001))
+                .unwrap();
             db.set_node_property(
                 node,
                 "embedding",
                 Value::Vector(random_384d_vector(i as u64).into()),
-            );
+            )
+            .unwrap();
         }
         inserted += batch_size as u64;
 
@@ -144,15 +148,19 @@ fn test_incremental_growth_with_persistence() {
 
         let batch_end = (inserted + reopen_every as u64).min(total_nodes as u64);
         for i in inserted..batch_end {
-            let node = db.create_node(&["Memory"]);
-            db.set_node_property(node, "text", Value::String(format!("fact_{i}").into()));
-            db.set_node_property(node, "timestamp", Value::Int64(1_700_000_000 + i as i64));
-            db.set_node_property(node, "confidence", Value::Float64(0.5 + (i as f64) * 0.001));
+            let node = db.create_node(&["Memory"]).unwrap();
+            db.set_node_property(node, "text", Value::String(format!("fact_{i}").into()))
+                .unwrap();
+            db.set_node_property(node, "timestamp", Value::Int64(1_700_000_000 + i as i64))
+                .unwrap();
+            db.set_node_property(node, "confidence", Value::Float64(0.5 + (i as f64) * 0.001))
+                .unwrap();
             db.set_node_property(
                 node,
                 "embedding",
                 Value::Vector(random_384d_vector(i).into()),
-            );
+            )
+            .unwrap();
         }
         inserted = batch_end;
 
@@ -196,12 +204,13 @@ fn bench_hnsw_at_20k() {
 
     // Insert first 100, then create index
     for i in 0..100u64 {
-        let node = db.create_node(&["Memory"]);
+        let node = db.create_node(&["Memory"]).unwrap();
         db.set_node_property(
             node,
             "embedding",
             Value::Vector(random_384d_vector(i).into()),
-        );
+        )
+        .unwrap();
     }
     db.create_vector_index(
         "Memory",
@@ -216,12 +225,13 @@ fn bench_hnsw_at_20k() {
 
     // Insert remaining incrementally
     for i in 100..total as u64 {
-        let node = db.create_node(&["Memory"]);
+        let node = db.create_node(&["Memory"]).unwrap();
         db.set_node_property(
             node,
             "embedding",
             Value::Vector(random_384d_vector(i).into()),
-        );
+        )
+        .unwrap();
 
         // Measure at milestones
         let count = (i + 1) as usize;
@@ -267,8 +277,9 @@ fn test_hnsw_recall_at_2k() {
     let mut id_to_index: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     for i in 0..count as u64 {
         let vec = random_384d_vector(i);
-        let node = db.create_node(&["Memory"]);
-        db.set_node_property(node, "embedding", Value::Vector(vec.clone().into()));
+        let node = db.create_node(&["Memory"]).unwrap();
+        db.set_node_property(node, "embedding", Value::Vector(vec.clone().into()))
+            .unwrap();
         id_to_index.insert(node.as_u64(), i as usize);
         all_vectors.push(vec);
     }
@@ -340,12 +351,13 @@ fn test_concurrent_vector_search_during_writes() {
 
     // Seed 500 nodes with vectors
     for i in 0..500u64 {
-        let node = db.create_node(&["Memory"]);
+        let node = db.create_node(&["Memory"]).unwrap();
         db.set_node_property(
             node,
             "embedding",
             Value::Vector(random_384d_vector(i).into()),
-        );
+        )
+        .unwrap();
     }
     db.create_vector_index(
         "Memory",
@@ -377,12 +389,13 @@ fn test_concurrent_vector_search_during_writes() {
         handles.push(std::thread::spawn(move || {
             barrier.wait();
             for i in 0..writes {
-                let node = db.create_node(&["Memory"]);
+                let node = db.create_node(&["Memory"]).unwrap();
                 db.set_node_property(
                     node,
                     "embedding",
                     Value::Vector(random_384d_vector(10_000 + i as u64).into()),
-                );
+                )
+                .unwrap();
                 write_success.fetch_add(1, Ordering::Relaxed);
             }
         }));
@@ -468,8 +481,9 @@ fn test_close_reopen_preserves_data() {
         let mut node_ids = Vec::with_capacity(100);
         for i in 0..100 {
             let label = ENTITY_LABELS[i % ENTITY_LABELS.len()];
-            let node = db.create_node(&[label]);
-            db.set_node_property(node, "name", Value::String(format!("entity_{i}").into()));
+            let node = db.create_node(&[label]).unwrap();
+            db.set_node_property(node, "name", Value::String(format!("entity_{i}").into()))
+                .unwrap();
             node_ids.push(node);
         }
         // Create some edges via direct API
@@ -529,12 +543,13 @@ fn test_storage_size_100_entities() {
                 ("confidence", Value::Float64(0.5 + (i as f64) * 0.005)),
                 ("source", Value::String(format!("agent_{}", i % 5).into())),
             ],
-        );
+        ).unwrap();
         db.set_node_property(
             node,
             "embedding",
             Value::Vector(random_384d_vector(i).into()),
-        );
+        )
+        .unwrap();
         node_ids.push(node);
     }
     // Create 150 edges via direct API
@@ -605,20 +620,23 @@ fn bench_storage_size_5400_entities() {
 
         let timestamp = base_ts + (i as i64 * six_months_secs / num_nodes as i64);
 
-        let node = db.create_node_with_props(
-            &[label],
-            vec![
-                ("text", Value::String(text.into())),
-                ("timestamp", Value::Int64(timestamp)),
-                ("confidence", Value::Float64(0.3 + (i as f64 % 70.0) * 0.01)),
-                ("source", Value::String(format!("agent_{}", i % 5).into())),
-            ],
-        );
+        let node = db
+            .create_node_with_props(
+                &[label],
+                vec![
+                    ("text", Value::String(text.into())),
+                    ("timestamp", Value::Int64(timestamp)),
+                    ("confidence", Value::Float64(0.3 + (i as f64 % 70.0) * 0.01)),
+                    ("source", Value::String(format!("agent_{}", i % 5).into())),
+                ],
+            )
+            .unwrap();
         db.set_node_property(
             node,
             "embedding",
             Value::Vector(random_384d_vector(i).into()),
-        );
+        )
+        .unwrap();
         node_ids.push(node);
     }
 
@@ -689,18 +707,21 @@ fn bench_vector_index_rebuild_5k() {
         let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
 
         for i in 0..num_nodes as u64 {
-            let node = db.create_node_with_props(
-                &["Memory"],
-                vec![
-                    ("text", Value::String(format!("fact_{i}").into())),
-                    ("confidence", Value::Float64(0.5 + (i as f64) * 0.0001)),
-                ],
-            );
+            let node = db
+                .create_node_with_props(
+                    &["Memory"],
+                    vec![
+                        ("text", Value::String(format!("fact_{i}").into())),
+                        ("confidence", Value::Float64(0.5 + (i as f64) * 0.0001)),
+                    ],
+                )
+                .unwrap();
             db.set_node_property(
                 node,
                 "embedding",
                 Value::Vector(random_384d_vector(i).into()),
-            );
+            )
+            .unwrap();
         }
 
         // Create index before close (so it gets persisted in snapshot v4)
@@ -803,12 +824,13 @@ fn test_byov_384_cosine() {
 
     // Insert 50 nodes with 384-dim vectors
     for i in 0..50u64 {
-        let node = db.create_node(&["Memory"]);
+        let node = db.create_node(&["Memory"]).unwrap();
         db.set_node_property(
             node,
             "embedding",
             Value::Vector(random_384d_vector(i).into()),
-        );
+        )
+        .unwrap();
     }
 
     db.create_vector_index(
@@ -854,12 +876,13 @@ fn test_byov_all_metrics() {
         let db = GrafeoDB::new_in_memory();
 
         for i in 0..20u64 {
-            let node = db.create_node(&["Memory"]);
+            let node = db.create_node(&["Memory"]).unwrap();
             db.set_node_property(
                 node,
                 "embedding",
                 Value::Vector(random_384d_vector(i).into()),
-            );
+            )
+            .unwrap();
         }
 
         db.create_vector_index(
@@ -894,12 +917,13 @@ fn test_byov_incremental_after_index() {
     let db = GrafeoDB::new_in_memory();
 
     // Create index on empty set with declared dimension
-    let sentinel = db.create_node(&["Memory"]);
+    let sentinel = db.create_node(&["Memory"]).unwrap();
     db.set_node_property(
         sentinel,
         "embedding",
         Value::Vector(random_384d_vector(9999).into()),
-    );
+    )
+    .unwrap();
     db.create_vector_index(
         "Memory",
         "embedding",
@@ -913,12 +937,13 @@ fn test_byov_incremental_after_index() {
 
     // Insert 100 nodes incrementally
     for i in 0..100u64 {
-        let node = db.create_node(&["Memory"]);
+        let node = db.create_node(&["Memory"]).unwrap();
         db.set_node_property(
             node,
             "embedding",
             Value::Vector(random_384d_vector(i).into()),
-        );
+        )
+        .unwrap();
 
         if (i + 1) % 25 == 0 {
             let results = db
@@ -960,14 +985,16 @@ fn test_bulk_import_single_transaction() {
     let mut node_ids = Vec::with_capacity(num_nodes);
     for i in 0..num_nodes as u64 {
         let label = ENTITY_LABELS[i as usize % ENTITY_LABELS.len()];
-        let id = db.create_node_with_props(
-            &[label],
-            vec![
-                ("name", Value::String(format!("entity_{i}").into())),
-                ("timestamp", Value::Int64(1_700_000_000 + i as i64)),
-                ("confidence", Value::Float64(0.5 + (i as f64) * 0.0003)),
-            ],
-        );
+        let id = db
+            .create_node_with_props(
+                &[label],
+                vec![
+                    ("name", Value::String(format!("entity_{i}").into())),
+                    ("timestamp", Value::Int64(1_700_000_000 + i as i64)),
+                    ("confidence", Value::Float64(0.5 + (i as f64) * 0.0003)),
+                ],
+            )
+            .unwrap();
         node_ids.push(id);
     }
 
@@ -1012,13 +1039,15 @@ fn bench_bulk_import_15k() {
         let mut node_ids = Vec::with_capacity(num_nodes);
         for i in 0..num_nodes as u64 {
             let label = ENTITY_LABELS[i as usize % ENTITY_LABELS.len()];
-            let id = db.create_node_with_props(
-                &[label],
-                vec![
-                    ("name", Value::String(format!("entity_{i}").into())),
-                    ("timestamp", Value::Int64(1_700_000_000 + i as i64)),
-                ],
-            );
+            let id = db
+                .create_node_with_props(
+                    &[label],
+                    vec![
+                        ("name", Value::String(format!("entity_{i}").into())),
+                        ("timestamp", Value::Int64(1_700_000_000 + i as i64)),
+                    ],
+                )
+                .unwrap();
             node_ids.push(id);
         }
 

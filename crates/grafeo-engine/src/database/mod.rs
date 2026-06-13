@@ -3239,11 +3239,13 @@ mod tests {
         {
             let db = GrafeoDB::open(&db_path).unwrap();
 
-            let alix = db.create_node(&["Person"]);
-            db.set_node_property(alix, "name", Value::from("Alix"));
+            let alix = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(alix, "name", Value::from("Alix"))
+                .unwrap();
 
-            let gus = db.create_node(&["Person"]);
-            db.set_node_property(gus, "name", Value::from("Gus"));
+            let gus = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(gus, "name", Value::from("Gus"))
+                .unwrap();
 
             let _edge = db.create_edge(alix, gus, "KNOWS");
 
@@ -3278,8 +3280,8 @@ mod tests {
         let db = GrafeoDB::open(&db_path).unwrap();
 
         // Create some data
-        let node = db.create_node(&["Test"]);
-        db.delete_node(node);
+        let node = db.create_node(&["Test"]).unwrap();
+        db.delete_node(node).unwrap();
 
         // WAL should have records
         if let Some(wal) = db.wal() {
@@ -3302,8 +3304,9 @@ mod tests {
         // Session 1: Create initial data
         {
             let db = GrafeoDB::open(&db_path).unwrap();
-            let alix = db.create_node(&["Person"]);
-            db.set_node_property(alix, "name", Value::from("Alix"));
+            let alix = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(alix, "name", Value::from("Alix"))
+                .unwrap();
             db.close().unwrap();
         }
 
@@ -3311,8 +3314,9 @@ mod tests {
         {
             let db = GrafeoDB::open(&db_path).unwrap();
             assert_eq!(db.node_count(), 1); // Previous data recovered
-            let gus = db.create_node(&["Person"]);
-            db.set_node_property(gus, "name", Value::from("Gus"));
+            let gus = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(gus, "name", Value::from("Gus"))
+                .unwrap();
             db.close().unwrap();
         }
 
@@ -3344,9 +3348,9 @@ mod tests {
             let db = GrafeoDB::open(&db_path).unwrap();
 
             // Create nodes
-            let a = db.create_node(&["Node"]);
-            let b = db.create_node(&["Node"]);
-            let c = db.create_node(&["Node"]);
+            let a = db.create_node(&["Node"]).unwrap();
+            let b = db.create_node(&["Node"]).unwrap();
+            let c = db.create_node(&["Node"]).unwrap();
 
             // Create edges
             let e1 = db.create_edge(a, b, "LINKS");
@@ -3354,11 +3358,11 @@ mod tests {
 
             // Delete middle node and its edge
             db.delete_edge(e1);
-            db.delete_node(b);
+            db.delete_node(b).unwrap();
 
             // Set properties on remaining nodes
-            db.set_node_property(a, "value", Value::Int64(1));
-            db.set_node_property(c, "value", Value::Int64(3));
+            db.set_node_property(a, "value", Value::Int64(1)).unwrap();
+            db.set_node_property(c, "value", Value::Int64(3)).unwrap();
 
             db.close().unwrap();
         }
@@ -3392,7 +3396,7 @@ mod tests {
         let db_path = dir.path().join("close_test_db");
 
         let db = GrafeoDB::open(&db_path).unwrap();
-        db.create_node(&["Test"]);
+        db.create_node(&["Test"]).unwrap();
 
         // First close should succeed
         assert!(db.close().is_ok());
@@ -3442,8 +3446,8 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
 
         // Perform some operations
-        db.create_node(&["Person"]);
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
+        db.create_node(&["Person"]).unwrap();
 
         // Check that metrics snapshot returns data
         let snap = db.metrics();
@@ -3455,8 +3459,8 @@ mod tests {
     fn test_query_result_has_metrics() {
         // Verifies that query results include execution metrics
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
+        db.create_node(&["Person"]).unwrap();
 
         #[cfg(feature = "gql")]
         {
@@ -3474,7 +3478,7 @@ mod tests {
     fn test_empty_query_result_metrics() {
         // Verifies metrics are correct for queries returning no results
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
 
         #[cfg(feature = "gql")]
         {
@@ -3501,12 +3505,12 @@ mod tests {
             let db = cdc_db();
 
             // Create
-            let id = db.create_node(&["Person"]);
+            let id = db.create_node(&["Person"]).unwrap();
             // Update
-            db.set_node_property(id, "name", "Alix".into());
-            db.set_node_property(id, "name", "Gus".into());
+            db.set_node_property(id, "name", "Alix".into()).unwrap();
+            db.set_node_property(id, "name", "Gus".into()).unwrap();
             // Delete
-            db.delete_node(id);
+            db.delete_node(id).unwrap();
 
             let history = db.history(id).unwrap();
             assert_eq!(history.len(), 4); // create + 2 updates + delete
@@ -3522,8 +3526,8 @@ mod tests {
         fn test_edge_lifecycle_history() {
             let db = cdc_db();
 
-            let alix = db.create_node(&["Person"]);
-            let gus = db.create_node(&["Person"]);
+            let alix = db.create_node(&["Person"]).unwrap();
+            let gus = db.create_node(&["Person"]).unwrap();
             let edge = db.create_edge(alix, gus, "KNOWS");
             db.set_edge_property(edge, "since", 2024i64.into());
             db.delete_edge(edge);
@@ -3539,13 +3543,15 @@ mod tests {
         fn test_create_node_with_props_cdc() {
             let db = cdc_db();
 
-            let id = db.create_node_with_props(
-                &["Person"],
-                vec![
-                    ("name", grafeo_common::types::Value::from("Alix")),
-                    ("age", grafeo_common::types::Value::from(30i64)),
-                ],
-            );
+            let id = db
+                .create_node_with_props(
+                    &["Person"],
+                    vec![
+                        ("name", grafeo_common::types::Value::from("Alix")),
+                        ("age", grafeo_common::types::Value::from(30i64)),
+                    ],
+                )
+                .unwrap();
 
             let history = db.history(id).unwrap();
             assert_eq!(history.len(), 1);
@@ -3559,9 +3565,9 @@ mod tests {
         fn test_changes_between() {
             let db = cdc_db();
 
-            let id1 = db.create_node(&["A"]);
-            let _id2 = db.create_node(&["B"]);
-            db.set_node_property(id1, "x", 1i64.into());
+            let id1 = db.create_node(&["A"]).unwrap();
+            let _id2 = db.create_node(&["B"]).unwrap();
+            db.set_node_property(id1, "x", 1i64.into()).unwrap();
 
             // All events should be at the same epoch (in-memory, epoch doesn't advance without tx)
             let changes = db
@@ -3578,8 +3584,8 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             assert!(!db.is_cdc_enabled());
 
-            let id = db.create_node(&["Person"]);
-            db.set_node_property(id, "name", "Alix".into());
+            let id = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(id, "name", "Alix".into()).unwrap();
 
             let history = db.history(id).unwrap();
             assert!(history.is_empty(), "CDC off by default: no events recorded");
@@ -3631,13 +3637,13 @@ mod tests {
             db.set_cdc_enabled(true);
             assert!(db.is_cdc_enabled());
 
-            let id = db.create_node(&["Person"]);
+            let id = db.create_node(&["Person"]).unwrap();
             let history = db.history(id).unwrap();
             assert_eq!(history.len(), 1, "CDC enabled at runtime records events");
 
             // Disable again
             db.set_cdc_enabled(false);
-            let id2 = db.create_node(&["Person"]);
+            let id2 = db.create_node(&["Person"]).unwrap();
             let history2 = db.history(id2).unwrap();
             assert!(
                 history2.is_empty(),
@@ -3913,7 +3919,7 @@ mod tests {
     #[test]
     fn test_database_gc() {
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
         db.gc();
         // Verify no panic, node still accessible
         assert_eq!(db.node_count(), 1);
@@ -4025,7 +4031,7 @@ mod tests {
     #[test]
     fn test_graph_store_returns_lpg_by_default() {
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
         let store = db.graph_store();
         assert_eq!(store.node_count(), 1);
     }
@@ -4080,7 +4086,7 @@ mod tests {
     #[allow(deprecated)]
     fn test_session_read_only() {
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
 
         let session = db.session_read_only();
         // Read queries should work
@@ -4098,7 +4104,7 @@ mod tests {
     #[test]
     fn test_close_in_memory_database() {
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
         assert!(db.close().is_ok());
         // Second close should also be fine (idempotent)
         assert!(db.close().is_ok());

@@ -12,22 +12,29 @@ use grafeo_engine::GrafeoDB;
 /// Seeds a small Person/KNOWS graph. Test data names follow the repo
 /// convention (Alix, Gus, Tarantino characters) from CODE_STYLE.md.
 fn seed_people(db: &GrafeoDB) {
-    let alix = db.create_node(&["Person"]);
-    let gus = db.create_node(&["Person"]);
-    let vincent = db.create_node(&["Person"]);
-    let jules = db.create_node(&["Person"]);
-    let mia = db.create_node(&["Person"]);
+    let alix = db.create_node(&["Person"]).unwrap();
+    let gus = db.create_node(&["Person"]).unwrap();
+    let vincent = db.create_node(&["Person"]).unwrap();
+    let jules = db.create_node(&["Person"]).unwrap();
+    let mia = db.create_node(&["Person"]).unwrap();
 
-    db.set_node_property(alix, "name", Value::String("Alix".into()));
-    db.set_node_property(alix, "age", Value::Int64(32));
-    db.set_node_property(gus, "name", Value::String("Gus".into()));
-    db.set_node_property(gus, "age", Value::Int64(28));
-    db.set_node_property(vincent, "name", Value::String("Vincent".into()));
-    db.set_node_property(vincent, "age", Value::Int64(45));
-    db.set_node_property(jules, "name", Value::String("Jules".into()));
-    db.set_node_property(jules, "age", Value::Int64(40));
-    db.set_node_property(mia, "name", Value::String("Mia".into()));
-    db.set_node_property(mia, "age", Value::Int64(24));
+    db.set_node_property(alix, "name", Value::String("Alix".into()))
+        .unwrap();
+    db.set_node_property(alix, "age", Value::Int64(32)).unwrap();
+    db.set_node_property(gus, "name", Value::String("Gus".into()))
+        .unwrap();
+    db.set_node_property(gus, "age", Value::Int64(28)).unwrap();
+    db.set_node_property(vincent, "name", Value::String("Vincent".into()))
+        .unwrap();
+    db.set_node_property(vincent, "age", Value::Int64(45))
+        .unwrap();
+    db.set_node_property(jules, "name", Value::String("Jules".into()))
+        .unwrap();
+    db.set_node_property(jules, "age", Value::Int64(40))
+        .unwrap();
+    db.set_node_property(mia, "name", Value::String("Mia".into()))
+        .unwrap();
+    db.set_node_property(mia, "age", Value::Int64(24)).unwrap();
 
     db.create_edge(alix, gus, "KNOWS");
     db.create_edge(vincent, jules, "KNOWS");

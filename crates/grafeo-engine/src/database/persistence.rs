@@ -1277,10 +1277,10 @@ mod tests {
     #[test]
     fn test_to_memory_copies_edges_and_properties() {
         let db = GrafeoDB::new_in_memory();
-        let a = db.create_node(&["Person"]);
-        db.set_node_property(a, "name", "Alix".into());
-        let b = db.create_node(&["Person"]);
-        db.set_node_property(b, "name", "Gus".into());
+        let a = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(a, "name", "Alix".into()).unwrap();
+        let b = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(b, "name", "Gus".into()).unwrap();
         let edge = db.create_edge(a, b, "KNOWS");
         db.set_edge_property(edge, "since", Value::Int64(2020));
 
@@ -1318,10 +1318,10 @@ mod tests {
     #[test]
     fn test_iter_nodes_returns_all() {
         let db = GrafeoDB::new_in_memory();
-        let id1 = db.create_node(&["Person"]);
-        db.set_node_property(id1, "name", "Alix".into());
-        let id2 = db.create_node(&["Animal"]);
-        db.set_node_property(id2, "name", "Fido".into());
+        let id1 = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(id1, "name", "Alix".into()).unwrap();
+        let id2 = db.create_node(&["Animal"]).unwrap();
+        db.set_node_property(id2, "name", "Fido".into()).unwrap();
 
         let nodes: Vec<_> = db.iter_nodes().collect();
         assert_eq!(nodes.len(), 2);
@@ -1344,9 +1344,9 @@ mod tests {
     #[test]
     fn test_iter_edges_returns_all() {
         let db = GrafeoDB::new_in_memory();
-        let a = db.create_node(&["A"]);
-        let b = db.create_node(&["B"]);
-        let c = db.create_node(&["C"]);
+        let a = db.create_node(&["A"]).unwrap();
+        let b = db.create_node(&["B"]).unwrap();
+        let c = db.create_node(&["C"]).unwrap();
         db.create_edge(a, b, "R1");
         db.create_edge(b, c, "R2");
 
@@ -1546,18 +1546,20 @@ mod tests {
 
         let db = GrafeoDB::new_in_memory();
 
-        let n1 = db.create_node(&["Doc"]);
+        let n1 = db.create_node(&["Doc"]).unwrap();
         db.set_node_property(
             n1,
             "embedding",
             Value::Vector(Arc::from([1.0_f32, 0.0, 0.0])),
-        );
-        let n2 = db.create_node(&["Doc"]);
+        )
+        .unwrap();
+        let n2 = db.create_node(&["Doc"]).unwrap();
         db.set_node_property(
             n2,
             "embedding",
             Value::Vector(Arc::from([0.0_f32, 1.0, 0.0])),
-        );
+        )
+        .unwrap();
 
         db.create_vector_index(
             "Doc",
@@ -1587,10 +1589,12 @@ mod tests {
     fn test_snapshot_roundtrip_text_index() {
         let db = GrafeoDB::new_in_memory();
 
-        let n1 = db.create_node(&["Article"]);
-        db.set_node_property(n1, "body", Value::String("rust graph database".into()));
-        let n2 = db.create_node(&["Article"]);
-        db.set_node_property(n2, "body", Value::String("python web framework".into()));
+        let n1 = db.create_node(&["Article"]).unwrap();
+        db.set_node_property(n1, "body", Value::String("rust graph database".into()))
+            .unwrap();
+        let n2 = db.create_node(&["Article"]).unwrap();
+        db.set_node_property(n2, "body", Value::String("python web framework".into()))
+            .unwrap();
 
         db.create_text_index("Article", "body").unwrap();
 

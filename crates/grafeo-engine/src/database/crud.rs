@@ -1,6 +1,8 @@
 //! Node and edge CRUD operations for GrafeoDB.
 
+#[cfg(feature = "wal")]
 use grafeo_common::grafeo_warn;
+use grafeo_common::utils::error::Result;
 #[cfg(feature = "wal")]
 use grafeo_storage::wal::WalRecord;
 
@@ -21,17 +23,15 @@ impl super::GrafeoDB {
     /// let alix = db.create_node(&["Person"]);
     /// let company = db.create_node(&["Company", "Startup"]);
     /// ```
-    pub fn create_node(&self, labels: &[&str]) -> grafeo_common::types::NodeId {
+    pub fn create_node(&self, labels: &[&str]) -> Result<grafeo_common::types::NodeId> {
         let id = self.lpg_store().create_node(labels);
 
         // Log to WAL if enabled
         #[cfg(feature = "wal")]
-        if let Err(e) = self.log_wal(&WalRecord::CreateNode {
+        self.log_wal(&WalRecord::CreateNode {
             id,
             labels: labels.iter().map(|s| (*s).to_string()).collect(),
-        }) {
-            grafeo_warn!("Failed to log CreateNode to WAL: {}", e);
-        }
+        })?;
 
         #[cfg(feature = "cdc")]
         if self.cdc_active() {
@@ -43,7 +43,7 @@ impl super::GrafeoDB {
             );
         }
 
-        id
+        Ok(id)
     }
 
     /// Creates a new node with labels and properties.
@@ -58,7 +58,7 @@ impl super::GrafeoDB {
                 impl Into<grafeo_common::types::Value>,
             ),
         >,
-    ) -> grafeo_common::types::NodeId {
+    ) -> Result<grafeo_common::types::NodeId> {
         // Collect properties first so we can log them to WAL
         let props: Vec<(
             grafeo_common::types::PropertyKey,
@@ -90,22 +90,18 @@ impl super::GrafeoDB {
         // Log node creation to WAL
         #[cfg(feature = "wal")]
         {
-            if let Err(e) = self.log_wal(&WalRecord::CreateNode {
+            self.log_wal(&WalRecord::CreateNode {
                 id,
                 labels: labels.iter().map(|s| (*s).to_string()).collect(),
-            }) {
-                grafeo_warn!("Failed to log CreateNode to WAL: {}", e);
-            }
+            })?;
 
             // Log each property to WAL for full durability
             for (key, value) in props {
-                if let Err(e) = self.log_wal(&WalRecord::SetNodeProperty {
+                self.log_wal(&WalRecord::SetNodeProperty {
                     id,
                     key: key.to_string(),
                     value,
-                }) {
-                    grafeo_warn!("Failed to log SetNodeProperty to WAL: {}", e);
-                }
+                })?;
             }
         }
 
@@ -139,7 +135,7 @@ impl super::GrafeoDB {
             }
         }
 
-        id
+        Ok(id)
     }
 
     /// Gets a node by ID.
@@ -262,7 +258,7 @@ impl super::GrafeoDB {
     /// Deletes a node and all its edges.
     ///
     /// If WAL is enabled, the operation is logged for durability.
-    pub fn delete_node(&self, id: grafeo_common::types::NodeId) -> bool {
+    pub fn delete_node(&self, id: grafeo_common::types::NodeId) -> Result<bool> {
         // Capture properties for CDC before deletion
         #[cfg(feature = "cdc")]
         let cdc_props = if self.cdc_active() {
@@ -318,7 +314,18 @@ impl super::GrafeoDB {
             })
             .unwrap_or_default();
 
-        let result = self.lpg_store().delete_node(id);
+        let exists = self.lpg_store().get_node(id).is_some();
+
+        #[cfg(feature = "wal")]
+        if exists {
+            self.log_wal(&WalRecord::DeleteNode { id })?;
+        }
+
+        let result = if exists {
+            self.lpg_store().delete_node(id)
+        } else {
+            false
+        };
 
         // Remove from vector indexes after successful deletion
         #[cfg(feature = "vector-index")]
@@ -336,11 +343,6 @@ impl super::GrafeoDB {
             }
         }
 
-        #[cfg(feature = "wal")]
-        if result && let Err(e) = self.log_wal(&WalRecord::DeleteNode { id }) {
-            grafeo_warn!("Failed to log DeleteNode to WAL: {}", e);
-        }
-
         #[cfg(feature = "cdc")]
         if result && self.cdc_active() {
             self.cdc_log.record_delete(
@@ -350,7 +352,7 @@ impl super::GrafeoDB {
             );
         }
 
-        result
+        Ok(result)
     }
 
     /// Sets a property on a node.
@@ -361,7 +363,7 @@ impl super::GrafeoDB {
         id: grafeo_common::types::NodeId,
         key: &str,
         value: grafeo_common::types::Value,
-    ) {
+    ) -> Result<()> {
         // Extract vector data before the value is moved into the store
         #[cfg(feature = "vector-index")]
         let vector_data = match &value {
@@ -371,13 +373,11 @@ impl super::GrafeoDB {
 
         // Log to WAL first
         #[cfg(feature = "wal")]
-        if let Err(e) = self.log_wal(&WalRecord::SetNodeProperty {
+        self.log_wal(&WalRecord::SetNodeProperty {
             id,
             key: key.to_string(),
             value: value.clone(),
-        }) {
-            grafeo_warn!("Failed to log SetNodeProperty to WAL: {}", e);
-        }
+        })?;
 
         // Capture old value for CDC before the store write
         #[cfg(feature = "cdc")]
@@ -446,6 +446,8 @@ impl super::GrafeoDB {
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Adds a label to an existing node.

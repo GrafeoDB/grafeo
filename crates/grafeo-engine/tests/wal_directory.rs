@@ -22,10 +22,12 @@ mod wal_directory {
         {
             let config = Config::persistent(&path).with_storage_format(StorageFormat::WalDirectory);
             let db = GrafeoDB::with_config(config).expect("open for write");
-            let a = db.create_node(&["Person"]);
-            db.set_node_property(a, "name", Value::String("Alix".into()));
-            let b = db.create_node(&["Person"]);
-            db.set_node_property(b, "name", Value::String("Gus".into()));
+            let a = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(a, "name", Value::String("Alix".into()))
+                .unwrap();
+            let b = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(b, "name", Value::String("Gus".into()))
+                .unwrap();
             db.create_edge(a, b, "KNOWS");
             db.close().expect("close");
         }
@@ -52,10 +54,12 @@ mod wal_directory {
             let db = GrafeoDB::with_config(config).expect("open for write");
 
             // Write nodes BEFORE rotation (these go into wal_0.log)
-            let a = db.create_node(&["Person"]);
-            db.set_node_property(a, "name", Value::String("Alix".into()));
-            let b = db.create_node(&["Person"]);
-            db.set_node_property(b, "name", Value::String("Gus".into()));
+            let a = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(a, "name", Value::String("Alix".into()))
+                .unwrap();
+            let b = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(b, "name", Value::String("Gus".into()))
+                .unwrap();
             db.create_edge(a, b, "KNOWS");
 
             // Force WAL rotation so current_sequence advances
@@ -63,8 +67,9 @@ mod wal_directory {
             wal.rotate().expect("rotate WAL");
 
             // Write more nodes AFTER rotation (these go into wal_1.log)
-            let c = db.create_node(&["Person"]);
-            db.set_node_property(c, "name", Value::String("Vincent".into()));
+            let c = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(c, "name", Value::String("Vincent".into()))
+                .unwrap();
 
             db.close().expect("close");
         }
@@ -118,7 +123,8 @@ mod wal_directory {
                 db.create_node_with_props(
                     &["Batch"],
                     [("cycle", Value::Int64(1)), ("idx", Value::Int64(i))],
-                );
+                )
+                .unwrap();
             }
             db.close().expect("close");
         }
@@ -131,14 +137,16 @@ mod wal_directory {
                 db.create_node_with_props(
                     &["Batch"],
                     [("cycle", Value::Int64(2)), ("idx", Value::Int64(i))],
-                );
+                )
+                .unwrap();
             }
             db.wal().expect("wal").rotate().expect("rotate");
             for i in 0..3 {
                 db.create_node_with_props(
                     &["Batch"],
                     [("cycle", Value::Int64(2)), ("idx", Value::Int64(10 + i))],
-                );
+                )
+                .unwrap();
             }
             db.close().expect("close");
         }
@@ -176,8 +184,9 @@ mod wal_directory {
         {
             let config = Config::persistent(&path).with_storage_format(StorageFormat::WalDirectory);
             let db = GrafeoDB::with_config(config).expect("open");
-            let n = db.create_node(&["Person"]);
-            db.set_node_property(n, "name", Value::String("Alix".into()));
+            let n = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(n, "name", Value::String("Alix".into()))
+                .unwrap();
             // intentionally no db.close(), Drop handles it
         }
 
@@ -212,9 +221,10 @@ mod wal_directory {
 
         // First batch: create nodes with properties
         for i in 0..10 {
-            let id = db.create_node(&["Person"]);
-            db.set_node_property(id, "name", Value::from(format!("Node{i}")));
-            db.set_node_property(id, "index", Value::Int64(i));
+            let id = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(id, "name", Value::from(format!("Node{i}")))
+                .unwrap();
+            db.set_node_property(id, "index", Value::Int64(i)).unwrap();
         }
 
         // Sleep long enough to trigger Batch mode sync threshold (default 100ms)
@@ -223,9 +233,10 @@ mod wal_directory {
         // Second batch: this would deadlock before the fix because the first
         // write_frame triggers sync_all() while holding active_log.
         for i in 10..20 {
-            let id = db.create_node(&["Person"]);
-            db.set_node_property(id, "name", Value::from(format!("Node{i}")));
-            db.set_node_property(id, "index", Value::Int64(i));
+            let id = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(id, "name", Value::from(format!("Node{i}")))
+                .unwrap();
+            db.set_node_property(id, "index", Value::Int64(i)).unwrap();
         }
 
         assert_eq!(db.node_count(), 20);
@@ -248,7 +259,7 @@ mod wal_directory {
         {
             let config = Config::persistent(&path).with_storage_format(StorageFormat::WalDirectory);
             let db = GrafeoDB::with_config(config).expect("open");
-            db.create_node(&["Test"]);
+            db.create_node(&["Test"]).unwrap();
             db.close().expect("close");
         }
 
@@ -332,16 +343,20 @@ mod wal_directory {
             let config = Config::persistent(&path).with_storage_format(StorageFormat::WalDirectory);
             let db = GrafeoDB::with_config(config).expect("open");
 
-            let a = db.create_node(&["Person"]);
-            db.set_node_property(a, "name", Value::String("Alix".into()));
-            db.set_node_property(a, "temp", Value::String("remove_me".into()));
+            let a = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(a, "name", Value::String("Alix".into()))
+                .unwrap();
+            db.set_node_property(a, "temp", Value::String("remove_me".into()))
+                .unwrap();
             db.remove_node_property(a, "temp");
 
-            let b = db.create_node(&["Person"]);
-            db.set_node_property(b, "name", Value::String("Gus".into()));
+            let b = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(b, "name", Value::String("Gus".into()))
+                .unwrap();
 
-            let c = db.create_node(&["Person"]);
-            db.set_node_property(c, "name", Value::String("Vincent".into()));
+            let c = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(c, "name", Value::String("Vincent".into()))
+                .unwrap();
 
             let e1 = db.create_edge(a, b, "KNOWS");
             db.set_edge_property(e1, "weight", Value::Float64(0.8));
@@ -350,7 +365,7 @@ mod wal_directory {
 
             // Delete the edge first, then the node (CRUD API does not detach)
             db.delete_edge(e2);
-            db.delete_node(c);
+            db.delete_node(c).unwrap();
 
             db.close().expect("close");
         }

@@ -45,9 +45,11 @@ fn vector_graph(metric: &str, with_index: bool) -> GrafeoDB {
         ("near", vec![0.9f32, 0.1, 0.0]),
         ("far", vec![0.0f32, 1.0, 0.0]),
     ] {
-        let n = db.create_node(&["Doc"]);
-        db.set_node_property(n, "title", Value::String(title.into()));
-        db.set_node_property(n, "embedding", Value::Vector(vec.into()));
+        let n = db.create_node(&["Doc"]).unwrap();
+        db.set_node_property(n, "title", Value::String(title.into()))
+            .unwrap();
+        db.set_node_property(n, "embedding", Value::Vector(vec.into()))
+            .unwrap();
     }
     if with_index {
         db.create_vector_index("Doc", "embedding", Some(3), Some(metric), None, None, None)
@@ -217,11 +219,14 @@ fn test_topk_negative_no_index() {
 #[test]
 fn test_topk_negative_wrong_variable() {
     let db = GrafeoDB::new_in_memory();
-    let d = db.create_node(&["Doc"]);
-    db.set_node_property(d, "title", Value::String("doc1".into()));
-    db.set_node_property(d, "embedding", Value::Vector(vec![0.9f32, 0.1, 0.0].into()));
-    let o = db.create_node(&["Other"]);
-    db.set_node_property(o, "embedding", Value::Vector(vec![0.5f32, 0.5, 0.0].into()));
+    let d = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(d, "title", Value::String("doc1".into()))
+        .unwrap();
+    db.set_node_property(d, "embedding", Value::Vector(vec![0.9f32, 0.1, 0.0].into()))
+        .unwrap();
+    let o = db.create_node(&["Other"]).unwrap();
+    db.set_node_property(o, "embedding", Value::Vector(vec![0.5f32, 0.5, 0.0].into()))
+        .unwrap();
     db.create_vector_index(
         "Doc",
         "embedding",
@@ -380,9 +385,11 @@ fn test_plan_text_scan_with_threshold() {
         ("Graph Databases", "property graphs and cypher queries"),
         ("ML Systems", "attention mechanisms in neural networks"),
     ] {
-        let n = db.create_node(&["Article"]);
-        db.set_node_property(n, "title", Value::String(title.into()));
-        db.set_node_property(n, "body", Value::String(body.into()));
+        let n = db.create_node(&["Article"]).unwrap();
+        db.set_node_property(n, "title", Value::String(title.into()))
+            .unwrap();
+        db.set_node_property(n, "body", Value::String(body.into()))
+            .unwrap();
     }
     db.create_text_index("Article", "body").unwrap();
 
@@ -445,9 +452,11 @@ fn test_plan_vector_scan_max_distance() {
 #[test]
 fn test_resolve_vector_literal_from_numeric_list() {
     let db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["Doc"]);
-    db.set_node_property(a, "title", Value::String("target".into()));
-    db.set_node_property(a, "embedding", Value::Vector(vec![1.0f32, 2.0, 3.0].into()));
+    let a = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(a, "title", Value::String("target".into()))
+        .unwrap();
+    db.set_node_property(a, "embedding", Value::Vector(vec![1.0f32, 2.0, 3.0].into()))
+        .unwrap();
     db.create_vector_index(
         "Doc",
         "embedding",
@@ -484,9 +493,11 @@ fn test_resolve_vector_literal_from_numeric_list() {
 #[test]
 fn test_resolve_vector_literal_non_literal_falls_through() {
     let db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["Doc"]);
-    db.set_node_property(a, "title", Value::String("target".into()));
-    db.set_node_property(a, "embedding", Value::Vector(vec![1.0f32, 2.0, 3.0].into()));
+    let a = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(a, "title", Value::String("target".into()))
+        .unwrap();
+    db.set_node_property(a, "embedding", Value::Vector(vec![1.0f32, 2.0, 3.0].into()))
+        .unwrap();
     db.create_vector_index(
         "Doc",
         "embedding",
@@ -561,9 +572,11 @@ fn test_plan_horizontal_aggregate_edge() {
 #[test]
 fn test_score_reuse_isolates_different_query_vectors() {
     let db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["Doc"]);
-    db.set_node_property(a, "title", Value::String("x-aligned".into()));
-    db.set_node_property(a, "embedding", Value::Vector(vec![1.0f32, 0.0, 0.0].into()));
+    let a = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(a, "title", Value::String("x-aligned".into()))
+        .unwrap();
+    db.set_node_property(a, "embedding", Value::Vector(vec![1.0f32, 0.0, 0.0].into()))
+        .unwrap();
     db.create_vector_index(
         "Doc",
         "embedding",
@@ -614,16 +627,20 @@ fn test_vector_scan_metric_mismatch_uses_brute_force() {
     let db = GrafeoDB::new_in_memory();
     // A is close to query in Euclidean space (distance ~1.41) but far in cosine.
     // B is far in Euclidean space (distance ~99) but cosine-identical to query.
-    let a = db.create_node(&["Doc"]);
-    db.set_node_property(a, "title", Value::String("near".into()));
-    db.set_node_property(a, "embedding", Value::Vector(vec![1.0f32, 0.0, 0.0].into()));
-    let b = db.create_node(&["Doc"]);
-    db.set_node_property(b, "title", Value::String("far".into()));
+    let a = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(a, "title", Value::String("near".into()))
+        .unwrap();
+    db.set_node_property(a, "embedding", Value::Vector(vec![1.0f32, 0.0, 0.0].into()))
+        .unwrap();
+    let b = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(b, "title", Value::String("far".into()))
+        .unwrap();
     db.set_node_property(
         b,
         "embedding",
         Value::Vector(vec![0.0f32, 100.0, 0.0].into()),
-    );
+    )
+    .unwrap();
     db.create_vector_index(
         "Doc",
         "embedding",

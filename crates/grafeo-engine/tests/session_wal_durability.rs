@@ -74,8 +74,8 @@ mod session_wal_durability {
 
             // Anchor nodes via the WAL-correct DB-direct path so we know the
             // nodes themselves survive; the test isolates the edge bug.
-            let alix = db.create_node(&["Person"]);
-            let gus = db.create_node(&["Person"]);
+            let alix = db.create_node(&["Person"]).unwrap();
+            let gus = db.create_node(&["Person"]).unwrap();
 
             let mut session = db.session();
             session.begin_transaction().expect("begin");
@@ -113,7 +113,7 @@ mod session_wal_durability {
 
             // Create node via DB-direct path so the node itself is durable;
             // the test isolates the property bug.
-            alix = db.create_node(&["Person"]);
+            alix = db.create_node(&["Person"]).expect("create anchor node");
 
             let mut session = db.session();
             session.begin_transaction().expect("begin");
@@ -147,8 +147,8 @@ mod session_wal_durability {
             let db = GrafeoDB::with_config(config).expect("open for write");
 
             // Anchor edge via DB-direct path; isolate the property bug.
-            let alix = db.create_node(&["Person"]);
-            let gus = db.create_node(&["Person"]);
+            let alix = db.create_node(&["Person"]).unwrap();
+            let gus = db.create_node(&["Person"]).unwrap();
             edge_id = db.create_edge(alix, gus, "KNOWS");
 
             let mut session = db.session();
@@ -230,8 +230,8 @@ mod session_wal_durability {
         {
             let config = Config::persistent(&path).with_storage_format(StorageFormat::WalDirectory);
             let db = GrafeoDB::with_config(config).expect("open for write");
-            let alix = db.create_node(&["Person"]);
-            let gus = db.create_node(&["Person"]);
+            let alix = db.create_node(&["Person"]).unwrap();
+            let gus = db.create_node(&["Person"]).unwrap();
 
             let mut session = db.session();
             session.begin_transaction().expect("begin");
@@ -258,8 +258,8 @@ mod session_wal_durability {
         {
             let config = Config::persistent(&path).with_storage_format(StorageFormat::WalDirectory);
             let db = GrafeoDB::with_config(config).expect("open for write");
-            let alix = db.create_node(&["Person"]);
-            let _gus = db.create_node(&["Person"]);
+            let alix = db.create_node(&["Person"]).unwrap();
+            let _gus = db.create_node(&["Person"]).unwrap();
 
             let mut session = db.session();
             session.begin_transaction().expect("begin");
@@ -287,8 +287,8 @@ mod session_wal_durability {
         {
             let config = Config::persistent(&path).with_storage_format(StorageFormat::WalDirectory);
             let db = GrafeoDB::with_config(config).expect("open for write");
-            let alix = db.create_node(&["Person"]);
-            let gus = db.create_node(&["Person"]);
+            let alix = db.create_node(&["Person"]).unwrap();
+            let gus = db.create_node(&["Person"]).unwrap();
             let _kept = db.create_edge(alix, gus, "KNOWS");
             let to_delete = db.create_edge(alix, gus, "ALSO_KNOWS");
 

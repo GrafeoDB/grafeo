@@ -91,12 +91,13 @@ fn graph_spec_strategy() -> impl Strategy<Value = GraphSpec> {
 fn apply_spec(spec: &GraphSpec, db: &GrafeoDB) {
     let mut ids: Vec<NodeId> = Vec::with_capacity(spec.nodes.len());
     for n in &spec.nodes {
-        let id = db.create_node(&[n.label]);
+        let id = db.create_node(&[n.label]).unwrap();
         if let Some(num) = n.num {
-            db.set_node_property(id, "num", Value::Int64(num));
+            db.set_node_property(id, "num", Value::Int64(num)).unwrap();
         }
         if let Some(s) = &n.name {
-            db.set_node_property(id, "name", Value::String(s.clone().into()));
+            db.set_node_property(id, "name", Value::String(s.clone().into()))
+                .unwrap();
         }
         ids.push(id);
     }

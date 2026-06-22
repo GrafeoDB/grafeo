@@ -16,7 +16,7 @@ jobs:
     outputs:
       release_id: ${{ steps.create_release.outputs.id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Create Release
         id: create_release
@@ -43,7 +43,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -105,7 +105,7 @@ jobs:
             rid: osx-arm64
             native_lib: libgrafeo_c.dylib
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -204,7 +204,7 @@ jobs:
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -255,7 +255,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: create-release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Create Go module tag
         run: |
@@ -298,7 +298,7 @@ jobs:
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -351,7 +351,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [create-release, build-node-native]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -406,7 +406,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: create-release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -444,7 +444,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: create-release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -508,7 +508,7 @@ jobs:
             cpu: x64
             binary: grafeo.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -557,7 +557,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: publish-cli-npm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -579,7 +579,7 @@ jobs:
     needs: build-binaries
     environment: nuget
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
@@ -636,7 +636,7 @@ jobs:
             wheel_platform: win_amd64
             binary: grafeo.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -674,7 +674,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -709,7 +709,7 @@ jobs:
     needs: [publish-crates, publish-npm, publish-wasm, publish-nuget, publish-cli]
     if: always() && needs.publish-crates.result != 'cancelled'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Extract changelog for this version
         id: changelog

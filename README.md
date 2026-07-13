@@ -439,6 +439,7 @@ grafeo info ./mydb --format table # Human-readable table (default)
 |---------|-------------|
 | [**grafeo-server**](https://github.com/GrafeoDB/grafeo-server) | HTTP server & web UI: REST API, transactions, single binary (~40MB Docker image) |
 | [**grafeo-web**](https://github.com/GrafeoDB/grafeo-web) | Browser-based Grafeo via WebAssembly with IndexedDB persistence |
+| [**grafeo-loro**](https://github.com/OndeHQ/grafeo-loro) | Local-first graph database with invisible consensus: Loro CRDT sync + Grafeo execution in one process, offline-first with mathematically impossible conflicts |
 | [**gwp**](https://github.com/GrafeoDB/gql-wire-protocol) | GQL Wire Protocol: gRPC wire protocol for GQL (ISO/IEC 39075) with client bindings in 5 languages |
 | [**boltr**](https://github.com/GrafeoDB/boltr) | Bolt Wire Protocol: pure Rust Bolt v5.x implementation for Neo4j driver compatibility |
 | [**grafeo-langchain**](https://github.com/GrafeoDB/grafeo-langchain) | LangChain integration: graph store, vector store, Graph RAG retrieval |

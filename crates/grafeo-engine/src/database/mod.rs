@@ -1562,16 +1562,17 @@ impl GrafeoDB {
     /// Rehydrate quantized vector index payloads after open.
     ///
     /// Catalog restore creates empty `VectorIndexKind` shells; VectorStore
-    /// applies topology only. Quantized indexes also need full-precision
-    /// vectors + codes, which live in-process (not in GVST). Scan embeddings
-    /// via [`graph_store()`] so CompactStore base + overlay are both visible.
+    /// applies topology only. Quantized indexes need in-process **codes** (not
+    /// a second full-f32 copy of LPG embeddings). Two-pass scan:
+    /// 1) train quantizer parameters without retaining every vector
+    /// 2) write codes only, rescoring uses [`PropertyVectorAccessor`] at search
     ///
     /// Sequencing (required): Catalog shells → LPG load → VectorStore topology
     /// → WAL → wire_layered_after_load → **this step** → spill restore.
     #[cfg(all(feature = "lpg", feature = "vector-index"))]
     fn rehydrate_quantized_vector_indexes(&self) -> Result<()> {
         use grafeo_common::types::{PropertyKey, Value};
-        use grafeo_core::index::vector::QuantizationType;
+        use grafeo_core::index::vector::{BinaryQuantizer, QuantizationType};
 
         let entries = self.lpg_store().vector_index_entries();
         if entries.is_empty() {
@@ -1587,27 +1588,123 @@ impl GrafeoDB {
                 continue;
             };
             let prop_key = PropertyKey::new(property);
-            let mut vectors = Vec::new();
-            for node_id in graph.nodes_by_label(label) {
-                if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key) {
-                    vectors.push((node_id, v.to_vec()));
+            let dimensions = q_idx.config().dimensions;
+            if dimensions == 0 {
+                return Err(grafeo_common::utils::error::Error::Serialization(format!(
+                    "Cannot rehydrate vector index {key}: catalog dimensions are zero"
+                )));
+            }
+
+            match q_idx.quantization_type() {
+                QuantizationType::None => {
+                    // Exact quantized-shell path: keep legacy full-vector rehydrate.
+                    let mut vectors = Vec::new();
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key)
+                        {
+                            if v.len() != dimensions {
+                                return Err(grafeo_common::utils::error::Error::Serialization(
+                                    format!(
+                                        "Cannot rehydrate vector index {key}: stored vectors do not match catalog dimensions {dimensions}"
+                                    ),
+                                ));
+                            }
+                            vectors.push((node_id, v.to_vec()));
+                        }
+                    }
+                    q_idx.rehydrate_payloads_from_vectors(vectors);
+                }
+                QuantizationType::Scalar => {
+                    // Topology is already restored from VectorStore. Today's
+                    // scalar search walk/rescore uses the LPG property accessor
+                    // (full precision), not the u8 code map — see
+                    // `search_scalar_quantized`. Materializing 1 byte/dim codes
+                    // for every embedding is pure RSS overhead on reopen and
+                    // prevented the Layer 4 "scalar < plain" bar.
+                    //
+                    // Keep mode sticky via Catalog; leave codes empty so search
+                    // falls through to accessor-backed exact distances (same
+                    // memory model as plain HNSW). When HNSW gains quantized
+                    // distance scoring, rehydrate codes here again.
+                    let mut count = 0usize;
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key)
+                        {
+                            if v.len() != dimensions {
+                                return Err(grafeo_common::utils::error::Error::Serialization(
+                                    format!(
+                                        "Cannot rehydrate vector index {key}: stored vectors do not match catalog dimensions {dimensions}"
+                                    ),
+                                ));
+                            }
+                            count += 1;
+                        }
+                    }
+                    let _ = count; // validates dim match; empty → probe ready=false
+                    q_idx.release_quantized_payloads();
+                }
+                QuantizationType::Binary => {
+                    let mut codes = Vec::new();
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key)
+                        {
+                            if v.len() != dimensions {
+                                return Err(grafeo_common::utils::error::Error::Serialization(
+                                    format!(
+                                        "Cannot rehydrate vector index {key}: stored vectors do not match catalog dimensions {dimensions}"
+                                    ),
+                                ));
+                            }
+                            codes.push((node_id, BinaryQuantizer::quantize(v.as_ref())));
+                        }
+                    }
+                    if codes.is_empty() {
+                        continue;
+                    }
+                    q_idx.rehydrate_binary_codes_only(codes);
+                }
+                QuantizationType::Product { num_subvectors } => {
+                    if num_subvectors == 0 || !dimensions.is_multiple_of(num_subvectors) {
+                        return Err(grafeo_common::utils::error::Error::Serialization(format!(
+                            "Cannot rehydrate product vector index {key}: dimensions {dimensions} are not divisible by {num_subvectors} subvectors"
+                        )));
+                    }
+                    // Product training still needs a temporary sample batch; drop after codes.
+                    let mut vectors = Vec::new();
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key)
+                        {
+                            if v.len() != dimensions {
+                                return Err(grafeo_common::utils::error::Error::Serialization(
+                                    format!(
+                                        "Cannot rehydrate vector index {key}: stored vectors do not match catalog dimensions {dimensions}"
+                                    ),
+                                ));
+                            }
+                            vectors.push((node_id, v.to_vec()));
+                        }
+                    }
+                    q_idx.rehydrate_payloads_from_vectors(vectors);
+                }
+                _ => {
+                    // Forward-compatible: unknown quant modes keep legacy path.
+                    let mut vectors = Vec::new();
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key)
+                        {
+                            if v.len() != dimensions {
+                                return Err(grafeo_common::utils::error::Error::Serialization(
+                                    format!(
+                                        "Cannot rehydrate vector index {key}: stored vectors do not match catalog dimensions {dimensions}"
+                                    ),
+                                ));
+                            }
+                            vectors.push((node_id, v.to_vec()));
+                        }
+                    }
+                    q_idx.rehydrate_payloads_from_vectors(vectors);
                 }
             }
-            let dimensions = q_idx.config().dimensions;
-            if dimensions == 0 || vectors.iter().any(|(_, vector)| vector.len() != dimensions) {
-                return Err(grafeo_common::utils::error::Error::Serialization(format!(
-                    "Cannot rehydrate vector index {key}: stored vectors do not match catalog dimensions {dimensions}"
-                )));
-            }
-            if let QuantizationType::Product { num_subvectors } = q_idx.quantization_type()
-                && (num_subvectors == 0 || !dimensions.is_multiple_of(num_subvectors))
-            {
-                return Err(grafeo_common::utils::error::Error::Serialization(format!(
-                    "Cannot rehydrate product vector index {key}: dimensions {dimensions} are not divisible by {num_subvectors} subvectors"
-                )));
-            }
-            // Empty scan leaves mode-correct empty shell (readiness false).
-            q_idx.rehydrate_payloads_from_vectors(vectors);
         }
         Ok(())
     }

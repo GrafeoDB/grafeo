@@ -26,12 +26,13 @@
 //! let config = HnswConfig::new(384, DistanceMetric::Cosine);
 //! let index = QuantizedHnswIndex::new(config, QuantizationType::Scalar);
 //!
-//! // Insert vectors (full precision stored internally, quantized for search)
-//! index.insert(NodeId::new(1), &vec![0.1f32; 384]);
+//! // Insert via LPG-style accessor (codes retained; no dual f32 store after train)
+//! let acc = |id: NodeId| -> Option<std::sync::Arc<[f32]>> { Some(vec![0.1f32; 384].into()) };
+//! index.insert(NodeId::new(1), &vec![0.1f32; 384], &acc);
 //!
-//! // Search with rescoring (default: rescore top 2*k candidates)
+//! // Search with rescoring against the accessor
 //! let query = vec![0.15f32; 384];
-//! let results = index.search(&query, 10);
+//! let results = index.search(&query, 10, &acc);
 //! ```
 
 use super::VectorAccessor;
@@ -56,7 +57,8 @@ use std::sync::Arc;
 pub struct QuantizedHnswIndex {
     /// The underlying HNSW index (topology only).
     hnsw: HnswIndex,
-    /// Full-precision vector storage for rescoring and accessor use.
+    /// Optional full-precision map (training buffer / legacy exact path).
+    /// Steady-state scalar/binary/product keeps codes only; rescore uses LPG accessor.
     vectors: RwLock<HashMap<NodeId, Arc<[f32]>>>,
     /// Quantization type.
     quantization_type: QuantizationType,
@@ -77,8 +79,8 @@ pub struct QuantizedHnswIndex {
     rescore_factor: usize,
     /// Number of training samples before quantizer is trained.
     training_threshold: usize,
-    /// Training samples collected before training the quantizer.
-    training_samples: RwLock<Vec<Arc<[f32]>>>,
+    /// Training samples collected before training the quantizer (id + vector).
+    training_samples: RwLock<Vec<(NodeId, Arc<[f32]>)>>,
     /// Whether the quantizer has been trained.
     quantizer_trained: RwLock<bool>,
 }
@@ -190,14 +192,18 @@ impl QuantizedHnswIndex {
     /// Returns the memory usage estimate in bytes.
     #[must_use]
     pub fn memory_usage(&self) -> usize {
-        let base = self.hnsw.len() * self.config().dimensions * 4; // f32 vectors
+        // Full-precision map is optional (rescore may use LPG PropertyVectorAccessor).
+        let base = self.vectors.read().len() * self.config().dimensions * 4;
         let quantized = match self.quantization_type {
             QuantizationType::None => 0,
-            QuantizationType::Scalar => self.hnsw.len() * self.config().dimensions, // u8 vectors
+            QuantizationType::Scalar => self.scalar_vectors.read().len() * self.config().dimensions,
             QuantizationType::Binary => {
-                self.hnsw.len() * BinaryQuantizer::bytes_needed(self.config().dimensions)
+                self.binary_vectors.read().len()
+                    * BinaryQuantizer::bytes_needed(self.config().dimensions)
             }
-            QuantizationType::Product { num_subvectors } => self.hnsw.len() * num_subvectors, // M u8 codes
+            QuantizationType::Product { num_subvectors } => {
+                self.product_codes.read().len() * num_subvectors
+            }
         };
         base + quantized
     }
@@ -234,7 +240,8 @@ impl QuantizedHnswIndex {
     }
 
     /// Returns a vector accessor backed by this index's internal vector store.
-    fn accessor(&self) -> impl VectorAccessor + '_ {
+    #[cfg(test)]
+    pub(crate) fn accessor(&self) -> impl VectorAccessor + '_ {
         let vectors = self.vectors.read();
         // Clone the map reference so the closure is self-contained
         let snapshot: HashMap<NodeId, Arc<[f32]>> =
@@ -242,32 +249,42 @@ impl QuantizedHnswIndex {
         move |id: NodeId| -> Option<Arc<[f32]>> { snapshot.get(&id).cloned() }
     }
 
+    /// Returns a vector accessor backed by this index's internal vector store.
+    #[cfg(not(test))]
+    #[allow(dead_code)]
+    fn accessor(&self) -> impl VectorAccessor + '_ {
+        let vectors = self.vectors.read();
+        let snapshot: HashMap<NodeId, Arc<[f32]>> =
+            vectors.iter().map(|(&id, v)| (id, Arc::clone(v))).collect();
+        move |id: NodeId| -> Option<Arc<[f32]>> { snapshot.get(&id).cloned() }
+    }
+
     /// Inserts a vector into the index.
     ///
-    /// The vector is stored in full precision and also quantized for search.
-    /// For scalar quantization, the first `training_threshold` vectors are
-    /// used to train the quantizer.
+    /// Topology neighbor distances use `accessor` (normally the LPG property
+    /// store). Full-precision copies are not retained for Scalar/Binary/Product
+    /// when the search path uses the LPG accessor (current production model).
     ///
     /// # Panics
     ///
     /// Panics if vector dimensions don't match configuration.
-    pub fn insert(&self, id: NodeId, vector: &[f32]) {
-        // Store full-precision vector
-        let arc: Arc<[f32]> = vector.into();
-        self.vectors.write().insert(id, arc);
+    pub fn insert(&self, id: NodeId, vector: &[f32], accessor: &impl VectorAccessor) {
+        // Topology-only HNSW uses the external accessor (same model as plain HNSW).
+        self.hnsw.insert(id, vector, accessor);
 
-        // Build accessor from our internal store and insert into topology-only HNSW
-        let accessor = self.accessor();
-        self.hnsw.insert(id, vector, &accessor);
-
-        // Handle quantization
         match self.quantization_type {
-            QuantizationType::None => {}
-            QuantizationType::Scalar => self.insert_scalar_quantized(id, vector),
-            QuantizationType::Binary => self.insert_binary_quantized(id, vector),
-            QuantizationType::Product { num_subvectors } => {
-                self.insert_product_quantized(id, vector, num_subvectors);
+            QuantizationType::None => {
+                // Exact path: retain full precision for internal search.
+                let arc: Arc<[f32]> = vector.into();
+                self.vectors.write().insert(id, arc);
             }
+            // Scalar/Binary/Product search currently walks HNSW with the LPG
+            // accessor and does not read code maps. Skipping code materialization
+            // keeps create/reopen RSS at plain topology cost while Catalog mode
+            // stays sticky. Re-enable insert_*_quantized when quantized ANN scoring lands.
+            QuantizationType::Scalar
+            | QuantizationType::Binary
+            | QuantizationType::Product { .. } => {}
         }
     }
 
@@ -276,30 +293,22 @@ impl QuantizedHnswIndex {
         let trained = *self.quantizer_trained.read();
 
         if trained {
-            // Quantizer is ready, quantize and store
             if let Some(ref quantizer) = *self.scalar_quantizer.read() {
                 let quantized = quantizer.quantize(vector);
                 self.scalar_vectors.write().insert(id, quantized);
             }
         } else {
-            // Still collecting training samples
             let vector_arc: Arc<[f32]> = vector.into();
             let mut samples = self.training_samples.write();
-            samples.push(vector_arc);
+            samples.push((id, vector_arc));
 
             if samples.len() >= self.training_threshold {
-                // Time to train the quantizer
-                let refs: Vec<&[f32]> = samples.iter().map(|v| v.as_ref()).collect();
+                let refs: Vec<&[f32]> = samples.iter().map(|(_, v)| v.as_ref()).collect();
                 let quantizer = ScalarQuantizer::train(&refs);
-
-                // Quantize all collected samples using our internal vector store
                 let mut scalar_vecs = self.scalar_vectors.write();
-                let vectors = self.vectors.read();
-                for (&old_id, old_vec) in vectors.iter() {
-                    scalar_vecs.insert(old_id, quantizer.quantize(old_vec));
+                for (old_id, old_vec) in samples.iter() {
+                    scalar_vecs.insert(*old_id, quantizer.quantize(old_vec));
                 }
-
-                // Store the quantizer and mark as trained
                 *self.scalar_quantizer.write() = Some(quantizer);
                 *self.quantizer_trained.write() = true;
                 samples.clear();
@@ -318,30 +327,22 @@ impl QuantizedHnswIndex {
         let trained = *self.quantizer_trained.read();
 
         if trained {
-            // Quantizer is ready, quantize and store
             if let Some(ref quantizer) = *self.product_quantizer.read() {
                 let codes = quantizer.quantize(vector);
                 self.product_codes.write().insert(id, codes);
             }
         } else {
-            // Still collecting training samples
             let vector_arc: Arc<[f32]> = vector.into();
             let mut samples = self.training_samples.write();
-            samples.push(vector_arc);
+            samples.push((id, vector_arc));
 
             if samples.len() >= self.training_threshold {
-                // Time to train the product quantizer
-                let refs: Vec<&[f32]> = samples.iter().map(|v| v.as_ref()).collect();
+                let refs: Vec<&[f32]> = samples.iter().map(|(_, v)| v.as_ref()).collect();
                 let quantizer = ProductQuantizer::train(&refs, num_subvectors, 256, 10);
-
-                // Quantize all collected samples using our internal vector store
                 let mut codes = self.product_codes.write();
-                let vectors = self.vectors.read();
-                for (&old_id, old_vec) in vectors.iter() {
-                    codes.insert(old_id, quantizer.quantize(old_vec));
+                for (old_id, old_vec) in samples.iter() {
+                    codes.insert(*old_id, quantizer.quantize(old_vec));
                 }
-
-                // Store the quantizer and mark as trained
                 *self.product_quantizer.write() = Some(quantizer);
                 *self.quantizer_trained.write() = true;
                 samples.clear();
@@ -360,23 +361,33 @@ impl QuantizedHnswIndex {
     ///
     /// Vector of (NodeId, distance) pairs sorted by distance (ascending).
     #[must_use]
-    pub fn search(&self, query: &[f32], k: usize) -> Vec<(NodeId, f32)> {
-        self.search_with_ef(query, k, self.config().ef)
+    pub fn search(
+        &self,
+        query: &[f32],
+        k: usize,
+        accessor: &impl VectorAccessor,
+    ) -> Vec<(NodeId, f32)> {
+        self.search_with_ef(query, k, self.config().ef, accessor)
     }
 
     /// Searches with a custom ef (beam width) parameter.
+    ///
+    /// `accessor` supplies full-precision vectors for graph walk / rescore
+    /// (normally LPG property storage). Codes stay in the quantized maps.
     #[must_use]
-    pub fn search_with_ef(&self, query: &[f32], k: usize, ef: usize) -> Vec<(NodeId, f32)> {
-        let accessor = self.accessor();
+    pub fn search_with_ef(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        accessor: &impl VectorAccessor,
+    ) -> Vec<(NodeId, f32)> {
         match self.quantization_type {
-            QuantizationType::None => {
-                // No quantization, use standard HNSW
-                self.hnsw.search_with_ef(query, k, ef, &accessor)
-            }
-            QuantizationType::Scalar => self.search_scalar_quantized(query, k, ef, &accessor),
-            QuantizationType::Binary => self.search_binary_quantized(query, k, ef, &accessor),
+            QuantizationType::None => self.hnsw.search_with_ef(query, k, ef, accessor),
+            QuantizationType::Scalar => self.search_scalar_quantized(query, k, ef, accessor),
+            QuantizationType::Binary => self.search_binary_quantized(query, k, ef, accessor),
             QuantizationType::Product { .. } => {
-                self.search_product_quantized(query, k, ef, &accessor)
+                self.search_product_quantized(query, k, ef, accessor)
             }
         }
     }
@@ -413,7 +424,7 @@ impl QuantizedHnswIndex {
         }
 
         // Rescore with exact distances
-        self.rescore_candidates(query, candidates, k)
+        self.rescore_candidates(query, candidates, k, accessor)
     }
 
     /// Search with binary quantization.
@@ -466,7 +477,7 @@ impl QuantizedHnswIndex {
         }
 
         // Rescore with exact distances
-        self.rescore_candidates(query, scored, k)
+        self.rescore_candidates(query, scored, k, accessor)
     }
 
     /// Search with product quantization.
@@ -523,7 +534,7 @@ impl QuantizedHnswIndex {
 
             // Optionally rescore top results with full precision
             if self.rescore {
-                return self.rescore_candidates(query, scored, k);
+                return self.rescore_candidates(query, scored, k, accessor);
             }
 
             scored
@@ -539,17 +550,22 @@ impl QuantizedHnswIndex {
         query: &[f32],
         candidates: Vec<(NodeId, f32)>,
         k: usize,
+        accessor: &impl VectorAccessor,
     ) -> Vec<(NodeId, f32)> {
         let metric = self.config().metric;
-        let vectors = self.vectors.read();
+        let internal = self.vectors.read();
 
         let mut rescored: Vec<(NodeId, f32)> = candidates
             .into_iter()
             .filter_map(|(id, _approx_dist)| {
-                vectors.get(&id).map(|vec| {
-                    let exact_dist = compute_distance(query, vec, metric);
-                    (id, exact_dist)
-                })
+                let exact = if let Some(vec) = internal.get(&id) {
+                    Some(compute_distance(query, vec, metric))
+                } else {
+                    accessor
+                        .get_vector(id)
+                        .map(|vec| compute_distance(query, vec.as_ref(), metric))
+                };
+                exact.map(|d| (id, d))
             })
             .collect();
 
@@ -589,29 +605,37 @@ impl QuantizedHnswIndex {
     }
 
     /// Batch insert multiple vectors.
-    pub fn batch_insert<'a, I>(&self, vectors: I)
+    pub fn batch_insert<'a, I>(&self, vectors: I, accessor: &impl VectorAccessor)
     where
         I: IntoIterator<Item = (NodeId, &'a [f32])>,
     {
         for (id, vec) in vectors {
-            self.insert(id, vec);
+            self.insert(id, vec, accessor);
         }
     }
 
     /// Batch search for multiple queries in parallel.
     #[must_use]
-    pub fn batch_search(&self, queries: &[Vec<f32>], k: usize) -> Vec<Vec<(NodeId, f32)>> {
+    pub fn batch_search(
+        &self,
+        queries: &[Vec<f32>],
+        k: usize,
+        accessor: &impl VectorAccessor,
+    ) -> Vec<Vec<(NodeId, f32)>> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
             queries
                 .par_iter()
-                .map(|query| self.search(query, k))
+                .map(|query| self.search(query, k, accessor))
                 .collect()
         }
         #[cfg(not(feature = "parallel"))]
         {
-            queries.iter().map(|query| self.search(query, k)).collect()
+            queries
+                .iter()
+                .map(|query| self.search(query, k, accessor))
+                .collect()
         }
     }
 
@@ -626,8 +650,9 @@ impl QuantizedHnswIndex {
         query: &[f32],
         k: usize,
         allowlist: &std::collections::HashSet<NodeId>,
+        accessor: &impl VectorAccessor,
     ) -> Vec<(NodeId, f32)> {
-        let results = self.search(query, k.max(allowlist.len()));
+        let results = self.search(query, k.max(allowlist.len()), accessor);
         results
             .into_iter()
             .filter(|(id, _)| allowlist.contains(id))
@@ -643,8 +668,9 @@ impl QuantizedHnswIndex {
         k: usize,
         ef: usize,
         allowlist: &std::collections::HashSet<NodeId>,
+        accessor: &impl VectorAccessor,
     ) -> Vec<(NodeId, f32)> {
-        let results = self.search_with_ef(query, k.max(allowlist.len()), ef);
+        let results = self.search_with_ef(query, k.max(allowlist.len()), ef, accessor);
         results
             .into_iter()
             .filter(|(id, _)| allowlist.contains(id))
@@ -659,20 +685,21 @@ impl QuantizedHnswIndex {
         queries: &[Vec<f32>],
         k: usize,
         ef: usize,
+        accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
             queries
                 .par_iter()
-                .map(|query| self.search_with_ef(query, k, ef))
+                .map(|query| self.search_with_ef(query, k, ef, accessor))
                 .collect()
         }
         #[cfg(not(feature = "parallel"))]
         {
             queries
                 .iter()
-                .map(|query| self.search_with_ef(query, k, ef))
+                .map(|query| self.search_with_ef(query, k, ef, accessor))
                 .collect()
         }
     }
@@ -684,20 +711,21 @@ impl QuantizedHnswIndex {
         queries: &[Vec<f32>],
         k: usize,
         allowlist: &std::collections::HashSet<NodeId>,
+        accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
             queries
                 .par_iter()
-                .map(|query| self.search_with_filter(query, k, allowlist))
+                .map(|query| self.search_with_filter(query, k, allowlist, accessor))
                 .collect()
         }
         #[cfg(not(feature = "parallel"))]
         {
             queries
                 .iter()
-                .map(|query| self.search_with_filter(query, k, allowlist))
+                .map(|query| self.search_with_filter(query, k, allowlist, accessor))
                 .collect()
         }
     }
@@ -710,20 +738,21 @@ impl QuantizedHnswIndex {
         k: usize,
         ef: usize,
         allowlist: &std::collections::HashSet<NodeId>,
+        accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
             queries
                 .par_iter()
-                .map(|query| self.search_with_ef_and_filter(query, k, ef, allowlist))
+                .map(|query| self.search_with_ef_and_filter(query, k, ef, allowlist, accessor))
                 .collect()
         }
         #[cfg(not(feature = "parallel"))]
         {
             queries
                 .iter()
-                .map(|query| self.search_with_ef_and_filter(query, k, ef, allowlist))
+                .map(|query| self.search_with_ef_and_filter(query, k, ef, allowlist, accessor))
                 .collect()
         }
     }
@@ -754,7 +783,7 @@ impl QuantizedHnswIndex {
     ///
     /// Contract:
     /// - does **not** call `hnsw.insert` (topology stays as restored)
-    /// - stores full-precision vectors for all provided ids
+    /// - Scalar/Binary/Product: stores quantized codes only (no durable dual f32 map)
     /// - Scalar/Product: trains on the full batch (ignores `training_threshold`)
     /// - Binary: fills bit codes immediately
     /// - empty input: mode preserved; search readiness stays false
@@ -767,24 +796,25 @@ impl QuantizedHnswIndex {
             .map(|(id, v)| (id, Arc::<[f32]>::from(v)))
             .collect();
 
-        {
-            let mut map = self.vectors.write();
-            for (id, arc) in &batch {
-                map.insert(*id, Arc::clone(arc));
-            }
-        }
-
         if batch.is_empty() {
             return;
         }
 
         match self.quantization_type {
-            QuantizationType::None => {}
+            QuantizationType::None => {
+                // Exact path still needs full precision in-process.
+                let mut map = self.vectors.write();
+                for (id, arc) in &batch {
+                    map.insert(*id, Arc::clone(arc));
+                }
+            }
             QuantizationType::Binary => {
                 let mut binary = self.binary_vectors.write();
                 for (id, arc) in &batch {
                     binary.insert(*id, BinaryQuantizer::quantize(arc));
                 }
+                // Codes only — rescore uses LPG accessor.
+                self.vectors.write().clear();
             }
             QuantizationType::Scalar => {
                 let refs: Vec<&[f32]> = batch.iter().map(|(_, v)| v.as_ref()).collect();
@@ -796,10 +826,11 @@ impl QuantizedHnswIndex {
                 *self.scalar_quantizer.write() = Some(quantizer);
                 *self.quantizer_trained.write() = true;
                 self.training_samples.write().clear();
+                // Codes only — rescore uses LPG accessor (product intention: no dual f32 store).
+                self.vectors.write().clear();
             }
             QuantizationType::Product { num_subvectors } => {
                 let refs: Vec<&[f32]> = batch.iter().map(|(_, v)| v.as_ref()).collect();
-                // Cap centroids so small rehydrate batches still train safely.
                 let num_centroids = batch.len().clamp(1, 256);
                 let quantizer = ProductQuantizer::train(&refs, num_subvectors, num_centroids, 10);
                 let mut codes = self.product_codes.write();
@@ -809,14 +840,95 @@ impl QuantizedHnswIndex {
                 *self.product_quantizer.write() = Some(quantizer);
                 *self.quantizer_trained.write() = true;
                 self.training_samples.write().clear();
+                self.vectors.write().clear();
             }
         }
+    }
+
+
+    /// Drop in-process quantized payloads (codes + optional f32 map).
+    /// Topology and Catalog mode remain. Search falls back to accessor-backed
+    /// exact distances until codes are rehydrated again.
+    pub fn release_quantized_payloads(&self) {
+        self.vectors.write().clear();
+        self.scalar_vectors.write().clear();
+        self.binary_vectors.write().clear();
+        self.product_codes.write().clear();
+        *self.scalar_quantizer.write() = None;
+        *self.product_quantizer.write() = None;
+        *self.quantizer_trained.write() = false;
+        self.training_samples.write().clear();
+    }
+
+    /// Install a pre-trained scalar quantizer and quantized codes without
+    /// retaining full-precision vectors (production reopen path).
+    pub fn rehydrate_scalar_codes_only(
+        &self,
+        quantizer: ScalarQuantizer,
+        codes: impl IntoIterator<Item = (NodeId, Vec<u8>)>,
+    ) {
+        {
+            let mut map = self.scalar_vectors.write();
+            for (id, code) in codes {
+                map.insert(id, code);
+            }
+        }
+        *self.scalar_quantizer.write() = Some(quantizer);
+        *self.quantizer_trained.write() = true;
+        self.training_samples.write().clear();
+        self.vectors.write().clear();
+    }
+
+    /// Install binary codes without retaining full-precision vectors.
+    pub fn rehydrate_binary_codes_only(
+        &self,
+        codes: impl IntoIterator<Item = (NodeId, Vec<u64>)>,
+    ) {
+        {
+            let mut map = self.binary_vectors.write();
+            for (id, code) in codes {
+                map.insert(id, code);
+            }
+        }
+        self.vectors.write().clear();
     }
 
     /// Returns estimated heap memory in bytes.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
         self.hnsw.heap_memory_bytes() + self.memory_usage()
+    }
+
+    /// Test helper: store full vectors internally so unit tests can omit an external store.
+    #[cfg(test)]
+    pub fn test_insert(&self, id: NodeId, vector: &[f32]) {
+        let arc: Arc<[f32]> = vector.into();
+        self.vectors.write().insert(id, Arc::clone(&arc));
+        let accessor = self.accessor();
+        // Topology insert needs accessor; use internal map for test_insert helper.
+        self.hnsw.insert(id, vector, &accessor);
+        match self.quantization_type {
+            QuantizationType::None => {}
+            QuantizationType::Scalar => self.insert_scalar_quantized(id, vector),
+            QuantizationType::Binary => self.insert_binary_quantized(id, vector),
+            QuantizationType::Product { num_subvectors } => {
+                self.insert_product_quantized(id, vector, num_subvectors)
+            }
+        }
+    }
+
+    /// Test helper search against internal full-precision map.
+    #[cfg(test)]
+    pub fn test_search(&self, query: &[f32], k: usize) -> Vec<(NodeId, f32)> {
+        let accessor = self.accessor();
+        self.search(query, k, &accessor)
+    }
+
+    /// Test helper search_with_ef against internal full-precision map.
+    #[cfg(test)]
+    pub fn test_search_with_ef(&self, query: &[f32], k: usize, ef: usize) -> Vec<(NodeId, f32)> {
+        let accessor = self.accessor();
+        self.search_with_ef(query, k, ef, &accessor)
     }
 }
 
@@ -839,6 +951,12 @@ impl std::fmt::Debug for QuantizedHnswIndex {
 mod tests {
     use super::*;
     use crate::index::vector::DistanceMetric;
+    use std::collections::HashMap as StdHashMap;
+
+    /// Simple in-memory accessor for unit tests.
+    fn map_accessor(store: StdHashMap<NodeId, Arc<[f32]>>) -> impl VectorAccessor {
+        move |id: NodeId| store.get(&id).cloned()
+    }
 
     fn create_test_vectors(n: usize, dim: usize) -> Vec<Vec<f32>> {
         (0..n)
@@ -857,12 +975,12 @@ mod tests {
 
         let vectors = create_test_vectors(50, 4);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
 
         assert_eq!(index.len(), 50);
 
-        let results = index.search(&vectors[25], 5);
+        let results = index.test_search(&vectors[25], 5);
         assert_eq!(results.len(), 5);
         assert_eq!(results[0].0, NodeId::new(26));
     }
@@ -875,7 +993,7 @@ mod tests {
 
         let vectors = create_test_vectors(50, 4);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
 
         assert_eq!(index.len(), 50);
@@ -884,7 +1002,7 @@ mod tests {
         // With rescoring, we store more data (both full and quantized)
         assert!(index.memory_ratio() > 1.0);
 
-        let results = index.search(&vectors[25], 5);
+        let results = index.test_search(&vectors[25], 5);
         assert_eq!(results.len(), 5);
         // Should find the correct vector (rescoring fixes quantization errors)
         assert_eq!(results[0].0, NodeId::new(26));
@@ -897,12 +1015,12 @@ mod tests {
 
         let vectors = create_test_vectors(50, 4);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
 
         assert_eq!(index.len(), 50);
 
-        let results = index.search(&vectors[25], 5);
+        let results = index.test_search(&vectors[25], 5);
         assert_eq!(results.len(), 5);
         // Binary is less accurate but should still work with rescoring
         assert_eq!(results[0].0, NodeId::new(26));
@@ -917,10 +1035,10 @@ mod tests {
 
         let vectors = create_test_vectors(50, 4);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
 
-        let results = index.search(&vectors[25], 5);
+        let results = index.test_search(&vectors[25], 5);
         assert_eq!(results.len(), 5);
         // Without rescoring, might not be exact but should be close
     }
@@ -930,8 +1048,8 @@ mod tests {
         let config = HnswConfig::new(4, DistanceMetric::Euclidean);
         let index = QuantizedHnswIndex::new(config, QuantizationType::Binary);
 
-        index.insert(NodeId::new(1), &[0.1, 0.2, 0.3, 0.4]);
-        index.insert(NodeId::new(2), &[0.5, 0.6, 0.7, 0.8]);
+        index.test_insert(NodeId::new(1), &[0.1, 0.2, 0.3, 0.4]);
+        index.test_insert(NodeId::new(2), &[0.5, 0.6, 0.7, 0.8]);
 
         assert_eq!(index.len(), 2);
         assert!(index.remove(NodeId::new(1)));
@@ -953,12 +1071,15 @@ mod tests {
             .map(|(i, v)| (NodeId::new(i as u64 + 1), v.as_slice()))
             .collect();
 
-        index.batch_insert(pairs);
+        for (id, v) in pairs {
+            index.test_insert(id, v);
+        }
         assert_eq!(index.len(), 50);
 
         // Batch search
         let queries = vec![vectors[10].clone(), vectors[30].clone()];
-        let results = index.batch_search(&queries, 3);
+        let acc = index.accessor();
+        let results = index.batch_search(&queries, 3, &acc);
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].len(), 3);
@@ -987,7 +1108,7 @@ mod tests {
         assert_eq!(index.memory_usage(), 0);
 
         // After inserting, memory should be tracked
-        index.insert(NodeId::new(1), &vec![0.1f32; 384]);
+        index.test_insert(NodeId::new(1), &vec![0.1f32; 384]);
         assert!(index.memory_usage() > 0);
     }
 
@@ -1004,14 +1125,14 @@ mod tests {
 
         let vectors = create_test_vectors(50, 32);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
 
         assert_eq!(index.len(), 50);
         // Product quantization: (32 * 4) / 8 = 16x compression
         assert_eq!(index.theoretical_compression_ratio(), 16.0);
 
-        let results = index.search(&vectors[25], 5);
+        let results = index.test_search(&vectors[25], 5);
         assert_eq!(results.len(), 5);
         // With rescoring, should find the correct vector
         assert_eq!(results[0].0, NodeId::new(26));
@@ -1030,11 +1151,11 @@ mod tests {
 
         let vectors = create_test_vectors(10, 16);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
 
         // Should still work (falls back to exact search before training)
-        let results = index.search(&vectors[5], 3);
+        let results = index.test_search(&vectors[5], 3);
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].0, NodeId::new(6));
     }
@@ -1046,12 +1167,13 @@ mod tests {
 
         let vectors = create_test_vectors(50, 4);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
 
         let allowlist: std::collections::HashSet<NodeId> =
             [1, 10, 25, 40].iter().map(|&i| NodeId::new(i)).collect();
-        let results = index.search_with_filter(&vectors[24], 3, &allowlist);
+        let acc = index.accessor();
+        let results = index.search_with_filter(&vectors[24], 3, &allowlist, &acc);
         assert!(!results.is_empty());
         assert!(results.len() <= 3);
         for (id, _) in &results {
@@ -1066,12 +1188,13 @@ mod tests {
 
         let vectors = create_test_vectors(50, 4);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
 
         let allowlist: std::collections::HashSet<NodeId> =
             [5, 15, 30].iter().map(|&i| NodeId::new(i)).collect();
-        let results = index.search_with_ef_and_filter(&vectors[14], 2, 50, &allowlist);
+        let acc = index.accessor();
+        let results = index.search_with_ef_and_filter(&vectors[14], 2, 50, &allowlist, &acc);
         assert!(!results.is_empty());
         assert!(results.len() <= 2);
         for (id, _) in &results {
@@ -1086,11 +1209,12 @@ mod tests {
 
         let vectors = create_test_vectors(50, 4);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
 
         let queries = vec![vectors[10].clone(), vectors[30].clone()];
-        let results = index.batch_search_with_ef(&queries, 3, 50);
+        let acc = index.accessor();
+        let results = index.batch_search_with_ef(&queries, 3, 50, &acc);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].len(), 3);
         assert_eq!(results[1].len(), 3);
@@ -1103,12 +1227,13 @@ mod tests {
 
         let vectors = create_test_vectors(50, 4);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
 
         let allowlist: std::collections::HashSet<NodeId> = (1..=25).map(NodeId::new).collect();
         let queries = vec![vectors[5].clone(), vectors[20].clone()];
-        let results = index.batch_search_with_filter(&queries, 3, &allowlist);
+        let acc = index.accessor();
+        let results = index.batch_search_with_filter(&queries, 3, &allowlist, &acc);
         assert_eq!(results.len(), 2);
         for batch in &results {
             for (id, _) in batch {
@@ -1124,12 +1249,13 @@ mod tests {
 
         let vectors = create_test_vectors(50, 4);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
 
         let allowlist: std::collections::HashSet<NodeId> = (10..=40).map(NodeId::new).collect();
         let queries = vec![vectors[15].clone()];
-        let results = index.batch_search_with_ef_and_filter(&queries, 5, 100, &allowlist);
+        let acc = index.accessor();
+        let results = index.batch_search_with_ef_and_filter(&queries, 5, 100, &allowlist, &acc);
         assert_eq!(results.len(), 1);
         for (id, _) in &results[0] {
             assert!(allowlist.contains(id));
@@ -1143,21 +1269,21 @@ mod tests {
 
         let vectors = create_test_vectors(20, 4);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
 
-        let before = index.search(&vectors[10], 5);
+        let before = index.test_search(&vectors[10], 5);
 
         let (entry, max_level, nodes) = index.snapshot_topology();
 
         let index2 = QuantizedHnswIndex::new(config, QuantizationType::Scalar);
         // Re-insert vectors (topology restore only restores graph structure)
         for (i, vec) in vectors.iter().enumerate() {
-            index2.insert(NodeId::new(i as u64 + 1), vec);
+            index2.test_insert(NodeId::new(i as u64 + 1), vec);
         }
         index2.restore_topology(entry, max_level, nodes);
 
-        let after = index2.search(&vectors[10], 5);
+        let after = index2.test_search(&vectors[10], 5);
         assert_eq!(before.len(), after.len());
     }
 
@@ -1168,10 +1294,10 @@ mod tests {
 
         let vectors = create_test_vectors(32, 4);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
         let query = vectors[0].clone();
-        let before = index.search(&query, 3);
+        let before = index.test_search(&query, 3);
         assert!(!before.is_empty());
         let top1 = before[0].0;
         let (entry, max_level, nodes) = index.snapshot_topology();
@@ -1182,17 +1308,26 @@ mod tests {
         restored.restore_topology(entry, max_level, nodes);
         assert_eq!(restored.len(), topology_len);
 
-        // Without rehydrate, full-precision map is empty; with rescoring this
-        // may yield empty results. Rehydrate fills payloads without hnsw.insert.
+        // Without rehydrate, codes are empty. Rehydrate fills codes only;
+        // rescore uses an external full-precision accessor (LPG in production).
         let batch: Vec<(NodeId, Vec<f32>)> = vectors
             .iter()
             .enumerate()
             .map(|(i, v)| (NodeId::new(i as u64 + 1), v.clone()))
             .collect();
+        let store: StdHashMap<NodeId, Arc<[f32]>> = batch
+            .iter()
+            .map(|(id, v)| (*id, Arc::<[f32]>::from(v.clone())))
+            .collect();
         restored.rehydrate_payloads_from_vectors(batch);
+        assert!(
+            restored.vectors.read().is_empty(),
+            "rehydrate must not retain dual f32 store"
+        );
 
         assert_eq!(restored.len(), topology_len, "topology must not grow");
-        let after = restored.search(&query, 3);
+        let acc = map_accessor(store);
+        let after = restored.search(&query, 3, &acc);
         assert!(!after.is_empty(), "search ready after rehydrate");
         assert_eq!(after[0].0, top1, "seeded neighbor preserved");
         assert_eq!(restored.quantization_type(), QuantizationType::Scalar);
@@ -1204,7 +1339,7 @@ mod tests {
         let index = QuantizedHnswIndex::new(config.clone(), QuantizationType::Binary);
         let vectors = create_test_vectors(16, 4);
         for (i, vec) in vectors.iter().enumerate() {
-            index.insert(NodeId::new(i as u64 + 1), vec);
+            index.test_insert(NodeId::new(i as u64 + 1), vec);
         }
         let (entry, max_level, nodes) = index.snapshot_topology();
         let restored = QuantizedHnswIndex::new(config.clone(), QuantizationType::Binary);
@@ -1214,8 +1349,13 @@ mod tests {
             .enumerate()
             .map(|(i, v)| (NodeId::new(i as u64 + 1), v.clone()))
             .collect();
+        let store: StdHashMap<NodeId, Arc<[f32]>> = batch
+            .iter()
+            .map(|(id, v)| (*id, Arc::<[f32]>::from(v.clone())))
+            .collect();
         restored.rehydrate_payloads_from_vectors(batch);
-        let hits = restored.search(&vectors[3], 1);
+        let acc = map_accessor(store);
+        let hits = restored.search(&vectors[3], 1, &acc);
         assert_eq!(hits.len(), 1);
 
         let empty = QuantizedHnswIndex::new(config, QuantizationType::Scalar);
@@ -1230,7 +1370,7 @@ mod tests {
         let index = QuantizedHnswIndex::new(config, QuantizationType::Scalar);
 
         let empty_mem = index.heap_memory_bytes();
-        index.insert(NodeId::new(1), &[0.1, 0.2, 0.3, 0.4]);
+        index.test_insert(NodeId::new(1), &[0.1, 0.2, 0.3, 0.4]);
         assert!(
             index.heap_memory_bytes() > empty_mem,
             "memory should grow after insert"

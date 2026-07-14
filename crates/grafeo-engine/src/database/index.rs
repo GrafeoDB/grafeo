@@ -213,8 +213,20 @@ impl super::GrafeoDB {
                     }
                 }
                 VectorIndexKind::Quantized(q_idx) => {
+                    let graph = self.graph_store();
+                    let accessor =
+                        grafeo_core::index::vector::PropertyVectorAccessor::new(&*graph, property);
                     for (node_id, vec) in &vectors {
-                        q_idx.insert(*node_id, vec);
+                        q_idx.insert(*node_id, vec, &accessor);
+                    }
+                    // Scalar search currently uses LPG accessor distances, not the
+                    // u8 code map. Dropping codes after build avoids pure RSS cost
+                    // while Catalog mode remains Scalar (sticky durability).
+                    if matches!(
+                        quantization_type,
+                        grafeo_core::index::vector::QuantizationType::Scalar
+                    ) {
+                        q_idx.release_quantized_payloads();
                     }
                 }
             }

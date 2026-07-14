@@ -31,7 +31,7 @@ use grafeo_common::storage::Section;
     feature = "mmap",
     not(feature = "temporal")
 ))]
-use grafeo_common::types::{PropertyKey, Value};
+use grafeo_common::types::{NodeId, PropertyKey, Value};
 #[cfg(all(
     feature = "lpg",
     feature = "vector-index",
@@ -52,7 +52,7 @@ use parking_lot::RwLock;
     feature = "mmap",
     not(feature = "temporal")
 ))]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Wraps a [`Section`] as a [`MemoryConsumer`] for the BufferManager.
 ///
@@ -296,66 +296,38 @@ impl VectorIndexConsumer {
         &self.spilled
     }
 
-    /// Spills a single vector index's embeddings to disk.
-    ///
-    /// Returns bytes freed, or an error.
+    /// Writes one label-scoped vector index payload to disk.
     fn spill_index(
         &self,
-        store: &grafeo_core::graph::lpg::LpgStore,
         key: &str,
         dimensions: usize,
-    ) -> Result<usize, SpillError> {
+        vectors: &[(NodeId, Arc<[f32]>)],
+    ) -> Result<(), SpillError> {
         let spill_dir = self
             .spill_path
             .as_ref()
             .ok_or(SpillError::NoSpillDirectory)?;
-
-        // Extract property name from key ("label:property" -> "property")
-        let property = key
-            .split(':')
-            .nth(1)
-            .ok_or_else(|| SpillError::IoError(format!("invalid index key: {key}")))?;
-        let prop_key = PropertyKey::new(property);
-
-        // Drain vector values from the property column
-        let drained = store.drain_node_property_column(&prop_key);
-        if drained.is_empty() {
-            return Ok(0);
-        }
-
-        // Create spill directory if needed
         std::fs::create_dir_all(spill_dir).map_err(|e| SpillError::IoError(e.to_string()))?;
 
         // Sanitize key for filename ("Label:property" -> "Label%3Aproperty")
-        // Percent-encodes ':' to preserve label case, underscores, and avoid
-        // ambiguity with any separator character.
+        // while preserving label case and underscores.
         let safe_key = key.replace('%', "%25").replace(':', "%3A");
         let spill_file = spill_dir.join(format!("vectors_{safe_key}.bin"));
-
-        // Create MmapStorage and write all vectors
         let mmap_storage = grafeo_core::index::vector::MmapStorage::create(&spill_file, dimensions)
             .map_err(|e| SpillError::IoError(e.to_string()))?;
 
-        let mut freed_bytes = 0;
-        for (id, value) in &drained {
-            if let Value::Vector(vec_data) = value {
-                freed_bytes += vec_data.len() * 4 + std::mem::size_of::<Arc<[f32]>>();
-                mmap_storage
-                    .insert(*id, vec_data)
-                    .map_err(|e| SpillError::IoError(e.to_string()))?;
-            }
+        for (id, vector) in vectors {
+            mmap_storage
+                .insert(*id, vector)
+                .map_err(|e| SpillError::IoError(e.to_string()))?;
         }
-
         mmap_storage
             .flush()
             .map_err(|e| SpillError::IoError(e.to_string()))?;
-
-        // Register the spill storage
         self.spilled
             .write()
             .insert(key.to_string(), Arc::new(mmap_storage));
-
-        Ok(freed_bytes)
+        Ok(())
     }
 }
 
@@ -418,26 +390,71 @@ impl MemoryConsumer for VectorIndexConsumer {
             .upgrade()
             .ok_or(SpillError::IoError("store dropped".to_string()))?;
 
-        let indexes = store.vector_index_entries();
-        let mut total_freed = 0;
+        // Property columns are global by property name while vector indexes are
+        // label-scoped. Drain each shared property exactly once, then partition
+        // its vectors by the labels registered for each index. The previous
+        // per-index drain made the first HashMap entry consume every label's
+        // vectors and left later indexes with empty spill stores.
+        let already_spilled: HashSet<String> = self.spilled.read().keys().cloned().collect();
+        let mut indexes_by_property: HashMap<String, Vec<(String, usize, HashSet<NodeId>)>> =
+            HashMap::new();
+        for (key, index) in store.vector_index_entries() {
+            if already_spilled.contains(&key) {
+                continue;
+            }
+            let Some((label, property)) = key.split_once(':') else {
+                eprintln!("failed to spill vector index {key}: invalid index key");
+                continue;
+            };
+            let label = label.to_string();
+            let property = property.to_string();
+            indexes_by_property.entry(property).or_default().push((
+                key,
+                index.config().dimensions,
+                store.nodes_by_label(&label).into_iter().collect(),
+            ));
+        }
 
-        for (key, index) in &indexes {
-            // Skip already-spilled indexes
-            if self.spilled.read().contains_key(key) {
+        let mut total_freed = 0;
+        for (property, indexes) in indexes_by_property {
+            let prop_key = PropertyKey::new(&property);
+            let drained = store.drain_node_property_column(&prop_key);
+            if drained.is_empty() {
                 continue;
             }
 
-            let dimensions = index.config().dimensions;
-            match self.spill_index(&store, key, dimensions) {
-                Ok(freed) => total_freed += freed,
-                Err(e) => {
-                    // Log but continue: earlier indexes may have already been
-                    // drained and persisted. Returning Err would discard the
-                    // freed bytes from those, leaving BufferManager with
-                    // incorrect pressure tracking.
-                    eprintln!("failed to spill vector index {key}: {e}");
+            let mut consumed = HashSet::new();
+            for (key, dimensions, label_nodes) in indexes {
+                let vectors: Vec<(NodeId, Arc<[f32]>)> = drained
+                    .iter()
+                    .filter_map(|(id, value)| match value {
+                        Value::Vector(vector)
+                            if label_nodes.contains(id) && vector.len() == dimensions =>
+                        {
+                            Some((*id, Arc::clone(vector)))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if vectors.is_empty() {
+                    continue;
+                }
+                match self.spill_index(&key, dimensions, &vectors) {
+                    Ok(()) => consumed.extend(vectors.iter().map(|(id, _)| *id)),
+                    Err(error) => eprintln!("failed to spill vector index {key}: {error}"),
                 }
             }
+
+            for (id, value) in &drained {
+                if consumed.contains(id) {
+                    if let Value::Vector(vector) = value {
+                        total_freed += vector.len() * std::mem::size_of::<f32>()
+                            + std::mem::size_of::<Arc<[f32]>>();
+                    }
+                }
+            }
+            let unconsumed = drained.into_iter().filter(|(id, _)| !consumed.contains(id));
+            store.restore_node_property_column(&prop_key, unconsumed);
         }
 
         Ok(total_freed)

@@ -65,12 +65,12 @@ impl VectorAccessor for PropertyVectorAccessor<'_> {
     }
 }
 
-/// Reads vectors from a spill-backed store first, falling back to
-/// property storage for vectors that haven't been spilled (e.g., new inserts).
+/// Reads vectors from mutable property storage first, falling back to a
+/// spill-backed store for vectors that have not changed since the last spill.
 ///
-/// Created by the engine when a vector index has been spilled to disk.
-/// The mmap-backed store serves the bulk of reads (zero-copy from page cache),
-/// while the property store catches any vectors inserted after the spill.
+/// Created by the engine when a vector index has been spilled to disk. New
+/// inserts and updates remain in the property-store delta until the next
+/// checkpoint/spill cycle, so that delta is authoritative over mmap contents.
 pub struct SpillableVectorAccessor<'a> {
     store: &'a dyn GraphStore,
     property: PropertyKey,
@@ -96,15 +96,11 @@ impl<'a> SpillableVectorAccessor<'a> {
 
 impl VectorAccessor for SpillableVectorAccessor<'_> {
     fn get_vector(&self, id: NodeId) -> Option<Arc<[f32]>> {
-        // Try spill storage first (mmap-backed, serves most reads)
-        if let Some(v) = self.spill_storage.get(id) {
-            return Some(v);
+        // Mutable post-spill writes are authoritative over the mmap snapshot.
+        if let Some(Value::Vector(vector)) = self.store.get_node_property(id, &self.property) {
+            return Some(vector);
         }
-        // Fall back to property store (new inserts after spill)
-        match self.store.get_node_property(id, &self.property) {
-            Some(Value::Vector(v)) => Some(v),
-            _ => None,
-        }
+        self.spill_storage.get(id)
     }
 }
 
@@ -218,11 +214,11 @@ mod spill_tests {
     }
 
     #[test]
-    fn spill_accessor_prefers_spill_over_property_store() {
+    fn spill_accessor_prefers_mutable_property_delta() {
         let store = LpgStore::new().unwrap();
         let vincent_id = store.create_node(&["Person"]);
         let prop_vec: Arc<[f32]> = vec![1.0, 0.0, 0.0].into();
-        store.set_node_property(vincent_id, "embedding", Value::Vector(prop_vec));
+        store.set_node_property(vincent_id, "embedding", Value::Vector(prop_vec.clone()));
 
         let spill_vec: Vec<f32> = vec![0.0, 1.0, 0.0];
         let spill = Arc::new(RamStorage::new(3));
@@ -230,7 +226,7 @@ mod spill_tests {
 
         let accessor = SpillableVectorAccessor::new(&store as &dyn GraphStore, "embedding", spill);
         let result = accessor.get_vector(vincent_id).unwrap();
-        assert_eq!(result.as_ref(), spill_vec.as_slice());
+        assert_eq!(result.as_ref(), prop_vec.as_ref());
     }
 
     #[test]

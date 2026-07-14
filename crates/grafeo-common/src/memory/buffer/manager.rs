@@ -1,6 +1,6 @@
 //! Unified buffer manager implementation.
 
-use super::consumer::MemoryConsumer;
+use super::consumer::{MemoryConsumer, SpillError};
 use super::grant::{GrantReleaser, MemoryGrant};
 use super::region::MemoryRegion;
 use super::stats::{BufferStats, PressureLevel};
@@ -361,6 +361,32 @@ impl BufferManager {
             "tier transition: spill"
         );
         total_freed
+    }
+
+    /// Reloads all OnDisk consumers whose name equals `name`, ignoring the
+    /// automatic reload budget. This is used by durability boundaries that must
+    /// materialize a complete authoritative snapshot before serialization.
+    ///
+    /// Returns the number of matching consumers reloaded. The first reload
+    /// failure is returned so snapshot callers can fail closed.
+    pub fn reload_consumer_by_name(&self, name: &str) -> Result<usize, SpillError> {
+        let candidates: Vec<Arc<dyn MemoryConsumer>> = self
+            .consumers
+            .read()
+            .iter()
+            .filter(|consumer| {
+                consumer.name() == name
+                    && consumer.current_tier() == super::tiered::StorageTier::OnDisk
+            })
+            .map(Arc::clone)
+            .collect();
+
+        let mut reloaded = 0;
+        for consumer in candidates {
+            consumer.reload()?;
+            reloaded += 1;
+        }
+        Ok(reloaded)
     }
 
     /// Reloads OnDisk consumers back into RAM, in priority order (highest

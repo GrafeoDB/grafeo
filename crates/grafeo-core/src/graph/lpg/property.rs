@@ -1082,15 +1082,15 @@ impl<Id: EntityId> PropertyColumn<Id> {
 
     /// Restores values into this column after a reload from disk.
     ///
-    /// Clears the `spilled` flag. Callers are responsible for providing
-    /// the correct values (from `MmapStorage::export_all()` or similar).
+    /// Clears the `spilled` flag. Existing hot values win over the mmap
+    /// snapshot because they are inserts or updates written after the spill.
     pub fn restore_values(&mut self, values: impl Iterator<Item = (Id, Value)>) {
         self.spilled = false;
-        // Insert directly into the map without calling set(), which would
-        // re-increment zone map counters (row_count, null_count) on top of
-        // the already-preserved zone map from before eviction.
+        // Insert directly without re-incrementing zone map counters. Preserve
+        // mutable post-spill deltas instead of overwriting them with stale mmap
+        // values for the same entity.
         for (id, value) in values {
-            self.values.insert(id, value);
+            self.values.entry(id).or_insert(value);
         }
     }
 

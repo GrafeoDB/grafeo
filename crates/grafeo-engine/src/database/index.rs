@@ -316,6 +316,18 @@ impl super::GrafeoDB {
         self.lpg_store().get_vector_index(label, property).is_some()
     }
 
+    /// Returns the configured dimensions for a registered vector index.
+    ///
+    /// This remains available when the authoritative property column is
+    /// ForceDisk-spilled and cannot be dimension-probed through graph reads.
+    #[cfg(feature = "vector-index")]
+    #[must_use]
+    pub fn vector_index_dimensions(&self, label: &str, property: &str) -> Option<usize> {
+        self.lpg_store()
+            .get_vector_index(label, property)
+            .map(|index| index.config().dimensions)
+    }
+
     /// Returns the durable quantization mode for a registered vector index.
     ///
     /// # Semantics

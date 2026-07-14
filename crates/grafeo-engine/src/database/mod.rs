@@ -692,16 +692,17 @@ impl GrafeoDB {
             ));
         }
 
-        // Discover existing spill files from a previous session.
-        // If vectors were spilled before close, the spill files persist on disk
-        // and need to be re-mapped so search can read from them.
+        // Spill sidecars are ephemeral mmap snapshots, never durability
+        // authority. The complete vector property column is restored from the
+        // .grafeo container (plus WAL) above; discard old sidecars before
+        // applying this session's ForceDisk policy.
         #[cfg(all(
             feature = "lpg",
             feature = "vector-index",
             feature = "mmap",
             not(feature = "temporal")
         ))]
-        db.restore_spill_files();
+        db.discard_stale_vector_spill_files();
 
         // Phase 8a: apply per-section ForceDisk overrides. Each section
         // type configured as ForceDisk triggers a targeted spill of its
@@ -2657,6 +2658,30 @@ impl GrafeoDB {
         self.buffer_manager.reload_eligible(target_fraction)
     }
 
+    /// Materializes spill-backed vectors before a mutation that may update an
+    /// existing HNSW topology.
+    ///
+    /// HNSW insertion reads neighboring vectors through the mutable property
+    /// accessor. Call this before vector-bearing GQL writes so those reads see
+    /// the complete graph rather than only the post-spill delta. The next
+    /// checkpoint reapplies ForceDisk when configured.
+    #[cfg(all(
+        feature = "lpg",
+        feature = "vector-index",
+        feature = "mmap",
+        not(feature = "temporal")
+    ))]
+    pub fn prepare_vector_mutation(&self) -> Result<()> {
+        self.buffer_manager
+            .reload_consumer_by_name("section:VectorStore")
+            .map(|_| ())
+            .map_err(|error| {
+                Error::Internal(format!(
+                    "failed to reload spilled vectors before mutation: {error}"
+                ))
+            })
+    }
+
     /// Returns the current [`StorageTier`] of every registered section consumer.
     ///
     /// The map keys are the [`SectionType`]s parsed from each consumer's name
@@ -2699,93 +2724,33 @@ impl GrafeoDB {
         out
     }
 
-    /// Discovers and re-opens spill files from a previous session.
+    /// Removes vector spill sidecars left by a prior process.
     ///
-    /// When the database was closed with spilled vector embeddings, the
-    /// `vectors_*.bin` files persist in the spill directory. This method
-    /// scans for them, opens each as `MmapStorage`, and registers them
-    /// in the `vector_spill_storages` map so search can read from them.
+    /// Spill files are ephemeral mmap snapshots. The `.grafeo` container plus
+    /// WAL is the durable authority, so reopen always rebuilds ForceDisk state
+    /// from the freshly loaded property column instead of trusting a sidecar
+    /// that may predate later Auto-tier mutations.
     #[cfg(all(
         feature = "lpg",
         feature = "vector-index",
         feature = "mmap",
         not(feature = "temporal")
     ))]
-    fn restore_spill_files(&mut self) {
-        use grafeo_core::index::vector::MmapStorage;
-
-        let spill_dir = match self.buffer_manager.config().spill_path {
-            Some(ref path) => path.clone(),
-            None => return,
-        };
-
-        if !spill_dir.exists() {
-            return;
-        }
-
-        let spill_map = match self.vector_spill_storages {
-            Some(ref map) => Arc::clone(map),
-            None => return,
-        };
-
-        let Ok(entries) = std::fs::read_dir(&spill_dir) else {
+    fn discard_stale_vector_spill_files(&self) {
+        let Some(spill_dir) = self.buffer_manager.config().spill_path.as_ref() else {
             return;
         };
-
-        let Some(ref store) = self.store else {
+        let Ok(entries) = std::fs::read_dir(spill_dir) else {
             return;
         };
-
         for entry in entries.flatten() {
             let path = entry.path();
-            let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name.to_string(),
-                None => continue,
-            };
-
-            // Match pattern: vectors_{key}.bin where key is percent-encoded
-            if !file_name.starts_with("vectors_")
-                || !std::path::Path::new(&file_name)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("bin"))
-            {
-                continue;
-            }
-
-            // Extract and decode key: "vectors_Label%3Aembedding.bin" -> "Label:embedding"
-            let key_part = &file_name["vectors_".len()..file_name.len() - ".bin".len()];
-
-            // Percent-decode: %3A -> ':', %25 -> '%'
-            let key = key_part.replace("%3A", ":").replace("%25", "%");
-
-            // Key must contain ':' (label:property format)
-            if !key.contains(':') {
-                // Legacy file with old encoding, skip (will be re-created on next spill)
-                continue;
-            }
-
-            // Only restore if the corresponding vector index exists
-            if store.get_vector_index_by_key(&key).is_none() {
-                // Stale spill file (index was dropped), clean it up
-                let _ = std::fs::remove_file(&path);
-                continue;
-            }
-
-            // Open the MmapStorage
-            match MmapStorage::open(&path) {
-                Ok(mmap_storage) => {
-                    // Mark the property column as spilled so get() returns None
-                    let property = key.split(':').nth(1).unwrap_or("");
-                    let prop_key = grafeo_common::types::PropertyKey::new(property);
-                    store.node_properties_mark_spilled(&prop_key);
-
-                    spill_map.write().insert(key, Arc::new(mmap_storage));
-                }
-                Err(e) => {
-                    eprintln!("failed to restore spill file {}: {e}", path.display());
-                    // Remove corrupt spill file
-                    let _ = std::fs::remove_file(&path);
-                }
+            let is_vector_spill = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("vectors_") && name.ends_with(".bin"));
+            if is_vector_spill {
+                let _ = std::fs::remove_file(path);
             }
         }
     }
@@ -2986,6 +2951,47 @@ impl GrafeoDB {
         fm: &GrafeoFileManager,
         reason: flush::FlushReason,
     ) -> Result<flush::FlushResult> {
+        #[cfg(all(
+            feature = "lpg",
+            feature = "vector-index",
+            feature = "mmap",
+            not(feature = "temporal")
+        ))]
+        let vector_was_on_disk =
+            self.buffer_manager
+                .snapshot_consumer_tiers()
+                .iter()
+                .any(|(name, tier)| {
+                    name == "section:VectorStore"
+                        && *tier == grafeo_common::memory::StorageTier::OnDisk
+                });
+        #[cfg(all(
+            feature = "lpg",
+            feature = "vector-index",
+            feature = "mmap",
+            not(feature = "temporal")
+        ))]
+        let vector_force_disk = self
+            .config
+            .section_configs
+            .get(&grafeo_common::storage::SectionType::VectorStore)
+            .is_some_and(|config| config.tier == grafeo_common::storage::TierOverride::ForceDisk);
+        #[cfg(all(
+            feature = "lpg",
+            feature = "vector-index",
+            feature = "mmap",
+            not(feature = "temporal")
+        ))]
+        if vector_was_on_disk {
+            self.buffer_manager
+                .reload_consumer_by_name("section:VectorStore")
+                .map_err(|error| {
+                    Error::Internal(format!(
+                        "failed to reload spilled vectors before checkpoint: {error}"
+                    ))
+                })?;
+        }
+
         let sections = self.build_sections();
         let section_refs: Vec<&dyn grafeo_common::storage::Section> =
             sections.iter().map(|s| s.as_ref()).collect();
@@ -2994,14 +3000,31 @@ impl GrafeoDB {
         #[cfg(not(feature = "lpg"))]
         let context = flush::build_context_minimal(&self.transaction_manager);
 
-        flush::flush(
+        let result = flush::flush(
             fm,
             &section_refs,
             &context,
             reason,
             #[cfg(feature = "wal")]
             self.wal.as_deref(),
-        )
+        );
+
+        // Spill sidecars are derived state. Recreate them only after the
+        // authoritative container snapshot has serialized the complete merged
+        // property column. Preserve an existing OnDisk tier, and enforce
+        // ForceDisk for indexes created after database open.
+        #[cfg(all(
+            feature = "lpg",
+            feature = "vector-index",
+            feature = "mmap",
+            not(feature = "temporal")
+        ))]
+        if vector_was_on_disk || vector_force_disk {
+            self.buffer_manager
+                .spill_consumer_by_name("section:VectorStore");
+        }
+
+        result
     }
 
     /// Returns the file manager if using single-file format.

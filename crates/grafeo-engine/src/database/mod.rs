@@ -667,6 +667,13 @@ impl GrafeoDB {
             db.wire_layered_after_load(compact_base, loaded_overlay_deletions)?;
         }
 
+        // After Catalog shells + VectorStore topology + WAL + layered wiring,
+        // rehydrate Quantized payloads from LPG embeddings via graph_store().
+        // Must not run inside CatalogSection::deserialize (misses CompactStore
+        // base embeddings). Topology is reused; no full HNSW rebuild.
+        #[cfg(all(feature = "lpg", feature = "vector-index"))]
+        db.rehydrate_quantized_vector_indexes()?;
+
         // Start periodic checkpoint timer if configured
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
         if let (Some(interval), Some(fm)) = (checkpoint_interval, &db.file_manager)
@@ -1550,6 +1557,59 @@ impl GrafeoDB {
             grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection::empty();
         section.deserialize(&data)?;
         Ok(Some(section.take()))
+    }
+
+    /// Rehydrate quantized vector index payloads after open.
+    ///
+    /// Catalog restore creates empty `VectorIndexKind` shells; VectorStore
+    /// applies topology only. Quantized indexes also need full-precision
+    /// vectors + codes, which live in-process (not in GVST). Scan embeddings
+    /// via [`graph_store()`] so CompactStore base + overlay are both visible.
+    ///
+    /// Sequencing (required): Catalog shells → LPG load → VectorStore topology
+    /// → WAL → wire_layered_after_load → **this step** → spill restore.
+    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    fn rehydrate_quantized_vector_indexes(&self) -> Result<()> {
+        use grafeo_common::types::{PropertyKey, Value};
+        use grafeo_core::index::vector::QuantizationType;
+
+        let entries = self.lpg_store().vector_index_entries();
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let graph = self.graph_store();
+        for (key, index) in entries {
+            let Some(q_idx) = index.as_quantized() else {
+                continue;
+            };
+            let Some((label, property)) = key.split_once(':') else {
+                continue;
+            };
+            let prop_key = PropertyKey::new(property);
+            let mut vectors = Vec::new();
+            for node_id in graph.nodes_by_label(label) {
+                if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key) {
+                    vectors.push((node_id, v.to_vec()));
+                }
+            }
+            let dimensions = q_idx.config().dimensions;
+            if dimensions == 0 || vectors.iter().any(|(_, vector)| vector.len() != dimensions) {
+                return Err(grafeo_common::utils::error::Error::Serialization(format!(
+                    "Cannot rehydrate vector index {key}: stored vectors do not match catalog dimensions {dimensions}"
+                )));
+            }
+            if let QuantizationType::Product { num_subvectors } = q_idx.quantization_type()
+                && (num_subvectors == 0 || !dimensions.is_multiple_of(num_subvectors))
+            {
+                return Err(grafeo_common::utils::error::Error::Serialization(format!(
+                    "Cannot rehydrate product vector index {key}: dimensions {dimensions} are not divisible by {num_subvectors} subvectors"
+                )));
+            }
+            // Empty scan leaves mode-correct empty shell (readiness false).
+            q_idx.rehydrate_payloads_from_vectors(vectors);
+        }
+        Ok(())
     }
 
     /// Loads from a section-based `.grafeo` file (v2 format).

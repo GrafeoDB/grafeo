@@ -341,6 +341,22 @@ impl VectorIndexKind {
         }
     }
 
+    /// Rehydrate quantized payloads without topology rebuild.
+    ///
+    /// No-op for plain [`Hnsw`] shells (search uses LPG property accessor).
+    pub fn rehydrate_payloads_from_vectors(
+        &self,
+        vectors: impl IntoIterator<Item = (NodeId, Vec<f32>)>,
+    ) {
+        match self {
+            Self::Hnsw(_) => {
+                // Plain HNSW keeps embeddings in LPG; nothing to rehydrate.
+                let _ = vectors.into_iter().count();
+            }
+            Self::Quantized(idx) => idx.rehydrate_payloads_from_vectors(vectors),
+        }
+    }
+
     /// Returns estimated heap memory in bytes.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
@@ -351,6 +367,9 @@ impl VectorIndexKind {
     }
 
     /// Returns the quantization type, if this is a quantized index.
+    ///
+    /// Note: plain `Hnsw` returns `None` (not `Some(QuantizationType::None)`).
+    /// Public DB inspect APIs map missing-index vs plain-mode separately.
     #[must_use]
     pub fn quantization_type(&self) -> Option<QuantizationType> {
         match self {

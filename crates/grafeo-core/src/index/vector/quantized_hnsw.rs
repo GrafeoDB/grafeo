@@ -745,6 +745,74 @@ impl QuantizedHnswIndex {
             .restore_topology(entry_point, max_level, node_data);
     }
 
+    /// Rehydrate full-precision payloads and quantized codes **without**
+    /// rebuilding HNSW topology.
+    ///
+    /// After Catalog shells + VectorStore `restore_topology`, quantized indexes
+    /// still need their in-process vectors/codes. Call this with LPG embedding
+    /// properties scanned via `graph_store()` (post-layered wiring).
+    ///
+    /// Contract:
+    /// - does **not** call `hnsw.insert` (topology stays as restored)
+    /// - stores full-precision vectors for all provided ids
+    /// - Scalar/Product: trains on the full batch (ignores `training_threshold`)
+    /// - Binary: fills bit codes immediately
+    /// - empty input: mode preserved; search readiness stays false
+    pub fn rehydrate_payloads_from_vectors(
+        &self,
+        vectors: impl IntoIterator<Item = (NodeId, Vec<f32>)>,
+    ) {
+        let batch: Vec<(NodeId, Arc<[f32]>)> = vectors
+            .into_iter()
+            .map(|(id, v)| (id, Arc::<[f32]>::from(v)))
+            .collect();
+
+        {
+            let mut map = self.vectors.write();
+            for (id, arc) in &batch {
+                map.insert(*id, Arc::clone(arc));
+            }
+        }
+
+        if batch.is_empty() {
+            return;
+        }
+
+        match self.quantization_type {
+            QuantizationType::None => {}
+            QuantizationType::Binary => {
+                let mut binary = self.binary_vectors.write();
+                for (id, arc) in &batch {
+                    binary.insert(*id, BinaryQuantizer::quantize(arc));
+                }
+            }
+            QuantizationType::Scalar => {
+                let refs: Vec<&[f32]> = batch.iter().map(|(_, v)| v.as_ref()).collect();
+                let quantizer = ScalarQuantizer::train(&refs);
+                let mut scalar_vecs = self.scalar_vectors.write();
+                for (id, arc) in &batch {
+                    scalar_vecs.insert(*id, quantizer.quantize(arc));
+                }
+                *self.scalar_quantizer.write() = Some(quantizer);
+                *self.quantizer_trained.write() = true;
+                self.training_samples.write().clear();
+            }
+            QuantizationType::Product { num_subvectors } => {
+                let refs: Vec<&[f32]> = batch.iter().map(|(_, v)| v.as_ref()).collect();
+                // Cap centroids so small rehydrate batches still train safely.
+                let num_centroids = batch.len().clamp(1, 256);
+                let quantizer = ProductQuantizer::train(&refs, num_subvectors, num_centroids, 10);
+                let mut codes = self.product_codes.write();
+                for (id, arc) in &batch {
+                    codes.insert(*id, quantizer.quantize(arc));
+                }
+                *self.product_quantizer.write() = Some(quantizer);
+                *self.quantizer_trained.write() = true;
+                self.training_samples.write().clear();
+            }
+        }
+    }
+
     /// Returns estimated heap memory in bytes.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
@@ -1091,6 +1159,69 @@ mod tests {
 
         let after = index2.search(&vectors[10], 5);
         assert_eq!(before.len(), after.len());
+    }
+
+    #[test]
+    fn test_rehydrate_payloads_without_topology_rebuild() {
+        let config = HnswConfig::new(4, DistanceMetric::Euclidean);
+        let index = QuantizedHnswIndex::new(config.clone(), QuantizationType::Scalar);
+
+        let vectors = create_test_vectors(32, 4);
+        for (i, vec) in vectors.iter().enumerate() {
+            index.insert(NodeId::new(i as u64 + 1), vec);
+        }
+        let query = vectors[0].clone();
+        let before = index.search(&query, 3);
+        assert!(!before.is_empty());
+        let top1 = before[0].0;
+        let (entry, max_level, nodes) = index.snapshot_topology();
+        let topology_len = index.len();
+
+        // Fresh shell + topology only (no insert path)
+        let restored = QuantizedHnswIndex::new(config, QuantizationType::Scalar);
+        restored.restore_topology(entry, max_level, nodes);
+        assert_eq!(restored.len(), topology_len);
+
+        // Without rehydrate, full-precision map is empty; with rescoring this
+        // may yield empty results. Rehydrate fills payloads without hnsw.insert.
+        let batch: Vec<(NodeId, Vec<f32>)> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (NodeId::new(i as u64 + 1), v.clone()))
+            .collect();
+        restored.rehydrate_payloads_from_vectors(batch);
+
+        assert_eq!(restored.len(), topology_len, "topology must not grow");
+        let after = restored.search(&query, 3);
+        assert!(!after.is_empty(), "search ready after rehydrate");
+        assert_eq!(after[0].0, top1, "seeded neighbor preserved");
+        assert_eq!(restored.quantization_type(), QuantizationType::Scalar);
+    }
+
+    #[test]
+    fn test_rehydrate_binary_and_empty() {
+        let config = HnswConfig::new(4, DistanceMetric::Cosine);
+        let index = QuantizedHnswIndex::new(config.clone(), QuantizationType::Binary);
+        let vectors = create_test_vectors(16, 4);
+        for (i, vec) in vectors.iter().enumerate() {
+            index.insert(NodeId::new(i as u64 + 1), vec);
+        }
+        let (entry, max_level, nodes) = index.snapshot_topology();
+        let restored = QuantizedHnswIndex::new(config.clone(), QuantizationType::Binary);
+        restored.restore_topology(entry, max_level, nodes);
+        let batch: Vec<(NodeId, Vec<f32>)> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (NodeId::new(i as u64 + 1), v.clone()))
+            .collect();
+        restored.rehydrate_payloads_from_vectors(batch);
+        let hits = restored.search(&vectors[3], 1);
+        assert_eq!(hits.len(), 1);
+
+        let empty = QuantizedHnswIndex::new(config, QuantizationType::Scalar);
+        empty.rehydrate_payloads_from_vectors(Vec::<(NodeId, Vec<f32>)>::new());
+        assert_eq!(empty.quantization_type(), QuantizationType::Scalar);
+        assert!(empty.is_empty());
     }
 
     #[test]

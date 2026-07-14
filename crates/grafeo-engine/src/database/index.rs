@@ -297,6 +297,48 @@ impl super::GrafeoDB {
         removed
     }
 
+    /// Returns whether a vector index is registered for `label` + `property`.
+    #[cfg(feature = "vector-index")]
+    #[must_use]
+    pub fn has_vector_index(&self, label: &str, property: &str) -> bool {
+        self.lpg_store().get_vector_index(label, property).is_some()
+    }
+
+    /// Returns the durable quantization mode for a registered vector index.
+    ///
+    /// # Semantics
+    ///
+    /// | Return | Meaning |
+    /// |--------|---------|
+    /// | `None` | no vector index registered for the label/property |
+    /// | `Some(QuantizationType::None)` | plain HNSW shell |
+    /// | `Some(Scalar \| Binary \| Product{..})` | quantized shell |
+    ///
+    /// This is the stable inspect surface for reopen/sticky-mode tests.
+    /// Prefer this over env defaults after open.
+    #[cfg(feature = "vector-index")]
+    #[must_use]
+    pub fn vector_index_quantization(
+        &self,
+        label: &str,
+        property: &str,
+    ) -> Option<grafeo_core::index::vector::QuantizationType> {
+        use grafeo_core::index::vector::QuantizationType;
+        let index = self.lpg_store().get_vector_index(label, property)?;
+        Some(index.quantization_type().unwrap_or(QuantizationType::None))
+    }
+
+    /// Estimated heap memory for a registered vector index (topology + payloads).
+    ///
+    /// Returns `None` if the index is not registered. Not process RSS.
+    #[cfg(feature = "vector-index")]
+    #[must_use]
+    pub fn vector_index_heap_memory_bytes(&self, label: &str, property: &str) -> Option<usize> {
+        self.lpg_store()
+            .get_vector_index(label, property)
+            .map(|idx| idx.heap_memory_bytes())
+    }
+
     /// Drops and recreates a vector index, rescanning all matching nodes.
     ///
     /// In normal usage you do **not** need to call this. Vector indexes

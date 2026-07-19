@@ -30,8 +30,11 @@ impl LpgStore {
             return Err("bulk node load requires no property indexes");
         }
         #[cfg(feature = "vector-index")]
-        if !self.vector_indexes.read().is_empty() {
-            return Err("bulk node load requires no vector indexes");
+        if self.vector_indexes.read().keys().any(|key| {
+            key.strip_prefix(label)
+                .is_some_and(|suffix| suffix.starts_with(':'))
+        }) {
+            return Err("bulk node load requires no vector indexes for its label");
         }
         #[cfg(feature = "text-index")]
         if !self.text_indexes.read().is_empty() {

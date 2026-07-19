@@ -189,6 +189,26 @@ impl<Id: EntityId> PropertyStorage<Id> {
             .set(id, value);
     }
 
+    /// Appends properties for a fresh bulk load while holding the column map
+    /// lock once.  Callers must not use this for an online mutation: it does
+    /// not update secondary indexes or transaction undo state.
+    #[cfg(not(feature = "temporal"))]
+    pub fn set_bulk_unindexed<I>(&self, rows: I)
+    where
+        I: IntoIterator<Item = (Id, FxHashMap<PropertyKey, Value>)>,
+    {
+        let mut columns = self.columns.write();
+        let mode = self.default_compression;
+        for (id, properties) in rows {
+            for (key, value) in properties {
+                columns
+                    .entry(key)
+                    .or_insert_with(|| PropertyColumn::with_compression(mode))
+                    .set(id, value);
+            }
+        }
+    }
+
     /// Sets a property value for an entity at a specific epoch.
     ///
     /// For non-transactional writes, pass the current epoch.

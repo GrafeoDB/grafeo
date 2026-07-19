@@ -134,9 +134,6 @@ impl super::GrafeoDB {
         let mut found_dims: Option<usize> = dimensions;
         let mut vector_count = 0usize;
 
-        #[cfg(feature = "vector-index")]
-        let mut vectors: Vec<(grafeo_common::types::NodeId, Vec<f32>)> = Vec::new();
-
         let graph = self.graph_store();
         for node_id in graph.nodes_by_label(label) {
             if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key) {
@@ -153,8 +150,6 @@ impl super::GrafeoDB {
                     found_dims = Some(v.len());
                 }
                 vector_count += 1;
-                #[cfg(feature = "vector-index")]
-                vectors.push((node_id, v.to_vec()));
             }
         }
 
@@ -200,7 +195,7 @@ impl super::GrafeoDB {
                 m,
                 ef_construction,
                 quantization_type,
-                vectors.len(),
+                vector_count,
             );
 
             match &index {
@@ -208,16 +203,24 @@ impl super::GrafeoDB {
                     let graph = self.graph_store();
                     let accessor =
                         grafeo_core::index::vector::PropertyVectorAccessor::new(&*graph, property);
-                    for (node_id, vec) in &vectors {
-                        index.insert(*node_id, vec, &accessor);
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(vector)) =
+                            graph.get_node_property(node_id, &prop_key)
+                        {
+                            index.insert(node_id, &vector, &accessor);
+                        }
                     }
                 }
                 VectorIndexKind::Quantized(q_idx) => {
                     let graph = self.graph_store();
                     let accessor =
                         grafeo_core::index::vector::PropertyVectorAccessor::new(&*graph, property);
-                    for (node_id, vec) in &vectors {
-                        q_idx.insert(*node_id, vec, &accessor);
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(vector)) =
+                            graph.get_node_property(node_id, &prop_key)
+                        {
+                            q_idx.insert(node_id, &vector, &accessor);
+                        }
                     }
                     // Scalar search currently uses LPG accessor distances, not the
                     // u8 code map. Dropping codes after build avoids pure RSS cost

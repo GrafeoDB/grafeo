@@ -1129,4 +1129,31 @@ impl super::GrafeoDB {
 
         ids
     }
+
+    /// Offline bulk loader for a fresh, unpublished graph.
+    ///
+    /// Unlike [`Self::batch_create_nodes_with_props`], this bypasses per-row
+    /// WAL/CDC/index work and holds the node and property-store locks once per
+    /// chunk.  It is rejected once any secondary index exists; create indexes
+    /// only after all rows have been loaded.
+    pub fn bulk_load_nodes_with_props_unindexed(
+        &self,
+        label: &str,
+        properties_list: Vec<
+            std::collections::HashMap<
+                grafeo_common::types::PropertyKey,
+                grafeo_common::types::Value,
+            >,
+        >,
+    ) -> Result<Vec<grafeo_common::types::NodeId>> {
+        use grafeo_common::utils::hash::FxHashMap;
+
+        let rows = properties_list
+            .into_iter()
+            .map(|properties| properties.into_iter().collect::<FxHashMap<_, _>>())
+            .collect();
+        self.lpg_store()
+            .bulk_create_nodes_with_props_unindexed(label, rows)
+            .map_err(|message| grafeo_common::utils::error::Error::Internal(message.to_owned()))
+    }
 }

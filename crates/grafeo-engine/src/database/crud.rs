@@ -739,6 +739,23 @@ impl super::GrafeoDB {
         id
     }
 
+    /// Appends property-less edges to a fresh offline graph without WAL or
+    /// CDC records. The underlying LPG store allocates IDs and updates both
+    /// adjacency directions under one lock per chunk.
+    ///
+    /// This is an offline-loader primitive. Callers must checkpoint the fully
+    /// built unpublished database before exposing it to readers.
+    pub fn bulk_load_edges_unindexed(
+        &self,
+        edges: &[(
+            grafeo_common::types::NodeId,
+            grafeo_common::types::NodeId,
+            &str,
+        )],
+    ) -> Vec<grafeo_common::types::EdgeId> {
+        self.lpg_store().batch_create_edges(edges)
+    }
+
     /// Gets an edge by ID.
     #[must_use]
     pub fn get_edge(

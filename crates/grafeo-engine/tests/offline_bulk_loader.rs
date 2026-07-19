@@ -44,3 +44,25 @@ fn bulk_loader_rejects_a_store_after_vector_index_creation() {
 
     assert!(result.is_err());
 }
+
+#[test]
+fn bulk_edge_loader_writes_adjacency_without_online_mutation_path() {
+    let db = GrafeoDB::new_in_memory();
+    let nodes = db
+        .bulk_load_nodes_with_props_unindexed(
+            "BulkRow",
+            (0..10_000)
+                .map(|index| HashMap::from([(PropertyKey::new("key"), Value::from(index as i64))]))
+                .collect(),
+        )
+        .expect("fresh store accepts nodes");
+    let edges: Vec<_> = nodes
+        .windows(2)
+        .map(|pair| (pair[0], pair[1], "NEXT"))
+        .collect();
+
+    let ids = db.bulk_load_edges_unindexed(&edges);
+
+    assert_eq!(ids.len(), edges.len());
+    assert_eq!(db.graph_store().edge_count(), edges.len());
+}

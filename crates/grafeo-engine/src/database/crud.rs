@@ -249,12 +249,6 @@ impl super::GrafeoDB {
         self.lpg_store().node_property_history(id)
     }
 
-    /// Returns the current epoch of the database.
-    #[must_use]
-    pub fn current_epoch(&self) -> grafeo_common::types::EpochId {
-        self.lpg_store().current_epoch()
-    }
-
     /// Deletes a node and all its edges.
     ///
     /// If WAL is enabled, the operation is logged for durability.

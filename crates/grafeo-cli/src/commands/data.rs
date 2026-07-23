@@ -66,7 +66,7 @@ pub fn run(cmd: DataCommands, _format: OutputFormat, quiet: bool) -> Result<()> 
                             .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
                             .unwrap_or_default();
 
-                        let id = db.create_node(&labels);
+                        let id = db.create_node(&labels)?;
 
                         if let Some(props) = record.get("properties").and_then(|p| p.as_object()) {
                             for (key, val) in props {

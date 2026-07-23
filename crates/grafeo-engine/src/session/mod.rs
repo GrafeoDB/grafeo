@@ -4552,7 +4552,13 @@ impl Session {
     /// Auto-commit kicks in when: the session is in auto-commit mode,
     /// no explicit transaction is active, and the query mutates data.
     fn needs_auto_commit(&self, has_mutations: bool) -> bool {
-        self.auto_commit && has_mutations && self.current_transaction.lock().is_none()
+        let result = self.auto_commit && has_mutations && self.current_transaction.lock().is_none();
+        eprintln!(
+            "[epoch-debug] needs_auto_commit: auto_commit={} has_mutations={has_mutations} has_active_tx={} result={result}",
+            self.auto_commit,
+            self.current_transaction.lock().is_some()
+        );
+        result
     }
 
     /// Wraps `body` in an automatic begin/commit when [`needs_auto_commit`]
@@ -4563,18 +4569,22 @@ impl Session {
         F: FnOnce() -> Result<QueryResult>,
     {
         if self.needs_auto_commit(has_mutations) {
+            eprintln!("[epoch-debug] with_auto_commit: entering auto-commit path (has_mutations={has_mutations})");
             self.begin_transaction_inner(false, None)?;
             match body() {
                 Ok(result) => {
+                    eprintln!("[epoch-debug] with_auto_commit: body succeeded, calling commit_inner");
                     self.commit_inner()?;
                     Ok(result)
                 }
                 Err(e) => {
+                    eprintln!("[epoch-debug] with_auto_commit: body failed, rolling back");
                     let _ = self.rollback_inner();
                     Err(e)
                 }
             }
         } else {
+            eprintln!("[epoch-debug] with_auto_commit: skipping auto-commit (has_mutations={has_mutations})");
             body()
         }
     }

@@ -342,7 +342,13 @@ impl TransactionManager {
 
         // Commit successful: advance epoch atomically.
         // SeqCst ensures all threads see commits in a consistent total order.
+        let old_epoch = self.current_epoch.load(Ordering::SeqCst);
         let commit_epoch = EpochId::new(self.current_epoch.fetch_add(1, Ordering::SeqCst) + 1);
+        eprintln!(
+            "[epoch-debug] TM::commit: tx={transaction_id:?} old_epoch={old_epoch} commit_epoch={} tm_ptr={:p}",
+            commit_epoch.as_u64(),
+            self
+        );
 
         // Update state and record commit epoch atomically (both write locks held).
         if let Some(info) = txns.get_mut(&transaction_id) {
@@ -449,7 +455,9 @@ impl TransactionManager {
     /// Returns the current epoch.
     #[must_use]
     pub fn current_epoch(&self) -> EpochId {
-        EpochId::new(self.current_epoch.load(Ordering::Acquire))
+        let epoch = self.current_epoch.load(Ordering::Acquire);
+        eprintln!("[epoch-debug] TM::current_epoch: epoch={epoch} tm_ptr={:p}", self);
+        EpochId::new(epoch)
     }
 
     /// Synchronizes the epoch counter to at least the given value.

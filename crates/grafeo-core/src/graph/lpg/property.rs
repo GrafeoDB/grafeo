@@ -209,6 +209,51 @@ impl<Id: EntityId> PropertyStorage<Id> {
         }
     }
 
+    /// Sets many property values across many entities while holding the column
+    /// map write lock exactly once.
+    ///
+    /// This is the storage-level primitive behind transactional batch node/edge
+    /// creation: the row-oriented [`set`](Self::set) re-acquires the column map
+    /// write lock for every single property, which dominates cost on wide
+    /// batches. Each row is `(entity_id, key, value)`. Columns are created
+    /// lazily with the storage's default compression mode, exactly as `set`
+    /// does. Callers remain responsible for secondary-index and transaction
+    /// undo bookkeeping; this only writes column values.
+    #[cfg(not(feature = "temporal"))]
+    pub fn set_batch<I>(&self, rows: I)
+    where
+        I: IntoIterator<Item = (Id, PropertyKey, Value)>,
+    {
+        let mut columns = self.columns.write();
+        let mode = self.default_compression;
+        for (id, key, value) in rows {
+            columns
+                .entry(key)
+                .or_insert_with(|| PropertyColumn::with_compression(mode))
+                .set(id, value);
+        }
+    }
+
+    /// Sets many property values across many entities at a specific epoch while
+    /// holding the column map write lock exactly once (temporal variant).
+    ///
+    /// Pass `EpochId::PENDING` for transactional writes so the values stay
+    /// invisible until commit finalizes them, matching [`set`](Self::set).
+    #[cfg(feature = "temporal")]
+    pub fn set_batch<I>(&self, rows: I, epoch: EpochId)
+    where
+        I: IntoIterator<Item = (Id, PropertyKey, Value)>,
+    {
+        let mut columns = self.columns.write();
+        let mode = self.default_compression;
+        for (id, key, value) in rows {
+            columns
+                .entry(key)
+                .or_insert_with(|| PropertyColumn::with_compression(mode))
+                .set(id, value, epoch);
+        }
+    }
+
     /// Sets a property value for an entity at a specific epoch.
     ///
     /// For non-transactional writes, pass the current epoch.

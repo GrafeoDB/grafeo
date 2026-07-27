@@ -266,6 +266,65 @@ impl AdjacencyList {
         self.deleted.insert(edge_id);
     }
 
+    /// Physically removes every edge in `exclude` from this list.
+    ///
+    /// Cold chunks are immutable once compressed, so any removal that may touch
+    /// cold storage rebuilds the list from the surviving entries. This keeps
+    /// rollback free of filtered-but-orphaned cold residue and preserves exact
+    /// `edge_count` / `deleted_count` accounting at the parent.
+    ///
+    /// Returns the number of physical entries that were removed.
+    fn rebuild_excluding(&mut self, exclude: &FxHashSet<EdgeId>, chunk_capacity: usize) -> usize {
+        if exclude.is_empty() {
+            return 0;
+        }
+
+        let mut kept: Vec<(NodeId, EdgeId)> = Vec::new();
+        let mut removed = 0usize;
+
+        let mut consider = |dst: NodeId, eid: EdgeId| {
+            if exclude.contains(&eid) {
+                removed += 1;
+            } else {
+                kept.push((dst, eid));
+            }
+        };
+
+        for chunk in &self.cold_chunks {
+            for (dst, eid) in chunk.iter() {
+                consider(dst, eid);
+            }
+        }
+        for chunk in &self.hot_chunks {
+            for (dst, eid) in chunk.iter() {
+                consider(dst, eid);
+            }
+        }
+        for &(dst, eid) in &self.delta_inserts {
+            consider(dst, eid);
+        }
+
+        // Drop soft-delete marks for removed ids; keep marks that still apply.
+        self.deleted.retain(|eid| !exclude.contains(eid));
+        self.cold_chunks.clear();
+        self.hot_chunks.clear();
+        self.delta_inserts.clear();
+        self.skip_index.clear();
+
+        for (dst, eid) in kept {
+            self.add_edge(dst, eid, chunk_capacity);
+        }
+        removed
+    }
+
+    /// Returns `true` when this list has no physical edge entries.
+    fn is_effectively_empty(&self) -> bool {
+        self.delta_inserts.is_empty()
+            && self.hot_chunks.iter().all(|c| c.len() == 0)
+            && self.cold_chunks.is_empty()
+            && self.deleted.is_empty()
+    }
+
     fn compact(&mut self, chunk_capacity: usize) {
         if self.delta_inserts.is_empty() {
             return;
@@ -593,6 +652,53 @@ impl ChunkedAdjacency {
         if let Some(list) = lists.get_mut(&src) {
             list.mark_deleted(edge_id);
             self.deleted_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Physically removes edges created inside a rolled-back transaction.
+    ///
+    /// Each tuple is `(src, edge_id)`. Always hard-removes matching entries,
+    /// including edges already compressed into cold chunks (those lists are
+    /// rebuilt). Soft-delete residue is never left behind for rollback. Empty
+    /// source lists are dropped from the map and counters stay exact.
+    pub fn batch_remove_edges(&self, edges: &[(NodeId, EdgeId)]) {
+        if edges.is_empty() {
+            return;
+        }
+
+        // Group by source so each cold list is rebuilt at most once.
+        let mut by_src: FxHashMap<NodeId, FxHashSet<EdgeId>> = FxHashMap::default();
+        for &(src, edge_id) in edges {
+            by_src.entry(src).or_default().insert(edge_id);
+        }
+
+        let mut lists = self.lists.write();
+        let mut removed = 0usize;
+        let mut deleted_released = 0usize;
+        let mut empty_srcs = Vec::new();
+        for (src, exclude) in by_src {
+            let Some(list) = lists.get_mut(&src) else {
+                continue;
+            };
+            let soft_before = list.deleted.len();
+            removed += list.rebuild_excluding(&exclude, self.chunk_capacity);
+            let soft_after = list.deleted.len();
+            if soft_before > soft_after {
+                deleted_released += soft_before - soft_after;
+            }
+            if list.is_effectively_empty() {
+                empty_srcs.push(src);
+            }
+        }
+        for src in empty_srcs {
+            lists.remove(&src);
+        }
+        if removed > 0 {
+            self.edge_count.fetch_sub(removed, Ordering::Relaxed);
+        }
+        if deleted_released > 0 {
+            self.deleted_count
+                .fetch_sub(deleted_released, Ordering::Relaxed);
         }
     }
 
@@ -1454,5 +1560,37 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    #[test]
+    fn test_batch_remove_physically_clears_cold_chunks() {
+        let adj = ChunkedAdjacency::with_chunk_capacity(8);
+        let src = NodeId::new(0);
+        let mut edges = Vec::new();
+        for i in 0..40 {
+            let eid = EdgeId::new(i);
+            adj.add_edge(src, NodeId::new(i + 1), eid);
+            edges.push((src, eid));
+        }
+        adj.compact();
+        adj.freeze_all();
+
+        let before = adj.memory_stats();
+        assert!(before.cold_entries > 0, "expected cold compression");
+        assert_eq!(adj.total_edge_count(), 40);
+        assert_eq!(adj.active_edge_count(), 40);
+
+        adj.batch_remove_edges(&edges);
+
+        let after = adj.memory_stats();
+        assert_eq!(after.cold_entries, 0, "cold residue must be rebuilt away");
+        assert_eq!(after.hot_entries, 0);
+        assert_eq!(after.node_count, 0, "empty source lists must be dropped");
+        assert_eq!(adj.total_edge_count(), 0);
+        assert_eq!(adj.active_edge_count(), 0);
+        assert!(adj.neighbors(src).is_empty());
+        // deleted_count is private via active/total; soft residue would make
+        // total>active. Exact zero on both proves no soft-delete leftovers.
+        assert_eq!(adj.total_edge_count(), adj.active_edge_count());
     }
 }

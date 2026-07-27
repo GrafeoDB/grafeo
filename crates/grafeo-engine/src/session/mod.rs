@@ -6,6 +6,10 @@
 
 #[cfg(feature = "triple-store")]
 mod rdf;
+#[cfg(feature = "lpg")]
+mod transactional_batch;
+#[cfg(feature = "lpg")]
+pub use transactional_batch::{TransactionalEdgeCreate, TransactionalNodeCreate};
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;

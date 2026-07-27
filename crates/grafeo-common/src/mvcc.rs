@@ -44,11 +44,13 @@ impl VersionInfo {
         self.deleted_by = Some(deleted_by);
     }
 
-    /// Unmarks deletion if deleted by the given transaction. Returns `true` if undeleted.
+    /// Unmarks deletion if deleted by the given transaction while still pending.
     ///
-    /// Used during rollback to restore versions deleted within the rolled-back transaction.
+    /// Returns `true` if undeleted. Committed deletions (non-`PENDING`
+    /// `deleted_epoch`) are left untouched even when `deleted_by` coincides
+    /// with a later recycled transaction id.
     pub fn unmark_deleted_by(&mut self, transaction_id: TransactionId) -> bool {
-        if self.deleted_by == Some(transaction_id) {
+        if self.deleted_by == Some(transaction_id) && self.deleted_epoch == Some(EpochId::PENDING) {
             self.deleted_epoch = None;
             self.deleted_by = None;
             true
@@ -219,14 +221,30 @@ impl<T> VersionChain<T> {
         self.versions.iter().any(|v| v.info.deleted_by == Some(tx))
     }
 
-    /// Removes all versions created by the given transaction.
+    /// Returns `true` when every version is an uncommitted create by `tx`.
     ///
-    /// Used for rollback to discard uncommitted changes.
-    pub fn remove_versions_by(&mut self, tx: TransactionId) {
-        self.versions.retain(|v| v.info.created_by != tx);
+    /// Used by rollback to detect entities created inside the active
+    /// transaction. Matching requires `created_epoch == PENDING` so a recycled
+    /// transaction id cannot treat already-committed versions as disposable.
+    #[must_use]
+    pub fn solely_created_by(&self, tx: TransactionId) -> bool {
+        !self.versions.is_empty()
+            && self
+                .versions
+                .iter()
+                .all(|v| v.info.created_by == tx && v.info.created_epoch == EpochId::PENDING)
     }
 
-    /// Finalizes PENDING epochs for versions created by the given transaction.
+    /// Removes uncommitted versions created by the given transaction.
+    ///
+    /// Only `PENDING` creates are discarded. Committed versions that happen to
+    /// share `created_by` after transaction-manager recreation are preserved.
+    pub fn remove_versions_by(&mut self, tx: TransactionId) {
+        self.versions
+            .retain(|v| !(v.info.created_by == tx && v.info.created_epoch == EpochId::PENDING));
+    }
+
+    /// Finalizes PENDING epochs for versions created or deleted by the given transaction.
     ///
     /// Called at commit time to make uncommitted versions visible at the
     /// real commit epoch instead of `EpochId::PENDING`.
@@ -236,6 +254,11 @@ impl<T> VersionChain<T> {
                 && version.info.created_epoch == EpochId::PENDING
             {
                 version.info.created_epoch = commit_epoch;
+            }
+            if version.info.deleted_by == Some(transaction_id)
+                && version.info.deleted_epoch == Some(EpochId::PENDING)
+            {
+                version.info.deleted_epoch = Some(commit_epoch);
             }
         }
     }
@@ -376,19 +399,27 @@ impl OptionalEpochId {
     /// Represents no epoch (deleted_epoch = None).
     pub const NONE: Self = Self(u32::MAX);
 
+    /// Compact encoding of [`EpochId::PENDING`] for uncommitted deletions.
+    ///
+    /// Real epochs use `0..u32::MAX-1`; `u32::MAX` is [`NONE`].
+    const PENDING_CODE: u32 = u32::MAX - 1;
+
     /// Creates an `OptionalEpochId` from an epoch.
     ///
     /// # Panics
-    /// Panics if epoch exceeds u32::MAX - 1 (4,294,967,294).
+    /// Panics if a non-PENDING epoch exceeds `u32::MAX - 2` (4,294,967,293).
     #[must_use]
     pub fn some(epoch: EpochId) -> Self {
+        if epoch == EpochId::PENDING {
+            return Self(Self::PENDING_CODE);
+        }
         assert!(
-            epoch.as_u64() < u64::from(u32::MAX),
+            epoch.as_u64() < u64::from(Self::PENDING_CODE),
             "epoch {} exceeds OptionalEpochId capacity (max {})",
             epoch.as_u64(),
-            u32::MAX as u64 - 1
+            u64::from(Self::PENDING_CODE) - 1
         );
-        // reason: the assert above guarantees epoch < u32::MAX
+        // reason: the assert above guarantees epoch < PENDING_CODE
         #[allow(clippy::cast_possible_truncation)]
         Self(epoch.as_u64() as u32)
     }
@@ -399,6 +430,8 @@ impl OptionalEpochId {
     pub fn get(self) -> Option<EpochId> {
         if self.0 == u32::MAX {
             None
+        } else if self.0 == Self::PENDING_CODE {
+            Some(EpochId::PENDING)
         } else {
             Some(EpochId::new(u64::from(self.0)))
         }
@@ -415,6 +448,13 @@ impl OptionalEpochId {
     #[must_use]
     pub fn is_none(self) -> bool {
         self.0 == u32::MAX
+    }
+
+    /// Returns `true` when this encodes an uncommitted (`PENDING`) deletion.
+    #[inline]
+    #[must_use]
+    pub fn is_pending(self) -> bool {
+        self.0 == Self::PENDING_CODE
     }
 }
 
@@ -481,9 +521,9 @@ impl HotVersionRef {
         self.deleted_by = Some(deleted_by);
     }
 
-    /// Unmarks deletion if deleted by the given transaction. Returns `true` if undeleted.
+    /// Unmarks a pending deletion by the given transaction. Returns `true` if undeleted.
     pub fn unmark_deleted_by(&mut self, transaction_id: TransactionId) -> bool {
-        if self.deleted_by == Some(transaction_id) {
+        if self.deleted_by == Some(transaction_id) && self.deleted_epoch.is_pending() {
             self.deleted_epoch = OptionalEpochId::NONE;
             self.deleted_by = None;
             true
@@ -779,7 +819,7 @@ impl VersionIndex {
         false
     }
 
-    /// Unmarks deletion for versions deleted by the given transaction.
+    /// Unmarks pending deletion for versions deleted by the given transaction.
     ///
     /// Returns `true` if any version was undeleted. Used during rollback.
     pub fn unmark_deleted_by(&mut self, tx: TransactionId) -> bool {
@@ -790,7 +830,7 @@ impl VersionIndex {
             }
         }
         for v in &mut self.cold {
-            if v.deleted_by == Some(tx) {
+            if v.deleted_by == Some(tx) && v.deleted_epoch.is_pending() {
                 v.deleted_epoch = OptionalEpochId::NONE;
                 v.deleted_by = None;
                 any_undeleted = true;
@@ -812,14 +852,32 @@ impl VersionIndex {
             || self.cold.iter().any(|v| v.deleted_by == Some(tx))
     }
 
-    /// Removes all versions created by the given transaction (for rollback).
+    /// Returns `true` when every version is an uncommitted create by `tx`.
+    ///
+    /// See [`VersionChain::solely_created_by`] for the rollback-cleanup contract.
+    #[must_use]
+    pub fn solely_created_by(&self, tx: TransactionId) -> bool {
+        !self.is_empty()
+            && self
+                .hot
+                .iter()
+                .all(|v| v.created_by == tx && v.epoch == EpochId::PENDING)
+            && self
+                .cold
+                .iter()
+                .all(|v| v.created_by == tx && v.epoch == EpochId::PENDING)
+    }
+
+    /// Removes uncommitted (`PENDING`) versions created by the given transaction.
     pub fn remove_versions_by(&mut self, tx: TransactionId) {
-        self.hot.retain(|v| v.created_by != tx);
-        self.cold.retain(|v| v.created_by != tx);
+        self.hot
+            .retain(|v| !(v.created_by == tx && v.epoch == EpochId::PENDING));
+        self.cold
+            .retain(|v| !(v.created_by == tx && v.epoch == EpochId::PENDING));
         self.recalculate_latest_epoch();
     }
 
-    /// Finalizes PENDING epochs for hot versions created by the given transaction.
+    /// Finalizes PENDING create/delete epochs for versions owned by the transaction.
     ///
     /// Called at commit time to make uncommitted versions visible at the
     /// real commit epoch instead of `EpochId::PENDING`.
@@ -827,6 +885,17 @@ impl VersionIndex {
         for v in &mut self.hot {
             if v.created_by == transaction_id && v.epoch == EpochId::PENDING {
                 v.epoch = commit_epoch;
+            }
+            if v.deleted_by == Some(transaction_id) && v.deleted_epoch.is_pending() {
+                v.deleted_epoch = OptionalEpochId::some(commit_epoch);
+            }
+        }
+        for v in &mut self.cold {
+            if v.created_by == transaction_id && v.epoch == EpochId::PENDING {
+                v.epoch = commit_epoch;
+            }
+            if v.deleted_by == Some(transaction_id) && v.deleted_epoch.is_pending() {
+                v.deleted_epoch = OptionalEpochId::some(commit_epoch);
             }
         }
         self.recalculate_latest_epoch();
@@ -1052,16 +1121,61 @@ mod tests {
     #[test]
     fn test_version_chain_rollback() {
         let mut chain = VersionChain::with_initial("v1", EpochId::new(1), TransactionId::new(1));
-        chain.add_version("v2", EpochId::new(5), TransactionId::new(2));
-        chain.add_version("v3", EpochId::new(6), TransactionId::new(2));
+        chain.add_version("v2", EpochId::PENDING, TransactionId::new(2));
+        chain.add_version("v3", EpochId::PENDING, TransactionId::new(2));
 
         assert_eq!(chain.version_count(), 3);
 
-        // Rollback tx 2's changes
+        // Rollback tx 2's PENDING changes
         chain.remove_versions_by(TransactionId::new(2));
 
         assert_eq!(chain.version_count(), 1);
         assert_eq!(chain.visible_at(EpochId::new(10)), Some(&"v1"));
+    }
+
+    #[test]
+    fn test_version_chain_rollback_ignores_committed_same_tx_id() {
+        let tx = TransactionId::new(7);
+        let mut chain = VersionChain::with_initial("committed", EpochId::new(3), tx);
+        // Simulate transaction-manager recreation reusing the same id while a
+        // prior committed version still carries that created_by.
+        assert!(!chain.solely_created_by(tx));
+        chain.remove_versions_by(tx);
+        assert_eq!(chain.version_count(), 1);
+        assert_eq!(chain.visible_at(EpochId::new(3)), Some(&"committed"));
+
+        chain.add_version("pending", EpochId::PENDING, tx);
+        assert!(chain.solely_created_by(tx) == false); // mixed committed + pending
+        // Only the PENDING create is discarded.
+        chain.remove_versions_by(tx);
+        assert_eq!(chain.version_count(), 1);
+        assert_eq!(chain.visible_at(EpochId::new(3)), Some(&"committed"));
+    }
+
+    #[test]
+    fn test_version_chain_unmark_requires_pending_delete() {
+        let tx = TransactionId::new(9);
+        let mut chain = VersionChain::with_initial("v1", EpochId::new(1), TransactionId::new(1));
+        chain.mark_deleted(EpochId::new(5), tx);
+        // Committed-style delete epoch must not roll back via tx-id coincidence.
+        assert!(!chain.unmark_deleted_by(tx));
+        assert!(chain.deleted_by(tx));
+
+        let mut pending = VersionChain::with_initial("v1", EpochId::new(1), TransactionId::new(1));
+        pending.mark_deleted(EpochId::PENDING, tx);
+        assert!(pending.unmark_deleted_by(tx));
+        assert!(!pending.deleted_by(tx));
+        assert_eq!(pending.visible_at(EpochId::new(10)), Some(&"v1"));
+    }
+
+    #[test]
+    fn test_version_chain_solely_created_requires_pending() {
+        let tx = TransactionId::new(3);
+        let pending = VersionChain::with_initial("p", EpochId::PENDING, tx);
+        assert!(pending.solely_created_by(tx));
+
+        let committed = VersionChain::with_initial("c", EpochId::new(2), tx);
+        assert!(!committed.solely_created_by(tx));
     }
 
     #[test]
@@ -1210,14 +1324,14 @@ mod tiered_storage_tests {
         let mut index = VersionIndex::new();
         index.add_hot(HotVersionRef::new(EpochId::new(1), EpochId::new(1), 0, tx1));
         index.add_hot(HotVersionRef::new(
-            EpochId::new(2),
+            EpochId::PENDING,
             EpochId::new(2),
             100,
             tx2,
         ));
         index.add_hot(HotVersionRef::new(
-            EpochId::new(3),
-            EpochId::new(3),
+            EpochId::PENDING,
+            EpochId::new(2),
             200,
             tx2,
         ));
@@ -1226,7 +1340,7 @@ mod tiered_storage_tests {
         assert!(index.modified_by(tx1));
         assert!(index.modified_by(tx2));
 
-        // Rollback tx2's changes
+        // Rollback tx2's PENDING changes
         index.remove_versions_by(tx2);
 
         assert_eq!(index.version_count(), 1);
@@ -1236,6 +1350,52 @@ mod tiered_storage_tests {
         // Should only see tx1's version
         let v = index.visible_at(EpochId::new(10)).unwrap();
         assert!(matches!(v, VersionRef::Hot(h) if h.created_by == tx1));
+    }
+
+    #[test]
+    fn test_version_index_rollback_ignores_committed_same_tx_id() {
+        let tx = TransactionId::new(42);
+        let mut index = VersionIndex::new();
+        index.add_hot(HotVersionRef::new(EpochId::new(3), EpochId::new(3), 0, tx));
+        assert!(!index.solely_created_by(tx));
+        index.remove_versions_by(tx);
+        assert_eq!(index.version_count(), 1);
+
+        index.add_hot(HotVersionRef::new(
+            EpochId::PENDING,
+            EpochId::new(4),
+            50,
+            tx,
+        ));
+        index.remove_versions_by(tx);
+        assert_eq!(index.version_count(), 1);
+        let v = index.visible_at(EpochId::new(3)).unwrap();
+        assert!(matches!(v, VersionRef::Hot(h) if h.epoch == EpochId::new(3)));
+    }
+
+    #[test]
+    fn test_version_index_unmark_requires_pending_delete() {
+        let tx = TransactionId::new(9);
+        let mut index = VersionIndex::new();
+        index.add_hot(HotVersionRef::new(
+            EpochId::new(1),
+            EpochId::new(1),
+            0,
+            TransactionId::new(1),
+        ));
+        assert!(index.mark_deleted(EpochId::new(5), tx));
+        assert!(!index.unmark_deleted_by(tx));
+
+        let mut pending = VersionIndex::new();
+        pending.add_hot(HotVersionRef::new(
+            EpochId::new(1),
+            EpochId::new(1),
+            0,
+            TransactionId::new(1),
+        ));
+        assert!(pending.mark_deleted(EpochId::PENDING, tx));
+        assert!(pending.unmark_deleted_by(tx));
+        assert!(!pending.deleted_by(tx));
     }
 
     #[test]
@@ -1396,14 +1556,14 @@ mod tiered_storage_tests {
         assert_eq!(index.latest_epoch(), EpochId::new(5));
 
         index.add_hot(HotVersionRef::new(
-            EpochId::new(10),
+            EpochId::PENDING,
             EpochId::new(10),
             100,
             TransactionId::new(2),
         ));
-        assert_eq!(index.latest_epoch(), EpochId::new(10));
+        assert_eq!(index.latest_epoch(), EpochId::PENDING);
 
-        // After rollback, should recalculate
+        // After rollback of the PENDING create, should recalculate
         index.remove_versions_by(TransactionId::new(2));
         assert_eq!(index.latest_epoch(), EpochId::new(5));
     }

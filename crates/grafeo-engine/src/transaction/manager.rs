@@ -217,6 +217,60 @@ impl TransactionManager {
         Ok(())
     }
 
+    /// Records many write operations for a transaction under a single
+    /// `transactions` write-lock acquisition.
+    ///
+    /// Storage-level batch node/edge creation writes hundreds or thousands of
+    /// entities at once; calling [`record_write`](Self::record_write) per row
+    /// would re-acquire the lock and re-scan for conflicts every time. This
+    /// performs the same first-writer-wins conflict detection as `record_write`
+    /// but amortizes both over the whole batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on a write-write conflict with another active
+    /// transaction, or if the transaction is missing/inactive. On conflict the
+    /// write set is left partially extended, which is harmless: the caller rolls
+    /// the transaction back.
+    pub fn record_writes(
+        &self,
+        transaction_id: TransactionId,
+        entities: &[EntityId],
+    ) -> Result<()> {
+        if entities.is_empty() {
+            return Ok(());
+        }
+        let mut txns = self.transactions.write();
+
+        if self.active_count.load(Ordering::Relaxed) > 1 {
+            for &entity in entities {
+                for (other_tx, other_info) in txns.iter() {
+                    if *other_tx != transaction_id
+                        && other_info.state == TransactionState::Active
+                        && other_info.write_set.contains(&entity)
+                    {
+                        return Err(Error::Transaction(TransactionError::WriteConflict(
+                            format!("Write-write conflict on entity {entity:?}"),
+                        )));
+                    }
+                }
+            }
+        }
+
+        let info = txns.get_mut(&transaction_id).ok_or_else(|| {
+            Error::Transaction(TransactionError::InvalidState(
+                "Transaction not found".to_string(),
+            ))
+        })?;
+        if info.state != TransactionState::Active {
+            return Err(Error::Transaction(TransactionError::InvalidState(
+                "Transaction not active".to_string(),
+            )));
+        }
+        info.write_set.extend(entities.iter().copied());
+        Ok(())
+    }
+
     /// Records a read operation for the transaction (for serializable isolation).
     ///
     /// # Errors
@@ -456,7 +510,10 @@ impl TransactionManager {
     #[must_use]
     pub fn current_epoch(&self) -> EpochId {
         let epoch = self.current_epoch.load(Ordering::Acquire);
-        eprintln!("[epoch-debug] TM::current_epoch: epoch={epoch} tm_ptr={:p}", self);
+        eprintln!(
+            "[epoch-debug] TM::current_epoch: epoch={epoch} tm_ptr={:p}",
+            self
+        );
         EpochId::new(epoch)
     }
 

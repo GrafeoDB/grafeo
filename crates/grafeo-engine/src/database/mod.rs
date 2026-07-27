@@ -7,6 +7,8 @@
 //! - `crud` - Node/edge CRUD operations
 //! - `index` - Property, vector, and text index management
 //! - `search` - Vector, text, and hybrid search
+//! - `vector_access` - Shared spill-aware vector accessor construction
+//! - `vector_read` - Exact spill-aware vector reads by NodeId
 //! - `embed` - Embedding model management
 //! - `persistence` - Save, load, snapshots, iteration
 //! - `admin` - Stats, introspection, diagnostics, CDC
@@ -47,8 +49,15 @@ mod rdf_ops;
 #[cfg(feature = "lpg")]
 mod search;
 pub(crate) mod section_consumer;
+#[cfg(all(feature = "lpg", feature = "vector-index"))]
+mod vector_access;
+#[cfg(all(feature = "lpg", feature = "vector-index"))]
+mod vector_read;
 #[cfg(all(feature = "wal", feature = "lpg"))]
 pub(crate) mod wal_store;
+
+#[cfg(all(feature = "lpg", feature = "vector-index"))]
+pub use vector_read::IndexedVectorRead;
 
 use grafeo_common::{grafeo_error, grafeo_warn};
 #[cfg(feature = "wal")]

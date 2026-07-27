@@ -100,12 +100,12 @@ mod tests {
     #[test]
     fn test_version_chain_rollback() {
         let mut chain = VersionChain::with_initial("v1", EpochId::new(1), TransactionId::new(1));
-        chain.add_version("v2", EpochId::new(5), TransactionId::new(2));
-        chain.add_version("v3", EpochId::new(6), TransactionId::new(2));
+        chain.add_version("v2", EpochId::PENDING, TransactionId::new(2));
+        chain.add_version("v3", EpochId::PENDING, TransactionId::new(2));
 
         assert_eq!(chain.version_count(), 3);
 
-        // Rollback tx 2's changes
+        // Rollback tx 2's PENDING changes
         chain.remove_versions_by(TransactionId::new(2));
 
         assert_eq!(chain.version_count(), 1);

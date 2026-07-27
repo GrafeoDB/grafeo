@@ -700,8 +700,9 @@ impl LpgStore {
                 return false;
             }
 
-            // Mark deleted with transaction tracking
-            chain.mark_deleted(epoch, transaction_id);
+            // Uncommitted deletes use PENDING so rollback matching stays
+            // epoch-safe after transaction-id reuse.
+            chain.mark_deleted(EpochId::PENDING, transaction_id);
 
             // Capture labels for undo log
             let registry = self.label_registry.read();
@@ -806,8 +807,9 @@ impl LpgStore {
                 return false;
             }
 
-            // Mark deleted with transaction tracking
-            index.mark_deleted(epoch, transaction_id);
+            // Uncommitted deletes use PENDING so rollback matching stays
+            // epoch-safe after transaction-id reuse.
+            index.mark_deleted(EpochId::PENDING, transaction_id);
 
             // Capture labels for undo log
             let registry = self.label_registry.read();

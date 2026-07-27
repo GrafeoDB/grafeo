@@ -33,4 +33,5 @@ pub use property::{CompareOp, PropertyStorage};
 #[cfg(feature = "lpg")]
 pub use section::LpgStoreSection;
 #[cfg(feature = "lpg")]
+pub use store::batch_ops::{BatchEdgeCreate, BatchNodeCreate};
 pub use store::{LpgStore, PropertyUndoEntry};

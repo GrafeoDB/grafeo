@@ -9,12 +9,18 @@
 //! - Columnar properties with zone maps for fast filtering
 //! - Forward and backward adjacency indexes
 
+pub mod batch_ops;
+#[cfg(not(feature = "tiered-storage"))]
+mod batch_ops_lpg;
+#[cfg(feature = "tiered-storage")]
+mod batch_ops_tiered;
 mod edge_ops;
 mod graph_store_impl;
 mod index;
 mod memory;
 mod node_ops;
 mod property_ops;
+mod rollback_cleanup;
 mod schema;
 mod search;
 mod statistics;

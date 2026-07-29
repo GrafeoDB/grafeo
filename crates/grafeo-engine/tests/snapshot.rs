@@ -105,10 +105,10 @@ fn export_import_preserves_nodes() {
 #[test]
 fn export_import_preserves_edges() {
     let db = GrafeoDB::new_in_memory();
-    let alix = db.create_node(&["Person"]);
-    db.set_node_property(alix, "name", "Alix".into());
-    let gus = db.create_node(&["Person"]);
-    db.set_node_property(gus, "name", "Gus".into());
+    let alix = db.create_node(&["Person"]).unwrap();
+    db.set_node_property(alix, "name", "Alix".into()).unwrap();
+    let gus = db.create_node(&["Person"]).unwrap();
+    db.set_node_property(gus, "name", "Gus".into()).unwrap();
     db.create_edge(alix, gus, "KNOWS");
 
     let bytes = db.export_snapshot().unwrap();
@@ -151,10 +151,10 @@ fn import_rejects_invalid_data() {
 #[test]
 fn snapshot_round_trip_schema() {
     let db = GrafeoDB::new_in_memory();
-    let alix = db.create_node(&["Person"]);
-    db.set_node_property(alix, "name", "Alix".into());
-    let gus = db.create_node(&["Person"]);
-    db.set_node_property(gus, "name", "Gus".into());
+    let alix = db.create_node(&["Person"]).unwrap();
+    db.set_node_property(alix, "name", "Alix".into()).unwrap();
+    let gus = db.create_node(&["Person"]).unwrap();
+    db.set_node_property(gus, "name", "Gus".into()).unwrap();
     db.create_edge(alix, gus, "KNOWS");
 
     let schema_before = db.schema();
@@ -173,8 +173,8 @@ fn snapshot_round_trip_schema() {
 #[test]
 fn export_import_preserves_edge_properties() {
     let db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["Person"]);
-    let b = db.create_node(&["Person"]);
+    let a = db.create_node(&["Person"]).unwrap();
+    let b = db.create_node(&["Person"]).unwrap();
     let edge = db.create_edge(a, b, "KNOWS");
     db.set_edge_property(edge, "since", Value::Int64(2020));
     db.set_edge_property(edge, "strength", Value::Float64(0.95));
@@ -196,9 +196,9 @@ fn export_import_preserves_edge_properties() {
 #[test]
 fn export_import_preserves_multiple_labels() {
     let db = GrafeoDB::new_in_memory();
-    db.create_node(&["Person", "Employee"]);
-    db.create_node(&["Person", "Manager"]);
-    db.create_node(&["Animal"]);
+    db.create_node(&["Person", "Employee"]).unwrap();
+    db.create_node(&["Person", "Manager"]).unwrap();
+    db.create_node(&["Animal"]).unwrap();
 
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
@@ -226,7 +226,7 @@ fn export_import_preserves_temporal_values() {
     use grafeo_common::types::{Date, Duration, Time, Timestamp, ZonedDatetime};
 
     let db = GrafeoDB::new_in_memory();
-    let id = db.create_node(&["Temporal"]);
+    let id = db.create_node(&["Temporal"]).unwrap();
 
     let date = Date::from_ymd(2025, 6, 15).unwrap();
     let time = Time::from_hms(14, 30, 0).unwrap();
@@ -234,11 +234,16 @@ fn export_import_preserves_temporal_values() {
     let duration = Duration::new(1, 15, 3_600_000_000_000); // 1 month, 15 days, 1 hour
     let zoned = ZonedDatetime::from_timestamp_offset(Timestamp::from_secs(1_700_000_000), 3600);
 
-    db.set_node_property(id, "date_val", Value::Date(date));
-    db.set_node_property(id, "time_val", Value::Time(time));
-    db.set_node_property(id, "ts_val", Value::Timestamp(timestamp));
-    db.set_node_property(id, "dur_val", Value::Duration(duration));
-    db.set_node_property(id, "zdt_val", Value::ZonedDatetime(zoned));
+    db.set_node_property(id, "date_val", Value::Date(date))
+        .unwrap();
+    db.set_node_property(id, "time_val", Value::Time(time))
+        .unwrap();
+    db.set_node_property(id, "ts_val", Value::Timestamp(timestamp))
+        .unwrap();
+    db.set_node_property(id, "dur_val", Value::Duration(duration))
+        .unwrap();
+    db.set_node_property(id, "zdt_val", Value::ZonedDatetime(zoned))
+        .unwrap();
 
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
@@ -260,17 +265,22 @@ fn export_import_preserves_temporal_values() {
 #[test]
 fn export_import_preserves_all_value_types() {
     let db = GrafeoDB::new_in_memory();
-    let id = db.create_node(&["Test"]);
-    db.set_node_property(id, "str_val", Value::String("hello".into()));
-    db.set_node_property(id, "int_val", Value::Int64(42));
-    db.set_node_property(id, "float_val", Value::Float64(9.81));
-    db.set_node_property(id, "bool_val", Value::Bool(true));
-    db.set_node_property(id, "null_val", Value::Null);
+    let id = db.create_node(&["Test"]).unwrap();
+    db.set_node_property(id, "str_val", Value::String("hello".into()))
+        .unwrap();
+    db.set_node_property(id, "int_val", Value::Int64(42))
+        .unwrap();
+    db.set_node_property(id, "float_val", Value::Float64(9.81))
+        .unwrap();
+    db.set_node_property(id, "bool_val", Value::Bool(true))
+        .unwrap();
+    db.set_node_property(id, "null_val", Value::Null).unwrap();
     db.set_node_property(
         id,
         "bytes_val",
         Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF].into()),
-    );
+    )
+    .unwrap();
 
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
@@ -296,12 +306,13 @@ fn export_import_preserves_all_value_types() {
 #[test]
 fn export_import_preserves_collection_values() {
     let db = GrafeoDB::new_in_memory();
-    let id = db.create_node(&["Test"]);
+    let id = db.create_node(&["Test"]).unwrap();
     db.set_node_property(
         id,
         "tags",
         Value::List(vec![Value::String("a".into()), Value::String("b".into())].into()),
-    );
+    )
+    .unwrap();
 
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
@@ -320,9 +331,9 @@ fn export_import_preserves_collection_values() {
 #[test]
 fn export_import_preserves_multiple_edge_types() {
     let db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["Person"]);
-    let b = db.create_node(&["Person"]);
-    let c = db.create_node(&["Company"]);
+    let a = db.create_node(&["Person"]).unwrap();
+    let b = db.create_node(&["Person"]).unwrap();
+    let c = db.create_node(&["Company"]).unwrap();
 
     db.create_edge(a, b, "KNOWS");
     db.create_edge(a, c, "WORKS_AT");
@@ -349,8 +360,8 @@ fn export_import_preserves_multiple_edge_types() {
 #[test]
 fn export_import_preserves_empty_property_nodes() {
     let db = GrafeoDB::new_in_memory();
-    db.create_node(&["Empty"]);
-    db.create_node(&["Empty"]);
+    db.create_node(&["Empty"]).unwrap();
+    db.create_node(&["Empty"]).unwrap();
 
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
@@ -371,9 +382,10 @@ fn export_import_moderate_dataset() {
     // Create 100 nodes with properties
     let mut ids = Vec::new();
     for i in 0..100 {
-        let id = db.create_node(&["Item"]);
-        db.set_node_property(id, "index", Value::Int64(i));
-        db.set_node_property(id, "name", Value::String(format!("item_{i}").into()));
+        let id = db.create_node(&["Item"]).unwrap();
+        db.set_node_property(id, "index", Value::Int64(i)).unwrap();
+        db.set_node_property(id, "name", Value::String(format!("item_{i}").into()))
+            .unwrap();
         ids.push(id);
     }
 
@@ -457,8 +469,8 @@ fn import_rejects_dangling_edge_source() {
     // Create a valid snapshot, then re-export after deleting the source node
     // to create a snapshot with a dangling edge reference.
     let db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["Person"]);
-    let b = db.create_node(&["Person"]);
+    let a = db.create_node(&["Person"]).unwrap();
+    let b = db.create_node(&["Person"]).unwrap();
     db.create_edge(a, b, "KNOWS");
 
     // Export valid snapshot
@@ -473,7 +485,7 @@ fn import_rejects_dangling_edge_source() {
     // Actually, let's tamper with binary data at a higher level:
     // Build a snapshot where edge references node ID 999 which doesn't exist.
     let db2 = GrafeoDB::new_in_memory();
-    let n = db2.create_node(&["Person"]);
+    let n = db2.create_node(&["Person"]).unwrap();
     // Create an edge referencing a non-existent source node
     // We need to use the direct store API since create_edge validates at a higher level
     db2.store()
@@ -502,7 +514,7 @@ fn import_rejects_dangling_edge_source() {
 #[test]
 fn import_rejects_dangling_edge_destination() {
     let db = GrafeoDB::new_in_memory();
-    let n = db.create_node(&["Person"]);
+    let n = db.create_node(&["Person"]).unwrap();
     db.store()
         .create_edge_with_id(
             grafeo_common::types::EdgeId::new(0),
@@ -975,7 +987,7 @@ fn import_unknown_snapshot_version_returns_clear_error() {
 #[test]
 fn import_truncated_snapshot_returns_error() {
     let db = GrafeoDB::new_in_memory();
-    db.create_node(&["Test"]);
+    db.create_node(&["Test"]).unwrap();
     let bytes = db.export_snapshot().unwrap();
 
     // Truncate to half

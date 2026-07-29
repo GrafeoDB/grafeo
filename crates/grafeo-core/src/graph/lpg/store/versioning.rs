@@ -17,10 +17,18 @@ impl LpgStore {
     ///
     /// This is called during transaction rollback to clean up uncommitted changes.
     /// The method removes version chain entries created by the specified transaction,
-    /// and replays the property undo log to restore property values.
+    /// erases secondary structures published for entities that were created inside
+    /// the transaction (label/property indexes, adjacency, type counts, property
+    /// columns, live counters), and replays the property undo log to restore
+    /// property values on pre-existing entities.
     #[doc(hidden)]
     #[cfg(not(feature = "tiered-storage"))]
     pub fn discard_uncommitted_versions(&self, transaction_id: TransactionId) {
+        // Capture create-path entities before version chains are emptied so we
+        // still have edge src/dst/type metadata for adjacency cleanup.
+        let discarded_nodes = self.collect_solely_created_nodes(transaction_id);
+        let discarded_edges = self.collect_solely_created_edges(transaction_id);
+
         // Remove uncommitted node versions
         {
             let mut nodes = self.nodes.write();
@@ -41,6 +49,10 @@ impl LpgStore {
             edges.retain(|_, chain| !chain.is_empty());
         }
 
+        // Erase non-versioned secondary state for fully discarded creates.
+        self.cleanup_discarded_node_secondaries(&discarded_nodes);
+        self.cleanup_discarded_edge_secondaries(&discarded_edges);
+
         // Replay property undo log to restore pre-transaction property values
         self.rollback_transaction_properties(transaction_id);
 
@@ -51,7 +63,10 @@ impl LpgStore {
     /// Discards uncommitted versions for specific entities created by a transaction.
     ///
     /// Used for savepoint rollback: only reverts the entities written after
-    /// the savepoint, keeping earlier writes intact.
+    /// the savepoint, keeping earlier writes intact. Also erases secondary
+    /// structures published for entities that this discard empties. Callers
+    /// must run `rollback_transaction_properties_to` first so property undo
+    /// for surviving entities is already applied.
     #[doc(hidden)]
     #[cfg(not(feature = "tiered-storage"))]
     pub fn discard_entities_by_id(
@@ -60,6 +75,39 @@ impl LpgStore {
         node_ids: &[NodeId],
         edge_ids: &[EdgeId],
     ) {
+        // Capture create-path secondaries before emptying version chains.
+        let discarded_nodes: Vec<NodeId> = {
+            let nodes = self.nodes.read();
+            node_ids
+                .iter()
+                .copied()
+                .filter(|id| {
+                    nodes
+                        .get(id)
+                        .is_some_and(|chain| chain.solely_created_by(transaction_id))
+                })
+                .collect()
+        };
+        let discarded_edges: Vec<super::rollback_cleanup::DiscardedEdge> = {
+            let edges = self.edges.read();
+            edge_ids
+                .iter()
+                .filter_map(|&id| {
+                    let chain = edges.get(&id)?;
+                    if !chain.solely_created_by(transaction_id) {
+                        return None;
+                    }
+                    let record = chain.latest()?;
+                    Some(super::rollback_cleanup::DiscardedEdge {
+                        id,
+                        src: record.src,
+                        dst: record.dst,
+                        type_id: record.type_id,
+                    })
+                })
+                .collect()
+        };
+
         if !node_ids.is_empty() {
             let mut nodes = self.nodes.write();
             for &nid in node_ids {
@@ -84,6 +132,9 @@ impl LpgStore {
             }
         }
 
+        self.cleanup_discarded_node_secondaries(&discarded_nodes);
+        self.cleanup_discarded_edge_secondaries(&discarded_edges);
+
         self.needs_stats_recompute.store(true, Ordering::Relaxed);
     }
 
@@ -92,6 +143,9 @@ impl LpgStore {
     #[doc(hidden)]
     #[cfg(feature = "tiered-storage")]
     pub fn discard_uncommitted_versions(&self, transaction_id: TransactionId) {
+        let discarded_nodes = self.collect_solely_created_nodes(transaction_id);
+        let discarded_edges = self.collect_solely_created_edges(transaction_id);
+
         // Remove uncommitted node versions
         {
             let mut versions = self.node_versions.write();
@@ -112,6 +166,9 @@ impl LpgStore {
             versions.retain(|_, index| !index.is_empty());
         }
 
+        self.cleanup_discarded_node_secondaries(&discarded_nodes);
+        self.cleanup_discarded_edge_secondaries(&discarded_edges);
+
         // Replay property undo log to restore pre-transaction property values
         self.rollback_transaction_properties(transaction_id);
 
@@ -120,6 +177,9 @@ impl LpgStore {
     }
 
     /// Discards uncommitted versions for specific entities (tiered storage version).
+    ///
+    /// Also erases secondary structures for entities emptied by this scoped
+    /// discard. Callers must run `rollback_transaction_properties_to` first.
     #[doc(hidden)]
     #[cfg(feature = "tiered-storage")]
     pub fn discard_entities_by_id(
@@ -128,6 +188,47 @@ impl LpgStore {
         node_ids: &[NodeId],
         edge_ids: &[EdgeId],
     ) {
+        let discarded_nodes: Vec<NodeId> = {
+            let versions = self.node_versions.read();
+            node_ids
+                .iter()
+                .copied()
+                .filter(|id| {
+                    versions
+                        .get(id)
+                        .is_some_and(|index| index.solely_created_by(transaction_id))
+                })
+                .collect()
+        };
+        let discarded_edges: Vec<super::rollback_cleanup::DiscardedEdge> = {
+            let versions = self.edge_versions.read();
+            let mut out = Vec::new();
+            for &id in edge_ids {
+                let Some(index) = versions.get(&id) else {
+                    continue;
+                };
+                if !index.solely_created_by(transaction_id) {
+                    continue;
+                }
+                let Some(vref) = index
+                    .visible_to(EpochId::PENDING, transaction_id)
+                    .or_else(|| index.latest())
+                else {
+                    continue;
+                };
+                let Some(record) = self.read_edge_record(&vref) else {
+                    continue;
+                };
+                out.push(super::rollback_cleanup::DiscardedEdge {
+                    id,
+                    src: record.src,
+                    dst: record.dst,
+                    type_id: record.type_id,
+                });
+            }
+            out
+        };
+
         if !node_ids.is_empty() {
             let mut versions = self.node_versions.write();
             for &nid in node_ids {
@@ -151,6 +252,9 @@ impl LpgStore {
                 }
             }
         }
+
+        self.cleanup_discarded_node_secondaries(&discarded_nodes);
+        self.cleanup_discarded_edge_secondaries(&discarded_edges);
 
         self.needs_stats_recompute.store(true, Ordering::Relaxed);
     }

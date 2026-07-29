@@ -23,56 +23,67 @@ fn setup_article_db() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
 
     // Create articles with embeddings and text
-    let a1 = db.create_node(&["Article"]);
-    db.set_node_property(a1, "title", Value::String("Graph Neural Networks".into()));
+    let a1 = db.create_node(&["Article"]).unwrap();
+    db.set_node_property(a1, "title", Value::String("Graph Neural Networks".into()))
+        .unwrap();
     db.set_node_property(
         a1,
         "body",
         Value::String(
             "attention mechanisms in graph neural networks for node classification".into(),
         ),
-    );
+    )
+    .unwrap();
     db.set_node_property(
         a1,
         "embedding",
         Value::Vector(vec![0.9f32, 0.1, 0.0].into()),
-    );
+    )
+    .unwrap();
 
-    let a2 = db.create_node(&["Article"]);
-    db.set_node_property(a2, "title", Value::String("Rust Database Internals".into()));
+    let a2 = db.create_node(&["Article"]).unwrap();
+    db.set_node_property(a2, "title", Value::String("Rust Database Internals".into()))
+        .unwrap();
     db.set_node_property(
         a2,
         "body",
         Value::String("building a database engine in rust with MVCC transactions".into()),
-    );
+    )
+    .unwrap();
     db.set_node_property(
         a2,
         "embedding",
         Value::Vector(vec![0.1f32, 0.9, 0.0].into()),
-    );
+    )
+    .unwrap();
 
-    let a3 = db.create_node(&["Article"]);
+    let a3 = db.create_node(&["Article"]).unwrap();
     db.set_node_property(
         a3,
         "title",
         Value::String("Transformer Architectures".into()),
-    );
+    )
+    .unwrap();
     db.set_node_property(
         a3,
         "body",
         Value::String("attention mechanisms and transformer models for natural language".into()),
-    );
+    )
+    .unwrap();
     db.set_node_property(
         a3,
         "embedding",
         Value::Vector(vec![0.8f32, 0.2, 0.1].into()),
-    );
+    )
+    .unwrap();
 
     // Create user + friend with relationships
-    let user = db.create_node(&["User"]);
-    db.set_node_property(user, "name", Value::String("Alix".into()));
-    let friend = db.create_node(&["User"]);
-    db.set_node_property(friend, "name", Value::String("Vincent".into()));
+    let user = db.create_node(&["User"]).unwrap();
+    db.set_node_property(user, "name", Value::String("Alix".into()))
+        .unwrap();
+    let friend = db.create_node(&["User"]).unwrap();
+    db.set_node_property(friend, "name", Value::String("Vincent".into()))
+        .unwrap();
     db.create_edge(user, friend, "FOLLOWS");
     db.create_edge(friend, a1, "WROTE");
     db.create_edge(friend, a2, "WROTE");
@@ -208,8 +219,9 @@ fn test_vector_where_with_pushdown() {
 fn test_text_score_without_index_fallthrough() {
     let db = GrafeoDB::new_in_memory();
     // Create nodes but NO text index
-    let n = db.create_node(&["Article"]);
-    db.set_node_property(n, "body", Value::String("some body text about rust".into()));
+    let n = db.create_node(&["Article"]).unwrap();
+    db.set_node_property(n, "body", Value::String("some body text about rust".into()))
+        .unwrap();
 
     let session = db.session();
     let result = session
@@ -232,21 +244,25 @@ fn test_text_score_without_index_fallthrough() {
 fn test_vector_without_index_brute_force() {
     let db = GrafeoDB::new_in_memory();
     // Create articles WITHOUT a vector index
-    let a1 = db.create_node(&["Article"]);
-    db.set_node_property(a1, "title", Value::String("Graph Neural Networks".into()));
+    let a1 = db.create_node(&["Article"]).unwrap();
+    db.set_node_property(a1, "title", Value::String("Graph Neural Networks".into()))
+        .unwrap();
     db.set_node_property(
         a1,
         "embedding",
         Value::Vector(vec![0.9f32, 0.1, 0.0].into()),
-    );
+    )
+    .unwrap();
 
-    let a2 = db.create_node(&["Article"]);
-    db.set_node_property(a2, "title", Value::String("Rust Database Internals".into()));
+    let a2 = db.create_node(&["Article"]).unwrap();
+    db.set_node_property(a2, "title", Value::String("Rust Database Internals".into()))
+        .unwrap();
     db.set_node_property(
         a2,
         "embedding",
         Value::Vector(vec![0.1f32, 0.9, 0.0].into()),
-    );
+    )
+    .unwrap();
 
     // NO vector index created — should fall back to brute-force per-row evaluation
     let session = db.session();
@@ -793,25 +809,33 @@ fn test_text_score_with_int_threshold() {
 #[test]
 fn test_compound_with_scalar_remainder() {
     let db = GrafeoDB::new_in_memory();
-    let a1 = db.create_node(&["Article"]);
-    db.set_node_property(a1, "title", Value::String("A1".into()));
-    db.set_node_property(a1, "body", Value::String("attention mechanisms".into()));
+    let a1 = db.create_node(&["Article"]).unwrap();
+    db.set_node_property(a1, "title", Value::String("A1".into()))
+        .unwrap();
+    db.set_node_property(a1, "body", Value::String("attention mechanisms".into()))
+        .unwrap();
     db.set_node_property(
         a1,
         "embedding",
         Value::Vector(vec![0.9_f32, 0.1, 0.0].into()),
-    );
-    db.set_node_property(a1, "published", Value::Bool(true));
+    )
+    .unwrap();
+    db.set_node_property(a1, "published", Value::Bool(true))
+        .unwrap();
 
-    let a2 = db.create_node(&["Article"]);
-    db.set_node_property(a2, "title", Value::String("A2".into()));
-    db.set_node_property(a2, "body", Value::String("attention mechanisms".into()));
+    let a2 = db.create_node(&["Article"]).unwrap();
+    db.set_node_property(a2, "title", Value::String("A2".into()))
+        .unwrap();
+    db.set_node_property(a2, "body", Value::String("attention mechanisms".into()))
+        .unwrap();
     db.set_node_property(
         a2,
         "embedding",
         Value::Vector(vec![0.9_f32, 0.1, 0.0].into()),
-    );
-    db.set_node_property(a2, "published", Value::Bool(false));
+    )
+    .unwrap();
+    db.set_node_property(a2, "published", Value::Bool(false))
+        .unwrap();
 
     db.create_vector_index(
         "Article",
@@ -850,13 +874,15 @@ fn test_compound_with_scalar_remainder() {
 #[test]
 fn test_compound_or_with_missing_text_index_falls_through() {
     let db = GrafeoDB::new_in_memory();
-    let a1 = db.create_node(&["Article"]);
-    db.set_node_property(a1, "body", Value::String("rust".into()));
+    let a1 = db.create_node(&["Article"]).unwrap();
+    db.set_node_property(a1, "body", Value::String("rust".into()))
+        .unwrap();
     db.set_node_property(
         a1,
         "embedding",
         Value::Vector(vec![1.0_f32, 0.0, 0.0].into()),
-    );
+    )
+    .unwrap();
 
     db.create_vector_index(
         "Article",
@@ -902,9 +928,11 @@ fn test_order_by_euclidean_distance_ascending() {
         ("Orthogonal", vec![0.0_f32, 0.0, 1.0]),
     ];
     for (title, emb) in &docs {
-        let n = db.create_node(&["Doc"]);
-        db.set_node_property(n, "title", Value::String((*title).into()));
-        db.set_node_property(n, "embedding", Value::Vector(emb.clone().into()));
+        let n = db.create_node(&["Doc"]).unwrap();
+        db.set_node_property(n, "title", Value::String((*title).into()))
+            .unwrap();
+        db.set_node_property(n, "embedding", Value::Vector(emb.clone().into()))
+            .unwrap();
     }
 
     let session = db.session();
@@ -1085,13 +1113,17 @@ fn test_text_score_two_properties_same_variable_and_query() {
     // They differ on title: only a1.title contains 'rust'.
     //   a1: title "rust guide",   body "rust tutorial"
     //   a2: title "other stuff",  body "rust tutorial"
-    let a1 = db.create_node(&["Article"]);
-    db.set_node_property(a1, "title", Value::String("rust guide".into()));
-    db.set_node_property(a1, "body", Value::String("rust tutorial".into()));
+    let a1 = db.create_node(&["Article"]).unwrap();
+    db.set_node_property(a1, "title", Value::String("rust guide".into()))
+        .unwrap();
+    db.set_node_property(a1, "body", Value::String("rust tutorial".into()))
+        .unwrap();
 
-    let a2 = db.create_node(&["Article"]);
-    db.set_node_property(a2, "title", Value::String("other stuff".into()));
-    db.set_node_property(a2, "body", Value::String("rust tutorial".into()));
+    let a2 = db.create_node(&["Article"]).unwrap();
+    db.set_node_property(a2, "title", Value::String("other stuff".into()))
+        .unwrap();
+    db.set_node_property(a2, "body", Value::String("rust tutorial".into()))
+        .unwrap();
 
     db.create_text_index("Article", "body").unwrap();
     db.create_text_index("Article", "title").unwrap();

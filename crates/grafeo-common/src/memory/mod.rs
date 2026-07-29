@@ -27,4 +27,7 @@ pub use buffer::{
 pub use bump::BumpAllocator;
 pub use pool::ObjectPool;
 pub use reporter::MemoryReporter;
-pub use usage::{IndexMemory, MvccMemory, NamedMemory, StoreMemory, StringPoolMemory};
+pub use usage::{
+    AdjacencyCapacityMemory, IndexMemory, LpgResidencyMemory, MvccMemory, NamedMemory,
+    PropertyColumnMemory, PropertyStorageMemory, StoreMemory, StringPoolMemory,
+};

@@ -16,15 +16,18 @@ fn vec3(x: f32, y: f32, z: f32) -> Value {
 
 fn setup_vector_graph() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0));
-    db.set_node_property(n1, "title", Value::from("A"));
-    let n2 = db.create_node(&["Doc"]);
-    db.set_node_property(n2, "emb", vec3(0.9, 0.1, 0.0));
-    db.set_node_property(n2, "title", Value::from("B"));
-    let n3 = db.create_node(&["Doc"]);
-    db.set_node_property(n3, "emb", vec3(0.0, 1.0, 0.0));
-    db.set_node_property(n3, "title", Value::from("C"));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0))
+        .unwrap();
+    db.set_node_property(n1, "title", Value::from("A")).unwrap();
+    let n2 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n2, "emb", vec3(0.9, 0.1, 0.0))
+        .unwrap();
+    db.set_node_property(n2, "title", Value::from("B")).unwrap();
+    let n3 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n3, "emb", vec3(0.0, 1.0, 0.0))
+        .unwrap();
+    db.set_node_property(n3, "title", Value::from("C")).unwrap();
 
     db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
         .expect("create vector index");
@@ -171,12 +174,15 @@ mod text {
 
     fn setup_text_graph() -> GrafeoDB {
         let db = GrafeoDB::new_in_memory();
-        let n1 = db.create_node(&["Doc"]);
-        db.set_node_property(n1, "body", Value::from("graph databases are great"));
-        let n2 = db.create_node(&["Doc"]);
-        db.set_node_property(n2, "body", Value::from("vector search for retrieval"));
-        let n3 = db.create_node(&["Doc"]);
-        db.set_node_property(n3, "body", Value::from("graph neural networks for nlp"));
+        let n1 = db.create_node(&["Doc"]).unwrap();
+        db.set_node_property(n1, "body", Value::from("graph databases are great"))
+            .unwrap();
+        let n2 = db.create_node(&["Doc"]).unwrap();
+        db.set_node_property(n2, "body", Value::from("vector search for retrieval"))
+            .unwrap();
+        let n3 = db.create_node(&["Doc"]).unwrap();
+        db.set_node_property(n3, "body", Value::from("graph neural networks for nlp"))
+            .unwrap();
 
         db.create_text_index("Doc", "body")
             .expect("create text index");

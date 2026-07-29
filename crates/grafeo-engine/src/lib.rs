@@ -52,6 +52,8 @@ pub use auth::{Grant, Identity, Role, StatementKind};
 pub use catalog::{Catalog, CatalogError, IndexDefinition, IndexType};
 pub use config::{AccessMode, Config, ConfigError, DurabilityMode, GraphModel};
 pub use database::GrafeoDB;
+#[cfg(all(feature = "lpg", feature = "vector-index"))]
+pub use database::IndexedVectorRead;
 pub use grafeo_core::graph::{GraphStore, GraphStoreMut, ProjectionSpec};
 pub use memory_usage::MemoryUsage;
 #[cfg(feature = "metrics")]

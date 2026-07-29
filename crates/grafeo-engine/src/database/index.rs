@@ -134,9 +134,6 @@ impl super::GrafeoDB {
         let mut found_dims: Option<usize> = dimensions;
         let mut vector_count = 0usize;
 
-        #[cfg(feature = "vector-index")]
-        let mut vectors: Vec<(grafeo_common::types::NodeId, Vec<f32>)> = Vec::new();
-
         let graph = self.graph_store();
         for node_id in graph.nodes_by_label(label) {
             if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key) {
@@ -153,8 +150,6 @@ impl super::GrafeoDB {
                     found_dims = Some(v.len());
                 }
                 vector_count += 1;
-                #[cfg(feature = "vector-index")]
-                vectors.push((node_id, v.to_vec()));
             }
         }
 
@@ -200,7 +195,7 @@ impl super::GrafeoDB {
                 m,
                 ef_construction,
                 quantization_type,
-                vectors.len(),
+                vector_count,
             );
 
             match &index {
@@ -208,13 +203,33 @@ impl super::GrafeoDB {
                     let graph = self.graph_store();
                     let accessor =
                         grafeo_core::index::vector::PropertyVectorAccessor::new(&*graph, property);
-                    for (node_id, vec) in &vectors {
-                        index.insert(*node_id, vec, &accessor);
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(vector)) =
+                            graph.get_node_property(node_id, &prop_key)
+                        {
+                            index.insert(node_id, &vector, &accessor);
+                        }
                     }
                 }
                 VectorIndexKind::Quantized(q_idx) => {
-                    for (node_id, vec) in &vectors {
-                        q_idx.insert(*node_id, vec);
+                    let graph = self.graph_store();
+                    let accessor =
+                        grafeo_core::index::vector::PropertyVectorAccessor::new(&*graph, property);
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(vector)) =
+                            graph.get_node_property(node_id, &prop_key)
+                        {
+                            q_idx.insert(node_id, &vector, &accessor);
+                        }
+                    }
+                    // Scalar search currently uses LPG accessor distances, not the
+                    // u8 code map. Dropping codes after build avoids pure RSS cost
+                    // while Catalog mode remains Scalar (sticky durability).
+                    if matches!(
+                        quantization_type,
+                        grafeo_core::index::vector::QuantizationType::Scalar
+                    ) {
+                        q_idx.release_quantized_payloads();
                     }
                 }
             }
@@ -295,6 +310,60 @@ impl super::GrafeoDB {
             grafeo_info!("Vector index dropped: :{label}({property})");
         }
         removed
+    }
+
+    /// Returns whether a vector index is registered for `label` + `property`.
+    #[cfg(feature = "vector-index")]
+    #[must_use]
+    pub fn has_vector_index(&self, label: &str, property: &str) -> bool {
+        self.lpg_store().get_vector_index(label, property).is_some()
+    }
+
+    /// Returns the configured dimensions for a registered vector index.
+    ///
+    /// This remains available when the authoritative property column is
+    /// ForceDisk-spilled and cannot be dimension-probed through graph reads.
+    #[cfg(feature = "vector-index")]
+    #[must_use]
+    pub fn vector_index_dimensions(&self, label: &str, property: &str) -> Option<usize> {
+        self.lpg_store()
+            .get_vector_index(label, property)
+            .map(|index| index.config().dimensions)
+    }
+
+    /// Returns the durable quantization mode for a registered vector index.
+    ///
+    /// # Semantics
+    ///
+    /// | Return | Meaning |
+    /// |--------|---------|
+    /// | `None` | no vector index registered for the label/property |
+    /// | `Some(QuantizationType::None)` | plain HNSW shell |
+    /// | `Some(Scalar \| Binary \| Product{..})` | quantized shell |
+    ///
+    /// This is the stable inspect surface for reopen/sticky-mode tests.
+    /// Prefer this over env defaults after open.
+    #[cfg(feature = "vector-index")]
+    #[must_use]
+    pub fn vector_index_quantization(
+        &self,
+        label: &str,
+        property: &str,
+    ) -> Option<grafeo_core::index::vector::QuantizationType> {
+        use grafeo_core::index::vector::QuantizationType;
+        let index = self.lpg_store().get_vector_index(label, property)?;
+        Some(index.quantization_type().unwrap_or(QuantizationType::None))
+    }
+
+    /// Estimated heap memory for a registered vector index (topology + payloads).
+    ///
+    /// Returns `None` if the index is not registered. Not process RSS.
+    #[cfg(feature = "vector-index")]
+    #[must_use]
+    pub fn vector_index_heap_memory_bytes(&self, label: &str, property: &str) -> Option<usize> {
+        self.lpg_store()
+            .get_vector_index(label, property)
+            .map(|idx| idx.heap_memory_bytes())
     }
 
     /// Drops and recreates a vector index, rescanning all matching nodes.

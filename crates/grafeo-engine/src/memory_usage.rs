@@ -5,7 +5,8 @@
 //! types (`CacheMemory`, `BufferManagerMemory`, `RdfMemory`, `CdcMemory`).
 
 pub use grafeo_common::memory::usage::{
-    IndexMemory, MvccMemory, NamedMemory, StoreMemory, StringPoolMemory,
+    AdjacencyCapacityMemory, IndexMemory, LpgResidencyMemory, MvccMemory, NamedMemory,
+    PropertyColumnMemory, PropertyStorageMemory, StoreMemory, StringPoolMemory,
 };
 use serde::{Deserialize, Serialize};
 

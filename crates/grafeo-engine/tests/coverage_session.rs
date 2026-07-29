@@ -598,8 +598,9 @@ mod cdc_tests {
     #[test]
     fn test_cdc_history_records_create() {
         let db = cdc_db();
-        let node_id = db.create_node(&["Person"]);
-        db.set_node_property(node_id, "name", Value::String("Alix".into()));
+        let node_id = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(node_id, "name", Value::String("Alix".into()))
+            .unwrap();
 
         let session = db.session();
         let history = session.history(node_id).unwrap();
@@ -619,9 +620,11 @@ mod cdc_tests {
     #[test]
     fn test_cdc_history_records_update() {
         let db = cdc_db();
-        let node_id = db.create_node(&["Person"]);
-        db.set_node_property(node_id, "name", Value::String("Alix".into()));
-        db.set_node_property(node_id, "name", Value::String("Gus".into()));
+        let node_id = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(node_id, "name", Value::String("Alix".into()))
+            .unwrap();
+        db.set_node_property(node_id, "name", Value::String("Gus".into()))
+            .unwrap();
 
         let session = db.session();
         let history = session.history(node_id).unwrap();
@@ -638,8 +641,9 @@ mod cdc_tests {
     #[test]
     fn test_cdc_history_since_filters_by_epoch() {
         let db = cdc_db();
-        let node_id = db.create_node(&["Person"]);
-        db.set_node_property(node_id, "name", Value::String("Alix".into()));
+        let node_id = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(node_id, "name", Value::String("Alix".into()))
+            .unwrap();
 
         let session = db.session();
         // history_since with a very high epoch should return nothing
@@ -662,8 +666,8 @@ mod cdc_tests {
     #[test]
     fn test_cdc_changes_between_epoch_range() {
         let db = cdc_db();
-        db.create_node(&["Person"]);
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
+        db.create_node(&["Person"]).unwrap();
 
         let session = db.session();
         // Get all changes from epoch 0 to a large epoch

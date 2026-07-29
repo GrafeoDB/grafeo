@@ -20,11 +20,13 @@ mod wal {
         // Create and populate
         {
             let db = GrafeoDB::open(&path).expect("open for write");
-            let a = db.create_node(&["Person"]);
-            db.set_node_property(a, "name", Value::String("Alix".into()));
-            db.set_node_property(a, "age", Value::Int64(30));
-            let b = db.create_node(&["Person"]);
-            db.set_node_property(b, "name", Value::String("Gus".into()));
+            let a = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(a, "name", Value::String("Alix".into()))
+                .unwrap();
+            db.set_node_property(a, "age", Value::Int64(30)).unwrap();
+            let b = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(b, "name", Value::String("Gus".into()))
+                .unwrap();
             db.create_edge(a, b, "KNOWS");
             db.close().expect("close");
         }
@@ -53,7 +55,7 @@ mod wal {
 
         {
             let db = GrafeoDB::open(&path).expect("open");
-            let n = db.create_node(&["Person"]);
+            let n = db.create_node(&["Person"]).unwrap();
             db.add_node_label(n, "Employee");
             db.close().expect("close");
         }
@@ -74,16 +76,19 @@ mod wal {
 
         {
             let db = GrafeoDB::open(&path).expect("open");
-            let a = db.create_node(&["Person"]);
-            db.set_node_property(a, "name", Value::String("Alix".into()));
-            let b = db.create_node(&["Person"]);
-            db.set_node_property(b, "name", Value::String("Gus".into()));
-            let c = db.create_node(&["Person"]);
-            db.set_node_property(c, "name", Value::String("Harm".into()));
+            let a = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(a, "name", Value::String("Alix".into()))
+                .unwrap();
+            let b = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(b, "name", Value::String("Gus".into()))
+                .unwrap();
+            let c = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(c, "name", Value::String("Harm".into()))
+                .unwrap();
             db.create_edge(a, b, "KNOWS");
 
             // Delete Harm (no edges)
-            db.delete_node(c);
+            db.delete_node(c).unwrap();
             db.close().expect("close");
         }
 
@@ -105,10 +110,12 @@ mod wal {
         let save_path = dir.path().join("saved.grafeo");
 
         let db = GrafeoDB::new_in_memory();
-        let a = db.create_node(&["Person"]);
-        db.set_node_property(a, "name", Value::String("Alix".into()));
-        let b = db.create_node(&["Person"]);
-        db.set_node_property(b, "name", Value::String("Gus".into()));
+        let a = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(a, "name", Value::String("Alix".into()))
+            .unwrap();
+        let b = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(b, "name", Value::String("Gus".into()))
+            .unwrap();
         db.create_edge(a, b, "KNOWS");
 
         // Save in-memory database to disk
@@ -129,8 +136,9 @@ mod wal {
         // Create persistent database
         {
             let db = GrafeoDB::open(&path).expect("open");
-            let n = db.create_node(&["Person"]);
-            db.set_node_property(n, "name", Value::String("Alix".into()));
+            let n = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(n, "name", Value::String("Alix".into()))
+                .unwrap();
             db.close().expect("close");
         }
 
@@ -143,7 +151,7 @@ mod wal {
         );
 
         // Modifications to the in-memory copy don't affect the file
-        mem_db.create_node(&["Extra"]);
+        mem_db.create_node(&["Extra"]).expect("create extra node");
         assert_eq!(mem_db.node_count(), 2);
 
         // Reopening the file should still show 1 node
@@ -158,7 +166,7 @@ mod wal {
         let path = dir.path().join("status.grafeo");
 
         let db = GrafeoDB::open(&path).expect("open");
-        db.create_node(&["N"]);
+        db.create_node(&["N"]).unwrap();
 
         let status = db.wal_status();
         assert!(status.enabled, "persistent db should have WAL enabled");
@@ -285,8 +293,9 @@ mod wal {
         let path = dir.path().join("checkpoint.grafeo");
 
         let db = GrafeoDB::open(&path).expect("open");
-        let n = db.create_node(&["Person"]);
-        db.set_node_property(n, "name", Value::String("Alix".into()));
+        let n = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(n, "name", Value::String("Alix".into()))
+            .unwrap();
 
         // Explicit checkpoint should not error
         db.wal_checkpoint().expect("checkpoint should succeed");
@@ -477,8 +486,9 @@ mod wal {
 
         {
             let db = GrafeoDB::open(&path).expect("open");
-            let n = db.create_node(&["Config"]);
-            db.set_node_property(n, "name", Value::String("settings".into()));
+            let n = db.create_node(&["Config"]).unwrap();
+            db.set_node_property(n, "name", Value::String("settings".into()))
+                .unwrap();
             let mut map = std::collections::BTreeMap::new();
             map.insert(
                 grafeo_common::types::PropertyKey::from("theme"),
@@ -488,7 +498,8 @@ mod wal {
                 grafeo_common::types::PropertyKey::from("font_size"),
                 Value::Int64(14),
             );
-            db.set_node_property(n, "prefs", Value::Map(std::sync::Arc::new(map)));
+            db.set_node_property(n, "prefs", Value::Map(std::sync::Arc::new(map)))
+                .unwrap();
             db.close().expect("close");
         }
 
@@ -520,11 +531,13 @@ mod wal {
 
         {
             let db = GrafeoDB::open(&path).expect("open");
-            let n = db.create_node(&["Document"]);
-            db.set_node_property(n, "name", Value::String("doc1".into()));
+            let n = db.create_node(&["Document"]).unwrap();
+            db.set_node_property(n, "name", Value::String("doc1".into()))
+                .unwrap();
             let embedding: std::sync::Arc<[f32]> =
                 std::sync::Arc::from(vec![0.1_f32, 0.2, 0.3, 0.4]);
-            db.set_node_property(n, "embedding", Value::Vector(embedding));
+            db.set_node_property(n, "embedding", Value::Vector(embedding))
+                .unwrap();
             db.close().expect("close");
         }
 
@@ -553,10 +566,12 @@ mod wal {
 
         {
             let db = GrafeoDB::open(&path).expect("open");
-            let n = db.create_node(&["Event"]);
-            db.set_node_property(n, "name", Value::String("launch".into()));
+            let n = db.create_node(&["Event"]).unwrap();
+            db.set_node_property(n, "name", Value::String("launch".into()))
+                .unwrap();
             let ts = grafeo_common::types::Timestamp::from_secs(1_700_000_000);
-            db.set_node_property(n, "occurred_at", Value::Timestamp(ts));
+            db.set_node_property(n, "occurred_at", Value::Timestamp(ts))
+                .unwrap();
             db.close().expect("close");
         }
 
@@ -584,11 +599,13 @@ mod wal {
 
         {
             let db = GrafeoDB::open(&path).expect("open");
-            let n = db.create_node(&["Meeting"]);
-            db.set_node_property(n, "name", Value::String("standup".into()));
+            let n = db.create_node(&["Meeting"]).unwrap();
+            db.set_node_property(n, "name", Value::String("standup".into()))
+                .unwrap();
             let ts = grafeo_common::types::Timestamp::from_secs(1_700_000_000);
             let zdt = grafeo_common::types::ZonedDatetime::from_timestamp_offset(ts, 3600);
-            db.set_node_property(n, "scheduled_at", Value::ZonedDatetime(zdt));
+            db.set_node_property(n, "scheduled_at", Value::ZonedDatetime(zdt))
+                .unwrap();
             db.close().expect("close");
         }
 
@@ -617,10 +634,12 @@ mod wal {
 
         {
             let db = GrafeoDB::open(&path).expect("open");
-            let n = db.create_node(&["Task"]);
-            db.set_node_property(n, "name", Value::String("sprint".into()));
+            let n = db.create_node(&["Task"]).unwrap();
+            db.set_node_property(n, "name", Value::String("sprint".into()))
+                .unwrap();
             let dur = grafeo_common::types::Duration::new(0, 14, 0); // 14 days
-            db.set_node_property(n, "duration", Value::Duration(dur));
+            db.set_node_property(n, "duration", Value::Duration(dur))
+                .unwrap();
             db.close().expect("close");
         }
 

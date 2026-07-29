@@ -130,6 +130,11 @@ testing-statement-injection = ["grafeo-common/testing-statement-injection"]  # F
 [lints]
 workspace = true
 
+[[test]]
+name = "exact_vector_read"
+path = "tests/exact_vector_read/main.rs"
+required-features = ["vector-index", "mmap", "grafeo-file"]
+
 [[bench]]
 name = "query_bench"
 harness = false
@@ -148,4 +153,8 @@ harness = false
 
 [[bench]]
 name = "topk_e2e"
+harness = false
+
+[[bench]]
+name = "transactional_batch_bench"
 harness = false

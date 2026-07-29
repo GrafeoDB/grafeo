@@ -189,6 +189,71 @@ impl<Id: EntityId> PropertyStorage<Id> {
             .set(id, value);
     }
 
+    /// Appends properties for a fresh bulk load while holding the column map
+    /// lock once.  Callers must not use this for an online mutation: it does
+    /// not update secondary indexes or transaction undo state.
+    #[cfg(not(feature = "temporal"))]
+    pub fn set_bulk_unindexed<I>(&self, rows: I)
+    where
+        I: IntoIterator<Item = (Id, FxHashMap<PropertyKey, Value>)>,
+    {
+        let mut columns = self.columns.write();
+        let mode = self.default_compression;
+        for (id, properties) in rows {
+            for (key, value) in properties {
+                columns
+                    .entry(key)
+                    .or_insert_with(|| PropertyColumn::with_compression(mode))
+                    .set(id, value);
+            }
+        }
+    }
+
+    /// Sets many property values across many entities while holding the column
+    /// map write lock exactly once.
+    ///
+    /// This is the storage-level primitive behind transactional batch node/edge
+    /// creation: the row-oriented [`set`](Self::set) re-acquires the column map
+    /// write lock for every single property, which dominates cost on wide
+    /// batches. Each row is `(entity_id, key, value)`. Columns are created
+    /// lazily with the storage's default compression mode, exactly as `set`
+    /// does. Callers remain responsible for secondary-index and transaction
+    /// undo bookkeeping; this only writes column values.
+    #[cfg(not(feature = "temporal"))]
+    pub fn set_batch<I>(&self, rows: I)
+    where
+        I: IntoIterator<Item = (Id, PropertyKey, Value)>,
+    {
+        let mut columns = self.columns.write();
+        let mode = self.default_compression;
+        for (id, key, value) in rows {
+            columns
+                .entry(key)
+                .or_insert_with(|| PropertyColumn::with_compression(mode))
+                .set(id, value);
+        }
+    }
+
+    /// Sets many property values across many entities at a specific epoch while
+    /// holding the column map write lock exactly once (temporal variant).
+    ///
+    /// Pass `EpochId::PENDING` for transactional writes so the values stay
+    /// invisible until commit finalizes them, matching [`set`](Self::set).
+    #[cfg(feature = "temporal")]
+    pub fn set_batch<I>(&self, rows: I, epoch: EpochId)
+    where
+        I: IntoIterator<Item = (Id, PropertyKey, Value)>,
+    {
+        let mut columns = self.columns.write();
+        let mode = self.default_compression;
+        for (id, key, value) in rows {
+            columns
+                .entry(key)
+                .or_insert_with(|| PropertyColumn::with_compression(mode))
+                .set(id, value, epoch);
+        }
+    }
+
     /// Sets a property value for an entity at a specific epoch.
     ///
     /// For non-transactional writes, pass the current epoch.
@@ -229,6 +294,17 @@ impl<Id: EntityId> PropertyStorage<Id> {
         }
     }
 
+    /// Shrinks hot-map capacities on every column to fit live entries.
+    ///
+    /// Does not change logical contents. Useful after bulk deserialize or
+    /// after eviction to reclaim HashMap capacity waste.
+    pub fn shrink_capacities(&self) {
+        let mut columns = self.columns.write();
+        for col in columns.values_mut() {
+            col.shrink_capacities();
+        }
+    }
+
     /// Returns compression statistics for all columns.
     #[must_use]
     pub fn compression_stats(&self) -> FxHashMap<PropertyKey, CompressionStats> {
@@ -252,13 +328,34 @@ impl<Id: EntityId> PropertyStorage<Id> {
     /// Returns estimated heap memory for all columns including hash map overhead.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
+        self.memory_detail().total_bytes
+    }
+
+    /// Detailed residency attribution for every property column.
+    #[must_use]
+    pub fn memory_detail(&self) -> grafeo_common::memory::PropertyStorageMemory {
+        use grafeo_common::memory::PropertyStorageMemory;
+
         let columns = self.columns.read();
-        // Outer hash map capacity
         let map_overhead = columns.capacity()
             * (std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyColumn<Id>>() + 1);
-        // Sum of all column heap memory
-        let column_bytes: usize = columns.values().map(|col| col.heap_memory_bytes()).sum();
-        map_overhead + column_bytes
+        let mut detail = PropertyStorageMemory {
+            map_overhead_bytes: map_overhead,
+            columns: columns
+                .iter()
+                .map(|(key, col)| {
+                    let mut m = col.memory_detail();
+                    m.key = key.as_ref().to_string();
+                    m
+                })
+                .collect(),
+            ..Default::default()
+        };
+        detail
+            .columns
+            .sort_by(|a, b| b.total_bytes().cmp(&a.total_bytes()));
+        detail.compute_total();
+        detail
     }
 
     /// Gets a property value for an entity.
@@ -1004,7 +1101,7 @@ impl<Id: EntityId> PropertyColumn<Id> {
     /// Gets a value for an entity.
     ///
     /// First checks the hot buffer (uncompressed values), then falls back
-    /// to the compressed data if present.
+    /// to compressed storage with on-demand (lazy) decode when present.
     #[must_use]
     pub fn get(&self, id: Id) -> Option<Value> {
         // First check hot buffer
@@ -1012,11 +1109,49 @@ impl<Id: EntityId> PropertyColumn<Id> {
             return Some(value.clone());
         }
 
-        // For now, compressed data lookup is not implemented for sparse access
-        // because the compressed format stores values by index, not by entity ID.
-        // This would require maintaining an ID -> index map in CompressedColumnData.
-        // The compressed data is primarily useful for bulk/scan operations.
-        None
+        self.get_compressed(id)
+    }
+
+    /// Lazy point lookup into compressed column data.
+    ///
+    /// `index_to_id` is sorted by entity id (see compress paths). Binary
+    /// search finds the compressed-array index; strings/bools decode one
+    /// value; integers decompress the whole column once per miss (acceptable
+    /// for sparse correctness; scan paths should use block decode instead).
+    fn get_compressed(&self, id: Id) -> Option<Value> {
+        let compressed = self.compressed.as_ref()?;
+        let id_u64 = id.as_u64();
+        match compressed {
+            CompressedColumnData::Strings {
+                encoding,
+                index_to_id,
+                ..
+            } => {
+                let idx = index_to_id.binary_search(&id_u64).ok()?;
+                encoding
+                    .get(idx)
+                    .map(|s| Value::String(ArcStr::from(s)))
+            }
+            CompressedColumnData::Booleans {
+                data,
+                index_to_id,
+                ..
+            } => {
+                let idx = index_to_id.binary_search(&id_u64).ok()?;
+                let values = TypeSpecificCompressor::decompress_booleans(data).ok()?;
+                values.get(idx).copied().map(Value::Bool)
+            }
+            CompressedColumnData::Integers {
+                data,
+                index_to_id,
+                ..
+            } => {
+                let idx = index_to_id.binary_search(&id_u64).ok()?;
+                let values = TypeSpecificCompressor::decompress_integers(data).ok()?;
+                let raw = *values.get(idx)?;
+                Some(Value::Int64(crate::codec::zigzag_decode(raw)))
+            }
+        }
     }
 
     /// Removes a value for an entity.
@@ -1082,15 +1217,15 @@ impl<Id: EntityId> PropertyColumn<Id> {
 
     /// Restores values into this column after a reload from disk.
     ///
-    /// Clears the `spilled` flag. Callers are responsible for providing
-    /// the correct values (from `MmapStorage::export_all()` or similar).
+    /// Clears the `spilled` flag. Existing hot values win over the mmap
+    /// snapshot because they are inserts or updates written after the spill.
     pub fn restore_values(&mut self, values: impl Iterator<Item = (Id, Value)>) {
         self.spilled = false;
-        // Insert directly into the map without calling set(), which would
-        // re-increment zone map counters (row_count, null_count) on top of
-        // the already-preserved zone map from before eviction.
+        // Insert directly without re-incrementing zone map counters. Preserve
+        // mutable post-spill deltas instead of overwriting them with stale mmap
+        // values for the same entity.
         for (id, value) in values {
-            self.values.insert(id, value);
+            self.values.entry(id).or_insert(value);
         }
     }
 
@@ -1129,17 +1264,49 @@ impl<Id: EntityId> PropertyColumn<Id> {
 
     /// Returns estimated heap memory for this column.
     ///
-    /// Includes the hot buffer hash map capacity, zone map, and any
-    /// compressed data.
+    /// Includes hot-map slot capacity, decoded `Value` payloads (strings,
+    /// lists, …), and any compressed backing.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
-        // Hot buffer: FxHashMap<Id, Value> capacity
-        let hot_bytes =
-            self.values.capacity() * (std::mem::size_of::<Id>() + std::mem::size_of::<Value>() + 1);
-        // Compressed data
+        self.memory_detail().total_bytes()
+    }
+
+    /// Detailed residency attribution for this column (key left empty).
+    #[must_use]
+    pub fn memory_detail(&self) -> grafeo_common::memory::PropertyColumnMemory {
+        use grafeo_common::memory::PropertyColumnMemory;
+
+        let entry_size =
+            std::mem::size_of::<Id>() + std::mem::size_of::<Value>() + 1;
+        let map_slot_bytes = self.values.capacity() * entry_size;
+        let capacity_waste_bytes =
+            self.values.capacity().saturating_sub(self.values.len()) * entry_size;
+        let decoded_payload_bytes: usize = self
+            .values
+            .values()
+            .map(Value::estimated_size_bytes)
+            .sum();
+        let string_payload_bytes: usize =
+            self.values.values().map(Value::string_payload_bytes).sum();
         let compressed_bytes = self.compressed.as_ref().map_or(0, |c| c.memory_usage());
-        // ZoneMapEntry is inline (no heap), so just hot + compressed
-        hot_bytes + compressed_bytes
+
+        PropertyColumnMemory {
+            key: String::new(),
+            entry_count: self.values.len(),
+            map_capacity: self.values.capacity(),
+            map_slot_bytes,
+            decoded_payload_bytes,
+            string_payload_bytes,
+            compressed_bytes,
+            capacity_waste_bytes,
+            compressed_entry_count: self.compressed_count,
+        }
+    }
+
+    /// Shrinks the hot map capacity to fit live entries.
+    pub fn shrink_capacities(&mut self) {
+        self.values.shrink_to_fit();
+        self.block_zone_maps.shrink_to_fit();
     }
 
     /// Returns whether the column has compressed data.
@@ -1724,8 +1891,45 @@ impl<Id: EntityId> PropertyColumn<Id> {
     /// Returns estimated heap memory for this column.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
-        self.values.capacity()
-            * (std::mem::size_of::<Id>() + std::mem::size_of::<VersionLog<Value>>() + 1)
+        self.memory_detail().total_bytes()
+    }
+
+    /// Detailed residency attribution (temporal: version-log slots + latest payloads).
+    #[must_use]
+    pub fn memory_detail(&self) -> grafeo_common::memory::PropertyColumnMemory {
+        use grafeo_common::memory::PropertyColumnMemory;
+
+        let entry_size =
+            std::mem::size_of::<Id>() + std::mem::size_of::<VersionLog<Value>>() + 1;
+        let map_slot_bytes = self.values.capacity() * entry_size;
+        let capacity_waste_bytes =
+            self.values.capacity().saturating_sub(self.values.len()) * entry_size;
+        let mut decoded_payload_bytes = 0usize;
+        let mut string_payload_bytes = 0usize;
+        for log in self.values.values() {
+            if let Some(v) = log.latest() {
+                decoded_payload_bytes += v.estimated_size_bytes();
+                string_payload_bytes += v.string_payload_bytes();
+            }
+        }
+
+        PropertyColumnMemory {
+            key: String::new(),
+            entry_count: self.values.len(),
+            map_capacity: self.values.capacity(),
+            map_slot_bytes,
+            decoded_payload_bytes,
+            string_payload_bytes,
+            compressed_bytes: 0,
+            capacity_waste_bytes,
+            compressed_entry_count: 0,
+        }
+    }
+
+    /// Shrinks the hot map capacity to fit live entries.
+    pub fn shrink_capacities(&mut self) {
+        self.values.shrink_to_fit();
+        self.block_zone_maps.shrink_to_fit();
     }
 
     /// Compression is not supported in temporal mode (no-op).

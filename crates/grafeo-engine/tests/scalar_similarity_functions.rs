@@ -12,15 +12,18 @@ use grafeo_engine::database::QueryResult;
 
 fn setup() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["Doc"]);
-    db.set_node_property(a, "name", Value::from("A"));
-    db.set_node_property(a, "emb", Value::Vector(vec![1.0f32, 0.0, 0.0].into()));
-    let b = db.create_node(&["Doc"]);
-    db.set_node_property(b, "name", Value::from("B"));
-    db.set_node_property(b, "emb", Value::Vector(vec![0.0f32, 1.0, 0.0].into()));
-    let c = db.create_node(&["Doc"]);
-    db.set_node_property(c, "name", Value::from("C"));
-    db.set_node_property(c, "emb", Value::Vector(vec![1.0f32, 0.0, 0.0].into())); // identical to A
+    let a = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(a, "name", Value::from("A")).unwrap();
+    db.set_node_property(a, "emb", Value::Vector(vec![1.0f32, 0.0, 0.0].into()))
+        .unwrap();
+    let b = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(b, "name", Value::from("B")).unwrap();
+    db.set_node_property(b, "emb", Value::Vector(vec![0.0f32, 1.0, 0.0].into()))
+        .unwrap();
+    let c = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(c, "name", Value::from("C")).unwrap();
+    db.set_node_property(c, "emb", Value::Vector(vec![1.0f32, 0.0, 0.0].into()))
+        .unwrap(); // identical to A
     db
 }
 

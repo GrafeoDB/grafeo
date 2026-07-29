@@ -190,6 +190,25 @@ impl super::GrafeoDB {
         usage
     }
 
+    /// Property / string / adjacency capacity residency attribution.
+    ///
+    /// Prefer this over coarse `memory_usage()` when diagnosing live RSS
+    /// residuals (decoded Value payloads, capacity waste).
+    #[must_use]
+    pub fn lpg_residency_detail(&self) -> grafeo_common::memory::LpgResidencyMemory {
+        self.lpg_store().lpg_residency_detail()
+    }
+
+    /// Shrinks LPG property-column and adjacency capacities in place.
+    pub fn shrink_lpg_capacities(&self) {
+        self.lpg_store().shrink_lpg_capacities();
+    }
+
+    /// Forces property-column compression (lazy point-get decode remains valid).
+    pub fn force_compress_properties(&self) {
+        self.lpg_store().force_compress_properties();
+    }
+
     /// Returns detailed database statistics.
     ///
     /// Includes counts, memory usage, and index information.
@@ -348,6 +367,25 @@ impl super::GrafeoDB {
         result
     }
 
+    /// Returns the current committed epoch of the database.
+    ///
+    /// This is the same committed epoch consumed by [`GrafeoDB::backup_full`]
+    /// and [`GrafeoDB::backup_incremental`]: it is read from the transaction
+    /// manager, which advances the epoch atomically only when a transaction
+    /// commits successfully. Pending/uncommitted transactions do not affect
+    /// the returned value, and a failed or rolled-back transaction is never
+    /// presented as a committed epoch.
+    ///
+    /// The call is read-only and side-effect free: it performs no backup,
+    /// WAL checkpoint, epoch increment, or storage mutation. It is safe to
+    /// call concurrently under the engine's existing concurrent-read contract.
+    ///
+    /// After successful transactions the value is monotonic.
+    #[must_use]
+    pub fn current_epoch(&self) -> grafeo_common::types::EpochId {
+        self.transaction_manager.current_epoch()
+    }
+
     /// Returns WAL (Write-Ahead Log) status.
     ///
     /// Returns None if WAL is not enabled.
@@ -472,5 +510,135 @@ impl super::GrafeoDB {
         end_epoch: grafeo_common::types::EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
         Ok(self.cdc_log.changes_between(start_epoch, end_epoch))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::GrafeoDB;
+
+    /// A freshly opened database reports its defined initial committed epoch.
+    #[test]
+    fn test_current_epoch_initial() {
+        let db = GrafeoDB::new_in_memory();
+        assert_eq!(
+            db.current_epoch(),
+            grafeo_common::types::EpochId::INITIAL,
+            "fresh DB must report the initial committed epoch"
+        );
+    }
+
+    /// A successful committed transaction advances the epoch monotonically.
+    #[test]
+    fn test_current_epoch_advances_on_commit() {
+        let db = GrafeoDB::new_in_memory();
+        let initial = db.current_epoch();
+
+        let mut session = db.session();
+        session.begin_transaction().expect("begin");
+        session
+            .execute("INSERT (:Person {name: 'Alix'})")
+            .expect("insert");
+        session.commit().expect("commit");
+
+        let after = db.current_epoch();
+        assert!(
+            after > initial,
+            "committed transaction must advance the epoch: initial={initial:?} after={after:?}"
+        );
+
+        // A second committed transaction advances it further (monotonic).
+        let mut session2 = db.session();
+        session2.begin_transaction().expect("begin2");
+        session2
+            .execute("INSERT (:Person {name: 'Boi'})")
+            .expect("insert2");
+        session2.commit().expect("commit2");
+        let after2 = db.current_epoch();
+        assert!(
+            after2 > after,
+            "epoch must be monotonic across commits: after={after:?} after2={after2:?}"
+        );
+    }
+
+    /// A rolled-back transaction must not be reported as a committed advance.
+    #[test]
+    fn test_current_epoch_rollback_no_advance() {
+        let db = GrafeoDB::new_in_memory();
+        let initial = db.current_epoch();
+
+        let mut session = db.session();
+        session.begin_transaction().expect("begin");
+        session
+            .execute("INSERT (:Person {name: 'Cy'})")
+            .expect("insert");
+        session.rollback().expect("rollback");
+
+        assert_eq!(
+            db.current_epoch(),
+            initial,
+            "rolled-back transaction must not advance the committed epoch"
+        );
+    }
+
+    /// Pending/uncommitted work is excluded from the reported epoch.
+    #[test]
+    fn test_current_epoch_excludes_pending() {
+        let db = GrafeoDB::new_in_memory();
+        let initial = db.current_epoch();
+
+        let mut session = db.session();
+        session.begin_transaction().expect("begin");
+        session
+            .execute("INSERT (:Person {name: 'Dee'})")
+            .expect("insert");
+
+        // The transaction is still open: the epoch must not have advanced.
+        assert_eq!(
+            db.current_epoch(),
+            initial,
+            "an open (uncommitted) transaction must not advance the committed epoch"
+        );
+
+        session.rollback().expect("cleanup rollback");
+    }
+
+    /// Calling the API repeatedly is side-effect free: it creates no backup
+    /// artifacts and does not mutate a watched empty backup directory.
+    #[cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]
+    #[test]
+    fn test_current_epoch_no_backup_side_effects() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let backup_dir = tmp.path().join("backups");
+        std::fs::create_dir_all(&backup_dir).expect("create backup dir");
+
+        let db = GrafeoDB::new_in_memory();
+
+        // Snapshot the directory listing before the calls.
+        let before: Vec<_> = std::fs::read_dir(&backup_dir)
+            .expect("read dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+
+        // Repeated calls must be side-effect free.
+        let e1 = db.current_epoch();
+        let e2 = db.current_epoch();
+        let e3 = db.current_epoch();
+        assert_eq!(e1, e2);
+        assert_eq!(e2, e3);
+
+        let after: Vec<_> = std::fs::read_dir(&backup_dir)
+            .expect("read dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+
+        assert_eq!(
+            before, after,
+            "current_epoch() must not create backup artifacts or mutate the backup dir"
+        );
+        assert!(
+            after.is_empty(),
+            "no backup manifest/segment files may be created by current_epoch()"
+        );
     }
 }

@@ -7,6 +7,8 @@
 //! - `crud` - Node/edge CRUD operations
 //! - `index` - Property, vector, and text index management
 //! - `search` - Vector, text, and hybrid search
+//! - `vector_access` - Shared spill-aware vector accessor construction
+//! - `vector_read` - Exact spill-aware vector reads by NodeId
 //! - `embed` - Embedding model management
 //! - `persistence` - Save, load, snapshots, iteration
 //! - `admin` - Stats, introspection, diagnostics, CDC
@@ -47,8 +49,15 @@ mod rdf_ops;
 #[cfg(feature = "lpg")]
 mod search;
 pub(crate) mod section_consumer;
+#[cfg(all(feature = "lpg", feature = "vector-index"))]
+mod vector_access;
+#[cfg(all(feature = "lpg", feature = "vector-index"))]
+mod vector_read;
 #[cfg(all(feature = "wal", feature = "lpg"))]
 pub(crate) mod wal_store;
+
+#[cfg(all(feature = "lpg", feature = "vector-index"))]
+pub use vector_read::IndexedVectorRead;
 
 use grafeo_common::{grafeo_error, grafeo_warn};
 #[cfg(feature = "wal")]
@@ -667,6 +676,13 @@ impl GrafeoDB {
             db.wire_layered_after_load(compact_base, loaded_overlay_deletions)?;
         }
 
+        // After Catalog shells + VectorStore topology + WAL + layered wiring,
+        // rehydrate Quantized payloads from LPG embeddings via graph_store().
+        // Must not run inside CatalogSection::deserialize (misses CompactStore
+        // base embeddings). Topology is reused; no full HNSW rebuild.
+        #[cfg(all(feature = "lpg", feature = "vector-index"))]
+        db.rehydrate_quantized_vector_indexes()?;
+
         // Start periodic checkpoint timer if configured
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
         if let (Some(interval), Some(fm)) = (checkpoint_interval, &db.file_manager)
@@ -685,16 +701,17 @@ impl GrafeoDB {
             ));
         }
 
-        // Discover existing spill files from a previous session.
-        // If vectors were spilled before close, the spill files persist on disk
-        // and need to be re-mapped so search can read from them.
+        // Spill sidecars are ephemeral mmap snapshots, never durability
+        // authority. The complete vector property column is restored from the
+        // .grafeo container (plus WAL) above; discard old sidecars before
+        // applying this session's ForceDisk policy.
         #[cfg(all(
             feature = "lpg",
             feature = "vector-index",
             feature = "mmap",
             not(feature = "temporal")
         ))]
-        db.restore_spill_files();
+        db.discard_stale_vector_spill_files();
 
         // Phase 8a: apply per-section ForceDisk overrides. Each section
         // type configured as ForceDisk triggers a targeted spill of its
@@ -1550,6 +1567,156 @@ impl GrafeoDB {
             grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection::empty();
         section.deserialize(&data)?;
         Ok(Some(section.take()))
+    }
+
+    /// Rehydrate quantized vector index payloads after open.
+    ///
+    /// Catalog restore creates empty `VectorIndexKind` shells; VectorStore
+    /// applies topology only. Quantized indexes need in-process **codes** (not
+    /// a second full-f32 copy of LPG embeddings). Two-pass scan:
+    /// 1) train quantizer parameters without retaining every vector
+    /// 2) write codes only, rescoring uses [`PropertyVectorAccessor`] at search
+    ///
+    /// Sequencing (required): Catalog shells → LPG load → VectorStore topology
+    /// → WAL → wire_layered_after_load → **this step** → spill restore.
+    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    fn rehydrate_quantized_vector_indexes(&self) -> Result<()> {
+        use grafeo_common::types::{PropertyKey, Value};
+        use grafeo_core::index::vector::{BinaryQuantizer, QuantizationType};
+
+        let entries = self.lpg_store().vector_index_entries();
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let graph = self.graph_store();
+        for (key, index) in entries {
+            let Some(q_idx) = index.as_quantized() else {
+                continue;
+            };
+            let Some((label, property)) = key.split_once(':') else {
+                continue;
+            };
+            let prop_key = PropertyKey::new(property);
+            let dimensions = q_idx.config().dimensions;
+            if dimensions == 0 {
+                return Err(grafeo_common::utils::error::Error::Serialization(format!(
+                    "Cannot rehydrate vector index {key}: catalog dimensions are zero"
+                )));
+            }
+
+            match q_idx.quantization_type() {
+                QuantizationType::None => {
+                    // Exact quantized-shell path: keep legacy full-vector rehydrate.
+                    let mut vectors = Vec::new();
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key)
+                        {
+                            if v.len() != dimensions {
+                                return Err(grafeo_common::utils::error::Error::Serialization(
+                                    format!(
+                                        "Cannot rehydrate vector index {key}: stored vectors do not match catalog dimensions {dimensions}"
+                                    ),
+                                ));
+                            }
+                            vectors.push((node_id, v.to_vec()));
+                        }
+                    }
+                    q_idx.rehydrate_payloads_from_vectors(vectors);
+                }
+                QuantizationType::Scalar => {
+                    // Topology is already restored from VectorStore. Today's
+                    // scalar search walk/rescore uses the LPG property accessor
+                    // (full precision), not the u8 code map — see
+                    // `search_scalar_quantized`. Materializing 1 byte/dim codes
+                    // for every embedding is pure RSS overhead on reopen and
+                    // prevented the Layer 4 "scalar < plain" bar.
+                    //
+                    // Keep mode sticky via Catalog; leave codes empty so search
+                    // falls through to accessor-backed exact distances (same
+                    // memory model as plain HNSW). When HNSW gains quantized
+                    // distance scoring, rehydrate codes here again.
+                    let mut count = 0usize;
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key)
+                        {
+                            if v.len() != dimensions {
+                                return Err(grafeo_common::utils::error::Error::Serialization(
+                                    format!(
+                                        "Cannot rehydrate vector index {key}: stored vectors do not match catalog dimensions {dimensions}"
+                                    ),
+                                ));
+                            }
+                            count += 1;
+                        }
+                    }
+                    let _ = count; // validates dim match; empty → probe ready=false
+                    q_idx.release_quantized_payloads();
+                }
+                QuantizationType::Binary => {
+                    let mut codes = Vec::new();
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key)
+                        {
+                            if v.len() != dimensions {
+                                return Err(grafeo_common::utils::error::Error::Serialization(
+                                    format!(
+                                        "Cannot rehydrate vector index {key}: stored vectors do not match catalog dimensions {dimensions}"
+                                    ),
+                                ));
+                            }
+                            codes.push((node_id, BinaryQuantizer::quantize(v.as_ref())));
+                        }
+                    }
+                    if codes.is_empty() {
+                        continue;
+                    }
+                    q_idx.rehydrate_binary_codes_only(codes);
+                }
+                QuantizationType::Product { num_subvectors } => {
+                    if num_subvectors == 0 || !dimensions.is_multiple_of(num_subvectors) {
+                        return Err(grafeo_common::utils::error::Error::Serialization(format!(
+                            "Cannot rehydrate product vector index {key}: dimensions {dimensions} are not divisible by {num_subvectors} subvectors"
+                        )));
+                    }
+                    // Product training still needs a temporary sample batch; drop after codes.
+                    let mut vectors = Vec::new();
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key)
+                        {
+                            if v.len() != dimensions {
+                                return Err(grafeo_common::utils::error::Error::Serialization(
+                                    format!(
+                                        "Cannot rehydrate vector index {key}: stored vectors do not match catalog dimensions {dimensions}"
+                                    ),
+                                ));
+                            }
+                            vectors.push((node_id, v.to_vec()));
+                        }
+                    }
+                    q_idx.rehydrate_payloads_from_vectors(vectors);
+                }
+                _ => {
+                    // Forward-compatible: unknown quant modes keep legacy path.
+                    let mut vectors = Vec::new();
+                    for node_id in graph.nodes_by_label(label) {
+                        if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key)
+                        {
+                            if v.len() != dimensions {
+                                return Err(grafeo_common::utils::error::Error::Serialization(
+                                    format!(
+                                        "Cannot rehydrate vector index {key}: stored vectors do not match catalog dimensions {dimensions}"
+                                    ),
+                                ));
+                            }
+                            vectors.push((node_id, v.to_vec()));
+                        }
+                    }
+                    q_idx.rehydrate_payloads_from_vectors(vectors);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Loads from a section-based `.grafeo` file (v2 format).
@@ -2500,6 +2667,30 @@ impl GrafeoDB {
         self.buffer_manager.reload_eligible(target_fraction)
     }
 
+    /// Materializes spill-backed vectors before a mutation that may update an
+    /// existing HNSW topology.
+    ///
+    /// HNSW insertion reads neighboring vectors through the mutable property
+    /// accessor. Call this before vector-bearing GQL writes so those reads see
+    /// the complete graph rather than only the post-spill delta. The next
+    /// checkpoint reapplies ForceDisk when configured.
+    #[cfg(all(
+        feature = "lpg",
+        feature = "vector-index",
+        feature = "mmap",
+        not(feature = "temporal")
+    ))]
+    pub fn prepare_vector_mutation(&self) -> Result<()> {
+        self.buffer_manager
+            .reload_consumer_by_name("section:VectorStore")
+            .map(|_| ())
+            .map_err(|error| {
+                Error::Internal(format!(
+                    "failed to reload spilled vectors before mutation: {error}"
+                ))
+            })
+    }
+
     /// Returns the current [`StorageTier`] of every registered section consumer.
     ///
     /// The map keys are the [`SectionType`]s parsed from each consumer's name
@@ -2542,93 +2733,33 @@ impl GrafeoDB {
         out
     }
 
-    /// Discovers and re-opens spill files from a previous session.
+    /// Removes vector spill sidecars left by a prior process.
     ///
-    /// When the database was closed with spilled vector embeddings, the
-    /// `vectors_*.bin` files persist in the spill directory. This method
-    /// scans for them, opens each as `MmapStorage`, and registers them
-    /// in the `vector_spill_storages` map so search can read from them.
+    /// Spill files are ephemeral mmap snapshots. The `.grafeo` container plus
+    /// WAL is the durable authority, so reopen always rebuilds ForceDisk state
+    /// from the freshly loaded property column instead of trusting a sidecar
+    /// that may predate later Auto-tier mutations.
     #[cfg(all(
         feature = "lpg",
         feature = "vector-index",
         feature = "mmap",
         not(feature = "temporal")
     ))]
-    fn restore_spill_files(&mut self) {
-        use grafeo_core::index::vector::MmapStorage;
-
-        let spill_dir = match self.buffer_manager.config().spill_path {
-            Some(ref path) => path.clone(),
-            None => return,
-        };
-
-        if !spill_dir.exists() {
-            return;
-        }
-
-        let spill_map = match self.vector_spill_storages {
-            Some(ref map) => Arc::clone(map),
-            None => return,
-        };
-
-        let Ok(entries) = std::fs::read_dir(&spill_dir) else {
+    fn discard_stale_vector_spill_files(&self) {
+        let Some(spill_dir) = self.buffer_manager.config().spill_path.as_ref() else {
             return;
         };
-
-        let Some(ref store) = self.store else {
+        let Ok(entries) = std::fs::read_dir(spill_dir) else {
             return;
         };
-
         for entry in entries.flatten() {
             let path = entry.path();
-            let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name.to_string(),
-                None => continue,
-            };
-
-            // Match pattern: vectors_{key}.bin where key is percent-encoded
-            if !file_name.starts_with("vectors_")
-                || !std::path::Path::new(&file_name)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("bin"))
-            {
-                continue;
-            }
-
-            // Extract and decode key: "vectors_Label%3Aembedding.bin" -> "Label:embedding"
-            let key_part = &file_name["vectors_".len()..file_name.len() - ".bin".len()];
-
-            // Percent-decode: %3A -> ':', %25 -> '%'
-            let key = key_part.replace("%3A", ":").replace("%25", "%");
-
-            // Key must contain ':' (label:property format)
-            if !key.contains(':') {
-                // Legacy file with old encoding, skip (will be re-created on next spill)
-                continue;
-            }
-
-            // Only restore if the corresponding vector index exists
-            if store.get_vector_index_by_key(&key).is_none() {
-                // Stale spill file (index was dropped), clean it up
-                let _ = std::fs::remove_file(&path);
-                continue;
-            }
-
-            // Open the MmapStorage
-            match MmapStorage::open(&path) {
-                Ok(mmap_storage) => {
-                    // Mark the property column as spilled so get() returns None
-                    let property = key.split(':').nth(1).unwrap_or("");
-                    let prop_key = grafeo_common::types::PropertyKey::new(property);
-                    store.node_properties_mark_spilled(&prop_key);
-
-                    spill_map.write().insert(key, Arc::new(mmap_storage));
-                }
-                Err(e) => {
-                    eprintln!("failed to restore spill file {}: {e}", path.display());
-                    // Remove corrupt spill file
-                    let _ = std::fs::remove_file(&path);
-                }
+            let is_vector_spill = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("vectors_") && name.ends_with(".bin"));
+            if is_vector_spill {
+                let _ = std::fs::remove_file(path);
             }
         }
     }
@@ -2829,6 +2960,47 @@ impl GrafeoDB {
         fm: &GrafeoFileManager,
         reason: flush::FlushReason,
     ) -> Result<flush::FlushResult> {
+        #[cfg(all(
+            feature = "lpg",
+            feature = "vector-index",
+            feature = "mmap",
+            not(feature = "temporal")
+        ))]
+        let vector_was_on_disk =
+            self.buffer_manager
+                .snapshot_consumer_tiers()
+                .iter()
+                .any(|(name, tier)| {
+                    name == "section:VectorStore"
+                        && *tier == grafeo_common::memory::StorageTier::OnDisk
+                });
+        #[cfg(all(
+            feature = "lpg",
+            feature = "vector-index",
+            feature = "mmap",
+            not(feature = "temporal")
+        ))]
+        let vector_force_disk = self
+            .config
+            .section_configs
+            .get(&grafeo_common::storage::SectionType::VectorStore)
+            .is_some_and(|config| config.tier == grafeo_common::storage::TierOverride::ForceDisk);
+        #[cfg(all(
+            feature = "lpg",
+            feature = "vector-index",
+            feature = "mmap",
+            not(feature = "temporal")
+        ))]
+        if vector_was_on_disk {
+            self.buffer_manager
+                .reload_consumer_by_name("section:VectorStore")
+                .map_err(|error| {
+                    Error::Internal(format!(
+                        "failed to reload spilled vectors before checkpoint: {error}"
+                    ))
+                })?;
+        }
+
         let sections = self.build_sections();
         let section_refs: Vec<&dyn grafeo_common::storage::Section> =
             sections.iter().map(|s| s.as_ref()).collect();
@@ -2837,14 +3009,31 @@ impl GrafeoDB {
         #[cfg(not(feature = "lpg"))]
         let context = flush::build_context_minimal(&self.transaction_manager);
 
-        flush::flush(
+        let result = flush::flush(
             fm,
             &section_refs,
             &context,
             reason,
             #[cfg(feature = "wal")]
             self.wal.as_deref(),
-        )
+        );
+
+        // Spill sidecars are derived state. Recreate them only after the
+        // authoritative container snapshot has serialized the complete merged
+        // property column. Preserve an existing OnDisk tier, and enforce
+        // ForceDisk for indexes created after database open.
+        #[cfg(all(
+            feature = "lpg",
+            feature = "vector-index",
+            feature = "mmap",
+            not(feature = "temporal")
+        ))]
+        if vector_was_on_disk || vector_force_disk {
+            self.buffer_manager
+                .spill_consumer_by_name("section:VectorStore");
+        }
+
+        result
     }
 
     /// Returns the file manager if using single-file format.
@@ -3239,11 +3428,13 @@ mod tests {
         {
             let db = GrafeoDB::open(&db_path).unwrap();
 
-            let alix = db.create_node(&["Person"]);
-            db.set_node_property(alix, "name", Value::from("Alix"));
+            let alix = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(alix, "name", Value::from("Alix"))
+                .unwrap();
 
-            let gus = db.create_node(&["Person"]);
-            db.set_node_property(gus, "name", Value::from("Gus"));
+            let gus = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(gus, "name", Value::from("Gus"))
+                .unwrap();
 
             let _edge = db.create_edge(alix, gus, "KNOWS");
 
@@ -3278,8 +3469,8 @@ mod tests {
         let db = GrafeoDB::open(&db_path).unwrap();
 
         // Create some data
-        let node = db.create_node(&["Test"]);
-        db.delete_node(node);
+        let node = db.create_node(&["Test"]).unwrap();
+        db.delete_node(node).unwrap();
 
         // WAL should have records
         if let Some(wal) = db.wal() {
@@ -3302,8 +3493,9 @@ mod tests {
         // Session 1: Create initial data
         {
             let db = GrafeoDB::open(&db_path).unwrap();
-            let alix = db.create_node(&["Person"]);
-            db.set_node_property(alix, "name", Value::from("Alix"));
+            let alix = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(alix, "name", Value::from("Alix"))
+                .unwrap();
             db.close().unwrap();
         }
 
@@ -3311,8 +3503,9 @@ mod tests {
         {
             let db = GrafeoDB::open(&db_path).unwrap();
             assert_eq!(db.node_count(), 1); // Previous data recovered
-            let gus = db.create_node(&["Person"]);
-            db.set_node_property(gus, "name", Value::from("Gus"));
+            let gus = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(gus, "name", Value::from("Gus"))
+                .unwrap();
             db.close().unwrap();
         }
 
@@ -3344,9 +3537,9 @@ mod tests {
             let db = GrafeoDB::open(&db_path).unwrap();
 
             // Create nodes
-            let a = db.create_node(&["Node"]);
-            let b = db.create_node(&["Node"]);
-            let c = db.create_node(&["Node"]);
+            let a = db.create_node(&["Node"]).unwrap();
+            let b = db.create_node(&["Node"]).unwrap();
+            let c = db.create_node(&["Node"]).unwrap();
 
             // Create edges
             let e1 = db.create_edge(a, b, "LINKS");
@@ -3354,11 +3547,11 @@ mod tests {
 
             // Delete middle node and its edge
             db.delete_edge(e1);
-            db.delete_node(b);
+            db.delete_node(b).unwrap();
 
             // Set properties on remaining nodes
-            db.set_node_property(a, "value", Value::Int64(1));
-            db.set_node_property(c, "value", Value::Int64(3));
+            db.set_node_property(a, "value", Value::Int64(1)).unwrap();
+            db.set_node_property(c, "value", Value::Int64(3)).unwrap();
 
             db.close().unwrap();
         }
@@ -3392,7 +3585,7 @@ mod tests {
         let db_path = dir.path().join("close_test_db");
 
         let db = GrafeoDB::open(&db_path).unwrap();
-        db.create_node(&["Test"]);
+        db.create_node(&["Test"]).unwrap();
 
         // First close should succeed
         assert!(db.close().is_ok());
@@ -3442,8 +3635,8 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
 
         // Perform some operations
-        db.create_node(&["Person"]);
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
+        db.create_node(&["Person"]).unwrap();
 
         // Check that metrics snapshot returns data
         let snap = db.metrics();
@@ -3455,8 +3648,8 @@ mod tests {
     fn test_query_result_has_metrics() {
         // Verifies that query results include execution metrics
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
+        db.create_node(&["Person"]).unwrap();
 
         #[cfg(feature = "gql")]
         {
@@ -3474,7 +3667,7 @@ mod tests {
     fn test_empty_query_result_metrics() {
         // Verifies metrics are correct for queries returning no results
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
 
         #[cfg(feature = "gql")]
         {
@@ -3501,12 +3694,12 @@ mod tests {
             let db = cdc_db();
 
             // Create
-            let id = db.create_node(&["Person"]);
+            let id = db.create_node(&["Person"]).unwrap();
             // Update
-            db.set_node_property(id, "name", "Alix".into());
-            db.set_node_property(id, "name", "Gus".into());
+            db.set_node_property(id, "name", "Alix".into()).unwrap();
+            db.set_node_property(id, "name", "Gus".into()).unwrap();
             // Delete
-            db.delete_node(id);
+            db.delete_node(id).unwrap();
 
             let history = db.history(id).unwrap();
             assert_eq!(history.len(), 4); // create + 2 updates + delete
@@ -3522,8 +3715,8 @@ mod tests {
         fn test_edge_lifecycle_history() {
             let db = cdc_db();
 
-            let alix = db.create_node(&["Person"]);
-            let gus = db.create_node(&["Person"]);
+            let alix = db.create_node(&["Person"]).unwrap();
+            let gus = db.create_node(&["Person"]).unwrap();
             let edge = db.create_edge(alix, gus, "KNOWS");
             db.set_edge_property(edge, "since", 2024i64.into());
             db.delete_edge(edge);
@@ -3539,13 +3732,15 @@ mod tests {
         fn test_create_node_with_props_cdc() {
             let db = cdc_db();
 
-            let id = db.create_node_with_props(
-                &["Person"],
-                vec![
-                    ("name", grafeo_common::types::Value::from("Alix")),
-                    ("age", grafeo_common::types::Value::from(30i64)),
-                ],
-            );
+            let id = db
+                .create_node_with_props(
+                    &["Person"],
+                    vec![
+                        ("name", grafeo_common::types::Value::from("Alix")),
+                        ("age", grafeo_common::types::Value::from(30i64)),
+                    ],
+                )
+                .unwrap();
 
             let history = db.history(id).unwrap();
             assert_eq!(history.len(), 1);
@@ -3559,9 +3754,9 @@ mod tests {
         fn test_changes_between() {
             let db = cdc_db();
 
-            let id1 = db.create_node(&["A"]);
-            let _id2 = db.create_node(&["B"]);
-            db.set_node_property(id1, "x", 1i64.into());
+            let id1 = db.create_node(&["A"]).unwrap();
+            let _id2 = db.create_node(&["B"]).unwrap();
+            db.set_node_property(id1, "x", 1i64.into()).unwrap();
 
             // All events should be at the same epoch (in-memory, epoch doesn't advance without tx)
             let changes = db
@@ -3578,8 +3773,8 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             assert!(!db.is_cdc_enabled());
 
-            let id = db.create_node(&["Person"]);
-            db.set_node_property(id, "name", "Alix".into());
+            let id = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(id, "name", "Alix".into()).unwrap();
 
             let history = db.history(id).unwrap();
             assert!(history.is_empty(), "CDC off by default: no events recorded");
@@ -3631,13 +3826,13 @@ mod tests {
             db.set_cdc_enabled(true);
             assert!(db.is_cdc_enabled());
 
-            let id = db.create_node(&["Person"]);
+            let id = db.create_node(&["Person"]).unwrap();
             let history = db.history(id).unwrap();
             assert_eq!(history.len(), 1, "CDC enabled at runtime records events");
 
             // Disable again
             db.set_cdc_enabled(false);
-            let id2 = db.create_node(&["Person"]);
+            let id2 = db.create_node(&["Person"]).unwrap();
             let history2 = db.history(id2).unwrap();
             assert!(
                 history2.is_empty(),
@@ -3913,7 +4108,7 @@ mod tests {
     #[test]
     fn test_database_gc() {
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
         db.gc();
         // Verify no panic, node still accessible
         assert_eq!(db.node_count(), 1);
@@ -4025,7 +4220,7 @@ mod tests {
     #[test]
     fn test_graph_store_returns_lpg_by_default() {
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
         let store = db.graph_store();
         assert_eq!(store.node_count(), 1);
     }
@@ -4080,7 +4275,7 @@ mod tests {
     #[allow(deprecated)]
     fn test_session_read_only() {
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
 
         let session = db.session_read_only();
         // Read queries should work
@@ -4098,7 +4293,7 @@ mod tests {
     #[test]
     fn test_close_in_memory_database() {
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
         assert!(db.close().is_ok());
         // Second close should also be fine (idempotent)
         assert!(db.close().is_ok());

@@ -65,6 +65,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 // Re-export the main database API
+#[cfg(feature = "vector-index")]
+pub use grafeo_engine::IndexedVectorRead;
 pub use grafeo_engine::{
     AccessMode, Catalog, CatalogError, Config, ConfigError, DurabilityMode, GrafeoDB, Grant,
     GraphModel, GraphStore, GraphStoreMut, Identity, IndexDefinition, IndexType, Role, Session,

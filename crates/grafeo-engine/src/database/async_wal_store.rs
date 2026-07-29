@@ -144,11 +144,15 @@ impl AsyncWalGraphStore {
     ///
     /// Returns an error if WAL logging fails.
     pub async fn delete_node(&self, id: NodeId) -> Result<bool> {
-        let deleted = self.inner.delete_node(id);
-        if deleted {
+        let exists = self.inner.get_node(id).is_some();
+        if exists {
             self.log_with_context(&WalRecord::DeleteNode { id }).await?;
         }
-        Ok(deleted)
+        Ok(if exists {
+            self.inner.delete_node(id)
+        } else {
+            false
+        })
     }
 
     /// Deletes all edges connected to a node.
@@ -169,11 +173,10 @@ impl AsyncWalGraphStore {
                 .map(|(_, eid)| eid)
                 .collect();
 
-        self.inner.delete_node_edges(node_id);
-
         for id in outgoing.into_iter().chain(incoming) {
             self.log_with_context(&WalRecord::DeleteEdge { id }).await?;
         }
+        self.inner.delete_node_edges(node_id);
         Ok(())
     }
 

@@ -27,7 +27,8 @@ fn test_get_nonexistent_edge() {
 fn test_set_property_on_nonexistent_node() {
     let db = GrafeoDB::new_in_memory();
     // Setting a property on a missing node should not panic
-    db.set_node_property(NodeId::new(999), "key", Value::Int64(1));
+    db.set_node_property(NodeId::new(999), "key", Value::Int64(1))
+        .unwrap();
     // Node still doesn't exist
     assert!(db.get_node(NodeId::new(999)).is_none());
 }
@@ -35,7 +36,7 @@ fn test_set_property_on_nonexistent_node() {
 #[test]
 fn test_delete_nonexistent_node() {
     let db = GrafeoDB::new_in_memory();
-    assert!(!db.delete_node(NodeId::new(999)));
+    assert!(!db.delete_node(NodeId::new(999)).unwrap());
 }
 
 #[test]
@@ -249,8 +250,8 @@ fn test_info_empty_database() {
 #[test]
 fn test_property_with_null_value() {
     let db = GrafeoDB::new_in_memory();
-    let n = db.create_node(&["Test"]);
-    db.set_node_property(n, "key", Value::Null);
+    let n = db.create_node(&["Test"]).unwrap();
+    db.set_node_property(n, "key", Value::Null).unwrap();
 
     // In temporal mode, Null acts as a tombstone and is filtered out.
     // In non-temporal mode, Null is stored and returned.
@@ -272,8 +273,9 @@ fn test_property_with_null_value() {
 #[test]
 fn test_property_with_empty_string() {
     let db = GrafeoDB::new_in_memory();
-    let n = db.create_node(&["Test"]);
-    db.set_node_property(n, "key", Value::String("".into()));
+    let n = db.create_node(&["Test"]).unwrap();
+    db.set_node_property(n, "key", Value::String("".into()))
+        .unwrap();
 
     let node = db.get_node(n).unwrap();
     assert_eq!(
@@ -286,7 +288,7 @@ fn test_property_with_empty_string() {
 #[test]
 fn test_node_with_no_labels() {
     let db = GrafeoDB::new_in_memory();
-    let n = db.create_node(&[]);
+    let n = db.create_node(&[]).unwrap();
 
     let node = db.get_node(n);
     assert!(node.is_some(), "Node with no labels should exist");
@@ -310,7 +312,7 @@ fn test_node_with_many_labels() {
             _ => "J",
         })
         .collect();
-    let n = db.create_node(&labels);
+    let n = db.create_node(&labels).unwrap();
 
     let stored_labels = db.get_node_labels(n).unwrap();
     assert_eq!(stored_labels.len(), 10);
@@ -319,7 +321,7 @@ fn test_node_with_many_labels() {
 #[test]
 fn test_self_referencing_edge() {
     let db = GrafeoDB::new_in_memory();
-    let n = db.create_node(&["Node"]);
+    let n = db.create_node(&["Node"]).unwrap();
     let e = db.create_edge(n, n, "SELF");
 
     let edge = db.get_edge(e).unwrap();
@@ -430,9 +432,11 @@ fn test_graphql_range_filter_end_to_end() {
     let db = GrafeoDB::new_in_memory();
     // Create test data
     for i in 0..5 {
-        let n = db.create_node(&["Person"]);
-        db.set_node_property(n, "name", Value::String(format!("Person{}", i).into()));
-        db.set_node_property(n, "age", Value::Int64(20 + i * 10)); // 20, 30, 40, 50, 60
+        let n = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(n, "name", Value::String(format!("Person{}", i).into()))
+            .unwrap();
+        db.set_node_property(n, "age", Value::Int64(20 + i * 10))
+            .unwrap(); // 20, 30, 40, 50, 60
     }
 
     let session = db.session();
@@ -472,8 +476,9 @@ fn test_insert_and_match_special_characters_in_properties() {
 #[test]
 fn test_match_with_multiple_labels() {
     let db = GrafeoDB::new_in_memory();
-    let n = db.create_node(&["Person", "Employee"]);
-    db.set_node_property(n, "name", Value::String("Alix".into()));
+    let n = db.create_node(&["Person", "Employee"]).unwrap();
+    db.set_node_property(n, "name", Value::String("Alix".into()))
+        .unwrap();
 
     let session = db.session();
     let result = session.execute("MATCH (n:Person) RETURN n.name").unwrap();
@@ -485,7 +490,7 @@ fn test_in_operator_with_empty_list() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    db.create_node(&["Person"]);
+    db.create_node(&["Person"]).unwrap();
 
     let result = session
         .execute("MATCH (n:Person) WHERE n.name IN [] RETURN n")

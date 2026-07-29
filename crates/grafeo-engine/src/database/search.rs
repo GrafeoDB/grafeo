@@ -18,52 +18,6 @@ use grafeo_common::utils::error::Error;
 use grafeo_common::utils::error::Result;
 
 impl super::GrafeoDB {
-    /// Creates a vector accessor for the given label/property, using spilled
-    /// MmapStorage if the index has been spilled to disk.
-    #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
-    fn make_vector_accessor<'a>(
-        &'a self,
-        label: &str,
-        property: &str,
-    ) -> grafeo_core::index::vector::VectorAccessorKind<'a> {
-        let key = format!("{label}:{property}");
-        if let Some(ref spill_map) = self.vector_spill_storages {
-            let map = spill_map.read();
-            if let Some(storage) = map.get(&key) {
-                return grafeo_core::index::vector::VectorAccessorKind::Spilled(
-                    grafeo_core::index::vector::SpillableVectorAccessor::new(
-                        self.graph_store_ref(),
-                        property,
-                        std::sync::Arc::clone(storage)
-                            as std::sync::Arc<dyn grafeo_core::index::vector::VectorStorage>,
-                    ),
-                );
-            }
-        }
-        grafeo_core::index::vector::VectorAccessorKind::Property(
-            grafeo_core::index::vector::PropertyVectorAccessor::new(
-                self.graph_store_ref(),
-                property,
-            ),
-        )
-    }
-
-    /// Creates a vector accessor (no spill support when mmap or temporal unavailable).
-    #[cfg(not(all(feature = "vector-index", feature = "mmap", not(feature = "temporal"))))]
-    #[cfg(feature = "vector-index")]
-    fn make_vector_accessor<'a>(
-        &'a self,
-        _label: &str,
-        property: &str,
-    ) -> grafeo_core::index::vector::VectorAccessorKind<'a> {
-        grafeo_core::index::vector::VectorAccessorKind::Property(
-            grafeo_core::index::vector::PropertyVectorAccessor::new(
-                self.graph_store_ref(),
-                property,
-            ),
-        )
-    }
-
     /// Computes a node allowlist from property filters.
     ///
     /// Supports equality filters (scalar values) and operator filters (Map values

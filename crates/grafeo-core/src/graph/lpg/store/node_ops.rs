@@ -11,6 +11,75 @@ use grafeo_common::mvcc::VersionChain;
 use grafeo_common::mvcc::{HotVersionRef, VersionIndex, VersionRef};
 
 impl LpgStore {
+    /// Appends homogeneous-label nodes to a fresh store without per-node lock
+    /// acquisition, WAL, CDC, or secondary-index maintenance.
+    ///
+    /// This is deliberately an offline-loader primitive.  It is valid only
+    /// before property, text, or vector indexes are installed and before the
+    /// store becomes visible to concurrent readers.
+    #[cfg(not(any(feature = "tiered-storage", feature = "temporal")))]
+    pub fn bulk_create_nodes_with_props_unindexed(
+        &self,
+        label: &str,
+        properties_list: Vec<FxHashMap<PropertyKey, Value>>,
+    ) -> Result<Vec<NodeId>, &'static str> {
+        if properties_list.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.property_indexes.read().is_empty() {
+            return Err("bulk node load requires no property indexes");
+        }
+        #[cfg(feature = "vector-index")]
+        if self.vector_indexes.read().keys().any(|key| {
+            key.strip_prefix(label)
+                .is_some_and(|suffix| suffix.starts_with(':'))
+        }) {
+            return Err("bulk node load requires no vector indexes for its label");
+        }
+        #[cfg(feature = "text-index")]
+        if !self.text_indexes.read().is_empty() {
+            return Err("bulk node load requires no text indexes");
+        }
+
+        let count = properties_list.len();
+        let base_id = self.next_node_id.fetch_add(count as u64, Ordering::Relaxed);
+        let epoch = self.current_epoch();
+        let label_id = self.get_or_create_label_id(label);
+        let mut label_set = FxHashSet::default();
+        label_set.insert(label_id);
+
+        let mut ids = Vec::with_capacity(count);
+        let mut property_rows = Vec::with_capacity(count);
+        let mut label_index = self.label_index.write();
+        if label_index.len() <= label_id as usize {
+            label_index.resize_with(label_id as usize + 1, FxHashMap::default);
+        }
+        let mut node_labels = self.node_labels.write();
+        let mut nodes = self.nodes.write();
+        for (offset, properties) in properties_list.into_iter().enumerate() {
+            let id = NodeId::new(base_id + offset as u64);
+            let mut record = NodeRecord::new(id, epoch);
+            record.set_label_count(1);
+            record.props_count = u16::try_from(properties.len()).unwrap_or(u16::MAX);
+            nodes.insert(
+                id,
+                VersionChain::with_initial(record, epoch, TransactionId::SYSTEM),
+            );
+            label_index[label_id as usize].insert(id, ());
+            node_labels.insert(id, label_set.clone());
+            ids.push(id);
+            property_rows.push((id, properties));
+        }
+        drop(nodes);
+        drop(node_labels);
+        drop(label_index);
+
+        self.node_properties.set_bulk_unindexed(property_rows);
+        self.live_node_count
+            .fetch_add(count as i64, Ordering::Relaxed);
+        Ok(ids)
+    }
+
     /// Creates a new node with the given labels.
     ///
     /// Uses the system transaction for non-transactional operations.
@@ -631,8 +700,9 @@ impl LpgStore {
                 return false;
             }
 
-            // Mark deleted with transaction tracking
-            chain.mark_deleted(epoch, transaction_id);
+            // Uncommitted deletes use PENDING so rollback matching stays
+            // epoch-safe after transaction-id reuse.
+            chain.mark_deleted(EpochId::PENDING, transaction_id);
 
             // Capture labels for undo log
             let registry = self.label_registry.read();
@@ -737,8 +807,9 @@ impl LpgStore {
                 return false;
             }
 
-            // Mark deleted with transaction tracking
-            index.mark_deleted(epoch, transaction_id);
+            // Uncommitted deletes use PENDING so rollback matching stays
+            // epoch-safe after transaction-id reuse.
+            index.mark_deleted(EpochId::PENDING, transaction_id);
 
             // Capture labels for undo log
             let registry = self.label_registry.read();

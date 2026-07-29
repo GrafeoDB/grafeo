@@ -37,9 +37,9 @@ fn row_count(db: &GrafeoDB, q: &str) -> usize {
 #[test]
 fn node_created_after_compact_is_visible() {
     let mut db = GrafeoDB::new_in_memory();
-    db.create_node(&["X"]);
+    db.create_node(&["X"]).unwrap();
     db.compact().expect("compact");
-    db.create_node(&["Y"]);
+    db.create_node(&["Y"]).unwrap();
 
     assert_eq!(int_scalar(&db, "MATCH (n) RETURN count(n)"), 2);
     assert_eq!(row_count(&db, "MATCH (n:Y) RETURN n"), 1);
@@ -49,10 +49,10 @@ fn node_created_after_compact_is_visible() {
 #[test]
 fn multiple_post_compact_nodes_visible() {
     let mut db = GrafeoDB::new_in_memory();
-    db.create_node(&["Base"]);
+    db.create_node(&["Base"]).unwrap();
     db.compact().expect("compact");
     for _ in 0..5 {
-        db.create_node(&["Overlay"]);
+        db.create_node(&["Overlay"]).unwrap();
     }
 
     assert_eq!(int_scalar(&db, "MATCH (n) RETURN count(n)"), 6);
@@ -63,14 +63,14 @@ fn multiple_post_compact_nodes_visible() {
 #[test]
 fn post_compact_edge_visible() {
     let mut db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["A"]);
-    let b = db.create_node(&["B"]);
+    let a = db.create_node(&["A"]).unwrap();
+    let b = db.create_node(&["B"]).unwrap();
     db.create_edge(a, b, "PRE");
     db.compact().expect("compact");
 
     // New nodes + edge entirely in the overlay.
-    let c = db.create_node(&["A"]);
-    let d = db.create_node(&["B"]);
+    let c = db.create_node(&["A"]).unwrap();
+    let d = db.create_node(&["B"]).unwrap();
     db.create_edge(c, d, "POST");
 
     assert_eq!(int_scalar(&db, "MATCH ()-[r]->() RETURN count(r)"), 2);
@@ -81,9 +81,9 @@ fn post_compact_edge_visible() {
 #[test]
 fn post_compact_edge_between_base_and_overlay_nodes() {
     let mut db = GrafeoDB::new_in_memory();
-    let base_a = db.create_node(&["A"]);
+    let base_a = db.create_node(&["A"]).unwrap();
     db.compact().expect("compact");
-    let overlay_b = db.create_node(&["B"]);
+    let overlay_b = db.create_node(&["B"]).unwrap();
     db.create_edge(base_a, overlay_b, "CROSS");
 
     // The edge connects a base node to an overlay node — visibility has
@@ -98,10 +98,11 @@ fn post_compact_edge_between_base_and_overlay_nodes() {
 #[test]
 fn post_compact_node_property_survives_reread() {
     let mut db = GrafeoDB::new_in_memory();
-    db.create_node(&["X"]);
+    db.create_node(&["X"]).unwrap();
     db.compact().expect("compact");
-    let n = db.create_node(&["Y"]);
-    db.set_node_property(n, "label", Value::String("hello".into()));
+    let n = db.create_node(&["Y"]).unwrap();
+    db.set_node_property(n, "label", Value::String("hello".into()))
+        .unwrap();
 
     let s = db.session();
     let r = s.execute("MATCH (n:Y) RETURN n.label").unwrap();

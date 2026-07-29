@@ -17,16 +17,19 @@ pub fn build_fixture_db() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
 
     // 3 nodes with different labels and properties
-    let alix = db.create_node(&["Person"]);
-    db.set_node_property(alix, "name", Value::String("Alix".into()));
-    db.set_node_property(alix, "age", Value::Int64(30));
+    let alix = db.create_node(&["Person"]).unwrap();
+    db.set_node_property(alix, "name", Value::String("Alix".into()))
+        .unwrap();
+    db.set_node_property(alix, "age", Value::Int64(30)).unwrap();
 
-    let gus = db.create_node(&["Person", "Employee"]);
-    db.set_node_property(gus, "name", Value::String("Gus".into()));
-    db.set_node_property(gus, "age", Value::Int64(25));
+    let gus = db.create_node(&["Person", "Employee"]).unwrap();
+    db.set_node_property(gus, "name", Value::String("Gus".into()))
+        .unwrap();
+    db.set_node_property(gus, "age", Value::Int64(25)).unwrap();
 
-    let acme = db.create_node(&["Company"]);
-    db.set_node_property(acme, "name", Value::String("Acme Corp".into()));
+    let acme = db.create_node(&["Company"]).unwrap();
+    db.set_node_property(acme, "name", Value::String("Acme Corp".into()))
+        .unwrap();
 
     // 2 edges with properties
     let knows = db.create_edge(alix, gus, "KNOWS");

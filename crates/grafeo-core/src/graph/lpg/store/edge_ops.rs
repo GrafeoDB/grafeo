@@ -485,8 +485,9 @@ impl LpgStore {
                 }
             };
 
-            // Mark deleted with transaction tracking
-            chain.mark_deleted(epoch, transaction_id);
+            // Uncommitted deletes use PENDING so rollback matching stays
+            // epoch-safe after transaction-id reuse.
+            chain.mark_deleted(EpochId::PENDING, transaction_id);
             drop(edges);
 
             // Get edge type name for undo log
@@ -563,8 +564,9 @@ impl LpgStore {
                 }
             };
 
-            // Mark deleted with transaction tracking
-            index.mark_deleted(epoch, transaction_id);
+            // Uncommitted deletes use PENDING so rollback matching stays
+            // epoch-safe after transaction-id reuse.
+            index.mark_deleted(EpochId::PENDING, transaction_id);
             drop(versions);
 
             // Get edge type name for undo log

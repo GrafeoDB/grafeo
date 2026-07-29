@@ -21,17 +21,23 @@ fn vec3(x: f32, y: f32, z: f32) -> Value {
 fn setup_compacted_vector_db() -> GrafeoDB {
     let mut db = GrafeoDB::new_in_memory();
 
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "embedding", vec3(1.0, 0.0, 0.0));
-    db.set_node_property(n1, "title", Value::String("alpha".into()));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "embedding", vec3(1.0, 0.0, 0.0))
+        .unwrap();
+    db.set_node_property(n1, "title", Value::String("alpha".into()))
+        .unwrap();
 
-    let n2 = db.create_node(&["Doc"]);
-    db.set_node_property(n2, "embedding", vec3(0.0, 1.0, 0.0));
-    db.set_node_property(n2, "title", Value::String("beta".into()));
+    let n2 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n2, "embedding", vec3(0.0, 1.0, 0.0))
+        .unwrap();
+    db.set_node_property(n2, "title", Value::String("beta".into()))
+        .unwrap();
 
-    let n3 = db.create_node(&["Doc"]);
-    db.set_node_property(n3, "embedding", vec3(0.0, 0.0, 1.0));
-    db.set_node_property(n3, "title", Value::String("gamma".into()));
+    let n3 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n3, "embedding", vec3(0.0, 0.0, 1.0))
+        .unwrap();
+    db.set_node_property(n3, "title", Value::String("gamma".into()))
+        .unwrap();
 
     db.compact().expect("compact");
     db
@@ -128,17 +134,23 @@ fn rebuild_vector_index_after_compact() {
 fn vector_search_with_filter_after_compact() {
     let mut db = GrafeoDB::new_in_memory();
 
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "embedding", vec3(1.0, 0.0, 0.0));
-    db.set_node_property(n1, "category", Value::String("science".into()));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "embedding", vec3(1.0, 0.0, 0.0))
+        .unwrap();
+    db.set_node_property(n1, "category", Value::String("science".into()))
+        .unwrap();
 
-    let n2 = db.create_node(&["Doc"]);
-    db.set_node_property(n2, "embedding", vec3(0.0, 1.0, 0.0));
-    db.set_node_property(n2, "category", Value::String("art".into()));
+    let n2 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n2, "embedding", vec3(0.0, 1.0, 0.0))
+        .unwrap();
+    db.set_node_property(n2, "category", Value::String("art".into()))
+        .unwrap();
 
-    let n3 = db.create_node(&["Doc"]);
-    db.set_node_property(n3, "embedding", vec3(0.0, 0.0, 1.0));
-    db.set_node_property(n3, "category", Value::String("science".into()));
+    let n3 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n3, "embedding", vec3(0.0, 0.0, 1.0))
+        .unwrap();
+    db.set_node_property(n3, "category", Value::String("science".into()))
+        .unwrap();
 
     db.compact().expect("compact");
     db.create_property_index("category");
@@ -177,22 +189,25 @@ fn vector_search_with_filter_after_compact() {
 fn text_index_after_compact() {
     let mut db = GrafeoDB::new_in_memory();
 
-    let n1 = db.create_node(&["Article"]);
+    let n1 = db.create_node(&["Article"]).unwrap();
     db.set_node_property(
         n1,
         "body",
         Value::String("the quick brown fox jumps over the lazy dog".into()),
-    );
+    )
+    .unwrap();
 
-    let n2 = db.create_node(&["Article"]);
+    let n2 = db.create_node(&["Article"]).unwrap();
     db.set_node_property(
         n2,
         "body",
         Value::String("a fast brown fox leaps over a sleepy hound".into()),
-    );
+    )
+    .unwrap();
 
-    let n3 = db.create_node(&["Article"]);
-    db.set_node_property(n3, "body", Value::String("the cat sat on the mat".into()));
+    let n3 = db.create_node(&["Article"]).unwrap();
+    db.set_node_property(n3, "body", Value::String("the cat sat on the mat".into()))
+        .unwrap();
 
     db.compact().expect("compact");
 
@@ -217,12 +232,15 @@ fn snapshot_compact_vector_index_round_trip() {
     // Phase 1: build DB, export snapshot
     let snapshot_bytes = {
         let db = GrafeoDB::new_in_memory();
-        let n1 = db.create_node(&["Doc"]);
-        db.set_node_property(n1, "embedding", vec3(1.0, 0.0, 0.0));
-        let n2 = db.create_node(&["Doc"]);
-        db.set_node_property(n2, "embedding", vec3(0.0, 1.0, 0.0));
-        let n3 = db.create_node(&["Doc"]);
-        db.set_node_property(n3, "embedding", vec3(0.0, 0.0, 1.0));
+        let n1 = db.create_node(&["Doc"]).unwrap();
+        db.set_node_property(n1, "embedding", vec3(1.0, 0.0, 0.0))
+            .unwrap();
+        let n2 = db.create_node(&["Doc"]).unwrap();
+        db.set_node_property(n2, "embedding", vec3(0.0, 1.0, 0.0))
+            .unwrap();
+        let n3 = db.create_node(&["Doc"]).unwrap();
+        db.set_node_property(n3, "embedding", vec3(0.0, 0.0, 1.0))
+            .unwrap();
         db.export_snapshot().expect("export")
     };
 
@@ -255,8 +273,9 @@ fn snapshot_compact_vector_index_round_trip() {
 fn layered_store_has_vector_index_forwards_to_overlay() {
     let mut db = GrafeoDB::new_in_memory();
 
-    let n = db.create_node(&["Doc"]);
-    db.set_node_property(n, "embedding", vec3(1.0, 0.0, 0.0));
+    let n = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n, "embedding", vec3(1.0, 0.0, 0.0))
+        .unwrap();
 
     db.compact().expect("compact");
 
@@ -287,8 +306,9 @@ fn layered_store_has_vector_index_forwards_to_overlay() {
 fn layered_store_has_text_index_forwards_to_overlay() {
     let mut db = GrafeoDB::new_in_memory();
 
-    let n = db.create_node(&["Article"]);
-    db.set_node_property(n, "body", Value::String("hello world".into()));
+    let n = db.create_node(&["Article"]).unwrap();
+    db.set_node_property(n, "body", Value::String("hello world".into()))
+        .unwrap();
 
     db.compact().expect("compact");
 
@@ -308,16 +328,19 @@ fn layered_store_has_text_index_forwards_to_overlay() {
 fn vector_index_after_recompact() {
     let mut db = GrafeoDB::new_in_memory();
 
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "embedding", vec3(1.0, 0.0, 0.0));
-    let n2 = db.create_node(&["Doc"]);
-    db.set_node_property(n2, "embedding", vec3(0.0, 1.0, 0.0));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "embedding", vec3(1.0, 0.0, 0.0))
+        .unwrap();
+    let n2 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n2, "embedding", vec3(0.0, 1.0, 0.0))
+        .unwrap();
 
     db.compact().expect("first compact");
 
     // Insert a third node after compact, then recompact to merge all three.
-    let n3 = db.create_node(&["Doc"]);
-    db.set_node_property(n3, "embedding", vec3(0.0, 0.0, 1.0));
+    let n3 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n3, "embedding", vec3(0.0, 0.0, 1.0))
+        .unwrap();
 
     db.recompact().expect("recompact");
 

@@ -24,10 +24,12 @@ fn db() -> GrafeoDB {
 #[test]
 fn create_node_with_props_generates_cdc() {
     let db = db();
-    let id = db.create_node_with_props(
-        &["Person"],
-        vec![("name", Value::from("Alix")), ("age", Value::Int64(30))],
-    );
+    let id = db
+        .create_node_with_props(
+            &["Person"],
+            vec![("name", Value::from("Alix")), ("age", Value::Int64(30))],
+        )
+        .unwrap();
 
     let history = db.history(id).unwrap();
     assert!(!history.is_empty(), "Should have CDC events");
@@ -48,11 +50,13 @@ fn create_node_with_props_generates_cdc() {
 #[test]
 fn delete_node_generates_cdc_with_before_snapshot() {
     let db = db();
-    let id = db.create_node(&["Person"]);
-    db.set_node_property(id, "name", Value::from("Alix"));
-    db.set_node_property(id, "city", Value::from("Amsterdam"));
+    let id = db.create_node(&["Person"]).unwrap();
+    db.set_node_property(id, "name", Value::from("Alix"))
+        .unwrap();
+    db.set_node_property(id, "city", Value::from("Amsterdam"))
+        .unwrap();
 
-    let deleted = db.delete_node(id);
+    let deleted = db.delete_node(id).unwrap();
     assert!(deleted);
 
     let history = db.history(id).unwrap();
@@ -72,9 +76,11 @@ fn delete_node_generates_cdc_with_before_snapshot() {
 #[test]
 fn set_node_property_records_old_and_new_values() {
     let db = db();
-    let id = db.create_node(&["Person"]);
-    db.set_node_property(id, "name", Value::from("Alix"));
-    db.set_node_property(id, "name", Value::from("Gus"));
+    let id = db.create_node(&["Person"]).unwrap();
+    db.set_node_property(id, "name", Value::from("Alix"))
+        .unwrap();
+    db.set_node_property(id, "name", Value::from("Gus"))
+        .unwrap();
 
     let history = db.history(id).unwrap();
     let updates: Vec<_> = history
@@ -102,8 +108,8 @@ fn set_node_property_records_old_and_new_values() {
 #[test]
 fn create_edge_generates_cdc() {
     let db = db();
-    let a = db.create_node(&["Person"]);
-    let b = db.create_node(&["Person"]);
+    let a = db.create_node(&["Person"]).unwrap();
+    let b = db.create_node(&["Person"]).unwrap();
     let eid = db.create_edge(a, b, "KNOWS");
 
     let changes = db
@@ -128,8 +134,8 @@ fn create_edge_generates_cdc() {
 #[test]
 fn create_edge_with_props_generates_cdc() {
     let db = db();
-    let a = db.create_node(&["Person"]);
-    let b = db.create_node(&["Person"]);
+    let a = db.create_node(&["Person"]).unwrap();
+    let b = db.create_node(&["Person"]).unwrap();
     let eid = db.create_edge_with_props(
         a,
         b,
@@ -163,8 +169,8 @@ fn create_edge_with_props_generates_cdc() {
 #[test]
 fn delete_edge_generates_cdc_with_before_snapshot() {
     let db = db();
-    let a = db.create_node(&["Person"]);
-    let b = db.create_node(&["Person"]);
+    let a = db.create_node(&["Person"]).unwrap();
+    let b = db.create_node(&["Person"]).unwrap();
     let eid = db.create_edge(a, b, "KNOWS");
     db.set_edge_property(eid, "since", Value::Int64(2020));
 
@@ -193,8 +199,8 @@ fn delete_edge_generates_cdc_with_before_snapshot() {
 #[test]
 fn set_edge_property_records_old_and_new_values() {
     let db = db();
-    let a = db.create_node(&["Person"]);
-    let b = db.create_node(&["Person"]);
+    let a = db.create_node(&["Person"]).unwrap();
+    let b = db.create_node(&["Person"]).unwrap();
     let eid = db.create_edge(a, b, "KNOWS");
     db.set_edge_property(eid, "weight", Value::Float64(0.5));
     db.set_edge_property(eid, "weight", Value::Float64(0.9));
@@ -237,7 +243,8 @@ fn database_gc_prunes_cdc_events() {
 
     // Create 10 nodes via the CRUD API (each generates a CDC Create event)
     for i in 0..10 {
-        db.create_node_with_props(&["Person"], vec![("idx", Value::Int64(i))]);
+        db.create_node_with_props(&["Person"], vec![("idx", Value::Int64(i))])
+            .unwrap();
     }
 
     let before_gc = db

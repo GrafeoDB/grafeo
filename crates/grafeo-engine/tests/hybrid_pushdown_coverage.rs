@@ -62,11 +62,15 @@ fn article_fixture(text_index: bool, vector_index: bool) -> GrafeoDB {
         ),
     ];
     for (title, body, emb, published) in rows {
-        let n = db.create_node(&["Article"]);
-        db.set_node_property(n, "title", Value::String(title.into()));
-        db.set_node_property(n, "body", Value::String(body.into()));
-        db.set_node_property(n, "embedding", Value::Vector(emb.into()));
-        db.set_node_property(n, "published", Value::Bool(published));
+        let n = db.create_node(&["Article"]).unwrap();
+        db.set_node_property(n, "title", Value::String(title.into()))
+            .unwrap();
+        db.set_node_property(n, "body", Value::String(body.into()))
+            .unwrap();
+        db.set_node_property(n, "embedding", Value::Vector(emb.into()))
+            .unwrap();
+        db.set_node_property(n, "published", Value::Bool(published))
+            .unwrap();
     }
 
     if vector_index {
@@ -340,10 +344,13 @@ fn test_text_pushdown_with_remaining() {
         ("graph", "property graphs and queries", true),
     ];
     for (title, body, published) in rows {
-        let n = db.create_node(&["Article"]);
-        db.set_node_property(n, "title", Value::String(title.into()));
-        db.set_node_property(n, "body", Value::String(body.into()));
-        db.set_node_property(n, "published", Value::Bool(published));
+        let n = db.create_node(&["Article"]).unwrap();
+        db.set_node_property(n, "title", Value::String(title.into()))
+            .unwrap();
+        db.set_node_property(n, "body", Value::String(body.into()))
+            .unwrap();
+        db.set_node_property(n, "published", Value::Bool(published))
+            .unwrap();
     }
     db.create_text_index("Article", "body").unwrap();
 
@@ -376,10 +383,13 @@ fn test_text_pushdown_with_remaining_reversed() {
         ("draft", "rust draft", false),
     ];
     for (title, body, published) in rows {
-        let n = db.create_node(&["Article"]);
-        db.set_node_property(n, "title", Value::String(title.into()));
-        db.set_node_property(n, "body", Value::String(body.into()));
-        db.set_node_property(n, "published", Value::Bool(published));
+        let n = db.create_node(&["Article"]).unwrap();
+        db.set_node_property(n, "title", Value::String(title.into()))
+            .unwrap();
+        db.set_node_property(n, "body", Value::String(body.into()))
+            .unwrap();
+        db.set_node_property(n, "published", Value::Bool(published))
+            .unwrap();
     }
     db.create_text_index("Article", "body").unwrap();
 
@@ -411,10 +421,13 @@ fn test_vector_pushdown_with_remaining() {
         ("far-published", vec![0.0f32, 1.0, 0.0], true),
     ];
     for (title, emb, published) in rows {
-        let n = db.create_node(&["Doc"]);
-        db.set_node_property(n, "title", Value::String(title.into()));
-        db.set_node_property(n, "embedding", Value::Vector(emb.into()));
-        db.set_node_property(n, "published", Value::Bool(published));
+        let n = db.create_node(&["Doc"]).unwrap();
+        db.set_node_property(n, "title", Value::String(title.into()))
+            .unwrap();
+        db.set_node_property(n, "embedding", Value::Vector(emb.into()))
+            .unwrap();
+        db.set_node_property(n, "published", Value::Bool(published))
+            .unwrap();
     }
     db.create_vector_index(
         "Doc",
@@ -458,9 +471,11 @@ fn test_vector_scan_with_similarity_and_distance() {
         ("far", vec![0.0, 1.0, 0.0]),
     ];
     for (title, emb) in rows {
-        let n = db.create_node(&["Doc"]);
-        db.set_node_property(n, "title", Value::String(title.into()));
-        db.set_node_property(n, "embedding", Value::Vector(emb.into()));
+        let n = db.create_node(&["Doc"]).unwrap();
+        db.set_node_property(n, "title", Value::String(title.into()))
+            .unwrap();
+        db.set_node_property(n, "embedding", Value::Vector(emb.into()))
+            .unwrap();
     }
     db.create_vector_index(
         "Doc",
@@ -511,9 +526,11 @@ fn test_plan_text_scan_threshold_only_no_limit() {
         ("brief", "rust brief"),
         ("unrelated", "graphs and queries"),
     ] {
-        let n = db.create_node(&["Article"]);
-        db.set_node_property(n, "title", Value::String(title.into()));
-        db.set_node_property(n, "body", Value::String(body.into()));
+        let n = db.create_node(&["Article"]).unwrap();
+        db.set_node_property(n, "title", Value::String(title.into()))
+            .unwrap();
+        db.set_node_property(n, "body", Value::String(body.into()))
+            .unwrap();
     }
     db.create_text_index("Article", "body").unwrap();
 
@@ -543,9 +560,11 @@ fn test_plan_text_scan_threshold_only_no_limit() {
 #[test]
 fn test_resolve_vector_literal_string_element_falls_through() {
     let db = GrafeoDB::new_in_memory();
-    let n = db.create_node(&["Doc"]);
-    db.set_node_property(n, "title", Value::String("only".into()));
-    db.set_node_property(n, "embedding", Value::Vector(vec![0.9f32, 0.1, 0.0].into()));
+    let n = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n, "title", Value::String("only".into()))
+        .unwrap();
+    db.set_node_property(n, "embedding", Value::Vector(vec![0.9f32, 0.1, 0.0].into()))
+        .unwrap();
     db.create_vector_index(
         "Doc",
         "embedding",

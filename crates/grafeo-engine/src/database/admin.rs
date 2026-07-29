@@ -190,6 +190,25 @@ impl super::GrafeoDB {
         usage
     }
 
+    /// Property / string / adjacency capacity residency attribution.
+    ///
+    /// Prefer this over coarse `memory_usage()` when diagnosing live RSS
+    /// residuals (decoded Value payloads, capacity waste).
+    #[must_use]
+    pub fn lpg_residency_detail(&self) -> grafeo_common::memory::LpgResidencyMemory {
+        self.lpg_store().lpg_residency_detail()
+    }
+
+    /// Shrinks LPG property-column and adjacency capacities in place.
+    pub fn shrink_lpg_capacities(&self) {
+        self.lpg_store().shrink_lpg_capacities();
+    }
+
+    /// Forces property-column compression (lazy point-get decode remains valid).
+    pub fn force_compress_properties(&self) {
+        self.lpg_store().force_compress_properties();
+    }
+
     /// Returns detailed database statistics.
     ///
     /// Includes counts, memory usage, and index information.

@@ -1,7 +1,9 @@
 //! Memory introspection for `LpgStore`.
 
 use super::LpgStore;
-use grafeo_common::memory::usage::{IndexMemory, MvccMemory, StoreMemory, StringPoolMemory};
+use grafeo_common::memory::usage::{
+    IndexMemory, LpgResidencyMemory, MvccMemory, StoreMemory, StringPoolMemory,
+};
 use std::mem::size_of;
 
 impl LpgStore {
@@ -19,9 +21,50 @@ impl LpgStore {
         (store, indexes, mvcc, string_pool)
     }
 
+    /// Property-column / string-payload / adjacency-capacity residency detail.
+    ///
+    /// Closes the `memory_usage()` blind spot where map-slot estimates omitted
+    /// decoded `Value` heap (especially ArcStr) and adjacency capacity waste.
+    #[must_use]
+    pub fn lpg_residency_detail(&self) -> LpgResidencyMemory {
+        let mut detail = LpgResidencyMemory {
+            node_properties: self.node_properties.memory_detail(),
+            edge_properties: self.edge_properties.memory_detail(),
+            forward_adjacency: self.forward_adj.capacity_memory(),
+            backward_adjacency: self
+                .backward_adj
+                .as_ref()
+                .map_or_else(Default::default, |adj| adj.capacity_memory()),
+            ..Default::default()
+        };
+        detail.compute_total();
+        detail
+    }
+
+    /// Shrinks property-column and adjacency Vec/HashMap capacities in place.
+    ///
+    /// Does not change logical graph contents. Intended for residency
+    /// experiments after bulk open/deserialize.
+    pub fn shrink_lpg_capacities(&self) {
+        self.node_properties.shrink_capacities();
+        self.edge_properties.shrink_capacities();
+        self.forward_adj.shrink_capacities();
+        if let Some(adj) = &self.backward_adj {
+            adj.shrink_capacities();
+        }
+    }
+
+    /// Forces dictionary/int/bool compression on all property columns.
+    ///
+    /// Point reads remain correct via lazy compressed `get` decode.
+    pub fn force_compress_properties(&self) {
+        self.node_properties.force_compress_all();
+        self.edge_properties.force_compress_all();
+    }
+
     fn store_memory(&self) -> StoreMemory {
-        let node_props_bytes = self.node_properties.heap_memory_bytes();
-        let edge_props_bytes = self.edge_properties.heap_memory_bytes();
+        let node_detail = self.node_properties.memory_detail();
+        let edge_detail = self.edge_properties.memory_detail();
         let col_count = self.node_properties.column_count() + self.edge_properties.column_count();
 
         // Node/edge map overhead (excluding version chain internals, which go to MVCC)
@@ -57,9 +100,17 @@ impl LpgStore {
         let mut store = StoreMemory {
             nodes_bytes,
             edges_bytes,
-            node_properties_bytes: node_props_bytes,
-            edge_properties_bytes: edge_props_bytes,
+            node_properties_bytes: node_detail.total_bytes,
+            edge_properties_bytes: edge_detail.total_bytes,
             property_column_count: col_count,
+            node_property_map_slot_bytes: node_detail.total_map_slot_bytes,
+            node_property_decoded_payload_bytes: node_detail.total_decoded_payload_bytes,
+            node_property_string_payload_bytes: node_detail.total_string_payload_bytes,
+            node_property_capacity_waste_bytes: node_detail.total_capacity_waste_bytes,
+            edge_property_map_slot_bytes: edge_detail.total_map_slot_bytes,
+            edge_property_decoded_payload_bytes: edge_detail.total_decoded_payload_bytes,
+            edge_property_string_payload_bytes: edge_detail.total_string_payload_bytes,
+            edge_property_capacity_waste_bytes: edge_detail.total_capacity_waste_bytes,
             ..Default::default()
         };
         store.compute_total();
@@ -136,11 +187,15 @@ impl LpgStore {
     }
 
     fn index_memory(&self) -> IndexMemory {
-        let forward_bytes = self.forward_adj.heap_memory_bytes();
-        let backward_bytes = self
+        let forward_detail = self.forward_adj.capacity_memory();
+        let backward_detail = self
             .backward_adj
             .as_ref()
-            .map_or(0, |adj| adj.heap_memory_bytes());
+            .map(|adj| adj.capacity_memory());
+        let forward_bytes = forward_detail.total_bytes;
+        let backward_bytes = backward_detail
+            .as_ref()
+            .map_or(0, |d| d.total_bytes);
 
         // Label index: Vec<FxHashMap<NodeId, ()>>
         let label_idx = self.label_index.read();
@@ -231,6 +286,10 @@ impl LpgStore {
         let mut indexes = IndexMemory {
             forward_adjacency_bytes: forward_bytes,
             backward_adjacency_bytes: backward_bytes,
+            forward_adjacency_capacity_waste_bytes: forward_detail.capacity_waste_bytes,
+            backward_adjacency_capacity_waste_bytes: backward_detail
+                .as_ref()
+                .map_or(0, |d| d.capacity_waste_bytes),
             label_index_bytes,
             node_labels_bytes,
             property_index_bytes,

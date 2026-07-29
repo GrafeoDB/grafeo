@@ -407,6 +407,19 @@ impl AdjacencyList {
         self.skip_index.sort_unstable_by_key(|e| e.min_destination);
     }
 
+    /// Shrinks Vec capacities to fit live entries (does not freeze/compress).
+    fn shrink_capacities(&mut self) {
+        self.hot_chunks.shrink_to_fit();
+        for chunk in &mut self.hot_chunks {
+            chunk.destinations.shrink_to_fit();
+            chunk.edge_ids.shrink_to_fit();
+        }
+        self.cold_chunks.shrink_to_fit();
+        self.delta_inserts.shrink_to_fit();
+        self.deleted.shrink_to_fit();
+        self.skip_index.shrink_to_fit();
+    }
+
     fn iter(&self) -> impl Iterator<Item = (NodeId, EdgeId)> + '_ {
         let deleted = &self.deleted;
 
@@ -883,33 +896,62 @@ impl ChunkedAdjacency {
     /// Returns estimated heap memory in bytes.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
+        self.capacity_memory().total_bytes
+    }
+
+    /// Capacity vs used-byte attribution for adjacency lists.
+    #[must_use]
+    pub fn capacity_memory(&self) -> grafeo_common::memory::AdjacencyCapacityMemory {
+        use grafeo_common::memory::AdjacencyCapacityMemory;
+
         let lists = self.lists.read();
-        // Outer hash map overhead
-        let map_overhead = lists.capacity()
+        let list_map_overhead_bytes = lists.capacity()
             * (std::mem::size_of::<NodeId>() + std::mem::size_of::<AdjacencyList>() + 1);
-        // Per-list memory: hot chunks + cold chunks + deltas + deleted set
-        let mut list_bytes = 0usize;
+
+        let mut hot_used_bytes = 0usize;
+        let mut hot_capacity_bytes = 0usize;
+        let mut cold_bytes = 0usize;
+        let mut aux_capacity_bytes = 0usize;
+
         for list in lists.values() {
-            // Hot chunks: Vec<AdjacencyChunk> capacity + each chunk's Vec capacity
-            list_bytes += list.hot_chunks.capacity() * std::mem::size_of::<AdjacencyChunk>();
+            hot_capacity_bytes += list.hot_chunks.capacity() * std::mem::size_of::<AdjacencyChunk>();
             for chunk in &list.hot_chunks {
-                list_bytes += chunk.destinations.capacity() * std::mem::size_of::<NodeId>();
-                list_bytes += chunk.edge_ids.capacity() * std::mem::size_of::<EdgeId>();
+                hot_used_bytes += chunk.destinations.len() * std::mem::size_of::<NodeId>();
+                hot_used_bytes += chunk.edge_ids.len() * std::mem::size_of::<EdgeId>();
+                hot_capacity_bytes += chunk.destinations.capacity() * std::mem::size_of::<NodeId>();
+                hot_capacity_bytes += chunk.edge_ids.capacity() * std::mem::size_of::<EdgeId>();
             }
-            // Cold chunks: compressed data
-            list_bytes +=
+            hot_capacity_bytes +=
                 list.cold_chunks.capacity() * std::mem::size_of::<CompressedAdjacencyChunk>();
             for cold in &list.cold_chunks {
-                list_bytes += cold.memory_size();
+                cold_bytes += cold.memory_size();
             }
-            // Delta buffer
-            list_bytes += list.delta_inserts.capacity() * 16;
-            // Deleted set
-            list_bytes += list.deleted.capacity() * (std::mem::size_of::<EdgeId>() + 1);
-            // Skip index
-            list_bytes += list.skip_index.capacity() * std::mem::size_of::<SkipIndexEntry>();
+            aux_capacity_bytes += list.delta_inserts.capacity() * 16;
+            aux_capacity_bytes += list.deleted.capacity() * (std::mem::size_of::<EdgeId>() + 1);
+            aux_capacity_bytes +=
+                list.skip_index.capacity() * std::mem::size_of::<SkipIndexEntry>();
         }
-        map_overhead + list_bytes
+
+        let mut detail = AdjacencyCapacityMemory {
+            node_count: lists.len(),
+            list_map_capacity: lists.capacity(),
+            list_map_overhead_bytes,
+            hot_used_bytes,
+            hot_capacity_bytes,
+            cold_bytes,
+            aux_capacity_bytes,
+            ..Default::default()
+        };
+        detail.compute_total();
+        detail
+    }
+
+    /// Shrinks Vec capacities on every adjacency list to fit live data.
+    pub fn shrink_capacities(&self) {
+        let mut lists = self.lists.write();
+        for list in lists.values_mut() {
+            list.shrink_capacities();
+        }
     }
 
     /// Forces all hot chunks to be compressed for all adjacency lists.

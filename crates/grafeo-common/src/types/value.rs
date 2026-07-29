@@ -425,6 +425,28 @@ impl Value {
             }
         }
     }
+
+    /// String / bytes payload bytes only (subset of [`Self::estimated_size_bytes`]).
+    ///
+    /// Used by LPG residency accounting to attribute ArcStr/bytes separately
+    /// from map-slot and compressed-column bytes. Nested lists/maps recurse.
+    #[must_use]
+    pub fn string_payload_bytes(&self) -> usize {
+        match self {
+            Value::String(s) => s.len(),
+            Value::Bytes(b) => b.len(),
+            Value::List(items) => items.iter().map(Value::string_payload_bytes).sum(),
+            Value::Map(m) => m
+                .iter()
+                .map(|(k, v)| k.as_ref().len() + v.string_payload_bytes())
+                .sum(),
+            Value::Path { nodes, edges } => {
+                nodes.iter().map(Value::string_payload_bytes).sum::<usize>()
+                    + edges.iter().map(Value::string_payload_bytes).sum::<usize>()
+            }
+            _ => 0,
+        }
+    }
 }
 
 impl fmt::Debug for Value {

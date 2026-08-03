@@ -32,7 +32,7 @@ bytes.workspace = true
 bincode.workspace = true
 
 # Data import (optional)
-parquet = { version = "58", optional = true, default-features = false }
+parquet = { version = "59", optional = true, default-features = false }
 
 # Concurrency
 parking_lot.workspace = true

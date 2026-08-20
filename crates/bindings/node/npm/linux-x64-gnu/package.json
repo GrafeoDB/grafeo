@@ -1,6 +1,6 @@
 {
-  "name": "@grafeo-db/js-linux-x64-gnu",
-  "version": "0.5.42",
+  "name": "@react-querybuilder/grafeo-linux-x64-gnu",
+  "version": "0.5.43",
   "os": [
     "linux"
   ],
@@ -21,6 +21,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/GrafeoDB/grafeo.git"
+    "url": "https://github.com/react-querybuilder/grafeo.git"
   }
 }

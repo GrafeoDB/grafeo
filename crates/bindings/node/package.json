@@ -1,7 +1,7 @@
 {
-  "name": "@grafeo-db/js",
-  "version": "0.5.42",
-  "description": "Node.js/TypeScript bindings for Grafeo - a high-performance embeddable graph database",
+  "name": "@react-querybuilder/grafeo",
+  "version": "0.5.43",
+  "description": "Node.js/TypeScript bindings for Grafeo - a high-performance embeddable graph database (react-querybuilder fork, see README)",
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {
@@ -10,9 +10,7 @@
       "x86_64-apple-darwin",
       "x86_64-pc-windows-msvc",
       "x86_64-unknown-linux-gnu",
-      "aarch64-apple-darwin",
-      "aarch64-unknown-linux-gnu",
-      "aarch64-unknown-linux-musl"
+      "aarch64-apple-darwin"
     ]
   },
   "files": [
@@ -20,12 +18,10 @@
     "index.d.ts"
   ],
   "optionalDependencies": {
-    "@grafeo-db/js-darwin-x64": "0.5.42",
-    "@grafeo-db/js-win32-x64-msvc": "0.5.42",
-    "@grafeo-db/js-linux-x64-gnu": "0.5.42",
-    "@grafeo-db/js-darwin-arm64": "0.5.42",
-    "@grafeo-db/js-linux-arm64-gnu": "0.5.42",
-    "@grafeo-db/js-linux-arm64-musl": "0.5.42"
+    "@react-querybuilder/grafeo-darwin-x64": "0.5.43",
+    "@react-querybuilder/grafeo-darwin-arm64": "0.5.43",
+    "@react-querybuilder/grafeo-linux-x64-gnu": "0.5.43",
+    "@react-querybuilder/grafeo-win32-x64-msvc": "0.5.43"
   },
   "keywords": [
     "graph",
@@ -42,12 +38,15 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/GrafeoDB/grafeo.git",
+    "url": "https://github.com/react-querybuilder/grafeo.git",
     "directory": "crates/bindings/node"
   },
-  "homepage": "https://grafeo.dev",
+  "homepage": "https://github.com/react-querybuilder/grafeo",
   "bugs": {
-    "url": "https://github.com/GrafeoDB/grafeo/issues"
+    "url": "https://github.com/react-querybuilder/grafeo/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=20"

@@ -224,6 +224,18 @@ export declare class GrafeoDB {
   nodeHistorySince(nodeId: number, sinceEpoch: number): Promise<Array<any>>
   /** Returns all change events across entities in an epoch range. */
   changesBetween(startEpoch: number, endEpoch: number): Promise<Array<any>>
+  /** Execute a Cypher query. */
+  executeCypher(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a SQL/PGQ query (SQL:2023 GRAPH_TABLE). */
+  executeSql(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a Gremlin query. */
+  executeGremlin(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a GraphQL query. */
+  executeGraphql(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a SPARQL query against the RDF triple store. */
+  executeSparql(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a query in a named language (e.g. `"graphql-rdf"`). */
+  executeLanguage(language: string, query: string, params?: any | undefined | null): Promise<QueryResult>
   /**
    * Import a CSV file as graph nodes.
    *
@@ -365,6 +377,16 @@ export declare class Transaction {
   rollback(): void
   /** Whether the transaction is still active. */
   get isActive(): boolean
+  /** Execute a Cypher query within this transaction. */
+  executeCypher(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a SQL/PGQ query (SQL:2023 GRAPH_TABLE) within this transaction. */
+  executeSql(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a Gremlin query within this transaction. */
+  executeGremlin(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a GraphQL query within this transaction. */
+  executeGraphql(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a SPARQL query within this transaction. */
+  executeSparql(query: string, params?: any | undefined | null): Promise<QueryResult>
 }
 
 /** Options for CSV import. */

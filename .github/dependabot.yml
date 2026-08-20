@@ -12,21 +12,3 @@ updates:
           - "*"
     commit-message:
       prefix: "deps(rust)"
-
-  # GitHub Actions
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "deps(actions)"
-
-  # Python dependencies
-  - package-ecosystem: "pip"
-    directory: "/crates/bindings/python"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "deps(python)"

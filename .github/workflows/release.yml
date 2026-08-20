@@ -36,7 +36,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - host: macos-13
+          # macos-13 (x64 host) is retired; cross-compile x64 from the arm64 runner
+          - host: macos-latest
             target: x86_64-apple-darwin
           - host: macos-latest
             target: aarch64-apple-darwin

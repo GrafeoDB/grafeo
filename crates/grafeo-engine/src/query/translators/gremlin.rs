@@ -80,6 +80,22 @@ struct EdgeContext {
     direction: ExpandDirection,
 }
 
+/// TinkerPop `not()` semantics: a traverser missing the property is *retained*.
+/// SQL `NOT NULL` is `NULL` (row dropped), so widen to `NOT(p) OR p IS NULL`.
+fn negate_null_safe(pred: LogicalExpression) -> LogicalExpression {
+    LogicalExpression::Binary {
+        left: Box::new(LogicalExpression::Unary {
+            op: UnaryOp::Not,
+            operand: Box::new(pred.clone()),
+        }),
+        op: BinaryOp::Or,
+        right: Box::new(LogicalExpression::Unary {
+            op: UnaryOp::IsNull,
+            operand: Box::new(pred),
+        }),
+    }
+}
+
 impl GremlinTranslator {
     fn new() -> Self {
         Self {
@@ -1452,17 +1468,10 @@ impl GremlinTranslator {
                 Ok((plan, None))
             }
 
-            // not() filter: negate a sub-traversal filter
+            // not() filter: negate a sub-traversal filter (null-safe, per TinkerPop)
             ast::Step::Not(steps) => {
                 if let Some(pred) = self.steps_to_predicate(steps, current_var)? {
-                    let plan = wrap_filter(
-                        input,
-                        LogicalExpression::Unary {
-                            op: UnaryOp::Not,
-                            operand: Box::new(pred),
-                        },
-                    );
-                    Ok((plan, None))
+                    Ok((wrap_filter(input, negate_null_safe(pred)), None))
                 } else {
                     Ok((input, None))
                 }
@@ -2272,6 +2281,35 @@ impl GremlinTranslator {
                         path_mode: PathMode::Walk,
                     });
                     predicates.push(LogicalExpression::ExistsSubquery(Box::new(expand)));
+                }
+                // Nested compound groups: recurse so `.or(__.and(..), __.has(..))` is not
+                // silently dropped by the fallthrough below.
+                ast::Step::And(traversals) | ast::Step::Or(traversals) => {
+                    let is_and = matches!(step, ast::Step::And(_));
+                    let mut inner: Vec<LogicalExpression> = Vec::new();
+                    for sub in traversals {
+                        if let Some(pred) = self.steps_to_predicate(sub, current_var)? {
+                            inner.push(pred);
+                        }
+                    }
+                    let folded = if is_and {
+                        LogicalExpression::conjunction(inner)
+                    } else {
+                        LogicalExpression::disjunction(inner)
+                    };
+                    if let Some(pred) = folded {
+                        predicates.push(pred);
+                    }
+                }
+                ast::Step::Not(inner_steps) => {
+                    if let Some(pred) = self.steps_to_predicate(inner_steps, current_var)? {
+                        predicates.push(negate_null_safe(pred));
+                    }
+                }
+                ast::Step::Where(ast::WhereClause::Traversal(inner_steps)) => {
+                    if let Some(pred) = self.steps_to_predicate(inner_steps, current_var)? {
+                        predicates.push(pred);
+                    }
                 }
                 _ => {}
             }

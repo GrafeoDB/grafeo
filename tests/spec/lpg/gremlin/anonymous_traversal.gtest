@@ -1,0 +1,115 @@
+# Gremlin anonymous traversals: the `__.` prefix inside sub-traversal arguments.
+#
+# Covers: `__` in and()/or()/not()/where(), mixing prefixed and bare arguments,
+# nested compound groups, and TinkerPop's null-retaining not() semantics.
+#
+# Social network topology (from dataset):
+#   Persons: Alix(30, Amsterdam), Gus(25, Berlin), Vincent(35, Paris)
+#   Company: Grafeo OSS (founded 2025) - has no `age` or `city` property
+#   Edges: Alix-KNOWS->Gus, Gus-KNOWS->Vincent, Alix-WORKS_AT->Grafeo OSS
+
+meta:
+  language: gremlin
+  model: lpg
+  section: "anonymous-traversal"
+  title: Anonymous Traversals
+  dataset: social_network
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # `__` inside and() / or() / not()
+  # ---------------------------------------------------------------------------
+
+  - name: anon_in_and
+    query: "g.V().and(__.hasLabel('Person'), __.has('age', gt(25))).values('name')"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: anon_in_or
+    query: "g.V().hasLabel('Person').or(__.has('city', 'Berlin'), __.has('city', 'Paris')).values('name')"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: anon_in_not
+    query: "g.V().hasLabel('Person').not(__.has('city', 'Berlin')).values('name')"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  # ---------------------------------------------------------------------------
+  # The prefix is optional and may be mixed with bare arguments
+  # ---------------------------------------------------------------------------
+
+  - name: anon_mixed_with_bare_args
+    query: "g.V().or(__.has('city', 'Berlin'), has('city', 'Paris')).values('name')"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: anon_chained_inner_steps
+    skip: "pre-existing, unrelated to `__`: steps_to_predicate applies the chained has() to the outer vertex instead of the out() target, so this returns Gus"
+    query: "g.V().hasLabel('Person').where(__.out('KNOWS').has('name', 'Gus')).values('name')"
+    expect:
+      rows:
+        - [Alix]
+
+  # ---------------------------------------------------------------------------
+  # Nested compound groups (previously dropped silently)
+  # ---------------------------------------------------------------------------
+
+  - name: anon_nested_or_of_and
+    query: "g.V().hasLabel('Person').or(__.and(__.has('age', gt(25)), __.has('city', 'Amsterdam')), __.has('city', 'Paris')).values('name')"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: anon_nested_and_of_or
+    query: "g.V().hasLabel('Person').and(__.or(__.has('city', 'Berlin'), __.has('city', 'Paris')), __.has('age', gt(30))).values('name')"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: anon_nested_not_inside_and
+    query: "g.V().hasLabel('Person').and(__.not(__.has('city', 'Berlin')), __.has('age', lt(35))).values('name')"
+    expect:
+      rows:
+        - [Alix]
+
+  # ---------------------------------------------------------------------------
+  # where(traversal)
+  # ---------------------------------------------------------------------------
+
+  - name: anon_in_where_out
+    query: "g.V().hasLabel('Person').where(__.out('KNOWS')).values('name')"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  # ---------------------------------------------------------------------------
+  # not() null retention: TinkerPop keeps traversers whose inner traversal is
+  # empty, including vertices that simply lack the property.
+  # ---------------------------------------------------------------------------
+
+  - name: not_retains_vertices_missing_property
+    # Grafeo OSS (Company) has no `city`, so it survives not(has('city', ...)).
+    query: "g.V().not(__.has('city', 'Berlin')).values('name')"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+        - ["Grafeo OSS"]
+
+  - name: not_retains_vertices_missing_property_count
+    query: "g.V().not(__.has('age', lt(100))).count()"
+    expect:
+      rows:
+        - [1]

@@ -249,6 +249,8 @@ pub enum TokenKind {
     RBracket,
     /// Underscore (`_`) token.
     Underscore,
+    /// Anonymous traversal (`__`).
+    Anon,
 
     /// A `$name` parameter reference.
     Parameter(String),
@@ -307,7 +309,9 @@ impl<'a> Lexer<'a> {
             Some(')') => TokenKind::RParen,
             Some('[') => TokenKind::LBracket,
             Some(']') => TokenKind::RBracket,
-            Some('_') if self.peek_is(|c| !c.is_alphanumeric()) => TokenKind::Underscore,
+            Some('_') if self.peek_is(|c| !c.is_alphanumeric() && c != '_') => {
+                TokenKind::Underscore
+            }
 
             Some('"') => self.read_string('"'),
             Some('\'') => self.read_string('\''),
@@ -467,6 +471,7 @@ impl<'a> Lexer<'a> {
 
         // Match keywords
         match value.as_str() {
+            "__" => TokenKind::Anon,
             "g" => TokenKind::G,
             "V" => TokenKind::V,
             "E" => TokenKind::E,
@@ -615,5 +620,44 @@ mod tests {
         assert_eq!(tokens[0].kind, TokenKind::P);
         assert_eq!(tokens[1].kind, TokenKind::Dot);
         assert_eq!(tokens[2].kind, TokenKind::Gt);
+    }
+
+    #[test]
+    fn test_anon_token() {
+        let tokens = Lexer::new("__").tokenize();
+        assert_eq!(tokens[0].kind, TokenKind::Anon);
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn test_single_underscore_still_underscore() {
+        // Regression guard for the tightened `_` lookahead. (A bare `_` at EOF has always
+        // lexed as an identifier, since `peek_is` is false on `None`.)
+        let tokens = Lexer::new("_ ").tokenize();
+        assert_eq!(tokens[0].kind, TokenKind::Underscore);
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+
+        let tokens = Lexer::new("_.has('a', 1)").tokenize();
+        assert_eq!(tokens[0].kind, TokenKind::Underscore);
+        assert_eq!(tokens[1].kind, TokenKind::Dot);
+    }
+
+    #[test]
+    fn test_double_underscore_prefixed_identifier() {
+        let tokens = Lexer::new("__foo").tokenize();
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("__foo".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+
+        let tokens = Lexer::new("___").tokenize();
+        assert_eq!(tokens[0].kind, TokenKind::Identifier("___".to_string()));
+    }
+
+    #[test]
+    fn test_anon_traversal_prefix() {
+        let tokens = Lexer::new("__.has('a', 1)").tokenize();
+        assert_eq!(tokens[0].kind, TokenKind::Anon);
+        assert_eq!(tokens[1].kind, TokenKind::Dot);
+        assert_eq!(tokens[2].kind, TokenKind::Has);
+        assert_eq!(tokens[3].kind, TokenKind::LParen);
     }
 }

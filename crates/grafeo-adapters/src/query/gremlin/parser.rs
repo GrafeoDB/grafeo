@@ -1009,8 +1009,8 @@ impl<'a> Parser<'a> {
             return Ok(FromTo::Traversal(steps));
         }
 
-        // Check for bare V()/E() traversal (without 'g.' prefix)
-        if self.check(TokenKind::V) || self.check(TokenKind::E) {
+        // Check for bare V()/E() traversal (without 'g.' prefix), optionally `__.`-prefixed
+        if self.check(TokenKind::V) || self.check(TokenKind::E) || self.check(TokenKind::Anon) {
             let steps = self.parse_bare_traversal()?;
             return Ok(FromTo::Traversal(steps));
         }
@@ -1023,6 +1023,7 @@ impl<'a> Parser<'a> {
     /// responsible for consuming the outer delimiters.
     fn parse_inner_steps(&mut self) -> Result<Vec<Step>> {
         self.enter_nesting()?;
+        self.skip_anon_prefix()?;
         let mut steps = Vec::new();
         // Parse first step
         let step = self.parse_step()?;
@@ -1053,6 +1054,7 @@ impl<'a> Parser<'a> {
     /// Used inside from()/to() arguments, e.g. `from(V().has('name', 'Gus'))`.
     fn parse_bare_traversal(&mut self) -> Result<Vec<Step>> {
         self.enter_nesting()?;
+        self.skip_anon_prefix()?;
 
         // Parse source (V, E, etc.) and convert to a step
         let source = self.parse_source()?;
@@ -1193,6 +1195,15 @@ impl<'a> Parser<'a> {
             TokenKind::Parameter(name) => Ok(Value::String(format!("${name}").into())),
             _ => Err(self.error("Expected value")),
         }
+    }
+
+    /// Consume the optional `__.` anonymous-traversal prefix.
+    fn skip_anon_prefix(&mut self) -> Result<()> {
+        if self.check(TokenKind::Anon) {
+            self.advance();
+            self.expect(TokenKind::Dot)?;
+        }
+        Ok(())
     }
 
     fn check(&self, kind: TokenKind) -> bool {
@@ -1940,5 +1951,89 @@ mod tests {
             result.is_err(),
             "300 levels of or() should error, not stack overflow"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Anonymous traversal (`__`) prefix
+    // -------------------------------------------------------------------------
+
+    fn parse_ok(query: &str) -> Statement {
+        Parser::new(query)
+            .parse()
+            .unwrap_or_else(|e| panic!("{query} should parse: {e}"))
+    }
+
+    #[test]
+    fn test_anon_prefix_in_or() {
+        let stmt = parse_ok("g.V().or(__.has('a', 1), __.has('b', 2))");
+        let Step::Or(traversals) = &stmt.steps[0] else {
+            panic!("expected Step::Or, got {:?}", stmt.steps[0]);
+        };
+        assert_eq!(traversals.len(), 2);
+        assert!(matches!(traversals[0][0], Step::Has(_)));
+        assert!(matches!(traversals[1][0], Step::Has(_)));
+    }
+
+    #[test]
+    fn test_anon_prefix_is_optional_and_mixable() {
+        let prefixed = parse_ok("g.V().or(__.has('a', 1), __.has('b', 2))");
+        let mixed = parse_ok("g.V().or(__.has('a', 1), has('b', 2))");
+        let bare = parse_ok("g.V().or(has('a', 1), has('b', 2))");
+        assert_eq!(
+            format!("{:?}", prefixed.steps),
+            format!("{:?}", mixed.steps)
+        );
+        assert_eq!(format!("{:?}", prefixed.steps), format!("{:?}", bare.steps));
+    }
+
+    #[test]
+    fn test_anon_prefix_nested_compound() {
+        let stmt = parse_ok("g.V().or(__.and(__.has('a', 1), __.has('b', 2)), __.has('c', 3))");
+        let Step::Or(traversals) = &stmt.steps[0] else {
+            panic!("expected Step::Or, got {:?}", stmt.steps[0]);
+        };
+        assert_eq!(traversals.len(), 2);
+        let Step::And(inner) = &traversals[0][0] else {
+            panic!("expected nested Step::And, got {:?}", traversals[0][0]);
+        };
+        assert_eq!(inner.len(), 2);
+        assert!(matches!(traversals[1][0], Step::Has(_)));
+    }
+
+    #[test]
+    fn test_anon_prefix_in_not() {
+        let stmt = parse_ok("g.V().not(__.has('a', 1))");
+        let Step::Not(steps) = &stmt.steps[0] else {
+            panic!("expected Step::Not, got {:?}", stmt.steps[0]);
+        };
+        assert_eq!(steps.len(), 1);
+    }
+
+    #[test]
+    fn test_multi_arg_not_still_rejected() {
+        // TinkerPop's not() takes exactly one traversal.
+        assert!(
+            Parser::new("g.V().not(__.has('a', 1), __.has('b', 2))")
+                .parse()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_anon_prefix_in_where() {
+        let stmt = parse_ok("g.V().where(__.out('knows'))");
+        let Step::Where(WhereClause::Traversal(steps)) = &stmt.steps[0] else {
+            panic!("expected Step::Where(Traversal), got {:?}", stmt.steps[0]);
+        };
+        assert!(matches!(steps[0], Step::Out(_)));
+    }
+
+    #[test]
+    fn test_anon_prefix_chained_inner_steps() {
+        let stmt = parse_ok("g.V().where(__.out('knows').has('name', 'Gus'))");
+        let Step::Where(WhereClause::Traversal(steps)) = &stmt.steps[0] else {
+            panic!("expected Step::Where(Traversal), got {:?}", stmt.steps[0]);
+        };
+        assert_eq!(steps.len(), 2);
     }
 }

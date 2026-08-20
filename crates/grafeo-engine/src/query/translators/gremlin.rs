@@ -79,6 +79,38 @@ struct EdgeContext {
     direction: ExpandDirection,
 }
 
+/// Fold `preds` into one expression joined by `op`. Returns `None` when empty.
+///
+/// Right-fold: last element is the innermost right operand, matching the shape the
+/// `and()`/`or()` arms have always produced.
+fn fold_predicates(mut preds: Vec<LogicalExpression>, op: BinaryOp) -> Option<LogicalExpression> {
+    let mut combined = preds.pop()?;
+    for pred in preds {
+        combined = LogicalExpression::Binary {
+            left: Box::new(pred),
+            op,
+            right: Box::new(combined),
+        };
+    }
+    Some(combined)
+}
+
+/// TinkerPop `not()` semantics: a traverser missing the property is *retained*.
+/// SQL `NOT NULL` is `NULL` (row dropped), so widen to `NOT(p) OR p IS NULL`.
+fn negate_null_safe(pred: LogicalExpression) -> LogicalExpression {
+    LogicalExpression::Binary {
+        left: Box::new(LogicalExpression::Unary {
+            op: UnaryOp::Not,
+            operand: Box::new(pred.clone()),
+        }),
+        op: BinaryOp::Or,
+        right: Box::new(LogicalExpression::Unary {
+            op: UnaryOp::IsNull,
+            operand: Box::new(pred),
+        }),
+    }
+}
+
 impl GremlinTranslator {
     fn new() -> Self {
         Self {
@@ -1422,21 +1454,10 @@ impl GremlinTranslator {
                         predicates.push(pred);
                     }
                 }
-                if predicates.is_empty() {
-                    return Ok((input, None));
+                match fold_predicates(predicates, BinaryOp::And) {
+                    Some(combined) => Ok((wrap_filter(input, combined), None)),
+                    None => Ok((input, None)),
                 }
-                let mut combined = predicates
-                    .pop()
-                    .expect("predicates non-empty after is_empty check");
-                for pred in predicates {
-                    combined = LogicalExpression::Binary {
-                        left: Box::new(pred),
-                        op: BinaryOp::And,
-                        right: Box::new(combined),
-                    };
-                }
-                let plan = wrap_filter(input, combined);
-                Ok((plan, None))
             }
 
             // or() filter: at least one sub-traversal must produce results
@@ -1447,34 +1468,16 @@ impl GremlinTranslator {
                         predicates.push(pred);
                     }
                 }
-                if predicates.is_empty() {
-                    return Ok((input, None));
+                match fold_predicates(predicates, BinaryOp::Or) {
+                    Some(combined) => Ok((wrap_filter(input, combined), None)),
+                    None => Ok((input, None)),
                 }
-                let mut combined = predicates
-                    .pop()
-                    .expect("predicates non-empty after is_empty check");
-                for pred in predicates {
-                    combined = LogicalExpression::Binary {
-                        left: Box::new(pred),
-                        op: BinaryOp::Or,
-                        right: Box::new(combined),
-                    };
-                }
-                let plan = wrap_filter(input, combined);
-                Ok((plan, None))
             }
 
-            // not() filter: negate a sub-traversal filter
+            // not() filter: negate a sub-traversal filter (null-safe, per TinkerPop)
             ast::Step::Not(steps) => {
                 if let Some(pred) = self.steps_to_predicate(steps, current_var)? {
-                    let plan = wrap_filter(
-                        input,
-                        LogicalExpression::Unary {
-                            op: UnaryOp::Not,
-                            operand: Box::new(pred),
-                        },
-                    );
-                    Ok((plan, None))
+                    Ok((wrap_filter(input, negate_null_safe(pred)), None))
                 } else {
                     Ok((input, None))
                 }
@@ -2290,23 +2293,41 @@ impl GremlinTranslator {
                     });
                     predicates.push(LogicalExpression::ExistsSubquery(Box::new(expand)));
                 }
+                // Nested compound groups: recurse so `.or(__.and(..), __.has(..))` is not
+                // silently dropped by the fallthrough below.
+                ast::Step::And(traversals) | ast::Step::Or(traversals) => {
+                    let op = if matches!(step, ast::Step::And(_)) {
+                        BinaryOp::And
+                    } else {
+                        BinaryOp::Or
+                    };
+                    let mut inner: Vec<LogicalExpression> = Vec::new();
+                    for sub in traversals {
+                        if let Some(pred) = self.steps_to_predicate(sub, current_var)? {
+                            inner.push(pred);
+                        }
+                    }
+                    if let Some(pred) = fold_predicates(inner, op) {
+                        predicates.push(pred);
+                    }
+                }
+                ast::Step::Not(inner_steps) => {
+                    if let Some(pred) = self.steps_to_predicate(inner_steps, current_var)? {
+                        predicates.push(negate_null_safe(pred));
+                    }
+                }
+                ast::Step::Where(ast::WhereClause::Traversal(inner_steps)) => {
+                    if let Some(pred) = self.steps_to_predicate(inner_steps, current_var)? {
+                        predicates.push(pred);
+                    }
+                }
                 _ => {}
             }
         }
         if predicates.is_empty() {
             return Ok(None);
         }
-        let mut result = predicates
-            .pop()
-            .expect("predicates non-empty after is_empty check");
-        for pred in predicates {
-            result = LogicalExpression::Binary {
-                left: Box::new(pred),
-                op: BinaryOp::And,
-                right: Box::new(result),
-            };
-        }
-        Ok(Some(result))
+        Ok(fold_predicates(predicates, BinaryOp::And))
     }
 
     fn build_id_filter(&self, var: &str, ids: &[Value]) -> LogicalExpression {

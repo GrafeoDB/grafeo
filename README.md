@@ -18,6 +18,16 @@
 
 # Grafeo
 
+> **This is a fork.** [react-querybuilder/grafeo](https://github.com/react-querybuilder/grafeo)
+> forks [GrafeoDB/grafeo](https://github.com/GrafeoDB/grafeo) to land
+> [PR #340](https://github.com/GrafeoDB/grafeo/pull/340) (Gremlin negated text predicates —
+> `notContaining`/`notStartingWith`/`notEndingWith`) ahead of upstream release, so
+> [react-querybuilder](https://github.com/react-querybuilder/react-querybuilder) can test its
+> `formatQuery` Gremlin output against a real engine. This fork publishes only the **Node.js
+> binding** as `@react-querybuilder/grafeo` (plus 4 platform packages); it does **not** publish
+> WASM, Python, CLI, C, C#, Go, or Dart packages. All other Grafeo functionality is unchanged. See
+> upstream for the full project.
+
 Grafeo is a graph database built in Rust from the ground up for speed and low memory use. It runs embedded as a library or as a standalone server, with in-memory or persistent storage and full ACID transactions.
 
 In our [graph-bench](https://github.com/GrafeoDB/graph-bench) suite (which includes workloads inspired by the [LDBC Social Network Benchmark](https://ldbcouncil.org/benchmarks/snb/)), Grafeo is the fastest tested graph database in both embedded and server configurations, while using a fraction of the memory of some of the alternatives.

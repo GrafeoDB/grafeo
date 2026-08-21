@@ -5,7 +5,7 @@
 use super::common::{VarGen, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort};
 use crate::query::plan::{
     AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CreateEdgeOp, CreateNodeOp,
-    DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, JoinOp, JoinType, LeftJoinOp,
+    DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, FilterOp, JoinOp, JoinType, LeftJoinOp,
     LogicalExpression, LogicalOperator, LogicalPlan, MapCollectOp, NodeScanOp, OtherwiseOp,
     PathMode, ProjectOp, Projection, ReturnItem, SetPropertyOp, SortKey, SortOrder, UnaryOp,
     UnionOp, UnwindOp,
@@ -2201,7 +2201,7 @@ impl GremlinTranslator {
         current_var: &str,
     ) -> Result<Option<LogicalExpression>> {
         let mut predicates: Vec<LogicalExpression> = Vec::new();
-        for step in steps {
+        for (idx, step) in steps.iter().enumerate() {
             match step {
                 ast::Step::Has(has_step) => {
                     predicates.push(self.translate_has_step(has_step, current_var)?);
@@ -2253,7 +2253,9 @@ impl GremlinTranslator {
                     predicates.push(self.build_id_filter(current_var, ids));
                 }
                 // For navigation steps like out('knows') in where(), check if
-                // expanding produces any results (existence check).
+                // expanding produces any results (existence check). Steps that
+                // follow the navigation apply to the expansion target, not the
+                // outer variable, so they become a filter inside the subquery.
                 ast::Step::Out(labels) | ast::Step::In(labels) | ast::Step::Both(labels) => {
                     let direction = match step {
                         ast::Step::Out(_) => ExpandDirection::Outgoing,
@@ -2262,6 +2264,8 @@ impl GremlinTranslator {
                     };
                     let edge_types = labels.clone();
                     let target_var = self.var_gen.next();
+                    // Remaining steps are evaluated against the expansion target.
+                    let inner = self.steps_to_predicate(&steps[idx + 1..], &target_var)?;
                     // Create an existence subquery via Expand + count > 0
                     let expand = LogicalOperator::Expand(ExpandOp {
                         quantified: false,
@@ -2280,7 +2284,17 @@ impl GremlinTranslator {
                         path_alias: None,
                         path_mode: PathMode::Walk,
                     });
-                    predicates.push(LogicalExpression::ExistsSubquery(Box::new(expand)));
+                    let subquery = match inner {
+                        Some(predicate) => LogicalOperator::Filter(FilterOp {
+                            predicate,
+                            input: Box::new(expand),
+                            pushdown_hint: None,
+                        }),
+                        None => expand,
+                    };
+                    predicates.push(LogicalExpression::ExistsSubquery(Box::new(subquery)));
+                    // Trailing steps consumed by the subquery above.
+                    break;
                 }
                 // Nested compound groups: recurse so `.or(__.and(..), __.has(..))` is not
                 // silently dropped by the fallthrough below.
@@ -2380,7 +2394,7 @@ fn anywhere(pattern: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::plan::{FilterOp, LimitOp, SkipOp, SortOp};
+    use crate::query::plan::{LimitOp, SkipOp, SortOp};
 
     // === Basic Traversal Tests ===
 

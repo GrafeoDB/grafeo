@@ -54,7 +54,6 @@ tests:
         - [Vincent]
 
   - name: anon_chained_inner_steps
-    skip: "pre-existing, unrelated to `__`: steps_to_predicate applies the chained has() to the outer vertex instead of the out() target, so this returns Gus"
     query: "g.V().hasLabel('Person').where(__.out('KNOWS').has('name', 'Gus')).values('name')"
     expect:
       rows:

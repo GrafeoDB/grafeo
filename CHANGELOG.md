@@ -19,6 +19,11 @@ Gremlin `notRegex()` predicate plus a planner fix for `ORDER BY` + `LIMIT` over 
 ### Security
 
 - Dependency updates for RUSTSEC-2026-0190 (anyhow), RUSTSEC-2026-0186 (memmap2), RUSTSEC-2026-0204 (crossbeam-epoch), RUSTSEC-2026-0258 (h2) and RUSTSEC-2026-0285 (rustls), plus replacements for two yanked crates (chacha20, der).
+- **Python bindings on PyO3 0.29** (from 0.27), fixing RUSTSEC-2026-0176 (out-of-bounds read in list/tuple iterators) and RUSTSEC-2026-0177 (missing `Sync` bound on closure callables). No Python API changes.
+
+### Dependencies
+
+- Updated arrow and parquet to 59, aes-gcm to 0.11, comfy-table to 8, tikv-jemallocator to 0.7 and hf-hub to 1.0, among others ([#396](https://github.com/GrafeoDB/grafeo/pull/396)). With hf-hub 1.0 the `embed` feature downloads models through its new client; models cached in the Hugging Face cache (`HF_HOME` / `HF_HUB_CACHE`) are still reused.
 
 ### Fixed
 

@@ -27,7 +27,7 @@ use crate::error::{PyGrafeoError, PyGrafeoResult};
 ///
 /// Usually you don't need this - Python types convert automatically. Use this
 /// when you need explicit control like `Value.null()` or type checking.
-#[pyclass(name = "Value")]
+#[pyclass(name = "Value", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyValue {
     pub(crate) inner: Value,

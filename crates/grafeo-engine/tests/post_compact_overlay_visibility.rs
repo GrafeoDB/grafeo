@@ -95,6 +95,123 @@ fn post_compact_edge_between_base_and_overlay_nodes() {
     );
 }
 
+/// Regression (#345): a snapshot-tier edge stays reachable after an
+/// unrelated overlay write promotes either endpoint. The planner may walk
+/// `MATCH (a {id: $x})-[:T]->(b {id: $y})` from either anchor.
+#[test]
+fn post_compact_property_anchored_edge_survives_unrelated_overlay_write() {
+    let mut db = GrafeoDB::new_in_memory();
+    let a = db.create_node(&["A"]);
+    let b = db.create_node(&["B"]);
+    db.set_node_property(a, "id", Value::Int64(1));
+    db.set_node_property(b, "id", Value::Int64(2));
+    db.create_edge(a, b, "T");
+    db.compact().expect("compact");
+
+    // Both endpoints are in the snapshot tier.
+    assert_eq!(
+        row_count(&db, "MATCH (a:A {id: 1})-[:T]->(b:B {id: 2}) RETURN true"),
+        1,
+        "double-anchor edge query should match before any overlay write"
+    );
+
+    // Unrelated overlay write that promotes `a` (it becomes the endpoint of
+    // a brand-new overlay edge). The original snapshot-tier `T` edge between
+    // `a` and `b` is not touched in any way.
+    let c = db.create_node(&["C"]);
+    db.set_node_property(c, "id", Value::Int64(99));
+    db.create_edge(a, c, "UNRELATED");
+
+    assert_eq!(
+        row_count(&db, "MATCH (a:A {id: 1})-[:T]->(b:B {id: 2}) RETURN true"),
+        1,
+        "snapshot-tier T edge must still match after an unrelated overlay write \
+         promotes its source endpoint"
+    );
+
+    // Same when the destination endpoint is the one promoted.
+    let mut db = GrafeoDB::new_in_memory();
+    let a = db.create_node(&["A"]);
+    let b = db.create_node(&["B"]);
+    db.set_node_property(a, "id", Value::Int64(1));
+    db.set_node_property(b, "id", Value::Int64(2));
+    db.create_edge(a, b, "T");
+    db.compact().expect("compact");
+
+    let c = db.create_node(&["C"]);
+    db.set_node_property(c, "id", Value::Int64(99));
+    db.create_edge(c, b, "UNRELATED"); // promotes b
+
+    assert_eq!(
+        row_count(&db, "MATCH (a:A {id: 1})-[:T]->(b:B {id: 2}) RETURN true"),
+        1,
+        "snapshot-tier T edge must still match after an unrelated overlay write \
+         promotes its destination endpoint"
+    );
+}
+
+/// Regression: deleting a snapshot-tier edge after it was promoted into the
+/// overlay (by setting one of its properties) must not bring the base copy
+/// back through either endpoint.
+#[test]
+fn post_compact_deleted_promoted_edge_stays_deleted() {
+    let mut db = GrafeoDB::new_in_memory();
+    let a = db.create_node(&["A"]);
+    let b = db.create_node(&["B"]);
+    let c = db.create_node(&["C"]);
+    db.set_node_property(a, "id", Value::Int64(1));
+    db.set_node_property(b, "id", Value::Int64(2));
+    db.set_node_property(c, "id", Value::Int64(3));
+    db.create_edge(a, b, "T");
+    db.create_edge(c, b, "T");
+    db.compact().expect("compact");
+
+    let session = db.session();
+    session
+        .execute("MATCH (:A {id: 1})-[r:T]->(:B) SET r.weight = 5")
+        .unwrap();
+    session
+        .execute("MATCH (:A {id: 1})-[r:T]->(:B) DELETE r")
+        .unwrap();
+
+    assert_eq!(
+        row_count(&db, "MATCH (a:A {id: 1})-[:T]->(b:B) RETURN b"),
+        0,
+        "deleted edge must not reappear from the source side"
+    );
+    assert_eq!(
+        row_count(&db, "MATCH (b:B {id: 2})<-[:T]-(a:A) RETURN a"),
+        0,
+        "deleted edge must not reappear from the target side"
+    );
+    assert_eq!(
+        int_scalar(&db, "MATCH (:B {id: 2})<-[:T]-(x) RETURN count(x)"),
+        1,
+        "the untouched C->B edge is still there"
+    );
+    assert_eq!(int_scalar(&db, "MATCH ()-[r:T]->() RETURN count(r)"), 1);
+}
+
+/// Regression: a deleted snapshot-tier edge must not be returned as a
+/// neighbor while both of its endpoints still exist.
+#[test]
+fn post_compact_deleted_base_edge_hidden_while_endpoints_survive() {
+    let mut db = GrafeoDB::new_in_memory();
+    let a = db.create_node(&["A"]);
+    let b = db.create_node(&["B"]);
+    db.set_node_property(a, "id", Value::Int64(1));
+    db.create_edge(a, b, "T");
+    db.compact().expect("compact");
+
+    db.session()
+        .execute("MATCH (:A {id: 1})-[r:T]->() DELETE r")
+        .unwrap();
+
+    assert_eq!(row_count(&db, "MATCH (a:A {id: 1})-->(n) RETURN n"), 0);
+    assert_eq!(row_count(&db, "MATCH (a:A {id: 1})--(n) RETURN n"), 0);
+    assert_eq!(int_scalar(&db, "MATCH (n) RETURN count(n)"), 2);
+}
+
 #[test]
 fn post_compact_node_property_survives_reread() {
     let mut db = GrafeoDB::new_in_memory();

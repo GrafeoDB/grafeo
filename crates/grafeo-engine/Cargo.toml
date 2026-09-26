@@ -55,7 +55,7 @@ arrow-ipc = { workspace = true, optional = true }
 # Embedding (optional, for ONNX embedding generation)
 ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 tokenizers = { version = "0.23", optional = true, default-features = false, features = ["onig"] }
-hf-hub = { version = "0.5", optional = true }
+hf-hub = { version = "1.0", optional = true }
 crc32fast = { workspace = true, optional = true }
 
 # Memory-mapped files (optional, for compact-store mmap spill)

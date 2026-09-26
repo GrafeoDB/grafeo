@@ -1366,6 +1366,22 @@ fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
             collect_vars(right, out);
         }
         LogicalExpression::Unary { operand, .. } => collect_vars(operand, out),
+        LogicalExpression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            if let Some(o) = operand {
+                collect_vars(o, out);
+            }
+            for (when, then) in when_clauses {
+                collect_vars(when, out);
+                collect_vars(then, out);
+            }
+            if let Some(e) = else_clause {
+                collect_vars(e, out);
+            }
+        }
         _ => {}
     }
 }
@@ -1373,9 +1389,16 @@ fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
 /// True if `sort` requires injecting extra projection columns before sorting.
 ///
 /// Mirrors the logic at the top of `plan_sort`: when the sort input is a
-/// `Return` and any sort key references a variable that the RETURN clause has
-/// projected away, the planner must augment the Return with extra columns so
-/// the sort key is available at compare time.
+/// `Return` and any sort key is not fully materialised by that Return, the
+/// planner must augment the Return with extra columns so the sort key is
+/// available at compare time.
+///
+/// Two cases trigger augmenting:
+/// - Sort key `Property { v, p }` where Return does not explicitly project
+///   that property (e.g. `RETURN n ORDER BY n.title`: "n" is in Return but
+///   "n_title" is not a column, returning a full node is not enough).
+/// - Sort key whose expression references a variable `v` that is absent
+///   from Return entirely (covers wrapped references like `CASE n.tier ...`).
 ///
 /// Used by both `plan_sort` (which knows how to inject the augmenting
 /// projection) and `try_heap_topk_rewrite` (which doesn't, and bails out so
@@ -1384,18 +1407,33 @@ pub(super) fn sort_needs_augmenting_projection(sort: &SortOp) -> bool {
     let LogicalOperator::Return(ret) = sort.input.as_ref() else {
         return false;
     };
-    sort.keys.iter().any(|key| {
-        let mut vars = Vec::new();
-        collect_vars(&key.expression, &mut vars);
-        vars.iter().any(|variable| {
+    sort.keys.iter().any(|key| match &key.expression {
+        LogicalExpression::Property { variable, property } => {
+            // Sort key is v.p. Return satisfies it only if it explicitly
+            // projects Property{v,p}. Returning Variable(v) as a full node
+            // is not sufficient: the sort column "v_p" does not exist in
+            // the output, so augmenting is needed.
             !ret.items.iter().any(|item| {
-                item.alias.as_deref() == Some(variable)
-                    || matches!(
-                        &item.expression,
-                        LogicalExpression::Variable(v) if v == variable
-                    )
+                matches!(
+                    &item.expression,
+                    LogicalExpression::Property { variable: v, property: p }
+                    if v == variable && p == property
+                )
             })
-        })
+        }
+        _ => {
+            let mut vars = Vec::new();
+            collect_vars(&key.expression, &mut vars);
+            vars.iter().any(|variable| {
+                !ret.items.iter().any(|item| {
+                    item.alias.as_deref() == Some(variable)
+                        || matches!(
+                            &item.expression,
+                            LogicalExpression::Variable(v) if v == variable
+                        )
+                })
+            })
+        }
     })
 }
 

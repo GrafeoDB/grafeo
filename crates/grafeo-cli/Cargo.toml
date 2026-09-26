@@ -22,7 +22,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 
 # Output formatting
-comfy-table = "7"
+comfy-table = "8"
 serde = { workspace = true }
 serde_json = "1"
 is-terminal = "0.4"

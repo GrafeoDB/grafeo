@@ -134,14 +134,27 @@ The beta series focuses on correctness, completeness and real-world durability. 
 - **`LayeredStore` new-node visibility**: `get_node` and `get_node_property` fall back to the overlay for nodes added after `compact()`, fixing `recompact()` dropping those nodes from the merged base.
 - **Named graphs across `compact()` / `recompact()`**: `list_graphs`, `drop_graph`, `create_graph`, and `set_current_graph` now see graphs that existed before compaction.
 
+### Delivered in 0.5.41
+
+- **Compact-store correctness**: post-`compact()` read path and signed integer round-trip fixes
+- **Search procedures**: `CALL grafeo.search.*` for vector, text and hybrid search from queries
+- **Disk-backed compact base**: the columnar base of a compacted store can live on disk under memory pressure
+- **Memory introspection** for RDF and CDC components
+
+### Delivered in 0.5.42
+
+- **Tiered storage**: per-section RAM/disk tier configuration, spill under memory pressure, introspection and reload
+- **Paged HNSW topology** and **packed RDF Ring**: neighbor lookups and ring data served directly from mmap
+- **Streaming top-K operator**: `ORDER BY ... LIMIT k` in a single bounded-heap pass (~12x faster at 1M rows)
+- **`WHERE prop IN [...]` index fast path** and filter pushdown through `OPTIONAL MATCH` and subqueries
+
 ### Planned Releases
 
-| Version    | Focus                                                                                                                                                               |
-|------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **0.5.41** | API stability and developer experience: stable/beta/experimental tier annotations, contributor documentation                                                        |
-| **0.5.42** | Improved temporal queries: temporal indexes, GQL temporal syntax extensions, async storage server integration                                                       |
-| **0.5.43** | Offline-first sync protocol, cross-language query translation, final 0.6.x blocker audit                                                                            |
-| **0.5.44** | Flutter/mobile builds (Android NDK, iOS xcframework), final feature profile audit and doc sweep                                                                     |
+| Version    | Focus |
+|------------|-------|
+| **0.5.43** | Stabilization: green CI and dependency security updates, WAL durability fixes (transaction-grouped WAL records, database directory lock, safe checkpoints), query correctness fixes from community reports, HNSW connectivity fixes, and index seeks for keys that come from earlier rows (`UNWIND ... MATCH (n {id: row.id})`) |
+| **0.5.44** | Persistence and query completeness: vector and text indexes survive reopen in WAL mode, storage format support for databases over 4 GiB, temporal properties (point-in-time queries), streaming results, shortest-path elements (`nodes(p)`, `edges(p)`), `VECTOR(n)` schema type and filtered hybrid search, property equi-joins as hash joins, next phase of tiered storage |
+| **0.5.45** | Driver and protocol compatibility: ADBC driver, W3C SPARQL HTTP Protocol and Graph Store Protocol, offline-first sync, cross-language query translation, Jupyter cell magic, final audit. Last 0.5.x release |
 
 ---
 

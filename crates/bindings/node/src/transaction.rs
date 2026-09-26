@@ -23,7 +23,8 @@ use crate::query::QueryResult;
 #[napi]
 pub struct Transaction {
     db: Arc<RwLock<GrafeoDB>>,
-    session: parking_lot::Mutex<Option<grafeo_engine::session::Session>>,
+    /// Shared with `spawn_blocking` tasks so queries run off the JS thread.
+    session: Arc<parking_lot::Mutex<Option<grafeo_engine::session::Session>>>,
     committed: bool,
     rolled_back: bool,
 }
@@ -32,13 +33,12 @@ pub struct Transaction {
 impl Transaction {
     /// Execute a GQL query within this transaction.
     #[napi]
-    #[allow(clippy::unused_async)] // async required for napi Promise return
     pub async fn execute(
         &self,
         query: String,
         params: Option<serde_json::Value>,
     ) -> Result<QueryResult> {
-        self.execute_language_impl("gql", &query, params.as_ref())
+        self.execute_language_impl("gql", query, params).await
     }
 
     /// Commit the transaction.
@@ -84,30 +84,37 @@ impl Transaction {
 
 impl Transaction {
     /// Shared implementation for all language-specific execute methods.
-    fn execute_language_impl(
+    ///
+    /// The query runs on a blocking worker thread (like `Database.execute`)
+    /// so a long transaction query does not stall the Node.js event loop.
+    async fn execute_language_impl(
         &self,
-        language: &str,
-        query: &str,
-        params: Option<&serde_json::Value>,
+        language: &'static str,
+        query: String,
+        params: Option<serde_json::Value>,
     ) -> Result<QueryResult> {
         if self.committed || self.rolled_back {
             return Err(
                 NodeGrafeoError::Transaction("Transaction is no longer active".into()).into(),
             );
         }
-        let session_guard = self.session.lock();
-        let session = session_guard.as_ref().ok_or_else(|| {
-            napi::Error::from(NodeGrafeoError::Transaction(
-                "Transaction is no longer active".into(),
-            ))
-        })?;
-
-        let param_map = grafeo_bindings_common::json::json_params_to_map(params)
+        let param_map = grafeo_bindings_common::json::json_params_to_map(params.as_ref())
             .map_err(|msg| napi::Error::from(NodeGrafeoError::InvalidArgument(msg)))?;
 
-        let mut result = session
-            .execute_language(query, language, param_map)
-            .map_err(NodeGrafeoError::from)?;
+        let session = Arc::clone(&self.session);
+        let mut result = tokio::task::spawn_blocking(move || -> Result<_> {
+            let session_guard = session.lock();
+            let session = session_guard.as_ref().ok_or_else(|| {
+                napi::Error::from(NodeGrafeoError::Transaction(
+                    "Transaction is no longer active".into(),
+                ))
+            })?;
+            Ok(session
+                .execute_language(&query, language, param_map)
+                .map_err(NodeGrafeoError::from)?)
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(e.to_string()))??;
 
         let db = self.db.read();
         let (nodes, edges) = crate::database::extract_entities(&result, &db);
@@ -158,7 +165,7 @@ impl Transaction {
 
         Ok(Self {
             db,
-            session: parking_lot::Mutex::new(Some(session)),
+            session: Arc::new(parking_lot::Mutex::new(Some(session))),
             committed: false,
             rolled_back: false,
         })
@@ -185,13 +192,12 @@ impl Drop for Transaction {
 impl Transaction {
     /// Execute a Cypher query within this transaction.
     #[napi(js_name = "executeCypher")]
-    #[allow(clippy::unused_async)]
     pub async fn execute_cypher(
         &self,
         query: String,
         params: Option<serde_json::Value>,
     ) -> Result<QueryResult> {
-        self.execute_language_impl("cypher", &query, params.as_ref())
+        self.execute_language_impl("cypher", query, params).await
     }
 }
 
@@ -200,13 +206,12 @@ impl Transaction {
 impl Transaction {
     /// Execute a SQL/PGQ query (SQL:2023 GRAPH_TABLE) within this transaction.
     #[napi(js_name = "executeSql")]
-    #[allow(clippy::unused_async)]
     pub async fn execute_sql(
         &self,
         query: String,
         params: Option<serde_json::Value>,
     ) -> Result<QueryResult> {
-        self.execute_language_impl("sql", &query, params.as_ref())
+        self.execute_language_impl("sql", query, params).await
     }
 }
 
@@ -215,13 +220,12 @@ impl Transaction {
 impl Transaction {
     /// Execute a Gremlin query within this transaction.
     #[napi(js_name = "executeGremlin")]
-    #[allow(clippy::unused_async)]
     pub async fn execute_gremlin(
         &self,
         query: String,
         params: Option<serde_json::Value>,
     ) -> Result<QueryResult> {
-        self.execute_language_impl("gremlin", &query, params.as_ref())
+        self.execute_language_impl("gremlin", query, params).await
     }
 }
 
@@ -230,13 +234,12 @@ impl Transaction {
 impl Transaction {
     /// Execute a GraphQL query within this transaction.
     #[napi(js_name = "executeGraphql")]
-    #[allow(clippy::unused_async)]
     pub async fn execute_graphql(
         &self,
         query: String,
         params: Option<serde_json::Value>,
     ) -> Result<QueryResult> {
-        self.execute_language_impl("graphql", &query, params.as_ref())
+        self.execute_language_impl("graphql", query, params).await
     }
 }
 
@@ -245,12 +248,11 @@ impl Transaction {
 impl Transaction {
     /// Execute a SPARQL query within this transaction.
     #[napi(js_name = "executeSparql")]
-    #[allow(clippy::unused_async)]
     pub async fn execute_sparql(
         &self,
         query: String,
         params: Option<serde_json::Value>,
     ) -> Result<QueryResult> {
-        self.execute_language_impl("sparql", &query, params.as_ref())
+        self.execute_language_impl("sparql", query, params).await
     }
 }

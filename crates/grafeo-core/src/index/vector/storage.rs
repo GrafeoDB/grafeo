@@ -474,14 +474,10 @@ impl VectorStorage for MmapStorage {
 
         // Convert bytes to f32
         let vector: Vec<f32> = bytes
-            .chunks_exact(4)
-            .map(|chunk| {
-                f32::from_le_bytes(
-                    chunk
-                        .try_into()
-                        .expect("chunks_exact(4) yields 4-byte slices"),
-                )
-            })
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect();
 
         let arc: Arc<[f32]> = vector.into();

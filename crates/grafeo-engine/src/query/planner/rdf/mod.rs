@@ -4190,7 +4190,7 @@ impl RdfExpressionPredicate {
                 {
                     // Regex-based replace
                     let regex_pattern = if flags.contains('i') {
-                        format!("(?i){}", &pattern)
+                        format!("(?i){}", pattern)
                     } else {
                         pattern.clone()
                     };

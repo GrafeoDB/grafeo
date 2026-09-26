@@ -3029,7 +3029,7 @@ mod tests {
         // Display/Equality sanity
         assert_eq!(format!("{literal}"), "42");
         assert_eq!(format!("{param}"), "$limit");
-        assert!(literal == 42usize);
+        assert_eq!(literal, 42usize);
     }
 
     // ==================== CountExpr ====================

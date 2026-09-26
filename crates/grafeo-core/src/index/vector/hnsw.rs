@@ -753,7 +753,7 @@ impl HnswIndex {
         }
 
         // Remove bidirectional links
-        for (_, node) in nodes_map.iter_mut() {
+        for node in nodes_map.values_mut() {
             for neighbors in &mut node.neighbors {
                 neighbors.retain(|&n| n != id);
             }

@@ -1164,7 +1164,7 @@ mod tests {
     fn test_processor_creation() {
         let store = Arc::new(LpgStore::new().unwrap());
         let processor = QueryProcessor::for_lpg(store);
-        assert!(processor.lpg_store().node_count() == 0);
+        assert_eq!(processor.lpg_store().node_count(), 0);
     }
 
     #[cfg(feature = "gql")]

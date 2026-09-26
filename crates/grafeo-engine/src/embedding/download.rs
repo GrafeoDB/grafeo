@@ -3,13 +3,13 @@
 //! Downloads ONNX model and tokenizer files on first use and caches them
 //! locally. The cache is managed by `hf-hub` and defaults to
 //! `~/.cache/huggingface/hub/` (compatible with the Python `huggingface_hub`
-//! package). Override with the `HF_HOME` or `HUGGINGFACE_HUB_CACHE`
-//! environment variables.
+//! package). Override with the `HF_HOME` or `HF_HUB_CACHE` environment
+//! variables.
 
 use std::path::PathBuf;
 
 use grafeo_common::utils::error::{Error, Result};
-use hf_hub::api::sync::Api;
+use hf_hub::HFClientSync;
 
 use super::config::{EmbeddingModelConfig, ResolveInfo};
 
@@ -43,23 +43,37 @@ pub(crate) fn resolve(config: &EmbeddingModelConfig) -> Result<ResolvedModel> {
             model_file,
             tokenizer_file,
         } => {
-            let api = Api::new().map_err(|e| {
+            let (owner, repo_name) = repo_id.split_once('/').ok_or_else(|| {
+                Error::Internal(format!(
+                    "Invalid HuggingFace repo id '{repo_id}': expected 'owner/name'"
+                ))
+            })?;
+
+            let client = HFClientSync::new().map_err(|e| {
                 Error::Internal(format!("Failed to initialize HuggingFace Hub client: {e}"))
             })?;
 
-            let repo = api.model(repo_id.to_string());
+            let repo = client.model(owner, repo_name);
 
-            let model_path = repo.get(model_file).map_err(|e| {
-                Error::Internal(format!(
-                    "Failed to download model file '{model_file}' from '{repo_id}': {e}"
-                ))
-            })?;
+            let model_path = repo
+                .download_file()
+                .filename(model_file.to_string())
+                .send()
+                .map_err(|e| {
+                    Error::Internal(format!(
+                        "Failed to download model file '{model_file}' from '{repo_id}': {e}"
+                    ))
+                })?;
 
-            let tokenizer_path = repo.get(tokenizer_file).map_err(|e| {
-                Error::Internal(format!(
-                    "Failed to download tokenizer file '{tokenizer_file}' from '{repo_id}': {e}"
-                ))
-            })?;
+            let tokenizer_path = repo
+                .download_file()
+                .filename(tokenizer_file.to_string())
+                .send()
+                .map_err(|e| {
+                    Error::Internal(format!(
+                        "Failed to download tokenizer file '{tokenizer_file}' from '{repo_id}': {e}"
+                    ))
+                })?;
 
             Ok(ResolvedModel {
                 model_path,

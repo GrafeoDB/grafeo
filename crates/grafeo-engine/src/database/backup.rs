@@ -507,13 +507,9 @@ pub(super) fn do_restore_to_epoch(
     target_epoch: EpochId,
     output_path: &Path,
 ) -> Result<()> {
-    // Refuse to restore on top of an existing database. The `std::fs::copy`
-    // below overwrites `output_path` unconditionally, and the sidecar handling
-    // further down deletes an existing `<output_path>.wal/` directory. Pointing
-    // a restore at a live database would therefore clobber the `.grafeo` file
-    // and silently destroy its sidecar WAL -- exactly the data an operator may
-    // be trying to recover. Restores must target a fresh path; callers that
-    // intend to replace a database should move or remove it first.
+    // Restore must target a fresh path: the copy below overwrites
+    // `output_path` and the sidecar handling deletes `<output_path>.wal/`,
+    // which would destroy a live database and its unflushed WAL.
     let sidecar_dir = format!("{}.wal", output_path.display());
     if output_path.exists() || Path::new(&sidecar_dir).exists() {
         return Err(Error::InvalidValue(format!(
@@ -788,7 +784,7 @@ mod tests {
         // before any copy/overwrite happens (the guard fires ahead of manifest
         // reading, so no real backup chain is needed for this case).
         let output_path = dir.path().join("live.grafeo");
-        std::fs::write(&output_path, b"existing database -- must not be clobbered").unwrap();
+        std::fs::write(&output_path, b"existing database, must not be clobbered").unwrap();
 
         let err = do_restore_to_epoch(&backup_dir, EpochId::new(0), &output_path).unwrap_err();
         let msg = err.to_string();
@@ -800,7 +796,7 @@ mod tests {
         // The existing file must be left untouched by the refused restore.
         assert_eq!(
             std::fs::read(&output_path).unwrap(),
-            b"existing database -- must not be clobbered"
+            b"existing database, must not be clobbered"
         );
     }
 

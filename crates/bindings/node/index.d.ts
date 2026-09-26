@@ -371,9 +371,20 @@ export type JsResultStream = ResultStream
 export declare class Transaction {
   /** Execute a GQL query within this transaction. */
   execute(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Commit the transaction. */
+  /**
+   * Commit the transaction.
+   *
+   * Throws if a query from this transaction is still running: await it
+   * first. Closing never waits on a running query, so it cannot stall the
+   * event loop.
+   */
   commit(): void
-  /** Roll back the transaction. */
+  /**
+   * Roll back the transaction.
+   *
+   * Throws if a query from this transaction is still running: await it
+   * first.
+   */
   rollback(): void
   /** Whether the transaction is still active. */
   get isActive(): boolean

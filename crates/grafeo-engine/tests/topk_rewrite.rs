@@ -302,3 +302,53 @@ fn order_by_limit_node_return_yields_map() {
         result.rows()[0][0]
     );
 }
+
+// ORDER BY keys that wrap a RETURN-dropped variable inside a slice, list
+// comprehension or list predicate must still take the augmenting projection,
+// both on the plain Sort path and the ORDER BY ... LIMIT top-K path.
+#[test]
+fn order_by_wrapped_dropped_variable_sorts_correctly() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute("INSERT (:Seq {id: 0, s: [1, 2, 3]})")
+        .unwrap();
+    session.execute("INSERT (:Seq {id: 1, s: [1]})").unwrap();
+    session.execute("INSERT (:Seq {id: 2, s: [1, 2]})").unwrap();
+
+    let ids = |query: &str| -> Vec<Value> {
+        let result = session
+            .execute(query)
+            .unwrap_or_else(|e| panic!("{query}: {e}"));
+        result.rows().iter().map(|row| row[0].clone()).collect()
+    };
+    let expected =
+        |order: &[i64]| -> Vec<Value> { order.iter().map(|&i| Value::Int64(i)).collect() };
+
+    for limit in ["", " LIMIT 3"] {
+        // Slice: remaining lengths are 2, 0, 1.
+        assert_eq!(
+            ids(&format!(
+                "MATCH (n:Seq) RETURN n.id AS id ORDER BY size(n.s[1..]){limit}"
+            )),
+            expected(&[1, 2, 0]),
+            "slice key{limit}"
+        );
+        // List comprehension: sizes 3, 1, 2.
+        assert_eq!(
+            ids(&format!(
+                "MATCH (n:Seq) RETURN n.id AS id ORDER BY size([x IN n.s WHERE x > 0 | x * 2]) DESC{limit}"
+            )),
+            expected(&[0, 2, 1]),
+            "list comprehension key{limit}"
+        );
+        // List predicate: only node 0 contains 3; node 2 is excluded to avoid ties.
+        assert_eq!(
+            ids(&format!(
+                "MATCH (n:Seq) WHERE n.id < 2 RETURN n.id AS id ORDER BY any(x IN n.s WHERE x = 3) DESC{limit}"
+            )),
+            expected(&[0, 1]),
+            "list predicate key{limit}"
+        );
+    }
+}

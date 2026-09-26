@@ -1360,7 +1360,52 @@ fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
                 collect_vars(a, out);
             }
         }
-        LogicalExpression::IndexAccess { base, .. } => collect_vars(base, out),
+        LogicalExpression::IndexAccess { base, index } => {
+            collect_vars(base, out);
+            collect_vars(index, out);
+        }
+        LogicalExpression::SliceAccess { base, start, end } => {
+            collect_vars(base, out);
+            for bound in [start, end].into_iter().flatten() {
+                collect_vars(bound, out);
+            }
+        }
+        LogicalExpression::List(items) => {
+            for item in items {
+                collect_vars(item, out);
+            }
+        }
+        LogicalExpression::Map(entries) => {
+            for (_, value) in entries {
+                collect_vars(value, out);
+            }
+        }
+        LogicalExpression::ListComprehension {
+            variable,
+            list_expr,
+            filter_expr,
+            map_expr,
+        } => {
+            collect_vars(list_expr, out);
+            let mut inner = Vec::new();
+            if let Some(filter) = filter_expr {
+                collect_vars(filter, &mut inner);
+            }
+            collect_vars(map_expr, &mut inner);
+            // The iteration variable is bound locally, never a RETURN column.
+            out.extend(inner.into_iter().filter(|v| v != variable));
+        }
+        LogicalExpression::ListPredicate {
+            variable,
+            list_expr,
+            predicate,
+            ..
+        } => {
+            collect_vars(list_expr, out);
+            let mut inner = Vec::new();
+            collect_vars(predicate, &mut inner);
+            out.extend(inner.into_iter().filter(|v| v != variable));
+        }
         LogicalExpression::Binary { left, right, .. } => {
             collect_vars(left, out);
             collect_vars(right, out);
@@ -1398,7 +1443,8 @@ fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
 ///   that property (e.g. `RETURN n ORDER BY n.title`: "n" is in Return but
 ///   "n_title" is not a column, returning a full node is not enough).
 /// - Sort key whose expression references a variable `v` that is absent
-///   from Return entirely (covers wrapped references like `CASE n.tier ...`).
+///   from Return entirely (covers wrapped references like `CASE n.tier ...`,
+///   `n.s[1..]` or `[x IN n.s | x * 2]`).
 ///
 /// Used by both `plan_sort` (which knows how to inject the augmenting
 /// projection) and `try_heap_topk_rewrite` (which doesn't, and bails out so

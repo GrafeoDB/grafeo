@@ -25,7 +25,6 @@ jobs:
       - name: Setup rust toolchain, cache and cargo-codspeed binary
         uses: moonrepo/setup-rust@v1
         with:
-          channel: stable
           cache-target: release
           bins: cargo-codspeed
 

@@ -9,12 +9,14 @@ Gremlin `notRegex()` predicate plus a planner fix for `ORDER BY` + `LIMIT` over 
 ### Added
 
 - **Gremlin `notRegex()` text predicate**: negated regex match in `has()` filters, e.g. `g.V().has('name', notRegex('^A.*'))`. Lexer/parser/AST symmetrical with the existing `regex()`; translator emits `Not(Regex)` so the engine reuses the existing primitive. Cross-binding spec coverage in `predicates_extended.gtest`. ([#336](https://github.com/GrafeoDB/grafeo/pull/336), [@jakeboone02](https://github.com/jakeboone02))
+- **Gremlin `notContaining()`, `notStartingWith()`, `notEndingWith()` text predicates**: negated counterparts of the existing substring predicates in `has()` filters, e.g. `g.V().has('city', notStartingWith('Am'))`. ([#340](https://github.com/GrafeoDB/grafeo/pull/340), [@jakeboone02](https://github.com/jakeboone02))
 
 ### Changed
 
 - **Rust toolchain pinned to 1.98** via `rust-toolchain.toml`, used by local builds and CI alike, so new stable releases no longer break CI with fresh clippy lints. The MSRV stays 1.91.1 and is still checked in CI.
-- **Node.js: transaction queries run off the event loop.** `Transaction.execute*()` now runs on a worker thread like `Database.execute()`, so a long query inside a transaction no longer blocks other JavaScript. The API is unchanged (still returns a Promise).
+- **Node.js: transaction queries run off the event loop.** `Transaction.execute*()` now runs on a worker thread like `Database.execute()`, so a long query inside a transaction no longer blocks other JavaScript. The API is unchanged (still returns a Promise). `commit()` and `rollback()` now throw if a query from the same transaction is still running instead of blocking the event loop, so await queries before closing the transaction.
 - **`grafeo` crate declares `rust-version`** ([#390](https://github.com/GrafeoDB/grafeo/issues/390)): the facade now carries the workspace MSRV, so Cargo's MSRV-aware resolver and tooling see the real minimum.
+- **`restore_to_epoch()` refuses to overwrite an existing database**: restoring onto a path where a `.grafeo` file or its `.wal` sidecar already exists now returns an error instead of overwriting it and deleting the sidecar WAL. Restore to a fresh path, or move the old database first. ([#363](https://github.com/GrafeoDB/grafeo/pull/363), [@teipsum](https://github.com/teipsum))
 
 ### Security
 
@@ -27,7 +29,9 @@ Gremlin `notRegex()` predicate plus a planner fix for `ORDER BY` + `LIMIT` over 
 
 ### Fixed
 
-- **`MATCH (n) RETURN n ORDER BY n.p LIMIT k` returned a raw NodeId instead of a resolved map** ([#335](https://github.com/GrafeoDB/grafeo/issues/335)): `sort_needs_augmenting_projection` checked whether the variable `n` appeared in `RETURN`, not whether the specific property column was materialised. The TopK probe then mutated `scalar_columns` as a side effect, causing the unfused re-plan to skip `NodeResolve` and emit raw `Int64` NodeIds. The predicate now requires `Property{v,p}` sort keys to find that exact property in `RETURN`, and `collect_vars` recurses into `Case` so CASE-wrapped property references are visible too (otherwise queries like `ORDER BY CASE c.tier ... END` silently route through the non-augmenting path). Diagnosis and initial fix by [@temporaryfix](https://github.com/temporaryfix) ([#337](https://github.com/GrafeoDB/grafeo/pull/337)).
+- **`MATCH (n) RETURN n ORDER BY n.p LIMIT k` returned a raw NodeId instead of a resolved map** ([#335](https://github.com/GrafeoDB/grafeo/issues/335)): `sort_needs_augmenting_projection` checked whether the variable `n` appeared in `RETURN`, not whether the specific property column was materialised. The TopK probe then mutated `scalar_columns` as a side effect, causing the unfused re-plan to skip `NodeResolve` and emit raw `Int64` NodeIds. The predicate now requires `Property{v,p}` sort keys to find that exact property in `RETURN`, and `collect_vars` recurses into `Case`, slices, list comprehensions and list predicates so wrapped references are visible too (otherwise queries like `ORDER BY CASE c.tier ... END` or `ORDER BY size(n.s[1..])` silently returned unsorted rows). Diagnosis and initial fix by [@temporaryfix](https://github.com/temporaryfix) ([#337](https://github.com/GrafeoDB/grafeo/pull/337)).
+- **SPARQL `path+` (one-or-more) returned only direct neighbours** ([#369](https://github.com/GrafeoDB/grafeo/issues/369)): each depth branch is now projected to its endpoints before the union, so `?s :p+ ?o` returns the full transitive closure instead of the first hop repeated per depth. ([#370](https://github.com/GrafeoDB/grafeo/pull/370), [@teipsum](https://github.com/teipsum))
+- **Storage docs: sidecar WAL removal timing**: docs said the `.grafeo` sidecar WAL is removed after every checkpoint; it is kept across periodic checkpoints and removed only on a clean `close()`. ([#364](https://github.com/GrafeoDB/grafeo/pull/364), [@teipsum](https://github.com/teipsum))
 
 ---
 

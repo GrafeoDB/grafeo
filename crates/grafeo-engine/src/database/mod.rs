@@ -2807,8 +2807,10 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the backup chain does not cover the target epoch,
-    /// segment checksums fail, or I/O fails.
+    /// Returns an error if `output_path` or its `<output_path>.wal` sidecar
+    /// already exists (restores never overwrite a database), if the backup
+    /// chain does not cover the target epoch, segment checksums fail, or I/O
+    /// fails.
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     pub fn restore_to_epoch(
         backup_dir: &std::path::Path,

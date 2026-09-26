@@ -137,7 +137,7 @@ The beta series focuses on correctness, completeness and real-world durability. 
 ### Delivered in 0.5.41
 
 - **Compact-store correctness**: post-`compact()` read path and signed integer round-trip fixes
-- **Search procedures**: `CALL grafeo.search.*` for vector, text and hybrid search from queries
+- **Search procedures**: `CALL grafeo.search.*` for vector, text and MMR search from queries
 - **Disk-backed compact base**: the columnar base of a compacted store can live on disk under memory pressure
 - **Memory introspection** for RDF and CDC components
 
@@ -206,4 +206,4 @@ Interested in contributing? Check the [GitHub Issues](https://github.com/GrafeoD
 
 ---
 
-Last updated: April 2026
+Last updated: September 2026

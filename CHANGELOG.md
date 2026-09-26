@@ -10,6 +10,16 @@ Gremlin `notRegex()` predicate plus a planner fix for `ORDER BY` + `LIMIT` over 
 
 - **Gremlin `notRegex()` text predicate**: negated regex match in `has()` filters, e.g. `g.V().has('name', notRegex('^A.*'))`. Lexer/parser/AST symmetrical with the existing `regex()`; translator emits `Not(Regex)` so the engine reuses the existing primitive. Cross-binding spec coverage in `predicates_extended.gtest`. ([#336](https://github.com/GrafeoDB/grafeo/pull/336), [@jakeboone02](https://github.com/jakeboone02))
 
+### Changed
+
+- **Rust toolchain pinned to 1.98** via `rust-toolchain.toml`, used by local builds and CI alike, so new stable releases no longer break CI with fresh clippy lints. The MSRV stays 1.91.1 and is still checked in CI.
+- **Node.js: transaction queries run off the event loop.** `Transaction.execute*()` now runs on a worker thread like `Database.execute()`, so a long query inside a transaction no longer blocks other JavaScript. The API is unchanged (still returns a Promise).
+- **`grafeo` crate declares `rust-version`** ([#390](https://github.com/GrafeoDB/grafeo/issues/390)): the facade now carries the workspace MSRV, so Cargo's MSRV-aware resolver and tooling see the real minimum.
+
+### Security
+
+- Dependency updates for RUSTSEC-2026-0190 (anyhow), RUSTSEC-2026-0186 (memmap2), RUSTSEC-2026-0204 (crossbeam-epoch), RUSTSEC-2026-0258 (h2) and RUSTSEC-2026-0285 (rustls), plus replacements for two yanked crates (chacha20, der).
+
 ### Fixed
 
 - **`MATCH (n) RETURN n ORDER BY n.p LIMIT k` returned a raw NodeId instead of a resolved map** ([#335](https://github.com/GrafeoDB/grafeo/issues/335)): `sort_needs_augmenting_projection` checked whether the variable `n` appeared in `RETURN`, not whether the specific property column was materialised. The TopK probe then mutated `scalar_columns` as a side effect, causing the unfused re-plan to skip `NodeResolve` and emit raw `Int64` NodeIds. The predicate now requires `Property{v,p}` sort keys to find that exact property in `RETURN`, and `collect_vars` recurses into `Case` so CASE-wrapped property references are visible too (otherwise queries like `ORDER BY CASE c.tier ... END` silently route through the non-augmenting path). Diagnosis and initial fix by [@temporaryfix](https://github.com/temporaryfix) ([#337](https://github.com/GrafeoDB/grafeo/pull/337)).

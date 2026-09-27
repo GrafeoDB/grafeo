@@ -11,6 +11,19 @@ use std::path::Path;
 /// Name of the checkpoint metadata file.
 const CHECKPOINT_METADATA_FILE: &str = "checkpoint.meta";
 
+/// Committed records from a recovery pass, and whether the log ends torn.
+#[derive(Debug)]
+pub struct RecoveredWal<R = WalRecord> {
+    /// Records of committed transactions, plus checkpoint and metadata
+    /// records, in log order.
+    pub records: Vec<R>,
+    /// Whether the log ends with records that no commit or abort marker
+    /// closes, or with bytes that do not form a complete record. Such a tail
+    /// must be sealed (see `LpgWal::seal_torn_tail`) before anything new is
+    /// logged, otherwise the next commit marker would commit the torn records.
+    pub torn_tail: bool,
+}
+
 /// Handles WAL recovery after a crash.
 pub struct WalRecovery {
     /// Directory containing WAL files.
@@ -104,7 +117,7 @@ impl WalRecovery {
     /// Returns an error if recovery fails.
     pub fn recover_as<R: WalEntry>(&self) -> Result<Vec<R>> {
         let checkpoint = self.read_checkpoint_metadata()?;
-        self.recover_internal_as::<R>(checkpoint)
+        Ok(self.recover_internal_as::<R>(checkpoint)?.records)
     }
 
     /// Recovers committed records from every WAL file, ignoring checkpoint
@@ -118,6 +131,16 @@ impl WalRecovery {
     ///
     /// Returns an error if recovery fails.
     pub fn recover_all(&self) -> Result<Vec<WalRecord>> {
+        Ok(self.recover_all_with_tail()?.records)
+    }
+
+    /// Like [`recover_all`](Self::recover_all), and also reports whether the
+    /// log ends with a torn tail.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if recovery fails.
+    pub fn recover_all_with_tail(&self) -> Result<RecoveredWal> {
         if self.dir.join(CHECKPOINT_METADATA_FILE).exists() {
             grafeo_warn!(
                 "Ignoring {:?}: the WAL is the only copy of the data, replaying every WAL file",
@@ -125,6 +148,17 @@ impl WalRecovery {
             );
         }
         self.recover_internal_as::<WalRecord>(None)
+    }
+
+    /// Like [`recover`](Self::recover), and also reports whether the log
+    /// ends with a torn tail.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if recovery fails.
+    pub fn recover_with_tail(&self) -> Result<RecoveredWal> {
+        let checkpoint = self.read_checkpoint_metadata()?;
+        self.recover_internal_as::<WalRecord>(checkpoint)
     }
 
     /// Recovers committed records up to and including the given epoch.
@@ -176,9 +210,11 @@ impl WalRecovery {
     fn recover_internal_as<R: WalEntry>(
         &self,
         checkpoint: Option<CheckpointMetadata>,
-    ) -> Result<Vec<R>> {
+    ) -> Result<RecoveredWal<R>> {
         let mut current_tx_records = Vec::new();
         let mut committed_records = Vec::new();
+        // Whether the last file read ended exactly at a record boundary.
+        let mut last_file_clean = true;
 
         // Get all log files in order
         let log_files = self.get_log_files()?;
@@ -217,12 +253,15 @@ impl WalRecovery {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(e.into()),
             };
+            let file_len = file.metadata()?.len();
             let mut reader = BufReader::new(file);
+            let mut position = 0u64;
 
             // Read all records from this file
             loop {
                 match self.read_record_as::<R>(&mut reader) {
-                    Ok(Some(record)) => {
+                    Ok(Some((record, frame_len))) => {
+                        position += frame_len;
                         if record.is_commit() {
                             committed_records.append(&mut current_tx_records);
                             committed_records.push(record);
@@ -236,11 +275,16 @@ impl WalRecovery {
                             current_tx_records.push(record);
                         }
                     }
-                    Ok(None) => break, // EOF
+                    Ok(None) => {
+                        // EOF, or a partial length prefix at the end.
+                        last_file_clean = position >= file_len;
+                        break;
+                    }
                     Err(e) => {
                         // Log corruption - stop reading this file but continue
                         // with remaining files (best-effort recovery)
                         grafeo_warn!("WAL corruption detected in {:?}: {}", log_file, e);
+                        last_file_clean = false;
                         break;
                     }
                 }
@@ -248,8 +292,24 @@ impl WalRecovery {
         }
 
         // Uncommitted records in current_tx_records are discarded
+        let torn_tail = !current_tx_records.is_empty() || !last_file_clean;
+        if torn_tail {
+            grafeo_warn!(
+                "WAL in {:?} ends with an incomplete transaction ({} records without a commit marker{})",
+                self.dir,
+                current_tx_records.len(),
+                if last_file_clean {
+                    ""
+                } else {
+                    ", followed by an incomplete record"
+                }
+            );
+        }
 
-        Ok(committed_records)
+        Ok(RecoveredWal {
+            records: committed_records,
+            torn_tail,
+        })
     }
 
     /// Extracts the sequence number from a WAL log file path.
@@ -282,7 +342,11 @@ impl WalRecovery {
         Ok(files)
     }
 
-    fn read_record_as<R: WalEntry>(&self, reader: &mut BufReader<File>) -> Result<Option<R>> {
+    /// Reads one record, returning it with its frame length in bytes.
+    fn read_record_as<R: WalEntry>(
+        &self,
+        reader: &mut BufReader<File>,
+    ) -> Result<Option<(R, u64)>> {
         // Read length prefix
         let mut len_buf = [0u8; 4];
         match reader.read_exact(&mut len_buf) {
@@ -343,7 +407,13 @@ impl WalRecovery {
             bincode::serde::decode_from_slice(&data, bincode::config::standard())
                 .map_err(|e| Error::Serialization(e.to_string()))?;
 
-        Ok(Some(record))
+        // Length prefix + payload, plus the CRC32 for plaintext frames
+        // (an encrypted payload carries its own authentication tag).
+        #[cfg(feature = "encryption")]
+        let checksum_len = if self.encryptor.is_some() { 0 } else { 4 };
+        #[cfg(not(feature = "encryption"))]
+        let checksum_len = 4;
+        Ok(Some((record, 4 + len as u64 + checksum_len)))
     }
 }
 
@@ -610,6 +680,158 @@ mod tests {
             node_ids(&recovery.recover_all().unwrap()),
             vec![0, 1, 2, 3, 4]
         );
+    }
+
+    fn create(id: u64) -> WalRecord {
+        WalRecord::CreateNode {
+            id: NodeId::new(id),
+            labels: vec!["N".to_string()],
+        }
+    }
+
+    fn commit(tx: u64) -> WalRecord {
+        WalRecord::TransactionCommit {
+            transaction_id: TransactionId::new(tx),
+        }
+    }
+
+    fn created_ids(records: &[WalRecord]) -> Vec<u64> {
+        records
+            .iter()
+            .filter_map(|r| match r {
+                WalRecord::CreateNode { id, .. } => Some(id.as_u64()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn only_log_file(dir: &Path) -> std::path::PathBuf {
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "log"))
+            .collect();
+        assert_eq!(files.len(), 1);
+        files.pop().unwrap()
+    }
+
+    #[test]
+    fn test_torn_tail_detection() {
+        // Every committed: clean.
+        let dir = tempdir().unwrap();
+        {
+            let wal = WalManager::open(dir.path()).unwrap();
+            wal.log_batch(&[create(1), commit(1)]).unwrap();
+        }
+        let recovered = WalRecovery::new(dir.path()).recover_with_tail().unwrap();
+        assert!(!recovered.torn_tail);
+        assert_eq!(created_ids(&recovered.records), vec![1]);
+
+        // Records without a closing marker at the end: torn.
+        {
+            let wal = WalManager::open(dir.path()).unwrap();
+            wal.log(&create(2)).unwrap();
+        }
+        let recovered = WalRecovery::new(dir.path()).recover_with_tail().unwrap();
+        assert!(recovered.torn_tail);
+        assert_eq!(created_ids(&recovered.records), vec![1]);
+
+        // An abort closes them: clean again.
+        {
+            let wal = WalManager::open(dir.path()).unwrap();
+            wal.log(&WalRecord::TransactionAbort {
+                transaction_id: TransactionId::new(2),
+            })
+            .unwrap();
+        }
+        let recovered = WalRecovery::new(dir.path())
+            .recover_all_with_tail()
+            .unwrap();
+        assert!(!recovered.torn_tail);
+        assert_eq!(created_ids(&recovered.records), vec![1]);
+    }
+
+    #[test]
+    fn test_partial_frame_is_a_torn_tail() {
+        // A crash mid-write leaves bytes that are not a complete record, even
+        // when every complete record is committed.
+        for garbage in [&[7u8, 0][..], &[40, 0, 0, 0, 1, 2, 3][..]] {
+            let dir = tempdir().unwrap();
+            {
+                let wal = WalManager::open(dir.path()).unwrap();
+                wal.log_batch(&[create(1), commit(1)]).unwrap();
+            }
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(only_log_file(dir.path()))
+                .unwrap()
+                .write_all(garbage)
+                .unwrap();
+
+            let recovered = WalRecovery::new(dir.path()).recover_with_tail().unwrap();
+            assert!(recovered.torn_tail, "garbage {garbage:?}");
+            assert_eq!(created_ids(&recovered.records), vec![1]);
+        }
+    }
+
+    #[test]
+    fn test_sealed_torn_tail_is_not_committed_later() {
+        use super::super::LpgWal;
+
+        let dir = tempdir().unwrap();
+        {
+            let wal = LpgWal::open(dir.path()).unwrap();
+            wal.log_batch(&[create(1), commit(1)]).unwrap();
+            wal.log(&create(2)).unwrap(); // crash before the commit marker
+        }
+
+        let recovered = WalRecovery::new(dir.path()).recover_with_tail().unwrap();
+        assert!(recovered.torn_tail);
+        {
+            let wal = LpgWal::open(dir.path()).unwrap();
+            wal.seal_torn_tail().unwrap();
+            wal.log_batch(&[create(3), commit(3)]).unwrap();
+        }
+
+        let recovered = WalRecovery::new(dir.path()).recover_with_tail().unwrap();
+        assert!(!recovered.torn_tail);
+        assert_eq!(created_ids(&recovered.records), vec![1, 3]);
+    }
+
+    #[test]
+    fn test_seal_after_partial_frame_keeps_new_records_readable() {
+        use super::super::LpgWal;
+        use std::io::Write;
+
+        let dir = tempdir().unwrap();
+        {
+            let wal = LpgWal::open(dir.path()).unwrap();
+            wal.log_batch(&[create(1), commit(1)]).unwrap();
+        }
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(only_log_file(dir.path()))
+            .unwrap()
+            .write_all(&[40, 0, 0, 0, 1, 2, 3])
+            .unwrap();
+
+        assert!(
+            WalRecovery::new(dir.path())
+                .recover_with_tail()
+                .unwrap()
+                .torn_tail
+        );
+        {
+            // Records appended after the partial frame in the same file would
+            // be unreadable: sealing moves on to a new file.
+            let wal = LpgWal::open(dir.path()).unwrap();
+            wal.seal_torn_tail().unwrap();
+            wal.log_batch(&[create(2), commit(2)]).unwrap();
+        }
+
+        let recovered = WalRecovery::new(dir.path()).recover_with_tail().unwrap();
+        assert_eq!(created_ids(&recovered.records), vec![1, 2]);
     }
 
     #[test]

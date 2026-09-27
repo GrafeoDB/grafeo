@@ -109,6 +109,71 @@ struct TripleOperands {
     predicate: TripleComponent,
     object: TripleComponent,
     column_map: HashMap<String, usize>,
+    /// Named graph to mutate (`None` = default graph).
+    graph: Option<String>,
+    /// Open transaction: writes are buffered in it instead of applied.
+    transaction_id: Option<TransactionId>,
+}
+
+/// Inserts `triple` into `target`, buffered in the transaction when there is
+/// one (applied on commit, discarded on rollback). Returns whether the triple
+/// is new, as seen by the transaction.
+fn apply_triple_insert(
+    target: &RdfStore,
+    transaction_id: Option<TransactionId>,
+    triple: Triple,
+) -> bool {
+    match transaction_id {
+        Some(tx) => {
+            if target.contains_with_pending(&triple, tx) {
+                return false;
+            }
+            target.insert_in_transaction(tx, triple);
+            true
+        }
+        None => target.insert(triple),
+    }
+}
+
+/// Deletes `triple` from `target`, buffered in the transaction when there is
+/// one. Returns whether the triple was present, as seen by the transaction.
+fn apply_triple_delete(
+    target: &RdfStore,
+    transaction_id: Option<TransactionId>,
+    triple: &Triple,
+) -> bool {
+    match transaction_id {
+        Some(tx) => {
+            if !target.contains_with_pending(triple, tx) {
+                return false;
+            }
+            target.remove_in_transaction(tx, triple.clone());
+            true
+        }
+        None => target.remove(triple),
+    }
+}
+
+/// Resolves the store a graph mutation targets (`None` graph = default graph).
+///
+/// With `create` (inserts) a missing named graph is created; without it
+/// (deletes) a missing graph yields `None`, so a delete never creates an empty
+/// graph. A `?`-prefixed name is an unbound `GRAPH ?var` target, which is
+/// rejected instead of being written to the wrong graph.
+fn resolve_mutation_graph(
+    store: &Arc<RdfStore>,
+    graph_name: Option<&str>,
+    create: bool,
+) -> std::result::Result<Option<Arc<RdfStore>>, OperatorError> {
+    match graph_name {
+        None => Ok(Some(Arc::clone(store))),
+        Some(name) if name.starts_with('?') => Err(OperatorError::Execution(format!(
+            "SPARQL Update cannot target a variable graph ({name}); \
+             use a concrete graph IRI or a WITH clause"
+        ))),
+        Some(name) if create => Ok(Some(store.graph_or_create(name))),
+        Some(name) => Ok(store.graph(name)),
+    }
 }
 
 /// Converts logical plans with RDF operators to physical operators.
@@ -411,7 +476,8 @@ impl RdfPlanner {
             },
             emit_companion_columns,
             emit_datatype_column,
-        );
+        )
+        .with_transaction(self.transaction_id);
 
         // Dictionary encoding is available but not yet automatically enabled for
         // all queries. The infrastructure (TermDictionary, DictResolveOperator) is
@@ -445,11 +511,7 @@ impl RdfPlanner {
         let columns: Vec<String> = ret
             .items
             .iter()
-            .map(|item| {
-                item.alias
-                    .clone()
-                    .unwrap_or_else(|| expression_to_string(&item.expression))
-            })
+            .map(|item| output_column_name(item.alias.as_deref(), &item.expression))
             .collect();
 
         Ok((input_op, columns, input_types))
@@ -609,7 +671,7 @@ impl RdfPlanner {
             match &key.expression {
                 LogicalExpression::Variable(_) => {}
                 _ => {
-                    let col_name = format!("__expr_{:?}", key.expression);
+                    let col_name = resolved_column_name(&key.expression);
                     if !variable_columns.contains_key(&col_name) {
                         let filter_expr = convert_filter_expression(&key.expression)?;
                         expression_projections.push((filter_expr, col_name.clone()));
@@ -825,7 +887,7 @@ impl RdfPlanner {
             match expr {
                 LogicalExpression::Variable(_) => {}
                 _ => {
-                    let col_name = format!("__expr_{:?}", expr);
+                    let col_name = resolved_column_name(expr);
                     if !variable_columns.contains_key(&col_name) {
                         let filter_expr = convert_filter_expression(expr)?;
                         expression_projections.push((filter_expr, col_name.clone()));
@@ -843,7 +905,7 @@ impl RdfPlanner {
                 match expr {
                     LogicalExpression::Variable(_) => {}
                     _ => {
-                        let col_name = format!("__expr_{:?}", expr);
+                        let col_name = resolved_column_name(expr);
                         if !variable_columns.contains_key(&col_name) {
                             let filter_expr = convert_filter_expression(expr)?;
                             expression_projections.push((filter_expr, col_name.clone()));
@@ -931,10 +993,9 @@ impl RdfPlanner {
             };
             output_schema.push(result_type);
             output_columns.push(
-                agg_expr
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| format!("{:?}(...)", agg_expr.function).to_lowercase()),
+                agg_expr.alias.clone().unwrap_or_else(|| {
+                    crate::query::planner::common::aggregate_column_name(agg_expr)
+                }),
             );
         }
 
@@ -1268,6 +1329,10 @@ impl RdfPlanner {
     }
 
     /// Plans a UNION operator.
+    ///
+    /// The output variables are the union of all branches' variables (SPARQL
+    /// 1.1 sec 18.2.1); a variable missing from a branch is unbound (NULL) there.
+    /// Each branch is aligned by name and padded to the full width (#365).
     fn plan_union(
         &self,
         union: &crate::query::plan::UnionOp,
@@ -1276,34 +1341,45 @@ impl RdfPlanner {
             return Err(Error::Internal("Empty UNION".to_string()));
         }
 
-        // For INSERT operations, we execute all operators in sequence
-        let mut operators: Vec<Box<dyn Operator>> = Vec::new();
-        let mut columns = Vec::new();
-        let mut types = Vec::new();
+        // Plan every branch, keeping its own columns and types.
+        let mut planned: Vec<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> =
+            Vec::with_capacity(union.inputs.len());
+        for input in &union.inputs {
+            planned.push(self.plan_operator(input)?);
+        }
 
-        for (i, input) in union.inputs.iter().enumerate() {
-            let (op, cols, tys) = self.plan_operator(input)?;
-            operators.push(op);
-            if i == 0 {
-                columns = cols;
-                types = tys;
+        // A single branch needs no alignment.
+        if planned.len() == 1 {
+            let (op, cols, tys) = planned.into_iter().next().expect("single-element vector");
+            return Ok((op, cols, tys));
+        }
+
+        // Union of branch variables in first-seen order; a variable bound with
+        // different types in different branches widens to Any.
+        let mut unified_columns: Vec<String> = Vec::new();
+        let mut unified_types: Vec<LogicalType> = Vec::new();
+        for (_, cols, tys) in &planned {
+            for (col, ty) in cols.iter().zip(tys.iter()) {
+                if let Some(existing) = unified_columns.iter().position(|c| c == col) {
+                    if unified_types[existing] != *ty {
+                        unified_types[existing] = LogicalType::Any;
+                    }
+                } else {
+                    unified_columns.push(col.clone());
+                    unified_types.push(ty.clone());
+                }
             }
         }
 
-        if operators.len() == 1 {
-            return Ok((
-                operators
-                    .into_iter()
-                    .next()
-                    .expect("single-element iterator"),
-                columns,
-                types,
-            ));
-        }
+        // Pad each branch to the full width with real NULL columns: DISTINCT and
+        // ORDER BY copy rows at each chunk's own width.
+        let operators: Vec<Box<dyn Operator>> = planned
+            .into_iter()
+            .map(|(op, cols, _)| pad_union_branch(op, &cols, &unified_columns, &unified_types))
+            .collect();
 
-        // Create a chain operator that executes all operators in sequence
-        let operator = Box::new(RdfUnionOperator::new(operators));
-        Ok((operator, columns, types))
+        let operator = Box::new(RdfUnionOperator::new(operators, unified_columns.len()));
+        Ok((operator, unified_columns, unified_types))
     }
 
     /// Plans an INSERT TRIPLE operator.
@@ -1338,6 +1414,8 @@ impl RdfPlanner {
                         predicate: insert.predicate.clone(),
                         object: insert.object.clone(),
                         column_map,
+                        graph: insert.graph.clone(),
+                        transaction_id: self.transaction_id,
                     },
                     #[cfg(feature = "wal")]
                     self.wal.clone(),
@@ -1451,6 +1529,8 @@ impl RdfPlanner {
                         predicate: delete.predicate.clone(),
                         object: delete.object.clone(),
                         column_map,
+                        graph: delete.graph.clone(),
+                        transaction_id: self.transaction_id,
                     },
                     #[cfg(feature = "wal")]
                     self.wal.clone(),
@@ -1593,17 +1673,24 @@ impl RdfPlanner {
             .map(|(i, name)| (name.clone(), i))
             .collect();
 
-        let operator = Box::new(RdfModifyOperator::new(
-            Arc::clone(&self.store),
-            where_op,
-            modify.delete_templates.clone(),
-            modify.insert_templates.clone(),
-            column_map,
-            #[cfg(feature = "cdc")]
-            self.cdc_log.clone(),
-            #[cfg(feature = "cdc")]
-            self.cdc_epoch,
-        ));
+        let operator = Box::new(
+            RdfModifyOperator::new(
+                Arc::clone(&self.store),
+                where_op,
+                ModifyTemplates {
+                    delete: modify.delete_templates.clone(),
+                    insert: modify.insert_templates.clone(),
+                },
+                column_map,
+                #[cfg(feature = "wal")]
+                self.wal.clone(),
+                #[cfg(feature = "cdc")]
+                self.cdc_log.clone(),
+                #[cfg(feature = "cdc")]
+                self.cdc_epoch,
+            )
+            .with_transaction(self.transaction_id),
+        );
 
         Ok((operator, Vec::new(), Vec::new()))
     }
@@ -1726,6 +1813,10 @@ struct RdfInsertPatternOperator {
     predicate: TripleComponent,
     object: TripleComponent,
     column_map: HashMap<String, usize>,
+    /// Named graph to insert into (`None` = default graph).
+    graph_name: Option<String>,
+    /// Open transaction the inserts are buffered in.
+    transaction_id: Option<TransactionId>,
     done: bool,
     #[cfg(feature = "wal")]
     wal: Option<Arc<RdfWal>>,
@@ -1751,6 +1842,8 @@ impl RdfInsertPatternOperator {
             predicate: operands.predicate,
             object: operands.object,
             column_map: operands.column_map,
+            graph_name: operands.graph,
+            transaction_id: operands.transaction_id,
             done: false,
             #[cfg(feature = "wal")]
             wal,
@@ -1830,6 +1923,10 @@ impl Operator for RdfInsertPatternOperator {
             return Ok(None);
         }
 
+        // Resolve the target first so a variable graph errors even with no rows.
+        let target = resolve_mutation_graph(&self.store, self.graph_name.as_deref(), true)?
+            .expect("insert target is always present when create=true");
+
         // Collect all triples to insert
         let mut triples_to_insert = Vec::new();
 
@@ -1845,32 +1942,36 @@ impl Operator for RdfInsertPatternOperator {
             }
         }
 
-        // Insert all collected triples
-        for triple in &triples_to_insert {
-            self.store.insert(triple.clone());
+        // Insert into the resolved graph (buffered in an open transaction).
+        // Only triples that are actually new are logged.
+        let mut inserted = Vec::with_capacity(triples_to_insert.len());
+        for triple in triples_to_insert {
+            if apply_triple_insert(&target, self.transaction_id, triple.clone()) {
+                inserted.push(triple);
+            }
         }
 
         #[cfg(feature = "wal")]
-        for triple in &triples_to_insert {
+        for triple in &inserted {
             log_rdf_wal(
                 &self.wal,
                 &grafeo_storage::wal::WalRecord::InsertRdfTriple {
                     subject: term_to_wal(triple.subject()),
                     predicate: term_to_wal(triple.predicate()),
                     object: term_to_wal(triple.object()),
-                    graph: None,
+                    graph: self.graph_name.clone(),
                 },
             );
         }
 
         #[cfg(feature = "cdc")]
-        for triple in &triples_to_insert {
+        for triple in &inserted {
             record_cdc_triple_insert(
                 &self.cdc_log,
                 triple.subject(),
                 triple.predicate(),
                 triple.object(),
-                None,
+                self.graph_name.as_deref(),
                 self.cdc_epoch,
             );
         }
@@ -2010,6 +2111,10 @@ struct RdfDeletePatternOperator {
     predicate: TripleComponent,
     object: TripleComponent,
     column_map: HashMap<String, usize>,
+    /// Named graph to delete from (`None` = default graph).
+    graph_name: Option<String>,
+    /// Open transaction the deletes are buffered in.
+    transaction_id: Option<TransactionId>,
     done: bool,
     #[cfg(feature = "wal")]
     wal: Option<Arc<RdfWal>>,
@@ -2035,6 +2140,8 @@ impl RdfDeletePatternOperator {
             predicate: operands.predicate,
             object: operands.object,
             column_map: operands.column_map,
+            graph_name: operands.graph,
+            transaction_id: operands.transaction_id,
             done: false,
             #[cfg(feature = "wal")]
             wal,
@@ -2114,6 +2221,9 @@ impl Operator for RdfDeletePatternOperator {
             return Ok(None);
         }
 
+        // Resolve the target first; a missing named graph means nothing to delete.
+        let target = resolve_mutation_graph(&self.store, self.graph_name.as_deref(), false)?;
+
         // Collect all triples to delete
         let mut triples_to_delete = Vec::new();
 
@@ -2129,34 +2239,36 @@ impl Operator for RdfDeletePatternOperator {
             }
         }
 
-        // Delete all collected triples
-        for triple in &triples_to_delete {
-            self.store.remove(triple);
-        }
+        // Delete from the resolved graph (buffered in an open transaction).
+        // Only triples that were actually present are logged.
+        if let Some(target) = target {
+            triples_to_delete
+                .retain(|triple| apply_triple_delete(&target, self.transaction_id, triple));
 
-        #[cfg(feature = "wal")]
-        for triple in &triples_to_delete {
-            log_rdf_wal(
-                &self.wal,
-                &grafeo_storage::wal::WalRecord::DeleteRdfTriple {
-                    subject: term_to_wal(triple.subject()),
-                    predicate: term_to_wal(triple.predicate()),
-                    object: term_to_wal(triple.object()),
-                    graph: None,
-                },
-            );
-        }
+            #[cfg(feature = "wal")]
+            for triple in &triples_to_delete {
+                log_rdf_wal(
+                    &self.wal,
+                    &grafeo_storage::wal::WalRecord::DeleteRdfTriple {
+                        subject: term_to_wal(triple.subject()),
+                        predicate: term_to_wal(triple.predicate()),
+                        object: term_to_wal(triple.object()),
+                        graph: self.graph_name.clone(),
+                    },
+                );
+            }
 
-        #[cfg(feature = "cdc")]
-        for triple in &triples_to_delete {
-            record_cdc_triple_delete(
-                &self.cdc_log,
-                triple.subject(),
-                triple.predicate(),
-                triple.object(),
-                None,
-                self.cdc_epoch,
-            );
+            #[cfg(feature = "cdc")]
+            for triple in &triples_to_delete {
+                record_cdc_triple_delete(
+                    &self.cdc_log,
+                    triple.subject(),
+                    triple.predicate(),
+                    triple.object(),
+                    self.graph_name.as_deref(),
+                    self.cdc_epoch,
+                );
+            }
         }
 
         self.done = true;
@@ -2591,35 +2703,54 @@ struct RdfModifyOperator {
     delete_templates: Vec<TripleTemplate>,
     insert_templates: Vec<TripleTemplate>,
     column_map: HashMap<String, usize>,
+    /// Open transaction the changes are buffered in.
+    transaction_id: Option<TransactionId>,
     done: bool,
+    #[cfg(feature = "wal")]
+    wal: Option<Arc<RdfWal>>,
     #[cfg(feature = "cdc")]
     cdc_log: Option<Arc<crate::cdc::CdcLog>>,
     #[cfg(feature = "cdc")]
     cdc_epoch: grafeo_common::types::EpochId,
 }
 
+/// DELETE and INSERT templates of a SPARQL MODIFY.
+struct ModifyTemplates {
+    delete: Vec<TripleTemplate>,
+    insert: Vec<TripleTemplate>,
+}
+
 impl RdfModifyOperator {
     fn new(
         store: Arc<RdfStore>,
         input: Box<dyn Operator>,
-        delete_templates: Vec<TripleTemplate>,
-        insert_templates: Vec<TripleTemplate>,
+        templates: ModifyTemplates,
         column_map: HashMap<String, usize>,
+        #[cfg(feature = "wal")] wal: Option<Arc<RdfWal>>,
         #[cfg(feature = "cdc")] cdc_log: Option<Arc<crate::cdc::CdcLog>>,
         #[cfg(feature = "cdc")] cdc_epoch: grafeo_common::types::EpochId,
     ) -> Self {
         Self {
             store,
             input,
-            delete_templates,
-            insert_templates,
+            delete_templates: templates.delete,
+            insert_templates: templates.insert,
             column_map,
+            transaction_id: None,
             done: false,
+            #[cfg(feature = "wal")]
+            wal,
             #[cfg(feature = "cdc")]
             cdc_log,
             #[cfg(feature = "cdc")]
             cdc_epoch,
         }
+    }
+
+    /// Buffers the changes in `transaction_id` when a transaction is open.
+    fn with_transaction(mut self, transaction_id: Option<TransactionId>) -> Self {
+        self.transaction_id = transaction_id;
+        self
     }
 
     fn resolve_component(
@@ -2710,6 +2841,12 @@ impl Operator for RdfModifyOperator {
         // matches the bound string. This handles the type mismatch without
         // changing the column type system.
         for template in &self.delete_templates {
+            // Resolve the target first; a missing named graph means nothing to delete.
+            let Some(target) =
+                resolve_mutation_graph(&self.store, template.graph.as_deref(), false)?
+            else {
+                continue;
+            };
             for (chunk, row) in &bindings {
                 let subject = self.resolve_component(&template.subject, chunk, *row);
                 let predicate = self.resolve_component(&template.predicate, chunk, *row);
@@ -2717,7 +2854,7 @@ impl Operator for RdfModifyOperator {
 
                 if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
                     let triple = Triple::new(s.clone(), p.clone(), o.clone());
-                    if !self.store.remove(&triple) {
+                    if !apply_triple_delete(&target, self.transaction_id, &triple) {
                         // Exact match failed: the object may be a plain string
                         // whose stored form is a typed literal (e.g. "1" vs
                         // xsd:integer "1"). Query by subject+predicate and
@@ -2728,9 +2865,8 @@ impl Operator for RdfModifyOperator {
                                 predicate: Some(p.clone()),
                                 object: None,
                             };
-                            let matching: Vec<_> = self
-                                .store
-                                .find(&pattern)
+                            let matching: Vec<_> = target
+                                .find_with_pending(&pattern, self.transaction_id)
                                 .into_iter()
                                 .filter(|t| {
                                     if let Term::Literal(lit) = t.object() {
@@ -2745,27 +2881,50 @@ impl Operator for RdfModifyOperator {
                                 })
                                 .collect();
                             for matched in matching {
+                                if !apply_triple_delete(&target, self.transaction_id, &matched) {
+                                    continue;
+                                }
+                                #[cfg(feature = "wal")]
+                                log_rdf_wal(
+                                    &self.wal,
+                                    &grafeo_storage::wal::WalRecord::DeleteRdfTriple {
+                                        subject: term_to_wal(matched.subject()),
+                                        predicate: term_to_wal(matched.predicate()),
+                                        object: term_to_wal(matched.object()),
+                                        graph: template.graph.clone(),
+                                    },
+                                );
                                 #[cfg(feature = "cdc")]
                                 record_cdc_triple_delete(
                                     &self.cdc_log,
                                     matched.subject(),
                                     matched.predicate(),
                                     matched.object(),
-                                    None,
+                                    template.graph.as_deref(),
                                     self.cdc_epoch,
                                 );
-                                self.store.remove(&matched);
                             }
-                            continue;
                         }
+                        // Nothing matched: nothing to log.
+                        continue;
                     }
+                    #[cfg(feature = "wal")]
+                    log_rdf_wal(
+                        &self.wal,
+                        &grafeo_storage::wal::WalRecord::DeleteRdfTriple {
+                            subject: term_to_wal(triple.subject()),
+                            predicate: term_to_wal(triple.predicate()),
+                            object: term_to_wal(triple.object()),
+                            graph: template.graph.clone(),
+                        },
+                    );
                     #[cfg(feature = "cdc")]
                     record_cdc_triple_delete(
                         &self.cdc_log,
                         triple.subject(),
                         triple.predicate(),
                         triple.object(),
-                        None,
+                        template.graph.as_deref(),
                         self.cdc_epoch,
                     );
                 }
@@ -2774,6 +2933,9 @@ impl Operator for RdfModifyOperator {
 
         // Step 3: Apply INSERT templates using the SAME bindings
         for template in &self.insert_templates {
+            // Resolve the target first (created if missing).
+            let target = resolve_mutation_graph(&self.store, template.graph.as_deref(), true)?
+                .expect("insert target is always present when create=true");
             for (chunk, row) in &bindings {
                 let subject = self.resolve_component(&template.subject, chunk, *row);
                 let predicate = self.resolve_component(&template.predicate, chunk, *row);
@@ -2781,16 +2943,28 @@ impl Operator for RdfModifyOperator {
 
                 if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
                     let triple = Triple::new(s, p, o);
+                    if !apply_triple_insert(&target, self.transaction_id, triple.clone()) {
+                        continue;
+                    }
+                    #[cfg(feature = "wal")]
+                    log_rdf_wal(
+                        &self.wal,
+                        &grafeo_storage::wal::WalRecord::InsertRdfTriple {
+                            subject: term_to_wal(triple.subject()),
+                            predicate: term_to_wal(triple.predicate()),
+                            object: term_to_wal(triple.object()),
+                            graph: template.graph.clone(),
+                        },
+                    );
                     #[cfg(feature = "cdc")]
                     record_cdc_triple_insert(
                         &self.cdc_log,
                         triple.subject(),
                         triple.predicate(),
                         triple.object(),
-                        None,
+                        template.graph.as_deref(),
                         self.cdc_epoch,
                     );
-                    self.store.insert(triple);
                 }
             }
         }
@@ -2817,18 +2991,22 @@ impl Operator for RdfModifyOperator {
 // RDF Union Operator
 // ============================================================================
 
-/// Operator that executes multiple operators in sequence.
-/// Used for UNION of INSERT operations.
+/// Emits the chunks of each (already width-aligned) UNION branch in turn,
+/// without de-duplication (SPARQL 1.1 sec 18.5).
 struct RdfUnionOperator {
     operators: Vec<Box<dyn Operator>>,
     current_idx: usize,
+    /// Unified output width (the number of columns in the union variable
+    /// domain). Every branch is null-padded to this width by `plan_union`.
+    expected_width: usize,
 }
 
 impl RdfUnionOperator {
-    fn new(operators: Vec<Box<dyn Operator>>) -> Self {
+    fn new(operators: Vec<Box<dyn Operator>>, expected_width: usize) -> Self {
         Self {
             operators,
             current_idx: 0,
+            expected_width,
         }
     }
 }
@@ -2839,7 +3017,19 @@ impl Operator for RdfUnionOperator {
         while self.current_idx < self.operators.len() {
             let op = &mut self.operators[self.current_idx];
             match op.next()? {
-                Some(chunk) => return Ok(Some(chunk)),
+                Some(chunk) => {
+                    debug_assert_eq!(
+                        chunk.column_count(),
+                        self.expected_width,
+                        "RdfUnion branch {} emitted a {}-column chunk but the unified \
+                         UNION schema is {} columns wide; branches must be null-padded \
+                         to a uniform width for DISTINCT / ORDER BY correctness",
+                        self.current_idx,
+                        chunk.column_count(),
+                        self.expected_width,
+                    );
+                    return Ok(Some(chunk));
+                }
                 None => self.current_idx += 1,
             }
         }
@@ -3482,6 +3672,8 @@ struct RdfTripleScanOperator {
     /// Optional term dictionary for dictionary-encoded output. When present,
     /// S/P/O variable columns emit Int64 term IDs instead of String values.
     dictionary: Option<Arc<grafeo_core::graph::rdf::TermDictionary>>,
+    /// Open transaction whose pending writes the scan must see.
+    transaction_id: Option<TransactionId>,
 }
 
 impl RdfTripleScanOperator {
@@ -3505,7 +3697,15 @@ impl RdfTripleScanOperator {
             triples: None,
             position: 0,
             dictionary: None,
+            transaction_id: None,
         }
+    }
+
+    /// Makes the scan see the pending writes of `transaction_id`
+    /// (read-your-writes inside an explicit transaction).
+    fn with_transaction(mut self, transaction_id: Option<TransactionId>) -> Self {
+        self.transaction_id = transaction_id;
+        self
     }
 
     /// Enables dictionary-encoded output for S/P/O columns.
@@ -3526,6 +3726,7 @@ impl RdfTripleScanOperator {
     fn ensure_triples(&mut self) {
         if self.triples.is_none() {
             let ctx = &self.graph_context;
+            let tx = self.transaction_id;
             self.triples = Some(if ctx.scan_all_graphs {
                 // GRAPH ?var: scan named graphs (restricted by FROM NAMED if present)
                 if let Some(ref ds) = ctx.dataset {
@@ -3533,14 +3734,17 @@ impl RdfTripleScanOperator {
                         // FROM NAMED restricts which named graphs are visible
                         let graph_refs: Vec<&str> =
                             ds.named_graphs.iter().map(String::as_str).collect();
-                        self.store.find_in_graphs(&self.pattern, Some(&graph_refs))
+                        self.store
+                            .find_in_graphs_with_pending(&self.pattern, Some(&graph_refs), tx)
                     } else {
                         // No FROM NAMED: all graphs visible
-                        self.store.find_in_graphs(&self.pattern, Some(&[]))
+                        self.store
+                            .find_in_graphs_with_pending(&self.pattern, Some(&[]), tx)
                     }
                 } else {
                     // No dataset restriction: scan all graphs
-                    self.store.find_in_graphs(&self.pattern, Some(&[]))
+                    self.store
+                        .find_in_graphs_with_pending(&self.pattern, Some(&[]), tx)
                 }
             } else if let Some(ref graph_iri) = ctx.graph {
                 // GRAPH <iri>: scan specific named graph (restricted by FROM NAMED if present)
@@ -3554,7 +3758,7 @@ impl RdfTripleScanOperator {
                         self.store
                             .graph(graph_iri)
                             .map(|g| {
-                                g.find(&self.pattern)
+                                g.find_with_pending(&self.pattern, tx)
                                     .into_iter()
                                     .map(|t| (Some(graph_iri.clone()), t))
                                     .collect()
@@ -3565,7 +3769,7 @@ impl RdfTripleScanOperator {
                     self.store
                         .graph(graph_iri)
                         .map(|g| {
-                            g.find(&self.pattern)
+                            g.find_with_pending(&self.pattern, tx)
                                 .into_iter()
                                 .map(|t| (Some(graph_iri.clone()), t))
                                 .collect()
@@ -3584,9 +3788,11 @@ impl RdfTripleScanOperator {
                             ds.default_graphs.iter().map(String::as_str).collect();
                         unique_graphs.sort_unstable();
                         unique_graphs.dedup();
-                        let mut results = self
-                            .store
-                            .find_in_graphs(&self.pattern, Some(&unique_graphs));
+                        let mut results = self.store.find_in_graphs_with_pending(
+                            &self.pattern,
+                            Some(&unique_graphs),
+                            tx,
+                        );
                         // Clear graph names so results appear as default-graph triples
                         for item in &mut results {
                             item.0 = None;
@@ -3597,6 +3803,13 @@ impl RdfTripleScanOperator {
                         // per SPARQL spec sec 13.2
                         Vec::new()
                     }
+                } else if let Some(tx) = tx.filter(|&tx| self.store.has_pending_ops(tx)) {
+                    // Inside a transaction with pending writes: read them too.
+                    self.store
+                        .find_with_pending(&self.pattern, Some(tx))
+                        .into_iter()
+                        .map(|t| (None, t))
+                        .collect()
                 } else {
                     // No dataset restriction: use actual default graph.
                     // Prefer Ring Index when available (O(log sigma) access).
@@ -4190,7 +4403,7 @@ impl RdfExpressionPredicate {
                 {
                     // Regex-based replace
                     let regex_pattern = if flags.contains('i') {
-                        format!("(?i){}", &pattern)
+                        format!("(?i){}", pattern)
                     } else {
                         pattern.clone()
                     };
@@ -5101,6 +5314,42 @@ fn strip_internal_columns(
     (stripped, output_columns)
 }
 
+/// Aligns a UNION branch to the unified columns by name, filling columns the
+/// branch does not bind with NULL.
+///
+/// A branch whose columns already equal the unified domain in order is returned
+/// unwrapped (this also covers branch 0 when no later branch adds a variable).
+fn pad_union_branch(
+    branch: Box<dyn Operator>,
+    branch_columns: &[String],
+    unified_columns: &[String],
+    unified_types: &[LogicalType],
+) -> Box<dyn Operator> {
+    if branch_columns == unified_columns {
+        return branch;
+    }
+
+    let local_index: HashMap<&str, usize> = branch_columns
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.as_str(), i))
+        .collect();
+
+    let projections: Vec<RdfProjectExpr> = unified_columns
+        .iter()
+        .map(|name| match local_index.get(name.as_str()) {
+            Some(&idx) => RdfProjectExpr::Column(idx),
+            None => RdfProjectExpr::Constant(Value::Null),
+        })
+        .collect();
+
+    Box::new(RdfProjectOperator::new(
+        branch,
+        projections,
+        unified_types.to_vec(),
+    ))
+}
+
 /// Converts an RDF Term to a string for IRI/blank node representation.
 fn term_to_string(term: &Term) -> String {
     match term {
@@ -5313,7 +5562,9 @@ fn resolve_expression(
 }
 
 // expression_to_string is now in planner/common.rs
-use crate::query::planner::common::expression_to_string;
+use crate::query::planner::common::{
+    expression_to_string, output_column_name, resolved_column_name,
+};
 
 /// Converts a value to its string representation.
 fn value_to_string(value: &Value) -> String {
@@ -6510,6 +6761,93 @@ mod tests {
         assert_eq!(rows, 2);
     }
 
+    /// White-box guard for the UNION output-arity fix: when a later branch
+    /// binds a variable absent from branch 0, `plan_union` must advertise the
+    /// UNION of the branch variable sets and every emitted chunk must be
+    /// null-padded to that unified width (not the branch-0 width). This is the
+    /// planner-level counterpart to the gtest oracles; a regression here is the
+    /// branch-0-only seed returning, which surfaces downstream as GRAFEO-X001 /
+    /// GRAFEO-V001 / silent SELECT-star corruption.
+    #[test]
+    fn test_plan_union_heterogeneous_pads_to_union_domain() {
+        let store = Arc::new(RdfStore::new());
+        // Branch 0 (?s <p> ?a) binds {s, a}; branch 1 (?s <q> ?b) binds {s, b}.
+        store.insert(Triple::new(
+            Term::iri("http://example.org/x"),
+            Term::iri("http://example.org/p"),
+            Term::literal("PVAL"),
+        ));
+        store.insert(Triple::new(
+            Term::iri("http://example.org/y"),
+            Term::iri("http://example.org/q"),
+            Term::literal("QVAL"),
+        ));
+        let planner = RdfPlanner::new(Arc::clone(&store));
+        let scan1 = LogicalOperator::TripleScan(TripleScanOp {
+            subject: TripleComponent::Variable("s".to_string()),
+            predicate: TripleComponent::Iri("http://example.org/p".to_string()),
+            object: TripleComponent::Variable("a".to_string()),
+            graph: None,
+            input: None,
+            dataset: None,
+        });
+        let scan2 = LogicalOperator::TripleScan(TripleScanOp {
+            subject: TripleComponent::Variable("s".to_string()),
+            predicate: TripleComponent::Iri("http://example.org/q".to_string()),
+            object: TripleComponent::Variable("b".to_string()),
+            graph: None,
+            input: None,
+            dataset: None,
+        });
+        let union = LogicalOperator::Union(crate::query::plan::UnionOp {
+            inputs: vec![scan1, scan2],
+        });
+        let physical = planner.plan(&LogicalPlan::new(union)).unwrap();
+
+        // The advertised schema is the UNION of the branch variable sets.
+        assert_eq!(physical.columns.len(), 3, "expected the union of {{s,a,b}}");
+        for v in ["s", "a", "b"] {
+            assert!(
+                physical.columns.iter().any(|c| c == v),
+                "unified UNION schema is missing variable '{v}': {:?}",
+                physical.columns
+            );
+        }
+        let a_idx = physical.columns.iter().position(|c| c == "a").unwrap();
+        let b_idx = physical.columns.iter().position(|c| c == "b").unwrap();
+
+        let mut op = physical.operator;
+        let mut rows = 0;
+        let mut saw_a_only = false;
+        let mut saw_b_only = false;
+        while let Ok(Some(chunk)) = op.next() {
+            // Every branch chunk is genuinely padded to the unified width.
+            assert_eq!(
+                chunk.column_count(),
+                3,
+                "branch chunk was not null-padded to the unified width"
+            );
+            for row in chunk.selected_indices() {
+                let a = chunk.column(a_idx).unwrap().get_value(row);
+                let b = chunk.column(b_idx).unwrap().get_value(row);
+                let a_null = matches!(a, None | Some(Value::Null));
+                let b_null = matches!(b, None | Some(Value::Null));
+                // Disjoint branches: exactly one of {a, b} is bound per row, and
+                // the absent branch's variable is UNBOUND (Null), never dropped.
+                assert!(
+                    a_null ^ b_null,
+                    "each row binds exactly one branch variable; got a={a:?}, b={b:?}"
+                );
+                saw_a_only |= b_null;
+                saw_b_only |= a_null;
+                rows += 1;
+            }
+        }
+        assert_eq!(rows, 2, "expected one row from each branch");
+        assert!(saw_a_only, "branch 0 row (a bound, b UNBOUND) missing");
+        assert!(saw_b_only, "branch 1 row (b bound, a UNBOUND) missing");
+    }
+
     #[test]
     fn test_plan_construct() {
         let store = Arc::new(RdfStore::new());
@@ -7024,6 +7362,8 @@ mod tests {
             predicate: TripleComponent::Iri("http://example.org/p".to_string()),
             object: TripleComponent::Literal(Value::String("o".into())),
             column_map: HashMap::new(),
+            graph: None,
+            transaction_id: None,
         };
         let op: Box<dyn Operator> = Box::new(RdfInsertPatternOperator::new(
             store,
@@ -7073,6 +7413,8 @@ mod tests {
             predicate: TripleComponent::Iri("http://example.org/p".to_string()),
             object: TripleComponent::Literal(Value::String("o".into())),
             column_map: HashMap::new(),
+            graph: None,
+            transaction_id: None,
         };
         let op: Box<dyn Operator> = Box::new(RdfDeletePatternOperator::new(
             store,
@@ -7177,9 +7519,13 @@ mod tests {
         let op: Box<dyn Operator> = Box::new(RdfModifyOperator::new(
             store,
             child,
-            vec![],
-            vec![],
+            ModifyTemplates {
+                delete: vec![],
+                insert: vec![],
+            },
             HashMap::new(),
+            #[cfg(feature = "wal")]
+            None,
             #[cfg(feature = "cdc")]
             None,
             #[cfg(feature = "cdc")]
@@ -7191,7 +7537,7 @@ mod tests {
 
     #[test]
     fn test_into_any_rdf_union_operator() {
-        let op: Box<dyn Operator> = Box::new(RdfUnionOperator::new(vec![]));
+        let op: Box<dyn Operator> = Box::new(RdfUnionOperator::new(vec![], 0));
         let any = op.into_any();
         assert!(any.downcast::<RdfUnionOperator>().is_ok());
     }

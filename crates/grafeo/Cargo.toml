@@ -2,6 +2,7 @@
 name = "grafeo"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "A high-performance, embeddable graph database with a Rust core and no required C dependencies"

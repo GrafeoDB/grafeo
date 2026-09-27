@@ -145,6 +145,24 @@ impl<'a> Parser<'a> {
         let where_clause = self.parse_where_clause()?;
         let solution_modifiers = self.parse_solution_modifiers()?;
 
+        // The target of `(expr AS ?v)` must not be in scope already (SPARQL 1.1
+        // sec 18.2.1): `SELECT (STR(?o) AS ?o) WHERE { ?s ?p ?o }` is an error,
+        // not a silent overwrite of the bound ?o.
+        if let Projection::Variables(variables) = &projection {
+            let mut in_scope = std::collections::HashSet::new();
+            collect_in_scope_variables(&where_clause, &mut in_scope);
+            if let Some(name) = variables
+                .iter()
+                .filter_map(|var| var.alias.as_deref())
+                .find(|alias| in_scope.contains(*alias))
+            {
+                return Err(self.error(&format!(
+                    "the target of AS must be a fresh variable, but '?{name}' is already bound \
+                     in the WHERE clause (SPARQL 1.1 sec 18.2.1)"
+                )));
+            }
+        }
+
         Ok(SelectQuery {
             modifier,
             projection,
@@ -574,6 +592,30 @@ impl<'a> Parser<'a> {
 
         if variables.is_empty() {
             return Err(self.error("expected '*' or variable list in SELECT"));
+        }
+
+        // The target of `(expr AS ?v)` must be a new variable (SPARQL 1.1
+        // sec 18.2.4.4): reject an alias that repeats another projected name.
+        // `SELECT ?s ?s` is left to the engine's duplicate-column check.
+        {
+            let mut seen: Vec<(&str, bool)> = Vec::with_capacity(variables.len());
+            for var in &variables {
+                let (name, is_alias): (&str, bool) = match (&var.alias, &var.expression) {
+                    (Some(alias), _) => (alias.as_str(), true),
+                    (None, Expression::Variable(name)) => (name.as_str(), false),
+                    (None, _) => continue,
+                };
+                let collides = seen.iter().any(|&(prev_name, prev_is_alias)| {
+                    prev_name == name && (prev_is_alias || is_alias)
+                });
+                if collides {
+                    return Err(self.error(&format!(
+                        "duplicate projection variable '?{name}' in SELECT: the target of AS \
+                         must be a fresh variable (SPARQL 1.1 sec 18.2.4.4)"
+                    )));
+                }
+                seen.push((name, is_alias));
+            }
         }
 
         Ok(Projection::Variables(variables))
@@ -2269,6 +2311,67 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Collects the variables in scope after evaluating `pattern` (SPARQL 1.1 sec
+/// 18.2.1): those bound by triple patterns, `BIND`, `VALUES`, `GRAPH ?g`,
+/// `SERVICE` and sub-select projections. `FILTER` and `MINUS` bind nothing.
+fn collect_in_scope_variables(pattern: &GraphPattern, out: &mut std::collections::HashSet<String>) {
+    match pattern {
+        GraphPattern::Basic(triples) => {
+            for triple in triples {
+                for term in [&triple.subject, &triple.object] {
+                    if let TripleTerm::Variable(name) = term {
+                        out.insert(name.clone());
+                    }
+                }
+                if let PropertyPath::Variable(name) = &triple.predicate {
+                    out.insert(name.clone());
+                }
+            }
+        }
+        GraphPattern::Group(patterns) | GraphPattern::Union(patterns) => {
+            for inner in patterns {
+                collect_in_scope_variables(inner, out);
+            }
+        }
+        GraphPattern::Optional(inner) => collect_in_scope_variables(inner, out),
+        GraphPattern::NamedGraph { graph, pattern } => {
+            if let VariableOrIri::Variable(name) = graph {
+                out.insert(name.clone());
+            }
+            collect_in_scope_variables(pattern, out);
+        }
+        GraphPattern::Service {
+            endpoint, pattern, ..
+        } => {
+            if let VariableOrIri::Variable(name) = endpoint {
+                out.insert(name.clone());
+            }
+            collect_in_scope_variables(pattern, out);
+        }
+        GraphPattern::Bind { variable, .. } => {
+            out.insert(variable.clone());
+        }
+        GraphPattern::InlineData(data) => out.extend(data.variables.iter().cloned()),
+        GraphPattern::SubSelect(query) => match &query.projection {
+            Projection::Wildcard => collect_in_scope_variables(&query.where_clause, out),
+            Projection::Variables(variables) => {
+                for var in variables {
+                    match (&var.alias, &var.expression) {
+                        (Some(alias), _) => {
+                            out.insert(alias.clone());
+                        }
+                        (None, Expression::Variable(name)) => {
+                            out.insert(name.clone());
+                        }
+                        (None, _) => {}
+                    }
+                }
+            }
+        },
+        GraphPattern::Minus(_) | GraphPattern::Filter(_) => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2646,6 +2749,98 @@ mod tests {
     fn test_parse_invalid_keyword_fails() {
         let result = parse("SELECTX ?x WHERE { ?x ?y ?z }");
         assert!(result.is_err(), "Invalid keyword should fail");
+    }
+
+    // --- duplicate projection aliases (SPARQL 1.1 sec 18.2.4.4) ---
+
+    #[test]
+    fn test_projection_duplicate_alias_fails() {
+        let result = parse("SELECT (?s AS ?x) (?o AS ?x) WHERE { ?s ?p ?o }");
+        assert!(result.is_err(), "Duplicate projection alias should fail");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("duplicate projection variable"),
+            "error should flag the duplicate projection variable"
+        );
+    }
+
+    #[test]
+    fn test_projection_alias_shadowing_bare_var_fails() {
+        let result = parse("SELECT ?x (?o AS ?x) WHERE { ?x ?p ?o }");
+        assert!(
+            result.is_err(),
+            "Alias shadowing a bare variable should fail"
+        );
+    }
+
+    #[test]
+    fn test_projection_distinct_aliases_ok() {
+        let result = parse("SELECT (?s AS ?a) (?o AS ?b) WHERE { ?s ?p ?o }");
+        assert!(result.is_ok(), "Distinct aliases must still parse");
+    }
+
+    #[test]
+    fn test_projection_bare_duplicate_variable_parses() {
+        // Rejected later by the engine's duplicate-column check, not the parser.
+        let result = parse("SELECT ?s ?s WHERE { ?s ?p ?o }");
+        assert!(
+            result.is_ok(),
+            "Bare duplicate variables parse; rejection is deferred to the engine"
+        );
+    }
+
+    // --- AS targets must not be in scope in WHERE (SPARQL 1.1 sec 18.2.1) ---
+
+    fn assert_alias_in_scope_error(query: &str, variable: &str) {
+        let err = parse(query).expect_err(query).to_string();
+        assert!(
+            err.contains(&format!(
+                "'?{variable}' is already bound in the WHERE clause"
+            )),
+            "{query}: {err}"
+        );
+    }
+
+    #[test]
+    fn test_projection_alias_bound_in_where_fails() {
+        // Bound by a triple pattern, used in its own expression or not.
+        assert_alias_in_scope_error("SELECT (STR(?o) AS ?o) WHERE { ?s ?p ?o }", "o");
+        assert_alias_in_scope_error("SELECT ?s (1 AS ?o) WHERE { ?s ?p ?o }", "o");
+        // Bound by a variable predicate, BIND, VALUES, GRAPH ?g, OPTIONAL, UNION.
+        assert_alias_in_scope_error("SELECT (1 AS ?p) WHERE { ?s ?p ?o }", "p");
+        assert_alias_in_scope_error("SELECT (1 AS ?x) WHERE { BIND(2 AS ?x) }", "x");
+        assert_alias_in_scope_error("SELECT (1 AS ?x) WHERE { VALUES ?x { 1 } }", "x");
+        assert_alias_in_scope_error("SELECT (1 AS ?g) WHERE { GRAPH ?g { ?s ?p ?o } }", "g");
+        assert_alias_in_scope_error(
+            "SELECT (1 AS ?o) WHERE { ?s ?p ?x OPTIONAL { ?s ?q ?o } }",
+            "o",
+        );
+        assert_alias_in_scope_error(
+            "SELECT (1 AS ?o) WHERE { { ?s ?p ?x } UNION { ?s ?q ?o } }",
+            "o",
+        );
+        // Projected by a sub-select.
+        assert_alias_in_scope_error(
+            "SELECT (1 AS ?c) WHERE { { SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o } } }",
+            "c",
+        );
+    }
+
+    #[test]
+    fn test_projection_alias_not_in_scope_parses() {
+        for query in [
+            "SELECT (COUNT(?s) AS ?n) WHERE { ?s ?p ?o }",
+            // MINUS and FILTER bind nothing.
+            "SELECT (1 AS ?x) WHERE { ?s ?p ?o MINUS { ?x ?p ?o } }",
+            "SELECT (1 AS ?x) WHERE { ?s ?p ?o FILTER(?x = 1) }",
+            // A sub-select's inner variables are not in scope outside it.
+            "SELECT (1 AS ?o) WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }",
+        ] {
+            assert!(parse(query).is_ok(), "{query} must parse");
+        }
     }
 
     // ==================== Recursion depth limit tests ====================

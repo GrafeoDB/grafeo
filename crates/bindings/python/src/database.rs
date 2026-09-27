@@ -3496,6 +3496,7 @@ fn extract_isolation_level(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<
     name = "IsolationLevel",
     eq,
     eq_int,
+    from_py_object,
     rename_all = "SCREAMING_SNAKE_CASE"
 )]
 #[derive(Clone, Copy, PartialEq, Eq)]

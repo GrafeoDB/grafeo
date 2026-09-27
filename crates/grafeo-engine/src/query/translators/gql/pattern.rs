@@ -546,7 +546,12 @@ impl GqlTranslator {
                 .clone()
                 .unwrap_or_else(|| format!("_anon_{}", rand_id()));
 
-            let edge_var = edge.variable.clone();
+            // An edge with a property map needs a variable to filter on, even
+            // when the pattern leaves it anonymous: `-[:T {w: 1}]->`.
+            let edge_var = edge
+                .variable
+                .clone()
+                .or_else(|| (!edge.properties.is_empty()).then(|| format!("_anon_{}", rand_id())));
             let edge_types = edge.types.clone();
 
             let direction = match edge.direction {

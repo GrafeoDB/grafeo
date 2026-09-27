@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn extracts_nodes_and_edges() {
-        let mut result = QueryResult::new(vec!["n".into(), "e".into()]);
+        let mut result = QueryResult::new(vec!["n".into(), "e".into()]).unwrap();
         result.push_row(vec![
             node_map(1, &["Person"], &[("name", Value::String("Alix".into()))]),
             edge_map(10, "KNOWS", 1, 2, &[("since", Value::Int64(2020))]),
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn deduplicates_by_id() {
-        let mut result = QueryResult::new(vec!["n".into()]);
+        let mut result = QueryResult::new(vec!["n".into()]).unwrap();
         result.push_row(vec![node_map(1, &["Person"], &[])]);
         result.push_row(vec![node_map(1, &["Person"], &[])]);
 
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn handles_empty_result() {
-        let result = QueryResult::new(vec![]);
+        let result = QueryResult::new(vec![]).unwrap();
         let (nodes, edges) = extract_entities(&result);
         assert!(nodes.is_empty());
         assert!(edges.is_empty());

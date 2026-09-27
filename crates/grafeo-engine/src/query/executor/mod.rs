@@ -104,7 +104,7 @@ impl Executor {
     /// Returns an error if operator execution fails or the query timeout is exceeded.
     pub fn execute(&self, operator: &mut dyn Operator) -> Result<QueryResult> {
         let _span = grafeo_debug_span!("grafeo::query::execute");
-        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone());
+        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
 
         loop {
@@ -149,6 +149,10 @@ impl Executor {
 
         let _span = grafeo_debug_span!("grafeo::query::execute_pipeline");
 
+        // Reject a duplicate result schema before running: the pipeline may
+        // contain mutations, which must not happen for a query that errors.
+        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
+
         let source = Box::new(OperatorSource::new(source));
         let collector = ChunkCollector::new();
 
@@ -166,7 +170,6 @@ impl Executor {
             .expect("sink should be ChunkCollector");
         let chunks = collector.into_chunks();
 
-        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone());
         let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
 
         for chunk in &chunks {
@@ -190,7 +193,7 @@ impl Executor {
         operator: &mut dyn Operator,
         limit: usize,
     ) -> Result<QueryResult> {
-        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone());
+        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         let mut collected = 0;
         let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
 
@@ -338,7 +341,7 @@ impl Executor {
         let mut wrapped = CardinalityTrackingWrapper::new(operator, "root", shared_ctx.clone());
 
         // Execute with tracking
-        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone());
+        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
         let mut total_rows: u64 = 0;
         let check_interval = config.min_rows;
@@ -566,6 +569,56 @@ mod tests {
         assert_eq!(result.row_count(), 1);
         // Types should remain as explicitly set (String), not changed to Int64
         assert_eq!(result.column_types, vec![LogicalType::String]);
+    }
+
+    /// Source that counts how often it is pulled, so tests can prove a query
+    /// was rejected before any operator (possibly a mutation) ran.
+    struct CountingOperator {
+        pulls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Operator for CountingOperator {
+        fn next(&mut self) -> grafeo_core::execution::operators::OperatorResult {
+            self.pulls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        }
+
+        fn reset(&mut self) {}
+
+        fn name(&self) -> &'static str {
+            "Counting"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    #[test]
+    fn test_duplicate_columns_rejected_before_any_operator_runs() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let duplicate = vec!["a".to_string(), "a".to_string()];
+        let executor = Executor::with_columns(duplicate);
+
+        let pulls = Arc::new(AtomicUsize::new(0));
+        let source = Box::new(CountingOperator {
+            pulls: Arc::clone(&pulls),
+        });
+        let err = executor.execute_pipeline(source, vec![]).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate column name 'a'"),
+            "{err}"
+        );
+        assert_eq!(pulls.load(Ordering::SeqCst), 0, "pipeline must not run");
+
+        let mut op = CountingOperator {
+            pulls: Arc::clone(&pulls),
+        };
+        assert!(executor.execute(&mut op).is_err());
+        assert!(executor.execute_with_limit(&mut op, 10).is_err());
+        assert_eq!(pulls.load(Ordering::SeqCst), 0, "pull path must not run");
     }
 
     #[test]

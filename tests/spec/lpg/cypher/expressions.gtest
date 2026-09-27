@@ -325,3 +325,16 @@ tests:
     expect:
       rows:
         - [true]
+
+  # Equality of temporal values and vectors (used to be always false)
+  - name: temporal_equality_in_expressions
+    query: "RETURN date('2024-03-15') = date('2024-03-15') AS d, datetime('2024-01-15T14:30:00Z') = datetime('2024-01-15T14:30:00Z') AS dt, duration('P1D') <> duration('P1D') AS ne, date('2024-03-15') = date('2024-03-16') AS diff"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: vector_equality_in_expressions
+    query: "RETURN vector([1.0, 2.0]) = vector([1.0, 2.0]) AS same, vector([1.0, 2.0]) = vector([1.0, 3.0]) AS diff"
+    expect:
+      rows:
+        - [true, false]

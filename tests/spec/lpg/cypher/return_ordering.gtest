@@ -150,3 +150,53 @@ tests:
       rows:
         - [1]
         - [2]
+
+  # ---------------------------------------------------------------------------
+  # Aggregates: columns are named and ordered as written
+  # ---------------------------------------------------------------------------
+
+  - name: unaliased_aggregate_after_aliased_key
+    setup:
+      - "CREATE (:Person {name: 'Alix', city: 'Amsterdam'})"
+      - "CREATE (:Person {name: 'Gus', city: 'Amsterdam'})"
+      - "CREATE (:Person {name: 'Vincent', city: 'Berlin'})"
+    query: "MATCH (p:Person) RETURN p.city AS city, count(p)"
+    expect:
+      columns: [city, count(p)]
+      rows:
+        - [Amsterdam, 2]
+        - [Berlin, 1]
+
+  - name: unaliased_aggregate_before_key_keeps_column_order
+    setup:
+      - "CREATE (:Person {name: 'Alix', city: 'Amsterdam'})"
+      - "CREATE (:Person {name: 'Gus', city: 'Amsterdam'})"
+      - "CREATE (:Person {name: 'Vincent', city: 'Berlin'})"
+    query: "MATCH (p:Person) RETURN count(p), p.city"
+    expect:
+      columns: [count(p), p.city]
+      rows:
+        - [1, Berlin]
+        - [2, Amsterdam]
+
+  - name: unaliased_aggregate_with_wrapped_aggregate
+    setup:
+      - "CREATE (:N {v: 1})"
+      - "CREATE (:N {v: 2})"
+    query: "MATCH (n:N) RETURN count(n), sum(n.v) + 1"
+    expect:
+      columns: [count(n), sum(n.v) + 1]
+      rows:
+        - [2, 4]
+
+  - name: with_aliased_key_and_aggregate
+    setup:
+      - "CREATE (:Person {name: 'Alix', city: 'Amsterdam'})"
+      - "CREATE (:Person {name: 'Gus', city: 'Amsterdam'})"
+      - "CREATE (:Person {name: 'Vincent', city: 'Berlin'})"
+    query: "MATCH (p:Person) WITH p.city AS city, count(p) AS n RETURN n, city"
+    expect:
+      columns: [n, city]
+      rows:
+        - [1, Berlin]
+        - [2, Amsterdam]

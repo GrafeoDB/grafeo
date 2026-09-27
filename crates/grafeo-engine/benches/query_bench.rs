@@ -41,7 +41,7 @@ fn setup_social_graph(node_count: usize, edge_multiplier: usize) -> GrafeoDB {
         session.execute(&query).unwrap();
     }
 
-    // Create KNOWS edges using CREATE (not INSERT - INSERT doesn't work after MATCH in GQL)
+    // Create KNOWS edges (CREATE and INSERT are equivalent after MATCH in GQL)
     let edge_count = node_count * edge_multiplier;
     for i in 0..edge_count {
         let src = i % node_count;

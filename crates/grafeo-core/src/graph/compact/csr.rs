@@ -206,14 +206,18 @@ impl CsrAdjacency {
     }
 
     /// Serializes this CSR to a byte buffer.
-    pub fn write_to(&self, buf: &mut Vec<u8>) {
+    ///
+    /// # Errors
+    ///
+    /// Fails if an array length does not fit the format's `u32` fields.
+    pub fn write_to(&self, buf: &mut Vec<u8>) -> grafeo_common::utils::error::Result<()> {
         // offsets
-        write_usize_as_u32(buf, self.offsets.len());
+        write_usize_as_u32(buf, self.offsets.len())?;
         for &o in &self.offsets {
             buf.extend_from_slice(&o.to_le_bytes());
         }
         // targets
-        write_usize_as_u32(buf, self.targets.len());
+        write_usize_as_u32(buf, self.targets.len())?;
         for &t in &self.targets {
             buf.extend_from_slice(&t.to_le_bytes());
         }
@@ -221,13 +225,14 @@ impl CsrAdjacency {
         match &self.edge_data {
             Some(ed) => {
                 buf.push(1);
-                write_usize_as_u32(buf, ed.len());
+                write_usize_as_u32(buf, ed.len())?;
                 for &d in ed {
                     buf.extend_from_slice(&d.to_le_bytes());
                 }
             }
             None => buf.push(0),
         }
+        Ok(())
     }
 
     /// Deserializes a CSR from a byte buffer at the given offset.
@@ -273,9 +278,10 @@ impl CsrAdjacency {
     }
 }
 
-fn write_usize_as_u32(buf: &mut Vec<u8>, v: usize) {
-    let n = u32::try_from(v).expect("value exceeds u32::MAX in CSR serialization");
+fn write_usize_as_u32(buf: &mut Vec<u8>, v: usize) -> grafeo_common::utils::error::Result<()> {
+    let n = crate::codec::limits::checked_u32(v, "compact store adjacency size")?;
     buf.extend_from_slice(&n.to_le_bytes());
+    Ok(())
 }
 
 fn read_u32_le(data: &[u8], pos: &mut usize) -> Result<u32, &'static str> {

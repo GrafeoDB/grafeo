@@ -6,8 +6,8 @@
 //! 3. If not found, create the element (optionally apply ON CREATE SET)
 
 use super::{
-    ConstraintValidator, ExpressionPredicate, Operator, OperatorResult, PropertySource,
-    SessionContext,
+    ConstraintValidator, ExpressionPredicate, Operator, OperatorError, OperatorResult,
+    PropertySource, SessionContext,
 };
 use crate::execution::chunk::{DataChunk, DataChunkBuilder};
 use crate::graph::{GraphStore, GraphStoreMut, GraphStoreSearch};
@@ -451,8 +451,18 @@ impl MergeOperator {
         let store_ref: &dyn GraphStore = self.store.as_ref();
         // Match properties cannot reference the MERGE variable (ISO §15.5),
         // so they resolve against the input chunk directly.
-        let resolved_match =
-            Self::resolve_properties(&self.config.match_properties, chunk, row, store_ref);
+        let resolved_match = resolve_match_properties(
+            &self.config.match_properties,
+            chunk,
+            row,
+            store_ref,
+            MatchContext {
+                search_store: self.search_store.as_ref(),
+                session_context: &self.session_context,
+                viewing_epoch: self.viewing_epoch,
+                transaction_id: self.transaction_id,
+            },
+        )?;
 
         if let Some(existing_id) = self.find_matching_node(&resolved_match) {
             // Resolve ON MATCH SET against an augmented row containing the
@@ -790,14 +800,28 @@ impl MergeRelationshipOperator {
                 continue;
             }
 
-            if let Some(edge) = self.store.get_edge(edge_id) {
+            // Same as `find_matching_node`: edges this transaction created
+            // earlier in the statement sit at `EpochId::PENDING`, so the
+            // unversioned read would hide them and every repeated row would
+            // create another edge.
+            let edge_opt = match (self.viewing_epoch, self.transaction_id) {
+                (Some(epoch), Some(tid)) => self.store.get_edge_versioned(edge_id, epoch, tid),
+                _ => self.store.get_edge(edge_id),
+            };
+            if let Some(edge) = edge_opt {
                 if edge.edge_type.as_str() != self.config.edge_type {
                     continue;
                 }
 
-                let has_all_props = resolved_match_props
-                    .iter()
-                    .all(|(key, expected)| edge.get_property(key).is_some_and(|v| v == expected));
+                let has_all_props = resolved_match_props.iter().all(|(key, expected)| {
+                    let prop = edge.get_property(key);
+                    if expected.is_null() {
+                        // Null in a MERGE pattern matches both absent and explicitly null properties
+                        prop.is_none_or(Value::is_null)
+                    } else {
+                        prop.is_some_and(|v| v == expected)
+                    }
+                });
 
                 if has_all_props {
                     return Some(edge_id);
@@ -972,12 +996,18 @@ impl Operator for MergeRelationshipOperator {
                     })?;
 
                 let store_ref: &dyn GraphStore = self.store.as_ref();
-                let resolved_match = MergeOperator::resolve_properties(
+                let resolved_match = resolve_match_properties(
                     &self.config.match_properties,
                     Some(&chunk),
                     row,
                     store_ref,
-                );
+                    MatchContext {
+                        search_store: self.search_store.as_ref(),
+                        session_context: &self.session_context,
+                        viewing_epoch: self.viewing_epoch,
+                        transaction_id: self.transaction_id,
+                    },
+                )?;
 
                 let edge_id = if let Some(existing) =
                     self.find_matching_edge(src_val, dst_val, &resolved_match)
@@ -1050,6 +1080,46 @@ impl Operator for MergeRelationshipOperator {
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
     }
+}
+
+/// What a MERGE needs to evaluate computed match properties.
+struct MatchContext<'a> {
+    search_store: Option<&'a Arc<dyn GraphStoreSearch>>,
+    session_context: &'a SessionContext,
+    viewing_epoch: Option<EpochId>,
+    transaction_id: Option<TransactionId>,
+}
+
+/// Resolves MERGE match properties for one row. Computed values such as
+/// `MERGE (:X {id: toString(i)})` are evaluated against the input row; they
+/// used to resolve to NULL, so every row matched or created the same node.
+fn resolve_match_properties(
+    props: &[(String, PropertySource)],
+    chunk: Option<&DataChunk>,
+    row: usize,
+    store: &dyn GraphStore,
+    context: MatchContext<'_>,
+) -> Result<Vec<(String, Value)>, OperatorError> {
+    if !MergeOperator::has_expression_source(props) {
+        return Ok(MergeOperator::resolve_properties(props, chunk, row, store));
+    }
+    let chunk = chunk.ok_or_else(|| {
+        OperatorError::Execution(
+            "computed MERGE property without an input row; planner did not provide one".to_string(),
+        )
+    })?;
+    super::mutation::PropertyExpressions::new(
+        context.search_store.cloned(),
+        context.session_context.clone(),
+    )
+    .resolve_row(
+        props,
+        chunk,
+        row,
+        store,
+        context.viewing_epoch,
+        context.transaction_id,
+    )
 }
 
 #[cfg(all(test, feature = "lpg"))]

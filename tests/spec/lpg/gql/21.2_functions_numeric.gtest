@@ -162,9 +162,21 @@ tests:
   - name: power_returns_result
     query: RETURN 2.0 ^ 10.0 AS r
     expect:
-      count: 1
+      precision: 6
+      rows:
+        - [1024.0]
 
   - name: power_square_root
     query: RETURN 9.0 ^ 0.5 AS r
     expect:
-      count: 1
+      precision: 6
+      rows:
+        - [3.0]
+
+  # `^` binds tighter than `*` and is right associative: (2 ^ (3 ^ 2)) * 2.
+  - name: power_precedence_and_associativity
+    query: RETURN 2.0 ^ 3.0 ^ 2.0 * 2.0 AS r
+    expect:
+      precision: 6
+      rows:
+        - [1024.0]

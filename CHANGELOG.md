@@ -2,6 +2,63 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.5.43] - 2026-09-27
+
+Stabilization release. Fixes for silent wrong results (`ORDER BY` + `LIMIT`, `UNION`, aggregates, duplicate column names, SPARQL named graphs and property paths), queries whose trailing statements were ignored, rollbacks that did not undo changes on persistent databases or SPARQL updates, databases over 4 GiB written corrupt, edges lost after `compact()` and HNSW vector updates, plus dependency and security updates.
+
+### Added
+
+- **Gremlin negated text predicates**: `notRegex()`, `notContaining()`, `notStartingWith()` and `notEndingWith()` in `has()` filters, e.g. `g.V().has('city', notStartingWith('Am'))`. ([#336](https://github.com/GrafeoDB/grafeo/pull/336), [#340](https://github.com/GrafeoDB/grafeo/pull/340), [@jakeboone02](https://github.com/jakeboone02))
+
+### Changed
+
+- **Breaking (Rust API): `QueryResult::new`, `with_types` and `from_rows` return `Result`** and reject repeated column names ([#371](https://github.com/GrafeoDB/grafeo/issues/371)). Add `?` or `.unwrap()` at call sites.
+- **Unaliased columns are named after their expression, as written**: `RETURN id(a), n.a + 1, count(b), 'x'` yields `id(a)`, `n.a + 1`, `count(b)` and `'x'` instead of `id(...)`, `expr`, `count(...)` and `String("x")`. `CASE`, `reduce`, list comprehensions, map projections and aggregate parameters (`percentile_cont(x, 0.9)`) are rendered too. Aliased columns are unchanged. ([#350](https://github.com/GrafeoDB/grafeo/pull/350), [#372](https://github.com/GrafeoDB/grafeo/pull/372))
+- **`restore_to_epoch()` refuses to overwrite an existing database** or its `.wal` sidecar; restore to a fresh path instead. ([#363](https://github.com/GrafeoDB/grafeo/pull/363), [@teipsum](https://github.com/teipsum))
+- **Node.js: transaction queries run on a worker thread**, like `Database.execute()`, so they no longer block the event loop. `commit()` and `rollback()` now throw while a query from the same transaction is still running.
+- **Queries with trailing input are rejected** ([#380](https://github.com/GrafeoDB/grafeo/issues/380)): GQL, Cypher and Gremlin now fail with a syntax error when text follows the statement, when several statements are separated by `;` (a trailing `;` is fine), or, in GQL, when clauses come in an order the parser does not support yet (e.g. `SET ... DELETE`). These used to run only the first part.
+- **Breaking (Rust, `grafeo-core`): `ColumnCodec::write_to`, `write_to_v2`, `write_to_v3` and `CsrAdjacency::write_to` return `Result`**, failing instead of writing a truncated size ([#392](https://github.com/GrafeoDB/grafeo/issues/392)).
+- **Rust toolchain pinned to 1.98.1** for local builds and CI. The MSRV stays 1.91.1, and the `grafeo` crate now declares it ([#390](https://github.com/GrafeoDB/grafeo/issues/390)).
+
+### Fixed
+
+- **GQL ran only the first statement and ignored the rest** ([#380](https://github.com/GrafeoDB/grafeo/issues/380)): `INSERT ... INSERT ...` (as in the quickstart) created only the first node, `INSERT ... RETURN` ignored its `RETURN`, and any other text after a statement was silently dropped. Consecutive `INSERT` clauses and `INSERT ... RETURN` now work. Gremlin (text after an unknown character) and Cypher (text after schema statements) had the same gap.
+- **GQL `^` (power) was not parsed**: `RETURN 2 ^ 10` returned `2`. It now computes the power, binding tighter than `*` and right associative.
+- **`ALTER NODE TYPE / ALTER EDGE TYPE ... ADD PROPERTY name TYPE` added a property called `PROPERTY`** of type `name` and dropped the real type; `DROP PROPERTY name` dropped the wrong property. `PROPERTY` is now an optional keyword.
+- **Databases over the storage format's limits were written corrupt** ([#392](https://github.com/GrafeoDB/grafeo/issues/392)): an LPG section over 4 GiB, more than 65,535 blocks, or more than 65,535 labels on one node or versions of one property wrapped a size field, and the file failed to open with `block N CRC mismatch`. Such a checkpoint now fails with an error naming the limit, the sidecar WAL is kept and nothing is lost. RDF and compact-store sections get the same checks; the compact store used to panic on names over 64 KiB. Support for larger sections is planned for 0.5.44.
+- **Rolling back a transaction on a persistent database did not undo `SET`, `REMOVE` or label changes**: they stayed applied after `rollback()`, and single-file databases wrote them to disk on `close()`. In-memory databases were not affected.
+- **`ORDER BY ... LIMIT` over a whole-node `RETURN` returned raw NodeIds** instead of node maps, both for property sort keys ([#335](https://github.com/GrafeoDB/grafeo/issues/335)) and for expression keys such as `text_score(...)`, `CASE` or arithmetic ([#347](https://github.com/GrafeoDB/grafeo/issues/347)). ([#337](https://github.com/GrafeoDB/grafeo/pull/337), [#349](https://github.com/GrafeoDB/grafeo/pull/349), [@temporaryfix](https://github.com/temporaryfix))
+- **Duplicate column names silently lost data** ([#371](https://github.com/GrafeoDB/grafeo/issues/371)), e.g. `RETURN id(s), id(t)` or `RETURN a.name, a.name`. Distinct expressions now get distinct names, and a result that would still repeat a name is an error asking for an alias. In SPARQL, an `AS ?x` that repeats another projected name or a variable bound in `WHERE` is a parse error. ([#372](https://github.com/GrafeoDB/grafeo/pull/372), [@teipsum](https://github.com/teipsum); [#350](https://github.com/GrafeoDB/grafeo/pull/350), [@temporaryfix](https://github.com/temporaryfix))
+- **`UNION` with differing branches** ([#365](https://github.com/GrafeoDB/grafeo/issues/365)): SPARQL now returns every variable from every branch, unbound where a branch lacks it. GQL and Cypher reject branches with a different number of columns or differently named columns instead of padding or truncating them, also in chains (`a UNION b UNION c`) and for branches that return only aggregates. ([#366](https://github.com/GrafeoDB/grafeo/pull/366), [@teipsum](https://github.com/teipsum))
+- **Aggregates next to aliased or later items** (GQL and Cypher): `RETURN n.city AS city, count(n)` and `RETURN count(n), sum(n.v) + 1` failed with `Undefined variable '_agg_0'`, `RETURN count(n), n.city` returned its columns in the wrong order, a `GROUP BY` key that was not returned appeared as an extra column, and `CALL ... RETURN count(x) GROUP BY y` ignored its `GROUP BY`.
+- **SPARQL updates ignored open transactions**: `INSERT ... WHERE`, `DELETE WHERE` and `DELETE/INSERT ... WHERE` applied immediately, so `rollback()` did not undo them, and `INSERT DATA` / `DELETE DATA` on a named graph inside a transaction was dropped on commit. All updates now apply on commit and are discarded on rollback, and queries inside a transaction see its own earlier writes.
+- **SPARQL `FROM` and `WITH <g>` did not apply inside subqueries**: a nested `SELECT` read the default graph instead of the query's dataset.
+- **SPARQL updates on named graphs went to the wrong graph or were lost** ([#367](https://github.com/GrafeoDB/grafeo/issues/367)): `INSERT`/`DELETE ... WHERE` with `GRAPH <g>` or `WITH <g>` now targets the named graph and survives a restart. `USING` / `USING NAMED` is rejected until it is supported. ([#368](https://github.com/GrafeoDB/grafeo/pull/368), [@teipsum](https://github.com/teipsum))
+- **SPARQL `path+` returned only direct neighbours** ([#369](https://github.com/GrafeoDB/grafeo/issues/369)); it now returns the full transitive closure. ([#370](https://github.com/GrafeoDB/grafeo/pull/370), [@teipsum](https://github.com/teipsum))
+- **Edges disappeared after `compact()`** once an endpoint was modified ([#345](https://github.com/GrafeoDB/grafeo/issues/345)). Deleted edges also no longer reappear or show up as neighbours. ([#346](https://github.com/GrafeoDB/grafeo/pull/346), [@temporaryfix](https://github.com/temporaryfix))
+- **Updating an indexed vector could make other vectors unfindable** ([#374](https://github.com/GrafeoDB/grafeo/issues/374)). Removing or replacing the HNSW entry point also no longer leaves the upper index layers unreachable. ([#375](https://github.com/GrafeoDB/grafeo/pull/375), [@jarmen423](https://github.com/jarmen423))
+- **Filters on edge properties or map values returned no rows** when nodes had a property with the same name: `MATCH ()-[r]->() WHERE r.id = 'e1'`, `-[r {id: 'e1'}]->`, `UNWIND [{id: 'a'}] AS m WHERE m.id = 'a'` and similar filters were answered from node statistics. Filters on values written earlier in the same query (`SET ... WITH ... WHERE`) had the same problem.
+- **Property maps on anonymous edges were ignored**: `()-[:T {since: 2020}]->()` in Cypher and GQL matched every `T` edge.
+- **Deleted nodes stayed in property and vector indexes**: `find_nodes_by_property` kept returning a deleted node, so a re-created node with the same key was found twice, and a vector search after `DELETE` could still return it. The lookup API also returned nodes from transactions that had not committed yet. Rolling back a delete or a `SET` now restores the index entries.
+- **Computed property values in `CREATE`, `INSERT` and `MERGE`**: `CREATE (:X {id: toString(i)})`, `i * 2` or `'v' + toString(i)` failed with an internal error, and `MERGE (:X {id: toString(i)})` silently used `null`, so every row matched or created the same node. They are now evaluated per row.
+- **`MERGE` created duplicate relationships** when several rows of one statement merged the same edge (`UNWIND [1, 2] AS i MATCH (a), (b) MERGE (a)-[:T]->(b)` created two). A `null` in a relationship's `MERGE` pattern now also matches an absent property, as it already did for nodes.
+- **`=` and `<>` on dates, times, datetimes, durations and vectors were always false / true** in expressions, e.g. `RETURN date('2024-01-01') = date('2024-01-01')`, `x IN [date(...)]` or a comparison after `WITH`. Filters answered directly from a node property were not affected.
+- **Python: naive `datetime` values were read as local time** but returned as UTC, so they shifted by the machine's UTC offset on a round trip; they are now UTC both ways. Microseconds are no longer rounded, dates before 1970 work on Windows, and the Python 3.12 `utcfromtimestamp` deprecation warning is gone.
+- **Storage docs**: the `.grafeo` sidecar WAL is removed on a clean `close()`, not after every checkpoint. ([#364](https://github.com/GrafeoDB/grafeo/pull/364), [@teipsum](https://github.com/teipsum))
+
+### Security
+
+- Fixed RUSTSEC-2026-0190 (anyhow), RUSTSEC-2026-0186 (memmap2), RUSTSEC-2026-0204 (crossbeam-epoch), RUSTSEC-2026-0258 (h2) and RUSTSEC-2026-0285 (rustls), and replaced two yanked crates (chacha20, der).
+- **Python bindings on PyO3 0.29**, fixing RUSTSEC-2026-0176 and RUSTSEC-2026-0177. No Python API changes.
+
+### Dependencies
+
+- Arrow and Parquet 59, aes-gcm 0.11, comfy-table 8, tikv-jemallocator 0.7 and hf-hub 1.0, among others ([#396](https://github.com/GrafeoDB/grafeo/pull/396)). The `embed` feature now downloads models through hf-hub's new client; models already in the Hugging Face cache are reused.
+
+---
+
+Thanks to [@teipsum](https://github.com/teipsum) for six PRs and the detailed reports behind them, to [@temporaryfix](https://github.com/temporaryfix) for [#346](https://github.com/GrafeoDB/grafeo/pull/346), [#349](https://github.com/GrafeoDB/grafeo/pull/349) and [#350](https://github.com/GrafeoDB/grafeo/pull/350) and the root-cause analysis on [#335](https://github.com/GrafeoDB/grafeo/issues/335), to [@jakeboone02](https://github.com/jakeboone02) for the Gremlin predicates, to [@jarmen423](https://github.com/jarmen423) for the HNSW fix, and to [@stiff](https://github.com/stiff), [@halaharvi](https://github.com/halaharvi), [@GanbaruTobi](https://github.com/GanbaruTobi) and [@cuongvo](https://github.com/cuongvo) for their reports. The filter, index and `MERGE` fixes come from reports by the Deriva project.
+
 ## [0.5.42] - 2026-05-04
 
 End-to-end tiered storage: section data (LPG, RDF Ring, vector topology) can spill to mmap-backed disk under memory pressure or explicit configuration, with per-section tier overrides, introspection, and reload. Plus per-block columnar zone maps for selective range scans, paged HNSW topology, packed RDF Ring on disk, a WAL overlay for mutating mmap'd compact stores and a streaming top-K operator that fuses `ORDER BY ... LIMIT` into a single bounded-heap pass.

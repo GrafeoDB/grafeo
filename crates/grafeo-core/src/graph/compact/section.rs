@@ -19,6 +19,7 @@ use super::node_table::NodeTable;
 use super::rel_table::RelTable;
 use super::schema::{ColumnDef, ColumnType, EdgeSchema, TableSchema};
 use super::zone_map::ZoneMap;
+use crate::codec::limits::{checked_u16, checked_u32};
 use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
 
 /// Magic bytes identifying a CompactStore section.
@@ -122,19 +123,19 @@ impl CompactStoreSection {
         buf.push(flags);
 
         // Node tables.
-        write_len(&mut buf, store.node_tables_by_id.len());
+        write_len(&mut buf, store.node_tables_by_id.len())?;
         for nt in &store.node_tables_by_id {
-            write_str(&mut buf, nt.label());
-            write_len(&mut buf, nt.len());
+            write_str(&mut buf, nt.label())?;
+            write_len(&mut buf, nt.len())?;
             let columns = nt.columns();
             let zone_maps = nt.zone_maps();
-            write_len(&mut buf, columns.len());
+            write_len(&mut buf, columns.len())?;
             for (key, codec) in columns {
-                write_str(&mut buf, key.as_str());
+                write_str(&mut buf, key.as_str())?;
                 // Zone map for this column.
                 if let Some(zm) = zone_maps.get(key) {
                     buf.push(1);
-                    write_zone_map(&mut buf, zm);
+                    write_zone_map(&mut buf, zm)?;
                 } else {
                     buf.push(0);
                 }
@@ -143,34 +144,34 @@ impl CompactStoreSection {
                     &mut buf,
                     version,
                     nt.block_zone_maps().get(key).map(Vec::as_slice),
-                );
+                )?;
             }
         }
 
         // Relationship tables.
-        write_len(&mut buf, store.rel_tables_by_id.len());
+        write_len(&mut buf, store.rel_tables_by_id.len())?;
         for rt in &store.rel_tables_by_id {
-            write_str(&mut buf, rt.edge_type().as_str());
+            write_str(&mut buf, rt.edge_type().as_str())?;
             write_u16(&mut buf, rt.src_table_id());
             write_u16(&mut buf, rt.dst_table_id());
-            rt.fwd().write_to(&mut buf);
+            rt.fwd().write_to(&mut buf)?;
             if let Some(bwd) = rt.bwd() {
                 buf.push(1);
-                bwd.write_to(&mut buf);
+                bwd.write_to(&mut buf)?;
             } else {
                 buf.push(0);
             }
             let properties = rt.properties();
-            write_len(&mut buf, properties.len());
+            write_len(&mut buf, properties.len())?;
             for (key, codec) in properties {
-                write_str(&mut buf, key.as_str());
+                write_str(&mut buf, key.as_str())?;
                 // Edge property columns don't track per-block zone maps
                 // yet; v3 will compute them inline during write.
-                write_codec(codec, &mut buf, version, None);
+                write_codec(codec, &mut buf, version, None)?;
             }
         }
         // Continue building buf in `serialize()` epilogue.
-        Ok(self.append_id_maps_and_crc(buf, store, version))
+        self.append_id_maps_and_crc(buf, store, version)
     }
 
     /// Appends ID maps (if applicable) and trailing CRC to the buffer.
@@ -179,11 +180,11 @@ impl CompactStoreSection {
         mut buf: Vec<u8>,
         store: &CompactStore,
         _version: u8,
-    ) -> Vec<u8> {
+    ) -> grafeo_common::utils::error::Result<Vec<u8>> {
         // ID maps.
         if store.preserves_ids() {
             if let Some(ref node_map) = store.node_id_map {
-                write_len(&mut buf, node_map.len());
+                write_len(&mut buf, node_map.len())?;
                 for (&nid, &(tid, off)) in node_map {
                     write_u64(&mut buf, nid.as_u64());
                     write_u16(&mut buf, tid);
@@ -191,7 +192,7 @@ impl CompactStoreSection {
                 }
             }
             if let Some(ref edge_map) = store.edge_id_map {
-                write_len(&mut buf, edge_map.len());
+                write_len(&mut buf, edge_map.len())?;
                 for (&eid, &(rtid, pos)) in edge_map {
                     write_u64(&mut buf, eid.as_u64());
                     write_u16(&mut buf, rtid);
@@ -203,7 +204,7 @@ impl CompactStoreSection {
         // CRC32 at end.
         let crc = crc32fast::hash(&buf);
         buf.extend_from_slice(&crc.to_le_bytes());
-        buf
+        Ok(buf)
     }
 }
 
@@ -222,7 +223,7 @@ fn write_codec(
     buf: &mut Vec<u8>,
     version: u8,
     block_stats_hint: Option<&[ZoneMap]>,
-) {
+) -> grafeo_common::utils::error::Result<()> {
     match version {
         FORMAT_VERSION_V1 => codec.write_to(buf),
         FORMAT_VERSION_V2 => codec.write_to_v2(buf),
@@ -538,27 +539,34 @@ fn write_u64(buf: &mut Vec<u8>, v: u64) {
     buf.extend_from_slice(&v.to_le_bytes());
 }
 
-fn write_len(buf: &mut Vec<u8>, v: usize) {
-    let n = u32::try_from(v).expect("length exceeds u32::MAX in compact section");
+fn write_len(buf: &mut Vec<u8>, v: usize) -> grafeo_common::utils::error::Result<()> {
+    let n = checked_u32(v, "compact store length")?;
     buf.extend_from_slice(&n.to_le_bytes());
+    Ok(())
 }
 
-fn write_str(buf: &mut Vec<u8>, s: &str) {
+/// Labels, edge types and property keys are stored with a `u16` length, so a
+/// name over 64 KiB cannot be written.
+fn write_str(buf: &mut Vec<u8>, s: &str) -> grafeo_common::utils::error::Result<()> {
     let bytes = s.as_bytes();
-    let slen = u16::try_from(bytes.len()).expect("string exceeds u16::MAX in compact section");
-    write_u16(buf, slen);
+    write_u16(buf, checked_u16(bytes.len(), "compact store name length")?);
     buf.extend_from_slice(bytes);
+    Ok(())
 }
 
-fn write_zone_map(buf: &mut Vec<u8>, zm: &ZoneMap) {
-    write_len(buf, zm.null_count);
-    write_len(buf, zm.row_count);
+fn write_zone_map(buf: &mut Vec<u8>, zm: &ZoneMap) -> grafeo_common::utils::error::Result<()> {
+    write_len(buf, zm.null_count)?;
+    write_len(buf, zm.row_count)?;
     // Encode min/max as (tag, value) pairs.
-    write_optional_value(buf, &zm.min);
-    write_optional_value(buf, &zm.max);
+    write_optional_value(buf, &zm.min)?;
+    write_optional_value(buf, &zm.max)?;
+    Ok(())
 }
 
-fn write_optional_value(buf: &mut Vec<u8>, v: &Option<grafeo_common::types::Value>) {
+fn write_optional_value(
+    buf: &mut Vec<u8>,
+    v: &Option<grafeo_common::types::Value>,
+) -> grafeo_common::utils::error::Result<()> {
     match v {
         None => buf.push(0),
         Some(grafeo_common::types::Value::Int64(n)) => {
@@ -572,13 +580,14 @@ fn write_optional_value(buf: &mut Vec<u8>, v: &Option<grafeo_common::types::Valu
         }
         Some(grafeo_common::types::Value::String(s)) => {
             buf.push(3);
-            write_str(buf, s.as_str());
+            write_str(buf, s.as_str())?;
         }
         Some(_) => {
             // Unsupported type for zone map: write as absent.
             buf.push(0);
         }
     }
+    Ok(())
 }
 
 // ── Read helpers ───────────────────────────────────────────────────
@@ -707,6 +716,52 @@ mod tests {
         let restored = section2.store().unwrap();
         assert_eq!(restored.node_count(), 0);
         assert_eq!(restored.edge_count(), 0);
+    }
+
+    /// Names are stored with a u16 length: one over 64 KiB is a serialization
+    /// error (it used to panic), and names at the limit still round-trip.
+    #[test]
+    fn test_name_over_u16_limit_is_an_error_not_a_panic() {
+        let too_long = "x".repeat(usize::from(u16::MAX) + 1);
+        for (what, store) in [
+            ("label", {
+                let store = LpgStore::new().unwrap();
+                store.create_node(&[too_long.as_str()]);
+                store
+            }),
+            ("property key", {
+                let store = LpgStore::new().unwrap();
+                let n = store.create_node(&["Person"]);
+                store.set_node_property(n, &too_long, Value::Int64(1));
+                store
+            }),
+            ("string zone map bound", {
+                let store = LpgStore::new().unwrap();
+                let n = store.create_node(&["Person"]);
+                store.set_node_property(n, "name", Value::from(too_long.as_str()));
+                store
+            }),
+        ] {
+            let compact = from_graph_store_preserving_ids(&store).unwrap();
+            let err = CompactStoreSection::new(Arc::new(compact))
+                .serialize()
+                .expect_err(what);
+            assert!(
+                err.to_string().contains("compact store name length: 65536"),
+                "{what}: {err}"
+            );
+        }
+
+        let at_limit = "x".repeat(usize::from(u16::MAX));
+        let store = LpgStore::new().unwrap();
+        store.create_node(&[at_limit.as_str()]);
+        let compact = from_graph_store_preserving_ids(&store).unwrap();
+        let bytes = CompactStoreSection::new(Arc::new(compact))
+            .serialize()
+            .unwrap();
+        let mut restored = CompactStoreSection::empty();
+        restored.deserialize(&bytes).unwrap();
+        assert_eq!(restored.store().unwrap().node_count(), 1);
     }
 
     #[test]

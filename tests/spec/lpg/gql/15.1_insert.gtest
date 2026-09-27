@@ -148,3 +148,82 @@ tests:
     expect:
       rows:
         - [2020, 0.9]
+
+  # ---------------------------------------------------------------------------
+  # Statement boundaries (#380): consecutive INSERTs, INSERT ... RETURN, and
+  # trailing input is an error instead of being silently dropped.
+  # ---------------------------------------------------------------------------
+
+  - name: insert_sequence_runs_every_insert
+    statements:
+      - |
+        INSERT (:Person {name: 'Alix', age: 30})
+        INSERT (:Person {name: 'Gus', age: 25})
+        INSERT (:Person {name: 'Harm', age: 35})
+      - "MATCH (p:Person) RETURN p.name ORDER BY p.name"
+    expect:
+      ordered: true
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Harm]
+
+  - name: insert_sequence_binds_earlier_variables
+    statements:
+      - "INSERT (a:Person {name: 'Alix'}) INSERT (b:Person {name: 'Gus'})-[:KNOWS]->(a)"
+      - "MATCH (x)-[:KNOWS]->(y) RETURN x.name, y.name"
+    expect:
+      rows:
+        - [Gus, Alix]
+
+  - name: insert_return_returns_the_projection
+    query: "INSERT (m:Marker {v: 7}) RETURN m.v AS v, 1 AS one"
+    expect:
+      columns: [v, one]
+      rows:
+        - [7, 1]
+
+  - name: insert_trailing_semicolon_is_accepted
+    statements:
+      - "INSERT (:Marker);"
+      - "MATCH (m:Marker) RETURN count(m) AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: insert_statements_separated_by_semicolon_are_rejected
+    query: "INSERT (:A); INSERT (:B)"
+    expect:
+      error: "multiple statements separated by ';'"
+
+  - name: insert_trailing_garbage_is_rejected
+    query: "INSERT (:A) garbage"
+    expect:
+      error: "after the end of the statement"
+
+  # Computed property values (used to fail with an internal error)
+  - name: insert_computed_properties_per_row
+    statements:
+      - "FOR i IN [1, 2] INSERT (:W {id: 'w' || CAST(i AS STRING), double: i * 2})"
+      - "MATCH (w:W) RETURN w.id, w.double"
+    expect:
+      rows:
+        - [w1, 2]
+        - [w2, 4]
+
+  - name: insert_computed_property_without_input
+    statements:
+      - "INSERT (:W {sum: 2 + 3, id: upper('abc')})"
+      - "MATCH (w:W) RETURN w.sum, w.id"
+    expect:
+      rows:
+        - [5, ABC]
+
+  - name: insert_computed_edge_property
+    statements:
+      - "INSERT (:N {id: 1}), (:N {id: 2})"
+      - "MATCH (a:N {id: 1}), (b:N {id: 2}) INSERT (a)-[:T {w: a.id + b.id}]->(b)"
+      - "MATCH (:N)-[t:T]->(:N) RETURN t.w"
+    expect:
+      rows:
+        - [3]

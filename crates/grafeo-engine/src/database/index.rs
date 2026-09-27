@@ -72,7 +72,11 @@ impl super::GrafeoDB {
         property: &str,
         value: &grafeo_common::types::Value,
     ) -> Vec<grafeo_common::types::NodeId> {
-        self.lpg_store().find_nodes_by_property(property, value)
+        // The index also holds nodes created by transactions that have not
+        // committed yet; return only what a reader at the current epoch sees.
+        let store = self.lpg_store();
+        let candidates = store.find_nodes_by_property(property, value);
+        store.filter_visible_node_ids(&candidates, store.current_epoch())
     }
 
     // =========================================================================

@@ -325,3 +325,108 @@ tests:
     expect:
       rows:
         - [3]
+
+  # ---------------------------------------------------------------------------
+  # Computed property values in CREATE and MERGE (used to fail with an internal
+  # error in CREATE, and silently became NULL in MERGE)
+  # ---------------------------------------------------------------------------
+
+  - name: create_computed_properties_per_row
+    statements:
+      - "UNWIND range(1, 3) AS i CREATE (:W {id: toString(i), double: i * 2, tag: 'v' + toString(i)})"
+      - "MATCH (w:W) RETURN w.id, w.double, w.tag"
+    expect:
+      rows:
+        - ['1', 2, v1]
+        - ['2', 4, v2]
+        - ['3', 6, v3]
+
+  - name: create_computed_property_from_matched_node
+    statements:
+      - "CREATE (:P {name: 'Alix', age: 30})"
+      - "MATCH (p:P) CREATE (:Copy {label: toUpper(p.name), next: p.age + 1})"
+      - "MATCH (c:Copy) RETURN c.label, c.next"
+    expect:
+      rows:
+        - [ALIX, 31]
+
+  - name: create_computed_property_without_input
+    statements:
+      - "CREATE (:W {id: toString(5), sum: 2 + 3})"
+      - "MATCH (w:W) RETURN w.id, w.sum"
+    expect:
+      rows:
+        - ['5', 5]
+
+  - name: create_computed_edge_properties
+    statements:
+      - "CREATE (:N {id: 1}), (:N {id: 2})"
+      - "UNWIND range(1, 2) AS i MATCH (a:N {id: 1}), (b:N {id: 2}) CREATE (a)-[:T {k: 'e' + toString(i), w: i * 10}]->(b)"
+      - "MATCH (:N)-[t:T]->(:N) RETURN t.k, t.w"
+    expect:
+      rows:
+        - [e1, 10]
+        - [e2, 20]
+
+  - name: merge_computed_properties_create_distinct_nodes
+    statements:
+      - "UNWIND range(1, 3) AS i MERGE (:X {id: toString(i)})"
+      - "MATCH (x:X) RETURN x.id"
+    expect:
+      rows:
+        - ['1']
+        - ['2']
+        - ['3']
+
+  - name: merge_computed_properties_match_on_rerun
+    statements:
+      - "UNWIND range(1, 3) AS i MERGE (:X {id: toString(i)})"
+      - "UNWIND range(1, 3) AS i MERGE (:X {id: toString(i)})"
+      - "MATCH (x:X) RETURN count(x) AS c, count(x.id) AS with_id"
+    expect:
+      rows:
+        - [3, 3]
+
+  - name: merge_computed_property_without_input
+    statements:
+      - "MERGE (:X {id: toString(7)})"
+      - "MERGE (:X {id: toString(7)})"
+      - "MATCH (x:X) RETURN x.id"
+    expect:
+      rows:
+        - ['7']
+
+  - name: merge_computed_edge_properties
+    statements:
+      - "CREATE (:N {id: 1}), (:N {id: 2})"
+      - "UNWIND [1, 2, 2] AS i MATCH (a:N {id: 1}), (b:N {id: 2}) MERGE (a)-[:T {k: 'e' + toString(i)}]->(b)"
+      - "MATCH (:N)-[t:T]->(:N) RETURN t.k"
+    expect:
+      rows:
+        - [e1]
+        - [e2]
+
+  - name: create_property_with_unknown_variable_is_rejected
+    query: "CREATE (:W {id: toString(missing)})"
+    expect:
+      error: "missing"
+
+  # MERGE of a relationship used to miss edges created earlier in the same
+  # statement, so repeated rows created duplicate edges.
+  - name: merge_relationship_repeated_rows_create_one_edge
+    statements:
+      - "CREATE (:N {id: 1}), (:N {id: 2})"
+      - "UNWIND [1, 2, 3] AS i MATCH (a:N {id: 1}), (b:N {id: 2}) MERGE (a)-[:T {k: 'c'}]->(b)"
+      - "MATCH (:N)-[t:T]->(:N) RETURN count(t) AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: merge_relationship_null_key_matches_absent_property
+    statements:
+      - "CREATE (:N {id: 1})-[:T]->(:N {id: 2})"
+      - "MATCH (a:N {id: 1}), (b:N {id: 2}) MERGE (a)-[:T {k: null}]->(b)"
+      - "MATCH (:N)-[t:T]->(:N) RETURN count(t) AS c"
+    expect:
+      rows:
+        - [1]

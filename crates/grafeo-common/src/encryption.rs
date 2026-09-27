@@ -87,14 +87,14 @@ impl PageEncryptor {
         nonce: &[u8; NONCE_SIZE],
         aad: &[u8],
     ) -> Result<Vec<u8>> {
-        let nonce_obj = Nonce::from_slice(nonce);
+        let nonce_obj = Nonce::from(*nonce);
         let payload = Payload {
             msg: plaintext,
             aad,
         };
         let ciphertext = self
             .cipher
-            .encrypt(nonce_obj, payload)
+            .encrypt(&nonce_obj, payload)
             .map_err(|e| Error::Internal(format!("encryption failed: {e}")))?;
 
         // Output format: nonce || ciphertext (which includes the tag appended by aes-gcm)
@@ -120,13 +120,15 @@ impl PageEncryptor {
         }
 
         let (nonce_bytes, ciphertext_with_tag) = encrypted.split_at(NONCE_SIZE);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        // Length checked above, so the split always yields NONCE_SIZE bytes.
+        let nonce = Nonce::try_from(nonce_bytes)
+            .map_err(|_| Error::Internal("encrypted data has a malformed nonce".to_string()))?;
         let payload = Payload {
             msg: ciphertext_with_tag,
             aad,
         };
 
-        self.cipher.decrypt(nonce, payload).map_err(|_| {
+        self.cipher.decrypt(&nonce, payload).map_err(|_| {
             Error::Internal(
                 "decryption failed: authentication tag mismatch (wrong key or corrupted data)"
                     .to_string(),

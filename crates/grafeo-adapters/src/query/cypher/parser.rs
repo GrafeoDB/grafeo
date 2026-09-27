@@ -90,14 +90,14 @@ impl<'a> Parser<'a> {
                 || self.peek_text_eq_ignore_case("CONSTRAINT"))
         {
             let stmt = self.parse_schema_create()?;
-            self.skip_semicolons();
+            self.expect_end_of_query()?;
             return Ok(stmt);
         }
         if self.current.kind == TokenKind::Identifier
             && self.current.text.eq_ignore_ascii_case("DROP")
             && let Some(stmt) = self.try_parse_schema_drop()?
         {
-            self.skip_semicolons();
+            self.expect_end_of_query()?;
             return Ok(stmt);
         }
         // ALTER CURRENT GRAPH TYPE
@@ -105,7 +105,7 @@ impl<'a> Parser<'a> {
             && self.current.text.eq_ignore_ascii_case("ALTER")
             && let Some(stmt) = self.try_parse_alter_current_graph_type()?
         {
-            self.skip_semicolons();
+            self.expect_end_of_query()?;
             return Ok(stmt);
         }
         // SHOW INDEXES / SHOW CONSTRAINTS / SHOW CURRENT GRAPH TYPE
@@ -113,7 +113,7 @@ impl<'a> Parser<'a> {
             && self.current.text.eq_ignore_ascii_case("SHOW")
             && let Some(stmt) = self.try_parse_show()?
         {
-            self.skip_semicolons();
+            self.expect_end_of_query()?;
             return Ok(stmt);
         }
 
@@ -122,14 +122,24 @@ impl<'a> Parser<'a> {
         if self.current.kind == TokenKind::Union {
             return self.parse_union_continuation(stmt);
         }
-        // Consume optional trailing semicolon(s)
-        while self.current.kind == TokenKind::Semicolon {
-            self.advance();
-        }
-        if self.current.kind != TokenKind::Eof {
-            return Err(self.error("Expected end of query"));
-        }
+        self.expect_end_of_query()?;
         Ok(stmt)
+    }
+
+    /// Requires that only `;` remain after a complete statement.
+    fn expect_end_of_query(&mut self) -> Result<()> {
+        let saw_semicolon = self.current.kind == TokenKind::Semicolon;
+        self.skip_semicolons();
+        if self.current.kind == TokenKind::Eof {
+            return Ok(());
+        }
+        if saw_semicolon {
+            return Err(self.error(
+                "multiple statements separated by ';' are not supported in one call: \
+                 run them separately",
+            ));
+        }
+        Err(self.error("Expected end of query"))
     }
 
     /// Parses UNION / UNION ALL between query blocks.
@@ -153,9 +163,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        if self.current.kind != TokenKind::Eof {
-            return Err(self.error("Expected end of query"));
-        }
+        self.expect_end_of_query()?;
 
         Ok(Statement::Union {
             queries,
@@ -3660,6 +3668,31 @@ mod tests {
         parse_ok("RETURN 1;;;");
         // Semicolon after full query
         parse_ok("MATCH (n) RETURN n;");
+    }
+
+    fn parse_error_message(query: &str) -> String {
+        Parser::new(query).parse().expect_err(query).to_string()
+    }
+
+    #[test]
+    fn test_union_and_schema_statements_check_end_of_input() {
+        // A trailing ';' after a UNION used to fail; trailing input after a
+        // schema statement used to be ignored (#380).
+        parse_ok("MATCH (n) RETURN n.a AS a UNION MATCH (m) RETURN m.a AS a;");
+        parse_ok("CREATE INDEX idx_name FOR (n:Person) ON (n.name);");
+        let err = parse_error_message("CREATE INDEX idx_name FOR (n:Person) ON (n.name) garbage");
+        assert!(err.contains("Expected end of query"), "{err}");
+        let err = parse_error_message("SHOW INDEXES garbage");
+        assert!(err.contains("Expected end of query"), "{err}");
+    }
+
+    #[test]
+    fn test_statements_separated_by_semicolon_are_rejected() {
+        let err = parse_error_message("RETURN 1; RETURN 2");
+        assert!(
+            err.contains("multiple statements separated by ';' are not supported in one call"),
+            "{err}"
+        );
     }
 
     // === Schema DDL Tests ===

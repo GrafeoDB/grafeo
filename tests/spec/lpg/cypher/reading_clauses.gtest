@@ -241,6 +241,52 @@ tests:
     expect:
       count: 2
 
+  # UNION branches must return the same column names in the same order (#365).
+  - name: union_wider_second_branch_rejected
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 30})"
+    query: "MATCH (p:Person) RETURN p.name AS name UNION ALL MATCH (q:Person) RETURN q.name AS name, q.age AS age"
+    expect:
+      error: "same columns"
+
+  - name: union_wider_first_branch_rejected
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 30})"
+      - "CREATE (:City {name: 'Amsterdam'})"
+    query: "MATCH (p:Person) RETURN p.name AS name, p.age AS age UNION ALL MATCH (c:City) RETURN c.name AS name"
+    expect:
+      error: "same columns"
+
+  - name: union_same_names_different_order_rejected
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 30})"
+    query: "MATCH (p:Person) RETURN p.name AS name, p.age AS age UNION ALL MATCH (q:Person) RETURN q.age AS age, q.name AS name"
+    expect:
+      error: "same columns"
+
+  - name: union_matching_columns_combines
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 30})"
+      - "CREATE (:City {name: 'Amsterdam'})"
+    query: "MATCH (p:Person) RETURN p.name AS name UNION ALL MATCH (c:City) RETURN c.name AS name"
+    expect:
+      columns: [name]
+      rows:
+        - [Alix]
+        - [Amsterdam]
+
+  - name: union_third_branch_name_rejected
+    query: "RETURN 1 AS a UNION RETURN 2 AS a UNION RETURN 3 AS b"
+    expect:
+      error: "same columns"
+
+  - name: union_aggregate_branch_arity_rejected
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 30})"
+    query: "MATCH (p:Person) RETURN count(p) UNION RETURN 1, 2"
+    expect:
+      error: "same columns"
+
   # ---------------------------------------------------------------------------
   # CALL procedure
   # ---------------------------------------------------------------------------

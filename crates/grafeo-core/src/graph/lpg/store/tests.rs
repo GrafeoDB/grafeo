@@ -1024,6 +1024,94 @@ fn test_property_index_maintained_on_remove() {
 }
 
 #[test]
+fn test_property_index_drops_deleted_nodes() {
+    let store = LpgStore::new().unwrap();
+    store.create_property_index("id");
+    let first = store.create_node_with_props(&["Graph"], [("id", Value::from("a"))]);
+    assert_eq!(
+        store.find_nodes_by_property("id", &Value::from("a")),
+        vec![first]
+    );
+
+    assert!(store.delete_node(first));
+    assert!(
+        store
+            .find_nodes_by_property("id", &Value::from("a"))
+            .is_empty(),
+        "a deleted node must leave the index"
+    );
+
+    // Delete and re-create the same key many times: the index holds only the
+    // live node instead of growing with every cycle.
+    let mut live = store.create_node_with_props(&["Graph"], [("id", Value::from("a"))]);
+    for _ in 0..100 {
+        assert!(store.delete_node(live));
+        live = store.create_node_with_props(&["Graph"], [("id", Value::from("a"))]);
+    }
+    assert_eq!(
+        store.find_nodes_by_property("id", &Value::from("a")),
+        vec![live]
+    );
+}
+
+#[test]
+fn test_property_index_restored_when_delete_rolls_back() {
+    use crate::graph::GraphStoreMut;
+
+    let store = LpgStore::new().unwrap();
+    store.create_property_index("id");
+    let node = store.create_node_with_props(&["Graph"], [("id", Value::from("a"))]);
+
+    let tx = TransactionId::new(9);
+    assert!(GraphStoreMut::delete_node_versioned(
+        &store,
+        node,
+        store.current_epoch(),
+        tx
+    ));
+    assert!(
+        store
+            .find_nodes_by_property("id", &Value::from("a"))
+            .is_empty()
+    );
+
+    store.rollback_transaction_properties(tx);
+    assert_eq!(
+        store.find_nodes_by_property("id", &Value::from("a")),
+        vec![node]
+    );
+}
+
+#[test]
+fn test_property_index_restored_when_set_rolls_back() {
+    use crate::graph::GraphStoreMut;
+
+    let store = LpgStore::new().unwrap();
+    store.create_property_index("id");
+    let node = store.create_node_with_props(&["Graph"], [("id", Value::from("a"))]);
+    store.new_epoch();
+
+    let tx = TransactionId::new(9);
+    GraphStoreMut::set_node_property_versioned(&store, node, "id", Value::from("b"), tx);
+    assert_eq!(
+        store.find_nodes_by_property("id", &Value::from("b")),
+        vec![node]
+    );
+
+    store.rollback_transaction_properties(tx);
+    assert_eq!(
+        store.find_nodes_by_property("id", &Value::from("a")),
+        vec![node]
+    );
+    assert!(
+        store
+            .find_nodes_by_property("id", &Value::from("b"))
+            .is_empty(),
+        "the rolled-back value must leave the index"
+    );
+}
+
+#[test]
 fn test_property_index_drop() {
     let store = LpgStore::new().unwrap();
 

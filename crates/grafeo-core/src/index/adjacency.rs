@@ -1301,7 +1301,7 @@ mod tests {
 
         // Verify only odd-numbered destinations remain
         for neighbor in neighbors {
-            assert!(neighbor.as_u64() % 2 == 0); // Original IDs were i+1, so even means odd i
+            assert_eq!(neighbor.as_u64() % 2, 0); // Original IDs were i+1, so even means odd i
         }
     }
 

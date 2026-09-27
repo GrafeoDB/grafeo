@@ -195,7 +195,11 @@ impl Session {
         result
     }
 
-    /// Executes a SPARQL query.
+    /// Executes a SPARQL query or update against this session.
+    ///
+    /// Without an open transaction each update commits on its own; to apply a
+    /// sequence of updates atomically, wrap it in `begin_transaction` and
+    /// `commit` on this session.
     ///
     /// # Errors
     ///

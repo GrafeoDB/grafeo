@@ -134,14 +134,35 @@ The beta series focuses on correctness, completeness and real-world durability. 
 - **`LayeredStore` new-node visibility**: `get_node` and `get_node_property` fall back to the overlay for nodes added after `compact()`, fixing `recompact()` dropping those nodes from the merged base.
 - **Named graphs across `compact()` / `recompact()`**: `list_graphs`, `drop_graph`, `create_graph`, and `set_current_graph` now see graphs that existed before compaction.
 
+### Delivered in 0.5.41
+
+- **Compact-store correctness**: post-`compact()` read path and signed integer round-trip fixes
+- **Search procedures**: `CALL grafeo.search.*` for vector, text and MMR search from queries
+- **Disk-backed compact base**: the columnar base of a compacted store can live on disk under memory pressure
+- **Memory introspection** for RDF and CDC components
+
+### Delivered in 0.5.42
+
+- **Tiered storage**: per-section RAM/disk tier configuration, spill under memory pressure, introspection and reload
+- **Paged HNSW topology** and **packed RDF Ring**: neighbor lookups and ring data served directly from mmap
+- **Streaming top-K operator**: `ORDER BY ... LIMIT k` in a single bounded-heap pass (~12x faster at 1M rows)
+- **`WHERE prop IN [...]` index fast path** and filter pushdown through `OPTIONAL MATCH` and subqueries
+
+### Delivered in 0.5.43
+
+- **Stabilization**: green CI, dependency and security updates, Rust toolchain pinned
+- **Query correctness** from community reports: `ORDER BY ... LIMIT` over whole nodes, `UNION` column checks, aggregates next to aliased items, duplicate column names, SPARQL named-graph updates and `path+`
+- **Statements are no longer truncated**: consecutive `INSERT`s and `INSERT ... RETURN` work in GQL, and trailing input is a syntax error in GQL, Cypher and Gremlin
+- **Rollbacks that undo everything**: property and label changes on persistent databases, and SPARQL updates inside transactions
+- **Refusing to write databases beyond the storage format limits** instead of producing unreadable files
+- **HNSW connectivity** when indexed vectors are updated
+
 ### Planned Releases
 
-| Version    | Focus                                                                                                                                                               |
-|------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **0.5.41** | API stability and developer experience: stable/beta/experimental tier annotations, contributor documentation                                                        |
-| **0.5.42** | Improved temporal queries: temporal indexes, GQL temporal syntax extensions, async storage server integration                                                       |
-| **0.5.43** | Offline-first sync protocol, cross-language query translation, final 0.6.x blocker audit                                                                            |
-| **0.5.44** | Flutter/mobile builds (Android NDK, iOS xcframework), final feature profile audit and doc sweep                                                                     |
+| Version    | Focus |
+|------------|-------|
+| **0.5.44** | Durability and persistence completeness: transaction-grouped WAL records, durable writes without `close()`, safe WAL checkpoints, a database directory lock, vector and text indexes that survive reopen in WAL mode, storage format support for databases over 4 GiB; index seeks for keys that come from earlier rows (`UNWIND ... MATCH (n {id: row.id})`), property equi-joins as hash joins, temporal properties (point-in-time queries), streaming results, shortest-path elements (`nodes(p)`, `edges(p)`), `VECTOR(n)` schema type and filtered hybrid search, next phase of tiered storage |
+| **0.5.45** | Driver and protocol compatibility: ADBC driver, W3C SPARQL HTTP Protocol and Graph Store Protocol, offline-first sync, cross-language query translation, Jupyter cell magic, final audit. Last 0.5.x release |
 
 ---
 
@@ -193,4 +214,4 @@ Interested in contributing? Check the [GitHub Issues](https://github.com/GrafeoD
 
 ---
 
-Last updated: April 2026
+Last updated: September 2026

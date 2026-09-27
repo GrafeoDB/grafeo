@@ -115,6 +115,122 @@ impl LpgStore {
         }
     }
 
+    /// Removes a deleted node from every vector index, so it can no longer be
+    /// returned by a vector search (quantized indexes keep their own copy of
+    /// the vector, so a leftover entry would still score like a live node).
+    #[cfg(feature = "vector-index")]
+    pub(super) fn remove_from_all_vector_indexes(&self, node_id: NodeId) {
+        let indexes: Vec<Arc<VectorIndexKind>> =
+            self.vector_indexes.read().values().cloned().collect();
+        for index in indexes {
+            index.remove(node_id);
+        }
+    }
+
+    /// Re-inserts a node whose delete was rolled back into the vector indexes
+    /// of its labels (keys are `label:property`), reading vectors from the
+    /// store's properties.
+    #[cfg(feature = "vector-index")]
+    pub(super) fn reinsert_into_vector_indexes(&self, node_id: NodeId, labels: &[String]) {
+        let indexes: Vec<(String, Arc<VectorIndexKind>)> = self
+            .vector_indexes
+            .read()
+            .iter()
+            .map(|(key, index)| (key.clone(), Arc::clone(index)))
+            .collect();
+        for (key, index) in indexes {
+            let Some((label, property)) = key.split_once(':') else {
+                continue;
+            };
+            if !labels.iter().any(|l| l == label) {
+                continue;
+            }
+            let accessor = crate::index::vector::PropertyVectorAccessor::new(self, property);
+            if let Some(vector) =
+                crate::index::vector::VectorAccessor::get_vector(&accessor, node_id)
+            {
+                index.insert(node_id, &vector, &accessor);
+            }
+        }
+    }
+
+    /// Removes a node from every property index. Called when the node is
+    /// deleted, before its properties are dropped: the index is keyed by value.
+    /// A rollback of the delete re-adds the entries through `set_node_property`.
+    pub(super) fn remove_from_all_property_indexes(&self, node_id: NodeId) {
+        let indexes = self.property_indexes.read();
+        for (key, index) in indexes.iter() {
+            if let Some(value) = self.node_properties.get(node_id, key) {
+                Self::remove_index_entry(index, &HashableValue::new(value), node_id);
+            }
+        }
+    }
+
+    /// Removes `node_id` from the set of `value`, dropping the set when empty.
+    fn remove_index_entry(
+        index: &DashMap<HashableValue, FxHashSet<NodeId>>,
+        value: &HashableValue,
+        node_id: NodeId,
+    ) {
+        if let Some(mut nodes) = index.get_mut(value) {
+            nodes.remove(&node_id);
+            if nodes.is_empty() {
+                drop(nodes);
+                index.remove(value);
+            }
+        }
+    }
+
+    /// The current values of the indexed `(node, key)` pairs, taken before a
+    /// temporal rollback pops pending versions (see
+    /// [`reconcile_property_indexes`](Self::reconcile_property_indexes)).
+    #[cfg(feature = "temporal")]
+    pub(super) fn indexed_values<'a>(
+        &self,
+        pairs: impl Iterator<Item = (NodeId, &'a PropertyKey)>,
+    ) -> Vec<(NodeId, PropertyKey, Option<Value>)> {
+        let indexes = self.property_indexes.read();
+        if indexes.is_empty() {
+            return Vec::new();
+        }
+        pairs
+            .filter(|(_, key)| indexes.contains_key(*key))
+            .map(|(node_id, key)| (node_id, key.clone(), self.node_properties.get(node_id, key)))
+            .collect()
+    }
+
+    /// Moves index entries from the values in `before` to the values the
+    /// nodes have now. Used after a temporal rollback, which restores property
+    /// values by popping versions instead of calling `set_node_property`.
+    #[cfg(feature = "temporal")]
+    pub(super) fn reconcile_property_indexes(
+        &self,
+        before: Vec<(NodeId, PropertyKey, Option<Value>)>,
+    ) {
+        if before.is_empty() {
+            return;
+        }
+        let indexes = self.property_indexes.read();
+        for (node_id, key, old_value) in before {
+            let Some(index) = indexes.get(&key) else {
+                continue;
+            };
+            let new_value = self.node_properties.get(node_id, &key);
+            if new_value == old_value {
+                continue;
+            }
+            if let Some(old_value) = old_value {
+                Self::remove_index_entry(index, &HashableValue::new(old_value), node_id);
+            }
+            if let Some(new_value) = new_value {
+                index
+                    .entry(HashableValue::new(new_value))
+                    .or_insert_with(FxHashSet::default)
+                    .insert(node_id);
+            }
+        }
+    }
+
     /// Updates property indexes when a property is removed.
     pub(super) fn update_property_index_on_remove(&self, node_id: NodeId, key: &PropertyKey) {
         let indexes = self.property_indexes.read();

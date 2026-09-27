@@ -6,7 +6,7 @@
 
     <!-- NuGet metadata -->
     <PackageId>Grafeo</PackageId>
-    <Version>0.5.42</Version>
+    <Version>0.5.43</Version>
     <Description>C# bindings for the Grafeo graph database. Supports GQL queries, ACID transactions, and vector search.</Description>
     <Authors>GrafeoDB</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>

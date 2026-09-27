@@ -218,7 +218,8 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: one_or_more_path_chain
-    # <p>+ follows transitive closure, excluding the start node
+    # <p>+ follows transitive closure, excluding the start node. Checked by
+    # value: a row count alone passes even when endpoints are wrong.
     setup:
       - |
         INSERT DATA {
@@ -231,7 +232,10 @@ tests:
         <http://ex.org/alix> <http://ex.org/next>+ ?node
       }
     expect:
-      count: 3
+      rows:
+        - [http://ex.org/gus]
+        - [http://ex.org/vincent]
+        - [http://ex.org/jules]
 
   - name: one_or_more_path_single_hop
     # Exactly one hop in the data
@@ -404,7 +408,8 @@ tests:
         - [http://ex.org/amsterdam]
 
   - name: sequence_with_one_or_more
-    # Combine sequence and + for transitive chain then final step
+    # Combine sequence and + for transitive chain then final step. Checked by
+    # value: the transitive step must reach vincent (2 hops), not just gus.
     setup:
       - |
         INSERT DATA {
@@ -418,7 +423,9 @@ tests:
         <http://ex.org/alix> <http://ex.org/knows>+/<http://ex.org/name> ?name
       }
     expect:
-      count: 2
+      rows:
+        - [Gus]
+        - [Vincent]
 
   - name: zero_or_more_rdf_collection_traversal
     # Traverse an RDF collection using rdf:rest*/rdf:first
@@ -456,3 +463,232 @@ tests:
     expect:
       rows:
         - [Alix]
+
+  # ---------------------------------------------------------------------------
+  # 9.5b  One-or-More (+) transitive closure, checked by value (#369)
+  #       Graph G (predicate p):  a -> b -> c -> d -> e  and  c -> x
+  # ---------------------------------------------------------------------------
+
+  - name: one_or_more_open_ended_full_closure
+    # O1: open-ended ?s :p+ ?o -> the full distinct transitive closure of G.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/c> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+          <http://ex.org/d> <http://ex.org/p> <http://ex.org/e> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/x> .
+        }
+    query: |
+      SELECT ?s ?o WHERE { ?s <http://ex.org/p>+ ?o }
+    expect:
+      rows:
+        - [http://ex.org/a, http://ex.org/b]
+        - [http://ex.org/a, http://ex.org/c]
+        - [http://ex.org/a, http://ex.org/d]
+        - [http://ex.org/a, http://ex.org/e]
+        - [http://ex.org/a, http://ex.org/x]
+        - [http://ex.org/b, http://ex.org/c]
+        - [http://ex.org/b, http://ex.org/d]
+        - [http://ex.org/b, http://ex.org/e]
+        - [http://ex.org/b, http://ex.org/x]
+        - [http://ex.org/c, http://ex.org/d]
+        - [http://ex.org/c, http://ex.org/e]
+        - [http://ex.org/c, http://ex.org/x]
+        - [http://ex.org/d, http://ex.org/e]
+
+  - name: one_or_more_open_ended_distinct_count
+    # O1 (distinct-count form): SELECT DISTINCT over the closure is 13 rows.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/c> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+          <http://ex.org/d> <http://ex.org/p> <http://ex.org/e> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/x> .
+        }
+    query: |
+      SELECT DISTINCT ?s ?o WHERE { ?s <http://ex.org/p>+ ?o }
+    expect:
+      count: 13
+
+  - name: one_or_more_bound_subject_closure
+    # O2: bound-subject :a :p+ ?o -> {b,c,d,e,x}, each once.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/c> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+          <http://ex.org/d> <http://ex.org/p> <http://ex.org/e> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/x> .
+        }
+    query: |
+      SELECT ?o WHERE { <http://ex.org/a> <http://ex.org/p>+ ?o }
+    expect:
+      rows:
+        - [http://ex.org/b]
+        - [http://ex.org/c]
+        - [http://ex.org/d]
+        - [http://ex.org/e]
+        - [http://ex.org/x]
+
+  - name: zero_or_more_bound_subject_closure_regression
+    # O3: control, * on the same graph: :a :p* ?o = {a,b,c,d,e,x}.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/c> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+          <http://ex.org/d> <http://ex.org/p> <http://ex.org/e> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/x> .
+        }
+    query: |
+      SELECT ?o WHERE { <http://ex.org/a> <http://ex.org/p>* ?o }
+    expect:
+      rows:
+        - [http://ex.org/a]
+        - [http://ex.org/b]
+        - [http://ex.org/c]
+        - [http://ex.org/d]
+        - [http://ex.org/e]
+        - [http://ex.org/x]
+
+  - name: one_or_more_ask_three_hops
+    # O4: ASK over a fully-bound + path (3 hops a->b->c->d) -> TRUE.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/c> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+          <http://ex.org/d> <http://ex.org/p> <http://ex.org/e> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/x> .
+        }
+    query: |
+      ASK { <http://ex.org/a> <http://ex.org/p>+ <http://ex.org/d> }
+    expect:
+      count: 1
+
+  - name: one_or_more_cycle_terminates_and_dedups
+    # O5: cycle a <-> b. ?s :p+ ?o -> {(a,a),(a,b),(b,a),(b,b)}, each once;
+    # terminates via the bounded depth-50 expansion.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/a> .
+        }
+    query: |
+      SELECT ?s ?o WHERE { ?s <http://ex.org/p>+ ?o }
+    expect:
+      rows:
+        - [http://ex.org/a, http://ex.org/a]
+        - [http://ex.org/a, http://ex.org/b]
+        - [http://ex.org/b, http://ex.org/a]
+        - [http://ex.org/b, http://ex.org/b]
+
+  - name: one_or_more_cycle_distinct_count
+    # O5 (distinct-count form): the cycle closure has exactly 4 distinct pairs.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/a> .
+        }
+    query: |
+      SELECT DISTINCT ?s ?o WHERE { ?s <http://ex.org/p>+ ?o }
+    expect:
+      count: 4
+
+  - name: one_or_more_inverse_nesting
+    # O6: ^(:p+) reverse closure. Nodes that reach e via p+ are {a,b,c,d}.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/c> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+          <http://ex.org/d> <http://ex.org/p> <http://ex.org/e> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/x> .
+        }
+    query: |
+      SELECT ?o WHERE { <http://ex.org/e> ^(<http://ex.org/p>+) ?o }
+    expect:
+      rows:
+        - [http://ex.org/a]
+        - [http://ex.org/b]
+        - [http://ex.org/c]
+        - [http://ex.org/d]
+
+  - name: one_or_more_sequence_leg_nesting
+    # O6: (:p+)/:q sequence leg. Closure of p from a = {b,c,d}; only d has a q
+    # edge to z, so the result is {z}.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/c> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+          <http://ex.org/d> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT ?o WHERE { <http://ex.org/a> <http://ex.org/p>+/<http://ex.org/q> ?o }
+    expect:
+      rows:
+        - [http://ex.org/z]
+
+  - name: zero_or_one_bound_subject_regression
+    # O7: ? operator unchanged. :a :p? ?o -> {a (0-hop), b (1-hop)}.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/c> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+          <http://ex.org/d> <http://ex.org/p> <http://ex.org/e> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/x> .
+        }
+    query: |
+      SELECT ?o WHERE { <http://ex.org/a> <http://ex.org/p>? ?o }
+    expect:
+      rows:
+        - [http://ex.org/a]
+        - [http://ex.org/b]
+
+  - name: sequence_two_hops_regression
+    # O7: / operator unchanged. :a :p/:p ?o -> {c} (exactly two hops a->b->c).
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/c> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+          <http://ex.org/d> <http://ex.org/p> <http://ex.org/e> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/x> .
+        }
+    query: |
+      SELECT ?o WHERE { <http://ex.org/a> <http://ex.org/p>/<http://ex.org/p> ?o }
+    expect:
+      rows:
+        - [http://ex.org/c]
+
+  - name: inverse_single_hop_regression
+    # O7: ^ operator unchanged. :b ^:p ?o -> {a} (a is the only inbound).
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/c> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+          <http://ex.org/d> <http://ex.org/p> <http://ex.org/e> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/x> .
+        }
+    query: |
+      SELECT ?o WHERE { <http://ex.org/b> ^<http://ex.org/p> ?o }
+    expect:
+      rows:
+        - [http://ex.org/a]

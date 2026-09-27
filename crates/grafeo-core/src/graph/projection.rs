@@ -657,8 +657,8 @@ mod tests {
             .with_edge_types(["KNOWS"]);
         let proj = GraphProjection::new(store, spec);
 
-        assert!(proj.estimate_label_cardinality("City") == 0.0);
-        assert!(proj.estimate_avg_degree("LIVES_IN", true) == 0.0);
+        assert_eq!(proj.estimate_label_cardinality("City"), 0.0);
+        assert_eq!(proj.estimate_avg_degree("LIVES_IN", true), 0.0);
     }
 
     #[test]

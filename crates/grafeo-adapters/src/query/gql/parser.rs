@@ -211,22 +211,77 @@ impl<'a> Parser<'a> {
 
     /// Parses the input into a statement.
     ///
+    /// The whole input must be one statement: trailing `;` are allowed, any
+    /// other trailing text is an error (it used to be silently ignored, #380).
+    ///
     /// # Errors
     ///
-    /// Returns an error if the input contains invalid or unexpected GQL syntax.
+    /// Returns an error if the input contains invalid or unexpected GQL syntax,
+    /// or text after the end of the statement.
     pub fn parse(&mut self) -> Result<Statement> {
+        let statement = self.parse_statement()?;
+        self.expect_end_of_input()?;
+        Ok(statement)
+    }
+
+    /// Requires that only `;` remain after a complete statement.
+    fn expect_end_of_input(&mut self) -> Result<()> {
+        let mut saw_semicolon = false;
+        while self.current.kind == TokenKind::Semicolon {
+            self.advance();
+            saw_semicolon = true;
+        }
+        if self.current.kind == TokenKind::Eof {
+            return Ok(());
+        }
+        if saw_semicolon {
+            return Err(self.error(
+                "multiple statements separated by ';' are not supported in one call: \
+                 run them separately, chain them with NEXT, or write consecutive INSERT clauses",
+            ));
+        }
+        let hint = if matches!(
+            self.current.kind,
+            TokenKind::Match
+                | TokenKind::Optional
+                | TokenKind::Insert
+                | TokenKind::Create
+                | TokenKind::Delete
+                | TokenKind::Detach
+                | TokenKind::Nodetach
+                | TokenKind::Set
+                | TokenKind::Remove
+                | TokenKind::Merge
+                | TokenKind::With
+                | TokenKind::Unwind
+                | TokenKind::Where
+                | TokenKind::Return
+        ) {
+            " (this clause is not supported at this position of the statement)"
+        } else {
+            ""
+        };
+        Err(self.error(&format!(
+            "unexpected '{}' after the end of the statement{hint}",
+            self.current.text
+        )))
+    }
+
+    /// Parses one statement, including an EXPLAIN / PROFILE prefix and any
+    /// NEXT or set-operation composition, without the end-of-input check.
+    fn parse_statement(&mut self) -> Result<Statement> {
         // Handle EXPLAIN/PROFILE prefix: wraps the entire following statement
         if self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("EXPLAIN") {
             self.advance(); // consume EXPLAIN
             self.enter_nesting()?;
-            let inner = self.parse()?;
+            let inner = self.parse_statement()?;
             self.exit_nesting();
             return Ok(Statement::Explain(Box::new(inner)));
         }
         if self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("PROFILE") {
             self.advance(); // consume PROFILE
             self.enter_nesting()?;
-            let inner = self.parse()?;
+            let inner = self.parse_statement()?;
             self.exit_nesting();
             return Ok(Statement::Profile(Box::new(inner)));
         }
@@ -316,9 +371,9 @@ impl<'a> Parser<'a> {
             | TokenKind::Merge
             | TokenKind::For
             | TokenKind::Return => self.parse_query().map(Statement::Query),
-            TokenKind::Insert => self
-                .parse_insert()
-                .map(|s| Statement::DataModification(DataModificationStatement::Insert(s))),
+            // A statement starting with INSERT is parsed as a query so that it
+            // can continue with more INSERT clauses or a RETURN (#380).
+            TokenKind::Insert => self.parse_query().map(Self::lone_insert_as_statement),
             TokenKind::Delete | TokenKind::Detach | TokenKind::Nodetach => self
                 .parse_delete()
                 .map(|s| Statement::DataModification(DataModificationStatement::Delete(s))),
@@ -327,8 +382,7 @@ impl<'a> Parser<'a> {
                 let next = self.peek_kind();
                 if next == TokenKind::LParen {
                     // Cypher-style: CREATE (n:Label {...}) - treat as INSERT
-                    self.parse_create_as_insert()
-                        .map(|s| Statement::DataModification(DataModificationStatement::Insert(s)))
+                    self.parse_query().map(Self::lone_insert_as_statement)
                 } else {
                     // GQL schema/session: dispatches between DDL (NODE TYPE, EDGE TYPE,
                     // GRAPH TYPE, INDEX, CONSTRAINT, SCHEMA) and session (GRAPH instance)
@@ -548,6 +602,28 @@ impl<'a> Parser<'a> {
             alias,
             span: Some(SourceSpan::new(span_start, self.current.span.start, 1, 1)),
         })
+    }
+
+    /// A query made of a single INSERT (or `CREATE (...)`) clause and nothing
+    /// else is kept as a standalone INSERT statement, whose result returns the
+    /// created entity as before; anything longer stays a query.
+    fn lone_insert_as_statement(mut query: QueryStatement) -> Statement {
+        let lone_insert = matches!(query.ordered_clauses.as_slice(), [QueryClause::Create(_)])
+            && query.where_clause.is_none()
+            && query.set_clauses.is_empty()
+            && query.remove_clauses.is_empty()
+            && query.with_clauses.is_empty()
+            && query.having_clause.is_none()
+            && query.return_clause.items.is_empty()
+            && !query.return_clause.is_wildcard
+            && !query.return_clause.is_finish
+            && query.return_clause.order_by.is_none()
+            && query.return_clause.skip.is_none()
+            && query.return_clause.limit.is_none();
+        if lone_insert && let Some(QueryClause::Create(insert)) = query.ordered_clauses.pop() {
+            return Statement::DataModification(DataModificationStatement::Insert(insert));
+        }
+        Statement::Query(query)
     }
 
     fn parse_query(&mut self) -> Result<QueryStatement> {
@@ -3414,7 +3490,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_multiplicative_expression(&mut self) -> Result<Expression> {
-        let mut left = self.parse_unary_expression()?;
+        let mut left = self.parse_power_expression()?;
 
         loop {
             let op = match self.current.kind {
@@ -3424,7 +3500,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_unary_expression()?;
+            let right = self.parse_power_expression()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op,
@@ -3433,6 +3509,22 @@ impl<'a> Parser<'a> {
         }
 
         Ok(left)
+    }
+
+    /// `a ^ b`, binding tighter than `*` and right associative
+    /// (`2 ^ 3 ^ 2` is `2 ^ 9`), as in Cypher.
+    fn parse_power_expression(&mut self) -> Result<Expression> {
+        let left = self.parse_unary_expression()?;
+        if self.current.kind != TokenKind::Caret {
+            return Ok(left);
+        }
+        self.advance();
+        let right = self.parse_power_expression()?;
+        Ok(Expression::Binary {
+            left: Box::new(left),
+            op: BinaryOp::Pow,
+            right: Box::new(right),
+        })
     }
 
     fn parse_unary_expression(&mut self) -> Result<Expression> {
@@ -4359,24 +4451,6 @@ impl<'a> Parser<'a> {
 
     fn parse_insert(&mut self) -> Result<InsertStatement> {
         self.expect(TokenKind::Insert)?;
-
-        let mut patterns = Vec::new();
-        patterns.push(self.parse_pattern()?);
-
-        while self.current.kind == TokenKind::Comma {
-            self.advance();
-            patterns.push(self.parse_pattern()?);
-        }
-
-        Ok(InsertStatement {
-            patterns,
-            span: None,
-        })
-    }
-
-    /// Parses CREATE as INSERT (Cypher-style data modification).
-    fn parse_create_as_insert(&mut self) -> Result<InsertStatement> {
-        self.expect(TokenKind::Create)?;
 
         let mut patterns = Vec::new();
         patterns.push(self.parse_pattern()?);
@@ -5777,6 +5851,22 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses ALTER NODE TYPE name / ALTER EDGE TYPE name alterations.
+    /// Consumes an optional `PROPERTY` keyword in `ADD PROPERTY name ...` /
+    /// `DROP PROPERTY name`. It is a keyword only when a name follows, so a
+    /// property that is itself called `property` still works as a backtick-quoted
+    /// identifier.
+    fn skip_property_keyword(&mut self) {
+        if self.current.kind == TokenKind::Identifier
+            && self.current.text.eq_ignore_ascii_case("PROPERTY")
+            && matches!(
+                self.peek_kind(),
+                TokenKind::Identifier | TokenKind::QuotedIdentifier
+            )
+        {
+            self.advance();
+        }
+    }
+
     fn parse_alter_type(&mut self, is_node: bool, span_start: usize) -> Result<Statement> {
         if !self.is_identifier() {
             return Err(self.error("Expected type name"));
@@ -5793,7 +5883,8 @@ impl<'a> Parser<'a> {
             match action.as_str() {
                 "ADD" => {
                     self.advance();
-                    // ADD property_name type [NOT NULL]
+                    // ADD [PROPERTY] property_name type [NOT NULL]
+                    self.skip_property_keyword();
                     if !self.is_identifier() {
                         return Err(self.error("Expected property name after ADD"));
                     }
@@ -5842,6 +5933,8 @@ impl<'a> Parser<'a> {
                 }
                 "DROP" => {
                     self.advance();
+                    // DROP [PROPERTY] property_name
+                    self.skip_property_keyword();
                     if !self.is_identifier() {
                         return Err(self.error("Expected property name after DROP"));
                     }
@@ -7637,6 +7730,153 @@ mod tests {
         let mut parser = Parser::new("RETURN RETURN");
         let result = parser.parse();
         assert!(result.is_err(), "RETURN RETURN should fail");
+    }
+
+    // ==================== End of input (#380) ====================
+
+    fn parse_err(query: &str) -> String {
+        match Parser::new(query).parse() {
+            Ok(statement) => panic!("{query}: expected an error, parsed {statement:?}"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_trailing_semicolons_and_comments_are_accepted() {
+        for query in [
+            "MATCH (n) RETURN n;",
+            "MATCH (n) RETURN n ;;",
+            "MATCH (n) RETURN n -- trailing comment",
+            "MATCH (n) RETURN n /* trailing comment */ ;",
+            "INSERT (:Person {name: 'Alix'});",
+        ] {
+            assert!(Parser::new(query).parse().is_ok(), "{query}");
+        }
+    }
+
+    #[test]
+    fn test_statements_separated_by_semicolon_are_rejected() {
+        let err = parse_err("INSERT (:A); INSERT (:B)");
+        assert!(
+            err.contains("multiple statements separated by ';' are not supported in one call"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_trailing_input_is_rejected() {
+        let err = parse_err("MATCH (n) RETURN n garbage");
+        assert!(
+            err.contains("unexpected 'garbage' after the end of the statement"),
+            "{err}"
+        );
+
+        // Clause orders the parser does not support fail loudly instead of
+        // silently dropping the rest of the statement.
+        let err = parse_err("MATCH (n) SET n.x = 1 DELETE n");
+        assert!(err.contains("unexpected 'DELETE'"), "{err}");
+        assert!(err.contains("not supported at this position"), "{err}");
+    }
+
+    #[test]
+    fn test_insert_sequences_and_insert_return_parse_as_queries() {
+        // The docs quickstart shape: several INSERTs in one statement.
+        let Statement::Query(query) = Parser::new(
+            "INSERT (:Person {name: 'Alix'})\n\
+             INSERT (:Person {name: 'Gus'})\n\
+             INSERT (:Person {name: 'Harm'})",
+        )
+        .parse()
+        .unwrap() else {
+            panic!("an INSERT sequence is a query");
+        };
+        assert_eq!(query.create_clauses.len(), 3);
+        assert!(query.return_clause.items.is_empty());
+
+        let Statement::Query(query) = Parser::new("INSERT (a:A) RETURN a").parse().unwrap() else {
+            panic!("INSERT ... RETURN is a query");
+        };
+        assert_eq!(query.create_clauses.len(), 1);
+        assert_eq!(query.return_clause.items.len(), 1);
+
+        let Statement::Query(query) = Parser::new("CREATE (:A) CREATE (:B)").parse().unwrap()
+        else {
+            panic!("a CREATE sequence is a query");
+        };
+        assert_eq!(query.create_clauses.len(), 2);
+    }
+
+    #[test]
+    fn test_lone_insert_stays_an_insert_statement() {
+        for query in ["INSERT (:A {v: 1})", "INSERT (:A), (:B)", "CREATE (:A)"] {
+            let statement = Parser::new(query).parse().unwrap();
+            assert!(
+                matches!(
+                    statement,
+                    Statement::DataModification(DataModificationStatement::Insert(_))
+                ),
+                "{query}: {statement:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_power_operator_is_right_associative() {
+        let Statement::Query(query) = Parser::new("RETURN 2 ^ 3 ^ 2 * 4").parse().unwrap() else {
+            panic!("expected a query");
+        };
+        // (2 ^ (3 ^ 2)) * 4
+        let Expression::Binary { left, op, .. } = &query.return_clause.items[0].expression else {
+            panic!("expected a binary expression");
+        };
+        assert_eq!(*op, BinaryOp::Mul);
+        let Expression::Binary { op, right, .. } = left.as_ref() else {
+            panic!("expected 2 ^ (3 ^ 2)");
+        };
+        assert_eq!(*op, BinaryOp::Pow);
+        assert!(matches!(
+            right.as_ref(),
+            Expression::Binary {
+                op: BinaryOp::Pow,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_alter_type_accepts_optional_property_keyword() {
+        let properties = |query: &str| -> Vec<(String, String)> {
+            let Statement::Schema(SchemaStatement::AlterNodeType(stmt)) =
+                Parser::new(query).parse().unwrap()
+            else {
+                panic!("{query}: expected ALTER NODE TYPE");
+            };
+            stmt.alterations
+                .iter()
+                .map(|alteration| match alteration {
+                    TypeAlteration::AddProperty(def) => (def.name.clone(), def.data_type.clone()),
+                    TypeAlteration::DropProperty(name) => (name.clone(), "dropped".to_string()),
+                })
+                .collect()
+        };
+        let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+
+        assert_eq!(
+            properties("ALTER NODE TYPE Sensor ADD PROPERTY location STRING"),
+            vec![pair("location", "STRING")]
+        );
+        assert_eq!(
+            properties("ALTER NODE TYPE Sensor ADD location STRING"),
+            vec![pair("location", "STRING")]
+        );
+        assert_eq!(
+            properties("ALTER NODE TYPE Sensor DROP PROPERTY location"),
+            vec![pair("location", "dropped")]
+        );
+        assert_eq!(
+            properties("ALTER NODE TYPE Sensor ADD `property` STRING"),
+            vec![pair("property", "STRING")]
+        );
     }
 
     #[test]

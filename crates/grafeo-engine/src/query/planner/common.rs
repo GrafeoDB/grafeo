@@ -5,7 +5,7 @@
 //! Each function takes already-planned input operators and column lists,
 //! plus a schema derivation function to handle LPG vs RDF type differences.
 
-use crate::query::plan::LogicalExpression;
+use crate::query::plan::{BinaryOp, LogicalExpression, UnaryOp};
 use grafeo_common::types::LogicalType;
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
@@ -424,6 +424,12 @@ pub(crate) fn resolve_expression_to_column(
 }
 
 /// Converts a logical expression to a human-readable string for column naming.
+///
+/// Used when a `RETURN` item has no alias. The text follows the source syntax
+/// so structurally different expressions get different names (`id(a)` and
+/// `id(b)`, `n.a + n.b` and `n.c + n.d`). Heavy expressions (CASE, subqueries,
+/// comprehensions) get short generic labels; two of those unaliased in one
+/// `RETURN` still collide and are rejected by `QueryResult`, so alias them.
 pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
     match expr {
         LogicalExpression::Variable(name) => name.clone(),
@@ -431,7 +437,19 @@ pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
             format!("{variable}.{property}")
         }
         LogicalExpression::Literal(value) => format!("{value:?}"),
-        LogicalExpression::FunctionCall { name, .. } => format!("{name}(...)"),
+        LogicalExpression::Parameter(name) => format!("${name}"),
+        LogicalExpression::FunctionCall {
+            name,
+            args,
+            distinct,
+        } => {
+            let rendered = join_expressions(args);
+            if *distinct {
+                format!("{name}(DISTINCT {rendered})")
+            } else {
+                format!("{name}({rendered})")
+            }
+        }
         LogicalExpression::IndexAccess { base, index } => {
             format!(
                 "{}[{}]",
@@ -439,7 +457,146 @@ pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
                 expression_to_string(index)
             )
         }
-        _ => "expr".to_string(),
+        LogicalExpression::SliceAccess { base, start, end } => {
+            let start = start
+                .as_deref()
+                .map(expression_to_string)
+                .unwrap_or_default();
+            let end = end.as_deref().map(expression_to_string).unwrap_or_default();
+            format!("{}[{start}..{end}]", expression_to_string(base))
+        }
+        LogicalExpression::Binary { left, op, right } => format!(
+            "{} {} {}",
+            operand_to_string(left),
+            binary_op_symbol(*op),
+            operand_to_string(right)
+        ),
+        LogicalExpression::Unary { op, operand } => {
+            let inner = operand_to_string(operand);
+            match op {
+                UnaryOp::Not => format!("NOT {inner}"),
+                UnaryOp::Neg => format!("-{inner}"),
+                UnaryOp::IsNull => format!("{inner} IS NULL"),
+                UnaryOp::IsNotNull => format!("{inner} IS NOT NULL"),
+            }
+        }
+        LogicalExpression::Labels(variable) => format!("labels({variable})"),
+        LogicalExpression::Type(variable) => format!("type({variable})"),
+        LogicalExpression::Id(variable) => format!("id({variable})"),
+        LogicalExpression::List(items) => format!("[{}]", join_expressions(items)),
+        LogicalExpression::Map(entries) => {
+            let inner = entries
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", expression_to_string(value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{inner}}}")
+        }
+        LogicalExpression::MapProjection { base, .. } => format!("{base}{{...}}"),
+        LogicalExpression::Case { .. } => "case".to_string(),
+        LogicalExpression::ExistsSubquery(_) => "exists".to_string(),
+        LogicalExpression::CountSubquery(_) => "count".to_string(),
+        LogicalExpression::ValueSubquery(_) => "subquery".to_string(),
+        LogicalExpression::Reduce { .. } => "reduce".to_string(),
+        LogicalExpression::ListComprehension { .. } => "list_comprehension".to_string(),
+        LogicalExpression::ListPredicate { kind, .. } => format!("{kind:?}").to_lowercase(),
+        LogicalExpression::PatternComprehension { .. } => "pattern_comprehension".to_string(),
+    }
+}
+
+/// Renders an operand of a binary or unary expression, parenthesizing nested
+/// operators so `(a + b) * c` and `a + b * c` get different names.
+fn operand_to_string(expr: &LogicalExpression) -> String {
+    match expr {
+        LogicalExpression::Binary { .. } | LogicalExpression::Unary { .. } => {
+            format!("({})", expression_to_string(expr))
+        }
+        _ => expression_to_string(expr),
+    }
+}
+
+fn join_expressions(exprs: &[LogicalExpression]) -> String {
+    exprs
+        .iter()
+        .map(expression_to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Column name of an unaliased aggregate: `count(*)`, `count(n)`,
+/// `sum(DISTINCT n.age)`, `covar_pop(x, y)`. Shared by the LPG and RDF planners.
+pub(crate) fn aggregate_column_name(aggregate: &crate::query::plan::AggregateExpr) -> String {
+    let function = aggregate_function_name(aggregate.function);
+    let mut args: Vec<String> = Vec::with_capacity(2);
+    match &aggregate.expression {
+        Some(expr) => args.push(expression_to_string(expr)),
+        None => args.push("*".to_string()),
+    }
+    if let Some(second) = &aggregate.expression2 {
+        args.push(expression_to_string(second));
+    }
+    let distinct = if aggregate.distinct { "DISTINCT " } else { "" };
+    format!("{function}({distinct}{})", args.join(", "))
+}
+
+/// Surface name of an aggregate function, for column names.
+fn aggregate_function_name(function: crate::query::plan::AggregateFunction) -> &'static str {
+    use crate::query::plan::AggregateFunction as F;
+    match function {
+        F::Count | F::CountNonNull => "count",
+        F::Sum => "sum",
+        F::Avg => "avg",
+        F::Min => "min",
+        F::Max => "max",
+        F::Collect => "collect",
+        F::StdDev => "stdev",
+        F::StdDevPop => "stdevp",
+        F::Variance => "var_samp",
+        F::VariancePop => "var_pop",
+        F::PercentileDisc => "percentile_disc",
+        F::PercentileCont => "percentile_cont",
+        F::GroupConcat => "group_concat",
+        F::Sample => "sample",
+        F::CovarSamp => "covar_samp",
+        F::CovarPop => "covar_pop",
+        F::Corr => "corr",
+        F::RegrSlope => "regr_slope",
+        F::RegrIntercept => "regr_intercept",
+        F::RegrR2 => "regr_r2",
+        F::RegrCount => "regr_count",
+        F::RegrSxx => "regr_sxx",
+        F::RegrSyy => "regr_syy",
+        F::RegrSxy => "regr_sxy",
+        F::RegrAvgx => "regr_avgx",
+        F::RegrAvgy => "regr_avgy",
+    }
+}
+
+/// Surface symbol of a binary operator, for column names.
+fn binary_op_symbol(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Eq => "=",
+        BinaryOp::Ne => "<>",
+        BinaryOp::Lt => "<",
+        BinaryOp::Le => "<=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Ge => ">=",
+        BinaryOp::And => "AND",
+        BinaryOp::Or => "OR",
+        BinaryOp::Xor => "XOR",
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Mod => "%",
+        BinaryOp::Concat => "||",
+        BinaryOp::StartsWith => "STARTS WITH",
+        BinaryOp::EndsWith => "ENDS WITH",
+        BinaryOp::Contains => "CONTAINS",
+        BinaryOp::In => "IN",
+        BinaryOp::Like => "LIKE",
+        BinaryOp::Regex => "=~",
+        BinaryOp::Pow => "^",
     }
 }
 

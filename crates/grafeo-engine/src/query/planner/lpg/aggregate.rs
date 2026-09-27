@@ -258,10 +258,9 @@ impl super::Planner {
             };
             output_schema.push(result_type);
             output_columns.push(
-                agg_expr
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| format!("{:?}(...)", agg_expr.function).to_lowercase()),
+                agg_expr.alias.clone().unwrap_or_else(|| {
+                    crate::query::planner::common::aggregate_column_name(agg_expr)
+                }),
             );
         }
 
@@ -444,10 +443,9 @@ impl super::Planner {
             .aggregates
             .iter()
             .map(|agg_expr| {
-                agg_expr
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| format!("{:?}(...)", agg_expr.function).to_lowercase())
+                agg_expr.alias.clone().unwrap_or_else(|| {
+                    crate::query::planner::common::aggregate_column_name(agg_expr)
+                })
             })
             .collect();
 

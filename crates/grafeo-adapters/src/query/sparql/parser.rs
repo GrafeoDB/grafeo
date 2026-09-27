@@ -576,6 +576,30 @@ impl<'a> Parser<'a> {
             return Err(self.error("expected '*' or variable list in SELECT"));
         }
 
+        // The target of `(expr AS ?v)` must be a new variable (SPARQL 1.1
+        // sec 18.2.4.4): reject an alias that repeats another projected name.
+        // `SELECT ?s ?s` is left to the engine's duplicate-column check.
+        {
+            let mut seen: Vec<(&str, bool)> = Vec::with_capacity(variables.len());
+            for var in &variables {
+                let (name, is_alias): (&str, bool) = match (&var.alias, &var.expression) {
+                    (Some(alias), _) => (alias.as_str(), true),
+                    (None, Expression::Variable(name)) => (name.as_str(), false),
+                    (None, _) => continue,
+                };
+                let collides = seen.iter().any(|&(prev_name, prev_is_alias)| {
+                    prev_name == name && (prev_is_alias || is_alias)
+                });
+                if collides {
+                    return Err(self.error(&format!(
+                        "duplicate projection variable '?{name}' in SELECT: the target of AS \
+                         must be a fresh variable (SPARQL 1.1 sec 18.2.4.4)"
+                    )));
+                }
+                seen.push((name, is_alias));
+            }
+        }
+
         Ok(Projection::Variables(variables))
     }
 
@@ -2646,6 +2670,47 @@ mod tests {
     fn test_parse_invalid_keyword_fails() {
         let result = parse("SELECTX ?x WHERE { ?x ?y ?z }");
         assert!(result.is_err(), "Invalid keyword should fail");
+    }
+
+    // --- duplicate projection aliases (SPARQL 1.1 sec 18.2.4.4) ---
+
+    #[test]
+    fn test_projection_duplicate_alias_fails() {
+        let result = parse("SELECT (?s AS ?x) (?o AS ?x) WHERE { ?s ?p ?o }");
+        assert!(result.is_err(), "Duplicate projection alias should fail");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("duplicate projection variable"),
+            "error should flag the duplicate projection variable"
+        );
+    }
+
+    #[test]
+    fn test_projection_alias_shadowing_bare_var_fails() {
+        let result = parse("SELECT ?x (?o AS ?x) WHERE { ?x ?p ?o }");
+        assert!(
+            result.is_err(),
+            "Alias shadowing a bare variable should fail"
+        );
+    }
+
+    #[test]
+    fn test_projection_distinct_aliases_ok() {
+        let result = parse("SELECT (?s AS ?a) (?o AS ?b) WHERE { ?s ?p ?o }");
+        assert!(result.is_ok(), "Distinct aliases must still parse");
+    }
+
+    #[test]
+    fn test_projection_bare_duplicate_variable_parses() {
+        // Rejected later by the engine's duplicate-column check, not the parser.
+        let result = parse("SELECT ?s ?s WHERE { ?s ?p ?o }");
+        assert!(
+            result.is_ok(),
+            "Bare duplicate variables parse; rejection is deferred to the engine"
+        );
     }
 
     // ==================== Recursion depth limit tests ====================

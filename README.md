@@ -14,7 +14,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.91.1-blue)](https://www.rust-lang.org)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
-[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/dzxeSQFwGA)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/nqU6RUVaxW)
 
 # Grafeo
 

@@ -21,20 +21,13 @@ use grafeo_engine::GrafeoDB;
 
 /// Inserts `n` `:Item` nodes with property `r` set to a deterministic
 /// pseudo-random `Int64` derived from the index. Returns the DB.
-///
-/// One INSERT per row: the GQL/Cypher INSERT path doesn't accept
-/// arithmetic expressions in property sources, so a single
-/// `UNWIND range(...) INSERT (:Item {r: i * k % m})` shape is rejected.
-/// Tests use small `n`, so the per-row cost is acceptable here.
 fn seed_items(n: usize) -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
-    let session = db.session();
-    for i in 0..n {
-        let r = seed_value(i as u64);
-        session
-            .execute(&format!("INSERT (:Item {{id: {i}, r: {r}}})"))
-            .unwrap();
-    }
+    db.session()
+        .execute(&format!(
+            "FOR i IN range(1, {n}) INSERT (:Item {{id: i - 1, r: (i - 1) * 2654435761 % 1000000}})"
+        ))
+        .unwrap();
     db
 }
 

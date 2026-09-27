@@ -765,10 +765,16 @@ impl CypherTranslator {
         path_alias: Option<String>,
     ) -> Result<LogicalOperator> {
         let from_variable = Self::get_last_variable(&input)?;
-        let edge_variable = rel.variable.clone();
+        // An edge with a property map needs a variable to filter on, even when
+        // the pattern leaves it anonymous: `-[:T {w: 1}]->`, `-[*1..2 {w: 1}]->`.
+        let edge_variable = rel
+            .variable
+            .clone()
+            .or_else(|| (!rel.properties.is_empty()).then(|| self.next_anon_var()));
         if let Some(ref ev) = edge_variable {
             self.register_edge_variable(ev);
         }
+        let edge_variable_for_filter = edge_variable.clone();
         let edge_types = rel.types.clone();
         let to_variable = rel
             .target
@@ -851,7 +857,7 @@ impl CypherTranslator {
 
         // Apply property filters on the edge: -[r {since: 2020}]->
         if !rel.properties.is_empty()
-            && let Some(ref ev) = rel.variable
+            && let Some(ref ev) = edge_variable_for_filter
         {
             let predicate = self.build_property_predicate(ev, &rel.properties)?;
             result = wrap_filter(result, predicate);

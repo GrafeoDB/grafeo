@@ -1352,3 +1352,39 @@ tests:
     expect:
       rows:
         - [42]
+
+  - name: gql_zone_map_edge_filter_with_shared_key
+    setup:
+      - "INSERT (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+      - "INSERT (:N {id: 'c', w: 3})-[:T {id: 'e2', w: 7}]->(:N {id: 'd', w: 4})"
+    query: "MATCH ()-[r]->() WHERE r.id = 'e1' RETURN r.id"
+    expect:
+      rows:
+        - [e1]
+
+  - name: gql_zone_map_map_filter_with_shared_key
+    setup:
+      - "INSERT (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+      - "INSERT (:N {id: 'c', w: 3})-[:T {id: 'e2', w: 7}]->(:N {id: 'd', w: 4})"
+    query: "FOR u IN [{id: 'zz'}] FILTER u.id = 'zz' RETURN u.id"
+    expect:
+      rows:
+        - [zz]
+
+  - name: gql_anonymous_edge_property_map_filters
+    setup:
+      - "INSERT (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+      - "INSERT (:N {id: 'c', w: 3})-[:T {id: 'e2', w: 7}]->(:N {id: 'd', w: 4})"
+    query: "MATCH (x)-[{w: 50}]->(y) RETURN x.id"
+    expect:
+      rows:
+        - [a]
+
+  - name: gql_anonymous_variable_length_edge_property_map_filters
+    setup:
+      - "INSERT (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+      - "INSERT (:N {id: 'c', w: 3})-[:T {id: 'e2', w: 7}]->(:N {id: 'd', w: 4})"
+    query: "MATCH (x)-[{w: 50}]->{1,2}(y) RETURN x.id"
+    expect:
+      rows:
+        - [a]

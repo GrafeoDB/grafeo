@@ -3715,7 +3715,11 @@ impl ExpressionPredicate {
                         .zip(e2.iter())
                         .all(|(a, b)| Self::values_equal(a, b))
             }
-            _ => false,
+            // Temporal values, bytes, vectors and the rest: the same variant
+            // with the same value (zoned datetimes compare by instant). This
+            // used to be `false`, so `date('2024-01-01') = date('2024-01-01')`
+            // was false.
+            _ => left == right,
         }
     }
 

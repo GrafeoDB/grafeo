@@ -405,3 +405,120 @@ tests:
       rows:
         - [foo, "java://A:foo()"]
         - [baz, "java://C:baz()"]
+
+  # ---------------------------------------------------------------------------
+  # Zone-map pruning must only use node statistics for node variables: edge and
+  # map properties that share a key with nodes used to return no rows, and so
+  # did values written earlier in the same query.
+  # ---------------------------------------------------------------------------
+  - name: zone_map_edge_equality_with_shared_key
+    setup:
+      - "CREATE (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+    query: "MATCH ()-[r]->() WHERE r.id = 'e1' RETURN r.id"
+    expect:
+      rows:
+        - [e1]
+  - name: zone_map_edge_inline_property_map
+    setup:
+      - "CREATE (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+    query: "MATCH ()-[r:T {id: 'e1'}]->() RETURN r.id"
+    expect:
+      rows:
+        - [e1]
+  - name: zone_map_edge_reversed_operands
+    setup:
+      - "CREATE (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+    query: "MATCH ()-[r]->() WHERE 'e1' = r.id RETURN r.id"
+    expect:
+      rows:
+        - [e1]
+  - name: zone_map_edge_inside_and
+    setup:
+      - "CREATE (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+    query: "MATCH ()-[r]->() WHERE r.w = 50 AND r.id = 'e1' RETURN r.id"
+    expect:
+      rows:
+        - [e1]
+  - name: zone_map_edge_range_outside_node_range
+    setup:
+      - "CREATE (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+    query: "MATCH ()-[r]->() WHERE r.w > 10 RETURN r.id"
+    expect:
+      rows:
+        - [e1]
+  - name: zone_map_edge_not_equal
+    setup:
+      - "CREATE (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+    query: "MATCH ()-[r]->() WHERE r.w <> 1 RETURN r.id"
+    expect:
+      rows:
+        - [e1]
+  - name: zone_map_unwind_map_filter
+    setup:
+      - "CREATE (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+    query: "UNWIND [{id: 'zz'}] AS u WITH u WHERE u.id = 'zz' RETURN u.id"
+    expect:
+      rows:
+        - [zz]
+  - name: zone_map_with_map_filter
+    setup:
+      - "CREATE (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+    query: "WITH {id: 'zz'} AS m WHERE m.id = 'zz' RETURN m.id"
+    expect:
+      rows:
+        - [zz]
+  - name: zone_map_value_written_in_same_query
+    setup:
+      - "CREATE (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+    query: "MATCH (n:N {id: 'a'}) SET n.w = 99 WITH n WHERE n.w = 99 RETURN n.id"
+    expect:
+      rows:
+        - [a]
+
+  # Pruning still applies where it is valid: no node can have w = 1000.
+  - name: zone_map_node_pruning_still_empty
+    setup:
+      - "CREATE (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+    query: "MATCH (n:N) WHERE n.w = 1000 RETURN n.id"
+    expect:
+      empty: true
+
+  # A later MATCH rescans nodes written earlier in the same query; the zone
+  # map does not know the new value yet.
+  - name: zone_map_rescan_after_set_in_same_query
+    setup:
+      - "CREATE (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
+    query: "MATCH (a:N {id: 'a'}) SET a.w = 999 WITH a MATCH (b:N) WHERE b.w = 999 RETURN b.id"
+    expect:
+      rows:
+        - [a]
+
+  # An edge property map without an edge variable used to be ignored.
+  - name: anonymous_edge_property_map_filters
+    setup:
+      - "CREATE (:N {id: 'a'})-[:T {w: 50}]->(:N {id: 'b'})"
+      - "CREATE (:N {id: 'c'})-[:T {w: 7}]->(:N {id: 'd'})"
+    query: "MATCH (x)-[{w: 50}]->(y) RETURN x.id"
+    expect:
+      rows:
+        - [a]
+
+  # An edge property map without an edge variable used to be ignored.
+  - name: anonymous_typed_edge_property_map_filters
+    setup:
+      - "CREATE (:N {id: 'a'})-[:T {w: 50}]->(:N {id: 'b'})"
+      - "CREATE (:N {id: 'c'})-[:T {w: 7}]->(:N {id: 'd'})"
+    query: "MATCH (x)-[:T {w: 50}]->(y) RETURN x.id"
+    expect:
+      rows:
+        - [a]
+
+  # An edge property map without an edge variable used to be ignored.
+  - name: anonymous_variable_length_edge_property_map_filters
+    setup:
+      - "CREATE (:N {id: 'a'})-[:T {w: 50}]->(:N {id: 'b'})"
+      - "CREATE (:N {id: 'c'})-[:T {w: 7}]->(:N {id: 'd'})"
+    query: "MATCH (x)-[*1..2 {w: 50}]->(y) RETURN x.id"
+    expect:
+      rows:
+        - [a]

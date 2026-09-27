@@ -200,3 +200,30 @@ tests:
     query: "INSERT (:A) garbage"
     expect:
       error: "after the end of the statement"
+
+  # Computed property values (used to fail with an internal error)
+  - name: insert_computed_properties_per_row
+    statements:
+      - "FOR i IN [1, 2] INSERT (:W {id: 'w' || CAST(i AS STRING), double: i * 2})"
+      - "MATCH (w:W) RETURN w.id, w.double"
+    expect:
+      rows:
+        - [w1, 2]
+        - [w2, 4]
+
+  - name: insert_computed_property_without_input
+    statements:
+      - "INSERT (:W {sum: 2 + 3, id: upper('abc')})"
+      - "MATCH (w:W) RETURN w.sum, w.id"
+    expect:
+      rows:
+        - [5, ABC]
+
+  - name: insert_computed_edge_property
+    statements:
+      - "INSERT (:N {id: 1}), (:N {id: 2})"
+      - "MATCH (a:N {id: 1}), (b:N {id: 2}) INSERT (a)-[:T {w: a.id + b.id}]->(b)"
+      - "MATCH (:N)-[t:T]->(:N) RETURN t.w"
+    expect:
+      rows:
+        - [3]

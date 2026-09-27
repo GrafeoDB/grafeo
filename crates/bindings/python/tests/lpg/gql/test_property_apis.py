@@ -6,7 +6,10 @@ create_property_index, drop_property_index, has_property_index,
 find_nodes_by_property, get_nodes_by_label, get_property_batch.
 """
 
-from datetime import UTC, datetime
+import os
+import time
+import warnings
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -252,6 +255,19 @@ class TestPropertyIndex:
         ids = db.find_nodes_by_property("age", 30)
         assert len(ids) == 1
 
+    def test_deleted_node_is_not_found(self, db):
+        # A deleted node used to stay in the index, and a re-created node with
+        # the same key was returned together with the deleted one.
+        db.create_property_index("id")
+        db.execute_cypher("CREATE (:Graph:File {id: 'a'})", {})
+        assert len(db.find_nodes_by_property("id", "a")) == 1
+
+        db.execute_cypher("MATCH (n:Graph) WHERE n.id = 'a' DETACH DELETE n", {})
+        assert db.find_nodes_by_property("id", "a") == []
+
+        node = db.create_node(["Graph", "File"], {"id": "a"})
+        assert db.find_nodes_by_property("id", "a") == [node.id]
+
 
 # ── Batch Operations ────────────────────────────────────────────────
 
@@ -405,7 +421,8 @@ class TestTypeRoundtrips:
         db.set_node_property(node.id, "val", dt)
         result = db.execute(f"MATCH (n) WHERE id(n) = {node.id} RETURN n.val AS v")
         v = list(result)[0]["v"]
-        assert isinstance(v, datetime)
+        assert v == datetime(2024, 6, 15, 12, 30, 0)
+        assert v.tzinfo is None
 
     def test_list_roundtrip(self, db):
         node = db.create_node(["T"], {"val": [1, "two", True]})
@@ -445,6 +462,74 @@ class TestTypeRoundtrips:
 
 
 # ── Error Handling ──────────────────────────────────────────────────
+
+
+@pytest.fixture
+def non_utc_local_time():
+    """Forces a non-UTC local timezone where the OS allows it (POSIX).
+
+    Naive datetimes used to be read as local time, so they only
+    round-tripped on machines (and CI runners) set to UTC.
+    """
+    if not hasattr(time, "tzset"):
+        yield
+        return
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "Europe/Amsterdam"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if old is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
+class TestDatetimeConversion:
+    """Python datetime <-> Grafeo timestamp: naive values are UTC both ways."""
+
+    @staticmethod
+    def roundtrip(db, value):
+        node = db.create_node(["T"], {"val": value})
+        result = db.execute(f"MATCH (n) WHERE id(n) = {node.id} RETURN n.val AS v")
+        return list(result)[0]["v"]
+
+    def test_naive_datetime_roundtrips_exactly(self, db, non_utc_local_time):
+        dt = datetime(2024, 1, 15, 14, 30, 0)
+        assert self.roundtrip(db, dt) == dt
+
+    def test_naive_datetime_is_utc_in_queries(self, db, non_utc_local_time):
+        db.create_node(["T"], {"val": datetime(2024, 1, 15, 14, 30, 0)})
+        result = db.execute(
+            "MATCH (n:T) WHERE n.val = datetime('2024-01-15T14:30:00Z') RETURN count(n) AS c"
+        )
+        assert list(result)[0]["c"] == 1
+        utc = datetime(2024, 1, 15, 14, 30, 0, tzinfo=UTC)
+        result = db.execute("MATCH (n:T) RETURN n.val = $t AS eq", {"t": utc})
+        assert list(result)[0]["eq"] is True
+
+    def test_aware_datetime_is_converted_to_utc(self, db):
+        amsterdam_summer = timezone(timedelta(hours=2))
+        dt = datetime(2024, 6, 15, 14, 30, 0, tzinfo=amsterdam_summer)
+        assert self.roundtrip(db, dt) == datetime(2024, 6, 15, 12, 30, 0)
+
+    def test_microseconds_are_kept(self, db):
+        dt = datetime(2024, 6, 15, 12, 30, 0, 123457)
+        assert self.roundtrip(db, dt) == dt
+
+    def test_datetime_before_1970(self, db):
+        # datetime.fromtimestamp raises OSError for negative values on Windows.
+        dt = datetime(1969, 7, 20, 20, 17, 40)
+        assert self.roundtrip(db, dt) == dt
+
+    def test_no_deprecation_warning(self, db):
+        # datetime.utcfromtimestamp is deprecated since Python 3.12.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            result = db.execute("RETURN datetime('2024-01-15T14:30:00') AS r")
+            assert list(result)[0]["r"] == datetime(2024, 1, 15, 14, 30, 0)
 
 
 class TestErrorHandling:

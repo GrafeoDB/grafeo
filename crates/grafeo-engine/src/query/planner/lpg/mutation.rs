@@ -12,6 +12,7 @@ use super::{
 };
 #[cfg(feature = "algos")]
 use super::{CallProcedureOp, StaticResultOperator};
+use grafeo_common::utils::error::{QueryError, QueryErrorKind};
 
 impl super::Planner {
     /// Plans a CREATE NODE operator.
@@ -20,7 +21,7 @@ impl super::Planner {
         create: &CreateNodeOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Plan input if present
-        let (input_op, mut columns) = if let Some(ref input) = create.input {
+        let (mut input_op, mut columns) = if let Some(ref input) = create.input {
             let (op, cols) = self.plan_operator(input)?;
             (Some(op), cols)
         } else {
@@ -42,15 +43,13 @@ impl super::Planner {
         let output_column = columns.len();
         columns.push(create.variable.clone());
 
-        // Convert properties: resolve variables/property access from input columns
-        let properties: Vec<(String, PropertySource)> = create
-            .properties
-            .iter()
-            .map(|(name, expr)| {
-                let source = self.expression_to_property_source(expr, &columns)?;
-                Ok((name.clone(), source))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        // Convert properties: resolve variables/property access from input
+        // columns, computed values (`toString(i)`) are evaluated per row.
+        let properties =
+            self.row_property_sources(&create.properties, &columns[..output_column])?;
+        if input_op.is_none() && has_computed_source(&properties) {
+            input_op = Some(single_row_input());
+        }
 
         // Input pass-through columns use generic types (Any); the new node column
         // gets Node for compact VectorData::NodeId storage.
@@ -65,7 +64,9 @@ impl super::Planner {
             output_schema,
             output_column,
         )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id);
+        .with_transaction_context(self.viewing_epoch, self.transaction_id)
+        .with_search_store(Arc::clone(&self.store))
+        .with_session_context(self.session_context.clone());
 
         if let Some(ref tracker) = self.write_tracker {
             op = op.with_write_tracker(Arc::clone(tracker));
@@ -114,15 +115,10 @@ impl super::Planner {
             idx
         });
 
-        // Convert properties: resolve variables/property access from input columns
-        let properties: Vec<(String, PropertySource)> = create
-            .properties
-            .iter()
-            .map(|(name, expr)| {
-                let source = self.expression_to_property_source(expr, &columns)?;
-                Ok((name.clone(), source))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        // Convert properties: resolve variables/property access from input
+        // columns, computed values (`i * 2`) are evaluated per row.
+        let input_width = output_column.unwrap_or(columns.len());
+        let properties = self.row_property_sources(&create.properties, &columns[..input_width])?;
 
         let output_schema = self.derive_schema_from_columns(&columns);
 
@@ -135,7 +131,9 @@ impl super::Planner {
             output_schema,
         )
         .with_properties(properties)
-        .with_transaction_context(self.viewing_epoch, self.transaction_id);
+        .with_transaction_context(self.viewing_epoch, self.transaction_id)
+        .with_search_store(Arc::clone(&self.store))
+        .with_session_context(self.session_context.clone());
 
         if let Some(ref tracker) = self.write_tracker {
             operator = operator.with_write_tracker(Arc::clone(tracker));
@@ -455,7 +453,8 @@ impl super::Planner {
     /// Plans a MERGE operator.
     pub(super) fn plan_merge(&self, merge: &MergeOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Plan the input operator if present (skip if Empty)
-        let (input_op, mut columns) = if matches!(merge.input.as_ref(), LogicalOperator::Empty) {
+        let (mut input_op, mut columns) = if matches!(merge.input.as_ref(), LogicalOperator::Empty)
+        {
             (None, Vec::new())
         } else {
             let (op, cols) = self.plan_operator(&merge.input)?;
@@ -463,21 +462,11 @@ impl super::Planner {
         };
 
         // Match properties cannot reference the MERGE variable (ISO §15.5).
-        let match_properties: Vec<(String, PropertySource)> = merge
-            .match_properties
-            .iter()
-            .map(|(name, expr)| {
-                let source = self
-                    .expression_to_property_source(expr, &columns)
-                    .unwrap_or_else(|_| {
-                        Self::try_fold_expression(expr).map_or(
-                            PropertySource::Constant(Value::Null),
-                            PropertySource::Constant,
-                        )
-                    });
-                (name.clone(), source)
-            })
-            .collect();
+        // Computed values (`toString(i)`) are evaluated per input row.
+        let match_properties = self.row_property_sources(&merge.match_properties, &columns)?;
+        if input_op.is_none() && has_computed_source(&match_properties) {
+            input_op = Some(single_row_input());
+        }
 
         // ON CREATE / ON MATCH expressions are evaluated against an augmented row
         // that includes the merged node. Build the action-scope columns now so
@@ -572,22 +561,9 @@ impl super::Planner {
                 ))
             })?;
 
-        // Convert match properties to PropertySource (supports variables from input)
-        let match_properties: Vec<(String, PropertySource)> = merge_rel
-            .match_properties
-            .iter()
-            .map(|(name, expr)| {
-                let source = self
-                    .expression_to_property_source(expr, &columns)
-                    .unwrap_or_else(|_| {
-                        Self::try_fold_expression(expr).map_or(
-                            PropertySource::Constant(Value::Null),
-                            PropertySource::Constant,
-                        )
-                    });
-                (name.clone(), source)
-            })
-            .collect();
+        // Convert match properties to PropertySource (supports variables from
+        // input); computed values are evaluated per input row.
+        let match_properties = self.row_property_sources(&merge_rel.match_properties, &columns)?;
 
         // ON CREATE / ON MATCH SET on a MERGE relationship may reference the
         // edge variable itself: build an augmented scope that includes it.
@@ -1178,6 +1154,57 @@ impl super::Planner {
         })
     }
 
+    /// Lowers the property map of a CREATE, INSERT or MERGE pattern against
+    /// the input `columns`.
+    ///
+    /// Tries a direct source (literal, variable, property access), then
+    /// constant folding, then a runtime [`PropertySource::Expression`] that
+    /// the operator evaluates per input row. Computed values such as
+    /// `toString(i)` used to fail with an internal error in CREATE, and
+    /// silently became NULL in MERGE.
+    pub(super) fn row_property_sources(
+        &self,
+        properties: &[(String, LogicalExpression)],
+        columns: &[String],
+    ) -> Result<Vec<(String, PropertySource)>> {
+        properties
+            .iter()
+            .map(|(name, expr)| {
+                let source = self.row_property_source(expr, columns).map_err(|e| {
+                    Error::Query(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        format!("Cannot evaluate the value of property '{name}': {e}"),
+                    ))
+                })?;
+                Ok((name.clone(), source))
+            })
+            .collect()
+    }
+
+    fn row_property_source(
+        &self,
+        expr: &LogicalExpression,
+        columns: &[String],
+    ) -> Result<PropertySource> {
+        if let Ok(source) = self.expression_to_property_source(expr, columns) {
+            return Ok(source);
+        }
+        if let Some(value) = Self::try_fold_expression(expr) {
+            return Ok(PropertySource::Constant(value));
+        }
+        let filter_expr = self.convert_expression(expr)?;
+        // Last occurrence wins, matching `expression_to_property_source`.
+        let variable_columns: HashMap<String, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.clone(), i))
+            .collect();
+        Ok(PropertySource::Expression {
+            expr: Box::new(filter_expr),
+            variable_columns,
+        })
+    }
+
     /// Converts a logical expression to a PropertySource.
     ///
     /// Variable resolution uses `rposition` rather than `position` so that
@@ -1385,4 +1412,17 @@ impl super::Planner {
             _ => None,
         }
     }
+}
+
+/// Whether any property value must be computed per input row.
+fn has_computed_source(properties: &[(String, PropertySource)]) -> bool {
+    properties
+        .iter()
+        .any(|(_, source)| !matches!(source, PropertySource::Constant(_)))
+}
+
+/// A one-row input, so a CREATE or MERGE without a MATCH still has a row to
+/// evaluate computed property values against.
+fn single_row_input() -> Box<dyn Operator> {
+    Box::new(grafeo_core::execution::operators::single_row::SingleRowOperator::new())
 }

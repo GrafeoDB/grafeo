@@ -51,5 +51,5 @@ pub use async_typed::{AsyncLpgWal, AsyncTypedWal};
 pub use flusher::{AdaptiveFlusher, FlusherStats};
 pub use log::{CheckpointMetadata, DurabilityMode, WalConfig, WalManager};
 pub use record::{WalEntry, WalRecord};
-pub use recovery::WalRecovery;
+pub use recovery::{RecoveredWal, WalRecovery};
 pub use typed::{LpgWal, TypedWal};

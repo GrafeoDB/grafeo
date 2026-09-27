@@ -233,11 +233,23 @@ impl GqlTranslator {
                     .any(|item| contains_aggregate(&item.expression));
 
             if has_aggregates {
-                let (aggregates, auto_group_by, post_return) =
-                    self.extract_aggregates_and_groups(&return_clause.items, false)?;
+                let (aggregates, auto_group_by, post_return) = self.extract_aggregates_and_groups(
+                    &return_clause.items,
+                    !return_clause.group_by.is_empty(),
+                )?;
+                // Explicit GROUP BY wins over the keys implied by the items.
+                let group_by = if return_clause.group_by.is_empty() {
+                    auto_group_by
+                } else {
+                    return_clause
+                        .group_by
+                        .iter()
+                        .map(|e| self.translate_expression(e))
+                        .collect::<Result<Vec<_>>>()?
+                };
 
                 plan = LogicalOperator::Aggregate(AggregateOp {
-                    group_by: auto_group_by,
+                    group_by,
                     aggregates,
                     input: Box::new(plan),
                     having: None,

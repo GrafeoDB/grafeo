@@ -29,6 +29,19 @@ tests:
         - [City]
         - [Person]
 
+  # An explicit GROUP BY groups the procedure rows even when the key is not
+  # returned: one count per label, not one global count.
+  - name: call_db_labels_group_by_hidden_key
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:City {name: 'Amsterdam'})"
+    query: "CALL db.labels() YIELD label RETURN count(label) AS n GROUP BY label"
+    expect:
+      columns: [n]
+      rows:
+        - [1]
+        - [1]
+
   - name: call_db_labels_empty
     query: "CALL db.labels() YIELD label RETURN label"
     expect:

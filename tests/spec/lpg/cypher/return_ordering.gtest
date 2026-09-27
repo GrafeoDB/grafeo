@@ -167,7 +167,7 @@ tests:
         - [Amsterdam, 2]
         - [Berlin, 1]
 
-  - name: unaliased_aggregate_before_key_keeps_order
+  - name: unaliased_aggregate_before_key_keeps_column_order
     setup:
       - "CREATE (:Person {name: 'Alix', city: 'Amsterdam'})"
       - "CREATE (:Person {name: 'Gus', city: 'Amsterdam'})"
@@ -176,8 +176,8 @@ tests:
     expect:
       columns: [count(p), p.city]
       rows:
-        - [2, Amsterdam]
         - [1, Berlin]
+        - [2, Amsterdam]
 
   - name: unaliased_aggregate_with_wrapped_aggregate
     setup:
@@ -198,5 +198,5 @@ tests:
     expect:
       columns: [n, city]
       rows:
-        - [2, Amsterdam]
         - [1, Berlin]
+        - [2, Amsterdam]

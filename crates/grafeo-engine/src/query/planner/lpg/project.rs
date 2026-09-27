@@ -1387,6 +1387,10 @@ fn resolve_logical_to_physical_keys(
     Ok(out)
 }
 
+/// Stand-in reported by [`collect_vars`] for a subquery: never the name of a
+/// RETURN item, so sorting by a subquery always takes the augmenting projection.
+const OPAQUE_SUBQUERY_VARIABLE: &str = "\0subquery";
+
 /// Collects variable references from an expression tree.
 ///
 /// Walks `expr` and pushes every referenced variable name into `out`. Used by
@@ -1497,27 +1501,18 @@ fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
                     .filter(|v| v != accumulator && v != variable),
             );
         }
-        // Subqueries: every variable their plan mentions, which includes the
-        // correlated outer ones. Over-reporting only adds a harmless
-        // augmenting projection; under-reporting would break the sort.
-        LogicalExpression::ExistsSubquery(plan)
-        | LogicalExpression::CountSubquery(plan)
-        | LogicalExpression::ValueSubquery(plan) => collect_plan_vars(plan, out),
-        LogicalExpression::PatternComprehension {
-            subplan,
-            projection,
-        } => {
-            collect_plan_vars(subplan, out);
-            collect_vars(projection, out);
+        // A subquery can reference outer variables anywhere in its plan (in
+        // predicates too, not only as scan variables), so treat it as opaque:
+        // report a name no RETURN item can have, which always takes the
+        // augmenting projection. That costs one hidden column at most.
+        LogicalExpression::ExistsSubquery(_)
+        | LogicalExpression::CountSubquery(_)
+        | LogicalExpression::ValueSubquery(_)
+        | LogicalExpression::PatternComprehension { .. } => {
+            out.push(OPAQUE_SUBQUERY_VARIABLE.to_string());
         }
         LogicalExpression::Literal(_) | LogicalExpression::Parameter(_) => {}
     }
-}
-
-fn collect_plan_vars(plan: &LogicalOperator, out: &mut Vec<String>) {
-    let mut vars = std::collections::HashSet::new();
-    crate::query::translators::common::collect_operator_variables(plan, &mut vars);
-    out.extend(vars);
 }
 
 /// True if `sort` requires injecting extra projection columns before sorting.

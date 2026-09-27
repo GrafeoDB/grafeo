@@ -331,9 +331,15 @@ impl SparqlTranslator {
                 with_graph,
                 delete_template,
                 insert_template,
-                using_clauses: _,
+                using_clauses,
                 where_clause,
-            } => self.translate_modify(with_graph, delete_template, insert_template, where_clause),
+            } => self.translate_modify(
+                with_graph,
+                delete_template,
+                insert_template,
+                using_clauses,
+                where_clause,
+            ),
             ast::UpdateOperation::Load {
                 silent,
                 source,
@@ -457,16 +463,18 @@ impl SparqlTranslator {
 
         // Build delete operators with the match plan as input
         let mut ops = Vec::new();
-        for triple in &triples {
+        for (triple, graph) in &triples {
             let subject = self.translate_triple_term(&triple.subject)?;
             let predicate = self.translate_property_path(&triple.predicate)?;
             let object = self.translate_triple_term(&triple.object)?;
+            // `GRAPH ?g` resolves to a "?"-prefixed name, which the executor rejects.
+            let graph = graph.as_ref().map(|g| self.resolve_variable_or_iri(g));
 
             ops.push(LogicalOperator::DeleteTriple(DeleteTripleOp {
                 subject,
                 predicate,
                 object,
-                graph: None, // Default graph
+                graph,
                 input: Some(Box::new(match_plan.clone())),
             }));
         }
@@ -484,13 +492,31 @@ impl SparqlTranslator {
         }
     }
 
-    fn extract_triples_from_pattern(pattern: &ast::GraphPattern) -> Vec<ast::TriplePattern> {
+    /// Extracts the triple templates of a DELETE WHERE pattern, each tagged with
+    /// its enclosing `GRAPH` (if any) so the delete targets that graph.
+    fn extract_triples_from_pattern(
+        pattern: &ast::GraphPattern,
+    ) -> Vec<(ast::TriplePattern, Option<ast::VariableOrIri>)> {
+        Self::extract_triples_with_graph(pattern, None)
+    }
+
+    fn extract_triples_with_graph(
+        pattern: &ast::GraphPattern,
+        graph: Option<&ast::VariableOrIri>,
+    ) -> Vec<(ast::TriplePattern, Option<ast::VariableOrIri>)> {
         match pattern {
-            ast::GraphPattern::Basic(triples) => triples.clone(),
+            ast::GraphPattern::Basic(triples) => triples
+                .iter()
+                .map(|t| (t.clone(), graph.cloned()))
+                .collect(),
             ast::GraphPattern::Group(patterns) => patterns
                 .iter()
-                .flat_map(Self::extract_triples_from_pattern)
+                .flat_map(|p| Self::extract_triples_with_graph(p, graph))
                 .collect(),
+            ast::GraphPattern::NamedGraph {
+                graph: inner_graph,
+                pattern: inner_pattern,
+            } => Self::extract_triples_with_graph(inner_pattern, Some(inner_graph)),
             _ => Vec::new(),
         }
     }
@@ -500,12 +526,36 @@ impl SparqlTranslator {
         with_graph: &Option<ast::Iri>,
         delete_template: &Option<Vec<ast::QuadPattern>>,
         insert_template: &Option<Vec<ast::QuadPattern>>,
+        using_clauses: &[ast::UsingClause],
         where_clause: &ast::GraphPattern,
     ) -> Result<LogicalPlan> {
-        // Translate the WHERE clause - this will be evaluated once and shared
-        let where_plan = self.translate_graph_pattern(where_clause)?;
+        // USING / USING NAMED is parsed but not executed yet; reject it instead
+        // of evaluating the WHERE clause against the wrong dataset.
+        if !using_clauses.is_empty() {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                "SPARQL Update USING / USING NAMED is not yet supported",
+            )));
+        }
 
         let default_graph = with_graph.as_ref().map(|g| self.resolve_iri(g));
+
+        // WITH <g> makes <g> the default graph of the WHERE clause (SPARQL 1.1
+        // Update 3.1.3). Redirect the dataset while translating WHERE, then
+        // restore the previous one, also when translation fails.
+        let previous_dataset = default_graph.as_ref().map(|graph| {
+            self.dataset.replace(DatasetRestriction {
+                default_graphs: vec![graph.clone()],
+                named_graphs: Vec::new(),
+            })
+        });
+
+        // Translate the WHERE clause - this will be evaluated once and shared
+        let where_plan = self.translate_graph_pattern(where_clause);
+        if let Some(previous) = previous_dataset {
+            self.dataset = previous;
+        }
+        let where_plan = where_plan?;
 
         // Build DELETE templates
         let mut delete_templates = Vec::new();

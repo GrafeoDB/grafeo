@@ -205,6 +205,8 @@ pub enum TokenKind {
     Slash,
     /// % operator.
     Percent,
+    /// ^ operator (exponentiation).
+    Caret,
     /// || operator.
     Concat,
     /// | pipe (label disjunction).
@@ -219,6 +221,8 @@ pub enum TokenKind {
     Tilde,
     /// ? question mark (questioned path).
     QuestionMark,
+    /// `;` statement terminator.
+    Semicolon,
 
     // Punctuation
     /// ( punctuation.
@@ -353,6 +357,10 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 TokenKind::Percent
             }
+            '^' => {
+                self.advance();
+                TokenKind::Caret
+            }
             '=' => {
                 self.advance();
                 TokenKind::Eq
@@ -426,6 +434,10 @@ impl<'a> Lexer<'a> {
             '?' => {
                 self.advance();
                 TokenKind::QuestionMark
+            }
+            ';' => {
+                self.advance();
+                TokenKind::Semicolon
             }
             '\'' | '"' => self.scan_string(),
             '`' => self.scan_quoted_identifier(),

@@ -95,6 +95,25 @@ tests:
       rows:
         - [1]
 
+  # `ADD PROPERTY name TYPE` adds `name` with that type (the PROPERTY keyword
+  # used to be read as the property name and the type silently dropped).
+  - name: alter_node_type_add_property_enforces_its_type
+    setup:
+      - "CREATE NODE TYPE Sensor (id INTEGER NOT NULL)"
+      - "ALTER NODE TYPE Sensor ADD PROPERTY location STRING"
+    query: "INSERT (:Sensor {id: 1, location: 5})"
+    expect:
+      error: "property 'location' on :Sensor expects String"
+
+  - name: alter_node_type_add_property_shows_in_schema
+    setup:
+      - "CREATE NODE TYPE Sensor (id INTEGER NOT NULL)"
+      - "ALTER NODE TYPE Sensor ADD PROPERTY location STRING"
+    query: "SHOW NODE TYPES"
+    expect:
+      rows:
+        - [Sensor, "id INT64 NOT NULL, location STRING", "", ""]
+
   # ---------------------------------------------------------------------------
   # ALTER EDGE TYPE: ADD / DROP PROPERTY
   # ---------------------------------------------------------------------------

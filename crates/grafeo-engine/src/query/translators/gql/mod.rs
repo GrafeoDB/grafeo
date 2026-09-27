@@ -478,7 +478,12 @@ impl GqlTranslator {
                         });
                     }
                     ast::QueryClause::Create(create_clause) => {
-                        plan = self.translate_create_patterns(&create_clause.patterns, plan)?;
+                        // An INSERT that starts the statement has no input rows.
+                        plan = if matches!(plan, LogicalOperator::Empty) {
+                            self.insert_chain(&create_clause.patterns)?.0
+                        } else {
+                            self.translate_create_patterns(&create_clause.patterns, plan)?
+                        };
                     }
                     ast::QueryClause::Delete(delete_clause) => {
                         plan = self.translate_delete_targets(
@@ -1788,7 +1793,24 @@ impl GqlTranslator {
     }
 
     fn translate_insert(&self, insert: &ast::InsertStatement) -> Result<LogicalPlan> {
-        if insert.patterns.is_empty() {
+        let (plan, last_variable) = self.insert_chain(&insert.patterns)?;
+        let ret = wrap_return(
+            plan,
+            vec![ReturnItem {
+                expression: LogicalExpression::Variable(last_variable),
+                alias: None,
+            }],
+            false,
+        );
+        Ok(LogicalPlan::new(ret))
+    }
+
+    /// Builds the CreateNode / CreateEdge chain of an INSERT that starts a
+    /// statement (no input rows). Returns the plan and the last variable
+    /// created. Used for a standalone INSERT and for the first INSERT clause of
+    /// a query such as `INSERT (a) INSERT (b) RETURN a, b`.
+    fn insert_chain(&self, patterns: &[ast::Pattern]) -> Result<(LogicalOperator, String)> {
+        if patterns.is_empty() {
             return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Empty INSERT statement",
@@ -1800,7 +1822,7 @@ impl GqlTranslator {
         let mut plan: Option<LogicalOperator> = None;
         let mut last_variable = String::new();
 
-        for pattern in &insert.patterns {
+        for pattern in patterns {
             match pattern {
                 ast::Pattern::Node(node) => {
                     let variable = node
@@ -1903,16 +1925,13 @@ impl GqlTranslator {
             }
         }
 
-        let ret = wrap_return(
-            plan.expect("plan initialized by non-empty patterns"),
-            vec![ReturnItem {
-                expression: LogicalExpression::Variable(last_variable),
-                alias: None,
-            }],
-            false,
-        );
-
-        Ok(LogicalPlan::new(ret))
+        let plan = plan.ok_or_else(|| {
+            Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                "INSERT must create at least one node",
+            ))
+        })?;
+        Ok((plan, last_variable))
     }
 
     /// Translates a subquery to a logical operator (without Return).

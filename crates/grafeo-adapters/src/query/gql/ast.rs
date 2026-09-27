@@ -925,6 +925,8 @@ pub enum BinaryOp {
     Div,
     /// Modulo.
     Mod,
+    /// Exponentiation (`^`).
+    Pow,
 
     // String
     /// String concatenation.

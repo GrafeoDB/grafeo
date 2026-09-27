@@ -253,6 +253,9 @@ pub enum TokenKind {
     /// A `$name` parameter reference.
     Parameter(String),
 
+    /// `;` terminator (only allowed at the end of a traversal).
+    Semicolon,
+
     // End of input
     /// End of input.
     Eof,
@@ -327,8 +330,11 @@ impl<'a> Lexer<'a> {
 
             Some(c) if c.is_alphabetic() || c == '_' => self.read_identifier(c),
 
+            Some(';') => TokenKind::Semicolon,
             None => TokenKind::Eof,
-            _ => TokenKind::Eof,
+            // Anything else is an error, not the end of input: text after an
+            // unknown character used to be silently dropped (#380).
+            Some(c) => TokenKind::Error(format!("unexpected character '{c}'")),
         };
 
         Token {

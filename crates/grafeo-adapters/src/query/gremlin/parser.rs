@@ -56,7 +56,26 @@ impl<'a> Parser<'a> {
     ///
     /// Returns an error if the input contains invalid or unexpected Gremlin syntax.
     pub fn parse(&mut self) -> Result<Statement> {
-        self.parse_statement()
+        let statement = self.parse_statement()?;
+        self.expect_end_of_input()?;
+        Ok(statement)
+    }
+
+    /// Requires that only `;` remain after a complete traversal.
+    fn expect_end_of_input(&mut self) -> Result<()> {
+        let saw_semicolon = self.check(TokenKind::Semicolon);
+        while self.check(TokenKind::Semicolon) {
+            self.advance();
+        }
+        match self.current_kind() {
+            None | Some(TokenKind::Eof) => Ok(()),
+            Some(TokenKind::Error(message)) => Err(self.error(message)),
+            Some(_) if saw_semicolon => Err(self.error(
+                "multiple traversals separated by ';' are not supported in one call: \
+                 run them separately",
+            )),
+            Some(_) => Err(self.error("unexpected input after the end of the traversal")),
+        }
     }
 
     fn parse_statement(&mut self) -> Result<Statement> {
@@ -1261,6 +1280,30 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_error_message(query: &str) -> String {
+        Parser::new(query).parse().expect_err(query).to_string()
+    }
+
+    #[test]
+    fn test_trailing_input_is_rejected() {
+        // Text after an unknown character used to be dropped silently (#380).
+        assert!(Parser::new("g.V();").parse().is_ok());
+        assert!(Parser::new("g.V().count() ;; ").parse().is_ok());
+
+        let err = parse_error_message("g.V(); g.E()");
+        assert!(
+            err.contains("multiple traversals separated by ';' are not supported in one call"),
+            "{err}"
+        );
+        let err = parse_error_message("g.V() # comment");
+        assert!(err.contains("unexpected character '#'"), "{err}");
+        let err = parse_error_message("g.V() g.E()");
+        assert!(
+            err.contains("unexpected input after the end of the traversal"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn test_parse_simple_traversal() {

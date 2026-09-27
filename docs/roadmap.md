@@ -161,7 +161,7 @@ The beta series focuses on correctness, completeness and real-world durability. 
 
 | Version    | Focus |
 |------------|-------|
-| **0.5.44** | Durability and persistence completeness: transaction-grouped WAL records, durable writes without `close()`, safe WAL checkpoints, a database directory lock, vector and text indexes that survive reopen in WAL mode, storage format support for databases over 4 GiB; index seeks for keys that come from earlier rows (`UNWIND ... MATCH (n {id: row.id})`), property equi-joins as hash joins, temporal properties (point-in-time queries), streaming results, shortest-path elements (`nodes(p)`, `edges(p)`), `VECTOR(n)` schema type and filtered hybrid search, next phase of tiered storage |
+| **0.5.44** | Durability and persistence: transaction-grouped WAL records, durable writes without `close()`, safe WAL checkpoints, a database directory lock, vector and text indexes that survive reopen in WAL mode, and databases over 4 GiB. Queries and features: index seeks for keys from earlier rows (`UNWIND ... MATCH (n {id: row.id})`), property equi-joins as hash joins, temporal properties (point-in-time queries), streaming results, shortest-path elements (`nodes(p)`, `edges(p)`), the `VECTOR(n)` schema type with filtered hybrid search, and the next phase of tiered storage. |
 | **0.5.45** | Driver and protocol compatibility: ADBC driver, W3C SPARQL HTTP Protocol and Graph Store Protocol, offline-first sync, cross-language query translation, Jupyter cell magic, final audit. Last 0.5.x release |
 
 ---
@@ -210,7 +210,7 @@ Not scheduled, but on the radar:
 
 ## Contributing
 
-Interested in contributing? Check the [GitHub Issues](https://github.com/GrafeoDB/grafeo/issues), join the [Discussions](https://github.com/orgs/GrafeoDB/discussions) or hop into the [Discord server](https://discord.gg/jrgMD2Zj3).
+Interested in contributing? Check the [GitHub Issues](https://github.com/GrafeoDB/grafeo/issues), join the [Discussions](https://github.com/orgs/GrafeoDB/discussions) or hop into the [Discord server](https://discord.gg/nqU6RUVaxW).
 
 ---
 

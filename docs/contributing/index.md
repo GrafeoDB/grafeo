@@ -39,7 +39,7 @@ Thank you for your interest in contributing to Grafeo!
 
 ## Community
 
-Join the [Grafeo Discord server](https://discord.gg/jrgMD2Zj3) to ask questions, share feedback and connect with other users and contributors.
+Join the [Grafeo Discord server](https://discord.gg/nqU6RUVaxW) to ask questions, share feedback and connect with other users and contributors.
 
 ## Code of Conduct
 

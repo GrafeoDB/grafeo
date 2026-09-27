@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 /// Maximum nanoseconds in a day (exclusive).
 const NANOS_PER_DAY: u64 = 86_400_000_000_000;
@@ -28,7 +29,7 @@ const NANOS_PER_SECOND: u64 = 1_000_000_000;
 /// let tz = t.with_offset(3600); // +01:00
 /// assert_eq!(tz.to_string(), "14:30:00+01:00");
 /// ```
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct Time {
     /// Nanoseconds since midnight (0..86_400_000_000_000).
     nanos: u64,
@@ -238,14 +239,36 @@ impl Default for Time {
     }
 }
 
+// Equality, ordering and hashing agree: two times with offsets compare by
+// their UTC instant (`14:00+01:00` equals `13:00Z`, like `ZonedDatetime`);
+// otherwise by wall-clock time, with the offset breaking ties so a local time
+// never equals an offset time.
+
+impl PartialEq for Time {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Time {}
+
+impl Hash for Time {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self.offset {
+            Some(_) => (true, self.utc_nanos()).hash(state),
+            None => (false, self.nanos).hash(state),
+        }
+    }
+}
+
 impl Ord for Time {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Compare by UTC-normalized value when both have offsets,
-        // or by raw nanos when neither has an offset.
-        // Mixed offset/no-offset compares raw nanos as fallback.
         match (self.offset, other.offset) {
             (Some(_), Some(_)) => self.utc_nanos().cmp(&other.utc_nanos()),
-            _ => self.nanos.cmp(&other.nanos),
+            _ => self
+                .nanos
+                .cmp(&other.nanos)
+                .then_with(|| self.offset.is_some().cmp(&other.offset.is_some())),
         }
     }
 }
@@ -319,6 +342,27 @@ impl fmt::Display for Time {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn equal_instants_with_different_offsets_are_equal() {
+        use std::collections::hash_map::DefaultHasher;
+        let hash = |t: &Time| {
+            let mut h = DefaultHasher::new();
+            t.hash(&mut h);
+            h.finish()
+        };
+        let amsterdam = Time::from_hms(14, 0, 0).unwrap().with_offset(3600);
+        let utc = Time::from_hms(13, 0, 0).unwrap().with_offset(0);
+        assert_eq!(amsterdam.cmp(&utc), Ordering::Equal);
+        assert_eq!(amsterdam, utc);
+        assert_eq!(hash(&amsterdam), hash(&utc));
+
+        // A local time never equals an offset time, even at the same clock time.
+        let local = Time::from_hms(14, 0, 0).unwrap();
+        assert_ne!(local, amsterdam);
+        assert_ne!(local.cmp(&amsterdam), Ordering::Equal);
+        assert_eq!(local, Time::from_hms(14, 0, 0).unwrap());
+    }
     use super::*;
 
     #[test]

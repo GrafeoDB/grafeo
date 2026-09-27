@@ -96,14 +96,7 @@ impl LpgStore {
         if let Some(index) = indexes.get(key) {
             // Get old value to remove from index
             if let Some(old_value) = self.node_properties.get(node_id, key) {
-                let old_hv = HashableValue::new(old_value);
-                if let Some(mut nodes) = index.get_mut(&old_hv) {
-                    nodes.remove(&node_id);
-                    if nodes.is_empty() {
-                        drop(nodes);
-                        index.remove(&old_hv);
-                    }
-                }
+                Self::remove_index_entry(index, &HashableValue::new(old_value), node_id);
             }
 
             // Add new value to index
@@ -139,12 +132,15 @@ impl LpgStore {
             .map(|(key, index)| (key.clone(), Arc::clone(index)))
             .collect();
         for (key, index) in indexes {
-            let Some((label, property)) = key.split_once(':') else {
+            // Match the key against the node's labels rather than splitting
+            // on ':', which labels (`` :`a:b` ``) and properties may contain.
+            let Some(property) = labels
+                .iter()
+                .filter_map(|label| key.strip_prefix(label.as_str())?.strip_prefix(':'))
+                .min_by_key(|property| property.len())
+            else {
                 continue;
             };
-            if !labels.iter().any(|l| l == label) {
-                continue;
-            }
             let accessor = crate::index::vector::PropertyVectorAccessor::new(self, property);
             if let Some(vector) =
                 crate::index::vector::VectorAccessor::get_vector(&accessor, node_id)
@@ -174,11 +170,10 @@ impl LpgStore {
     ) {
         if let Some(mut nodes) = index.get_mut(value) {
             nodes.remove(&node_id);
-            if nodes.is_empty() {
-                drop(nodes);
-                index.remove(value);
-            }
         }
+        // Checked again under the shard lock: between releasing the bucket and
+        // removing it, another writer may have added a node to it.
+        index.remove_if(value, |_, nodes| nodes.is_empty());
     }
 
     /// The current values of the indexed `(node, key)` pairs, taken before a
@@ -237,14 +232,7 @@ impl LpgStore {
         if let Some(index) = indexes.get(key) {
             // Get old value to remove from index
             if let Some(old_value) = self.node_properties.get(node_id, key) {
-                let old_hv = HashableValue::new(old_value);
-                if let Some(mut nodes) = index.get_mut(&old_hv) {
-                    nodes.remove(&node_id);
-                    if nodes.is_empty() {
-                        drop(nodes);
-                        index.remove(&old_hv);
-                    }
-                }
+                Self::remove_index_entry(index, &HashableValue::new(old_value), node_id);
             }
         }
     }

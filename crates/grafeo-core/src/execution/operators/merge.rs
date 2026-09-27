@@ -64,6 +64,8 @@ pub struct MergeOperator {
     /// runtime expressions in `ON CREATE` / `ON MATCH SET`. None when no
     /// expression sources are present (the planner skips threading it).
     search_store: Option<Arc<dyn GraphStoreSearch>>,
+    /// Compiled computed match properties, built on first use.
+    match_expressions: Option<super::mutation::PropertyExpressions>,
     /// Session context for expression evaluation (info, schema, etc.).
     session_context: SessionContext,
 }
@@ -84,6 +86,7 @@ impl MergeOperator {
             transaction_id: None,
             validator: None,
             search_store: None,
+            match_expressions: None,
             session_context: SessionContext::default(),
         }
     }
@@ -444,7 +447,7 @@ impl MergeOperator {
 
     /// Finds or creates a matching node for a single row, applying ON MATCH/ON CREATE.
     fn merge_node_for_row(
-        &self,
+        &mut self,
         chunk: Option<&DataChunk>,
         row: usize,
     ) -> Result<NodeId, super::OperatorError> {
@@ -461,6 +464,7 @@ impl MergeOperator {
                 session_context: &self.session_context,
                 viewing_epoch: self.viewing_epoch,
                 transaction_id: self.transaction_id,
+                cache: &mut self.match_expressions,
             },
         )?;
 
@@ -656,6 +660,8 @@ pub struct MergeRelationshipOperator {
     validator: Option<Arc<dyn ConstraintValidator>>,
     /// Search-store handle for evaluating `PropertySource::Expression`.
     search_store: Option<Arc<dyn GraphStoreSearch>>,
+    /// Compiled computed match properties, built on first use.
+    match_expressions: Option<super::mutation::PropertyExpressions>,
     /// Session context for expression evaluation.
     session_context: SessionContext,
 }
@@ -675,6 +681,7 @@ impl MergeRelationshipOperator {
             transaction_id: None,
             validator: None,
             search_store: None,
+            match_expressions: None,
             session_context: SessionContext::default(),
         }
     }
@@ -1006,6 +1013,7 @@ impl Operator for MergeRelationshipOperator {
                         session_context: &self.session_context,
                         viewing_epoch: self.viewing_epoch,
                         transaction_id: self.transaction_id,
+                        cache: &mut self.match_expressions,
                     },
                 )?;
 
@@ -1088,6 +1096,8 @@ struct MatchContext<'a> {
     session_context: &'a SessionContext,
     viewing_epoch: Option<EpochId>,
     transaction_id: Option<TransactionId>,
+    /// The operator's compiled evaluators, reused across rows.
+    cache: &'a mut Option<super::mutation::PropertyExpressions>,
 }
 
 /// Resolves MERGE match properties for one row. Computed values such as
@@ -1108,18 +1118,22 @@ fn resolve_match_properties(
             "computed MERGE property without an input row; planner did not provide one".to_string(),
         )
     })?;
-    super::mutation::PropertyExpressions::new(
-        context.search_store.cloned(),
-        context.session_context.clone(),
-    )
-    .resolve_row(
-        props,
-        chunk,
-        row,
-        store,
-        context.viewing_epoch,
-        context.transaction_id,
-    )
+    context
+        .cache
+        .get_or_insert_with(|| {
+            super::mutation::PropertyExpressions::new(
+                context.search_store.cloned(),
+                context.session_context.clone(),
+            )
+        })
+        .resolve_row(
+            props,
+            chunk,
+            row,
+            store,
+            context.viewing_epoch,
+            context.transaction_id,
+        )
 }
 
 #[cfg(all(test, feature = "lpg"))]

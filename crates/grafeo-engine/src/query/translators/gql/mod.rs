@@ -1821,6 +1821,9 @@ impl GqlTranslator {
         // First pattern gets input: None, subsequent ones chain via input: Some(prev).
         let mut plan: Option<LogicalOperator> = None;
         let mut last_variable = String::new();
+        // With no input rows, a variable is bound only if this INSERT created
+        // it earlier: `INSERT (a:A), (a)-[:T]->(b)` creates `a` once and `b`.
+        let mut created: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for pattern in patterns {
             match pattern {
@@ -1842,6 +1845,7 @@ impl GqlTranslator {
                         properties,
                         input: plan.map(Box::new),
                     }));
+                    created.insert(variable.clone());
                     last_variable = variable;
                 }
                 ast::Pattern::Path(path) => {
@@ -1852,7 +1856,9 @@ impl GqlTranslator {
                         .clone()
                         .unwrap_or_else(|| format!("_anon_{}", rand_id()));
 
-                    if !path.source.labels.is_empty() {
+                    // Endpoints used to be created only when labeled, so
+                    // `INSERT (a)-[:T]->(b)` failed with an undefined variable.
+                    if created.insert(source_var.clone()) {
                         let source_props: Vec<(String, LogicalExpression)> = path
                             .source
                             .properties
@@ -1875,7 +1881,7 @@ impl GqlTranslator {
                             .clone()
                             .unwrap_or_else(|| format!("_anon_{}", rand_id()));
 
-                        if !edge.target.labels.is_empty() {
+                        if created.insert(target_var.clone()) {
                             let target_props: Vec<(String, LogicalExpression)> = edge
                                 .target
                                 .properties

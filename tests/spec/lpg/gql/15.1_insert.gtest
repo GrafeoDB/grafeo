@@ -227,3 +227,38 @@ tests:
     expect:
       rows:
         - [3]
+
+  # Endpoints without labels used to be treated as bound variables, so these
+  # failed with "Undefined variable".
+  - name: insert_path_with_unlabeled_endpoints
+    statements:
+      - "INSERT (a)-[:T]->(b)"
+      - "MATCH (x)-[:T]->(y) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: insert_path_with_property_only_endpoints
+    statements:
+      - "INSERT ({id: 1})-[:T]->({id: 2})-[:T]->(:C {id: 3})"
+      - "MATCH (x)-[:T]->(y) RETURN x.id, y.id"
+    expect:
+      rows:
+        - [1, 2]
+        - [2, 3]
+
+  - name: insert_path_reuses_variable_created_earlier
+    statements:
+      - "INSERT (a:A {id: 1}), (a)-[:T]->(b {id: 2})"
+      - "MATCH (n) RETURN count(n) AS nodes"
+    expect:
+      rows:
+        - [2]
+
+  - name: later_insert_creates_property_only_endpoint
+    statements:
+      - "INSERT (x:A {id: 1}) INSERT ({id: 2})-[:T]->(x)"
+      - "MATCH (s)-[:T]->(t:A) RETURN s.id, t.id"
+    expect:
+      rows:
+        - [2, 1]

@@ -3832,24 +3832,35 @@ mod tests {
     /// the test stays bounded.
     #[test]
     fn jules_concurrent_readers_survive_repeated_base_swaps() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Barrier};
         use std::thread;
 
+        const READERS: usize = 4;
         let layered = Arc::new(build_test_layered());
         let stop = Arc::new(AtomicBool::new(false));
+        // The swapper starts only once every reader is running, so reads
+        // overlap the swaps. Without it a fast swapper could finish before a
+        // reader was scheduled, and that reader never read at all.
+        let start = Arc::new(Barrier::new(READERS + 1));
 
         let mut readers = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..READERS {
             let l = Arc::clone(&layered);
             let s = Arc::clone(&stop);
+            let b = Arc::clone(&start);
             readers.push(thread::spawn(move || {
+                b.wait();
                 let mut total = 0u64;
-                while !s.load(Ordering::Relaxed) {
+                // Read at least once, then until the swapper is done.
+                loop {
                     let people = l.nodes_by_label("Person");
                     // Person count is base(2) + overlay(0..many); never less than base.
                     assert!(people.len() >= 2, "lost a base node mid-swap");
                     total += people.len() as u64;
+                    if s.load(Ordering::Relaxed) {
+                        break;
+                    }
                 }
                 total
             }));
@@ -3857,12 +3868,10 @@ mod tests {
 
         // Swapper builds a fresh base with one extra Person each round.
         let l = Arc::clone(&layered);
-        let s = Arc::clone(&stop);
+        let b = Arc::clone(&start);
         let swapper = thread::spawn(move || {
+            b.wait();
             for _ in 0..200 {
-                if s.load(Ordering::Relaxed) {
-                    break;
-                }
                 // Read the current combined view, build a new compact base.
                 let new_base = from_graph_store_preserving_ids(&*l).unwrap();
                 l.swap_base(Arc::new(new_base));

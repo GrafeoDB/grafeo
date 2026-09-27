@@ -3519,7 +3519,12 @@ impl<'a> Parser<'a> {
             return Ok(left);
         }
         self.advance();
-        let right = self.parse_power_expression()?;
+        // Each `^` nests one level (right associative): bound the depth so a
+        // long chain is an error, not a stack overflow.
+        self.enter_nesting()?;
+        let right = self.parse_power_expression();
+        self.exit_nesting();
+        let right = right?;
         Ok(Expression::Binary {
             left: Box::new(left),
             op: BinaryOp::Pow,
@@ -3547,7 +3552,10 @@ impl<'a> Parser<'a> {
                         return Ok(Expression::Literal(Literal::Float(val)));
                     }
                 }
-                let operand = self.parse_unary_expression()?;
+                self.enter_nesting()?;
+                let operand = self.parse_unary_expression();
+                self.exit_nesting();
+                let operand = operand?;
                 Ok(Expression::Unary {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
@@ -3555,7 +3563,10 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Plus => {
                 self.advance();
-                let operand = self.parse_unary_expression()?;
+                self.enter_nesting()?;
+                let operand = self.parse_unary_expression();
+                self.exit_nesting();
+                let operand = operand?;
                 Ok(Expression::Unary {
                     op: UnaryOp::Pos,
                     operand: Box::new(operand),
@@ -10665,6 +10676,25 @@ mod tests {
             err.contains("nesting depth"),
             "Expected nesting depth error, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_long_power_and_sign_chains_error_not_stack_overflow() {
+        for query in [
+            format!("RETURN 2{}", " ^ 2".repeat(50_000)),
+            format!("RETURN {}1", "- ".repeat(50_000)),
+            format!("RETURN {}1", "+ ".repeat(50_000)),
+        ] {
+            let err = Parser::new(&query).parse().unwrap_err().to_string();
+            assert!(err.contains("nesting depth"), "got: {err}");
+        }
+        // Short chains are unaffected.
+        assert!(
+            Parser::new(&format!("RETURN 2{}", " ^ 1".repeat(20)))
+                .parse()
+                .is_ok()
+        );
+        assert!(Parser::new("RETURN - - 1").parse().is_ok());
     }
 
     #[test]

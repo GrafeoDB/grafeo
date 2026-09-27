@@ -795,6 +795,16 @@ impl CypherTranslator {
             (1, Some(1))
         };
 
+        // A property map on a variable-length edge must hold for every hop, so
+        // it is checked over the path's edges; that needs a path column.
+        let per_hop_properties = rel.length.is_some() && !rel.properties.is_empty();
+        let path_alias = if per_hop_properties {
+            path_alias.or_else(|| Some(self.next_anon_var()))
+        } else {
+            path_alias
+        };
+        let property_path = path_alias.clone();
+
         // Detect cycle pattern: (s)-[*]->(s) where source == target variable.
         // The expand must use a temporary target, then filter for equality.
         let is_cycle = to_variable == from_variable;
@@ -859,7 +869,19 @@ impl CypherTranslator {
         if !rel.properties.is_empty()
             && let Some(ref ev) = edge_variable_for_filter
         {
-            let predicate = self.build_property_predicate(ev, &rel.properties)?;
+            let predicate = match property_path.filter(|_| per_hop_properties) {
+                // `all(e IN edges(path) WHERE e.k = v ...)`: the edge column of a
+                // variable-length expand only holds the last hop.
+                Some(path) => {
+                    let hop = self.next_anon_var();
+                    crate::query::translators::common::every_edge_matches(
+                        path,
+                        hop.clone(),
+                        self.build_property_predicate(&hop, &rel.properties)?,
+                    )
+                }
+                None => self.build_property_predicate(ev, &rel.properties)?,
+            };
             result = wrap_filter(result, predicate);
         }
 

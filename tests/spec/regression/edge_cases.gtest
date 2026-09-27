@@ -1380,11 +1380,28 @@ tests:
       rows:
         - [a]
 
+  # Must hold for every hop: a -[w:7]-> b -[w:50]-> c -[w:50]-> d
   - name: gql_anonymous_variable_length_edge_property_map_filters
     setup:
-      - "INSERT (:N {id: 'a', w: 1})-[:T {id: 'e1', w: 50}]->(:N {id: 'b', w: 2})"
-      - "INSERT (:N {id: 'c', w: 3})-[:T {id: 'e2', w: 7}]->(:N {id: 'd', w: 4})"
-    query: "MATCH (x)-[{w: 50}]->{1,2}(y) RETURN x.id"
+      - "INSERT (:N {id: 'a'})-[:T {w: 7}]->(:N {id: 'b'})-[:T {w: 50}]->(:N {id: 'c'})-[:T {w: 50}]->(:N {id: 'd'})"
+    query: "MATCH (x)-[{w: 50}]->{1,3}(y) RETURN x.id, y.id"
     expect:
       rows:
-        - [a]
+        - [b, c]
+        - [b, d]
+        - [c, d]
+
+  - name: gql_named_variable_length_edge_property_map_checks_every_hop
+    setup:
+      - "INSERT (:N {id: 'a'})-[:T {w: 7}]->(:N {id: 'b'})-[:T {w: 50}]->(:N {id: 'c'})"
+    query: "MATCH (x {id: 'a'})-[r {w: 50}]->{1,2}(y) RETURN y.id"
+    expect:
+      empty: true
+
+  - name: gql_all_over_path_edges
+    setup:
+      - "INSERT (:N {id: 'a'})-[:T {w: 7}]->(:N {id: 'b'})-[:T {w: 50}]->(:N {id: 'c'})"
+    query: "MATCH p = (x)-[]->{1,2}(y) WHERE all(e IN edges(p) WHERE e.w = 50) RETURN x.id, y.id"
+    expect:
+      rows:
+        - [b, c]

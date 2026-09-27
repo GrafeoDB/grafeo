@@ -259,10 +259,10 @@ class TestPropertyIndex:
         # A deleted node used to stay in the index, and a re-created node with
         # the same key was returned together with the deleted one.
         db.create_property_index("id")
-        db.execute_cypher("CREATE (:Graph:File {id: 'a'})", {})
+        db.execute("INSERT (:Graph:File {id: 'a'})")
         assert len(db.find_nodes_by_property("id", "a")) == 1
 
-        db.execute_cypher("MATCH (n:Graph) WHERE n.id = 'a' DETACH DELETE n", {})
+        db.execute("MATCH (n:Graph) WHERE n.id = 'a' DETACH DELETE n")
         assert db.find_nodes_by_property("id", "a") == []
 
         node = db.create_node(["Graph", "File"], {"id": "a"})
@@ -514,6 +514,16 @@ class TestDatetimeConversion:
         amsterdam_summer = timezone(timedelta(hours=2))
         dt = datetime(2024, 6, 15, 14, 30, 0, tzinfo=amsterdam_summer)
         assert self.roundtrip(db, dt) == datetime(2024, 6, 15, 12, 30, 0)
+
+    def test_aware_datetime_near_year_one(self, db):
+        # Converting to UTC first would fall before year 1 and raise.
+        dt = datetime(1, 1, 1, 0, 30, 0, tzinfo=timezone(timedelta(hours=1)))
+        node = db.create_node(["T"], {"val": dt})
+        result = db.execute(
+            f"MATCH (n) WHERE id(n) = {node.id} RETURN n.val < $t AS earlier",
+            {"t": datetime(1, 1, 1, 0, 0, 0)},
+        )
+        assert list(result)[0]["earlier"] is True
 
     def test_microseconds_are_kept(self, db):
         dt = datetime(2024, 6, 15, 12, 30, 0, 123457)

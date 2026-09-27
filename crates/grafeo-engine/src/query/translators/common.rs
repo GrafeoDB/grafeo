@@ -221,6 +221,25 @@ pub(crate) fn combine_with_and(predicates: Vec<LogicalExpression>) -> Result<Log
 // Variable extraction
 // ---------------------------------------------------------------------------
 
+/// `all(hop IN edges(path) WHERE predicate)`: a property map on a
+/// variable-length edge must hold for every edge of the path.
+pub(crate) fn every_edge_matches(
+    path: String,
+    hop: String,
+    predicate: LogicalExpression,
+) -> LogicalExpression {
+    LogicalExpression::ListPredicate {
+        kind: crate::query::plan::ListPredicateKind::All,
+        variable: hop,
+        list_expr: Box::new(LogicalExpression::FunctionCall {
+            name: "edges".into(),
+            args: vec![LogicalExpression::Variable(path)],
+            distinct: false,
+        }),
+        predicate: Box::new(predicate),
+    }
+}
+
 /// Collects all variable names referenced by a logical expression.
 pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut HashSet<String>) {
     match expr {

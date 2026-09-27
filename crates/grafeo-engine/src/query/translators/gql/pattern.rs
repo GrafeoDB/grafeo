@@ -243,8 +243,9 @@ impl GqlTranslator {
                         .clone()
                         .unwrap_or_else(|| format!("_anon_{}", rand_id()));
 
-                    // If source has labels, it's a new node to create
-                    if !path.source.labels.is_empty() {
+                    // A bare variable refers to a bound node; an anonymous,
+                    // labeled or property-carrying endpoint is a new node.
+                    if is_new_endpoint(&path.source) {
                         let source_props: Vec<(String, LogicalExpression)> = path
                             .source
                             .properties
@@ -268,8 +269,7 @@ impl GqlTranslator {
                             .clone()
                             .unwrap_or_else(|| format!("_anon_{}", rand_id()));
 
-                        // If target has labels, create it
-                        if !edge.target.labels.is_empty() {
+                        if is_new_endpoint(&edge.target) {
                             let target_props: Vec<(String, LogicalExpression)> = edge
                                 .target
                                 .properties
@@ -616,6 +616,7 @@ impl GqlTranslator {
                 target_var.clone()
             };
 
+            let property_path = expand_path_alias.clone();
             plan = LogicalOperator::Expand(ExpandOp {
                 from_variable: current_source,
                 to_variable: expand_target.clone(),
@@ -653,7 +654,19 @@ impl GqlTranslator {
             if !edge.properties.is_empty()
                 && let Some(ref ev) = edge_var_for_filter
             {
-                let predicate = self.build_property_predicate(ev, &edge.properties)?;
+                let predicate = match property_path.filter(|_| is_variable_length) {
+                    // `all(e IN edges(path) WHERE e.k = v ...)`: the edge column
+                    // of a variable-length expand only holds the last hop.
+                    Some(path) => {
+                        let hop = format!("_anon_{}", rand_id());
+                        crate::query::translators::common::every_edge_matches(
+                            path,
+                            hop.clone(),
+                            self.build_property_predicate(&hop, &edge.properties)?,
+                        )
+                    }
+                    None => self.build_property_predicate(ev, &edge.properties)?,
+                };
                 plan = wrap_filter(plan, predicate);
             }
 
@@ -717,4 +730,11 @@ impl GqlTranslator {
 
         Ok(plan)
     }
+}
+
+/// Whether an INSERT endpoint with input rows creates a node: `(a)` refers to a
+/// bound `a`, while `()`, `(:L)` and `({k: v})` are new nodes. Only labeled
+/// endpoints used to be created, so `({id: 1})` failed as undefined.
+fn is_new_endpoint(node: &ast::NodePattern) -> bool {
+    node.variable.is_none() || !node.labels.is_empty() || !node.properties.is_empty()
 }

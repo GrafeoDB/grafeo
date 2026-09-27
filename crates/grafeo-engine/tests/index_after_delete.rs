@@ -77,23 +77,27 @@ mod vectors {
     use super::*;
 
     fn vector_db(quantization: Option<&str>) -> (GrafeoDB, NodeId, NodeId) {
+        vector_db_with_label("Doc", quantization)
+    }
+
+    fn vector_db_with_label(label: &str, quantization: Option<&str>) -> (GrafeoDB, NodeId, NodeId) {
         let db = GrafeoDB::new_in_memory();
         let near = db.create_node_with_props(
-            &["Doc"],
+            &[label],
             [
                 ("id", Value::from("near")),
                 ("emb", Value::Vector(vec![1.0f32, 0.0].into())),
             ],
         );
         let far = db.create_node_with_props(
-            &["Doc"],
+            &[label],
             [
                 ("id", Value::from("far")),
                 ("emb", Value::Vector(vec![0.0f32, 1.0].into())),
             ],
         );
         db.create_vector_index(
-            "Doc",
+            label,
             "emb",
             Some(2),
             Some("euclidean"),
@@ -106,7 +110,11 @@ mod vectors {
     }
 
     fn search(db: &GrafeoDB) -> Vec<NodeId> {
-        db.vector_search("Doc", "emb", &[1.0, 0.0], 5, None, None)
+        search_label(db, "Doc")
+    }
+
+    fn search_label(db: &GrafeoDB, label: &str) -> Vec<NodeId> {
+        db.vector_search(label, "emb", &[1.0, 0.0], 5, None, None)
             .unwrap()
             .into_iter()
             .map(|(id, _)| id)
@@ -136,5 +144,19 @@ mod vectors {
             .unwrap();
         session.rollback().unwrap();
         assert_eq!(search(&db), vec![near, far]);
+    }
+
+    #[test]
+    fn rolled_back_delete_restores_vector_entry_for_label_with_colon() {
+        // Index keys are `label:property`; a ':' in the label used to break
+        // the lookup, so the node was not re-inserted.
+        let (db, near, far) = vector_db_with_label("Doc:Draft", None);
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        session
+            .execute_cypher("MATCH (n:`Doc:Draft` {id: 'near'}) DETACH DELETE n")
+            .unwrap();
+        session.rollback().unwrap();
+        assert_eq!(search_label(&db, "Doc:Draft"), vec![near, far]);
     }
 }

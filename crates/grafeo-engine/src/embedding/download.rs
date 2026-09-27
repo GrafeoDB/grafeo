@@ -104,6 +104,23 @@ mod tests {
     }
 
     #[test]
+    fn hub_repo_id_without_owner_is_rejected_before_network() {
+        let config = EmbeddingModelConfig::HuggingFace {
+            repo_id: "all-MiniLM-L6-v2".to_string(),
+            model_file: "onnx/model.onnx".to_string(),
+            tokenizer_file: "tokenizer.json".to_string(),
+        };
+        let Err(err) = resolve(&config) else {
+            panic!("repo id without an owner must be rejected");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("all-MiniLM-L6-v2") && message.contains("owner/name"),
+            "error should name the repo id and the expected form, got: {message}"
+        );
+    }
+
+    #[test]
     #[ignore = "requires network access (~23MB download on first run)"]
     fn preset_downloads_minilm_l6() {
         let config = EmbeddingModelConfig::MiniLmL6v2;

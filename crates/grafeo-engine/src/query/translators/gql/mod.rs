@@ -9,7 +9,7 @@ mod pattern;
 use std::collections::{HashMap, HashSet};
 
 use super::common::{
-    build_left_join_with_predicates, combine_with_and, flatten_and_conjuncts,
+    build_left_join_with_predicates, check_union_columns, combine_with_and, flatten_and_conjuncts,
     is_aggregate_function, is_binary_set_function, join_and_conjuncts, references_any,
     to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
     wrap_sort,
@@ -145,9 +145,9 @@ impl GqlTranslator {
 
         match op {
             ast::CompositeOp::Union | ast::CompositeOp::UnionAll => {
-                let union_op = LogicalOperator::Union(UnionOp {
-                    inputs: vec![left_plan.root, right_plan.root],
-                });
+                let inputs = vec![left_plan.root, right_plan.root];
+                check_union_columns(&inputs)?;
+                let union_op = LogicalOperator::Union(UnionOp { inputs });
                 let root = if op == ast::CompositeOp::UnionAll {
                     union_op
                 } else {

@@ -3,7 +3,7 @@
 use super::{
     ApplyOp, ApplyOperator, DistinctOp, Error, ExceptOp, HashJoinOperator, IntersectOp, JoinOp,
     JoinType, LeapfrogJoinOperator, LogicalExpression, MultiWayJoinOp, Operator, OtherwiseOp,
-    PhysicalJoinType, ProjectExpr, ProjectOperator, Result, UnionOp, common,
+    PhysicalJoinType, ProjectExpr, ProjectOperator, Result, UnionOp, Value, common,
 };
 
 impl super::Planner {
@@ -204,20 +204,58 @@ impl super::Planner {
     }
 
     /// Plans a UNION operator.
+    ///
+    /// Branches are combined by position and the output takes the widest
+    /// branch; narrower branches are padded with NULL so every chunk has the
+    /// same width. User-written Cypher/GQL UNIONNs are checked for matching
+    /// columns in the translators, so padding only applies to internal unions.
     pub(super) fn plan_union(&self, union: &UnionOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let mut inputs = Vec::with_capacity(union.inputs.len());
-        let mut columns = Vec::new();
-
-        for (i, input) in union.inputs.iter().enumerate() {
-            let (op, cols) = self.plan_operator(input)?;
-            if i == 0 {
-                columns = cols;
-            }
-            inputs.push(op);
+        let mut planned = Vec::with_capacity(union.inputs.len());
+        for input in &union.inputs {
+            planned.push(self.plan_operator(input)?);
         }
 
-        let schema = self.derive_schema_from_columns(&columns);
-        common::build_union(inputs, columns, schema)
+        // Pad narrower branches with NULL up to the widest branch.
+        let mut unified_columns: Vec<String> = Vec::new();
+        for (_, cols) in &planned {
+            for (i, col) in cols.iter().enumerate() {
+                if i == unified_columns.len() {
+                    unified_columns.push(col.clone());
+                }
+            }
+        }
+
+        let unified_schema = self.derive_schema_from_columns(&unified_columns);
+        let width = unified_columns.len();
+
+        // Null-pad each narrower branch's trailing positions so the core
+        // UnionOperator never forwards a short chunk. A full-width branch passes
+        // through unwrapped (positional union keeps its values in place; the
+        // output column names are taken from `unified_columns`).
+        let inputs: Vec<Box<dyn Operator>> = planned
+            .into_iter()
+            .map(|(op, cols)| {
+                if cols.len() == width {
+                    return op;
+                }
+                let projections: Vec<ProjectExpr> = (0..width)
+                    .map(|i| {
+                        if i < cols.len() {
+                            ProjectExpr::Column(i)
+                        } else {
+                            ProjectExpr::Constant(Value::Null)
+                        }
+                    })
+                    .collect();
+                Box::new(ProjectOperator::new(
+                    op,
+                    projections,
+                    unified_schema.clone(),
+                )) as Box<dyn Operator>
+            })
+            .collect();
+
+        common::build_union(inputs, unified_columns, unified_schema)
     }
 
     /// Plans a DISTINCT operator.

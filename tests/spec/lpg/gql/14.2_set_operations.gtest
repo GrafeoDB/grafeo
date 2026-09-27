@@ -39,6 +39,22 @@ tests:
         - [Alix]
         - [Amsterdam]
 
+  # ISO/IEC 39075 14.2: UNION operands must have the same column names (#365).
+  - name: union_all_different_column_names_rejected
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:City {city: 'Amsterdam'})"
+    query: MATCH (n:Person) RETURN n.name AS name UNION ALL MATCH (c:City) RETURN c.city AS city
+    expect:
+      error: "same columns"
+
+  - name: union_different_arity_rejected
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    query: MATCH (n:Person) RETURN n.name AS name UNION MATCH (n:Person) RETURN n.name AS name, n.age AS age
+    expect:
+      error: "same columns"
+
   - name: except_set_difference
     setup:
       - "INSERT (:N {v: 1})"

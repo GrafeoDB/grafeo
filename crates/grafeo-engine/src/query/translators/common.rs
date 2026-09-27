@@ -681,6 +681,87 @@ pub(crate) fn wrap_limit(input: LogicalOperator, count: impl Into<CountExpr>) ->
     })
 }
 
+/// Output columns of a query branch, looking through ORDER BY, SKIP, LIMIT and
+/// DISTINCT down to its `RETURN`. Each entry is the explicit column name (an
+/// alias or a bare variable), or `None` for an unaliased expression, whose name
+/// is implementation-defined. Returns `None` when the branch does not end in a
+/// `RETURN` or uses `RETURN *` (columns unknown before planning).
+fn branch_output_columns(op: &LogicalOperator) -> Option<Vec<Option<String>>> {
+    match op {
+        LogicalOperator::Return(ret) => {
+            if ret
+                .items
+                .iter()
+                .any(|item| matches!(&item.expression, LogicalExpression::Variable(v) if v == "*"))
+            {
+                return None;
+            }
+            Some(
+                ret.items
+                    .iter()
+                    .map(|item| match (&item.alias, &item.expression) {
+                        (Some(alias), _) => Some(alias.clone()),
+                        (None, LogicalExpression::Variable(name)) => Some(name.clone()),
+                        (None, _) => None,
+                    })
+                    .collect(),
+            )
+        }
+        LogicalOperator::Sort(sort) => branch_output_columns(&sort.input),
+        LogicalOperator::Limit(limit) => branch_output_columns(&limit.input),
+        LogicalOperator::Skip(skip) => branch_output_columns(&skip.input),
+        LogicalOperator::Distinct(distinct) => branch_output_columns(&distinct.input),
+        _ => None,
+    }
+}
+
+/// Checks that the branches of a user-written `UNION` are compatible, as GQL
+/// (ISO/IEC 39075 14.2) and Cypher require: every branch returns the same number
+/// of columns, and where both branches name a column explicitly (alias or bare
+/// variable) the names match position by position.
+///
+/// Branches whose columns cannot be determined here (for example `RETURN *`)
+/// are not checked.
+///
+/// # Errors
+///
+/// Returns a semantic error naming both column lists on the first mismatch.
+pub(crate) fn check_union_columns(branches: &[LogicalOperator]) -> Result<()> {
+    let render = |columns: &[Option<String>]| -> String {
+        columns
+            .iter()
+            .map(|c| c.as_deref().unwrap_or("<expression>"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut expected: Option<Vec<Option<String>>> = None;
+    for branch in branches {
+        let Some(columns) = branch_output_columns(branch) else {
+            continue;
+        };
+        let Some(first) = &expected else {
+            expected = Some(columns);
+            continue;
+        };
+        let names_conflict = first
+            .iter()
+            .zip(&columns)
+            .any(|(a, b)| matches!((a, b), (Some(a), Some(b)) if a != b));
+        if first.len() != columns.len() || names_conflict {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "All UNION branches must return the same columns in the same order: \
+                     [{}] vs [{}]",
+                    render(first),
+                    render(&columns)
+                ),
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Wraps an operator with DISTINCT.
 pub(crate) fn wrap_distinct(input: LogicalOperator) -> LogicalOperator {
     LogicalOperator::Distinct(DistinctOp {

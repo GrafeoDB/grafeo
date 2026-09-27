@@ -4,7 +4,7 @@
 //! that can be optimized and executed.
 
 use super::common::{
-    build_left_join_with_predicates, combine_with_and, is_aggregate_function,
+    build_left_join_with_predicates, check_union_columns, combine_with_and, is_aggregate_function,
     to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
     wrap_sort,
 };
@@ -130,6 +130,7 @@ impl CypherTranslator {
                         Ok(plan.root)
                     })
                     .collect::<Result<Vec<_>>>()?;
+                check_union_columns(&inputs)?;
 
                 let union_op = LogicalOperator::Union(UnionOp { inputs });
 
@@ -764,10 +765,16 @@ impl CypherTranslator {
         path_alias: Option<String>,
     ) -> Result<LogicalOperator> {
         let from_variable = Self::get_last_variable(&input)?;
-        let edge_variable = rel.variable.clone();
+        // An edge with a property map needs a variable to filter on, even when
+        // the pattern leaves it anonymous: `-[:T {w: 1}]->`, `-[*1..2 {w: 1}]->`.
+        let edge_variable = rel
+            .variable
+            .clone()
+            .or_else(|| (!rel.properties.is_empty()).then(|| self.next_anon_var()));
         if let Some(ref ev) = edge_variable {
             self.register_edge_variable(ev);
         }
+        let edge_variable_for_filter = edge_variable.clone();
         let edge_types = rel.types.clone();
         let to_variable = rel
             .target
@@ -850,7 +857,7 @@ impl CypherTranslator {
 
         // Apply property filters on the edge: -[r {since: 2020}]->
         if !rel.properties.is_empty()
-            && let Some(ref ev) = rel.variable
+            && let Some(ref ev) = edge_variable_for_filter
         {
             let predicate = self.build_property_predicate(ev, &rel.properties)?;
             result = wrap_filter(result, predicate);
@@ -1318,37 +1325,10 @@ impl CypherTranslator {
                 }
                 ast::ReturnItems::Explicit(items) => items,
             };
-            let (aggregates, group_by, mut post_return) =
+            // With aliases (e.g. `n.city AS city`) the post-Return renames the
+            // columns, which ORDER BY alias resolution and result naming need.
+            let (aggregates, group_by, post_return) =
                 self.extract_aggregates_and_groups_from_items(items)?;
-
-            // For RETURN with aliases (e.g. `n.city AS city`), always produce
-            // a post-Return so output column names reflect the aliases.
-            // This is needed for ORDER BY alias resolution and for correct
-            // column naming in results.
-            if post_return.is_none() && items.iter().any(|item| item.alias.is_some()) {
-                let mut return_items = Vec::new();
-                for item in items {
-                    if let Some(agg_expr) =
-                        self.try_extract_aggregate(&item.expression, &item.alias)?
-                    {
-                        let alias = item.alias.clone().unwrap_or_else(|| {
-                            agg_expr.alias.as_deref().unwrap_or("_agg").to_string()
-                        });
-                        return_items.push(ReturnItem {
-                            expression: LogicalExpression::Variable(alias),
-                            alias: item.alias.clone(),
-                        });
-                    } else {
-                        let expr = self.translate_expression(&item.expression)?;
-                        let col_name = crate::query::planner::common::expression_to_string(&expr);
-                        return_items.push(ReturnItem {
-                            expression: LogicalExpression::Variable(col_name),
-                            alias: item.alias.clone(),
-                        });
-                    }
-                }
-                post_return = Some(return_items);
-            }
 
             // Register aggregate output column names so ORDER BY can
             // reference them. Group-by columns use expression_to_string
@@ -1433,10 +1413,14 @@ impl CypherTranslator {
 
     /// Extracts aggregate and group-by expressions from RETURN items.
     ///
-    /// Returns `(aggregates, group_by, post_return)` where `post_return` is
-    /// `Some(...)` when any return item wraps an aggregate in a binary/unary
-    /// expression (e.g. `count(n) > 0 AS exists`). In that case a post-aggregate
-    /// `ReturnOp` must be chained to evaluate the outer expression.
+    /// Returns `(aggregates, group_by, post_return)`. The Aggregate operator
+    /// outputs its grouping keys first, then its aggregates, named by alias or
+    /// [`aggregate_column_name`](crate::query::planner::common::aggregate_column_name).
+    /// `post_return` is `Some(...)` whenever that output differs from what the
+    /// items ask for: an item wraps an aggregate (`count(n) > 0 AS exists`),
+    /// an item has an alias, or a grouping key follows an aggregate (so
+    /// columns must be reordered). A post-aggregate projection must then be
+    /// chained.
     fn extract_aggregates_and_groups_from_items(
         &self,
         items: &[ast::ProjectionItem],
@@ -1450,24 +1434,27 @@ impl CypherTranslator {
         let mut needs_post_return = false;
         let mut post_return_items = Vec::new();
         let mut agg_counter: u32 = 0;
+        let mut seen_aggregate = false;
 
         for item in items {
-            if let Some(agg_expr) = self.try_extract_aggregate(&item.expression, &item.alias)? {
-                // Direct aggregate (e.g. `count(n) AS cnt`)
+            if let Some(mut agg_expr) = self.try_extract_aggregate(&item.expression, &item.alias)? {
+                // Direct aggregate (e.g. `count(n) AS cnt`). An unaliased one is
+                // named after its source text (`count(n)`); the name doubles as
+                // the alias so the binder resolves the post-Return reference.
+                let column = agg_expr.alias.clone().unwrap_or_else(|| {
+                    crate::query::planner::common::aggregate_column_name(&agg_expr)
+                });
+                agg_expr.alias = Some(column.clone());
                 aggregates.push(agg_expr);
-                // For post-return passthrough: reference the aggregate by its alias
-                let agg_alias = item
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| format!("_agg_{agg_counter}"));
                 post_return_items.push(ReturnItem {
-                    expression: LogicalExpression::Variable(agg_alias),
+                    expression: LogicalExpression::Variable(column),
                     alias: item.alias.clone(),
                 });
-                agg_counter += 1;
+                seen_aggregate = true;
             } else if contains_aggregate(&item.expression) {
                 // Wrapped aggregate (e.g. `count(n) > 0 AS exists`)
                 needs_post_return = true;
+                seen_aggregate = true;
 
                 // Extract all aggregates and build a substitute expression
                 // with variable references replacing each aggregate.
@@ -1476,12 +1463,22 @@ impl CypherTranslator {
                     &mut agg_counter,
                     &mut aggregates,
                 )?;
+                // Unaliased, the column is named after the written expression
+                // (`sum(n.v) + 1`), not the substitute (`_agg_0 + 1`).
+                let alias = item.alias.clone().or_else(|| {
+                    self.translate_expression(&item.expression)
+                        .ok()
+                        .map(|expr| crate::query::planner::common::expression_to_string(&expr))
+                });
                 post_return_items.push(ReturnItem {
                     expression: substitute,
-                    alias: item.alias.clone(),
+                    alias,
                 });
             } else {
-                // Non-aggregate expression: group-by key
+                // Non-aggregate expression: group-by key. Keys come first in
+                // the Aggregate's output, so a key after an aggregate needs the
+                // post-return to restore the item order.
+                needs_post_return |= seen_aggregate;
                 let expr = self.translate_expression(&item.expression)?;
                 group_by.push(expr.clone());
                 // In the post-return, reference the Aggregate's output column
@@ -1495,7 +1492,8 @@ impl CypherTranslator {
             }
         }
 
-        if needs_post_return {
+        let has_aliases = items.iter().any(|item| item.alias.is_some());
+        if needs_post_return || has_aliases {
             Ok((aggregates, group_by, Some(post_return_items)))
         } else {
             Ok((aggregates, group_by, None))

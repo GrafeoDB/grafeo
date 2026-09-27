@@ -203,6 +203,167 @@ tests:
         - [http://ex.org/gus, editor]
 
   # ---------------------------------------------------------------------------
+  # Named-graph DELETE/INSERT WHERE (#367): updates target the named graph and
+  # leave the default graph alone.
+  # ---------------------------------------------------------------------------
+
+  - name: named_delete_where_removes_from_named_graph
+    # DELETE WHERE inside a GRAPH block deletes from the named graph.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/g> {
+            <http://ex.org/a> <http://ex.org/p> "1" .
+            <http://ex.org/b> <http://ex.org/p> "2" .
+          }
+        }
+      - |
+        DELETE WHERE {
+          GRAPH <http://ex.org/g> { <http://ex.org/a> <http://ex.org/p> "1" }
+        }
+    query: |
+      SELECT ?s WHERE { GRAPH <http://ex.org/g> { ?s <http://ex.org/p> ?o } }
+    expect:
+      rows:
+        - [http://ex.org/b]
+
+  - name: named_delete_where_preserves_default_graph
+    # A named DELETE WHERE does not touch the default graph.
+    setup:
+      - |
+        INSERT DATA { <http://ex.org/a> <http://ex.org/p> "1" . }
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/g> { <http://ex.org/a> <http://ex.org/p> "1" . }
+        }
+      - |
+        DELETE WHERE {
+          GRAPH <http://ex.org/g> { <http://ex.org/a> <http://ex.org/p> "1" }
+        }
+    query: |
+      SELECT ?s WHERE { ?s <http://ex.org/p> ?o }
+    expect:
+      rows:
+        - [http://ex.org/a]
+
+  - name: named_modify_insert_lands_in_named_graph
+    # A GRAPH-wrapped INSERT template writes to the named graph.
+    setup:
+      - |
+        INSERT DATA { <http://ex.org/trigger> <http://ex.org/p> "go" . }
+      - |
+        INSERT { GRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "v" } }
+        WHERE  { <http://ex.org/trigger> <http://ex.org/p> ?x }
+    query: |
+      SELECT ?s WHERE { GRAPH <http://ex.org/g> { ?s <http://ex.org/p> "v" } }
+    expect:
+      rows:
+        - [http://ex.org/s]
+
+  - name: named_modify_insert_does_not_leak_to_default
+    # ... and nothing reaches the default graph.
+    setup:
+      - |
+        INSERT DATA { <http://ex.org/trigger> <http://ex.org/p> "go" . }
+      - |
+        INSERT { GRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "v" } }
+        WHERE  { <http://ex.org/trigger> <http://ex.org/p> ?x }
+    query: |
+      SELECT ?s WHERE { ?s <http://ex.org/p> "v" }
+    expect:
+      empty: true
+
+  - name: named_modify_graph_wrapped_delete_and_insert
+    # GRAPH-wrapped DELETE + INSERT: rename within a named graph.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/g> { <http://ex.org/alix> <http://ex.org/city> "Amsterdam" . }
+        }
+      - |
+        DELETE { GRAPH <http://ex.org/g> { <http://ex.org/alix> <http://ex.org/city> ?old } }
+        INSERT { GRAPH <http://ex.org/g> { <http://ex.org/alix> <http://ex.org/city> "Berlin" } }
+        WHERE  { GRAPH <http://ex.org/g> { <http://ex.org/alix> <http://ex.org/city> ?old } }
+    query: |
+      SELECT ?city WHERE {
+        GRAPH <http://ex.org/g> { <http://ex.org/alix> <http://ex.org/city> ?city }
+      }
+    expect:
+      rows:
+        - [Berlin]
+
+  - name: named_modify_with_clause_binds_named_graph
+    # WITH <g> makes <g> the default graph of WHERE, so the rename applies in <g>.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/g> { <http://ex.org/alix> <http://ex.org/status> "active" . }
+        }
+      - |
+        WITH <http://ex.org/g>
+        DELETE { <http://ex.org/alix> <http://ex.org/status> ?s }
+        INSERT { <http://ex.org/alix> <http://ex.org/status> "archived" }
+        WHERE  { <http://ex.org/alix> <http://ex.org/status> ?s }
+    query: |
+      SELECT ?s WHERE {
+        GRAPH <http://ex.org/g> { <http://ex.org/alix> <http://ex.org/status> ?s }
+      }
+    expect:
+      rows:
+        - [archived]
+
+  - name: named_modify_with_clause_does_not_leak_to_default
+    # The WITH-scoped rename does not write to the default graph.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/g> { <http://ex.org/alix> <http://ex.org/status> "active" . }
+        }
+      - |
+        WITH <http://ex.org/g>
+        DELETE { <http://ex.org/alix> <http://ex.org/status> ?s }
+        INSERT { <http://ex.org/alix> <http://ex.org/status> "archived" }
+        WHERE  { <http://ex.org/alix> <http://ex.org/status> ?s }
+    query: |
+      SELECT ?s WHERE { <http://ex.org/alix> <http://ex.org/status> ?s }
+    expect:
+      empty: true
+
+  - name: named_modify_with_clause_applies_inside_subquery
+    # A subquery in the WHERE of a WITH update also reads <g>, not the default graph.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/vincent> <http://ex.org/status> "active" .
+          GRAPH <http://ex.org/g> { <http://ex.org/alix> <http://ex.org/status> "active" . }
+        }
+      - |
+        WITH <http://ex.org/g>
+        INSERT { ?who <http://ex.org/flag> "seen" }
+        WHERE  { { SELECT ?who WHERE { ?who <http://ex.org/status> "active" } } }
+    query: |
+      SELECT ?who WHERE {
+        GRAPH <http://ex.org/g> { ?who <http://ex.org/flag> "seen" }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix]
+
+  - name: named_drop_graph_still_works
+    # DROP GRAPH still removes the whole named graph.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/g> { <http://ex.org/a> <http://ex.org/p> "1" . }
+        }
+      - |
+        DROP GRAPH <http://ex.org/g>
+    query: |
+      SELECT ?s WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }
+    expect:
+      empty: true
+
+  # ---------------------------------------------------------------------------
   # RDF set semantics
   # ---------------------------------------------------------------------------
 

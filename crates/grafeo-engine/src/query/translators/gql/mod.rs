@@ -9,7 +9,7 @@ mod pattern;
 use std::collections::{HashMap, HashSet};
 
 use super::common::{
-    build_left_join_with_predicates, combine_with_and, flatten_and_conjuncts,
+    build_left_join_with_predicates, check_union_columns, combine_with_and, flatten_and_conjuncts,
     is_aggregate_function, is_binary_set_function, join_and_conjuncts, references_any,
     to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
     wrap_sort,
@@ -145,9 +145,9 @@ impl GqlTranslator {
 
         match op {
             ast::CompositeOp::Union | ast::CompositeOp::UnionAll => {
-                let union_op = LogicalOperator::Union(UnionOp {
-                    inputs: vec![left_plan.root, right_plan.root],
-                });
+                let inputs = vec![left_plan.root, right_plan.root];
+                check_union_columns(&inputs)?;
+                let union_op = LogicalOperator::Union(UnionOp { inputs });
                 let root = if op == ast::CompositeOp::UnionAll {
                     union_op
                 } else {
@@ -233,11 +233,23 @@ impl GqlTranslator {
                     .any(|item| contains_aggregate(&item.expression));
 
             if has_aggregates {
-                let (aggregates, auto_group_by, post_return) =
-                    self.extract_aggregates_and_groups(&return_clause.items)?;
+                let (aggregates, auto_group_by, post_return) = self.extract_aggregates_and_groups(
+                    &return_clause.items,
+                    !return_clause.group_by.is_empty(),
+                )?;
+                // Explicit GROUP BY wins over the keys implied by the items.
+                let group_by = if return_clause.group_by.is_empty() {
+                    auto_group_by
+                } else {
+                    return_clause
+                        .group_by
+                        .iter()
+                        .map(|e| self.translate_expression(e))
+                        .collect::<Result<Vec<_>>>()?
+                };
 
                 plan = LogicalOperator::Aggregate(AggregateOp {
-                    group_by: auto_group_by,
+                    group_by,
                     aggregates,
                     input: Box::new(plan),
                     having: None,
@@ -466,7 +478,12 @@ impl GqlTranslator {
                         });
                     }
                     ast::QueryClause::Create(create_clause) => {
-                        plan = self.translate_create_patterns(&create_clause.patterns, plan)?;
+                        // An INSERT that starts the statement has no input rows.
+                        plan = if matches!(plan, LogicalOperator::Empty) {
+                            self.insert_chain(&create_clause.patterns)?.0
+                        } else {
+                            self.translate_create_patterns(&create_clause.patterns, plan)?
+                        };
                     }
                     ast::QueryClause::Delete(delete_clause) => {
                         plan = self.translate_delete_targets(
@@ -684,7 +701,7 @@ impl GqlTranslator {
 
                 if has_aggregates {
                     let (aggregates, auto_group_by, post_return) =
-                        self.extract_aggregates_and_groups(&with_clause.items)?;
+                        self.extract_aggregates_and_groups(&with_clause.items, false)?;
 
                     // Split the WHERE into HAVING (aggregate-referencing
                     // conjuncts) and a post-aggregate filter (the rest).
@@ -815,8 +832,10 @@ impl GqlTranslator {
             // (e.g. `count(n) > 0 AS exists`), we decompose it into:
             //   1. An aggregate (`count(n)` with synthetic alias)
             //   2. A post-aggregate projection (`_agg_0 > 0 AS exists`)
-            let (aggregates, auto_group_by, post_return) =
-                self.extract_aggregates_and_groups(&query.return_clause.items)?;
+            let (aggregates, auto_group_by, post_return) = self.extract_aggregates_and_groups(
+                &query.return_clause.items,
+                !query.return_clause.group_by.is_empty(),
+            )?;
 
             // Separate horizontal aggregates (over group-list variables from
             // variable-length paths) from regular aggregates.
@@ -827,8 +846,10 @@ impl GqlTranslator {
                     && let LogicalExpression::Property { variable, property } = expr
                     && let Some(path_alias) = glv.get(variable)
                 {
+                    // Same name as a regular aggregate, which the post-Return
+                    // built by `extract_aggregates_and_groups` refers to.
                     let alias = agg_expr.alias.clone().unwrap_or_else(|| {
-                        format!("{:?}_{}", agg_expr.function, property).to_lowercase()
+                        crate::query::planner::common::aggregate_column_name(&agg_expr)
                     });
                     plan = LogicalOperator::HorizontalAggregate(HorizontalAggregateOp {
                         list_column: format!("_path_edges_{}", path_alias),
@@ -1393,8 +1414,10 @@ impl GqlTranslator {
                     .any(|item| contains_aggregate(&item.expression));
 
             if has_aggregates {
-                let (aggregates, auto_group_by, post_return) =
-                    self.extract_aggregates_and_groups(&subquery.return_clause.items)?;
+                let (aggregates, auto_group_by, post_return) = self.extract_aggregates_and_groups(
+                    &subquery.return_clause.items,
+                    !subquery.return_clause.group_by.is_empty(),
+                )?;
                 let group_by = if subquery.return_clause.group_by.is_empty() {
                     auto_group_by
                 } else {
@@ -1770,7 +1793,24 @@ impl GqlTranslator {
     }
 
     fn translate_insert(&self, insert: &ast::InsertStatement) -> Result<LogicalPlan> {
-        if insert.patterns.is_empty() {
+        let (plan, last_variable) = self.insert_chain(&insert.patterns)?;
+        let ret = wrap_return(
+            plan,
+            vec![ReturnItem {
+                expression: LogicalExpression::Variable(last_variable),
+                alias: None,
+            }],
+            false,
+        );
+        Ok(LogicalPlan::new(ret))
+    }
+
+    /// Builds the CreateNode / CreateEdge chain of an INSERT that starts a
+    /// statement (no input rows). Returns the plan and the last variable
+    /// created. Used for a standalone INSERT and for the first INSERT clause of
+    /// a query such as `INSERT (a) INSERT (b) RETURN a, b`.
+    fn insert_chain(&self, patterns: &[ast::Pattern]) -> Result<(LogicalOperator, String)> {
+        if patterns.is_empty() {
             return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Empty INSERT statement",
@@ -1782,7 +1822,7 @@ impl GqlTranslator {
         let mut plan: Option<LogicalOperator> = None;
         let mut last_variable = String::new();
 
-        for pattern in &insert.patterns {
+        for pattern in patterns {
             match pattern {
                 ast::Pattern::Node(node) => {
                     let variable = node
@@ -1885,16 +1925,13 @@ impl GqlTranslator {
             }
         }
 
-        let ret = wrap_return(
-            plan.expect("plan initialized by non-empty patterns"),
-            vec![ReturnItem {
-                expression: LogicalExpression::Variable(last_variable),
-                alias: None,
-            }],
-            false,
-        );
-
-        Ok(LogicalPlan::new(ret))
+        let plan = plan.ok_or_else(|| {
+            Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                "INSERT must create at least one node",
+            ))
+        })?;
+        Ok((plan, last_variable))
     }
 
     /// Translates a subquery to a logical operator (without Return).

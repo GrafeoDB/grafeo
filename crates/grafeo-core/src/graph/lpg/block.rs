@@ -22,6 +22,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::codec::limits::{checked_u16, checked_u32};
 use grafeo_common::types::{EdgeId, EpochId, NodeId, Value};
 use grafeo_common::utils::error::{Error, Result};
 
@@ -103,6 +104,13 @@ pub struct BlockDirEntry {
 
 impl BlockDirEntry {
     const SIZE: usize = 24;
+
+    /// Byte range of the block within the section, computed in `usize` so a
+    /// corrupt entry cannot overflow the `u32` fields' sum.
+    fn range(&self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start.saturating_add(self.length as usize)
+    }
 
     fn write_to(&self, buf: &mut Vec<u8>) {
         buf.push(self.block_type);
@@ -209,30 +217,29 @@ impl StringTableBuilder {
         if let Some(&idx) = self.index.get(s) {
             return idx;
         }
-        // reason: string table size bounded by section limits, fits u32
-        #[allow(clippy::cast_possible_truncation)]
-        let idx = self.strings.len() as u32;
+        // More than u32::MAX strings cannot be held in memory in practice; if it
+        // ever happens the index saturates and `serialize` rejects the table
+        // before anything is written.
+        let idx = u32::try_from(self.strings.len()).unwrap_or(u32::MAX);
         self.strings.push(s.to_owned());
         self.index.insert(s.to_owned(), idx);
         idx
     }
 
     /// Serializes the string table: [count:u32] [offsets:u32*count] [packed strings]
-    fn serialize(&self) -> Vec<u8> {
-        // reason: string table counts and offsets within a section fit u32
-        #[allow(clippy::cast_possible_truncation)]
-        let count = self.strings.len() as u32;
-        // Pre-calculate total size
+    ///
+    /// # Errors
+    ///
+    /// Fails if the string count, a string's length or the packed size does
+    /// not fit the format's `u32` fields.
+    fn serialize(&self) -> Result<Vec<u8>> {
+        let count = checked_u32(self.strings.len(), "LPG string table count")?;
         let mut packed = Vec::new();
         let mut offsets = Vec::with_capacity(self.strings.len());
         for s in &self.strings {
-            // reason: packed buffer and string lengths bounded by section size, fit u32
-            #[allow(clippy::cast_possible_truncation)]
-            offsets.push(packed.len() as u32);
+            offsets.push(checked_u32(packed.len(), "LPG string table size")?);
             let bytes = s.as_bytes();
-            // reason: individual string lengths bounded by section size, fit u32
-            #[allow(clippy::cast_possible_truncation)]
-            packed.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            packed.extend_from_slice(&checked_u32(bytes.len(), "LPG string length")?.to_le_bytes());
             packed.extend_from_slice(bytes);
         }
 
@@ -242,7 +249,7 @@ impl StringTableBuilder {
             buf.extend_from_slice(&off.to_le_bytes());
         }
         buf.extend_from_slice(&packed);
-        buf
+        Ok(buf)
     }
 }
 
@@ -299,7 +306,7 @@ impl<'a> StringTableReader<'a> {
 /// Encodes a `Value` into the binary format used in property columns.
 ///
 /// Format: [tag:u8] [payload:variable]
-fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>) {
+fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>) -> Result<()> {
     match val {
         Value::Null => buf.push(ValueTag::Null as u8),
         Value::Bool(b) => {
@@ -321,9 +328,7 @@ fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>
         }
         Value::Bytes(b) => {
             buf.push(ValueTag::Bytes as u8);
-            // reason: serialized value sizes within a section fit u32
-            #[allow(clippy::cast_possible_truncation)]
-            buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&checked_u32(b.len(), "LPG bytes value length")?.to_le_bytes());
             buf.extend_from_slice(b);
         }
         Value::Date(d) => {
@@ -353,46 +358,36 @@ fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>
         }
         Value::List(items) => {
             buf.push(ValueTag::List as u8);
-            // reason: collection sizes within a section fit u32
-            #[allow(clippy::cast_possible_truncation)]
-            buf.extend_from_slice(&(items.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&checked_u32(items.len(), "LPG list length")?.to_le_bytes());
             for item in items.iter() {
-                encode_value(item, strings, buf);
+                encode_value(item, strings, buf)?;
             }
         }
         Value::Map(map) => {
             buf.push(ValueTag::Map as u8);
-            // reason: map sizes within a section fit u32
-            #[allow(clippy::cast_possible_truncation)]
-            buf.extend_from_slice(&(map.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&checked_u32(map.len(), "LPG map size")?.to_le_bytes());
             for (key, val) in map.iter() {
                 let key_idx = strings.intern(key.as_ref());
                 buf.extend_from_slice(&key_idx.to_le_bytes());
-                encode_value(val, strings, buf);
+                encode_value(val, strings, buf)?;
             }
         }
         Value::Vector(v) => {
             buf.push(ValueTag::Vector as u8);
-            // reason: vector dimension within a section fits u32
-            #[allow(clippy::cast_possible_truncation)]
-            buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&checked_u32(v.len(), "LPG vector dimension")?.to_le_bytes());
             for f in v.iter() {
                 buf.extend_from_slice(&f.to_le_bytes());
             }
         }
         Value::Path { nodes, edges } => {
             buf.push(ValueTag::Path as u8);
-            // reason: path node count within a section fits u32
-            #[allow(clippy::cast_possible_truncation)]
-            buf.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&checked_u32(nodes.len(), "LPG path node count")?.to_le_bytes());
             for n in nodes.iter() {
-                encode_value(n, strings, buf);
+                encode_value(n, strings, buf)?;
             }
-            // reason: path edge count within a section fits u32
-            #[allow(clippy::cast_possible_truncation)]
-            buf.extend_from_slice(&(edges.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&checked_u32(edges.len(), "LPG path edge count")?.to_le_bytes());
             for e in edges.iter() {
-                encode_value(e, strings, buf);
+                encode_value(e, strings, buf)?;
             }
         }
         // GCounter and OnCounter: encode as Map for forward compatibility
@@ -400,6 +395,7 @@ fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>
             buf.push(ValueTag::Null as u8);
         }
     }
+    Ok(())
 }
 
 /// Decodes a `Value` from the binary format.
@@ -676,7 +672,7 @@ pub(crate) fn write_blocks(
     }
 
     // Block 0: String table
-    let st_data = strings.serialize();
+    let st_data = strings.serialize()?;
     blocks.push((BlockType::StringTable, st_data, 0, 0));
 
     // Block 1: Node data
@@ -702,13 +698,11 @@ pub(crate) fn write_blocks(
     // Block 3: Label assignments
     // Format: [node_count:u32] for each node [label_count:u16][label_idx:u32*count]
     let mut label_buf = Vec::new();
-    // reason: node and label counts within a section fit u32/u16
-    #[allow(clippy::cast_possible_truncation)]
-    label_buf.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
+    label_buf.extend_from_slice(&checked_u32(nodes.len(), "LPG node count")?.to_le_bytes());
     for node in nodes {
-        // reason: label count per node is bounded, fits u16
-        #[allow(clippy::cast_possible_truncation)]
-        label_buf.extend_from_slice(&(node.labels.len() as u16).to_le_bytes());
+        label_buf.extend_from_slice(
+            &checked_u16(node.labels.len(), "LPG labels per node")?.to_le_bytes(),
+        );
         for label in &node.labels {
             let idx = strings.intern(label);
             label_buf.extend_from_slice(&idx.to_le_bytes());
@@ -721,7 +715,7 @@ pub(crate) fn write_blocks(
     let node_prop_keys = collect_property_keys(nodes.iter().flat_map(|n| n.properties.iter()));
     for key in &node_prop_keys {
         let key_idx = strings.intern(key);
-        let col_data = write_property_column(key, nodes.iter(), &mut strings, true);
+        let col_data = write_property_column(key, nodes.iter(), &mut strings, true)?;
         blocks.push((BlockType::PropertyColumn, col_data, key_idx, 0));
     }
 
@@ -729,7 +723,7 @@ pub(crate) fn write_blocks(
     let edge_prop_keys = collect_property_keys(edges.iter().flat_map(|e| e.properties.iter()));
     for key in &edge_prop_keys {
         let key_idx = strings.intern(key);
-        let col_data = write_property_column_edges(key, edges.iter(), &mut strings);
+        let col_data = write_property_column_edges(key, edges.iter(), &mut strings)?;
         blocks.push((BlockType::PropertyColumn, col_data, key_idx, 1));
     }
 
@@ -742,7 +736,7 @@ pub(crate) fn write_blocks(
 
     // Re-serialize the string table now that all strings are interned
     // (property column writing may have added new strings)
-    let final_st_data = strings.serialize();
+    let final_st_data = strings.serialize()?;
     blocks[0].1 = final_st_data;
 
     // Assemble the final output
@@ -755,15 +749,13 @@ pub(crate) fn write_blocks(
 
     for (block_type, block_data, key_idx, sub_type) in &blocks {
         let checksum = crc32fast::hash(block_data);
+        // The directory stores u32 offsets and lengths, so an LPG section is
+        // limited to 4 GiB (#392); refuse to write a larger one.
         dir_entries.push(BlockDirEntry {
             block_type: *block_type as u8,
             _reserved: [0; 3],
-            // reason: section offsets and block sizes fit u32
-            #[allow(clippy::cast_possible_truncation)]
-            offset: data_offset as u32,
-            // reason: block data offset and length bounded by block capacity (64 KB)
-            #[allow(clippy::cast_possible_truncation)]
-            length: block_data.len() as u32,
+            offset: checked_u32(data_offset, "LPG block offset")?,
+            length: checked_u32(block_data.len(), "LPG block length")?,
             checksum,
             key_string_index: *key_idx,
             sub_type: *sub_type,
@@ -776,17 +768,15 @@ pub(crate) fn write_blocks(
     let mut output = Vec::with_capacity(total_size);
 
     // Header
-    // reason: section block counts fit u16/u32
-    #[allow(clippy::cast_possible_truncation)]
     let header = SectionHeader {
         magic: LPG_BLOCK_MAGIC,
         version: LPG_BLOCK_VERSION,
         flags: 0,
-        block_count: block_count as u16,
+        block_count: checked_u16(block_count, "LPG block count")?,
         node_count: nodes.len() as u64,
         edge_count: edges.len() as u64,
         epoch,
-        named_graph_count: named_graphs.len() as u32,
+        named_graph_count: checked_u32(named_graphs.len(), "LPG named graph count")?,
         _reserved: [0; 28],
     };
     header.write_to(&mut output);
@@ -857,7 +847,7 @@ fn write_property_column<'a>(
     nodes: impl Iterator<Item = &'a BlockNode>,
     strings: &mut StringTableBuilder,
     _is_node: bool,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     let mut entries: Vec<(u64, &[(EpochId, Value)])> = Vec::new();
 
@@ -869,21 +859,21 @@ fn write_property_column<'a>(
         }
     }
 
-    // reason: property column entry counts fit u32/u16 within a section
-    #[allow(clippy::cast_possible_truncation)]
-    buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    buf.extend_from_slice(
+        &checked_u32(entries.len(), "LPG property column entry count")?.to_le_bytes(),
+    );
     for (entity_id, versions) in &entries {
         buf.extend_from_slice(&entity_id.to_le_bytes());
-        // reason: version count per entity is bounded, fits u16
-        #[allow(clippy::cast_possible_truncation)]
-        buf.extend_from_slice(&(versions.len() as u16).to_le_bytes());
+        buf.extend_from_slice(
+            &checked_u16(versions.len(), "LPG property version count")?.to_le_bytes(),
+        );
         for (epoch, value) in *versions {
             buf.extend_from_slice(&epoch.as_u64().to_le_bytes());
-            encode_value(value, strings, &mut buf);
+            encode_value(value, strings, &mut buf)?;
         }
     }
 
-    buf
+    Ok(buf)
 }
 
 /// Writes a property column for edge properties.
@@ -891,7 +881,7 @@ fn write_property_column_edges<'a>(
     key: &str,
     edges: impl Iterator<Item = &'a BlockEdge>,
     strings: &mut StringTableBuilder,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     let mut entries: Vec<(u64, &[(EpochId, Value)])> = Vec::new();
 
@@ -903,21 +893,21 @@ fn write_property_column_edges<'a>(
         }
     }
 
-    // reason: property column entry counts fit u32/u16 within a section
-    #[allow(clippy::cast_possible_truncation)]
-    buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    buf.extend_from_slice(
+        &checked_u32(entries.len(), "LPG property column entry count")?.to_le_bytes(),
+    );
     for (entity_id, versions) in &entries {
         buf.extend_from_slice(&entity_id.to_le_bytes());
-        // reason: version count per entity is bounded, fits u16
-        #[allow(clippy::cast_possible_truncation)]
-        buf.extend_from_slice(&(versions.len() as u16).to_le_bytes());
+        buf.extend_from_slice(
+            &checked_u16(versions.len(), "LPG property version count")?.to_le_bytes(),
+        );
         for (epoch, value) in *versions {
             buf.extend_from_slice(&epoch.as_u64().to_le_bytes());
-            encode_value(value, strings, &mut buf);
+            encode_value(value, strings, &mut buf)?;
         }
     }
 
-    buf
+    Ok(buf)
 }
 
 // ── Reader ─────────────────────────────────────────────────────────
@@ -963,8 +953,7 @@ pub(crate) fn read_blocks(
 
     // Verify checksums and extract blocks
     for (i, entry) in dir_entries.iter().enumerate() {
-        let start = entry.offset as usize;
-        let end = start + entry.length as usize;
+        let (start, end) = (entry.range().start, entry.range().end);
         if end > data.len() {
             return Err(Error::Serialization(format!(
                 "block {i} extends past end of data"
@@ -984,19 +973,18 @@ pub(crate) fn read_blocks(
         .iter()
         .find(|e| e.block_type == BlockType::StringTable as u8)
         .ok_or_else(|| Error::Serialization("missing string table block".to_string()))?;
-    let st_data = &data[st_entry.offset as usize..(st_entry.offset + st_entry.length) as usize];
+    let st_data = &data[st_entry.range()];
     let strings = StringTableReader::new(st_data)
         .ok_or_else(|| Error::Serialization("invalid string table".to_string()))?;
 
     // Read node data (cap capacity to prevent OOM from untrusted header)
-    // reason: on 64-bit targets u64 == usize; on 32-bit, capacity is capped by .min()
-    #[allow(clippy::cast_possible_truncation)]
-    let mut nodes = Vec::with_capacity((header.node_count as usize).min(data.len() / 8));
+    let node_count = usize::try_from(header.node_count).unwrap_or(usize::MAX);
+    let mut nodes = Vec::with_capacity(node_count.min(data.len() / 8));
     if let Some(entry) = dir_entries
         .iter()
         .find(|e| e.block_type == BlockType::NodeData as u8)
     {
-        let block = &data[entry.offset as usize..(entry.offset + entry.length) as usize];
+        let block = &data[entry.range()];
         let mut pos = 0;
         while pos + 8 <= block.len() {
             let id = NodeId::new(u64::from_le_bytes(block[pos..pos + 8].try_into().unwrap()));
@@ -1010,14 +998,13 @@ pub(crate) fn read_blocks(
     }
 
     // Read edge data
-    // reason: on 64-bit targets u64 == usize; on 32-bit, capacity is capped by .min()
-    #[allow(clippy::cast_possible_truncation)]
-    let mut edges = Vec::with_capacity((header.edge_count as usize).min(data.len() / 28));
+    let edge_count = usize::try_from(header.edge_count).unwrap_or(usize::MAX);
+    let mut edges = Vec::with_capacity(edge_count.min(data.len() / 28));
     if let Some(entry) = dir_entries
         .iter()
         .find(|e| e.block_type == BlockType::EdgeData as u8)
     {
-        let block = &data[entry.offset as usize..(entry.offset + entry.length) as usize];
+        let block = &data[entry.range()];
         let mut pos = 0;
         while pos + 28 <= block.len() {
             let id = EdgeId::new(u64::from_le_bytes(block[pos..pos + 8].try_into().unwrap()));
@@ -1049,7 +1036,7 @@ pub(crate) fn read_blocks(
         .iter()
         .find(|e| e.block_type == BlockType::LabelAssignment as u8)
     {
-        let block = &data[entry.offset as usize..(entry.offset + entry.length) as usize];
+        let block = &data[entry.range()];
         let mut pos = 0;
         ensure_remaining(block, pos, 4)?;
         let node_count = u32::from_le_bytes(block[pos..pos + 4].try_into().unwrap()) as usize;
@@ -1090,7 +1077,7 @@ pub(crate) fn read_blocks(
         if entry.block_type != BlockType::PropertyColumn as u8 {
             continue;
         }
-        let block = &data[entry.offset as usize..(entry.offset + entry.length) as usize];
+        let block = &data[entry.range()];
         let key_name = strings.get(entry.key_string_index).ok_or_else(|| {
             Error::Serialization(format!(
                 "invalid property key string index {}",
@@ -1138,7 +1125,7 @@ pub(crate) fn read_blocks(
         if entry.block_type != BlockType::NamedGraph as u8 {
             continue;
         }
-        let block = &data[entry.offset as usize..(entry.offset + entry.length) as usize];
+        let block = &data[entry.range()];
         let graph_name = strings.get(entry.key_string_index).ok_or_else(|| {
             Error::Serialization(format!(
                 "invalid graph name string index {}",
@@ -1426,7 +1413,7 @@ mod tests {
         let _header = SectionHeader::read_from(&data).unwrap();
         let dir_start = HEADER_SIZE;
         let st_entry = BlockDirEntry::read_from(&data[dir_start..]).unwrap();
-        let st_data = &data[st_entry.offset as usize..(st_entry.offset + st_entry.length) as usize];
+        let st_data = &data[st_entry.range()];
         let strings = StringTableReader::new(st_data).unwrap();
 
         // "Person" should only appear once in the string table
@@ -1468,6 +1455,108 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    // ── Format limits (#392): refuse to write what cannot be read back ──
+
+    fn write_error(nodes: &[BlockNode]) -> String {
+        match write_blocks(nodes, &[], &[], 1) {
+            Ok(data) => panic!("expected a serialization error, wrote {} bytes", data.len()),
+            Err(err) => {
+                assert!(matches!(err, Error::Serialization(_)), "{err:?}");
+                err.to_string()
+            }
+        }
+    }
+
+    #[test]
+    fn test_too_many_blocks_is_an_error() {
+        // Each named graph is one block; with the 4 fixed blocks, 65,531 graphs
+        // is exactly u16::MAX blocks and one more overflows the u16 count.
+        let graphs = |count: usize| -> Vec<BlockNamedGraph> {
+            (0..count)
+                .map(|i| BlockNamedGraph {
+                    name: format!("g{i}"),
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                })
+                .collect()
+        };
+        let at_limit = usize::from(u16::MAX) - 4;
+
+        let err = write_blocks(&[], &[], &graphs(at_limit + 1), 1).unwrap_err();
+        assert!(matches!(err, Error::Serialization(_)), "{err:?}");
+        assert!(err.to_string().contains("LPG block count: 65536"), "{err}");
+
+        let data = write_blocks(&[], &[], &graphs(at_limit), 1).unwrap();
+        read_blocks(&data, &mut |_, _, named, _| {
+            assert_eq!(named.len(), at_limit);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_too_many_labels_on_a_node_is_an_error() {
+        let node = BlockNode {
+            id: NodeId::new(1),
+            labels: (0..=usize::from(u16::MAX))
+                .map(|i| format!("L{i}"))
+                .collect(),
+            properties: Vec::new(),
+        };
+        let err = write_error(&[node]);
+        assert!(err.contains("LPG labels per node: 65536"), "{err}");
+    }
+
+    #[test]
+    fn test_too_many_property_versions_is_an_error() {
+        let versions = (0..=u64::from(u16::MAX))
+            .map(|e| (EpochId::new(e), Value::Int64(1)))
+            .collect();
+        let node = BlockNode {
+            id: NodeId::new(1),
+            labels: Vec::new(),
+            properties: vec![("v".to_string(), versions)],
+        };
+        let err = write_error(std::slice::from_ref(&node));
+        assert!(err.contains("LPG property version count: 65536"), "{err}");
+
+        // Edge property columns have the same limit.
+        let edge = BlockEdge {
+            id: EdgeId::new(1),
+            src: NodeId::new(1),
+            dst: NodeId::new(1),
+            edge_type: "SELF".to_string(),
+            properties: node.properties,
+        };
+        let node = BlockNode {
+            id: NodeId::new(1),
+            labels: Vec::new(),
+            properties: Vec::new(),
+        };
+        let err = write_blocks(&[node], &[edge], &[], 1).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("LPG property version count: 65536"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_block_range_past_end_is_an_error_not_a_panic() {
+        let data = write_blocks(&[], &[], &[], 1).unwrap();
+        // Point the first directory entry near u32::MAX: offset + length would
+        // overflow u32 arithmetic.
+        let mut corrupt = data.clone();
+        let entry = HEADER_SIZE;
+        corrupt[entry + 4..entry + 8].copy_from_slice(&(u32::MAX - 1).to_le_bytes());
+        corrupt[entry + 8..entry + 12].copy_from_slice(&16u32.to_le_bytes());
+        let err = read_blocks(&corrupt, &mut |_, _, _, _| Ok(())).unwrap_err();
+        assert!(
+            err.to_string().contains("extends past end of data"),
+            "{err}"
+        );
     }
 
     #[test]

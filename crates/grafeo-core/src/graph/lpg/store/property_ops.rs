@@ -575,14 +575,19 @@ impl LpgStore {
                 }
             }
 
-            // Remove PENDING entries from affected property version logs
+            // Remove PENDING entries from affected property version logs, then
+            // move property index entries back to the restored values.
             if !node_props.is_empty() {
-                let mut columns = self.node_properties.columns_write();
-                for (node_id, key) in &node_props {
-                    if let Some(col) = columns.get_mut(key) {
-                        col.remove_pending_for(*node_id);
+                let before = self.indexed_values(node_props.iter().map(|(n, k)| (*n, k)));
+                {
+                    let mut columns = self.node_properties.columns_write();
+                    for (node_id, key) in &node_props {
+                        if let Some(col) = columns.get_mut(key) {
+                            col.remove_pending_for(*node_id);
+                        }
                     }
                 }
+                self.reconcile_property_indexes(before);
             }
 
             if !edge_props.is_empty() {
@@ -797,14 +802,19 @@ impl LpgStore {
                 }
             }
 
-            // Pop PENDING entries from node property version logs
+            // Pop PENDING entries from node property version logs, then move
+            // property index entries back to the restored values.
             if !node_prop_counts.is_empty() {
-                let mut columns = self.node_properties.columns_write();
-                for ((node_id, key), count) in &node_prop_counts {
-                    if let Some(col) = columns.get_mut(key) {
-                        col.pop_n_pending_for(*node_id, *count);
+                let before = self.indexed_values(node_prop_counts.keys().map(|(n, k)| (*n, k)));
+                {
+                    let mut columns = self.node_properties.columns_write();
+                    for ((node_id, key), count) in &node_prop_counts {
+                        if let Some(col) = columns.get_mut(key) {
+                            col.pop_n_pending_for(*node_id, *count);
+                        }
                     }
                 }
+                self.reconcile_property_indexes(before);
             }
 
             // Pop PENDING entries from edge property version logs
@@ -889,10 +899,14 @@ impl LpgStore {
             self.add_label(node_id, label);
         }
 
-        // Restore properties
+        // Restore properties (this also restores property and text index entries)
         for (key, value) in properties {
             self.set_node_property(node_id, key.as_str(), value);
         }
+
+        // The delete removed the node from vector indexes; put it back.
+        #[cfg(feature = "vector-index")]
+        self.reinsert_into_vector_indexes(node_id, labels);
 
         self.live_node_count.fetch_add(1, Ordering::Relaxed);
     }

@@ -604,6 +604,114 @@ impl GraphStoreMut for WalGraphStore {
         }
         removed
     }
+
+    // The transactional mutators must reach the inner store's versioned
+    // methods, which record undo entries; the trait defaults would call the
+    // plain methods above and a rollback could not restore the old values.
+
+    fn set_node_property_versioned(
+        &self,
+        id: NodeId,
+        key: &str,
+        value: Value,
+        transaction_id: TransactionId,
+    ) {
+        self.inner
+            .set_node_property_versioned(id, key, value.clone(), transaction_id);
+        self.log_with_context(&WalRecord::SetNodeProperty {
+            id,
+            key: key.to_string(),
+            value,
+        });
+    }
+
+    fn set_edge_property_versioned(
+        &self,
+        id: EdgeId,
+        key: &str,
+        value: Value,
+        transaction_id: TransactionId,
+    ) {
+        self.inner
+            .set_edge_property_versioned(id, key, value.clone(), transaction_id);
+        self.log_with_context(&WalRecord::SetEdgeProperty {
+            id,
+            key: key.to_string(),
+            value,
+        });
+    }
+
+    fn remove_node_property_versioned(
+        &self,
+        id: NodeId,
+        key: &str,
+        transaction_id: TransactionId,
+    ) -> Option<Value> {
+        let removed = self
+            .inner
+            .remove_node_property_versioned(id, key, transaction_id);
+        if removed.is_some() {
+            self.log_with_context(&WalRecord::RemoveNodeProperty {
+                id,
+                key: key.to_string(),
+            });
+        }
+        removed
+    }
+
+    fn remove_edge_property_versioned(
+        &self,
+        id: EdgeId,
+        key: &str,
+        transaction_id: TransactionId,
+    ) -> Option<Value> {
+        let removed = self
+            .inner
+            .remove_edge_property_versioned(id, key, transaction_id);
+        if removed.is_some() {
+            self.log_with_context(&WalRecord::RemoveEdgeProperty {
+                id,
+                key: key.to_string(),
+            });
+        }
+        removed
+    }
+
+    fn add_label_versioned(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        transaction_id: TransactionId,
+    ) -> bool {
+        let added = self
+            .inner
+            .add_label_versioned(node_id, label, transaction_id);
+        if added {
+            self.log_with_context(&WalRecord::AddNodeLabel {
+                id: node_id,
+                label: label.to_string(),
+            });
+        }
+        added
+    }
+
+    fn remove_label_versioned(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        transaction_id: TransactionId,
+    ) -> bool {
+        let removed = self
+            .inner
+            .remove_label_versioned(node_id, label, transaction_id);
+        if removed {
+            self.log_with_context(&WalRecord::RemoveNodeLabel {
+                id: node_id,
+                label: label.to_string(),
+            });
+        }
+        removed
+    }
 }
 
 #[cfg(test)]
@@ -842,6 +950,62 @@ mod tests {
         assert!(eid.is_valid());
         // 2 CreateNode + 1 CreateEdge
         assert_eq!(wal.record_count(), 3);
+    }
+
+    /// The versioned property and label mutators must record undo entries in
+    /// the inner store (so a rollback restores them) and still log each change.
+    #[test]
+    fn versioned_property_and_label_changes_log_and_roll_back() {
+        let (ws, wal) = setup();
+        let a = ws.create_node(&["Base"]);
+        let b = ws.create_node(&["Base"]);
+        let e = ws.create_edge(a, b, "KNOWS");
+        ws.set_node_property(a, "v", Value::Int64(1));
+        ws.set_node_property(a, "x", Value::from("keep"));
+        ws.set_edge_property(e, "w", Value::Int64(5));
+        ws.set_edge_property(e, "note", Value::from("n"));
+        let logged = wal.record_count();
+
+        let tx = TransactionId::new(7);
+        ws.set_node_property_versioned(a, "v", Value::Int64(2), tx);
+        assert_eq!(
+            ws.remove_node_property_versioned(a, "x", tx),
+            Some(Value::from("keep"))
+        );
+        ws.set_edge_property_versioned(e, "w", Value::Int64(9), tx);
+        assert_eq!(
+            ws.remove_edge_property_versioned(e, "note", tx),
+            Some(Value::from("n"))
+        );
+        assert!(ws.add_label_versioned(a, "Extra", tx));
+        assert!(ws.remove_label_versioned(a, "Base", tx));
+        assert_eq!(wal.record_count(), logged + 6, "each change is logged");
+
+        // No-op changes are not logged.
+        assert_eq!(ws.remove_node_property_versioned(a, "missing", tx), None);
+        assert!(!ws.add_label_versioned(a, "Extra", tx));
+        assert_eq!(wal.record_count(), logged + 6);
+
+        // Undo-log replay (without `temporal`; temporal rollback pops pending
+        // versions and is covered end to end by the
+        // persistent_transaction_rollback integration tests).
+        #[cfg(not(feature = "temporal"))]
+        {
+            ws.inner.rollback_transaction_properties(tx);
+            assert_eq!(ws.get_node_property(a, &"v".into()), Some(Value::Int64(1)));
+            assert_eq!(
+                ws.get_node_property(a, &"x".into()),
+                Some(Value::from("keep"))
+            );
+            assert_eq!(ws.get_edge_property(e, &"w".into()), Some(Value::Int64(5)));
+            assert_eq!(
+                ws.get_edge_property(e, &"note".into()),
+                Some(Value::from("n"))
+            );
+            let labels = ws.get_node(a).unwrap().labels;
+            assert!(labels.iter().any(|l| l.as_str() == "Base"));
+            assert!(!labels.iter().any(|l| l.as_str() == "Extra"));
+        }
     }
 
     #[test]

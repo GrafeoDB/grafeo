@@ -696,6 +696,53 @@ describe('transaction edge cases', () => {
     expect(() => tx.rollback()).toThrow(/Already committed/)
     db.close()
   })
+
+  it('should never run an in-flight query outside a committed transaction', async () => {
+    for (let i = 0; i < 20; i++) {
+      const db = GrafeoDB.create()
+      const tx = db.beginTransaction()
+      const pending = tx.execute("INSERT (:Person {name: 'Vincent'})")
+      let commitError = null
+      try {
+        tx.commit()
+      } catch (e) {
+        commitError = e
+      }
+      if (commitError) {
+        // The query held the session: commit refused instead of blocking.
+        expect(commitError.message).toMatch(/still running/)
+        expect(tx.isActive).toBe(true)
+        await pending
+        tx.commit()
+        const r = await db.execute('MATCH (p:Person) RETURN p.name')
+        expect(r.length).toBe(1)
+      } else {
+        // Commit won the race: the queued query must fail, not run auto-committed.
+        await expect(pending).rejects.toThrow(/no longer active/)
+        const r = await db.execute('MATCH (p:Person) RETURN p.name')
+        expect(r.length).toBe(0)
+      }
+      db.close()
+    }
+  })
+
+  it('should refuse rollback while a query is running, then allow it', async () => {
+    const db = GrafeoDB.create()
+    const tx = db.beginTransaction()
+    const pending = tx.execute("INSERT (:Person {name: 'Jules'})")
+    try {
+      tx.rollback()
+    } catch (e) {
+      expect(e.message).toMatch(/still running/)
+      await pending
+      tx.rollback()
+    }
+    await pending.catch(() => {})
+    expect(tx.isActive).toBe(false)
+    const r = await db.execute('MATCH (p:Person) RETURN p.name')
+    expect(r.length).toBe(0)
+    db.close()
+  })
 })
 
 // ── Persistence and checkpoint ──────────────────────────────────────

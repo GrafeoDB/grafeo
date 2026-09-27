@@ -926,18 +926,15 @@ impl ExpressionPredicate {
             } => {
                 let list_val = self.eval_expr(list_expr, chunk, row)?;
                 // Accept both List and Vector as iterable sequences
-                let items: Vec<&Value>;
                 let vec_items: Vec<Value>;
-                match &list_val {
-                    Value::List(list) => {
-                        items = list.iter().collect();
-                    }
+                let items: Vec<&Value> = match &list_val {
+                    Value::List(list) => list.iter().collect(),
                     Value::Vector(vec) => {
                         vec_items = vec.iter().map(|&f| Value::Float64(f64::from(f))).collect();
-                        items = vec_items.iter().collect();
+                        vec_items.iter().collect()
                     }
                     _ => return None,
-                }
+                };
 
                 let mut match_count: u32 = 0;
                 for item in &items {
@@ -2280,18 +2277,15 @@ impl ExpressionPredicate {
                 // Multi-argument: compare element IDs
                 let mut ids: Vec<u64> = Vec::with_capacity(args.len());
                 for arg in args {
-                    if let FilterExpression::Variable(var) = arg {
-                        let col_idx = *self.variable_columns.get(var)?;
-                        let col = chunk.column(col_idx)?;
-                        if let Some(nid) = col.get_node_id(row) {
-                            ids.push(nid.0);
-                        } else if let Some(eid) = col.get_edge_id(row) {
-                            ids.push(eid.0);
-                        } else {
-                            return None;
-                        }
-                    } else {
+                    let FilterExpression::Variable(var) = arg else {
                         return None;
+                    };
+                    let col_idx = *self.variable_columns.get(var)?;
+                    let col = chunk.column(col_idx)?;
+                    if let Some(nid) = col.get_node_id(row) {
+                        ids.push(nid.0);
+                    } else {
+                        ids.push(col.get_edge_id(row)?.0);
                     }
                 }
                 let length = ids.len();
@@ -2325,23 +2319,20 @@ impl ExpressionPredicate {
                 // Multi-argument: compare element IDs
                 let mut first_id: Option<u64> = None;
                 for arg in args {
-                    if let FilterExpression::Variable(var) = arg {
-                        let col_idx = *self.variable_columns.get(var)?;
-                        let col = chunk.column(col_idx)?;
-                        let current_id = if let Some(nid) = col.get_node_id(row) {
-                            nid.0
-                        } else if let Some(eid) = col.get_edge_id(row) {
-                            eid.0
-                        } else {
-                            return None;
-                        };
-                        match first_id {
-                            None => first_id = Some(current_id),
-                            Some(fid) if fid != current_id => return Some(Value::Bool(false)),
-                            _ => {}
-                        }
-                    } else {
+                    let FilterExpression::Variable(var) = arg else {
                         return None;
+                    };
+                    let col_idx = *self.variable_columns.get(var)?;
+                    let col = chunk.column(col_idx)?;
+                    let current_id = if let Some(nid) = col.get_node_id(row) {
+                        nid.0
+                    } else {
+                        col.get_edge_id(row)?.0
+                    };
+                    match first_id {
+                        None => first_id = Some(current_id),
+                        Some(fid) if fid != current_id => return Some(Value::Bool(false)),
+                        _ => {}
                     }
                 }
                 Some(Value::Bool(true))
@@ -3724,7 +3715,11 @@ impl ExpressionPredicate {
                         .zip(e2.iter())
                         .all(|(a, b)| Self::values_equal(a, b))
             }
-            _ => false,
+            // Temporal values, bytes, vectors and the rest: the same variant
+            // with the same value (zoned datetimes compare by instant). This
+            // used to be `false`, so `date('2024-01-01') = date('2024-01-01')`
+            // was false.
+            _ => left == right,
         }
     }
 

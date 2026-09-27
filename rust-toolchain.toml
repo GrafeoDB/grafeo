@@ -1,0 +1,10 @@
+# Pinned so local builds and CI use the same compiler and clippy lint set.
+# Bump deliberately (and fix new lints in the same change) instead of tracking `stable`.
+# Keep this identical to the `dtolnay/rust-toolchain@<version>` refs in .github/workflows:
+# rustup treats "1.98" and "1.98.1" as different toolchains, so a mismatch installs a
+# second toolchain without the CI-installed targets (e.g. wasm32-unknown-unknown).
+# The MSRV check in CI uses `cargo +1.91.1` explicitly and is not affected by this file.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -227,7 +227,9 @@ impl Iterator for RingIterator<'_> {
             let p = self.pos;
             self.pos += 1;
             p
-        } else if let Some(id) = self.bound_id {
+        } else {
+            // Term not found (no bound id) shouldn't reach here due to has_next() check
+            let id = self.bound_id?;
             // Get next position for this term using wavelet tree select
             let wt = match self.component {
                 0 => self.ring.subjects_wt(),
@@ -239,9 +241,6 @@ impl Iterator for RingIterator<'_> {
             self.rank += 1;
             self.pos = next_pos + 1;
             next_pos
-        } else {
-            // Term not found - shouldn't reach here due to has_next() check
-            return None;
         };
 
         self.ring.get_spo(pos)

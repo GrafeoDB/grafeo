@@ -36,6 +36,7 @@ pub mod delta;
 pub mod dictionary;
 #[cfg(feature = "tiered-storage")]
 pub mod epoch_store;
+pub mod limits;
 pub mod runlength;
 pub mod selector;
 #[cfg(feature = "succinct-indexes")]

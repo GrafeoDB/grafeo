@@ -210,3 +210,16 @@ tests:
     expect:
       rows:
         - [3]
+
+  # Computed match properties used to become NULL, so every row matched or
+  # created the same node.
+  - name: merge_computed_properties_create_distinct_nodes
+    statements:
+      - "FOR i IN [1, 2, 3] MERGE (:X {id: 'x' || CAST(i AS STRING)})"
+      - "FOR i IN [1, 2, 3] MERGE (:X {id: 'x' || CAST(i AS STRING)})"
+      - "MATCH (x:X) RETURN x.id"
+    expect:
+      rows:
+        - [x1]
+        - [x2]
+        - [x3]

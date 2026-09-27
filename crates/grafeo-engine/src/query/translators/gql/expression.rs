@@ -322,6 +322,7 @@ impl GqlTranslator {
             ast::BinaryOp::Mul => BinaryOp::Mul,
             ast::BinaryOp::Div => BinaryOp::Div,
             ast::BinaryOp::Mod => BinaryOp::Mod,
+            ast::BinaryOp::Pow => BinaryOp::Pow,
             ast::BinaryOp::Concat => BinaryOp::Concat,
             ast::BinaryOp::Like => BinaryOp::Like,
             ast::BinaryOp::In => BinaryOp::In,

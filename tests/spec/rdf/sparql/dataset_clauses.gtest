@@ -359,3 +359,42 @@ tests:
     expect:
       # ?g should bind only to the two specified graphs
       count: 2
+
+  # ---------------------------------------------------------------------------
+  # Subqueries inherit the dataset (a subquery has no FROM of its own)
+  # ---------------------------------------------------------------------------
+
+  - name: from_applies_inside_subquery
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/livesIn> "Default" .
+          GRAPH <http://ex.org/g> { <http://ex.org/gus> <http://ex.org/livesIn> "Named" . }
+        }
+    query: |
+      SELECT ?city
+      FROM <http://ex.org/g>
+      WHERE {
+        { SELECT ?city WHERE { ?person <http://ex.org/livesIn> ?city } }
+      }
+    expect:
+      rows:
+        - [Named]
+
+  - name: from_still_applies_after_subquery
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/livesIn> "Default" .
+          GRAPH <http://ex.org/g> { <http://ex.org/gus> <http://ex.org/livesIn> "Named" . }
+        }
+    query: |
+      SELECT ?city ?other
+      FROM <http://ex.org/g>
+      WHERE {
+        { SELECT ?city WHERE { ?person <http://ex.org/livesIn> ?city } }
+        ?someone <http://ex.org/livesIn> ?other .
+      }
+    expect:
+      rows:
+        - [Named, Named]

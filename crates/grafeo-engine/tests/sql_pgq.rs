@@ -364,7 +364,7 @@ fn test_nodes_path_function() {
         assert!(
             matches!(&row[nodes_col], Value::List(_)),
             "path_nodes should be a list, got: {:?}",
-            &row[nodes_col]
+            row[nodes_col]
         );
     }
 }
@@ -396,7 +396,7 @@ fn test_edges_path_function() {
         assert!(
             matches!(&row[edges_col], Value::List(_)),
             "path_edges should be a list, got: {:?}",
-            &row[edges_col]
+            row[edges_col]
         );
     }
 }

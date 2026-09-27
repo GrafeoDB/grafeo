@@ -13,10 +13,10 @@ use grafeo_common::types::{
     EdgeId, EpochId, LogicalType, NodeId, PropertyKey, TransactionId, Value,
 };
 
-use super::filter::FilterExpression;
-use super::{Operator, OperatorError, OperatorResult, SharedWriteTracker};
-use crate::execution::chunk::DataChunkBuilder;
-use crate::graph::{GraphStore, GraphStoreMut};
+use super::filter::{ExpressionPredicate, FilterExpression};
+use super::{Operator, OperatorError, OperatorResult, SessionContext, SharedWriteTracker};
+use crate::execution::chunk::{DataChunk, DataChunkBuilder};
+use crate::graph::{GraphStore, GraphStoreMut, GraphStoreSearch};
 
 /// Trait for validating schema constraints during mutation operations.
 ///
@@ -154,6 +154,89 @@ pub struct CreateNodeOperator {
     validator: Option<Arc<dyn ConstraintValidator>>,
     /// Optional write tracker for conflict detection.
     write_tracker: Option<SharedWriteTracker>,
+    /// Evaluates computed property values (`PropertySource::Expression`).
+    expressions: PropertyExpressions,
+}
+
+/// Evaluators for the computed property values (`PropertySource::Expression`)
+/// of a CREATE or MERGE operator, such as `{id: toString(i)}`.
+///
+/// Compiled on first use: the search store and transaction context are
+/// attached to the operator after construction.
+#[derive(Default)]
+pub(super) struct PropertyExpressions {
+    search_store: Option<Arc<dyn GraphStoreSearch>>,
+    session_context: SessionContext,
+    compiled: Option<Vec<Option<ExpressionPredicate>>>,
+}
+
+impl PropertyExpressions {
+    /// Creates evaluators that use `search_store` and `session_context`.
+    pub(super) fn new(
+        search_store: Option<Arc<dyn GraphStoreSearch>>,
+        session_context: SessionContext,
+    ) -> Self {
+        Self {
+            search_store,
+            session_context,
+            compiled: None,
+        }
+    }
+
+    /// Resolves every property for one input row, evaluating computed values
+    /// against that row.
+    pub(super) fn resolve_row(
+        &mut self,
+        properties: &[(String, PropertySource)],
+        chunk: &DataChunk,
+        row: usize,
+        store: &dyn GraphStore,
+        viewing_epoch: Option<EpochId>,
+        transaction_id: Option<TransactionId>,
+    ) -> Result<Vec<(String, Value)>, OperatorError> {
+        if self.compiled.is_none() {
+            let mut compiled = Vec::with_capacity(properties.len());
+            for (_, source) in properties {
+                let PropertySource::Expression {
+                    expr,
+                    variable_columns,
+                } = source
+                else {
+                    compiled.push(None);
+                    continue;
+                };
+                let search_store = self.search_store.as_ref().ok_or_else(|| {
+                    OperatorError::Execution(
+                        "computed property value requires a search store; planner did not attach one"
+                            .to_string(),
+                    )
+                })?;
+                let mut predicate = ExpressionPredicate::new(
+                    (**expr).clone(),
+                    variable_columns.clone(),
+                    Arc::clone(search_store),
+                )
+                .with_session_context(self.session_context.clone());
+                if let Some(epoch) = viewing_epoch {
+                    predicate = predicate.with_transaction_context(epoch, transaction_id);
+                }
+                compiled.push(Some(predicate));
+            }
+            self.compiled = Some(compiled);
+        }
+        let compiled = self.compiled.as_deref().unwrap_or_default();
+        Ok(properties
+            .iter()
+            .enumerate()
+            .map(|(i, (name, source))| {
+                let value = match compiled.get(i).and_then(Option::as_ref) {
+                    Some(predicate) => predicate.eval_at(chunk, row).unwrap_or(Value::Null),
+                    None => source.resolve(chunk, row, store),
+                };
+                (name.clone(), value)
+            })
+            .collect())
+    }
 }
 
 /// Source for a property value.
@@ -171,15 +254,13 @@ pub enum PropertySource {
         /// The property name to extract.
         property: String,
     },
-    /// A runtime expression that may reference a variable not present in the
-    /// caller's input chunk. Used by `MERGE ... ON CREATE/MATCH SET` so that
-    /// expressions like `coalesce(c.description, 'fallback')` can reference
-    /// the MERGE variable, which only exists after the merge resolves.
+    /// A value computed per row, such as `toString(i)` or `i * 2` in
+    /// `CREATE (:X {id: toString(i)})`. Also used by `MERGE ... ON CREATE/MATCH
+    /// SET`, where the expression may reference the MERGE variable, which only
+    /// exists after the merge resolves.
     ///
-    /// Generic operators do not know how to evaluate this variant: the default
-    /// `resolve` implementation returns `Value::Null`. Operators that produce
-    /// an augmented row (e.g., MERGE) must intercept this variant before
-    /// calling `resolve`.
+    /// `resolve` cannot evaluate this variant and returns `Value::Null`: the
+    /// CREATE and MERGE operators evaluate it (see `PropertyExpressions`).
     Expression {
         /// The expression to evaluate against an augmented row.
         expr: Box<FilterExpression>,
@@ -265,6 +346,7 @@ impl CreateNodeOperator {
             transaction_id: None,
             validator: None,
             write_tracker: None,
+            expressions: PropertyExpressions::default(),
         }
     }
 
@@ -288,6 +370,21 @@ impl CreateNodeOperator {
     /// Sets the write tracker for conflict detection.
     pub fn with_write_tracker(mut self, tracker: SharedWriteTracker) -> Self {
         self.write_tracker = Some(tracker);
+        self
+    }
+
+    /// Provides a search-store handle so computed property values
+    /// (`PropertySource::Expression`) can be evaluated.
+    #[must_use]
+    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStoreSearch>) -> Self {
+        self.expressions.search_store = Some(search_store);
+        self
+    }
+
+    /// Sets the session context used when evaluating computed property values.
+    #[must_use]
+    pub fn with_session_context(mut self, context: SessionContext) -> Self {
+        self.expressions.session_context = context;
         self
     }
 }
@@ -350,15 +447,14 @@ impl Operator for CreateNodeOperator {
 
                 for row in chunk.selected_indices() {
                     // Resolve all property values first (before creating node)
-                    let mut resolved_props: Vec<(String, Value)> = self
-                        .properties
-                        .iter()
-                        .map(|(name, source)| {
-                            let value =
-                                source.resolve(&chunk, row, self.store.as_ref() as &dyn GraphStore);
-                            (name.clone(), value)
-                        })
-                        .collect();
+                    let mut resolved_props = self.expressions.resolve_row(
+                        &self.properties,
+                        &chunk,
+                        row,
+                        self.store.as_ref() as &dyn GraphStore,
+                        self.viewing_epoch,
+                        self.transaction_id,
+                    )?;
 
                     // Create the node with MVCC versioning
                     let label_refs: Vec<&str> = self.labels.iter().map(String::as_str).collect();
@@ -408,7 +504,8 @@ impl Operator for CreateNodeOperator {
             }
             self.executed = true;
 
-            // Resolve constant properties
+            // Resolve constant properties. Computed values need a row: the
+            // planner gives such a CREATE a single-row input instead.
             let mut resolved_props: Vec<(String, Value)> = self
                 .properties
                 .iter()
@@ -488,6 +585,8 @@ pub struct CreateEdgeOperator {
     validator: Option<Arc<dyn ConstraintValidator>>,
     /// Optional write tracker for conflict detection.
     write_tracker: Option<SharedWriteTracker>,
+    /// Evaluates computed property values (`PropertySource::Expression`).
+    expressions: PropertyExpressions,
 }
 
 impl CreateEdgeOperator {
@@ -518,6 +617,7 @@ impl CreateEdgeOperator {
             transaction_id: None,
             validator: None,
             write_tracker: None,
+            expressions: PropertyExpressions::default(),
         }
     }
 
@@ -553,6 +653,21 @@ impl CreateEdgeOperator {
     /// Sets the write tracker for conflict detection.
     pub fn with_write_tracker(mut self, tracker: SharedWriteTracker) -> Self {
         self.write_tracker = Some(tracker);
+        self
+    }
+
+    /// Provides a search-store handle so computed property values
+    /// (`PropertySource::Expression`) can be evaluated.
+    #[must_use]
+    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStoreSearch>) -> Self {
+        self.expressions.search_store = Some(search_store);
+        self
+    }
+
+    /// Sets the session context used when evaluating computed property values.
+    #[must_use]
+    pub fn with_session_context(mut self, context: SessionContext) -> Self {
+        self.expressions.session_context = context;
         self
     }
 }
@@ -633,15 +748,14 @@ impl Operator for CreateEdgeOperator {
                 }
 
                 // Resolve property values
-                let resolved_props: Vec<(String, Value)> = self
-                    .properties
-                    .iter()
-                    .map(|(name, source)| {
-                        let value =
-                            source.resolve(&chunk, row, self.store.as_ref() as &dyn GraphStore);
-                        (name.clone(), value)
-                    })
-                    .collect();
+                let resolved_props = self.expressions.resolve_row(
+                    &self.properties,
+                    &chunk,
+                    row,
+                    self.store.as_ref() as &dyn GraphStore,
+                    self.viewing_epoch,
+                    self.transaction_id,
+                )?;
 
                 // Validate constraints before writing
                 if let Some(ref validator) = self.validator {

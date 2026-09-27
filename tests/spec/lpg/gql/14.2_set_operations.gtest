@@ -39,6 +39,62 @@ tests:
         - [Alix]
         - [Amsterdam]
 
+  # ISO/IEC 39075 14.2: UNION operands must have the same column names (#365).
+  - name: union_all_different_column_names_rejected
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:City {city: 'Amsterdam'})"
+    query: MATCH (n:Person) RETURN n.name AS name UNION ALL MATCH (c:City) RETURN c.city AS city
+    expect:
+      error: "same columns"
+
+  - name: union_different_arity_rejected
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    query: MATCH (n:Person) RETURN n.name AS name UNION MATCH (n:Person) RETURN n.name AS name, n.age AS age
+    expect:
+      error: "same columns"
+
+  # A chain `a UNION b UNION c` nests the first two branches; the third branch
+  # must still be checked against them.
+  - name: union_chain_third_branch_name_rejected
+    query: RETURN 1 AS a UNION RETURN 2 AS a UNION RETURN 3 AS b
+    expect:
+      error: "same columns"
+
+  - name: union_chain_third_branch_arity_rejected
+    query: RETURN 1 AS a UNION ALL RETURN 2 AS a UNION ALL RETURN 3 AS a, 4 AS c
+    expect:
+      error: "same columns"
+
+  - name: union_chain_matching_columns_combines
+    query: RETURN 1 AS a UNION ALL RETURN 2 AS a UNION ALL RETURN 3 AS a
+    expect:
+      columns: [a]
+      rows:
+        - [1]
+        - [2]
+        - [3]
+
+  # A branch returning only aggregates is still checked for its column count.
+  - name: union_aggregate_branch_arity_rejected
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    query: MATCH (n:Person) RETURN count(n) UNION RETURN 1, 2
+    expect:
+      error: "same columns"
+
+  - name: union_aggregate_branch_combines
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:Person {name: 'Gus'})"
+    query: MATCH (n:Person) RETURN count(n) AS c UNION ALL RETURN 5 AS c
+    expect:
+      columns: [c]
+      rows:
+        - [2]
+        - [5]
+
   - name: except_set_difference
     setup:
       - "INSERT (:N {v: 1})"

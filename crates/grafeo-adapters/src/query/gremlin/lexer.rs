@@ -207,6 +207,12 @@ pub enum TokenKind {
     Regex,
     /// The `notRegex()` negated regular-expression predicate.
     NotRegex,
+    /// The `notContaining()` negated substring predicate.
+    NotContaining,
+    /// The `notStartingWith()` negated prefix predicate.
+    NotStartingWith,
+    /// The `notEndingWith()` negated suffix predicate.
+    NotEndingWith,
 
     // Tokens (T.*)
     /// The `T` token namespace (e.g., `T.id`, `T.label`).
@@ -246,6 +252,9 @@ pub enum TokenKind {
 
     /// A `$name` parameter reference.
     Parameter(String),
+
+    /// `;` terminator (only allowed at the end of a traversal).
+    Semicolon,
 
     // End of input
     /// End of input.
@@ -321,8 +330,11 @@ impl<'a> Lexer<'a> {
 
             Some(c) if c.is_alphabetic() || c == '_' => self.read_identifier(c),
 
+            Some(';') => TokenKind::Semicolon,
             None => TokenKind::Eof,
-            _ => TokenKind::Eof,
+            // Anything else is an error, not the end of input: text after an
+            // unknown character used to be silently dropped (#380).
+            Some(c) => TokenKind::Error(format!("unexpected character '{c}'")),
         };
 
         Token {
@@ -544,6 +556,9 @@ impl<'a> Lexer<'a> {
             "endingWith" => TokenKind::EndingWith,
             "regex" => TokenKind::Regex,
             "notRegex" => TokenKind::NotRegex,
+            "notContaining" => TokenKind::NotContaining,
+            "notStartingWith" => TokenKind::NotStartingWith,
+            "notEndingWith" => TokenKind::NotEndingWith,
             "T" => TokenKind::T,
             "asc" => TokenKind::Asc,
             "desc" => TokenKind::Desc,

@@ -11,7 +11,7 @@
 //! | `list` | `List` | All other lists converted recursively |
 //! | `dict` | `Map` | Keys must be strings |
 //! | `bytes` | `Bytes` | |
-//! | `datetime` | `Timestamp` | Converted to/from UTC |
+//! | `datetime` | `Timestamp` | Naive values are UTC; returned as naive UTC |
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -27,7 +27,7 @@ use crate::error::{PyGrafeoError, PyGrafeoResult};
 ///
 /// Usually you don't need this - Python types convert automatically. Use this
 /// when you need explicit control like `Value.null()` or type checking.
-#[pyclass(name = "Value")]
+#[pyclass(name = "Value", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyValue {
     pub(crate) inner: Value,
@@ -185,18 +185,11 @@ impl PyValue {
             return Ok(Value::Bytes(byte_slice.into()));
         }
 
-        // Handle datetime
+        // Handle datetime. Naive datetimes are UTC, the same convention used
+        // when timestamps are returned, so values round-trip on any machine.
         if obj.is_instance_of::<PyDateTime>() {
-            // Extract timestamp as float (seconds since epoch)
-            let timestamp: f64 = obj
-                .call_method0("timestamp")
-                .and_then(|ts| ts.extract())
-                .map_err(|e| {
-                    PyGrafeoError::Type(format!("Failed to get datetime timestamp: {}", e))
-                })?;
-            // reason: Convert to microseconds; Python timestamps are within i64 range
-            #[allow(clippy::cast_possible_truncation)]
-            let micros = (timestamp * 1_000_000.0) as i64;
+            let micros = datetime_to_utc_micros(obj)
+                .map_err(|e| PyGrafeoError::Type(format!("Failed to convert datetime: {}", e)))?;
             return Ok(Value::Timestamp(Timestamp::from_micros(micros)));
         }
 
@@ -251,22 +244,8 @@ impl PyValue {
                 dict.unbind().into_any()
             }
             Value::Bytes(bytes) => PyBytes::new(py, bytes.as_ref()).unbind().into_any(),
-            Value::Timestamp(ts) => {
-                // Convert microseconds to seconds (as float for precision)
-                let micros = ts.as_micros();
-                let timestamp_float = micros as f64 / 1_000_000.0;
-
-                // Import datetime module and create datetime from timestamp
-                let datetime_mod = py.import("datetime").expect("datetime module should exist");
-                let datetime_class = datetime_mod
-                    .getattr("datetime")
-                    .expect("datetime.datetime should exist");
-
-                // Use utcfromtimestamp for UTC datetime
-                datetime_class
-                    .call_method1("utcfromtimestamp", (timestamp_float,))
-                    .map_or_else(|_| py.None(), |dt| dt.unbind().into_any())
-            }
+            Value::Timestamp(ts) => utc_micros_to_datetime(py, ts.as_micros())
+                .map_or_else(|_| py.None(), |dt| dt.unbind().into_any()),
             Value::Date(d) => {
                 let datetime_mod = py.import("datetime").expect("datetime module should exist");
                 let date_class = datetime_mod
@@ -401,6 +380,51 @@ impl PyValue {
             }
         }
     }
+}
+
+const MICROS_PER_SECOND: i64 = 1_000_000;
+const MICROS_PER_DAY: i64 = 86_400 * MICROS_PER_SECOND;
+
+/// `datetime(1970, 1, 1)`, naive.
+fn unix_epoch(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    py.import("datetime")?
+        .getattr("datetime")?
+        .call1((1970, 1, 1))
+}
+
+/// Microseconds since the Unix epoch for a Python datetime. A naive datetime
+/// is read as UTC; an aware one is converted to UTC first.
+///
+/// Uses exact integer arithmetic (`datetime.timestamp()` reads naive values
+/// as local time and goes through a float).
+fn datetime_to_utc_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+    let py = obj.py();
+    let naive_utc = if obj.call_method0("utcoffset")?.is_none() {
+        obj.clone()
+    } else {
+        let utc = py.import("datetime")?.getattr("timezone")?.getattr("utc")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("tzinfo", py.None())?;
+        obj.call_method1("astimezone", (utc,))?
+            .call_method("replace", (), Some(&kwargs))?
+    };
+    let delta = naive_utc.call_method1("__sub__", (unix_epoch(py)?,))?;
+    let days: i64 = delta.getattr("days")?.extract()?;
+    let seconds: i64 = delta.getattr("seconds")?.extract()?;
+    let micros: i64 = delta.getattr("microseconds")?.extract()?;
+    Ok(days * MICROS_PER_DAY + seconds * MICROS_PER_SECOND + micros)
+}
+
+/// A naive UTC datetime for microseconds since the Unix epoch.
+///
+/// Built as `epoch + timedelta`, which is exact and, unlike
+/// `datetime.fromtimestamp`, also works for dates before 1970 on Windows.
+fn utc_micros_to_datetime(py: Python<'_>, micros: i64) -> PyResult<Bound<'_, PyAny>> {
+    let timedelta = py.import("datetime")?.getattr("timedelta")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("microseconds", micros)?;
+    let delta = timedelta.call((), Some(&kwargs))?;
+    unix_epoch(py)?.call_method1("__add__", (delta,))
 }
 
 impl From<Value> for PyValue {

@@ -18,7 +18,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.42"
+version = "0.5.43"
 edition = "2024"
 rust-version = "1.91.1"
 license = "Apache-2.0"
@@ -28,13 +28,13 @@ description = "A high-performance, embeddable graph database with support for LP
 
 [workspace.dependencies]
 # Internal crates (default-features = false to allow per-crate control)
-grafeo-common = { path = "crates/grafeo-common", version = "0.5.42" }
-grafeo-core = { path = "crates/grafeo-core", version = "0.5.42", default-features = false }
-grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.5.42", default-features = false }
-grafeo-storage = { path = "crates/grafeo-storage", version = "0.5.42", default-features = false }
-grafeo-engine = { path = "crates/grafeo-engine", version = "0.5.42", default-features = false }
-grafeo = { path = "crates/grafeo", version = "0.5.42" }
-grafeo-bindings-common = { path = "crates/bindings/common", version = "0.5.42", default-features = false }
+grafeo-common = { path = "crates/grafeo-common", version = "0.5.43" }
+grafeo-core = { path = "crates/grafeo-core", version = "0.5.43", default-features = false }
+grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.5.43", default-features = false }
+grafeo-storage = { path = "crates/grafeo-storage", version = "0.5.43", default-features = false }
+grafeo-engine = { path = "crates/grafeo-engine", version = "0.5.43", default-features = false }
+grafeo = { path = "crates/grafeo", version = "0.5.43" }
+grafeo-bindings-common = { path = "crates/bindings/common", version = "0.5.43", default-features = false }
 
 # Error handling
 thiserror = "2.0"
@@ -68,9 +68,9 @@ sha1 = "0.11"
 sha2 = "0.11"
 
 # Encryption (optional, behind `encryption` feature flag)
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 hkdf = "0.13"
-argon2 = "0.5"
+argon2 = "0.6"
 zeroize = { version = "1", features = ["derive"] }
 
 # Serialization
@@ -78,13 +78,13 @@ serde = { version = "1.0", features = ["derive", "rc"] }
 bincode = { version = "2.0", features = ["serde"] }
 
 # Arrow (optional, for zero-copy data export)
-arrow-schema = "58"
-arrow-array = "58"
-arrow-ipc = "58"
+arrow-schema = "60"
+arrow-array = "60"
+arrow-ipc = "60"
 
 # Python bindings
-pyo3 = "0.27"
-pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
+pyo3 = "0.29"
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "io-util", "sync", "time", "macros"] }
@@ -106,12 +106,12 @@ criterion = { package = "codspeed-criterion-compat", version = "4" }
 tempfile = "3"
 
 # Allocators (platform-optimized)
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.7"
 mimalloc = "0.1"
 
 # Vector index support
 ordered-float = "5"
-rand = "0.10.1"
+rand = "0.10.3"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -19,8 +19,8 @@ jobs:
           - runner: ubuntu-latest
             target: aarch64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Build wheels
@@ -30,7 +30,7 @@ jobs:
           args: --release --out dist -m crates/bindings/python/Cargo.toml
           sccache: "true"
           manylinux: auto
-          rust-toolchain: stable
+          rust-toolchain: "1.98.1"
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
@@ -47,8 +47,8 @@ jobs:
           - runner: ubuntu-latest
             target: aarch64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Build wheels
@@ -58,7 +58,7 @@ jobs:
           args: --release --out dist -m crates/bindings/python/Cargo.toml
           sccache: "true"
           manylinux: musllinux_1_2
-          rust-toolchain: stable
+          rust-toolchain: "1.98.1"
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
@@ -75,8 +75,8 @@ jobs:
           - runner: windows-latest
             target: x86
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           architecture: ${{ matrix.platform.target }}
@@ -102,8 +102,8 @@ jobs:
           - runner: macos-14
             target: aarch64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Build wheels
@@ -121,7 +121,7 @@ jobs:
   sdist:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:

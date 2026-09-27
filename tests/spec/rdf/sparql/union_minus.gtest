@@ -87,6 +87,181 @@ tests:
         - [Alix]
 
   # ---------------------------------------------------------------------------
+  # UNION over branches with different variables (#365, SPARQL 1.1 sec 18.2.1):
+  # the result has every branch variable, unbound where a branch lacks it.
+  # ---------------------------------------------------------------------------
+
+  - name: union_heterogeneous_vars_explicit
+    # ?y exists only in the second branch.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/a> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT ?x ?y WHERE {
+        { ?s <http://ex.org/p> ?x }
+        UNION
+        { ?s <http://ex.org/q> ?y }
+      }
+    expect:
+      columns: [x, y]
+      rows:
+        - [http://ex.org/b, null]
+        - [null, http://ex.org/z]
+
+  - name: union_heterogeneous_vars_reversed
+    # Same as above with the branches swapped.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/a> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT ?y ?x WHERE {
+        { ?s <http://ex.org/q> ?y }
+        UNION
+        { ?s <http://ex.org/p> ?x }
+      }
+    expect:
+      columns: [y, x]
+      rows:
+        - [http://ex.org/z, null]
+        - [null, http://ex.org/b]
+
+  - name: union_three_branches_heterogeneous
+    # Three branches, each with its own variable.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/a> <http://ex.org/q> <http://ex.org/z> .
+          <http://ex.org/a> <http://ex.org/r> <http://ex.org/w> .
+        }
+    query: |
+      SELECT ?x ?y ?z WHERE {
+        { ?s <http://ex.org/p> ?x }
+        UNION
+        { ?s <http://ex.org/q> ?y }
+        UNION
+        { ?s <http://ex.org/r> ?z }
+      }
+    expect:
+      columns: [x, y, z]
+      rows:
+        - [http://ex.org/b, null, null]
+        - [null, http://ex.org/z, null]
+        - [null, null, http://ex.org/w]
+
+  - name: union_bind_misaligned_v001
+    # The wider first branch binds ?dir at a different column than the second.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/c> <http://ex.org/q> <http://ex.org/d> .
+        }
+    query: |
+      SELECT ?s ?dir WHERE {
+        { ?s <http://ex.org/p> ?o . BIND("out" AS ?dir) }
+        UNION
+        { ?s <http://ex.org/q> ?dir }
+      }
+    expect:
+      columns: [s, dir]
+      rows:
+        - [http://ex.org/a, out]
+        - [http://ex.org/c, http://ex.org/d]
+
+  - name: union_select_star_no_corruption
+    # SELECT * must not show a later branch's values under the first branch's names.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/a> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT * WHERE {
+        { ?s <http://ex.org/p> ?x }
+        UNION
+        { ?s <http://ex.org/q> ?y }
+      }
+    expect:
+      columns: [s, x, y]
+      rows:
+        - [http://ex.org/a, http://ex.org/b, null]
+        - [http://ex.org/a, null, http://ex.org/z]
+
+  - name: union_same_arity_control
+    # Control: branches with the same variables.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/a> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT ?x WHERE {
+        { ?s <http://ex.org/p> ?x }
+        UNION
+        { ?s <http://ex.org/q> ?x }
+      }
+    expect:
+      columns: [x]
+      rows:
+        - [http://ex.org/b]
+        - [http://ex.org/z]
+
+  - name: union_distinct_over_null
+    # DISTINCT deduplicates rows containing unbound values.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/m> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/n> .
+          <http://ex.org/c> <http://ex.org/q> <http://ex.org/z> .
+          <http://ex.org/d> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT DISTINCT ?y WHERE {
+        { ?s <http://ex.org/p> ?x }
+        UNION
+        { ?s <http://ex.org/q> ?y }
+      }
+    expect:
+      columns: [y]
+      rows:
+        - [null]
+        - [http://ex.org/z]
+
+  - name: union_order_by_nulls_last
+    # ORDER BY puts unbound values last.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/m> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/n> .
+          <http://ex.org/c> <http://ex.org/q> <http://ex.org/z> .
+          <http://ex.org/d> <http://ex.org/q> <http://ex.org/z> .
+        }
+    query: |
+      SELECT DISTINCT ?y WHERE {
+        { ?s <http://ex.org/p> ?x }
+        UNION
+        { ?s <http://ex.org/q> ?y }
+      }
+      ORDER BY ?y
+    expect:
+      ordered: true
+      columns: [y]
+      rows:
+        - [http://ex.org/z]
+        - [null]
+
+  # ---------------------------------------------------------------------------
   # MINUS
   # ---------------------------------------------------------------------------
 

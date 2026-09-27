@@ -1241,6 +1241,49 @@ impl RdfStore {
         }
     }
 
+    /// Like [`find_in_graphs`](Self::find_in_graphs), but as seen by
+    /// `transaction_id`: each graph's pending changes from that transaction
+    /// are applied (see [`find_with_pending`](Self::find_with_pending)).
+    pub fn find_in_graphs_with_pending(
+        &self,
+        pattern: &TriplePattern,
+        graphs: Option<&[&str]>,
+        transaction_id: Option<TransactionId>,
+    ) -> Vec<(Option<String>, Arc<Triple>)> {
+        let Some(transaction_id) = transaction_id else {
+            return self.find_in_graphs(pattern, graphs);
+        };
+        let tx = Some(transaction_id);
+        match graphs {
+            None => self
+                .find_with_pending(pattern, tx)
+                .into_iter()
+                .map(|t| (None, t))
+                .collect(),
+            Some([]) => {
+                let mut results = Vec::new();
+                for (name, store) in self.named_graphs.read().iter() {
+                    for t in store.find_with_pending(pattern, tx) {
+                        results.push((Some(name.clone()), t));
+                    }
+                }
+                results
+            }
+            Some(names) => {
+                let mut results = Vec::new();
+                let graphs = self.named_graphs.read();
+                for name in names {
+                    if let Some(store) = graphs.get(*name) {
+                        for t in store.find_with_pending(pattern, tx) {
+                            results.push((Some((*name).to_string()), t));
+                        }
+                    }
+                }
+                results
+            }
+        }
+    }
+
     // =========================================================================
     // Transaction support
     // =========================================================================
@@ -1271,7 +1314,8 @@ impl RdfStore {
             .push(PendingOp::Delete(triple));
     }
 
-    /// Commits a transaction, applying all buffered operations.
+    /// Commits a transaction, applying all buffered operations in order, in
+    /// this graph and in every named graph.
     ///
     /// Returns the number of operations applied.
     pub fn commit_transaction(&self, transaction_id: TransactionId) -> usize {
@@ -1280,7 +1324,7 @@ impl RdfStore {
             buffer.buffers.remove(&transaction_id).unwrap_or_default()
         };
 
-        let count = ops.len();
+        let mut count = ops.len();
         for op in ops {
             match op {
                 PendingOp::Insert(triple) => {
@@ -1291,18 +1335,33 @@ impl RdfStore {
                 }
             }
         }
+        for graph in self.named_graph_stores() {
+            count += graph.commit_transaction(transaction_id);
+        }
         count
     }
 
-    /// Rolls back a transaction, discarding all buffered operations.
+    /// Rolls back a transaction, discarding all buffered operations in this
+    /// graph and in every named graph.
     ///
     /// Returns the number of operations discarded.
     pub fn rollback_transaction(&self, transaction_id: TransactionId) -> usize {
-        let mut buffer = self.tx_buffer.write();
-        buffer
+        let mut count = self
+            .tx_buffer
+            .write()
             .buffers
             .remove(&transaction_id)
-            .map_or(0, |ops| ops.len())
+            .map_or(0, |ops| ops.len());
+        for graph in self.named_graph_stores() {
+            count += graph.rollback_transaction(transaction_id);
+        }
+        count
+    }
+
+    /// Snapshot of the named graph stores, so their transaction buffers can be
+    /// committed or rolled back without holding the graph map lock.
+    fn named_graph_stores(&self) -> Vec<Arc<RdfStore>> {
+        self.named_graphs.read().values().cloned().collect()
     }
 
     /// Checks if a transaction has pending operations.
@@ -1315,12 +1374,12 @@ impl RdfStore {
             .is_some_and(|ops| !ops.is_empty())
     }
 
-    /// Returns triples matching the given pattern, including pending inserts
-    /// and excluding pending deletes from the specified transaction
-    /// (for read-your-writes within a transaction).
-    ///
-    /// This provides snapshot isolation semantics: within a transaction, you see
-    /// all your own pending changes (inserts and deletes) as if they were committed.
+    /// Returns triples matching the given pattern as seen by the specified
+    /// transaction: committed triples with that transaction's pending changes
+    /// applied (read-your-writes). Pending operations take effect in order, so
+    /// the result is exactly what the store will hold once the transaction
+    /// commits: a triple inserted and then deleted is absent, one deleted and
+    /// then re-inserted is present, and a triple is never returned twice.
     pub fn find_with_pending(
         &self,
         pattern: &TriplePattern,
@@ -1328,35 +1387,58 @@ impl RdfStore {
     ) -> Vec<Arc<Triple>> {
         let mut results = self.find(pattern);
 
-        if let Some(tx) = transaction_id {
-            let buffer = self.tx_buffer.read();
-            if let Some(ops) = buffer.buffers.get(&tx) {
-                // Collect pending deletes
-                let pending_deletes: FxHashSet<&Triple> = ops
-                    .iter()
-                    .filter_map(|op| match op {
-                        PendingOp::Delete(t) => Some(t),
-                        _ => None,
-                    })
-                    .collect();
+        let Some(tx) = transaction_id else {
+            return results;
+        };
+        let buffer = self.tx_buffer.read();
+        let Some(ops) = buffer.buffers.get(&tx) else {
+            return results;
+        };
 
-                // Filter out pending deletes from committed results
-                if !pending_deletes.is_empty() {
-                    results.retain(|t| !pending_deletes.contains(t.as_ref()));
+        // Net effect per matching triple: `true` = present after the
+        // transaction, `false` = absent. The last operation wins.
+        let mut net: HashMap<&Triple, bool> = HashMap::new();
+        for op in ops {
+            match op {
+                PendingOp::Insert(triple) if pattern.matches(triple) => {
+                    net.insert(triple, true);
                 }
-
-                // Include pending inserts
-                for op in ops {
-                    if let PendingOp::Insert(triple) = op
-                        && pattern.matches(triple)
-                    {
-                        results.push(Arc::new(triple.clone()));
-                    }
+                PendingOp::Delete(triple) if pattern.matches(triple) => {
+                    net.insert(triple, false);
                 }
+                _ => {}
             }
         }
+        if net.is_empty() {
+            return results;
+        }
 
+        // Committed triples the transaction deleted disappear; committed
+        // triples it re-inserted are already in `results`.
+        results.retain(|t| net.get(t.as_ref()).copied().unwrap_or(true));
+        let added: Vec<Arc<Triple>> = {
+            let committed: FxHashSet<&Triple> = results.iter().map(AsRef::as_ref).collect();
+            net.iter()
+                .filter(|&(triple, &present)| present && !committed.contains(*triple))
+                .map(|(triple, _)| Arc::new((*triple).clone()))
+                .collect()
+        };
+        results.extend(added);
         results
+    }
+
+    /// Whether `triple` is present as seen by `transaction_id` (committed
+    /// state plus that transaction's pending changes).
+    #[must_use]
+    pub fn contains_with_pending(&self, triple: &Triple, transaction_id: TransactionId) -> bool {
+        let pattern = TriplePattern {
+            subject: Some(triple.subject().clone()),
+            predicate: Some(triple.predicate().clone()),
+            object: Some(triple.object().clone()),
+        };
+        !self
+            .find_with_pending(&pattern, Some(transaction_id))
+            .is_empty()
     }
 }
 
@@ -1694,6 +1776,101 @@ mod tests {
             .iter()
             .any(|t| t.as_ref() == &new_triple);
         assert!(found_new, "Pending insert should be visible");
+    }
+
+    #[test]
+    fn test_find_with_pending_applies_ops_in_order() {
+        let store = RdfStore::new();
+        let committed = Triple::new(
+            Term::iri("http://example.org/alix"),
+            Term::iri("http://example.org/p"),
+            Term::literal("committed"),
+        );
+        let fresh = Triple::new(
+            Term::iri("http://example.org/alix"),
+            Term::iri("http://example.org/p"),
+            Term::literal("fresh"),
+        );
+        store.insert(committed.clone());
+        let tx = TransactionId::new(7);
+        let all = TriplePattern {
+            subject: Some(Term::iri("http://example.org/alix")),
+            predicate: None,
+            object: None,
+        };
+        let seen = |store: &RdfStore| -> Vec<Triple> {
+            let mut triples: Vec<Triple> = store
+                .find_with_pending(&all, Some(tx))
+                .into_iter()
+                .map(|t| (*t).clone())
+                .collect();
+            triples.sort_by_key(|t| t.object().to_string());
+            triples
+        };
+
+        // Inserting an already committed triple does not duplicate it.
+        store.insert_in_transaction(tx, committed.clone());
+        assert_eq!(seen(&store), vec![committed.clone()]);
+
+        // Inserted then deleted: absent.
+        store.insert_in_transaction(tx, fresh.clone());
+        store.remove_in_transaction(tx, fresh.clone());
+        assert_eq!(seen(&store), vec![committed.clone()]);
+        assert!(!store.contains_with_pending(&fresh, tx));
+
+        // Deleted then re-inserted: present once.
+        store.remove_in_transaction(tx, committed.clone());
+        assert!(!store.contains_with_pending(&committed, tx));
+        store.insert_in_transaction(tx, committed.clone());
+        assert_eq!(seen(&store), vec![committed.clone()]);
+        assert!(store.contains_with_pending(&committed, tx));
+
+        // Commit produces exactly what the transaction saw.
+        store.commit_transaction(tx);
+        assert_eq!(store.len(), 1);
+        assert!(store.contains(&committed));
+    }
+
+    #[test]
+    fn test_transaction_commit_and_rollback_reach_named_graphs() {
+        let store = RdfStore::new();
+        let triple = Triple::new(
+            Term::iri("http://example.org/gus"),
+            Term::iri("http://example.org/p"),
+            Term::literal("named"),
+        );
+        let everything = TriplePattern {
+            subject: None,
+            predicate: None,
+            object: None,
+        };
+
+        // Rollback discards a buffered write in a named graph.
+        let tx = TransactionId::new(1);
+        store
+            .graph_or_create("http://example.org/g")
+            .insert_in_transaction(tx, triple.clone());
+        let visible = store.find_in_graphs_with_pending(&everything, Some(&[]), Some(tx));
+        assert_eq!(
+            visible.len(),
+            1,
+            "the transaction sees its own named-graph write"
+        );
+        assert!(
+            store.find_in_graphs(&everything, Some(&[])).is_empty(),
+            "other readers do not"
+        );
+        assert_eq!(store.rollback_transaction(tx), 1);
+        let graph = store.graph("http://example.org/g").unwrap();
+        assert!(graph.is_empty());
+        assert!(!graph.has_pending_ops(tx));
+
+        // Commit applies a buffered write in a named graph.
+        let tx = TransactionId::new(2);
+        graph.insert_in_transaction(tx, triple.clone());
+        assert_eq!(store.commit_transaction(tx), 1);
+        assert!(graph.contains(&triple));
+        assert!(!graph.has_pending_ops(tx));
     }
 
     #[test]

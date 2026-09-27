@@ -6,12 +6,18 @@ use super::*;
 impl GqlTranslator {
     /// Extracts aggregate and group-by expressions from RETURN items.
     ///
-    /// Returns `(aggregates, group_by, post_return)` where `post_return` is
-    /// `Some(...)` when any return item wraps an aggregate in a binary/unary
-    /// expression (e.g. `count(n) > 0 AS exists`).
+    /// Returns `(aggregates, group_by, post_return)`. The Aggregate operator
+    /// outputs its grouping keys first, then its aggregates, named by alias or
+    /// [`aggregate_column_name`](crate::query::planner::common::aggregate_column_name).
+    /// `post_return` is `Some(...)` whenever that output differs from what the
+    /// items ask for: an item wraps an aggregate (`count(n) > 0 AS exists`),
+    /// an item has an alias, a grouping key follows an aggregate (so columns
+    /// must be reordered), or `explicit_group_by` is set (the GROUP BY keys may
+    /// not all be returned).
     pub(super) fn extract_aggregates_and_groups(
         &self,
         items: &[ast::ReturnItem],
+        explicit_group_by: bool,
     ) -> Result<(
         Vec<AggregateExpr>,
         Vec<LogicalExpression>,
@@ -22,39 +28,53 @@ impl GqlTranslator {
         let mut needs_post_return = false;
         let mut post_return_items = Vec::new();
         let mut agg_counter: u32 = 0;
+        let mut seen_aggregate = false;
 
         for item in items {
-            if let Some(agg_expr) = self.try_extract_aggregate(&item.expression, &item.alias)? {
-                // Direct aggregate (e.g. `count(n) AS cnt`)
+            if let Some(mut agg_expr) = self.try_extract_aggregate(&item.expression, &item.alias)? {
+                // Direct aggregate (e.g. `count(n) AS cnt`). An unaliased one is
+                // named after its source text (`count(n)`); the name doubles as
+                // the alias so the binder resolves the post-Return reference.
+                let column = agg_expr.alias.clone().unwrap_or_else(|| {
+                    crate::query::planner::common::aggregate_column_name(&agg_expr)
+                });
+                agg_expr.alias = Some(column.clone());
                 aggregates.push(agg_expr);
-                let agg_alias = item
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| format!("_agg_{agg_counter}"));
                 post_return_items.push(ReturnItem {
-                    expression: LogicalExpression::Variable(agg_alias),
+                    expression: LogicalExpression::Variable(column),
                     alias: item.alias.clone(),
                 });
-                agg_counter += 1;
+                seen_aggregate = true;
             } else if contains_aggregate(&item.expression) {
                 // Wrapped aggregate (e.g. `count(n) > 0 AS exists`,
                 // or `sum(a) + count(b)` with multiple aggregates).
                 needs_post_return = true;
+                seen_aggregate = true;
 
                 let substitute = self.extract_wrapped_aggregates(
                     &item.expression,
                     &mut agg_counter,
                     &mut aggregates,
                 )?;
+                // Unaliased, the column is named after the written expression
+                // (`sum(n.v) + 1`), not the substitute (`_agg_0 + 1`).
+                let alias = item.alias.clone().or_else(|| {
+                    self.translate_expression(&item.expression)
+                        .ok()
+                        .map(|expr| crate::query::planner::common::expression_to_string(&expr))
+                });
                 post_return_items.push(ReturnItem {
                     expression: substitute,
-                    alias: item.alias.clone(),
+                    alias,
                 });
             } else {
                 // Non-aggregate expression: group-by key.
                 // The Aggregate operator names its output columns using
                 // expression_to_string, so the post-Return must reference
                 // those column names (not the raw property expression).
+                // Keys come first in the Aggregate's output, so a key after an
+                // aggregate needs the post-Return to restore the item order.
+                needs_post_return |= seen_aggregate;
                 let expr = self.translate_expression(&item.expression)?;
                 group_by.push(expr.clone());
                 let col_name = crate::query::planner::common::expression_to_string(&expr);
@@ -68,7 +88,7 @@ impl GqlTranslator {
         // Always produce a post-Return when any item has an alias, so that
         // output column names reflect the aliases and are visible to ORDER BY.
         let has_aliases = items.iter().any(|item| item.alias.is_some());
-        if needs_post_return || has_aliases {
+        if needs_post_return || has_aliases || explicit_group_by {
             Ok((aggregates, group_by, Some(post_return_items)))
         } else {
             Ok((aggregates, group_by, None))

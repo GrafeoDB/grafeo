@@ -365,16 +365,19 @@ impl LogicalOperator {
             Self::MultiWayJoin(op) => op.inputs.iter().any(|i| i.has_mutations()),
             Self::Apply(op) => op.input.has_mutations() || op.subplan.has_mutations(),
 
+            // Read-only operators whose input may still write, as in
+            // `MATCH (a) SET a.x = 1 WITH a MATCH (b) ...` where the second
+            // scan runs on top of the SET.
+            Self::NodeScan(op) => op.input.as_deref().is_some_and(Self::has_mutations),
+            Self::EdgeScan(op) => op.input.as_deref().is_some_and(Self::has_mutations),
+            Self::TripleScan(op) => op.input.as_deref().is_some_and(Self::has_mutations),
+            Self::Expand(op) => op.input.has_mutations(),
+            Self::ShortestPath(op) => op.input.has_mutations(),
+
             // Leaf operators (read-only)
-            Self::NodeScan(_)
-            | Self::EdgeScan(_)
-            | Self::Expand(_)
-            | Self::TripleScan(_)
-            | Self::ShortestPath(_)
-            | Self::Empty
-            | Self::ParameterScan(_)
-            | Self::CallProcedure(_)
-            | Self::LoadData(_) => false,
+            Self::Empty | Self::ParameterScan(_) | Self::CallProcedure(_) | Self::LoadData(_) => {
+                false
+            }
             Self::Construct(op) => op.input.has_mutations(),
         }
     }
@@ -3029,7 +3032,7 @@ mod tests {
         // Display/Equality sanity
         assert_eq!(format!("{literal}"), "42");
         assert_eq!(format!("{param}"), "$limit");
-        assert!(literal == 42usize);
+        assert_eq!(literal, 42usize);
     }
 
     // ==================== CountExpr ====================
@@ -3165,6 +3168,26 @@ mod tests {
             edge_tables: vec![],
         });
         assert!(ddl.has_mutations());
+    }
+
+    #[test]
+    fn has_mutations_sees_writes_below_a_scan() {
+        // `MATCH (a) SET a.city = null WITH a MATCH (b) ...`: the second scan
+        // runs on top of the SET.
+        let set_prop = Box::new(LogicalOperator::SetProperty(SetPropertyOp {
+            variable: "mia".into(),
+            properties: vec![("city".into(), LogicalExpression::Literal(Value::Null))],
+            replace: false,
+            is_edge: false,
+            input: leaf_node_scan("mia"),
+        }));
+        let scan = LogicalOperator::NodeScan(NodeScanOp {
+            variable: "vincent".into(),
+            label: None,
+            input: Some(set_prop),
+        });
+        assert!(scan.has_mutations());
+        assert!(!leaf_node_scan("vincent").has_mutations());
     }
 
     #[test]

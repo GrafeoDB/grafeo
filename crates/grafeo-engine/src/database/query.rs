@@ -68,7 +68,7 @@ impl super::GrafeoDB {
         // defensive no-op today).
         *self.current_graph.write() = session.current_graph();
         *self.current_schema.write() = session.current_schema();
-        Ok(OwnedResultStream::new(source, columns, deadline))
+        OwnedResultStream::new(source, columns, deadline)
     }
 
     /// Executes a GQL query with visibility at the specified epoch.

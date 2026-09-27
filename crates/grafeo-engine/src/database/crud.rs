@@ -259,7 +259,8 @@ impl super::GrafeoDB {
         self.lpg_store().current_epoch()
     }
 
-    /// Deletes a node and all its edges.
+    /// Deletes a node. Its edges are not deleted: delete them first with
+    /// [`delete_edge`](Self::delete_edge), or use `DETACH DELETE` in a query.
     ///
     /// If WAL is enabled, the operation is logged for durability.
     pub fn delete_node(&self, id: grafeo_common::types::NodeId) -> bool {

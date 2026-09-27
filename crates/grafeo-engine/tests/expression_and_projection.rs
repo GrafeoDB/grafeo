@@ -2321,3 +2321,59 @@ fn edge_variable_multi_hop_returns_map() {
         rows[0][3]
     );
 }
+
+// ============================================================================
+// Column naming for un-aliased complex expressions in RETURN
+// ============================================================================
+
+// Unaliased expressions are named after their source text, so two different
+// expressions in one RETURN get different column names (#371, from PR #350).
+
+#[test]
+fn return_two_unaliased_binary_expressions_have_distinct_column_names() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute("INSERT (:Item {a: 1, b: 2, c: 3, d: 4})")
+        .unwrap();
+
+    let result = session
+        .execute("MATCH (n:Item) RETURN n.a + n.b, n.c + n.d")
+        .unwrap();
+
+    assert_eq!(result.columns, vec!["n.a + n.b", "n.c + n.d"]);
+    assert_eq!(result.rows()[0], vec![Value::Int64(3), Value::Int64(7)]);
+}
+
+#[test]
+fn return_two_unaliased_id_calls_have_distinct_column_names() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        .unwrap();
+
+    let result = session
+        .execute("MATCH (a)-[r]->(b) RETURN id(a), id(b)")
+        .unwrap();
+
+    assert_eq!(result.columns, vec!["id(a)", "id(b)"]);
+    assert_ne!(result.rows()[0][0], result.rows()[0][1]);
+}
+
+#[test]
+fn return_mixed_scalar_intrinsics_have_distinct_column_names() {
+    // labels(n), type(r), and id(n) used to all collapse to "expr".
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        .unwrap();
+
+    let result = session
+        .execute("MATCH (a)-[r]->(b) RETURN labels(a), type(r), id(a)")
+        .unwrap();
+
+    assert_eq!(result.columns, vec!["labels(a)", "type(r)", "id(a)"]);
+    assert_eq!(result.rows()[0][1], Value::String("KNOWS".into()));
+}

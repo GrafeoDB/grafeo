@@ -73,7 +73,7 @@ jobs:
           echo "$BODY" > /tmp/changelog-body.txt
 
       - name: Checkout grafeo-web
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: GrafeoDB/grafeo-web
           token: ${{ secrets.GRAFEO_WEB_TOKEN }}

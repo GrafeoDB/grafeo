@@ -251,6 +251,31 @@ pub struct HnswIndex {
     rng: RwLock<rand::rngs::StdRng>,
 }
 
+/// Picks a new entry point after the old one was removed: the node on the
+/// highest level (lowest id on ties, for determinism), and records that level
+/// as the index's top level. Search starts at the entry point's top level, so
+/// a stale, higher `max_level` would leave the upper layers unreachable.
+fn reset_entry_point(
+    nodes_map: &HashMap<NodeId, HnswNode>,
+    entry_point: &mut Option<NodeId>,
+    max_level: &mut usize,
+) {
+    let best = nodes_map
+        .iter()
+        .map(|(&node_id, node)| (node.neighbors.len().saturating_sub(1), node_id))
+        .max_by(|(level_a, id_a), (level_b, id_b)| level_a.cmp(level_b).then(id_b.cmp(id_a)));
+    match best {
+        Some((level, node_id)) => {
+            *entry_point = Some(node_id);
+            *max_level = level;
+        }
+        None => {
+            *entry_point = None;
+            *max_level = 0;
+        }
+    }
+}
+
 impl HnswIndex {
     /// Creates a new empty HNSW index with the given configuration.
     #[must_use]
@@ -439,6 +464,16 @@ impl HnswIndex {
         let mut entry_point = self.entry_point.write();
         let mut max_level = self.max_level.write();
 
+        // Updating an existing vector (#374): detach the old entry first, under
+        // the same locks, so searches never see its neighbor lists reset.
+        self.detach_for_replacement(
+            nodes.as_heap_mut(),
+            &mut entry_point,
+            &mut max_level,
+            id,
+            accessor,
+        );
+
         // Insert path always operates on the heap backend; calling
         // `as_heap_mut` panics if the topology is mmap-backed. Reload
         // to RAM via `restore_topology` first if needed.
@@ -573,6 +608,93 @@ impl HnswIndex {
         if level > current_max_level {
             *entry_point = Some(id);
             *max_level = level;
+        }
+    }
+
+    /// Removes `id` before its vector is replaced, reconnecting its former
+    /// neighbors with each other at every level so paths through it survive.
+    /// No-op when `id` is not in the index. Callers hold the topology locks.
+    fn detach_for_replacement(
+        &self,
+        nodes_map: &mut HashMap<NodeId, HnswNode>,
+        entry_point: &mut Option<NodeId>,
+        max_level: &mut usize,
+        id: NodeId,
+        accessor: &impl VectorAccessor,
+    ) {
+        let Some(removed) = nodes_map.remove(&id) else {
+            return;
+        };
+
+        for node in nodes_map.values_mut() {
+            for neighbors in &mut node.neighbors {
+                neighbors.retain(|&neighbor| neighbor != id);
+            }
+        }
+
+        // Connect the former neighbors at each level, then prune back to size.
+        for (level, former_neighbors) in removed.neighbors.iter().enumerate() {
+            let existing: Vec<NodeId> = former_neighbors
+                .iter()
+                .copied()
+                .filter(|neighbor| {
+                    nodes_map
+                        .get(neighbor)
+                        .is_some_and(|node| node.neighbors.len() > level)
+                })
+                .collect();
+
+            for &left in &existing {
+                if let Some(node) = nodes_map.get_mut(&left) {
+                    for &right in &existing {
+                        if left != right && !node.neighbors[level].contains(&right) {
+                            node.neighbors[level].push(right);
+                        }
+                    }
+                }
+            }
+
+            let max_neighbors = if level == 0 {
+                self.config.m_max
+            } else {
+                self.config.m
+            };
+            let mut prune_data: Vec<(NodeId, Vec<(NodeId, f32)>)> = Vec::new();
+            for &neighbor_id in &existing {
+                let Some(node) = nodes_map.get(&neighbor_id) else {
+                    continue;
+                };
+                if node.neighbors[level].len() <= max_neighbors {
+                    continue;
+                }
+                let Some(base_vector) = accessor.get_vector(neighbor_id) else {
+                    continue;
+                };
+                let distances: Vec<(NodeId, f32)> = node.neighbors[level]
+                    .iter()
+                    .map(|&candidate| {
+                        let distance = accessor.get_vector(candidate).map_or(f32::MAX, |vector| {
+                            self.vector_distance(&base_vector, &vector)
+                        });
+                        (candidate, distance)
+                    })
+                    .collect();
+                prune_data.push((neighbor_id, distances));
+            }
+
+            for (neighbor_id, distances) in prune_data {
+                if let Some(node) = nodes_map.get_mut(&neighbor_id) {
+                    Self::prune_neighbors_with_distances(
+                        &mut node.neighbors[level],
+                        &distances,
+                        max_neighbors,
+                    );
+                }
+            }
+        }
+
+        if *entry_point == Some(id) {
+            reset_entry_point(nodes_map, entry_point, max_level);
         }
     }
 
@@ -745,6 +867,7 @@ impl HnswIndex {
     pub fn remove(&self, id: NodeId) -> bool {
         let mut nodes = self.nodes.write();
         let mut entry_point = self.entry_point.write();
+        let mut max_level = self.max_level.write();
 
         let nodes_map = nodes.as_heap_mut();
 
@@ -753,7 +876,7 @@ impl HnswIndex {
         }
 
         // Remove bidirectional links
-        for (_, node) in nodes_map.iter_mut() {
+        for node in nodes_map.values_mut() {
             for neighbors in &mut node.neighbors {
                 neighbors.retain(|&n| n != id);
             }
@@ -761,7 +884,7 @@ impl HnswIndex {
 
         // Update entry point if needed
         if *entry_point == Some(id) {
-            *entry_point = nodes_map.keys().next().copied();
+            reset_entry_point(nodes_map, &mut entry_point, &mut max_level);
         }
 
         true
@@ -1891,6 +2014,164 @@ mod tests {
 
         let results = index.search(&[1.0, 0.0, 0.0], 5, &accessor);
         assert!(results.is_empty());
+    }
+
+    /// Builds a seeded 2-D index where every node is inserted once.
+    fn seeded_index(
+        seed: u64,
+        points: &[(u64, [f32; 2])],
+    ) -> (HnswIndex, HashMap<NodeId, Arc<[f32]>>) {
+        let config = HnswConfig::new(2, DistanceMetric::Euclidean).with_m(4);
+        let index = HnswIndex::with_seed(config, seed);
+        let mut map: HashMap<NodeId, Arc<[f32]>> = HashMap::new();
+        for &(id, v) in points {
+            map.insert(NodeId::new(id), Arc::from(v.as_slice()));
+        }
+        for &(id, v) in points {
+            index.insert(NodeId::new(id), &v, &make_accessor(&map));
+        }
+        (index, map)
+    }
+
+    /// Two tight clusters joined only through a few bridging points: a small
+    /// graph where losing one node's links disconnects the rest.
+    fn clustered_points() -> Vec<(u64, [f32; 2])> {
+        let mut points = Vec::new();
+        for i in 0..12u64 {
+            let offset = i as f32 * 0.01;
+            points.push((i, [offset, 0.0]));
+            points.push((100 + i, [10.0 + offset, 0.0]));
+        }
+        for i in 0..4u64 {
+            points.push((200 + i, [2.5 * (i as f32 + 1.0), 0.0]));
+        }
+        points
+    }
+
+    fn reachable_ids(index: &HnswIndex, map: &HashMap<NodeId, Arc<[f32]>>) -> Vec<NodeId> {
+        let accessor = make_accessor(map);
+        let mut ids: Vec<NodeId> = index
+            .search_with_ef(&[5.0, 0.0], map.len(), 512, &accessor)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[test]
+    fn test_replacing_vectors_keeps_every_node_reachable() {
+        // #374: re-inserting an indexed node used to reset its neighbor lists
+        // and leave other nodes unreachable. Checked over many seeds.
+        let points = clustered_points();
+        let mut expected: Vec<NodeId> = points.iter().map(|&(id, _)| NodeId::new(id)).collect();
+        expected.sort_unstable();
+        for seed in 0..40 {
+            let (index, map) = seeded_index(seed, &points);
+            let accessor = make_accessor(&map);
+            // Replace every bridge (same vector) several times, like repeated
+            // set_node_property calls.
+            for _ in 0..3 {
+                for i in 0..4u64 {
+                    let id = NodeId::new(200 + i);
+                    let v = map[&id].clone();
+                    index.insert(id, &v, &accessor);
+                }
+            }
+            assert_eq!(index.len(), points.len(), "seed {seed}: node count changed");
+            assert_eq!(reachable_ids(&index, &map), expected, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn test_replacing_vector_with_new_value_moves_the_node() {
+        let points = clustered_points();
+        let (index, mut map) = seeded_index(7, &points);
+        let moved = NodeId::new(3);
+        let new_vector: Arc<[f32]> = Arc::from([10.05f32, 0.0].as_slice());
+        map.insert(moved, new_vector.clone());
+        index.insert(moved, &new_vector, &make_accessor(&map));
+
+        let accessor = make_accessor(&map);
+        let nearest = index.search_with_ef(&[10.05, 0.0], 1, 64, &accessor);
+        assert_eq!(nearest[0].0, moved, "the node is found at its new position");
+        assert_eq!(index.len(), points.len());
+    }
+
+    /// The top level of the current entry point, which must equal `max_level`.
+    fn entry_point_level(index: &HnswIndex) -> Option<usize> {
+        let entry = (*index.entry_point.read())?;
+        let nodes = index.nodes.read();
+        match &*nodes {
+            TopologyBackend::Heap(map) => map.get(&entry).map(|node| node.neighbors.len() - 1),
+            TopologyBackend::Mmap(_) => None,
+        }
+    }
+
+    /// Highest level of any node in the index.
+    fn highest_level(index: &HnswIndex) -> usize {
+        match &*index.nodes.read() {
+            TopologyBackend::Heap(map) => map
+                .values()
+                .map(|node| node.neighbors.len() - 1)
+                .max()
+                .unwrap_or(0),
+            TopologyBackend::Mmap(_) => 0,
+        }
+    }
+
+    #[test]
+    fn test_removing_entry_point_resets_top_level() {
+        let points = clustered_points();
+        for seed in 0..40 {
+            let (index, _map) = seeded_index(seed, &points);
+            let entry = (*index.entry_point.read()).expect("entry point");
+            assert!(index.remove(entry));
+            assert_eq!(
+                *index.max_level.read(),
+                entry_point_level(&index).expect("new entry point"),
+                "seed {seed}: max_level must match the new entry point's level"
+            );
+            assert_eq!(
+                *index.max_level.read(),
+                highest_level(&index),
+                "seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_replacing_entry_point_resets_top_level() {
+        let points = clustered_points();
+        for seed in 0..40 {
+            let (index, map) = seeded_index(seed, &points);
+            let entry = (*index.entry_point.read()).expect("entry point");
+            let v = map[&entry].clone();
+            index.insert(entry, &v, &make_accessor(&map));
+            assert_eq!(
+                *index.max_level.read(),
+                entry_point_level(&index).expect("entry point"),
+                "seed {seed}"
+            );
+            assert_eq!(
+                *index.max_level.read(),
+                highest_level(&index),
+                "seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_removing_last_node_empties_index() {
+        let (index, map) = seeded_index(1, &[(1, [0.0, 0.0])]);
+        assert!(index.remove(NodeId::new(1)));
+        assert!(index.entry_point.read().is_none());
+        assert_eq!(*index.max_level.read(), 0);
+        assert!(
+            index
+                .search(&[0.0, 0.0], 1, &make_accessor(&map))
+                .is_empty()
+        );
     }
 
     #[test]

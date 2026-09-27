@@ -42,6 +42,82 @@ fn test_incremental_insert_via_set_property() {
 }
 
 #[test]
+fn test_repeated_vector_update_preserves_hnsw_reachability() {
+    const ITERATIONS: usize = 60;
+    const NODE_COUNT: usize = 6;
+
+    for iteration in 0..ITERATIONS {
+        let db = GrafeoDB::new_in_memory();
+        let mut nodes = Vec::with_capacity(NODE_COUNT);
+
+        for offset in 0..NODE_COUNT {
+            let node = db.create_node(&["Doc"]);
+            db.set_node_property(node, "emb", vec3(0.5 + offset as f32 * 0.01, 0.0, 0.0));
+            nodes.push(node);
+        }
+
+        db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
+            .expect("create index");
+
+        let target = nodes[NODE_COUNT / 2];
+        for _ in 0..5 {
+            db.set_node_property(target, "emb", vec3(0.53, 0.0, 0.0));
+        }
+
+        let results = db
+            .vector_search("Doc", "emb", &[0.5, 0.0, 0.0], NODE_COUNT, None, None)
+            .expect("search");
+
+        assert_eq!(
+            results.len(),
+            NODE_COUNT,
+            "same-ID vector replay must not disconnect HNSW nodes (iteration {iteration})"
+        );
+    }
+}
+
+#[test]
+fn test_vector_replacement_moves_node_without_losing_neighbors() {
+    let db = GrafeoDB::new_in_memory();
+
+    let left = db.create_node(&["Doc"]);
+    db.set_node_property(left, "emb", vec3(1.0, 0.0, 0.0));
+    let moving = db.create_node(&["Doc"]);
+    db.set_node_property(moving, "emb", vec3(0.9, 0.1, 0.0));
+    let right = db.create_node(&["Doc"]);
+    db.set_node_property(right, "emb", vec3(0.0, 1.0, 0.0));
+
+    db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
+        .expect("create index");
+
+    db.set_node_property(moving, "emb", vec3(0.0, 0.99, 0.01));
+
+    let results = db
+        .vector_search("Doc", "emb", &[0.0, 1.0, 0.0], 3, None, None)
+        .expect("search");
+    let ids: Vec<u64> = results.iter().map(|(id, _)| id.as_u64()).collect();
+
+    assert_eq!(
+        results.len(),
+        3,
+        "replacement must keep all nodes reachable"
+    );
+    assert_eq!(
+        ids.first(),
+        Some(&right.as_u64()),
+        "the unchanged nearest node should remain first"
+    );
+    assert!(
+        ids.contains(&moving.as_u64()),
+        "the replaced vector must remain indexed"
+    );
+    assert!(
+        ids.contains(&left.as_u64()),
+        "unrelated nodes must remain indexed"
+    );
+}
+
+#[test]
 fn test_incremental_batch_create_after_index() {
     let db = GrafeoDB::new_in_memory();
 

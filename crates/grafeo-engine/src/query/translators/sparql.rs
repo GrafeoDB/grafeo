@@ -111,14 +111,18 @@ impl SparqlTranslator {
     }
 
     fn translate_select(&mut self, select: &ast::SelectQuery) -> Result<LogicalPlan> {
-        // Apply dataset restriction from FROM / FROM NAMED clauses
-        self.dataset = self.translate_dataset_clause(&select.dataset);
-
-        // Start with the WHERE clause pattern
-        let mut plan = self.translate_graph_pattern(&select.where_clause)?;
-
-        // Clear dataset after translating the WHERE clause
-        self.dataset = None;
+        // FROM / FROM NAMED restrict this query's WHERE clause. A subquery has
+        // no dataset clause and is evaluated against its parent's dataset (the
+        // query's FROM, or the WITH graph of an update), so an absent clause
+        // keeps the active one. Restore the parent's dataset afterwards, also
+        // when translation fails.
+        let parent_dataset = self.dataset.clone();
+        if let Some(dataset) = self.translate_dataset_clause(&select.dataset) {
+            self.dataset = Some(dataset);
+        }
+        let plan = self.translate_graph_pattern(&select.where_clause);
+        self.dataset = parent_dataset;
+        let mut plan = plan?;
 
         // Check if projection contains aggregates (handles both explicit GROUP BY and implicit aggregation)
         let has_aggregates = Self::has_aggregates_in_projection(&select.projection);
@@ -331,9 +335,15 @@ impl SparqlTranslator {
                 with_graph,
                 delete_template,
                 insert_template,
-                using_clauses: _,
+                using_clauses,
                 where_clause,
-            } => self.translate_modify(with_graph, delete_template, insert_template, where_clause),
+            } => self.translate_modify(
+                with_graph,
+                delete_template,
+                insert_template,
+                using_clauses,
+                where_clause,
+            ),
             ast::UpdateOperation::Load {
                 silent,
                 source,
@@ -457,16 +467,18 @@ impl SparqlTranslator {
 
         // Build delete operators with the match plan as input
         let mut ops = Vec::new();
-        for triple in &triples {
+        for (triple, graph) in &triples {
             let subject = self.translate_triple_term(&triple.subject)?;
             let predicate = self.translate_property_path(&triple.predicate)?;
             let object = self.translate_triple_term(&triple.object)?;
+            // `GRAPH ?g` resolves to a "?"-prefixed name, which the executor rejects.
+            let graph = graph.as_ref().map(|g| self.resolve_variable_or_iri(g));
 
             ops.push(LogicalOperator::DeleteTriple(DeleteTripleOp {
                 subject,
                 predicate,
                 object,
-                graph: None, // Default graph
+                graph,
                 input: Some(Box::new(match_plan.clone())),
             }));
         }
@@ -484,13 +496,31 @@ impl SparqlTranslator {
         }
     }
 
-    fn extract_triples_from_pattern(pattern: &ast::GraphPattern) -> Vec<ast::TriplePattern> {
+    /// Extracts the triple templates of a DELETE WHERE pattern, each tagged with
+    /// its enclosing `GRAPH` (if any) so the delete targets that graph.
+    fn extract_triples_from_pattern(
+        pattern: &ast::GraphPattern,
+    ) -> Vec<(ast::TriplePattern, Option<ast::VariableOrIri>)> {
+        Self::extract_triples_with_graph(pattern, None)
+    }
+
+    fn extract_triples_with_graph(
+        pattern: &ast::GraphPattern,
+        graph: Option<&ast::VariableOrIri>,
+    ) -> Vec<(ast::TriplePattern, Option<ast::VariableOrIri>)> {
         match pattern {
-            ast::GraphPattern::Basic(triples) => triples.clone(),
+            ast::GraphPattern::Basic(triples) => triples
+                .iter()
+                .map(|t| (t.clone(), graph.cloned()))
+                .collect(),
             ast::GraphPattern::Group(patterns) => patterns
                 .iter()
-                .flat_map(Self::extract_triples_from_pattern)
+                .flat_map(|p| Self::extract_triples_with_graph(p, graph))
                 .collect(),
+            ast::GraphPattern::NamedGraph {
+                graph: inner_graph,
+                pattern: inner_pattern,
+            } => Self::extract_triples_with_graph(inner_pattern, Some(inner_graph)),
             _ => Vec::new(),
         }
     }
@@ -500,12 +530,36 @@ impl SparqlTranslator {
         with_graph: &Option<ast::Iri>,
         delete_template: &Option<Vec<ast::QuadPattern>>,
         insert_template: &Option<Vec<ast::QuadPattern>>,
+        using_clauses: &[ast::UsingClause],
         where_clause: &ast::GraphPattern,
     ) -> Result<LogicalPlan> {
-        // Translate the WHERE clause - this will be evaluated once and shared
-        let where_plan = self.translate_graph_pattern(where_clause)?;
+        // USING / USING NAMED is parsed but not executed yet; reject it instead
+        // of evaluating the WHERE clause against the wrong dataset.
+        if !using_clauses.is_empty() {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                "SPARQL Update USING / USING NAMED is not yet supported",
+            )));
+        }
 
         let default_graph = with_graph.as_ref().map(|g| self.resolve_iri(g));
+
+        // WITH <g> makes <g> the default graph of the WHERE clause (SPARQL 1.1
+        // Update 3.1.3). Redirect the dataset while translating WHERE, then
+        // restore the previous one, also when translation fails.
+        let previous_dataset = default_graph.as_ref().map(|graph| {
+            self.dataset.replace(DatasetRestriction {
+                default_graphs: vec![graph.clone()],
+                named_graphs: Vec::new(),
+            })
+        });
+
+        // Translate the WHERE clause - this will be evaluated once and shared
+        let where_plan = self.translate_graph_pattern(where_clause);
+        if let Some(previous) = previous_dataset {
+            self.dataset = previous;
+        }
+        let where_plan = where_plan?;
 
         // Build DELETE templates
         let mut delete_templates = Vec::new();
@@ -1904,8 +1958,11 @@ impl SparqlTranslator {
 
     /// Translates a `OneOrMore` property path (`path+`) using bounded expansion.
     ///
-    /// Expands to a `Union` of sequences from depth 1 to `MAX_DEPTH`, wrapped
-    /// in `Distinct` to deduplicate rows that appear at multiple depths.
+    /// Expands to a `Union` of fixed-depth sequences from depth 1 to
+    /// `MAX_DEPTH`, each projected to its endpoint columns so every branch
+    /// shares a schema, wrapped in `Distinct` to deduplicate the transitive
+    /// closure across depths. Unlike `ZeroOrMore`, no reflexive 0-hop branch is
+    /// added: `path+` excludes the zero-length path (SPARQL 1.1 sec 9.1).
     fn translate_one_or_more_path(
         &mut self,
         triple: &ast::TriplePattern,
@@ -1922,7 +1979,13 @@ impl SparqlTranslator {
         for depth in 1..=MAX_DEPTH {
             let branch =
                 self.translate_fixed_depth_path(inner_path, &subject, &object, &graph, depth)?;
-            branches.push(branch);
+            // Project every depth branch to its endpoint columns before the
+            // Union, exactly as `ZeroOrMore` and `ZeroOrOne` do. Depth-N
+            // branches carry intermediate-hop columns of differing widths;
+            // without this projection the heterogeneous branches reach `Union`
+            // and `Distinct` unnormalized and the visible object column ends up
+            // holding the first intermediate hop instead of the true endpoint.
+            branches.push(self.project_path_endpoints(&subject, &object, branch));
         }
 
         let union = LogicalOperator::Union(UnionOp { inputs: branches });
@@ -2839,7 +2902,7 @@ mod tests {
         }
         let branch_count = count_union_branches(&plan.root)
             .expect("Expected Union inside Distinct for ZeroOrMore path");
-        // ZeroOrMore has 2 reflexive branches + MAX_DEPTH (10) depth branches = 12
+        // ZeroOrMore has 2 reflexive branches + MAX_DEPTH (50) depth branches = 52
         assert!(
             branch_count > 10,
             "ZeroOrMore should have reflexive branches plus depth branches, got {}",

@@ -80,8 +80,12 @@ impl super::Planner {
         }
 
         // Check zone maps for simple property predicates before scanning
-        // If zone map says "definitely no matches", we can short-circuit
-        if let Some(false) = self.check_zone_map_for_predicate(&filter.predicate) {
+        // If zone map says "definitely no matches", we can short-circuit.
+        // Not below a mutation: zone maps describe the store as it is before
+        // this query runs, not values the query writes first.
+        if !filter.input.has_mutations()
+            && let Some(false) = self.check_zone_map_for_predicate(&filter.predicate, &filter.input)
+        {
             // Zone map says no matches possible - return empty result
             let (_, columns) = self.plan_operator(&filter.input)?;
             let schema = self.derive_schema_from_columns(&columns);
@@ -769,6 +773,12 @@ impl super::Planner {
 
     /// Checks zone maps for a predicate to see if we can skip the scan entirely.
     ///
+    /// A property comparison is checked against the node zone map only when its
+    /// variable is provably a node in `input`, and against the edge zone map
+    /// only when it is provably a single edge (see [`binding_kind`]); anything
+    /// else (maps, projected values, values written earlier in the query) is
+    /// not checked.
+    ///
     /// Returns:
     /// - `Some(false)` if zone map proves no matches possible (can skip)
     /// - `Some(true)` if zone map says matches might exist
@@ -776,6 +786,7 @@ impl super::Planner {
     pub(super) fn check_zone_map_for_predicate(
         &self,
         predicate: &LogicalExpression,
+        input: &LogicalOperator,
     ) -> Option<bool> {
         use grafeo_core::graph::lpg::CompareOp;
 
@@ -784,8 +795,8 @@ impl super::Planner {
                 // Check for AND/OR first (compound conditions)
                 match op {
                     BinaryOp::And => {
-                        let left_result = self.check_zone_map_for_predicate(left);
-                        let right_result = self.check_zone_map_for_predicate(right);
+                        let left_result = self.check_zone_map_for_predicate(left, input);
+                        let right_result = self.check_zone_map_for_predicate(right, input);
 
                         return match (left_result, right_result) {
                             // If either side definitely won't match, the AND won't match
@@ -797,8 +808,8 @@ impl super::Planner {
                         };
                     }
                     BinaryOp::Or => {
-                        let left_result = self.check_zone_map_for_predicate(left);
-                        let right_result = self.check_zone_map_for_predicate(right);
+                        let left_result = self.check_zone_map_for_predicate(left, input);
+                        let right_result = self.check_zone_map_for_predicate(right, input);
 
                         return match (left_result, right_result) {
                             // Both sides definitely won't match
@@ -813,9 +824,10 @@ impl super::Planner {
                 }
 
                 // Simple property comparison: n.property op value
-                let (property, compare_op, value) = match (left.as_ref(), right.as_ref()) {
+                let (variable, property, compare_op, value) = match (left.as_ref(), right.as_ref())
+                {
                     (
-                        LogicalExpression::Property { property, .. },
+                        LogicalExpression::Property { variable, property },
                         LogicalExpression::Literal(val),
                     ) => {
                         let cmp = match op {
@@ -827,11 +839,11 @@ impl super::Planner {
                             BinaryOp::Ge => CompareOp::Ge,
                             _ => return None,
                         };
-                        (property.clone(), cmp, val.clone())
+                        (variable, property.clone(), cmp, val.clone())
                     }
                     (
                         LogicalExpression::Literal(val),
-                        LogicalExpression::Property { property, .. },
+                        LogicalExpression::Property { variable, property },
                     ) => {
                         // Flip comparison for reversed operands
                         let cmp = match op {
@@ -843,17 +855,24 @@ impl super::Planner {
                             BinaryOp::Ge => CompareOp::Le,
                             _ => return None,
                         };
-                        (property.clone(), cmp, val.clone())
+                        (variable, property.clone(), cmp, val.clone())
                     }
                     _ => return None,
                 };
 
-                // Check zone map for node properties
-                let might_match =
-                    self.store
-                        .node_property_might_match(&property.into(), compare_op, &value);
-
-                Some(might_match)
+                // Node statistics only describe nodes: consult the zone map that
+                // matches what the variable is bound to, or nothing at all.
+                let key = property.into();
+                match binding_kind(input, variable)? {
+                    BindingKind::Node => Some(
+                        self.store
+                            .node_property_might_match(&key, compare_op, &value),
+                    ),
+                    BindingKind::Edge => Some(
+                        self.store
+                            .edge_property_might_match(&key, compare_op, &value),
+                    ),
+                }
             }
 
             _ => None,
@@ -1764,5 +1783,60 @@ impl super::Planner {
                 max_distance,
             ))
         }
+    }
+}
+
+/// What a variable is bound to, as far as zone-map pruning can prove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingKind {
+    Node,
+    Edge,
+}
+
+/// Finds what `variable` is bound to in `op`, looking only through read-only
+/// operators whose output rows carry graph entities unchanged.
+///
+/// Returns `None` when the binding cannot be proven: projected or unwound
+/// values (maps, scalars, a `WITH` rename), aggregates, correlated inputs, and
+/// anything below a mutation, because values written earlier in the query are
+/// not in the store's zone maps when the plan is built. Callers must treat
+/// `None` as "do not prune".
+fn binding_kind(op: &LogicalOperator, variable: &str) -> Option<BindingKind> {
+    match op {
+        LogicalOperator::NodeScan(scan) => {
+            if scan.variable == variable {
+                Some(BindingKind::Node)
+            } else {
+                scan.input
+                    .as_deref()
+                    .and_then(|input| binding_kind(input, variable))
+            }
+        }
+        LogicalOperator::Expand(expand) => {
+            if expand.to_variable == variable {
+                return Some(BindingKind::Node);
+            }
+            if expand.edge_variable.as_deref() == Some(variable) {
+                // A variable-length expand binds a list of edges.
+                let single_hop = expand.min_hops == 1 && expand.max_hops == Some(1);
+                return single_hop.then_some(BindingKind::Edge);
+            }
+            if expand.path_alias.as_deref() == Some(variable) {
+                return None;
+            }
+            binding_kind(&expand.input, variable)
+        }
+        LogicalOperator::Filter(filter) => binding_kind(&filter.input, variable),
+        LogicalOperator::Sort(sort) => binding_kind(&sort.input, variable),
+        LogicalOperator::Limit(limit) => binding_kind(&limit.input, variable),
+        LogicalOperator::Skip(skip) => binding_kind(&skip.input, variable),
+        LogicalOperator::Distinct(distinct) => binding_kind(&distinct.input, variable),
+        LogicalOperator::Join(join) => {
+            binding_kind(&join.left, variable).or_else(|| binding_kind(&join.right, variable))
+        }
+        LogicalOperator::LeftJoin(join) => {
+            binding_kind(&join.left, variable).or_else(|| binding_kind(&join.right, variable))
+        }
+        _ => None,
     }
 }

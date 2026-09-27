@@ -2121,6 +2121,30 @@ impl GremlinTranslator {
                     ))),
                 }),
             }),
+            ast::Predicate::NotContaining(s) => Ok(LogicalExpression::Unary {
+                op: UnaryOp::Not,
+                operand: Box::new(LogicalExpression::Binary {
+                    left: Box::new(expr),
+                    op: BinaryOp::Contains,
+                    right: Box::new(LogicalExpression::Literal(Value::String(s.clone().into()))),
+                }),
+            }),
+            ast::Predicate::NotStartingWith(s) => Ok(LogicalExpression::Unary {
+                op: UnaryOp::Not,
+                operand: Box::new(LogicalExpression::Binary {
+                    left: Box::new(expr),
+                    op: BinaryOp::StartsWith,
+                    right: Box::new(LogicalExpression::Literal(Value::String(s.clone().into()))),
+                }),
+            }),
+            ast::Predicate::NotEndingWith(s) => Ok(LogicalExpression::Unary {
+                op: UnaryOp::Not,
+                operand: Box::new(LogicalExpression::Binary {
+                    left: Box::new(expr),
+                    op: BinaryOp::EndsWith,
+                    right: Box::new(LogicalExpression::Literal(Value::String(s.clone().into()))),
+                }),
+            }),
         }
     }
 

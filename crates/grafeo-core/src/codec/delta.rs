@@ -370,6 +370,6 @@ mod tests {
         let sequential: Vec<u64> = (0..1000).collect();
         let encoded = DeltaEncoding::encode(&sequential);
         // Each delta is 1, so compression is minimal but base + deltas is stored
-        assert!(encoded.len() == 1000);
+        assert_eq!(encoded.len(), 1000);
     }
 }

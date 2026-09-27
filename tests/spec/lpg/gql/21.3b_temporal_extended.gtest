@@ -310,3 +310,41 @@ tests:
     expect:
       rows:
         - [P14D]
+
+  # ---------------------------------------------------------------------------
+  # Equality of temporal values in expressions (used to be always false for
+  # `=` and always true for `<>`)
+  # ---------------------------------------------------------------------------
+
+  - name: temporal_equality_in_expressions
+    query: "RETURN DATE '2024-03-15' = DATE '2024-03-15' AS d, TIME '14:30:00' = TIME '14:30:00' AS t, datetime('2024-01-15T14:30:00Z') = datetime('2024-01-15T14:30:00Z') AS dt, DURATION 'P1D' = DURATION 'P1D' AS du"
+    expect:
+      rows:
+        - [true, true, true, true]
+
+  - name: temporal_inequality_in_expressions
+    query: "RETURN DATE '2024-03-15' <> DATE '2024-03-15' AS same, DATE '2024-03-15' <> DATE '2024-03-16' AS different, DATE '2024-03-15' = DATE '2024-03-16' AS eq_different"
+    expect:
+      rows:
+        - [false, true, false]
+
+  - name: zoned_datetime_equality_compares_instants
+    query: "RETURN zoned_datetime('2024-01-15T14:30:00+01:00') = zoned_datetime('2024-01-15T13:30:00+00:00') AS r"
+    expect:
+      rows:
+        - [true]
+
+  - name: temporal_in_list
+    query: "RETURN DATE '2024-03-15' IN [DATE '2024-03-14', DATE '2024-03-15'] AS r"
+    expect:
+      rows:
+        - [true]
+
+  - name: projected_date_property_equality
+    setup:
+      - "INSERT (:Event {name: 'launch', d: DATE '2024-03-15'})"
+      - "INSERT (:Event {name: 'review', d: DATE '2024-04-01'})"
+    query: "MATCH (e:Event) WITH e.name AS name, e.d AS d WHERE d = DATE '2024-03-15' RETURN name"
+    expect:
+      rows:
+        - [launch]

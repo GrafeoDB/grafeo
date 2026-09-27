@@ -1384,7 +1384,7 @@ mod tests {
         assert!(v1 < v2);
         assert!(v2 < v_inf);
         assert!(v_inf < v_nan); // NaN is greater than everything
-        assert!(v_nan == v_nan); // NaN equals itself for total ordering
+        assert_eq!(v_nan, v_nan); // NaN equals itself for total ordering
     }
 
     #[test]

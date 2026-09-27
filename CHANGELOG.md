@@ -2,9 +2,9 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.5.43] - Unreleased
+## [0.5.43] - 2026-09-27
 
-Stabilization release: fixes for silent wrong results (`ORDER BY` + `LIMIT`, `UNION`, aggregates, duplicate column names, SPARQL named graphs and property paths), SPARQL updates that ignored transactions, edges lost after `compact()` and HNSW vector updates, plus dependency and security updates.
+Stabilization release. Fixes for silent wrong results (`ORDER BY` + `LIMIT`, `UNION`, aggregates, duplicate column names, SPARQL named graphs and property paths), queries whose trailing statements were ignored, rollbacks that did not undo changes on persistent databases or SPARQL updates, databases over 4 GiB written corrupt, edges lost after `compact()` and HNSW vector updates, plus dependency and security updates.
 
 ### Added
 
@@ -50,7 +50,7 @@ Stabilization release: fixes for silent wrong results (`ORDER BY` + `LIMIT`, `UN
 
 ---
 
-Thanks to [@teipsum](https://github.com/teipsum) for six PRs and the detailed reports behind them, to [@temporaryfix](https://github.com/temporaryfix) for [#346](https://github.com/GrafeoDB/grafeo/pull/346), [#349](https://github.com/GrafeoDB/grafeo/pull/349) and [#350](https://github.com/GrafeoDB/grafeo/pull/350) and the root-cause analysis on [#335](https://github.com/GrafeoDB/grafeo/issues/335), to [@jakeboone02](https://github.com/jakeboone02) for the Gremlin predicates, to [@jarmen423](https://github.com/jarmen423) for the HNSW fix, and to [@stiff](https://github.com/stiff) and [@halaharvi](https://github.com/halaharvi) for their reports.
+Thanks to [@teipsum](https://github.com/teipsum) for six PRs and the detailed reports behind them, to [@temporaryfix](https://github.com/temporaryfix) for [#346](https://github.com/GrafeoDB/grafeo/pull/346), [#349](https://github.com/GrafeoDB/grafeo/pull/349) and [#350](https://github.com/GrafeoDB/grafeo/pull/350) and the root-cause analysis on [#335](https://github.com/GrafeoDB/grafeo/issues/335), to [@jakeboone02](https://github.com/jakeboone02) for the Gremlin predicates, to [@jarmen423](https://github.com/jarmen423) for the HNSW fix, and to [@stiff](https://github.com/stiff), [@halaharvi](https://github.com/halaharvi), [@GanbaruTobi](https://github.com/GanbaruTobi) and [@cuongvo](https://github.com/cuongvo) for their reports.
 
 ## [0.5.42] - 2026-05-04
 

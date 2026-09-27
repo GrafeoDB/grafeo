@@ -366,14 +366,37 @@ fn find_shared_join_keys(left: &[String], right: &[String]) -> (Vec<usize>, Vec<
     (probe_keys, build_keys)
 }
 
+/// Column name that `resolve_expression_to_column` looks up for `expr`.
+///
+/// - `Variable(name)`: `"name"`
+/// - `Property { variable, property }`: `"{variable}_{property}"` (LPG projections)
+/// - anything else: `"__expr_{expr:?}"`
+///
+/// Planners that inject synthetic columns (aggregate and sort augmenting
+/// projections, LPG and RDF) must name them through this function so the
+/// resolver finds them.
+pub(crate) fn resolved_column_name(expr: &LogicalExpression) -> String {
+    match expr {
+        LogicalExpression::Variable(name) => name.clone(),
+        LogicalExpression::Property { variable, property } => {
+            format!("{variable}_{property}")
+        }
+        _ => format!("__expr_{expr:?}"),
+    }
+}
+
+/// Output column name for a Return/Project item: `alias` if set, otherwise
+/// `expression_to_string(expr)`. Shared by the LPG and RDF planners and the
+/// top-K rewrite's column prediction, which must never disagree.
+pub(crate) fn output_column_name(alias: Option<&str>, expr: &LogicalExpression) -> String {
+    alias.map_or_else(|| expression_to_string(expr), str::to_string)
+}
+
 /// Resolves a logical expression to a column index in the given variable-column map.
 ///
-/// Handles three expression kinds:
-/// - `Variable(name)`: direct lookup in `variable_columns`
-/// - `Property { variable, property }`: lookup of `"{variable}_{property}"` (LPG projections)
-/// - Complex expressions: lookup of `"__expr_{expr:?}"` (synthetic columns)
-///
-/// `context` is appended to error messages (e.g. `" for ORDER BY"`, or `""` for aggregations).
+/// Mirrors [`resolved_column_name`]: the column name looked up is whatever that
+/// function returns for `expr`. `context` is appended to error messages
+/// (e.g. `" for ORDER BY"`, or `""` for aggregations).
 ///
 /// NOTE: The expression *collection* loops (which build the synthetic columns that this
 /// function resolves) are intentionally NOT shared, because the LPG and RDF planners use
@@ -383,28 +406,21 @@ pub(crate) fn resolve_expression_to_column(
     variable_columns: &std::collections::HashMap<String, usize>,
     context: &str,
 ) -> Result<usize> {
-    match expr {
-        LogicalExpression::Variable(name) => variable_columns
-            .get(name)
-            .copied()
-            .ok_or_else(|| Error::Internal(format!("Variable '{name}' not found{context}"))),
-        LogicalExpression::Property { variable, property } => {
-            let col_name = format!("{variable}_{property}");
-            variable_columns.get(&col_name).copied().ok_or_else(|| {
-                Error::Internal(format!(
-                    "Property column '{col_name}' not found{context} (from {variable}.{property})"
-                ))
-            })
-        }
-        _ => {
-            let col_name = format!("__expr_{expr:?}");
-            variable_columns.get(&col_name).copied().ok_or_else(|| {
-                Error::Internal(format!(
-                    "Cannot resolve expression to column{context}: {expr:?}"
-                ))
-            })
-        }
-    }
+    let col_name = resolved_column_name(expr);
+    variable_columns
+        .get(&col_name)
+        .copied()
+        .ok_or_else(|| match expr {
+            LogicalExpression::Variable(name) => {
+                Error::Internal(format!("Variable '{name}' not found{context}"))
+            }
+            LogicalExpression::Property { variable, property } => Error::Internal(format!(
+                "Property column '{col_name}' not found{context} (from {variable}.{property})"
+            )),
+            _ => Error::Internal(format!(
+                "Cannot resolve expression to column{context}: {expr:?}"
+            )),
+        })
 }
 
 /// Converts a logical expression to a human-readable string for column naming.

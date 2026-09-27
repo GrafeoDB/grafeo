@@ -6,7 +6,7 @@ use super::{
     Arc, Error, FilterExpression, GraphStoreSearch, HashMap, LimitOp, LogicalExpression,
     LogicalOperator, LogicalType, NullOrder, Operator, PhysicalSortKey, ProjectExpr,
     ProjectOperator, Result, ReturnOp, SkipOp, SortDirection, SortOp, SortOperator, SortOrder,
-    common, expression_to_string, value_to_logical_type,
+    common, output_column_name, resolved_column_name, value_to_logical_type,
 };
 
 impl super::Planner {
@@ -80,12 +80,7 @@ impl super::Planner {
         // Extract column names from return items
         let columns: Vec<String> = items
             .iter()
-            .map(|item| {
-                item.alias.clone().unwrap_or_else(|| {
-                    // Generate a default name from the expression
-                    expression_to_string(&item.expression)
-                })
-            })
+            .map(|item| output_column_name(item.alias.as_deref(), &item.expression))
             .collect();
 
         // Check if we need a project operator (for property access or expression evaluation)
@@ -419,11 +414,7 @@ impl super::Planner {
         }
 
         for projection in &project.projections {
-            // Determine the output column name (alias or expression string)
-            let col_name = projection
-                .alias
-                .clone()
-                .unwrap_or_else(|| expression_to_string(&projection.expression));
+            let col_name = output_column_name(projection.alias.as_deref(), &projection.expression);
 
             match &projection.expression {
                 LogicalExpression::Variable(name) => {
@@ -659,7 +650,7 @@ impl super::Planner {
                         if already_in_return {
                             continue;
                         }
-                        let col_name = format!("{}_{}", variable, property);
+                        let col_name = resolved_column_name(&key.expression);
                         if seen.insert(col_name.clone()) {
                             augmented_items.push(crate::query::plan::ReturnItem {
                                 expression: key.expression.clone(),
@@ -669,7 +660,7 @@ impl super::Planner {
                         }
                     }
                     expr => {
-                        let col_name = format!("__expr_{expr:?}");
+                        let col_name = resolved_column_name(expr);
                         if seen.insert(col_name.clone()) {
                             augmented_items.push(crate::query::plan::ReturnItem {
                                 expression: expr.clone(),
@@ -710,29 +701,7 @@ impl super::Planner {
             .map(|(i, name)| (name.clone(), i))
             .collect();
 
-        // When the sort input is a Return, some sort key expressions may
-        // already be computed by the Return under an alias. For example,
-        // RETURN caller.name AS caller ORDER BY caller.name: the property
-        // access is already materialized in column "caller". Register the
-        // sort-style name ("caller_name") so the loop below resolves to the
-        // existing column instead of adding a broken extra PropertyAccess
-        // on a non-entity column.
-        if let LogicalOperator::Return(ret) = sort.input.as_ref() {
-            for item in &ret.items {
-                if let LogicalExpression::Property { variable, property } = &item.expression {
-                    let sort_col_name = format!("{variable}_{property}");
-                    if !variable_columns.contains_key(&sort_col_name) {
-                        let output_name = item
-                            .alias
-                            .clone()
-                            .unwrap_or_else(|| expression_to_string(&item.expression));
-                        if let Some(&col_idx) = variable_columns.get(&output_name) {
-                            variable_columns.insert(sort_col_name, col_idx);
-                        }
-                    }
-                }
-            }
-        }
+        register_return_property_sort_aliases(sort.input.as_ref(), &mut variable_columns);
 
         // Collect extra projections in a single ordered list so that column
         // index assignment matches the order they are added to the ProjectOperator.
@@ -754,7 +723,7 @@ impl super::Planner {
         for key in &sort.keys {
             match &key.expression {
                 LogicalExpression::Property { variable, property } => {
-                    let col_name = format!("{}_{}", variable, property);
+                    let col_name = resolved_column_name(&key.expression);
                     if !variable_columns.contains_key(&col_name) {
                         extra_projections.push(SortExtraProjection::Property {
                             variable: variable.clone(),
@@ -773,27 +742,24 @@ impl super::Planner {
                     // If this is a vector/text score function and the scan already projected
                     // a score column, register a direct alias so resolve_sort_expression
                     // picks it up without injecting a new projection.
+                    let col_name = resolved_column_name(&key.expression);
                     if let Some(score_col) =
                         self.find_projected_score(&key.expression, &input_columns)
                     {
-                        let col_name = format!("__expr_{:?}", key.expression);
                         if !variable_columns.contains_key(&col_name)
                             && let Some(&existing_idx) = variable_columns.get(&score_col)
                         {
                             variable_columns.insert(col_name, existing_idx);
                         }
-                    } else {
-                        let col_name = format!("__expr_{:?}", key.expression);
-                        if !variable_columns.contains_key(&col_name) {
-                            let filter_expr = self.convert_expression(&key.expression)?;
-                            extra_projections.push(SortExtraProjection::Expression {
-                                filter_expr,
-                                col_name: col_name.clone(),
-                            });
-                            variable_columns.insert(col_name, next_col_idx);
-                            next_col_idx += 1;
-                            expr_extra_count += 1;
-                        }
+                    } else if !variable_columns.contains_key(&col_name) {
+                        let filter_expr = self.convert_expression(&key.expression)?;
+                        extra_projections.push(SortExtraProjection::Expression {
+                            filter_expr,
+                            col_name: col_name.clone(),
+                        });
+                        variable_columns.insert(col_name, next_col_idx);
+                        next_col_idx += 1;
+                        expr_extra_count += 1;
                     }
                 }
             }
@@ -1235,10 +1201,10 @@ impl super::Planner {
     /// Attempts to rewrite `Limit` over `Sort` into a single [`TopKOperator`].
     ///
     /// Phase 1: heap-based, O(k) memory, accepts any input shape but bails
-    /// on the augmenting-projection case (see
-    /// [`sort_needs_augmenting_projection`]). Called from
-    /// [`Self::plan_limit`] when the input is a `Sort`, after the more
-    /// specific vector/text rewrite ([`Self::try_topk_rewrite`]).
+    /// when the sort keys cannot be resolved against the columns the input
+    /// subtree will produce. Called from [`Self::plan_limit`] when the input
+    /// is a `Sort`, after the more specific vector/text rewrite
+    /// ([`Self::try_topk_rewrite`]).
     ///
     /// PROFILE-mode plans skip this rewrite via the gate in `plan_limit`:
     /// `build_profile_tree` walks the logical tree expecting one entry per
@@ -1250,13 +1216,19 @@ impl super::Planner {
     ///
     /// 1. `count` is not a literal (parameter `LIMIT $k` falls through).
     /// 2. `count` is zero (no rewrite needed).
-    /// 3. Sort needs an augmenting projection (`plan_sort` handles it).
-    /// 4. Any sort key fails to resolve against the planned input columns.
+    /// 3. The input subtree's output columns can't be predicted (current scope:
+    ///    only Return is supported; anything else falls through).
+    /// 4. Any sort key fails to resolve against the predicted columns.
     ///
-    /// Otherwise plans the inner subtree as-is (reusing filter pushdown,
-    /// expand-chain fusion, NodeList absorption) and wraps it in a
-    /// `TopKOperator`. `derive_schema_from_columns` is the same helper
-    /// `plan_limit`'s unfused path uses.
+    /// ## Predict first, plan second
+    ///
+    /// Planning mutates planner state (`scalar_columns`, `edge_columns`), so
+    /// planning speculatively and then bailing out made the fallback re-plan
+    /// return raw NodeIds instead of maps (#335, #347). Sort keys are resolved
+    /// against columns predicted from the `Return` items first; the input is
+    /// planned only once resolution succeeds. A key that needs an augmenting
+    /// projection is never in the predicted set, so it falls through to
+    /// `plan_sort`.
     fn try_heap_topk_rewrite(
         &self,
         sort: &SortOp,
@@ -1269,15 +1241,45 @@ impl super::Planner {
         if k == 0 {
             return Ok(None);
         }
-        if sort_needs_augmenting_projection(sort) {
-            return Ok(None);
-        }
 
-        let (input_op, columns) = self.plan_operator(&sort.input)?;
-
-        let Ok(physical_keys) = resolve_logical_to_physical_keys(&sort.keys, &columns) else {
+        // Only `Return` inputs are predicted; anything else falls through.
+        let Some(predicted_columns) = predict_subtree_columns(sort.input.as_ref()) else {
             return Ok(None);
         };
+
+        // Same lookup `plan_sort` builds, including `v.p` -> `v_p` aliases so
+        // `RETURN n.title ORDER BY n.title LIMIT k` still takes the rewrite.
+        let mut variable_columns: HashMap<String, usize> = predicted_columns
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), i))
+            .collect();
+        register_return_property_sort_aliases(sort.input.as_ref(), &mut variable_columns);
+
+        // Resolve against the prediction; on failure nothing has been mutated.
+        let Ok(mut physical_keys) = resolve_logical_to_physical_keys(&sort.keys, &variable_columns)
+        else {
+            return Ok(None);
+        };
+
+        // Commit: plan the input once, for real.
+        let (input_op, columns) = self.plan_operator(&sort.input)?;
+        if columns != predicted_columns {
+            // The prediction drifted from the planner. Planner state is already
+            // committed, so re-resolve against the real columns rather than
+            // sorting by a wrong index; fail loudly if that is impossible.
+            debug_assert!(
+                false,
+                "predicted {predicted_columns:?}, planned {columns:?}"
+            );
+            let mut actual_columns: HashMap<String, usize> = columns
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.clone(), i))
+                .collect();
+            register_return_property_sort_aliases(sort.input.as_ref(), &mut actual_columns);
+            physical_keys = resolve_logical_to_physical_keys(&sort.keys, &actual_columns)?;
+        }
 
         let schema = self.derive_schema_from_columns(&columns);
         let op: Box<dyn Operator> = Box::new(grafeo_core::execution::operators::TopKOperator::new(
@@ -1290,6 +1292,56 @@ impl super::Planner {
     }
 }
 
+/// Predicts the output column names of `op` without planning it.
+///
+/// Returns `None` for shapes that are not predicted; callers then skip the
+/// rewrite. Each branch must mirror the naming rule of its `plan_*` method.
+fn predict_subtree_columns(op: &LogicalOperator) -> Option<Vec<String>> {
+    match op {
+        LogicalOperator::Return(ret) => {
+            // `RETURN *` expands from the input's columns, which are unknown
+            // without planning the input.
+            if ret.items.len() == 1
+                && matches!(&ret.items[0].expression, LogicalExpression::Variable(n) if n == "*")
+            {
+                return None;
+            }
+            Some(
+                ret.items
+                    .iter()
+                    .map(|item| output_column_name(item.alias.as_deref(), &item.expression))
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Registers `v_p` aliases for `v.p` items of a `Return`, so ORDER BY keys
+/// (resolved as `v_p`) find the column the Return already produced (named
+/// `v.p` or its alias). Used by both `plan_sort` and the top-K rewrite so
+/// the two paths resolve keys identically.
+fn register_return_property_sort_aliases(
+    sort_input: &LogicalOperator,
+    variable_columns: &mut HashMap<String, usize>,
+) {
+    let LogicalOperator::Return(ret) = sort_input else {
+        return;
+    };
+    for item in &ret.items {
+        if matches!(&item.expression, LogicalExpression::Property { .. }) {
+            let sort_col_name = resolved_column_name(&item.expression);
+            if variable_columns.contains_key(&sort_col_name) {
+                continue;
+            }
+            let output_name = output_column_name(item.alias.as_deref(), &item.expression);
+            if let Some(&col_idx) = variable_columns.get(&output_name) {
+                variable_columns.insert(sort_col_name, col_idx);
+            }
+        }
+    }
+}
+
 /// Resolves logical sort keys to physical sort keys for `TopKOperator`.
 ///
 /// For each logical key:
@@ -1298,27 +1350,20 @@ impl super::Planner {
 ///   - Maps `Option<NullsOrdering>` → physical `NullOrder` (default `NullsLast`,
 ///     matching `SortKey::ascending`'s default).
 ///
-/// Returns `Err` if any key references a column not present in `columns`.
+/// Returns `Err` if any key fails to resolve in `variable_columns`.
 /// Callers translate that to `Ok(None)` to fall through to the unfused path.
 fn resolve_logical_to_physical_keys(
     keys: &[crate::query::plan::SortKey],
-    columns: &[String],
+    variable_columns: &HashMap<String, usize>,
 ) -> Result<Vec<grafeo_core::execution::operators::SortKey>> {
     use crate::query::plan::{NullsOrdering, SortOrder};
     use grafeo_core::execution::operators::{NullOrder, SortDirection, SortKey as PhysSortKey};
-    use std::collections::HashMap;
-
-    let variable_columns: HashMap<String, usize> = columns
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.clone(), i))
-        .collect();
 
     let mut out = Vec::with_capacity(keys.len());
     for key in keys {
         let col = crate::query::planner::common::resolve_expression_to_column(
             &key.expression,
-            &variable_columns,
+            variable_columns,
             " for ORDER BY",
         )?;
 

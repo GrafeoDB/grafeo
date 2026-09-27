@@ -6,7 +6,7 @@ use super::{
     GraphStoreSearch, HashAggregateOperator, HashMap, LazyFactorizedChainOperator,
     LogicalAggregateFunction, LogicalExpression, LogicalType, Operator, PhysicalAggregateExpr,
     ProjectExpr, ProjectOperator, Result, SimpleAggregateOperator, convert_aggregate_function,
-    expression_to_string,
+    expression_to_string, resolved_column_name,
 };
 
 impl super::Planner {
@@ -55,7 +55,7 @@ impl super::Planner {
         for expr in &agg.group_by {
             match expr {
                 LogicalExpression::Property { variable, property } => {
-                    let col_name = format!("{}_{}", variable, property);
+                    let col_name = resolved_column_name(expr);
                     if !variable_columns.contains_key(&col_name) {
                         extra_projections.push(ExtraProjection::Property {
                             variable: variable.clone(),
@@ -71,7 +71,7 @@ impl super::Planner {
                 _ => {
                     // Complex expression (Labels, Type, FunctionCall, IndexAccess,
                     // CASE, Binary, etc.): project as computed column
-                    let col_name = format!("__expr_{:?}", expr);
+                    let col_name = resolved_column_name(expr);
                     if !variable_columns.contains_key(&col_name) {
                         let filter_expr = self.convert_expression(expr)?;
                         extra_projections.push(ExtraProjection::Expression { filter_expr });
@@ -89,7 +89,7 @@ impl super::Planner {
                 let Some(expr) = expr_opt else { continue };
                 match expr {
                     LogicalExpression::Property { variable, property } => {
-                        let col_name = format!("{}_{}", variable, property);
+                        let col_name = resolved_column_name(expr);
                         if !variable_columns.contains_key(&col_name) {
                             extra_projections.push(ExtraProjection::Property {
                                 variable: variable.clone(),
@@ -104,7 +104,7 @@ impl super::Planner {
                     }
                     _ => {
                         // Complex expression (CASE, Binary, etc.): project as computed column
-                        let col_name = format!("__expr_{:?}", expr);
+                        let col_name = resolved_column_name(expr);
                         if !variable_columns.contains_key(&col_name) {
                             let filter_expr = self.convert_expression(expr)?;
                             extra_projections.push(ExtraProjection::Expression { filter_expr });

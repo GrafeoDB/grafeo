@@ -16,7 +16,7 @@
 
 #![cfg(feature = "lpg")]
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
 
 /// Inserts `n` `:Item` nodes with property `r` set to a deterministic
@@ -351,4 +351,113 @@ fn order_by_wrapped_dropped_variable_sorts_correctly() {
             "list predicate key{limit}"
         );
     }
+}
+
+// Issues #335 and #347: `RETURN n ORDER BY <key> LIMIT k` must return `n` as a
+// resolved map for every sort-key shape (property, function call, CASE, binary).
+// The heap top-K rewrite used to plan the input speculatively and leave planner
+// state behind when it bailed out, turning `n` into a raw NodeId.
+
+#[cfg(feature = "text-index")]
+#[test]
+fn order_by_limit_text_score_key_yields_map() {
+    // Issue #347: a function-call sort key (text_score).
+    use std::collections::HashMap;
+
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute("INSERT (:Article {title: 'A1', body: 'rust database internals'})")
+        .unwrap();
+    db.create_text_index("Article", "body").expect("index");
+
+    let params = HashMap::from([("sub".to_string(), Value::from("database"))]);
+
+    // Without LIMIT: already worked, asserting it stays correct.
+    let result = session
+        .execute_with_params(
+            "MATCH (s:Article) RETURN s, text_score(s.body, $sub) \
+             ORDER BY text_score(s.body, $sub) DESC",
+            params.clone(),
+        )
+        .unwrap();
+    assert!(
+        result.rows()[0][0].as_map().is_some(),
+        "without LIMIT: expected Map, got {:?}",
+        result.rows()[0][0]
+    );
+
+    // With LIMIT: the failing case in #347.
+    let result = session
+        .execute_with_params(
+            "MATCH (s:Article) RETURN s, text_score(s.body, $sub) \
+             ORDER BY text_score(s.body, $sub) DESC LIMIT 50",
+            params.clone(),
+        )
+        .unwrap();
+    assert!(
+        result.rows()[0][0].as_map().is_some(),
+        "with LIMIT: expected Map, got {:?}",
+        result.rows()[0][0]
+    );
+}
+
+#[test]
+fn order_by_limit_case_key_yields_map() {
+    // CASE sort key over a variable that is also returned whole.
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute("INSERT (:Article {title: 'A1', tier: 1})")
+        .unwrap();
+    session
+        .execute("INSERT (:Article {title: 'A2', tier: 2})")
+        .unwrap();
+
+    let result = session
+        .execute(
+            "MATCH (n:Article) RETURN n \
+             ORDER BY CASE n.tier WHEN 1 THEN 0 ELSE 1 END LIMIT 50",
+        )
+        .unwrap();
+
+    assert_eq!(result.row_count(), 2);
+    let titles: Vec<Value> = result
+        .rows()
+        .iter()
+        .map(|row| {
+            let map = row[0]
+                .as_map()
+                .unwrap_or_else(|| panic!("expected Map, got {:?}", row[0]));
+            map.get(&PropertyKey::new("title")).cloned().expect("title")
+        })
+        .collect();
+    assert_eq!(titles, vec![Value::from("A1"), Value::from("A2")]);
+}
+
+#[test]
+fn order_by_limit_binary_key_yields_map() {
+    // Binary expression sort key, variable in Return.
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session.execute("INSERT (:Item {a: 3, b: 5})").unwrap();
+    session.execute("INSERT (:Item {a: 1, b: 2})").unwrap();
+
+    let result = session
+        .execute("MATCH (n:Item) RETURN n ORDER BY n.a + n.b DESC LIMIT 50")
+        .unwrap();
+
+    assert_eq!(result.row_count(), 2);
+    let sums: Vec<Value> = result
+        .rows()
+        .iter()
+        .map(|row| {
+            let map = row[0]
+                .as_map()
+                .unwrap_or_else(|| panic!("expected Map, got {:?}", row[0]));
+            map.get(&PropertyKey::new("a")).cloned().expect("a")
+        })
+        .collect();
+    // a + b is 8 for a = 3 and 3 for a = 1; DESC puts a = 3 first.
+    assert_eq!(sums, vec![Value::Int64(3), Value::Int64(1)]);
 }

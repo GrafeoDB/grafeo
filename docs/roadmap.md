@@ -148,12 +148,20 @@ The beta series focuses on correctness, completeness and real-world durability. 
 - **Streaming top-K operator**: `ORDER BY ... LIMIT k` in a single bounded-heap pass (~12x faster at 1M rows)
 - **`WHERE prop IN [...]` index fast path** and filter pushdown through `OPTIONAL MATCH` and subqueries
 
+### Delivered in 0.5.43
+
+- **Stabilization**: green CI, dependency and security updates, Rust toolchain pinned
+- **Query correctness** from community reports: `ORDER BY ... LIMIT` over whole nodes, `UNION` column checks, aggregates next to aliased items, duplicate column names, SPARQL named-graph updates and `path+`
+- **Statements are no longer truncated**: consecutive `INSERT`s and `INSERT ... RETURN` work in GQL, and trailing input is a syntax error in GQL, Cypher and Gremlin
+- **Rollbacks that undo everything**: property and label changes on persistent databases, and SPARQL updates inside transactions
+- **Refusing to write databases beyond the storage format limits** instead of producing unreadable files
+- **HNSW connectivity** when indexed vectors are updated
+
 ### Planned Releases
 
 | Version    | Focus |
 |------------|-------|
-| **0.5.43** | Stabilization: green CI and dependency security updates, WAL durability fixes (transaction-grouped WAL records, database directory lock, safe checkpoints), query correctness fixes from community reports, HNSW connectivity fixes, and index seeks for keys that come from earlier rows (`UNWIND ... MATCH (n {id: row.id})`) |
-| **0.5.44** | Persistence and query completeness: vector and text indexes survive reopen in WAL mode, storage format support for databases over 4 GiB, temporal properties (point-in-time queries), streaming results, shortest-path elements (`nodes(p)`, `edges(p)`), `VECTOR(n)` schema type and filtered hybrid search, property equi-joins as hash joins, next phase of tiered storage |
+| **0.5.44** | Durability and persistence completeness: transaction-grouped WAL records, durable writes without `close()`, safe WAL checkpoints, a database directory lock, vector and text indexes that survive reopen in WAL mode, storage format support for databases over 4 GiB; index seeks for keys that come from earlier rows (`UNWIND ... MATCH (n {id: row.id})`), property equi-joins as hash joins, temporal properties (point-in-time queries), streaming results, shortest-path elements (`nodes(p)`, `edges(p)`), `VECTOR(n)` schema type and filtered hybrid search, next phase of tiered storage |
 | **0.5.45** | Driver and protocol compatibility: ADBC driver, W3C SPARQL HTTP Protocol and Graph Store Protocol, offline-first sync, cross-language query translation, Jupyter cell magic, final audit. Last 0.5.x release |
 
 ---

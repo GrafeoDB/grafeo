@@ -543,10 +543,12 @@ impl GrafeoDB {
                 #[cfg(all(feature = "lpg", not(feature = "grafeo-file")))]
                 let is_single_file = false;
 
+                // The WAL is the only copy of the data here, so replay every
+                // file even if an older version left checkpoint metadata (#419).
                 #[cfg(feature = "lpg")]
                 if !is_single_file && wal_path.exists() {
                     let recovery = WalRecovery::new(&wal_path);
-                    let records = recovery.recover()?;
+                    let records = recovery.recover_all()?;
                     Self::apply_wal_records(
                         &store,
                         &catalog,

@@ -107,6 +107,26 @@ impl WalRecovery {
         self.recover_internal_as::<R>(checkpoint)
     }
 
+    /// Recovers committed records from every WAL file, ignoring checkpoint
+    /// metadata.
+    ///
+    /// For WAL-directory databases, where the WAL is the only copy of the data
+    /// and no snapshot covers the files a checkpoint would skip. An existing
+    /// `checkpoint.meta` (written by older versions) is reported with a warning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if recovery fails.
+    pub fn recover_all(&self) -> Result<Vec<WalRecord>> {
+        if self.dir.join(CHECKPOINT_METADATA_FILE).exists() {
+            grafeo_warn!(
+                "Ignoring {:?}: the WAL is the only copy of the data, replaying every WAL file",
+                self.dir.join(CHECKPOINT_METADATA_FILE)
+            );
+        }
+        self.recover_internal_as::<WalRecord>(None)
+    }
+
     /// Recovers committed records up to and including the given epoch.
     ///
     /// Returns only records belonging to transactions committed at or before
@@ -541,6 +561,55 @@ mod tests {
         // We should get all committed records (checkpoint metadata is used for optimization)
         // The number depends on how many log files were skipped
         assert!(!records.is_empty(), "Should recover some records");
+    }
+
+    #[test]
+    fn test_recover_all_ignores_checkpoint_metadata() {
+        use super::super::WalConfig;
+        use grafeo_common::types::EpochId;
+
+        let dir = tempdir().unwrap();
+        {
+            let config = WalConfig {
+                max_log_size: 100, // Force rotation
+                ..Default::default()
+            };
+            let wal = WalManager::with_config(dir.path(), config).unwrap();
+            for i in 0..5 {
+                wal.log(&WalRecord::CreateNode {
+                    id: NodeId::new(i),
+                    labels: vec!["Before".to_string()],
+                })
+                .unwrap();
+                wal.log(&WalRecord::TransactionCommit {
+                    transaction_id: TransactionId::new(i + 1),
+                })
+                .unwrap();
+            }
+            // Epoch 0 keeps all files on disk; the metadata still points at
+            // the latest sequence.
+            wal.checkpoint(TransactionId::new(5), EpochId::new(0))
+                .unwrap();
+        }
+
+        let recovery = WalRecovery::new(dir.path());
+        let node_ids = |records: &[WalRecord]| -> Vec<u64> {
+            records
+                .iter()
+                .filter_map(|r| match r {
+                    WalRecord::CreateNode { id, .. } => Some(id.as_u64()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            node_ids(&recovery.recover().unwrap()).len() < 5,
+            "checkpoint-aware recovery skips the rotated files"
+        );
+        assert_eq!(
+            node_ids(&recovery.recover_all().unwrap()),
+            vec![0, 1, 2, 3, 4]
+        );
     }
 
     #[test]

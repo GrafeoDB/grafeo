@@ -379,7 +379,8 @@ impl super::GrafeoDB {
 
     /// Forces a WAL checkpoint.
     ///
-    /// Flushes all pending WAL records to the main storage.
+    /// Flushes all pending WAL records to the main storage. In WAL-directory
+    /// databases the WAL is the only copy of the data, so this only syncs it.
     ///
     /// # Errors
     ///
@@ -389,6 +390,23 @@ impl super::GrafeoDB {
         // valid snapshot: nothing to checkpoint.
         if self.read_only {
             return Ok(());
+        }
+
+        // WAL-directory mode: a checkpoint record would make recovery skip,
+        // and truncation delete, WAL files that exist nowhere else (#419).
+        #[cfg(feature = "wal")]
+        {
+            #[cfg(feature = "grafeo-file")]
+            let has_snapshot = self.file_manager.is_some();
+            #[cfg(not(feature = "grafeo-file"))]
+            let has_snapshot = false;
+
+            if !has_snapshot {
+                if let Some(ref wal) = self.wal {
+                    wal.sync()?;
+                }
+                return Ok(());
+            }
         }
 
         #[cfg(feature = "wal")]

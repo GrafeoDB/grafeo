@@ -9,6 +9,7 @@
 //! ## Modules
 //!
 //! - [`wal`] - Write-ahead log for durability
+//! - [`lock`] - Exclusive lock for WAL-directory databases
 //! - [`mod@file`] - Single-file `.grafeo` format with crash-safe dual headers
 
 #![deny(unsafe_code)]
@@ -17,6 +18,9 @@ pub mod container;
 
 #[cfg(feature = "wal")]
 pub mod wal;
+
+#[cfg(feature = "wal")]
+pub mod lock;
 
 #[cfg(feature = "grafeo-file")]
 pub mod file;

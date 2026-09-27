@@ -97,12 +97,19 @@ Open a database in read-only mode to allow multiple processes to read the same `
 
 Read-only mode uses a shared file lock instead of an exclusive lock, so multiple readers can coexist.
 
+## One Writer at a Time
+
+A persistent database can be open for writing by one `GrafeoDB` instance at a time, in one process. Opening it again, from the same process or another one, fails with a `database is locked by another process` error until the first instance calls `close()` or is dropped. This applies to both `.grafeo` files and directory databases.
+
+To share a database between processes, run it behind [Grafeo Server](https://github.com/GrafeoDB/grafeo-server), or open `.grafeo` files in [read-only mode](#read-only-mode) from the readers.
+
 ## Reopening a Database
 
 ```python
 # First session
 db = grafeo.GrafeoDB(path="my_graph.db")
 db.execute("INSERT (:Person {name: 'Alix'})")
+db.close()  # releases the lock
 
 # Later session: data persists
 db = grafeo.GrafeoDB(path="my_graph.db")

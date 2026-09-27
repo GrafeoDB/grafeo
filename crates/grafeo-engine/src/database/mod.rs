@@ -118,6 +118,11 @@ pub struct GrafeoDB {
     /// Write-ahead log manager (if durability is enabled).
     #[cfg(feature = "wal")]
     pub(super) wal: Option<Arc<LpgWal>>,
+    /// Exclusive lock on a WAL-directory database, held until `close()` so a
+    /// second open cannot overwrite this one's data (#405). `.grafeo` files
+    /// lock themselves through the file manager.
+    #[cfg(feature = "wal")]
+    directory_lock: parking_lot::Mutex<Option<grafeo_storage::lock::DirectoryLock>>,
     /// Shared WAL graph context tracker. Tracks which named graph was last
     /// written to the WAL, so concurrent sessions can emit `SwitchGraph`
     /// records only when the context actually changes.
@@ -512,6 +517,25 @@ impl GrafeoDB {
             None
         };
 
+        // WAL-directory databases have no file to lock: lock the directory
+        // before recovery so a second open fails instead of later overwriting
+        // this one's data (#405).
+        #[cfg(feature = "wal")]
+        let directory_lock = match config.path {
+            Some(ref db_path) if !is_read_only && config.wal_enabled => {
+                #[cfg(feature = "grafeo-file")]
+                let is_single_file = file_manager.is_some();
+                #[cfg(not(feature = "grafeo-file"))]
+                let is_single_file = false;
+                if is_single_file {
+                    None
+                } else {
+                    Some(grafeo_storage::lock::DirectoryLock::acquire(db_path)?)
+                }
+            }
+            _ => None,
+        };
+
         // Determine whether to use the WAL directory path (legacy) or sidecar
         // Read-only mode skips WAL entirely (no recovery, no creation).
         #[cfg(feature = "wal")]
@@ -625,6 +649,8 @@ impl GrafeoDB {
             buffer_manager,
             #[cfg(feature = "wal")]
             wal,
+            #[cfg(feature = "wal")]
+            directory_lock: parking_lot::Mutex::new(directory_lock),
             #[cfg(feature = "wal")]
             wal_graph_context: Arc::new(parking_lot::Mutex::new(None)),
             query_cache,
@@ -772,6 +798,8 @@ impl GrafeoDB {
             #[cfg(feature = "wal")]
             wal: None,
             #[cfg(feature = "wal")]
+            directory_lock: parking_lot::Mutex::new(None),
+            #[cfg(feature = "wal")]
             wal_graph_context: Arc::new(parking_lot::Mutex::new(None)),
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
@@ -862,6 +890,8 @@ impl GrafeoDB {
             buffer_manager,
             #[cfg(feature = "wal")]
             wal: None,
+            #[cfg(feature = "wal")]
+            directory_lock: parking_lot::Mutex::new(None),
             #[cfg(feature = "wal")]
             wal_graph_context: Arc::new(parking_lot::Mutex::new(None)),
             query_cache,
@@ -2343,6 +2373,10 @@ impl GrafeoDB {
 
             wal.sync()?;
         }
+
+        // Release the directory lock last, after the WAL is synced.
+        #[cfg(feature = "wal")]
+        drop(self.directory_lock.lock().take());
 
         *is_open = false;
         Ok(())

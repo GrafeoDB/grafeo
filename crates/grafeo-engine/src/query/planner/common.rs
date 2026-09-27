@@ -5,8 +5,10 @@
 //! Each function takes already-planned input operators and column lists,
 //! plus a schema derivation function to handle LPG vs RDF type differences.
 
-use crate::query::plan::{BinaryOp, LogicalExpression, UnaryOp};
-use grafeo_common::types::LogicalType;
+use crate::query::plan::{
+    BinaryOp, ListPredicateKind, LogicalExpression, MapProjectionEntry, UnaryOp,
+};
+use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
     DistinctOperator, ExceptOperator, HashJoinOperator, IntersectOperator,
@@ -427,16 +429,17 @@ pub(crate) fn resolve_expression_to_column(
 ///
 /// Used when a `RETURN` item has no alias. The text follows the source syntax
 /// so structurally different expressions get different names (`id(a)` and
-/// `id(b)`, `n.a + n.b` and `n.c + n.d`). Heavy expressions (CASE, subqueries,
-/// comprehensions) get short generic labels; two of those unaliased in one
-/// `RETURN` still collide and are rejected by `QueryResult`, so alias them.
+/// `id(b)`, `n.a + n.b` and `n.c + n.d`, `1` and `1.0`). Subqueries cannot be
+/// rendered from the plan and get a short label (`EXISTS {...}`); two of those
+/// unaliased in one `RETURN` collide and are rejected by `QueryResult`, so
+/// alias them.
 pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
     match expr {
         LogicalExpression::Variable(name) => name.clone(),
         LogicalExpression::Property { variable, property } => {
             format!("{variable}.{property}")
         }
-        LogicalExpression::Literal(value) => format!("{value:?}"),
+        LogicalExpression::Literal(value) => literal_to_string(value),
         LogicalExpression::Parameter(name) => format!("${name}"),
         LogicalExpression::FunctionCall {
             name,
@@ -492,15 +495,137 @@ pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
                 .join(", ");
             format!("{{{inner}}}")
         }
-        LogicalExpression::MapProjection { base, .. } => format!("{base}{{...}}"),
-        LogicalExpression::Case { .. } => "case".to_string(),
-        LogicalExpression::ExistsSubquery(_) => "exists".to_string(),
-        LogicalExpression::CountSubquery(_) => "count".to_string(),
-        LogicalExpression::ValueSubquery(_) => "subquery".to_string(),
-        LogicalExpression::Reduce { .. } => "reduce".to_string(),
-        LogicalExpression::ListComprehension { .. } => "list_comprehension".to_string(),
-        LogicalExpression::ListPredicate { kind, .. } => format!("{kind:?}").to_lowercase(),
-        LogicalExpression::PatternComprehension { .. } => "pattern_comprehension".to_string(),
+        LogicalExpression::MapProjection { base, entries } => {
+            let inner = entries
+                .iter()
+                .map(|entry| match entry {
+                    MapProjectionEntry::PropertySelector(property) => format!(".{property}"),
+                    MapProjectionEntry::LiteralEntry(key, value) => {
+                        format!("{key}: {}", expression_to_string(value))
+                    }
+                    MapProjectionEntry::AllProperties => ".*".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{base}{{{inner}}}")
+        }
+        LogicalExpression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            let mut out = String::from("CASE");
+            if let Some(operand) = operand {
+                out.push(' ');
+                out.push_str(&expression_to_string(operand));
+            }
+            for (when, then) in when_clauses {
+                out.push_str(" WHEN ");
+                out.push_str(&expression_to_string(when));
+                out.push_str(" THEN ");
+                out.push_str(&expression_to_string(then));
+            }
+            if let Some(else_clause) = else_clause {
+                out.push_str(" ELSE ");
+                out.push_str(&expression_to_string(else_clause));
+            }
+            out.push_str(" END");
+            out
+        }
+        LogicalExpression::ExistsSubquery(_) => "EXISTS {...}".to_string(),
+        LogicalExpression::CountSubquery(_) => "COUNT {...}".to_string(),
+        LogicalExpression::ValueSubquery(_) => "VALUE {...}".to_string(),
+        LogicalExpression::Reduce {
+            accumulator,
+            initial,
+            variable,
+            list,
+            expression,
+        } => format!(
+            "reduce({accumulator} = {}, {variable} IN {} | {})",
+            expression_to_string(initial),
+            expression_to_string(list),
+            expression_to_string(expression)
+        ),
+        LogicalExpression::ListComprehension {
+            variable,
+            list_expr,
+            filter_expr,
+            map_expr,
+        } => {
+            let mut out = format!("[{variable} IN {}", expression_to_string(list_expr));
+            if let Some(filter) = filter_expr {
+                out.push_str(" WHERE ");
+                out.push_str(&expression_to_string(filter));
+            }
+            // `[x IN list WHERE p]` projects the iteration variable itself.
+            if !matches!(map_expr.as_ref(), LogicalExpression::Variable(v) if v == variable) {
+                out.push_str(" | ");
+                out.push_str(&expression_to_string(map_expr));
+            }
+            out.push(']');
+            out
+        }
+        LogicalExpression::ListPredicate {
+            kind,
+            variable,
+            list_expr,
+            predicate,
+        } => {
+            let function = match kind {
+                ListPredicateKind::All => "all",
+                ListPredicateKind::Any => "any",
+                ListPredicateKind::None => "none",
+                ListPredicateKind::Single => "single",
+            };
+            format!(
+                "{function}({variable} IN {} WHERE {})",
+                expression_to_string(list_expr),
+                expression_to_string(predicate)
+            )
+        }
+        LogicalExpression::PatternComprehension { projection, .. } => {
+            format!("[(...) | {}]", expression_to_string(projection))
+        }
+    }
+}
+
+/// Renders a literal as it would be written in a query: `1`, `1.0`, `'x'`,
+/// `true`, `NULL`, `[1, 2]`, `{a: 1}`. Floats keep their decimal point so `1`
+/// and `1.0` stay distinct; strings are single-quoted with `'` and `\`
+/// escaped.
+fn literal_to_string(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Int64(i) => i.to_string(),
+        Value::Float64(f) => format!("{f:?}"),
+        Value::String(s) => format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'")),
+        Value::List(items) => {
+            let inner = items
+                .iter()
+                .map(literal_to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{inner}]")
+        }
+        Value::Map(entries) => {
+            let inner = entries
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", literal_to_string(value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{inner}}}")
+        }
+        Value::Vector(values) => {
+            let inner = values
+                .iter()
+                .map(|v| format!("{v:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("vector([{inner}])")
+        }
+        other => other.to_string(),
     }
 }
 
@@ -524,16 +649,25 @@ fn join_expressions(exprs: &[LogicalExpression]) -> String {
 }
 
 /// Column name of an unaliased aggregate: `count(*)`, `count(n)`,
-/// `sum(DISTINCT n.age)`, `covar_pop(x, y)`. Shared by the LPG and RDF planners.
+/// `sum(DISTINCT n.age)`, `covar_pop(x, y)`, `percentile_cont(n.age, 0.5)`,
+/// `group_concat(n.name, ', ')`. Every argument that changes the result is
+/// rendered, so distinct aggregates get distinct names. Shared by the LPG and
+/// RDF planners.
 pub(crate) fn aggregate_column_name(aggregate: &crate::query::plan::AggregateExpr) -> String {
     let function = aggregate_function_name(aggregate.function);
-    let mut args: Vec<String> = Vec::with_capacity(2);
+    let mut args: Vec<String> = Vec::with_capacity(3);
     match &aggregate.expression {
         Some(expr) => args.push(expression_to_string(expr)),
         None => args.push("*".to_string()),
     }
     if let Some(second) = &aggregate.expression2 {
         args.push(expression_to_string(second));
+    }
+    if let Some(percentile) = aggregate.percentile {
+        args.push(literal_to_string(&Value::Float64(percentile)));
+    }
+    if let Some(separator) = &aggregate.separator {
+        args.push(literal_to_string(&Value::String(separator.as_str().into())));
     }
     let distinct = if aggregate.distinct { "DISTINCT " } else { "" };
     format!("{function}({distinct}{})", args.join(", "))

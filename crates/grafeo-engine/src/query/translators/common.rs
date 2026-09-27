@@ -707,10 +707,41 @@ fn branch_output_columns(op: &LogicalOperator) -> Option<Vec<Option<String>>> {
                     .collect(),
             )
         }
+        // A RETURN made only of aggregates and grouping keys plans to a bare
+        // Aggregate: grouping keys first, then aggregates.
+        LogicalOperator::Aggregate(agg) => Some(
+            agg.group_by
+                .iter()
+                .map(|key| match key {
+                    LogicalExpression::Variable(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .chain(agg.aggregates.iter().map(|a| a.alias.clone()))
+                .collect(),
+        ),
+        // A nested UNION (`a UNION b UNION c` parses left-deep) was checked when
+        // it was built; it outputs its branches' shared columns.
+        LogicalOperator::Union(union) => {
+            let mut merged: Option<Vec<Option<String>>> = None;
+            for columns in union.inputs.iter().filter_map(branch_output_columns) {
+                match &mut merged {
+                    None => merged = Some(columns),
+                    Some(known) => {
+                        for (slot, name) in known.iter_mut().zip(columns) {
+                            if slot.is_none() {
+                                *slot = name;
+                            }
+                        }
+                    }
+                }
+            }
+            merged
+        }
         LogicalOperator::Sort(sort) => branch_output_columns(&sort.input),
         LogicalOperator::Limit(limit) => branch_output_columns(&limit.input),
         LogicalOperator::Skip(skip) => branch_output_columns(&skip.input),
         LogicalOperator::Distinct(distinct) => branch_output_columns(&distinct.input),
+        LogicalOperator::Filter(filter) => branch_output_columns(&filter.input),
         _ => None,
     }
 }

@@ -329,6 +329,26 @@ tests:
     expect:
       empty: true
 
+  - name: named_modify_with_clause_applies_inside_subquery
+    # A subquery in the WHERE of a WITH update also reads <g>, not the default graph.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/vincent> <http://ex.org/status> "active" .
+          GRAPH <http://ex.org/g> { <http://ex.org/alix> <http://ex.org/status> "active" . }
+        }
+      - |
+        WITH <http://ex.org/g>
+        INSERT { ?who <http://ex.org/flag> "seen" }
+        WHERE  { { SELECT ?who WHERE { ?who <http://ex.org/status> "active" } } }
+    query: |
+      SELECT ?who WHERE {
+        GRAPH <http://ex.org/g> { ?who <http://ex.org/flag> "seen" }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix]
+
   - name: named_drop_graph_still_works
     # DROP GRAPH still removes the whole named graph.
     setup:

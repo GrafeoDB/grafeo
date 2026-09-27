@@ -353,6 +353,50 @@ fn order_by_wrapped_dropped_variable_sorts_correctly() {
     }
 }
 
+// The same for keys wrapping a dropped variable in `reduce` or a subquery,
+// which the variable collector used to skip.
+#[cfg(feature = "cypher")]
+#[test]
+fn order_by_reduce_or_subquery_over_dropped_variable_sorts_correctly() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute(
+            "INSERT (a:Seq {id: 0, s: [1, 2, 3]}), (b:Seq {id: 1, s: [1]}), \
+                    (c:Seq {id: 2, s: [1, 2]}), (t:Target), \
+                    (a)-[:R]->(t), (c)-[:R]->(t), (c)-[:R]->(t)",
+        )
+        .unwrap();
+
+    let ids = |query: &str| -> Vec<Value> {
+        let result = session
+            .execute_cypher(query)
+            .unwrap_or_else(|e| panic!("{query}: {e}"));
+        result.rows().iter().map(|row| row[0].clone()).collect()
+    };
+    let expected =
+        |order: &[i64]| -> Vec<Value> { order.iter().map(|&i| Value::Int64(i)).collect() };
+
+    for limit in ["", " LIMIT 3"] {
+        // reduce: sums are 6, 1, 3.
+        assert_eq!(
+            ids(&format!(
+                "MATCH (n:Seq) RETURN n.id AS id ORDER BY reduce(acc = 0, x IN n.s | acc + x){limit}"
+            )),
+            expected(&[1, 2, 0]),
+            "reduce key{limit}"
+        );
+        // COUNT subquery: out-degrees are 1, 0, 2.
+        assert_eq!(
+            ids(&format!(
+                "MATCH (n:Seq) RETURN n.id AS id ORDER BY COUNT {{ MATCH (n)-->() }} DESC{limit}"
+            )),
+            expected(&[2, 0, 1]),
+            "COUNT subquery key{limit}"
+        );
+    }
+}
+
 // Issues #335 and #347: `RETURN n ORDER BY <key> LIMIT k` must return `n` as a
 // resolved map for every sort-key shape (property, function call, CASE, binary).
 // The heap top-K rewrite used to plan the input speculatively and leave planner

@@ -3000,8 +3000,7 @@ impl QueryResult {
     ///
     /// # Errors
     ///
-    /// Returns an error if `columns` contains a repeated column name (see
-    /// [`validate_unique_columns`](Self::validate_unique_columns)).
+    /// Returns a semantic error if `columns` contains a repeated column name.
     pub fn new(columns: Vec<String>) -> Result<Self> {
         Self::validate_unique_columns(&columns)?;
         let len = columns.len();
@@ -3020,8 +3019,7 @@ impl QueryResult {
     ///
     /// # Errors
     ///
-    /// Returns an error if `columns` contains a repeated column name (see
-    /// [`validate_unique_columns`](Self::validate_unique_columns)).
+    /// Returns a semantic error if `columns` contains a repeated column name.
     pub fn with_types(
         columns: Vec<String>,
         column_types: Vec<grafeo_common::types::LogicalType>,
@@ -3042,8 +3040,7 @@ impl QueryResult {
     ///
     /// # Errors
     ///
-    /// Returns an error if `columns` contains a repeated column name (see
-    /// [`validate_unique_columns`](Self::validate_unique_columns)).
+    /// Returns a semantic error if `columns` contains a repeated column name.
     pub fn from_rows(
         columns: Vec<String>,
         rows: Vec<Vec<grafeo_common::types::Value>>,

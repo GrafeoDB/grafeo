@@ -2341,12 +2341,8 @@ fn return_two_unaliased_binary_expressions_have_distinct_column_names() {
         .execute("MATCH (n:Item) RETURN n.a + n.b, n.c + n.d")
         .unwrap();
 
-    assert_eq!(result.columns.len(), 2);
-    assert_ne!(
-        result.columns[0], result.columns[1],
-        "two distinct binary expressions must get distinct column names, got: {:?}",
-        result.columns
-    );
+    assert_eq!(result.columns, vec!["n.a + n.b", "n.c + n.d"]);
+    assert_eq!(result.rows()[0], vec![Value::Int64(3), Value::Int64(7)]);
 }
 
 #[test]
@@ -2361,12 +2357,8 @@ fn return_two_unaliased_id_calls_have_distinct_column_names() {
         .execute("MATCH (a)-[r]->(b) RETURN id(a), id(b)")
         .unwrap();
 
-    assert_eq!(result.columns.len(), 2);
-    assert_ne!(
-        result.columns[0], result.columns[1],
-        "id(a) and id(b) must get distinct column names, got: {:?}",
-        result.columns
-    );
+    assert_eq!(result.columns, vec!["id(a)", "id(b)"]);
+    assert_ne!(result.rows()[0][0], result.rows()[0][1]);
 }
 
 #[test]
@@ -2382,14 +2374,6 @@ fn return_mixed_scalar_intrinsics_have_distinct_column_names() {
         .execute("MATCH (a)-[r]->(b) RETURN labels(a), type(r), id(a)")
         .unwrap();
 
-    assert_eq!(result.columns.len(), 3);
-    let mut sorted = result.columns.clone();
-    sorted.sort();
-    sorted.dedup();
-    assert_eq!(
-        sorted.len(),
-        result.columns.len(),
-        "labels/type/id must each get a distinct column name, got: {:?}",
-        result.columns
-    );
+    assert_eq!(result.columns, vec!["labels(a)", "type(r)", "id(a)"]);
+    assert_eq!(result.rows()[0][1], Value::String("KNOWS".into()));
 }

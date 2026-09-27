@@ -234,7 +234,7 @@ impl GqlTranslator {
 
             if has_aggregates {
                 let (aggregates, auto_group_by, post_return) =
-                    self.extract_aggregates_and_groups(&return_clause.items)?;
+                    self.extract_aggregates_and_groups(&return_clause.items, false)?;
 
                 plan = LogicalOperator::Aggregate(AggregateOp {
                     group_by: auto_group_by,
@@ -684,7 +684,7 @@ impl GqlTranslator {
 
                 if has_aggregates {
                     let (aggregates, auto_group_by, post_return) =
-                        self.extract_aggregates_and_groups(&with_clause.items)?;
+                        self.extract_aggregates_and_groups(&with_clause.items, false)?;
 
                     // Split the WHERE into HAVING (aggregate-referencing
                     // conjuncts) and a post-aggregate filter (the rest).
@@ -815,8 +815,10 @@ impl GqlTranslator {
             // (e.g. `count(n) > 0 AS exists`), we decompose it into:
             //   1. An aggregate (`count(n)` with synthetic alias)
             //   2. A post-aggregate projection (`_agg_0 > 0 AS exists`)
-            let (aggregates, auto_group_by, post_return) =
-                self.extract_aggregates_and_groups(&query.return_clause.items)?;
+            let (aggregates, auto_group_by, post_return) = self.extract_aggregates_and_groups(
+                &query.return_clause.items,
+                !query.return_clause.group_by.is_empty(),
+            )?;
 
             // Separate horizontal aggregates (over group-list variables from
             // variable-length paths) from regular aggregates.
@@ -827,8 +829,10 @@ impl GqlTranslator {
                     && let LogicalExpression::Property { variable, property } = expr
                     && let Some(path_alias) = glv.get(variable)
                 {
+                    // Same name as a regular aggregate, which the post-Return
+                    // built by `extract_aggregates_and_groups` refers to.
                     let alias = agg_expr.alias.clone().unwrap_or_else(|| {
-                        format!("{:?}_{}", agg_expr.function, property).to_lowercase()
+                        crate::query::planner::common::aggregate_column_name(&agg_expr)
                     });
                     plan = LogicalOperator::HorizontalAggregate(HorizontalAggregateOp {
                         list_column: format!("_path_edges_{}", path_alias),
@@ -1393,8 +1397,10 @@ impl GqlTranslator {
                     .any(|item| contains_aggregate(&item.expression));
 
             if has_aggregates {
-                let (aggregates, auto_group_by, post_return) =
-                    self.extract_aggregates_and_groups(&subquery.return_clause.items)?;
+                let (aggregates, auto_group_by, post_return) = self.extract_aggregates_and_groups(
+                    &subquery.return_clause.items,
+                    !subquery.return_clause.group_by.is_empty(),
+                )?;
                 let group_by = if subquery.return_clause.group_by.is_empty() {
                     auto_group_by
                 } else {

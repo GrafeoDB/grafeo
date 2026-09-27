@@ -111,14 +111,18 @@ impl SparqlTranslator {
     }
 
     fn translate_select(&mut self, select: &ast::SelectQuery) -> Result<LogicalPlan> {
-        // Apply dataset restriction from FROM / FROM NAMED clauses
-        self.dataset = self.translate_dataset_clause(&select.dataset);
-
-        // Start with the WHERE clause pattern
-        let mut plan = self.translate_graph_pattern(&select.where_clause)?;
-
-        // Clear dataset after translating the WHERE clause
-        self.dataset = None;
+        // FROM / FROM NAMED restrict this query's WHERE clause. A subquery has
+        // no dataset clause and is evaluated against its parent's dataset (the
+        // query's FROM, or the WITH graph of an update), so an absent clause
+        // keeps the active one. Restore the parent's dataset afterwards, also
+        // when translation fails.
+        let parent_dataset = self.dataset.clone();
+        if let Some(dataset) = self.translate_dataset_clause(&select.dataset) {
+            self.dataset = Some(dataset);
+        }
+        let plan = self.translate_graph_pattern(&select.where_clause);
+        self.dataset = parent_dataset;
+        let mut plan = plan?;
 
         // Check if projection contains aggregates (handles both explicit GROUP BY and implicit aggregation)
         let has_aggregates = Self::has_aggregates_in_projection(&select.projection);

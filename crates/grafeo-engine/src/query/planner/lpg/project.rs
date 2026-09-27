@@ -1472,8 +1472,52 @@ fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
                 collect_vars(e, out);
             }
         }
-        _ => {}
+        LogicalExpression::MapProjection { base, entries } => {
+            out.push(base.clone());
+            for entry in entries {
+                if let crate::query::plan::MapProjectionEntry::LiteralEntry(_, value) = entry {
+                    collect_vars(value, out);
+                }
+            }
+        }
+        LogicalExpression::Reduce {
+            accumulator,
+            initial,
+            variable,
+            list,
+            expression,
+        } => {
+            collect_vars(initial, out);
+            collect_vars(list, out);
+            let mut inner = Vec::new();
+            collect_vars(expression, &mut inner);
+            out.extend(
+                inner
+                    .into_iter()
+                    .filter(|v| v != accumulator && v != variable),
+            );
+        }
+        // Subqueries: every variable their plan mentions, which includes the
+        // correlated outer ones. Over-reporting only adds a harmless
+        // augmenting projection; under-reporting would break the sort.
+        LogicalExpression::ExistsSubquery(plan)
+        | LogicalExpression::CountSubquery(plan)
+        | LogicalExpression::ValueSubquery(plan) => collect_plan_vars(plan, out),
+        LogicalExpression::PatternComprehension {
+            subplan,
+            projection,
+        } => {
+            collect_plan_vars(subplan, out);
+            collect_vars(projection, out);
+        }
+        LogicalExpression::Literal(_) | LogicalExpression::Parameter(_) => {}
     }
+}
+
+fn collect_plan_vars(plan: &LogicalOperator, out: &mut Vec<String>) {
+    let mut vars = std::collections::HashSet::new();
+    crate::query::translators::common::collect_operator_variables(plan, &mut vars);
+    out.extend(vars);
 }
 
 /// True if `sort` requires injecting extra projection columns before sorting.

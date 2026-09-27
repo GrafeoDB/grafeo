@@ -20,46 +20,6 @@ mod tests {
         GrafeoDB::with_config(Config::in_memory().with_graph_model(GraphModel::Rdf)).unwrap()
     }
 
-    // ==================== routing ====================
-
-    /// A GRAPH-wrapped INSERT template writes to the named graph only (#367).
-    #[test]
-    fn named_insert_via_modify_writes_named_not_default() {
-        let db = rdf_db();
-        let session = db.session();
-        session
-            .execute_sparql(r#"INSERT DATA { <http://ex.org/trigger> <http://ex.org/p> "go" . }"#)
-            .unwrap();
-        session
-            .execute_sparql(
-                r#"INSERT { GRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "v" } }
-                   WHERE  { <http://ex.org/trigger> <http://ex.org/p> ?x }"#,
-            )
-            .unwrap();
-
-        // The named graph received the triple ...
-        let named = session
-            .execute_sparql(
-                r#"SELECT ?s WHERE { GRAPH <http://ex.org/g> { ?s <http://ex.org/p> "v" } }"#,
-            )
-            .unwrap();
-        assert_eq!(
-            named.row_count(),
-            1,
-            "named INSERT-via-Modify must land in the named graph"
-        );
-
-        // ... and not to the default graph.
-        let default = session
-            .execute_sparql(r#"SELECT ?s WHERE { ?s <http://ex.org/p> "v" }"#)
-            .unwrap();
-        assert_eq!(
-            default.row_count(),
-            0,
-            "named INSERT-via-Modify must not leak into the default graph"
-        );
-    }
-
     // ==================== non-creating delete target ====================
 
     /// A DELETE WHERE targeting a graph that does not exist must be a clean

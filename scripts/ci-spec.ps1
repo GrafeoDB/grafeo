@@ -135,9 +135,15 @@ if (Should-Run "csharp") {
         $env:LD_LIBRARY_PATH = $csDest
         # Windows finds native DLLs via PATH, not LD_LIBRARY_PATH; without this the
         # runner silently skips every test or loads a stale copy from bin\.
+        # Scoped to this block so later steps see the original PATH.
+        $originalPath = $env:PATH
         $env:PATH = "$csDest$([System.IO.Path]::PathSeparator)$env:PATH"
-        dotnet test --verbosity minimal 2>&1 | Tee-Object -Variable csOut
-        if ($LASTEXITCODE -eq 0) { $passed += "csharp" } else { $failures += "csharp" }
+        try {
+            dotnet test --verbosity minimal 2>&1 | Tee-Object -Variable csOut
+            if ($LASTEXITCODE -eq 0) { $passed += "csharp" } else { $failures += "csharp" }
+        } finally {
+            $env:PATH = $originalPath
+        }
         Pop-Location
     } else {
         Write-Host "  Native lib build failed" -ForegroundColor Red

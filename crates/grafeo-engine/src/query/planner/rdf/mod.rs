@@ -111,6 +111,47 @@ struct TripleOperands {
     column_map: HashMap<String, usize>,
     /// Named graph to mutate (`None` = default graph).
     graph: Option<String>,
+    /// Open transaction: writes are buffered in it instead of applied.
+    transaction_id: Option<TransactionId>,
+}
+
+/// Inserts `triple` into `target`, buffered in the transaction when there is
+/// one (applied on commit, discarded on rollback). Returns whether the triple
+/// is new, as seen by the transaction.
+fn apply_triple_insert(
+    target: &RdfStore,
+    transaction_id: Option<TransactionId>,
+    triple: Triple,
+) -> bool {
+    match transaction_id {
+        Some(tx) => {
+            if target.contains_with_pending(&triple, tx) {
+                return false;
+            }
+            target.insert_in_transaction(tx, triple);
+            true
+        }
+        None => target.insert(triple),
+    }
+}
+
+/// Deletes `triple` from `target`, buffered in the transaction when there is
+/// one. Returns whether the triple was present, as seen by the transaction.
+fn apply_triple_delete(
+    target: &RdfStore,
+    transaction_id: Option<TransactionId>,
+    triple: &Triple,
+) -> bool {
+    match transaction_id {
+        Some(tx) => {
+            if !target.contains_with_pending(triple, tx) {
+                return false;
+            }
+            target.remove_in_transaction(tx, triple.clone());
+            true
+        }
+        None => target.remove(triple),
+    }
 }
 
 /// Resolves the store a graph mutation targets (`None` graph = default graph).
@@ -435,7 +476,8 @@ impl RdfPlanner {
             },
             emit_companion_columns,
             emit_datatype_column,
-        );
+        )
+        .with_transaction(self.transaction_id);
 
         // Dictionary encoding is available but not yet automatically enabled for
         // all queries. The infrastructure (TermDictionary, DictResolveOperator) is
@@ -1373,6 +1415,7 @@ impl RdfPlanner {
                         object: insert.object.clone(),
                         column_map,
                         graph: insert.graph.clone(),
+                        transaction_id: self.transaction_id,
                     },
                     #[cfg(feature = "wal")]
                     self.wal.clone(),
@@ -1487,6 +1530,7 @@ impl RdfPlanner {
                         object: delete.object.clone(),
                         column_map,
                         graph: delete.graph.clone(),
+                        transaction_id: self.transaction_id,
                     },
                     #[cfg(feature = "wal")]
                     self.wal.clone(),
@@ -1629,21 +1673,24 @@ impl RdfPlanner {
             .map(|(i, name)| (name.clone(), i))
             .collect();
 
-        let operator = Box::new(RdfModifyOperator::new(
-            Arc::clone(&self.store),
-            where_op,
-            ModifyTemplates {
-                delete: modify.delete_templates.clone(),
-                insert: modify.insert_templates.clone(),
-            },
-            column_map,
-            #[cfg(feature = "wal")]
-            self.wal.clone(),
-            #[cfg(feature = "cdc")]
-            self.cdc_log.clone(),
-            #[cfg(feature = "cdc")]
-            self.cdc_epoch,
-        ));
+        let operator = Box::new(
+            RdfModifyOperator::new(
+                Arc::clone(&self.store),
+                where_op,
+                ModifyTemplates {
+                    delete: modify.delete_templates.clone(),
+                    insert: modify.insert_templates.clone(),
+                },
+                column_map,
+                #[cfg(feature = "wal")]
+                self.wal.clone(),
+                #[cfg(feature = "cdc")]
+                self.cdc_log.clone(),
+                #[cfg(feature = "cdc")]
+                self.cdc_epoch,
+            )
+            .with_transaction(self.transaction_id),
+        );
 
         Ok((operator, Vec::new(), Vec::new()))
     }
@@ -1768,6 +1815,8 @@ struct RdfInsertPatternOperator {
     column_map: HashMap<String, usize>,
     /// Named graph to insert into (`None` = default graph).
     graph_name: Option<String>,
+    /// Open transaction the inserts are buffered in.
+    transaction_id: Option<TransactionId>,
     done: bool,
     #[cfg(feature = "wal")]
     wal: Option<Arc<RdfWal>>,
@@ -1794,6 +1843,7 @@ impl RdfInsertPatternOperator {
             object: operands.object,
             column_map: operands.column_map,
             graph_name: operands.graph,
+            transaction_id: operands.transaction_id,
             done: false,
             #[cfg(feature = "wal")]
             wal,
@@ -1892,13 +1942,17 @@ impl Operator for RdfInsertPatternOperator {
             }
         }
 
-        // Insert all collected triples into the resolved graph
-        for triple in &triples_to_insert {
-            target.insert(triple.clone());
+        // Insert into the resolved graph (buffered in an open transaction).
+        // Only triples that are actually new are logged.
+        let mut inserted = Vec::with_capacity(triples_to_insert.len());
+        for triple in triples_to_insert {
+            if apply_triple_insert(&target, self.transaction_id, triple.clone()) {
+                inserted.push(triple);
+            }
         }
 
         #[cfg(feature = "wal")]
-        for triple in &triples_to_insert {
+        for triple in &inserted {
             log_rdf_wal(
                 &self.wal,
                 &grafeo_storage::wal::WalRecord::InsertRdfTriple {
@@ -1911,7 +1965,7 @@ impl Operator for RdfInsertPatternOperator {
         }
 
         #[cfg(feature = "cdc")]
-        for triple in &triples_to_insert {
+        for triple in &inserted {
             record_cdc_triple_insert(
                 &self.cdc_log,
                 triple.subject(),
@@ -2059,6 +2113,8 @@ struct RdfDeletePatternOperator {
     column_map: HashMap<String, usize>,
     /// Named graph to delete from (`None` = default graph).
     graph_name: Option<String>,
+    /// Open transaction the deletes are buffered in.
+    transaction_id: Option<TransactionId>,
     done: bool,
     #[cfg(feature = "wal")]
     wal: Option<Arc<RdfWal>>,
@@ -2085,6 +2141,7 @@ impl RdfDeletePatternOperator {
             object: operands.object,
             column_map: operands.column_map,
             graph_name: operands.graph,
+            transaction_id: operands.transaction_id,
             done: false,
             #[cfg(feature = "wal")]
             wal,
@@ -2182,11 +2239,11 @@ impl Operator for RdfDeletePatternOperator {
             }
         }
 
-        // Delete all collected triples from the resolved graph
+        // Delete from the resolved graph (buffered in an open transaction).
+        // Only triples that were actually present are logged.
         if let Some(target) = target {
-            for triple in &triples_to_delete {
-                target.remove(triple);
-            }
+            triples_to_delete
+                .retain(|triple| apply_triple_delete(&target, self.transaction_id, triple));
 
             #[cfg(feature = "wal")]
             for triple in &triples_to_delete {
@@ -2646,6 +2703,8 @@ struct RdfModifyOperator {
     delete_templates: Vec<TripleTemplate>,
     insert_templates: Vec<TripleTemplate>,
     column_map: HashMap<String, usize>,
+    /// Open transaction the changes are buffered in.
+    transaction_id: Option<TransactionId>,
     done: bool,
     #[cfg(feature = "wal")]
     wal: Option<Arc<RdfWal>>,
@@ -2677,6 +2736,7 @@ impl RdfModifyOperator {
             delete_templates: templates.delete,
             insert_templates: templates.insert,
             column_map,
+            transaction_id: None,
             done: false,
             #[cfg(feature = "wal")]
             wal,
@@ -2685,6 +2745,12 @@ impl RdfModifyOperator {
             #[cfg(feature = "cdc")]
             cdc_epoch,
         }
+    }
+
+    /// Buffers the changes in `transaction_id` when a transaction is open.
+    fn with_transaction(mut self, transaction_id: Option<TransactionId>) -> Self {
+        self.transaction_id = transaction_id;
+        self
     }
 
     fn resolve_component(
@@ -2788,7 +2854,7 @@ impl Operator for RdfModifyOperator {
 
                 if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
                     let triple = Triple::new(s.clone(), p.clone(), o.clone());
-                    if !target.remove(&triple) {
+                    if !apply_triple_delete(&target, self.transaction_id, &triple) {
                         // Exact match failed: the object may be a plain string
                         // whose stored form is a typed literal (e.g. "1" vs
                         // xsd:integer "1"). Query by subject+predicate and
@@ -2800,7 +2866,7 @@ impl Operator for RdfModifyOperator {
                                 object: None,
                             };
                             let matching: Vec<_> = target
-                                .find(&pattern)
+                                .find_with_pending(&pattern, self.transaction_id)
                                 .into_iter()
                                 .filter(|t| {
                                     if let Term::Literal(lit) = t.object() {
@@ -2815,6 +2881,9 @@ impl Operator for RdfModifyOperator {
                                 })
                                 .collect();
                             for matched in matching {
+                                if !apply_triple_delete(&target, self.transaction_id, &matched) {
+                                    continue;
+                                }
                                 #[cfg(feature = "wal")]
                                 log_rdf_wal(
                                     &self.wal,
@@ -2834,10 +2903,10 @@ impl Operator for RdfModifyOperator {
                                     template.graph.as_deref(),
                                     self.cdc_epoch,
                                 );
-                                target.remove(&matched);
                             }
-                            continue;
                         }
+                        // Nothing matched: nothing to log.
+                        continue;
                     }
                     #[cfg(feature = "wal")]
                     log_rdf_wal(
@@ -2874,6 +2943,9 @@ impl Operator for RdfModifyOperator {
 
                 if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
                     let triple = Triple::new(s, p, o);
+                    if !apply_triple_insert(&target, self.transaction_id, triple.clone()) {
+                        continue;
+                    }
                     #[cfg(feature = "wal")]
                     log_rdf_wal(
                         &self.wal,
@@ -2893,7 +2965,6 @@ impl Operator for RdfModifyOperator {
                         template.graph.as_deref(),
                         self.cdc_epoch,
                     );
-                    target.insert(triple);
                 }
             }
         }
@@ -3601,6 +3672,8 @@ struct RdfTripleScanOperator {
     /// Optional term dictionary for dictionary-encoded output. When present,
     /// S/P/O variable columns emit Int64 term IDs instead of String values.
     dictionary: Option<Arc<grafeo_core::graph::rdf::TermDictionary>>,
+    /// Open transaction whose pending writes the scan must see.
+    transaction_id: Option<TransactionId>,
 }
 
 impl RdfTripleScanOperator {
@@ -3624,7 +3697,15 @@ impl RdfTripleScanOperator {
             triples: None,
             position: 0,
             dictionary: None,
+            transaction_id: None,
         }
+    }
+
+    /// Makes the scan see the pending writes of `transaction_id`
+    /// (read-your-writes inside an explicit transaction).
+    fn with_transaction(mut self, transaction_id: Option<TransactionId>) -> Self {
+        self.transaction_id = transaction_id;
+        self
     }
 
     /// Enables dictionary-encoded output for S/P/O columns.
@@ -3645,6 +3726,7 @@ impl RdfTripleScanOperator {
     fn ensure_triples(&mut self) {
         if self.triples.is_none() {
             let ctx = &self.graph_context;
+            let tx = self.transaction_id;
             self.triples = Some(if ctx.scan_all_graphs {
                 // GRAPH ?var: scan named graphs (restricted by FROM NAMED if present)
                 if let Some(ref ds) = ctx.dataset {
@@ -3652,14 +3734,17 @@ impl RdfTripleScanOperator {
                         // FROM NAMED restricts which named graphs are visible
                         let graph_refs: Vec<&str> =
                             ds.named_graphs.iter().map(String::as_str).collect();
-                        self.store.find_in_graphs(&self.pattern, Some(&graph_refs))
+                        self.store
+                            .find_in_graphs_with_pending(&self.pattern, Some(&graph_refs), tx)
                     } else {
                         // No FROM NAMED: all graphs visible
-                        self.store.find_in_graphs(&self.pattern, Some(&[]))
+                        self.store
+                            .find_in_graphs_with_pending(&self.pattern, Some(&[]), tx)
                     }
                 } else {
                     // No dataset restriction: scan all graphs
-                    self.store.find_in_graphs(&self.pattern, Some(&[]))
+                    self.store
+                        .find_in_graphs_with_pending(&self.pattern, Some(&[]), tx)
                 }
             } else if let Some(ref graph_iri) = ctx.graph {
                 // GRAPH <iri>: scan specific named graph (restricted by FROM NAMED if present)
@@ -3673,7 +3758,7 @@ impl RdfTripleScanOperator {
                         self.store
                             .graph(graph_iri)
                             .map(|g| {
-                                g.find(&self.pattern)
+                                g.find_with_pending(&self.pattern, tx)
                                     .into_iter()
                                     .map(|t| (Some(graph_iri.clone()), t))
                                     .collect()
@@ -3684,7 +3769,7 @@ impl RdfTripleScanOperator {
                     self.store
                         .graph(graph_iri)
                         .map(|g| {
-                            g.find(&self.pattern)
+                            g.find_with_pending(&self.pattern, tx)
                                 .into_iter()
                                 .map(|t| (Some(graph_iri.clone()), t))
                                 .collect()
@@ -3703,9 +3788,11 @@ impl RdfTripleScanOperator {
                             ds.default_graphs.iter().map(String::as_str).collect();
                         unique_graphs.sort_unstable();
                         unique_graphs.dedup();
-                        let mut results = self
-                            .store
-                            .find_in_graphs(&self.pattern, Some(&unique_graphs));
+                        let mut results = self.store.find_in_graphs_with_pending(
+                            &self.pattern,
+                            Some(&unique_graphs),
+                            tx,
+                        );
                         // Clear graph names so results appear as default-graph triples
                         for item in &mut results {
                             item.0 = None;
@@ -3716,6 +3803,13 @@ impl RdfTripleScanOperator {
                         // per SPARQL spec sec 13.2
                         Vec::new()
                     }
+                } else if let Some(tx) = tx.filter(|&tx| self.store.has_pending_ops(tx)) {
+                    // Inside a transaction with pending writes: read them too.
+                    self.store
+                        .find_with_pending(&self.pattern, Some(tx))
+                        .into_iter()
+                        .map(|t| (None, t))
+                        .collect()
                 } else {
                     // No dataset restriction: use actual default graph.
                     // Prefer Ring Index when available (O(log sigma) access).
@@ -7269,6 +7363,7 @@ mod tests {
             object: TripleComponent::Literal(Value::String("o".into())),
             column_map: HashMap::new(),
             graph: None,
+            transaction_id: None,
         };
         let op: Box<dyn Operator> = Box::new(RdfInsertPatternOperator::new(
             store,
@@ -7319,6 +7414,7 @@ mod tests {
             object: TripleComponent::Literal(Value::String("o".into())),
             column_map: HashMap::new(),
             graph: None,
+            transaction_id: None,
         };
         let op: Box<dyn Operator> = Box::new(RdfDeletePatternOperator::new(
             store,

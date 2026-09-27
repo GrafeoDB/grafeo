@@ -275,6 +275,18 @@ tests:
         - [Alix]
         - [Amsterdam]
 
+  - name: union_third_branch_name_rejected
+    query: "RETURN 1 AS a UNION RETURN 2 AS a UNION RETURN 3 AS b"
+    expect:
+      error: "same columns"
+
+  - name: union_aggregate_branch_arity_rejected
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 30})"
+    query: "MATCH (p:Person) RETURN count(p) UNION RETURN 1, 2"
+    expect:
+      error: "same columns"
+
   # ---------------------------------------------------------------------------
   # CALL procedure
   # ---------------------------------------------------------------------------

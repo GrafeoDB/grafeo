@@ -120,6 +120,32 @@ impl<R: WalEntry> TypedWal<R> {
         self.manager.complete_checkpoint(current_transaction, epoch)
     }
 
+    /// Records that a durable checkpoint image holds everything logged in
+    /// files below `log_sequence`. See [`WalManager::mark_checkpoint`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the metadata cannot be written.
+    pub fn mark_checkpoint(
+        &self,
+        log_sequence: u64,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> Result<()> {
+        self.manager
+            .mark_checkpoint(log_sequence, epoch, transaction_id)
+    }
+
+    /// Deletes the log files below `sequence`, never the active file. See
+    /// [`WalManager::remove_files_before`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a file cannot be deleted.
+    pub fn remove_files_before(&self, sequence: u64) -> Result<usize> {
+        self.manager.remove_files_before(sequence)
+    }
+
     /// Syncs the WAL to disk (fsync).
     ///
     /// # Errors

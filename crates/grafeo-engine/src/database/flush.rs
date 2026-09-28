@@ -44,7 +44,17 @@ pub(super) struct FlushResult {
 
 /// Executes the unified flush: serialize dirty sections, write to container, truncate WAL.
 ///
-/// This is the single write path for all persistence operations.
+/// This is the single write path for all persistence operations. With a WAL,
+/// the order is what makes a crash at any point safe (#417):
+///
+/// 1. start a new WAL file, so every record logged so far is in an earlier file,
+/// 2. serialize the sections (the snapshot then contains all those records),
+/// 3. write and sync the container,
+/// 4. only then mark the WAL: recovery starts at the new file, and the earlier
+///    files are deleted unless an incremental backup still needs them.
+///
+/// A crash before step 4 leaves the previous mark in place, so recovery
+/// replays more than needed, which is harmless because replay is idempotent.
 ///
 /// # Errors
 ///
@@ -59,22 +69,43 @@ pub(super) fn flush(
 ) -> Result<FlushResult> {
     use grafeo_common::testing::crash::maybe_crash;
 
+    // One checkpoint at a time: another one interleaving these steps could
+    // delete WAL files this one relies on.
+    let _checkpoint = fm.checkpoint_guard();
+
     maybe_crash("flush:before_serialize");
 
-    // Collect sections to write based on flush reason
-    // Write all sections (dirty or not for Explicit, only dirty for Checkpoint)
-    let mut targets: Vec<(SectionType, Vec<u8>)> = Vec::new();
-    for section in sections {
-        if reason == FlushReason::Explicit || section.is_dirty() {
-            targets.push((section.section_type(), section.serialize()?));
-        }
-    }
-    // If nothing is dirty on a periodic checkpoint, skip the write entirely.
-    // Previous sections remain intact in the container.
-    if targets.is_empty() {
+    // Write all sections for Explicit, only dirty ones for Checkpoint. If
+    // nothing is dirty on a periodic checkpoint, skip the write entirely:
+    // previous sections remain intact in the container.
+    let selected: Vec<&dyn Section> = sections
+        .iter()
+        .copied()
+        .filter(|section| reason == FlushReason::Explicit || section.is_dirty())
+        .collect();
+    if selected.is_empty() {
         return Ok(FlushResult {
             sections_written: 0,
         });
+    }
+
+    // Step 1: records logged before this point land in files below
+    // `covered_sequence`, and their effects are in the snapshot below.
+    #[cfg(feature = "wal")]
+    let covered_sequence = match wal {
+        Some(wal) => {
+            wal.rotate()?;
+            Some(wal.current_sequence())
+        }
+        None => None,
+    };
+
+    maybe_crash("flush:after_rotate");
+
+    // Step 2: serialize.
+    let mut targets: Vec<(SectionType, Vec<u8>)> = Vec::with_capacity(selected.len());
+    for section in &selected {
+        targets.push((section.section_type(), section.serialize()?));
     }
 
     let sections_written = targets.len();
@@ -102,9 +133,32 @@ pub(super) fn flush(
 
     maybe_crash("flush:after_write");
 
-    // Sync WAL to disk (all data is now in the container)
+    // Step 4: the container is durable (`write_sections` syncs it).
     #[cfg(feature = "wal")]
-    if let Some(wal) = wal {
+    if let (Some(wal), Some(sequence)) = (wal, covered_sequence) {
+        use grafeo_common::types::{EpochId, TransactionId};
+
+        wal.mark_checkpoint(
+            sequence,
+            EpochId::new(context.epoch),
+            TransactionId::new(context.transaction_id),
+        )?;
+
+        maybe_crash("flush:after_mark_checkpoint");
+
+        // Incremental backups read the files after their cursor: keep those.
+        let keep_from = match super::backup::read_backup_cursor(wal.dir()) {
+            Ok(Some(cursor)) => sequence.min(cursor.log_sequence + 1),
+            Ok(None) => sequence,
+            Err(e) => {
+                grafeo_common::grafeo_warn!(
+                    "keeping WAL files after checkpoint: cannot read backup cursor: {}",
+                    e
+                );
+                0
+            }
+        };
+        wal.remove_files_before(keep_from)?;
         wal.sync()?;
     }
 

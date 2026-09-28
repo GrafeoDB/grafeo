@@ -4,6 +4,8 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.5.44] - Unreleased
 
+> **Heads-up: 0.5.45 changes the on-disk format.** The `.grafeo` container, its catalog and the WAL move to new formats in one step. 0.5.45 migrates a database automatically the first time it opens it, and WAL-directory databases (paths without the `.grafeo` extension) become a single `.grafeo` file. After that, 0.5.44 and older can no longer open the database, so keep a backup if you may need to go back.
+
 ### Changed
 
 - **Breaking (Rust API, `grafeo-engine`): `RdfPlanner::with_wal` is no longer public.** The planner now records into the session's WAL buffer instead of the WAL.

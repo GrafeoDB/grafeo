@@ -27,7 +27,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Property maps on variable-length edges were checked only against the last hop**: `-[*1..3 {w: 1}]->` in Cypher and `-[{w: 1}]->{1,3}` in GQL, named or anonymous, matched paths whose earlier edges did not have `w = 1`. The map now has to hold for every hop.
 - **`all(e IN relationships(p) WHERE e.w = 1)` matched nothing**: `e.w` on the items of `relationships(p)` and `edges(p)` was NULL inside list predicates and comprehensions, so `[e IN relationships(p) | e.w]` returned `[]`.
 - **GQL `INSERT (a)-[:T]->(b)` failed with `Undefined variable`** when an endpoint had no label, e.g. `INSERT ({id: 1})-[:T]->({id: 2})`. Unlabeled endpoints are now created.
-- **Times with UTC offsets compared inconsistently**: `time('14:00+01:00') = time('13:00Z')` was false while `<=` and `>=` were true. Offset times now compare by instant, consistently for `=`, ordering, `DISTINCT` and grouping.
+- **Times with UTC offsets compared inconsistently**: `time('14:00+01:00') = time('13:00Z')` was false while `<=` and `>=` were true. Offset times now compare by instant, consistently for `=`, ordering, `DISTINCT` and grouping. A time without an offset compares as if it were UTC (it used to compare by clock time against offset times), and never equals an offset time.
 - **Python: aware `datetime` values near year 1 failed to convert**, e.g. `datetime(1, 1, 1, 0, 30, tzinfo=timezone(timedelta(hours=1)))`.
 - **Very long `^` chains or runs of `-`/`+` signs could crash the process** with a stack overflow in the GQL and Cypher parsers; they now fail with the usual nesting-depth error.
 - **Docs**: the Discord invite on the docs site pointed to an expired link.

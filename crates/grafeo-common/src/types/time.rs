@@ -239,10 +239,11 @@ impl Default for Time {
     }
 }
 
-// Equality, ordering and hashing agree: two times with offsets compare by
-// their UTC instant (`14:00+01:00` equals `13:00Z`, like `ZonedDatetime`);
-// otherwise by wall-clock time, with the offset breaking ties so a local time
-// never equals an offset time.
+// Equality, ordering and hashing agree and form one total order: every time
+// compares by its UTC instant, a local time as if it were UTC (`14:00+01:00`
+// equals `13:00Z`, like `ZonedDatetime`), and at the same instant a local time
+// comes first, so it never equals an offset time. Comparing mixed pairs by wall
+// clock instead is not transitive.
 
 impl PartialEq for Time {
     fn eq(&self, other: &Self) -> bool {
@@ -254,22 +255,15 @@ impl Eq for Time {}
 
 impl Hash for Time {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        match self.offset {
-            Some(_) => (true, self.utc_nanos()).hash(state),
-            None => (false, self.nanos).hash(state),
-        }
+        (self.utc_nanos(), self.offset.is_some()).hash(state);
     }
 }
 
 impl Ord for Time {
     fn cmp(&self, other: &Self) -> Ordering {
-        match (self.offset, other.offset) {
-            (Some(_), Some(_)) => self.utc_nanos().cmp(&other.utc_nanos()),
-            _ => self
-                .nanos
-                .cmp(&other.nanos)
-                .then_with(|| self.offset.is_some().cmp(&other.offset.is_some())),
-        }
+        self.utc_nanos()
+            .cmp(&other.utc_nanos())
+            .then_with(|| self.offset.is_some().cmp(&other.offset.is_some()))
     }
 }
 
@@ -362,6 +356,41 @@ mod tests {
         assert_ne!(local, amsterdam);
         assert_ne!(local.cmp(&amsterdam), Ordering::Equal);
         assert_eq!(local, Time::from_hms(14, 0, 0).unwrap());
+    }
+
+    /// Sorting, DISTINCT and grouping need one total order over local and
+    /// offset times together. Offset pairs compared by UTC and mixed pairs by
+    /// wall clock, which made `10:00-12:00 < 15:00 < 20:00+12:00 < 10:00-12:00`.
+    #[test]
+    fn local_and_offset_times_are_totally_ordered() {
+        let local = |hour| Time::from_hms(hour, 0, 0).unwrap();
+        let offset = |hour, seconds| Time::from_hms(hour, 0, 0).unwrap().with_offset(seconds);
+        let times = [
+            offset(10, -12 * 3600),
+            local(15),
+            offset(20, 12 * 3600),
+            local(8),
+            offset(8, 0),
+            offset(9, 3600),
+            local(22),
+            offset(23, -3600),
+        ];
+        for a in &times {
+            for b in &times {
+                assert_eq!(a.cmp(b), b.cmp(a).reverse(), "{a} vs {b}");
+                for c in &times {
+                    if a < b && b < c {
+                        assert!(a < c, "{a} < {b} < {c} but not {a} < {c}");
+                    }
+                }
+            }
+        }
+
+        // A local time compares as if it were UTC, and before an offset time
+        // at the same instant.
+        assert!(local(13) < offset(14, 3600), "13:00 vs 13:00Z");
+        assert!(Time::from_hms(13, 30, 0).unwrap() > offset(14, 3600));
+        assert!(local(12) < offset(14, 3600));
     }
     use super::*;
 

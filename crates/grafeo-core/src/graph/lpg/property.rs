@@ -783,6 +783,17 @@ pub enum CompressedColumnData {
 
 #[cfg(not(feature = "temporal"))]
 impl CompressedColumnData {
+    /// Returns the compressed-array index holding `id`, if present.
+    ///
+    /// `index_to_id` is sorted by entity id (every compress path sorts
+    /// before encoding), so this is a binary search.
+    fn position(&self, id: u64) -> Option<usize> {
+        let (CompressedColumnData::Integers { index_to_id, .. }
+        | CompressedColumnData::Strings { index_to_id, .. }
+        | CompressedColumnData::Booleans { index_to_id, .. }) = self;
+        index_to_id.binary_search(&id).ok()
+    }
+
     /// Returns the memory usage of the compressed data in bytes.
     #[must_use]
     pub fn memory_usage(&self) -> usize {
@@ -1012,11 +1023,31 @@ impl<Id: EntityId> PropertyColumn<Id> {
             return Some(value.clone());
         }
 
-        // For now, compressed data lookup is not implemented for sparse access
-        // because the compressed format stores values by index, not by entity ID.
-        // This would require maintaining an ID -> index map in CompressedColumnData.
-        // The compressed data is primarily useful for bulk/scan operations.
-        None
+        self.get_compressed(id)
+    }
+
+    /// Point lookup into compressed column data.
+    ///
+    /// Strings decode a single dictionary entry. Integers and booleans
+    /// decompress the whole column per lookup, which is correct but not
+    /// cheap for row-by-row reads of a large column.
+    fn get_compressed(&self, id: Id) -> Option<Value> {
+        let compressed = self.compressed.as_ref()?;
+        let idx = compressed.position(id.as_u64())?;
+        match compressed {
+            CompressedColumnData::Strings { encoding, .. } => {
+                encoding.get(idx).map(|s| Value::String(ArcStr::from(s)))
+            }
+            CompressedColumnData::Booleans { data, .. } => {
+                let values = TypeSpecificCompressor::decompress_booleans(data).ok()?;
+                values.get(idx).copied().map(Value::Bool)
+            }
+            CompressedColumnData::Integers { data, .. } => {
+                let values = TypeSpecificCompressor::decompress_integers(data).ok()?;
+                let raw = *values.get(idx)?;
+                Some(Value::Int64(crate::codec::zigzag_decode(raw)))
+            }
+        }
     }
 
     /// Removes a value for an entity.
@@ -2097,10 +2128,8 @@ mod tests {
         let stats = col.compression_stats();
         assert_eq!(stats.value_count, 2000);
 
-        // Values from the hot buffer should be readable
-        // Note: Compressed values are not accessible via get() - see design note
-        let last_value = col.get(NodeId::new(1999));
-        assert!(last_value.is_some() || col.is_compressed());
+        // Values are readable whether they sit in the hot buffer or compressed
+        assert_eq!(col.get(NodeId::new(1999)), Some(Value::Int64(2999)));
     }
 
     #[test]
@@ -2118,9 +2147,11 @@ mod tests {
         // Total count should be correct
         assert_eq!(col.len(), 2000);
 
-        // Late values should be in hot buffer and readable
-        let last_value = col.get(NodeId::new(1999));
-        assert!(last_value.is_some() || col.is_compressed());
+        // Values are readable whether they sit in the hot buffer or compressed
+        assert_eq!(
+            col.get(NodeId::new(1999)),
+            Some(Value::String("Location".into()))
+        );
     }
 
     #[test]
@@ -2136,9 +2167,8 @@ mod tests {
         // Verify total count
         assert_eq!(col.len(), 2000);
 
-        // Late values should be readable
-        let last_value = col.get(NodeId::new(1999));
-        assert!(last_value.is_some() || col.is_compressed());
+        // Values are readable whether they sit in the hot buffer or compressed
+        assert_eq!(col.get(NodeId::new(1999)), Some(Value::Bool(false)));
     }
 
     #[test]
@@ -2156,6 +2186,103 @@ mod tests {
         // Stats should show compression was applied if beneficial
         let stats = col.compression_stats();
         assert_eq!(stats.value_count, 100);
+    }
+
+    /// Spaced-out ids starting at 1000, so an id never equals its position
+    /// in the compressed arrays and a wrong id-to-position lookup fails.
+    fn gapped_id(k: u64) -> NodeId {
+        NodeId::new(1000 + 3 * k)
+    }
+
+    fn compressed_int_column() -> PropertyColumn<NodeId> {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        for k in 0u64..100 {
+            col.set(gapped_id(k), Value::Int64(i64::try_from(k).unwrap()));
+        }
+        col.force_compress();
+        assert!(col.is_compressed());
+        col
+    }
+
+    #[test]
+    fn test_get_reads_compressed_integers() {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        for k in 0u64..100 {
+            // Negative values exercise the zigzag round-trip.
+            col.set(gapped_id(k), Value::Int64(i64::try_from(k).unwrap() - 50));
+        }
+        col.force_compress();
+        assert!(col.is_compressed());
+
+        assert_eq!(col.get(gapped_id(0)), Some(Value::Int64(-50)));
+        assert_eq!(col.get(gapped_id(42)), Some(Value::Int64(-8)));
+        assert_eq!(col.get(gapped_id(99)), Some(Value::Int64(49)));
+        // Ids below, between and above the stored ones.
+        assert_eq!(col.get(NodeId::new(0)), None);
+        assert_eq!(col.get(NodeId::new(1001)), None);
+        assert_eq!(col.get(gapped_id(100)), None);
+    }
+
+    #[test]
+    fn test_get_reads_compressed_strings() {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        let categories = ["Person", "Company", "Product", "Location"];
+        for k in 0u64..100 {
+            col.set(
+                gapped_id(k),
+                Value::String(ArcStr::from(categories[usize::try_from(k % 4).unwrap()])),
+            );
+        }
+        col.force_compress();
+        assert!(col.is_compressed());
+
+        assert_eq!(col.get(gapped_id(0)), Some(Value::String("Person".into())));
+        assert_eq!(
+            col.get(gapped_id(42)),
+            Some(Value::String("Product".into()))
+        );
+        assert_eq!(col.get(NodeId::new(1001)), None);
+        assert_eq!(col.get(gapped_id(100)), None);
+    }
+
+    #[test]
+    fn test_get_reads_compressed_booleans() {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        for k in 0u64..100 {
+            col.set(gapped_id(k), Value::Bool(k % 3 == 0));
+        }
+        col.force_compress();
+        assert!(col.is_compressed());
+
+        assert_eq!(col.get(gapped_id(0)), Some(Value::Bool(true)));
+        assert_eq!(col.get(gapped_id(1)), Some(Value::Bool(false)));
+        assert_eq!(col.get(gapped_id(99)), Some(Value::Bool(true)));
+        assert_eq!(col.get(NodeId::new(1001)), None);
+        assert_eq!(col.get(gapped_id(100)), None);
+    }
+
+    #[test]
+    fn test_get_prefers_hot_value_over_compressed() {
+        let mut col = compressed_int_column();
+
+        col.set(gapped_id(7), Value::Int64(700));
+        assert_eq!(col.get(gapped_id(7)), Some(Value::Int64(700)));
+    }
+
+    #[test]
+    fn test_storage_get_after_force_compress_all() {
+        let storage: PropertyStorage<NodeId> = PropertyStorage::new();
+        let key = PropertyKey::new("age");
+        for k in 0u64..100 {
+            storage.set(
+                gapped_id(k),
+                key.clone(),
+                Value::Int64(i64::try_from(k).unwrap()),
+            );
+        }
+        storage.force_compress_all();
+
+        assert_eq!(storage.get(gapped_id(42), &key), Some(Value::Int64(42)));
     }
 
     #[test]

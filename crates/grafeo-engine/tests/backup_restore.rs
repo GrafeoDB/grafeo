@@ -407,3 +407,70 @@ fn multiple_incremental_backups_in_sequence() {
 
     db.close().expect("close");
 }
+
+// ── Backups while other sessions write ────────────────────────────
+
+/// Records written while a backup ran belonged to neither the backup nor the
+/// next one: a full backup copied the file of its checkpoint and then took
+/// the WAL file active at that point as backed up, and an incremental backup
+/// read the active WAL file and rotated only afterwards. A restore then
+/// missed those records.
+#[test]
+fn backups_during_writes_lose_nothing() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const NODES: i64 = 3000;
+
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let db_path = dir.path().join("busy.grafeo");
+    let backup_dir = dir.path().join("backups");
+    let restore_path = dir.path().join("restored.grafeo");
+
+    let db = Arc::new(GrafeoDB::open(&db_path).expect("open"));
+    db.session()
+        .execute("INSERT (:N {i: -1})")
+        .expect("seed insert");
+
+    let done = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let db = Arc::clone(&db);
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || {
+            let session = db.session();
+            for i in 0..NODES {
+                session
+                    .execute(&format!("INSERT (:N {{i: {i}}})"))
+                    .expect("insert");
+            }
+            done.store(true, Ordering::Release);
+        })
+    };
+
+    db.backup_full(&backup_dir).expect("full backup");
+    while !done.load(Ordering::Acquire) {
+        // "no new WAL records" is fine while the writer is between inserts
+        let _ = db.backup_incremental(&backup_dir);
+    }
+    writer.join().expect("writer thread");
+    // One more write, so the final incremental has content and its epoch is
+    // past every insert above.
+    db.session()
+        .execute("INSERT (:N {i: -2})")
+        .expect("last insert");
+    let last = db
+        .backup_incremental(&backup_dir)
+        .expect("final incremental");
+
+    GrafeoDB::restore_to_epoch(&backup_dir, last.end_epoch, &restore_path).expect("restore");
+    let restored = GrafeoDB::open(&restore_path).expect("open restored");
+    let count = restored
+        .session()
+        .execute("MATCH (n:N) RETURN count(n) AS c")
+        .expect("count")
+        .rows()[0][0]
+        .clone();
+    assert_eq!(count, grafeo_common::types::Value::Int64(NODES + 2));
+    restored.close().expect("close restored");
+    db.close().expect("close");
+}

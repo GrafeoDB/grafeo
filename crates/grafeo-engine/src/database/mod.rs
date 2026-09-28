@@ -2611,8 +2611,7 @@ impl GrafeoDB {
             let _ = self.checkpoint_to_file(fm)?;
         }
 
-        let current_epoch = self.transaction_manager.current_epoch();
-        backup::do_backup_full(backup_dir, fm, self.wal.as_deref(), current_epoch)
+        backup::do_backup_full(backup_dir, fm, self.wal.as_deref())
     }
 
     /// Creates an incremental backup containing WAL records since the last backup.

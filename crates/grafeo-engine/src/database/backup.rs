@@ -302,6 +302,10 @@ use grafeo_storage::wal::LpgWal;
 /// copy reads through the already-locked file handle. `std::fs::copy()` opens
 /// a new handle, which fails on Windows when an exclusive lock is held.
 ///
+/// The backup covers exactly what the copied file holds: its epoch, and the
+/// WAL files before the WAL's checkpoint marker. The files from the marker on
+/// are left to the next incremental backup.
+///
 /// # Errors
 ///
 /// Returns an error if the database has no file manager, or if I/O fails.
@@ -309,7 +313,6 @@ pub(super) fn do_backup_full(
     backup_dir: &Path,
     fm: &GrafeoFileManager,
     wal: Option<&LpgWal>,
-    current_epoch: EpochId,
 ) -> Result<BackupSegment> {
     std::fs::create_dir_all(backup_dir)
         .map_err(|e| Error::Internal(format!("failed to create backup directory: {e}")))?;
@@ -320,8 +323,13 @@ pub(super) fn do_backup_full(
     let filename = format!("backup_full_{segment_idx:04}.grafeo");
     let dest_path = backup_dir.join(&filename);
 
+    // No checkpoint may change the file or the WAL's checkpoint marker while
+    // they are read, so the two agree on what the copy contains.
+    let _checkpoint = fm.checkpoint_guard();
+
     // Copy the .grafeo file to the backup directory through the locked handle
     fm.copy_to(&dest_path)?;
+    let copied_epoch = EpochId::new(fm.active_header().epoch);
 
     let file_size = std::fs::metadata(&dest_path).map_or(0, |m| m.len());
     let file_data = std::fs::read(&dest_path)
@@ -332,7 +340,7 @@ pub(super) fn do_backup_full(
         kind: BackupKind::Full,
         filename,
         start_epoch: EpochId::new(0),
-        end_epoch: current_epoch,
+        end_epoch: copied_epoch,
         checksum,
         size_bytes: file_size,
         created_at_ms: now_ms(),
@@ -341,20 +349,20 @@ pub(super) fn do_backup_full(
     manifest.segments.push(segment.clone());
     write_manifest(backup_dir, &manifest)?;
 
-    // Update backup cursor in the WAL directory.
-    // Rotate the WAL so that post-backup writes land in a new file with a
-    // strictly greater sequence number. Without this, writes that append to
-    // the still-active log file are invisible to incremental backup, which
-    // skips files with seq <= cursor.log_sequence. (GrafeoDB/grafeo#267)
+    // The checkpoint that wrote the copied file started a new WAL file (the
+    // marker's sequence), so every record before it is in the copy. The next
+    // incremental backup starts at that file: taking the file active at this
+    // point instead left the records written since the checkpoint in neither.
     if let Some(wal) = wal {
-        // Record the sequence of the file that was active during this backup,
-        // then rotate so post-backup writes land in a new file with seq > this.
-        let backed_up_sequence = wal.current_sequence();
-        wal.rotate()
-            .map_err(|e| Error::Internal(format!("failed to rotate WAL after full backup: {e}")))?;
+        let covered = wal
+            .read_checkpoint_metadata()?
+            .ok_or_else(|| {
+                Error::Internal("full backup: the WAL has no checkpoint marker".to_string())
+            })?
+            .log_sequence;
         let cursor = BackupCursor {
-            backed_up_epoch: current_epoch,
-            log_sequence: backed_up_sequence,
+            backed_up_epoch: copied_epoch,
+            log_sequence: covered.saturating_sub(1),
             timestamp_ms: now_ms(),
         };
         write_backup_cursor(wal.dir(), &cursor)?;
@@ -391,6 +399,15 @@ pub(super) fn do_backup_incremental(
         Error::Internal("no backup cursor found; run a full backup first".to_string())
     })?;
 
+    // Seal the active file first: every record logged so far is then in a
+    // file up to `sealed`, and records logged from now on go to newer files,
+    // which the next incremental backup reads. Reading the active file and
+    // rotating afterwards lost the records appended in between.
+    let sealed = wal.current_sequence();
+    wal.rotate().map_err(|e| {
+        Error::Internal(format!("failed to rotate WAL for incremental backup: {e}"))
+    })?;
+
     let log_files = wal.log_files()?;
     if log_files.is_empty() {
         return Err(Error::Internal("no WAL log files to backup".to_string()));
@@ -409,11 +426,10 @@ pub(super) fn do_backup_incremental(
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        // Skip files at or before the cursor: the cursor records the
-        // sequence number that was active at the time of the last backup,
-        // so we need files strictly after that sequence to avoid re-including
-        // already-backed-up frames from the active log.
-        if seq <= cursor.log_sequence {
+        // Files up to the cursor are in earlier backups; files after
+        // `sealed` were started after the rotation above and belong to the
+        // next backup.
+        if seq <= cursor.log_sequence || seq > sealed {
             continue;
         }
 
@@ -469,19 +485,10 @@ pub(super) fn do_backup_incremental(
     manifest.segments.push(segment.clone());
     write_manifest(backup_dir, &manifest)?;
 
-    // Rotate the WAL so subsequent incremental backups see a clean boundary.
-    // Same rationale as in do_backup_full (GrafeoDB/grafeo#267).
-    let backed_up_sequence = wal.current_sequence();
-    wal.rotate().map_err(|e| {
-        Error::Internal(format!(
-            "failed to rotate WAL after incremental backup: {e}"
-        ))
-    })?;
-
     // Update backup cursor
     let new_cursor = BackupCursor {
         backed_up_epoch: current_epoch,
-        log_sequence: backed_up_sequence,
+        log_sequence: sealed,
         timestamp_ms: now_ms(),
     };
     write_backup_cursor(wal.dir(), &new_cursor)?;

@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use grafeo_common::grafeo_warn;
 use grafeo_common::types::{LogicalType, TransactionId, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::DataChunk;
@@ -38,13 +37,12 @@ use regex_lite::Regex;
 /// Default chunk size for morsel-driven execution.
 const DEFAULT_CHUNK_SIZE: usize = 1024;
 
-/// Logs an RDF WAL record if a WAL reference is present.
+/// Records an RDF WAL record in the session buffer, if there is one. The
+/// buffer writes it with the rest of the transaction's group.
 #[cfg(feature = "wal")]
 fn log_rdf_wal(wal: &Option<Arc<RdfWal>>, record: &grafeo_storage::wal::WalRecord) {
-    if let Some(wal) = wal
-        && let Err(err) = wal.log(record)
-    {
-        grafeo_warn!("RDF WAL log failed: {err}");
+    if let Some(wal) = wal {
+        wal.push(None, record.clone());
     }
 }
 
@@ -96,9 +94,9 @@ fn record_cdc_triple_delete(
     }
 }
 
-/// Type alias for the WAL used by the RDF planner.
+/// Type alias for the WAL buffer used by the RDF planner.
 #[cfg(feature = "wal")]
-type RdfWal = grafeo_storage::wal::LpgWal;
+type RdfWal = crate::transaction::wal_buffer::WalBuffer;
 
 /// Groups the variable-substitution operands for pattern-based mutation operators.
 ///
@@ -248,10 +246,10 @@ impl RdfPlanner {
         self
     }
 
-    /// Sets the WAL for logging RDF mutations.
+    /// Sets the WAL buffer that records RDF mutations.
     #[cfg(feature = "wal")]
     #[must_use]
-    pub fn with_wal(mut self, wal: Option<Arc<RdfWal>>) -> Self {
+    pub(crate) fn with_wal(mut self, wal: Option<Arc<RdfWal>>) -> Self {
         self.wal = wal;
         self
     }

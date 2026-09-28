@@ -123,11 +123,6 @@ pub struct GrafeoDB {
     /// lock themselves through the file manager.
     #[cfg(feature = "wal")]
     directory_lock: parking_lot::Mutex<Option<grafeo_storage::lock::DirectoryLock>>,
-    /// Shared WAL graph context tracker. Tracks which named graph was last
-    /// written to the WAL, so concurrent sessions can emit `SwitchGraph`
-    /// records only when the context actually changes.
-    #[cfg(feature = "wal")]
-    pub(super) wal_graph_context: Arc<parking_lot::Mutex<Option<String>>>,
     /// Query cache for parsed and optimized plans.
     pub(super) query_cache: Arc<QueryCache>,
     /// Shared commit counter for auto-GC across sessions.
@@ -402,6 +397,15 @@ impl GrafeoDB {
             Vec<grafeo_common::types::EdgeId>,
         )> = None;
 
+        // What WAL recovery found at the end of the log, applied once the WAL
+        // is open (#411): a torn tail must be sealed before anything new is
+        // logged, and a log that ends inside a named graph must switch back
+        // to the default graph, where every new group starts.
+        #[cfg(all(feature = "wal", feature = "lpg"))]
+        let mut wal_torn_tail = false;
+        #[cfg(all(feature = "wal", feature = "lpg"))]
+        let mut wal_in_named_graph = false;
+
         // --- Single-file format (.grafeo) ---
         #[cfg(feature = "grafeo-file")]
         let file_manager: Option<Arc<GrafeoFileManager>> = if is_read_only {
@@ -499,14 +503,16 @@ impl GrafeoDB {
                 #[cfg(all(feature = "wal", feature = "lpg"))]
                 if config.wal_enabled && fm.has_sidecar_wal() {
                     let recovery = WalRecovery::new(fm.sidecar_wal_path());
-                    let records = recovery.recover()?;
+                    let recovered = recovery.recover_with_tail()?;
                     Self::apply_wal_records(
                         &store,
                         &catalog,
                         #[cfg(feature = "triple-store")]
                         &rdf_store,
-                        &records,
+                        &recovered.records,
                     )?;
+                    wal_torn_tail = recovered.torn_tail;
+                    wal_in_named_graph = Self::ends_in_named_graph(&recovered.records);
                 }
 
                 Some(Arc::new(fm))
@@ -572,14 +578,16 @@ impl GrafeoDB {
                 #[cfg(feature = "lpg")]
                 if !is_single_file && wal_path.exists() {
                     let recovery = WalRecovery::new(&wal_path);
-                    let records = recovery.recover_all()?;
+                    let recovered = recovery.recover_all_with_tail()?;
                     Self::apply_wal_records(
                         &store,
                         &catalog,
                         #[cfg(feature = "triple-store")]
                         &rdf_store,
-                        &records,
+                        &recovered.records,
                     )?;
+                    wal_torn_tail = recovered.torn_tail;
+                    wal_in_named_graph = Self::ends_in_named_graph(&recovered.records);
                 }
 
                 // Open/create WAL manager with configured durability
@@ -602,6 +610,15 @@ impl GrafeoDB {
                     ..WalConfig::default()
                 };
                 let wal_manager = LpgWal::with_config(&wal_path, wal_config)?;
+                #[cfg(feature = "lpg")]
+                {
+                    if wal_torn_tail {
+                        wal_manager.seal_torn_tail()?;
+                    }
+                    if wal_in_named_graph {
+                        wal_manager.log(&WalRecord::SwitchGraph { name: None })?;
+                    }
+                }
                 Some(Arc::new(wal_manager))
             } else {
                 None
@@ -651,8 +668,6 @@ impl GrafeoDB {
             wal,
             #[cfg(feature = "wal")]
             directory_lock: parking_lot::Mutex::new(directory_lock),
-            #[cfg(feature = "wal")]
-            wal_graph_context: Arc::new(parking_lot::Mutex::new(None)),
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
@@ -799,8 +814,6 @@ impl GrafeoDB {
             wal: None,
             #[cfg(feature = "wal")]
             directory_lock: parking_lot::Mutex::new(None),
-            #[cfg(feature = "wal")]
-            wal_graph_context: Arc::new(parking_lot::Mutex::new(None)),
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
@@ -892,8 +905,6 @@ impl GrafeoDB {
             wal: None,
             #[cfg(feature = "wal")]
             directory_lock: parking_lot::Mutex::new(None),
-            #[cfg(feature = "wal")]
-            wal_graph_context: Arc::new(parking_lot::Mutex::new(None)),
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
@@ -1101,6 +1112,22 @@ impl GrafeoDB {
         self.query_cache = Arc::new(QueryCache::default());
 
         Ok(())
+    }
+
+    /// Whether replaying `records` leaves the graph cursor on a named graph.
+    ///
+    /// Logs written before 0.5.44 could end inside a named graph; new groups
+    /// assume they start in the default graph.
+    #[cfg(all(feature = "wal", feature = "lpg"))]
+    fn ends_in_named_graph(records: &[WalRecord]) -> bool {
+        records
+            .iter()
+            .rev()
+            .find_map(|record| match record {
+                WalRecord::SwitchGraph { name } => Some(name.is_some()),
+                _ => None,
+            })
+            .unwrap_or(false)
     }
 
     /// Applies WAL records to restore the database state.
@@ -1853,7 +1880,7 @@ impl GrafeoDB {
 
         #[cfg(all(feature = "wal", feature = "lpg"))]
         if let Some(ref wal) = self.wal {
-            session.set_wal(Arc::clone(wal), Arc::clone(&self.wal_graph_context));
+            session.set_wal(Arc::clone(wal));
         }
 
         #[cfg(feature = "cdc")]

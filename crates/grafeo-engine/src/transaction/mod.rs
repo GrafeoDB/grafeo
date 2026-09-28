@@ -208,5 +208,8 @@ pub use write_tracker::TransactionWriteTracker;
 
 mod write_tracker;
 
+#[cfg(feature = "wal")]
+pub(crate) mod wal_buffer;
+
 #[cfg(feature = "parallel")]
 pub use parallel::{BatchRequest, BatchResult, ExecutionStatus, ParallelExecutor};

@@ -4,7 +4,7 @@
 //! snapshot write/read, and sidecar WAL lifecycle management.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,6 +41,10 @@ pub struct GrafeoFileManager {
     read_only: bool,
     /// Held for a whole checkpoint, see [`checkpoint_guard`](Self::checkpoint_guard).
     checkpoint_lock: Mutex<()>,
+    /// The database file, when `file` is a pending checkpoint image instead
+    /// (read-only open, see [`open_read_only`](Self::open_read_only)). It
+    /// carries the shared lock.
+    lock_holder: Option<File>,
     /// Encryptor for section data (None = unencrypted).
     #[cfg(feature = "encryption")]
     section_encryptor: Option<grafeo_common::encryption::PageEncryptor>,
@@ -71,6 +75,12 @@ impl GrafeoFileManager {
         {
             fs::create_dir_all(parent)?;
         }
+
+        // Checkpoint side files next to a missing database file belong to a
+        // deleted database: a pending image must not be installed over the
+        // new one later.
+        remove_if_exists(&checkpoint_image_path(&path))?;
+        remove_if_exists(&checkpoint_tmp_path(&path))?;
 
         let mut file = OpenOptions::new()
             .read(true)
@@ -113,6 +123,7 @@ impl GrafeoFileManager {
             active_slot: Mutex::new(0),
             read_only: false,
             checkpoint_lock: Mutex::new(()),
+            lock_holder: None,
             #[cfg(feature = "encryption")]
             section_encryptor: None,
         })
@@ -140,6 +151,8 @@ impl GrafeoFileManager {
             ))
         })?;
 
+        finish_interrupted_checkpoint(&path, &mut file)?;
+
         let file_header = header::read_file_header(&mut file)?;
         header::validate_file_header(&file_header)?;
 
@@ -154,6 +167,7 @@ impl GrafeoFileManager {
             active_slot: Mutex::new(active_slot),
             read_only: false,
             checkpoint_lock: Mutex::new(()),
+            lock_holder: None,
             #[cfg(feature = "encryption")]
             section_encryptor: None,
         })
@@ -169,6 +183,10 @@ impl GrafeoFileManager {
     /// and other read-only operations. Calling [`write_snapshot`](Self::write_snapshot)
     /// will return an error.
     ///
+    /// If a checkpoint was interrupted while installing its new image, a
+    /// reader cannot finish it: it reads that complete image instead of the
+    /// database file and leaves it for the next read-write open.
+    ///
     /// # Errors
     ///
     /// Returns an error if the file does not exist, has invalid magic, or
@@ -176,16 +194,23 @@ impl GrafeoFileManager {
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
-        let mut file = OpenOptions::new().read(true).open(&path)?;
+        let database_file = OpenOptions::new().read(true).open(&path)?;
 
         // Acquire a shared lock: coexists with other shared locks but
         // blocks if an exclusive lock cannot be shared (platform-dependent).
-        file.try_lock_shared().map_err(|_| {
+        database_file.try_lock_shared().map_err(|_| {
             Error::Internal(format!(
                 "database file cannot be locked for reading: {}",
                 path.display()
             ))
         })?;
+
+        let pending_image = checkpoint_image_path(&path);
+        let (mut file, lock_holder) = if pending_image.exists() {
+            (File::open(&pending_image)?, Some(database_file))
+        } else {
+            (database_file, None)
+        };
 
         let file_header = header::read_file_header(&mut file)?;
         header::validate_file_header(&file_header)?;
@@ -201,6 +226,7 @@ impl GrafeoFileManager {
             active_slot: Mutex::new(active_slot),
             read_only: true,
             checkpoint_lock: Mutex::new(()),
+            lock_holder,
             #[cfg(feature = "encryption")]
             section_encryptor: None,
         })
@@ -447,6 +473,19 @@ impl GrafeoFileManager {
     /// is written at `DIRECTORY_OFFSET`, and a new DbHeader is committed to
     /// the inactive slot.
     ///
+    /// The database file is never overwritten before a complete copy of the
+    /// new image exists (#418):
+    ///
+    /// 1. the new image is written to `<file>.checkpoint.tmp` and synced,
+    /// 2. it is renamed to `<file>.checkpoint`: from now on an open finishes
+    ///    installing it (see [`open`](Self::open)),
+    /// 3. it is copied over the database file, which is synced,
+    /// 4. `<file>.checkpoint` is removed.
+    ///
+    /// A failure or crash before step 2 leaves the database file untouched;
+    /// after it, the next open installs the image. This needs room for a
+    /// second copy of the file while it runs.
+    ///
     /// # Errors
     ///
     /// Returns an error if write or sync fails.
@@ -458,9 +497,6 @@ impl GrafeoFileManager {
         node_count: u64,
         edge_count: u64,
     ) -> Result<()> {
-        use crate::container::SectionDirectory;
-        use crate::container::directory::{DIRECTORY_OFFSET, SECTION_DATA_OFFSET};
-        use grafeo_common::storage::SectionDirectoryEntry;
         use grafeo_common::testing::crash::maybe_crash;
 
         if self.read_only {
@@ -469,10 +505,97 @@ impl GrafeoFileManager {
             ));
         }
 
-        let mut dir = SectionDirectory::new();
         let mut file = self.file.lock();
+        let tmp_path = checkpoint_tmp_path(&self.path);
+        let image_path = checkpoint_image_path(&self.path);
+
+        // An image from an earlier checkpoint in this process that failed
+        // while installing: finish it first, the new image starts from it.
+        if image_path.exists() {
+            install_image(&mut file, &image_path)?;
+            fs::remove_file(&image_path)?;
+            let (h0, h1) = header::read_db_headers(&mut file)?;
+            let (slot, header) = header::active_db_header(&h0, &h1);
+            *self.active_header.lock() = header;
+            *self.active_slot.lock() = slot;
+        }
+
         let active_header = self.active_header.lock();
         let mut active_slot = self.active_slot.lock();
+
+        // Step 1.
+        let (new_header, target_slot) = match self.write_image(
+            &mut file,
+            &tmp_path,
+            sections,
+            &active_header,
+            *active_slot,
+            (epoch, transaction_id, node_count, edge_count),
+        ) {
+            Ok(written) => written,
+            Err(e) => {
+                // Do not leave a partial image taking up space (full disk).
+                let _ = fs::remove_file(&tmp_path);
+                return Err(e);
+            }
+        };
+
+        maybe_crash("checkpoint:after_image");
+
+        // Step 2.
+        fs::rename(&tmp_path, &image_path)?;
+        sync_parent_dir(&image_path)?;
+
+        maybe_crash("checkpoint:after_rename");
+
+        // Steps 3 and 4.
+        install_image(&mut file, &image_path)?;
+
+        maybe_crash("checkpoint:after_install");
+
+        fs::remove_file(&image_path)?;
+
+        // Update internal state
+        drop(active_header);
+        *self.active_header.lock() = new_header;
+        *active_slot = target_slot;
+
+        Ok(())
+    }
+
+    /// Writes a complete new image of the database file to `image_path`: the
+    /// current file and database headers, the sections, the directory and a
+    /// new header in the inactive slot. Returns that header and its slot.
+    fn write_image(
+        &self,
+        main: &mut File,
+        image_path: &Path,
+        sections: &[(grafeo_common::storage::SectionType, &[u8])],
+        active_header: &DbHeader,
+        active_slot: u8,
+        (epoch, transaction_id, node_count, edge_count): (u64, u64, u64, u64),
+    ) -> Result<(DbHeader, u8)> {
+        use crate::container::SectionDirectory;
+        use crate::container::directory::{DIRECTORY_OFFSET, SECTION_DATA_OFFSET};
+        use grafeo_common::storage::SectionDirectoryEntry;
+        use grafeo_common::testing::crash::maybe_crash;
+
+        let mut image = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(image_path)?;
+
+        // Start from the current file header and both database headers.
+        // reason: DIRECTORY_OFFSET is 12 KiB
+        #[allow(clippy::cast_possible_truncation)]
+        let mut headers = vec![0u8; DIRECTORY_OFFSET as usize];
+        main.seek(SeekFrom::Start(0))?;
+        main.read_exact(&mut headers)?;
+        image.write_all(&headers)?;
+
+        let mut dir = SectionDirectory::new();
 
         maybe_crash("write_sections:before_data");
 
@@ -518,8 +641,8 @@ impl GrafeoFileManager {
             let checksum = crc32fast::hash(write_data);
             let length = write_data.len() as u64;
 
-            file.seek(SeekFrom::Start(current_offset))?;
-            file.write_all(write_data)?;
+            image.seek(SeekFrom::Start(current_offset))?;
+            image.write_all(write_data)?;
 
             dir.upsert(SectionDirectoryEntry {
                 section_type: *section_type,
@@ -537,19 +660,19 @@ impl GrafeoFileManager {
 
         maybe_crash("write_sections:after_data");
 
-        // Truncate file to remove stale trailing data
-        file.set_len(current_offset)?;
+        // Cut the image right after the last section
+        image.set_len(current_offset)?;
 
         // Write section directory
         let dir_bytes = dir.to_bytes();
-        file.seek(SeekFrom::Start(DIRECTORY_OFFSET))?;
-        file.write_all(&dir_bytes)?;
+        image.seek(SeekFrom::Start(DIRECTORY_OFFSET))?;
+        image.write_all(&dir_bytes)?;
 
         maybe_crash("write_sections:after_directory");
 
         // Build and write new DbHeader to inactive slot
         let new_iteration = active_header.iteration + 1;
-        let target_slot = u8::from(*active_slot == 0);
+        let target_slot = u8::from(active_slot == 0);
         // reason: millis since UNIX epoch fits in u64 for ~585 million years
         #[allow(clippy::cast_possible_truncation)]
         let timestamp_ms = SystemTime::now()
@@ -567,19 +690,14 @@ impl GrafeoFileManager {
             edge_count,
             timestamp_ms,
         };
-        header::write_db_header(&mut file, target_slot, &new_header)?;
+        header::write_db_header(&mut image, target_slot, &new_header)?;
 
         // Ensure everything is on disk
-        file.sync_all()?;
+        image.sync_all()?;
 
         maybe_crash("write_sections:after_fsync");
 
-        // Update internal state
-        drop(active_header);
-        *self.active_header.lock() = new_header;
-        *active_slot = target_slot;
-
-        Ok(())
+        Ok((new_header, target_slot))
     }
 
     /// Reads the section directory from the file.
@@ -810,17 +928,96 @@ impl GrafeoFileManager {
         if !self.read_only {
             file.sync_all()?;
         }
-        file.unlock()
+        self.lock_carrier(&file)
+            .unlock()
             .map_err(|e| Error::Internal(format!("failed to unlock database file: {e}")))?;
         Ok(())
+    }
+
+    /// The handle that holds this manager's file lock.
+    fn lock_carrier<'a>(&'a self, file: &'a File) -> &'a File {
+        self.lock_holder.as_ref().unwrap_or(file)
     }
 }
 
 impl Drop for GrafeoFileManager {
     fn drop(&mut self) {
         let file = self.file.lock();
-        let _ = file.unlock();
+        let _ = self.lock_carrier(&file).unlock();
     }
+}
+
+/// Where a checkpoint writes its new image until it is complete.
+fn checkpoint_tmp_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".checkpoint.tmp");
+    PathBuf::from(name)
+}
+
+/// A complete new image that a checkpoint is installing over the database
+/// file. Its presence means the install has to be finished.
+fn checkpoint_image_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".checkpoint");
+    PathBuf::from(name)
+}
+
+fn remove_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Copies the complete image at `image` over the database file and syncs it.
+fn install_image(file: &mut File, image: &Path) -> Result<()> {
+    use grafeo_common::testing::crash::maybe_crash;
+
+    let mut source = File::open(image)?;
+    let length = source.metadata()?.len();
+    file.seek(SeekFrom::Start(0))?;
+    std::io::copy(&mut source, file)?;
+
+    maybe_crash("checkpoint:after_install_write");
+
+    file.set_len(length)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Opening a database file for writing: an image that was still being
+/// written is discarded (the database file was not touched yet), and a
+/// complete image whose install was cut off is installed.
+fn finish_interrupted_checkpoint(path: &Path, file: &mut File) -> Result<()> {
+    remove_if_exists(&checkpoint_tmp_path(path))?;
+    let image = checkpoint_image_path(path);
+    if image.exists() {
+        grafeo_common::grafeo_warn!(
+            "finishing a checkpoint that was interrupted while installing {}",
+            path.display()
+        );
+        install_image(file, &image)?;
+        fs::remove_file(&image)?;
+    }
+    Ok(())
+}
+
+/// Makes a rename in the directory holding `path` durable. Windows has no
+/// directory handles to sync; its renames are metadata-journaled.
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1674,5 +1871,172 @@ mod tests {
             let result = manager.read_section_data(entry);
             assert!(result.is_err(), "decryption with wrong key should fail");
         }
+    }
+
+    // ── Checkpoints never overwrite the file before a complete copy exists (#418) ──
+
+    fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    }
+
+    fn lpg_payload(manager: &GrafeoFileManager) -> Vec<u8> {
+        use grafeo_common::storage::SectionType;
+
+        let dir = manager.read_section_directory().unwrap().unwrap();
+        let entry = dir.find(SectionType::LpgStore).unwrap().clone();
+        manager.read_section_data(&entry).unwrap()
+    }
+
+    fn write_payload(manager: &GrafeoFileManager, payload: &[u8], epoch: u64) -> Result<()> {
+        use grafeo_common::storage::SectionType;
+
+        manager.write_sections(&[(SectionType::LpgStore, payload)], epoch, 1, 0, 0)
+    }
+
+    /// The bytes of the database file, read through the locked handle
+    /// (reading the path directly fails on Windows while it is locked).
+    fn file_bytes(manager: &GrafeoFileManager, dir: &TempDir) -> Vec<u8> {
+        let copy = dir.path().join("copy.bin");
+        manager.copy_to(&copy).unwrap();
+        fs::read(&copy).unwrap()
+    }
+
+    /// A complete new image of `path` with `payload`, built in another file.
+    fn image_with_payload(dir: &TempDir, payload: &[u8]) -> Vec<u8> {
+        let other = dir.path().join("other.grafeo");
+        {
+            let manager = GrafeoFileManager::create(&other).unwrap();
+            write_payload(&manager, payload, 7).unwrap();
+        }
+        let bytes = fs::read(&other).unwrap();
+        fs::remove_file(&other).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn checkpoint_leaves_no_side_files() {
+        let dir = test_dir();
+        let path = dir.path().join("db.grafeo");
+        let manager = GrafeoFileManager::create(&path).unwrap();
+        write_payload(&manager, b"first", 1).unwrap();
+        write_payload(&manager, b"second", 2).unwrap();
+
+        assert_eq!(lpg_payload(&manager), b"second");
+        assert!(!with_suffix(&path, ".checkpoint").exists());
+        assert!(!with_suffix(&path, ".checkpoint.tmp").exists());
+    }
+
+    /// A checkpoint that fails before its new image is complete (here: the
+    /// image file cannot be created, like on a full disk) leaves the database
+    /// file exactly as it was.
+    #[test]
+    fn failed_checkpoint_leaves_the_file_untouched() {
+        let dir = test_dir();
+        let path = dir.path().join("db.grafeo");
+        let manager = GrafeoFileManager::create(&path).unwrap();
+        write_payload(&manager, b"good state", 1).unwrap();
+        let before = file_bytes(&manager, &dir);
+
+        let blocker = with_suffix(&path, ".checkpoint.tmp");
+        fs::create_dir(&blocker).unwrap();
+        assert!(write_payload(&manager, b"never written", 2).is_err());
+        fs::remove_dir(&blocker).unwrap();
+
+        assert_eq!(file_bytes(&manager, &dir), before, "file bytes unchanged");
+        assert_eq!(lpg_payload(&manager), b"good state");
+        drop(manager);
+        let reopened = GrafeoFileManager::open(&path).unwrap();
+        assert_eq!(lpg_payload(&reopened), b"good state");
+    }
+
+    /// A complete image left by a checkpoint interrupted while installing it
+    /// is installed when the database is opened.
+    #[test]
+    fn open_finishes_an_interrupted_checkpoint() {
+        let dir = test_dir();
+        let path = dir.path().join("db.grafeo");
+        {
+            let manager = GrafeoFileManager::create(&path).unwrap();
+            write_payload(&manager, b"old", 1).unwrap();
+        }
+        let pending = with_suffix(&path, ".checkpoint");
+        fs::write(&pending, image_with_payload(&dir, b"new")).unwrap();
+        // The install was cut off halfway through the database file.
+        let mut torn = fs::read(&path).unwrap();
+        torn.truncate(torn.len() / 2);
+        fs::write(&path, torn).unwrap();
+
+        let manager = GrafeoFileManager::open(&path).unwrap();
+        assert_eq!(lpg_payload(&manager), b"new");
+        assert_eq!(manager.active_header().epoch, 7);
+        assert!(
+            !pending.exists(),
+            "the pending image is removed once installed"
+        );
+    }
+
+    /// An image that was still being written is discarded: the database file
+    /// was never touched, so it is still valid.
+    #[test]
+    fn open_discards_an_unfinished_image() {
+        let dir = test_dir();
+        let path = dir.path().join("db.grafeo");
+        {
+            let manager = GrafeoFileManager::create(&path).unwrap();
+            write_payload(&manager, b"old", 1).unwrap();
+        }
+        let unfinished = with_suffix(&path, ".checkpoint.tmp");
+        fs::write(&unfinished, b"half an image").unwrap();
+
+        let manager = GrafeoFileManager::open(&path).unwrap();
+        assert_eq!(lpg_payload(&manager), b"old");
+        assert!(!unfinished.exists());
+    }
+
+    /// A read-only open cannot install a pending image, so it reads it
+    /// instead of the database file, and leaves it for the next writer.
+    #[test]
+    fn read_only_open_reads_a_pending_image() {
+        let dir = test_dir();
+        let path = dir.path().join("db.grafeo");
+        {
+            let manager = GrafeoFileManager::create(&path).unwrap();
+            write_payload(&manager, b"old", 1).unwrap();
+        }
+        let pending = with_suffix(&path, ".checkpoint");
+        fs::write(&pending, image_with_payload(&dir, b"new")).unwrap();
+
+        {
+            let reader = GrafeoFileManager::open_read_only(&path).unwrap();
+            assert_eq!(lpg_payload(&reader), b"new");
+            reader.close().unwrap();
+        }
+        assert!(pending.exists(), "a reader does not install the image");
+
+        let writer = GrafeoFileManager::open(&path).unwrap();
+        assert_eq!(lpg_payload(&writer), b"new");
+        assert!(!pending.exists());
+    }
+
+    /// Side files next to a path whose database file is gone belong to a
+    /// deleted database: creating a new one there removes them.
+    #[test]
+    fn create_removes_stale_checkpoint_files() {
+        let dir = test_dir();
+        let path = dir.path().join("db.grafeo");
+        let pending = with_suffix(&path, ".checkpoint");
+        fs::write(&pending, image_with_payload(&dir, b"stale")).unwrap();
+        fs::write(with_suffix(&path, ".checkpoint.tmp"), b"stale").unwrap();
+
+        {
+            let manager = GrafeoFileManager::create(&path).unwrap();
+            assert!(manager.active_header().is_empty());
+        }
+        assert!(!pending.exists());
+        assert!(!with_suffix(&path, ".checkpoint.tmp").exists());
+        let reopened = GrafeoFileManager::open(&path).unwrap();
+        assert!(reopened.active_header().is_empty());
     }
 }

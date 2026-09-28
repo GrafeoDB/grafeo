@@ -195,7 +195,7 @@ mod tests {
     #[cfg(feature = "testing-crash-injection")]
     fn crash_sweep(phase: &str, expected: &[Vec<Value>]) {
         // More points than the checkpoint has, so the last runs complete.
-        for point in 1..=12 {
+        for point in 1..=18 {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("db.grafeo");
             crash_after(&format!("{phase}:{point}"), &path);
@@ -218,6 +218,72 @@ mod tests {
     #[test]
     fn crash_at_every_step_of_the_first_checkpoint() {
         crash_sweep("first", &[vec![Value::from("Alix"), Value::from("Gus")]]);
+    }
+
+    /// A later checkpoint used to overwrite the previous image in place, so a
+    /// crash while writing it left a file that no longer opened (#418).
+    #[cfg(feature = "testing-crash-injection")]
+    #[test]
+    fn crash_at_every_step_of_a_later_checkpoint() {
+        crash_sweep(
+            "second",
+            &[
+                vec![Value::from("Alix"), Value::from("Gus")],
+                vec![Value::from("Vincent"), Value::from("Jules")],
+            ],
+        );
+    }
+
+    /// A checkpoint that fails partway (here its new image cannot be created,
+    /// as on a full disk) leaves the database usable, and the data readable
+    /// after a reopen (#418).
+    #[test]
+    fn failed_checkpoint_keeps_the_database_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        let blocker = {
+            let mut name = path.as_os_str().to_owned();
+            name.push(".checkpoint.tmp");
+            PathBuf::from(name)
+        };
+        {
+            let db = open(&path);
+            let session = db.session();
+            session
+                .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+                .unwrap();
+            db.wal_checkpoint().unwrap();
+            session
+                .execute("INSERT (:Person {name: 'Vincent'})")
+                .unwrap();
+
+            std::fs::create_dir(&blocker).unwrap();
+            assert!(db.wal_checkpoint().is_err(), "the checkpoint must fail");
+            session.execute("INSERT (:Person {name: 'Jules'})").unwrap();
+            assert!(db.close().is_err(), "close() checkpoints too");
+        }
+        std::fs::remove_dir(&blocker).unwrap();
+
+        let db = open(&path);
+        let names = db
+            .session()
+            .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
+            .unwrap()
+            .rows()
+            .to_vec();
+        assert_eq!(
+            names,
+            vec![
+                vec![Value::from("Alix")],
+                vec![Value::from("Gus")],
+                vec![Value::from("Jules")],
+                vec![Value::from("Vincent")],
+            ]
+        );
+        assert_eq!(
+            knows(&db),
+            vec![vec![Value::from("Alix"), Value::from("Gus")]]
+        );
     }
 
     fn log_files(dir: &Path) -> Vec<PathBuf> {

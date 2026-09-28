@@ -2425,6 +2425,23 @@ impl GrafeoDB {
         Ok(())
     }
 
+    /// Logs the records of one database-level write (outside any
+    /// transaction) as a group with its own commit marker, so the write is
+    /// durable when the call returns and is recovered on its own (#395).
+    #[cfg(feature = "wal")]
+    pub(super) fn log_wal_group(&self, mut records: Vec<WalRecord>) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        if let Some(ref wal) = self.wal {
+            records.push(WalRecord::TransactionCommit {
+                transaction_id: grafeo_common::types::TransactionId::SYSTEM,
+            });
+            wal.log_batch(&records)?;
+        }
+        Ok(())
+    }
+
     /// Registers storage sections as [`MemoryConsumer`]s with the BufferManager.
     ///
     /// Each section reports its memory usage to the buffer manager, enabling

@@ -213,6 +213,54 @@ mod tests {
                 db.execute_sparql(r#"INSERT DATA { <http://ex.org/mia> <http://ex.org/p> "3" . }"#)
                     .unwrap();
             }
+            // #395: a database-level write, then `wal_checkpoint()`, no close.
+            "db_write_then_checkpoint" => {
+                db.create_node_with_props(&["Document"], [("title", Value::from("test"))]);
+                db.wal_checkpoint().unwrap();
+            }
+            // Every database-level write call, outside any transaction.
+            "db_crud" => {
+                let alix = db.create_node(&["Person"]);
+                db.set_node_property(alix, "name", Value::from("Alix"));
+                let gus = db.create_node_with_props(
+                    &["Person"],
+                    [("name", Value::from("Gus")), ("age", Value::from(40_i64))],
+                );
+                db.add_node_label(alix, "Employee");
+                db.add_node_label(gus, "Temp");
+                db.remove_node_label(gus, "Temp");
+                db.remove_node_property(gus, "age");
+                let knows = db.create_edge(alix, gus, "KNOWS");
+                db.set_edge_property(knows, "since", Value::from(2020_i64));
+                let likes = db.create_edge_with_props(
+                    gus,
+                    alix,
+                    "LIKES",
+                    [("w", Value::from(1_i64)), ("x", Value::from(2_i64))],
+                );
+                db.remove_edge_property(likes, "x");
+                let vincent = db.create_node(&["Person"]);
+                db.delete_node(vincent);
+                let temp = db.create_edge(alix, gus, "TEMP");
+                db.delete_edge(temp);
+                db.batch_create_nodes("Vec", "v", vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+                db.batch_create_nodes_with_props(
+                    "Doc",
+                    ["a", "b"]
+                        .iter()
+                        .map(|title| {
+                            std::iter::once(("title".into(), Value::from(*title))).collect()
+                        })
+                        .collect(),
+                );
+            }
+            // A database-level write while a session transaction is open.
+            "db_write_during_session_tx" => {
+                let mut a = db.session();
+                a.begin_transaction().unwrap();
+                insert(&a, "Mia");
+                db.create_node_with_props(&["Person"], [("name", Value::from("Django"))]);
+            }
             "seed_alix" => insert(&db.session(), "Alix"),
             "insert_gus" => insert(&db.session(), "Gus"),
             other => panic!("unknown scenario {other}"),
@@ -342,6 +390,111 @@ mod tests {
             let types = db.session().execute("SHOW NODE TYPES").unwrap();
             let names: Vec<Value> = types.rows().iter().map(|row| row[0].clone()).collect();
             assert_eq!(names, vec![Value::from("Robot")], "{format}");
+        }
+    }
+
+    /// Rows of a query, each value rendered as text (`NULL` for null).
+    fn rows(db: &GrafeoDB, query: &str) -> Vec<Vec<String>> {
+        let result = db.session().execute(query).unwrap();
+        result
+            .rows()
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|value| match value {
+                        Value::Null => "NULL".to_string(),
+                        Value::String(s) => s.to_string(),
+                        Value::List(items) => {
+                            let mut items: Vec<String> = items
+                                .iter()
+                                .map(|item| match item {
+                                    Value::String(s) => s.to_string(),
+                                    other => other.to_string(),
+                                })
+                                .collect();
+                            items.sort();
+                            items.join(",")
+                        }
+                        other => other.to_string(),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn row(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_string()).collect()
+    }
+
+    /// #395: a database-level write followed by `wal_checkpoint()` survives a
+    /// crash without `close()`.
+    #[test]
+    fn database_level_write_survives_checkpoint_without_close() {
+        let dir = tempfile::tempdir().unwrap();
+        for (format, path) in formats(dir.path()) {
+            crash_after("db_write_then_checkpoint", &path, format);
+            assert_eq!(
+                rows(&open(&path, format), "MATCH (d:Document) RETURN d.title"),
+                vec![row(&["test"])],
+                "{format}"
+            );
+        }
+    }
+
+    /// Every database-level write call is durable when it returns.
+    #[test]
+    fn database_level_writes_are_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        for (format, path) in formats(dir.path()) {
+            crash_after("db_crud", &path, format);
+            let db = open(&path, format);
+            assert_eq!(
+                rows(
+                    &db,
+                    "MATCH (n:Person) RETURN n.name, labels(n), n.age ORDER BY n.name"
+                ),
+                vec![
+                    row(&["Alix", "Employee,Person", "NULL"]),
+                    row(&["Gus", "Person", "NULL"]),
+                ],
+                "{format}: nodes"
+            );
+            assert_eq!(
+                rows(
+                    &db,
+                    "MATCH (a)-[r]->(b)                      RETURN a.name, type(r), b.name, r.since, r.w, r.x ORDER BY type(r)"
+                ),
+                vec![
+                    row(&["Alix", "KNOWS", "Gus", "2020", "NULL", "NULL"]),
+                    row(&["Gus", "LIKES", "Alix", "NULL", "1", "NULL"]),
+                ],
+                "{format}: edges"
+            );
+            assert_eq!(
+                rows(&db, "MATCH (n:Vec) RETURN count(n)"),
+                vec![row(&["2"])],
+                "{format}: batch_create_nodes"
+            );
+            assert_eq!(
+                rows(&db, "MATCH (n:Doc) RETURN n.title ORDER BY n.title"),
+                vec![row(&["a"]), row(&["b"])],
+                "{format}: batch_create_nodes_with_props"
+            );
+        }
+    }
+
+    /// A database-level write is committed on its own, without an open
+    /// session transaction's writes.
+    #[test]
+    fn database_level_write_during_a_session_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        for (format, path) in formats(dir.path()) {
+            crash_after("db_write_during_session_tx", &path, format);
+            assert_eq!(
+                names(&open(&path, format)),
+                strings(&["Django"]),
+                "{format}"
+            );
         }
     }
 

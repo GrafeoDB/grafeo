@@ -39,6 +39,8 @@ pub struct GrafeoFileManager {
     active_slot: Mutex<u8>,
     /// Whether this manager was opened in read-only mode.
     read_only: bool,
+    /// Held for a whole checkpoint, see [`checkpoint_guard`](Self::checkpoint_guard).
+    checkpoint_lock: Mutex<()>,
     /// Encryptor for section data (None = unencrypted).
     #[cfg(feature = "encryption")]
     section_encryptor: Option<grafeo_common::encryption::PageEncryptor>,
@@ -110,6 +112,7 @@ impl GrafeoFileManager {
             active_header: Mutex::new(DbHeader::EMPTY),
             active_slot: Mutex::new(0),
             read_only: false,
+            checkpoint_lock: Mutex::new(()),
             #[cfg(feature = "encryption")]
             section_encryptor: None,
         })
@@ -150,6 +153,7 @@ impl GrafeoFileManager {
             active_header: Mutex::new(active_header),
             active_slot: Mutex::new(active_slot),
             read_only: false,
+            checkpoint_lock: Mutex::new(()),
             #[cfg(feature = "encryption")]
             section_encryptor: None,
         })
@@ -196,6 +200,7 @@ impl GrafeoFileManager {
             active_header: Mutex::new(active_header),
             active_slot: Mutex::new(active_slot),
             read_only: true,
+            checkpoint_lock: Mutex::new(()),
             #[cfg(feature = "encryption")]
             section_encryptor: None,
         })
@@ -215,6 +220,17 @@ impl GrafeoFileManager {
     #[must_use]
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Serializes checkpoints of this file.
+    ///
+    /// A checkpoint rotates the WAL, takes its snapshot, writes the image and
+    /// then marks and truncates the WAL. Two checkpoints interleaving those
+    /// steps (for example the periodic timer and an explicit checkpoint) could
+    /// delete WAL files the other one still relies on, so the caller holds
+    /// this guard for the whole sequence.
+    pub fn checkpoint_guard(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.checkpoint_lock.lock()
     }
 
     /// Writes snapshot data into the file and updates the inactive DB header.

@@ -85,6 +85,28 @@ mod tests {
             "reopen" => {
                 session.execute("MATCH (n) RETURN count(n)").unwrap();
             }
+            // Crash at injection point N inside the first checkpoint
+            // (`first:N`) or inside a second one after more writes (`second:N`).
+            #[cfg(feature = "testing-crash-injection")]
+            other if other.starts_with("first:") || other.starts_with("second:") => {
+                let (phase, point) = other.split_once(':').unwrap();
+                let point: u64 = point.parse().unwrap();
+                session
+                    .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+                    .unwrap();
+                if phase == "second" {
+                    db.wal_checkpoint().unwrap();
+                    session
+                        .execute(
+                            "INSERT (:Person {name: 'Vincent'})-[:KNOWS]->(:Person {name: 'Jules'})",
+                        )
+                        .unwrap();
+                }
+                let db_ref = std::panic::AssertUnwindSafe(&db);
+                let _ = grafeo_common::testing::crash::with_crash_at(point, move || {
+                    let _ = db_ref.wal_checkpoint();
+                });
+            }
             other => panic!("unknown scenario {other}"),
         }
         // Crash: no close(), no destructors.
@@ -156,6 +178,145 @@ mod tests {
         GrafeoDB::restore_to_epoch(&backup_dir(&path), epoch, &restored_path).unwrap();
         let restored = open(&restored_path);
         assert_eq!(edge_rows(&restored), (Value::Int64(2), Value::Int64(2)));
+    }
+
+    /// `(name, name)` pairs of all KNOWS edges, sorted.
+    fn knows(db: &GrafeoDB) -> Vec<Vec<Value>> {
+        db.session()
+            .execute("MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name ORDER BY a.name")
+            .unwrap()
+            .rows()
+            .to_vec()
+    }
+
+    /// Crashes at every injection point of a checkpoint (`phase` is `first`,
+    /// or `second` for a checkpoint after an earlier one) and checks that the
+    /// reopened database holds exactly the committed KNOWS edges.
+    #[cfg(feature = "testing-crash-injection")]
+    fn crash_sweep(phase: &str, expected: &[Vec<Value>]) {
+        // More points than the checkpoint has, so the last runs complete.
+        for point in 1..=12 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("db.grafeo");
+            crash_after(&format!("{phase}:{point}"), &path);
+
+            let db = open(&path);
+            assert_eq!(
+                knows(&db),
+                expected,
+                "{phase} checkpoint, crash point {point}"
+            );
+            assert_eq!(
+                db.edge_count(),
+                expected.len(),
+                "{phase} checkpoint, crash point {point}"
+            );
+        }
+    }
+
+    #[cfg(feature = "testing-crash-injection")]
+    #[test]
+    fn crash_at_every_step_of_the_first_checkpoint() {
+        crash_sweep("first", &[vec![Value::from("Alix"), Value::from("Gus")]]);
+    }
+
+    fn log_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "log"))
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// After a checkpoint the sidecar keeps only what the file does not hold.
+    #[test]
+    fn checkpoint_truncates_the_wal_it_covers() {
+        use grafeo_storage::wal::WalRecovery;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        let db = open(&path);
+        for name in ["Alix", "Gus", "Vincent"] {
+            db.session()
+                .execute(&format!("INSERT (:Person {{name: '{name}'}})"))
+                .unwrap();
+            db.wal_checkpoint().unwrap();
+        }
+
+        let sidecar = sidecar_wal(&path);
+        let files = log_files(&sidecar);
+        assert_eq!(files.len(), 1, "only the active file is left: {files:?}");
+        let recovery = WalRecovery::new(&sidecar);
+        assert!(
+            recovery
+                .recover()
+                .unwrap()
+                .iter()
+                .all(|record| !matches!(record, WalRecord::CreateNode { .. })),
+            "records the file holds are not replayed again"
+        );
+        let checkpoint = recovery.checkpoint().expect("checkpoint.meta");
+        assert_eq!(
+            files[0].file_name().unwrap().to_str().unwrap(),
+            format!("wal_{:08}.log", checkpoint.log_sequence),
+            "recovery starts at the remaining file"
+        );
+
+        drop(db);
+        let names = open(&path)
+            .session()
+            .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
+            .unwrap()
+            .rows()
+            .to_vec();
+        assert_eq!(
+            names,
+            vec![
+                vec![Value::from("Alix")],
+                vec![Value::from("Gus")],
+                vec![Value::from("Vincent")],
+            ]
+        );
+    }
+
+    /// A checkpoint between a full and an incremental backup keeps the WAL
+    /// files the incremental backup still has to copy.
+    #[test]
+    fn checkpoint_keeps_wal_needed_by_incremental_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        let backups = backup_dir(&path);
+        let db = open(&path);
+        let session = db.session();
+        session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.backup_full(&backups).unwrap();
+        session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+        db.wal_checkpoint().unwrap();
+        session
+            .execute("INSERT (:Person {name: 'Vincent'})")
+            .unwrap();
+        let incremental = db.backup_incremental(&backups).unwrap();
+        drop(session);
+        drop(db);
+
+        let restored_path = dir.path().join("restored.grafeo");
+        GrafeoDB::restore_to_epoch(&backups, incremental.end_epoch, &restored_path).unwrap();
+        let names = open(&restored_path)
+            .session()
+            .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
+            .unwrap()
+            .rows()
+            .to_vec();
+        assert_eq!(
+            names,
+            vec![
+                vec![Value::from("Alix")],
+                vec![Value::from("Gus")],
+                vec![Value::from("Vincent")],
+            ]
+        );
     }
 
     /// Replaying records that the container already contains changes nothing,

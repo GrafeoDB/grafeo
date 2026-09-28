@@ -409,18 +409,8 @@ impl super::GrafeoDB {
             }
         }
 
-        #[cfg(feature = "wal")]
-        if let Some(ref wal) = self.wal {
-            let epoch = self.lpg_store().current_epoch();
-            let transaction_id = self
-                .transaction_manager
-                .last_assigned_transaction_id()
-                .unwrap_or_else(|| self.transaction_manager.begin());
-            wal.checkpoint(transaction_id, epoch)?;
-            wal.sync()?;
-        }
-
-        // Flush all sections to .grafeo file (explicit checkpoint)
+        // Flush all sections to the .grafeo file. The flush marks and truncates
+        // the WAL only once the file is durable (#417).
         #[cfg(feature = "grafeo-file")]
         if let Some(ref fm) = self.file_manager {
             let _ = self.checkpoint_to_file(fm, super::flush::FlushReason::Explicit)?;

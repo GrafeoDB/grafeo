@@ -419,6 +419,63 @@ impl WalManager {
         self.complete_checkpoint(current_transaction, epoch)
     }
 
+    /// Records that a checkpoint image holds everything logged in files with a
+    /// sequence below `log_sequence`, so recovery starts at that file.
+    ///
+    /// Call this only after the image is durable. The metadata is written
+    /// atomically (temporary file and rename). Unlike
+    /// [`checkpoint`](Self::checkpoint), it logs no record and deletes no file;
+    /// use [`remove_files_before`](Self::remove_files_before) for that.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the metadata cannot be written.
+    pub fn mark_checkpoint(
+        &self,
+        log_sequence: u64,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> Result<()> {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            // reason: millis since UNIX epoch fits in u64 for ~585 million years
+            .map_or(0, |d| {
+                #[allow(clippy::cast_possible_truncation)]
+                let ms = d.as_millis() as u64;
+                ms
+            });
+        self.write_checkpoint_metadata(&CheckpointMetadata {
+            epoch,
+            log_sequence,
+            timestamp_ms,
+            transaction_id,
+        })?;
+        *self.checkpoint_epoch.lock() = Some(epoch);
+        Ok(())
+    }
+
+    /// Deletes the log files with a sequence below `sequence`, never the
+    /// active file. Returns how many files were deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be listed or a file cannot be
+    /// deleted.
+    pub fn remove_files_before(&self, sequence: u64) -> Result<usize> {
+        let active = self.current_sequence.load(Ordering::SeqCst);
+        let mut removed = 0;
+        for file in self.log_files()? {
+            if let Some(seq) = Self::sequence_from_path(&file)
+                && seq < sequence
+                && seq != active
+            {
+                fs::remove_file(&file)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     /// Completes a checkpoint after the checkpoint record has been written.
     ///
     /// Syncs the WAL, writes checkpoint metadata atomically, updates the

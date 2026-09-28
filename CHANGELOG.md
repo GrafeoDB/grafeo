@@ -4,8 +4,13 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.5.44] - Unreleased
 
+### Changed
+
+- **Breaking (Rust API, `grafeo-engine`): `RdfPlanner::with_wal` is no longer public.** The planner now records into the session's WAL buffer instead of the WAL.
+
 ### Fixed
 
+- **Concurrent transactions could corrupt WAL recovery** ([#411](https://github.com/GrafeoDB/grafeo/issues/411)): WAL records of different sessions interleaved, so after a crash one session's rollback could erase another session's committed writes, and one session's commit could bring back another's rolled-back writes. Transactions still open at `close()` were committed on reopen, and writes undone by a rollback to a savepoint came back. Each transaction's changes are now written to the WAL as one group when it commits, a rollback writes nothing, and a transaction cut off by a crash is discarded on the next open. Writes outside a transaction through a session, schema changes and database-level SPARQL updates are written as soon as they are applied, and direct session writes to a named graph now replay into that graph.
 - **Two processes could open the same directory database and silently overwrite each other's writes** ([#405](https://github.com/GrafeoDB/grafeo/issues/405)): databases on a path without the `.grafeo` extension had no lock, so the process that closed last discarded the other's commits. They are now locked like `.grafeo` files: a second open, from any process, fails with `database is locked by another process` until the first one closes.
 - **A commit that failed with a write-write conflict left the transaction active** ([#409](https://github.com/GrafeoDB/grafeo/issues/409)): every later write to the same nodes or edges failed with a conflict until the process restarted, and on a persistent database the failed transaction's writes could reappear after reopen. A failed commit now aborts the transaction completely.
 - **`wal_checkpoint()` lost data in WAL-directory databases** ([#419](https://github.com/GrafeoDB/grafeo/issues/419)): on a path without the `.grafeo` extension, the WAL is the only copy of the data, but a checkpoint made the next open skip older WAL files and deleted them once the WAL had rotated (64 MiB). `wal_checkpoint()` now only syncs the WAL there, and opening such a database replays every WAL file, so databases checkpointed by older versions recover completely as long as their WAL files still exist.

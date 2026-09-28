@@ -76,6 +76,7 @@ Since 0.5.21, Grafeo supports a single-file database format. The entire database
 Features:
 
 - Dual-header crash safety with CRC32 checksums
+- Checkpoints write the new state to `my_graph.grafeo.checkpoint` first and copy it over the database file only when it is complete, so a checkpoint that fails (for example on a full disk) leaves the last good state readable. A checkpoint needs free disk space for a second copy of the file while it runs.
 - Automatic format detection: `.grafeo` extension uses single-file mode, directory paths use multi-file mode
 - Exclusive file locking prevents multiple processes from opening the same file simultaneously
 

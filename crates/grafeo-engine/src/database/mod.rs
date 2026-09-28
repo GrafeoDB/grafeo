@@ -1177,9 +1177,17 @@ impl GrafeoDB {
                 }
 
                 // --- Data mutations: routed through target_store ---
+                //
+                // Replay can see records the checkpoint container already
+                // holds, so every record must be safe to apply twice.
+                // Properties and labels are set operations; creating a node
+                // or edge that exists would duplicate its label and adjacency
+                // entries and counters, so those are skipped (#417).
                 WalRecord::CreateNode { id, labels } => {
-                    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-                    target_store.create_node_with_id(*id, &label_refs)?;
+                    if target_store.get_node(*id).is_none() {
+                        let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+                        target_store.create_node_with_id(*id, &label_refs)?;
+                    }
                 }
                 WalRecord::DeleteNode { id } => {
                     target_store.delete_node(*id);
@@ -1190,7 +1198,9 @@ impl GrafeoDB {
                     dst,
                     edge_type,
                 } => {
-                    target_store.create_edge_with_id(*id, *src, *dst, edge_type)?;
+                    if target_store.get_edge(*id).is_none() {
+                        target_store.create_edge_with_id(*id, *src, *dst, edge_type)?;
+                    }
                 }
                 WalRecord::DeleteEdge { id } => {
                     target_store.delete_edge(*id);

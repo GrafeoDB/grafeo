@@ -18,7 +18,7 @@ sys.path.insert(0, str(SCRIPT.parent))
 
 import check_policy  # noqa: E402
 
-EM, EN = "—", "–"
+EM, EN = "\u2014", "\u2013"
 # Without GITHUB_* variables the script prints plain findings, even when the tests run in CI.
 ENV = {key: value for key, value in os.environ.items() if not key.startswith("GITHUB_")}
 
@@ -64,7 +64,7 @@ def repo(tmp_path: Path) -> Path:
     write(
         root,
         "crates/grafeo-core/src/lib.rs",
-        "#[allow(dead_code)]\nfn old() {} // legacy — debt\n",
+        "#[allow(dead_code)]\nfn old() {} // legacy \u2014 debt\n",
     )
     write(root, "crates/grafeo-storage/src/wal/recovery.rs", "pub fn replay() {}\n")
     git(root, "add", ".")
@@ -79,7 +79,7 @@ def test_clean_change_passes(repo: Path) -> None:
     write(
         repo,
         "crates/grafeo-core/src/lib.rs",
-        "#[allow(dead_code)]\nfn old() {} // legacy — debt\nfn new() {}\n",
+        "#[allow(dead_code)]\nfn old() {} // legacy \u2014 debt\nfn new() {}\n",
     )
     result = policy(repo, "diff", "--base", "HEAD")
     assert (result.returncode, found(result)) == (0, [])

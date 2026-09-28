@@ -44,6 +44,8 @@ mod persistence;
 mod query;
 #[cfg(feature = "triple-store")]
 mod rdf_ops;
+#[cfg(all(feature = "wal", feature = "lpg"))]
+mod schema_replay;
 #[cfg(feature = "lpg")]
 mod search;
 pub(crate) mod section_consumer;
@@ -1142,9 +1144,6 @@ impl GrafeoDB {
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
         records: &[WalRecord],
     ) -> Result<()> {
-        use crate::catalog::{
-            EdgeTypeDefinition, NodeTypeDefinition, PropertyDataType, TypeConstraint, TypedProperty,
-        };
         use grafeo_common::utils::error::Error;
 
         // Graph cursor: tracks which named graph receives data mutations.
@@ -1225,74 +1224,20 @@ impl GrafeoDB {
                 }
 
                 // --- Schema DDL replay (always on root catalog) ---
-                WalRecord::CreateNodeType {
-                    name,
-                    properties,
-                    constraints,
-                } => {
-                    let def = NodeTypeDefinition {
-                        name: name.clone(),
-                        properties: properties
-                            .iter()
-                            .map(|(n, t, nullable)| TypedProperty {
-                                name: n.clone(),
-                                data_type: PropertyDataType::from_type_name(t),
-                                nullable: *nullable,
-                                default_value: None,
-                            })
-                            .collect(),
-                        constraints: constraints
-                            .iter()
-                            .map(|(kind, props)| match kind.as_str() {
-                                "unique" => TypeConstraint::Unique(props.clone()),
-                                "primary_key" => TypeConstraint::PrimaryKey(props.clone()),
-                                "not_null" if !props.is_empty() => {
-                                    TypeConstraint::NotNull(props[0].clone())
-                                }
-                                _ => TypeConstraint::Unique(props.clone()),
-                            })
-                            .collect(),
-                        parent_types: Vec::new(),
-                    };
-                    let _ = catalog.register_node_type(def);
-                }
-                WalRecord::DropNodeType { name } => {
-                    let _ = catalog.drop_node_type(name);
-                }
-                WalRecord::CreateEdgeType {
-                    name,
-                    properties,
-                    constraints,
-                } => {
-                    let def = EdgeTypeDefinition {
-                        name: name.clone(),
-                        properties: properties
-                            .iter()
-                            .map(|(n, t, nullable)| TypedProperty {
-                                name: n.clone(),
-                                data_type: PropertyDataType::from_type_name(t),
-                                nullable: *nullable,
-                                default_value: None,
-                            })
-                            .collect(),
-                        constraints: constraints
-                            .iter()
-                            .map(|(kind, props)| match kind.as_str() {
-                                "unique" => TypeConstraint::Unique(props.clone()),
-                                "primary_key" => TypeConstraint::PrimaryKey(props.clone()),
-                                "not_null" if !props.is_empty() => {
-                                    TypeConstraint::NotNull(props[0].clone())
-                                }
-                                _ => TypeConstraint::Unique(props.clone()),
-                            })
-                            .collect(),
-                        source_node_types: Vec::new(),
-                        target_node_types: Vec::new(),
-                    };
-                    let _ = catalog.register_edge_type_def(def);
-                }
-                WalRecord::DropEdgeType { name } => {
-                    let _ = catalog.drop_edge_type_def(name);
+                WalRecord::CreateNodeType { .. }
+                | WalRecord::DropNodeType { .. }
+                | WalRecord::CreateEdgeType { .. }
+                | WalRecord::DropEdgeType { .. }
+                | WalRecord::CreateGraphType { .. }
+                | WalRecord::DropGraphType { .. }
+                | WalRecord::CreateSchema { .. }
+                | WalRecord::DropSchema { .. }
+                | WalRecord::AlterNodeType { .. }
+                | WalRecord::AlterEdgeType { .. }
+                | WalRecord::AlterGraphType { .. }
+                | WalRecord::CreateProcedure { .. }
+                | WalRecord::DropProcedure { .. } => {
+                    schema_replay::apply_schema_record(catalog, record)?;
                 }
                 WalRecord::CreateIndex { .. } | WalRecord::DropIndex { .. } => {
                     // Index recreation is handled by the store on startup
@@ -1301,109 +1246,6 @@ impl GrafeoDB {
                 WalRecord::CreateConstraint { .. } | WalRecord::DropConstraint { .. } => {
                     // Constraint definitions are part of type definitions
                     // and replayed via CreateNodeType/CreateEdgeType
-                }
-                WalRecord::CreateGraphType {
-                    name,
-                    node_types,
-                    edge_types,
-                    open,
-                } => {
-                    use crate::catalog::GraphTypeDefinition;
-                    let def = GraphTypeDefinition {
-                        name: name.clone(),
-                        allowed_node_types: node_types.clone(),
-                        allowed_edge_types: edge_types.clone(),
-                        open: *open,
-                    };
-                    let _ = catalog.register_graph_type(def);
-                }
-                WalRecord::DropGraphType { name } => {
-                    let _ = catalog.drop_graph_type(name);
-                }
-                WalRecord::CreateSchema { name } => {
-                    let _ = catalog.register_schema_namespace(name.clone());
-                }
-                WalRecord::DropSchema { name } => {
-                    let _ = catalog.drop_schema_namespace(name);
-                }
-
-                WalRecord::AlterNodeType { name, alterations } => {
-                    for (action, prop_name, type_name, nullable) in alterations {
-                        match action.as_str() {
-                            "add" => {
-                                let prop = TypedProperty {
-                                    name: prop_name.clone(),
-                                    data_type: PropertyDataType::from_type_name(type_name),
-                                    nullable: *nullable,
-                                    default_value: None,
-                                };
-                                let _ = catalog.alter_node_type_add_property(name, prop);
-                            }
-                            "drop" => {
-                                let _ = catalog.alter_node_type_drop_property(name, prop_name);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                WalRecord::AlterEdgeType { name, alterations } => {
-                    for (action, prop_name, type_name, nullable) in alterations {
-                        match action.as_str() {
-                            "add" => {
-                                let prop = TypedProperty {
-                                    name: prop_name.clone(),
-                                    data_type: PropertyDataType::from_type_name(type_name),
-                                    nullable: *nullable,
-                                    default_value: None,
-                                };
-                                let _ = catalog.alter_edge_type_add_property(name, prop);
-                            }
-                            "drop" => {
-                                let _ = catalog.alter_edge_type_drop_property(name, prop_name);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                WalRecord::AlterGraphType { name, alterations } => {
-                    for (action, type_name) in alterations {
-                        match action.as_str() {
-                            "add_node" => {
-                                let _ =
-                                    catalog.alter_graph_type_add_node_type(name, type_name.clone());
-                            }
-                            "drop_node" => {
-                                let _ = catalog.alter_graph_type_drop_node_type(name, type_name);
-                            }
-                            "add_edge" => {
-                                let _ =
-                                    catalog.alter_graph_type_add_edge_type(name, type_name.clone());
-                            }
-                            "drop_edge" => {
-                                let _ = catalog.alter_graph_type_drop_edge_type(name, type_name);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                WalRecord::CreateProcedure {
-                    name,
-                    params,
-                    returns,
-                    body,
-                } => {
-                    use crate::catalog::ProcedureDefinition;
-                    let def = ProcedureDefinition {
-                        name: name.clone(),
-                        params: params.clone(),
-                        returns: returns.clone(),
-                        body: body.clone(),
-                    };
-                    let _ = catalog.register_procedure(def);
-                }
-                WalRecord::DropProcedure { name } => {
-                    let _ = catalog.drop_procedure(name);
                 }
 
                 // --- RDF triple replay ---

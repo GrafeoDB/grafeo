@@ -132,7 +132,8 @@ pub enum WalRecord {
         name: String,
         /// Property definitions: (name, data_type, nullable).
         properties: Vec<(String, String, bool)>,
-        /// Constraints: (kind, property_names). kind = "unique", "primary_key", "not_null".
+        /// Constraints: (kind, property_names), where the kind is a
+        /// [`TypeConstraintKind`].
         constraints: Vec<(String, Vec<String>)>,
     },
 
@@ -148,7 +149,8 @@ pub enum WalRecord {
         name: String,
         /// Property definitions: (name, data_type, nullable).
         properties: Vec<(String, String, bool)>,
-        /// Constraints: (kind, property_names).
+        /// Constraints: (kind, property_names), where the kind is a
+        /// [`TypeConstraintKind`].
         constraints: Vec<(String, Vec<String>)>,
     },
 
@@ -229,6 +231,7 @@ pub enum WalRecord {
         /// Type name.
         name: String,
         /// Alterations: ("add", prop_name, type, nullable) or ("drop", prop_name, "", false).
+        /// The action is a [`PropertyAlterationKind`].
         alterations: Vec<(String, String, String, bool)>,
     },
 
@@ -237,6 +240,7 @@ pub enum WalRecord {
         /// Type name.
         name: String,
         /// Alterations: ("add", prop_name, type, nullable) or ("drop", prop_name, "", false).
+        /// The action is a [`PropertyAlterationKind`].
         alterations: Vec<(String, String, String, bool)>,
     },
 
@@ -244,7 +248,8 @@ pub enum WalRecord {
     AlterGraphType {
         /// Graph type name.
         name: String,
-        /// Alterations: ("add_node_type"|"drop_node_type"|"add_edge_type"|"drop_edge_type", type_name).
+        /// Alterations: (action, type_name), where the action is a
+        /// [`GraphTypeAlterationKind`].
         alterations: Vec<(String, String)>,
     },
 
@@ -389,6 +394,84 @@ impl WalEntry for WalRecord {
 
     fn make_checkpoint(transaction_id: TransactionId) -> Self {
         WalRecord::Checkpoint { transaction_id }
+    }
+}
+
+// === Kinds stored as strings in schema records ===
+//
+// Schema records store their kinds as strings. Writers and replay both go
+// through these enums, so the two cannot drift apart again: `ALTER GRAPH TYPE`
+// wrote `"add_node_type"` while replay matched `"add_node"` (#422).
+
+/// Declares a closed set of kinds with the string each one is stored as.
+macro_rules! wal_kind {
+    (
+        $(#[$meta:meta])*
+        $name:ident { $($(#[$variant_meta:meta])* $variant:ident => $text:literal,)+ }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum $name {
+            $($(#[$variant_meta])* $variant,)+
+        }
+
+        impl $name {
+            /// The string this kind is stored as in the WAL.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $text,)+
+                }
+            }
+
+            /// Parses a stored kind, or `None` for a kind this version does
+            /// not know.
+            #[must_use]
+            pub fn parse(text: &str) -> Option<Self> {
+                match text {
+                    $($text => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+wal_kind! {
+    /// Kind of a type constraint in a [`WalRecord::CreateNodeType`] or
+    /// [`WalRecord::CreateEdgeType`] record.
+    TypeConstraintKind {
+        /// The properties are unique among nodes (or edges) of the type.
+        Unique => "unique",
+        /// The properties form the type's primary key.
+        PrimaryKey => "primary_key",
+        /// The (single) property must be present.
+        NotNull => "not_null",
+    }
+}
+
+wal_kind! {
+    /// Action of an alteration in a [`WalRecord::AlterNodeType`] or
+    /// [`WalRecord::AlterEdgeType`] record.
+    PropertyAlterationKind {
+        /// Add the property.
+        Add => "add",
+        /// Drop the property.
+        Drop => "drop",
+    }
+}
+
+wal_kind! {
+    /// Action of an alteration in a [`WalRecord::AlterGraphType`] record.
+    GraphTypeAlterationKind {
+        /// Allow a node type in the graph type.
+        AddNodeType => "add_node_type",
+        /// Remove a node type from the graph type.
+        DropNodeType => "drop_node_type",
+        /// Allow an edge type in the graph type.
+        AddEdgeType => "add_edge_type",
+        /// Remove an edge type from the graph type.
+        DropEdgeType => "drop_edge_type",
     }
 }
 
@@ -996,5 +1079,42 @@ mod tests {
             labels: vec![],
         };
         assert!(!create.is_metadata());
+    }
+
+    /// The stored spellings are part of the WAL format: these are the strings
+    /// 0.5.43 wrote, so its WAL files still replay.
+    #[test]
+    fn schema_kinds_keep_their_stored_spellings() {
+        use GraphTypeAlterationKind as Graph;
+        use PropertyAlterationKind as Property;
+        use TypeConstraintKind as Constraint;
+
+        let graph = [
+            (Graph::AddNodeType, "add_node_type"),
+            (Graph::DropNodeType, "drop_node_type"),
+            (Graph::AddEdgeType, "add_edge_type"),
+            (Graph::DropEdgeType, "drop_edge_type"),
+        ];
+        for (kind, text) in graph {
+            assert_eq!(kind.as_str(), text);
+            assert_eq!(Graph::parse(text), Some(kind));
+        }
+        for (kind, text) in [(Property::Add, "add"), (Property::Drop, "drop")] {
+            assert_eq!(kind.as_str(), text);
+            assert_eq!(Property::parse(text), Some(kind));
+        }
+        let constraints = [
+            (Constraint::Unique, "unique"),
+            (Constraint::PrimaryKey, "primary_key"),
+            (Constraint::NotNull, "not_null"),
+        ];
+        for (kind, text) in constraints {
+            assert_eq!(kind.as_str(), text);
+            assert_eq!(Constraint::parse(text), Some(kind));
+        }
+
+        // What replay used to match for graph types was never written.
+        assert_eq!(Graph::parse("add_node"), None);
+        assert_eq!(Constraint::parse("check"), None);
     }
 }

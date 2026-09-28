@@ -1193,14 +1193,19 @@ impl Session {
     /// written as its own committed group instead of joining the transaction.
     #[cfg(feature = "wal")]
     fn log_schema_wal(&self, record: &grafeo_storage::wal::WalRecord) {
+        self.log_schema_wal_group(vec![record.clone()]);
+    }
+
+    /// Logs schema records as one committed group, so replay applies all of
+    /// them or none of them.
+    #[cfg(feature = "wal")]
+    fn log_schema_wal_group(&self, mut records: Vec<grafeo_storage::wal::WalRecord>) {
         use grafeo_storage::wal::WalRecord;
+        records.push(WalRecord::TransactionCommit {
+            transaction_id: TransactionId::SYSTEM,
+        });
         if let Some(ref wal) = self.wal
-            && let Err(e) = wal.wal().log_batch(&[
-                record.clone(),
-                WalRecord::TransactionCommit {
-                    transaction_id: TransactionId::SYSTEM,
-                },
-            ])
+            && let Err(e) = wal.wal().log_batch(&records)
         {
             grafeo_warn!("Failed to log schema change to WAL: {}", e);
         }
@@ -1225,6 +1230,23 @@ impl Session {
             ($self:expr, $record:expr) => {
                 #[cfg(feature = "wal")]
                 $self.log_schema_wal(&$record);
+            };
+        }
+
+        /// Logs a definition created by `CREATE OR REPLACE`, preceded by the
+        /// drop of the definition it replaced, as one group: replaying the
+        /// create alone fails against the old definition, and a crash between
+        /// two groups would lose both. Compiles to nothing without `wal`.
+        macro_rules! wal_log_replacing {
+            ($self:expr, $replaced:expr, $drop:expr, $create:expr) => {
+                #[cfg(feature = "wal")]
+                $self.log_schema_wal_group(if $replaced {
+                    vec![$drop, $create]
+                } else {
+                    vec![$create]
+                });
+                #[cfg(not(feature = "wal"))]
+                let _ = $replaced;
             };
         }
 
@@ -1255,16 +1277,16 @@ impl Session {
                     constraints: Vec::new(),
                     parent_types: stmt.parent_types.clone(),
                 };
-                let result = if stmt.or_replace {
-                    let _ = self.catalog.drop_node_type(&effective_name);
-                    self.catalog.register_node_type(def)
-                } else {
-                    self.catalog.register_node_type(def)
-                };
-                match result {
+                let replaced =
+                    stmt.or_replace && self.catalog.drop_node_type(&effective_name).is_ok();
+                match self.catalog.register_node_type(def) {
                     Ok(()) => {
-                        wal_log!(
+                        wal_log_replacing!(
                             self,
+                            replaced,
+                            WalRecord::DropNodeType {
+                                name: effective_name.clone(),
+                            },
                             WalRecord::CreateNodeType {
                                 name: effective_name.clone(),
                                 properties: props_for_wal,
@@ -1313,16 +1335,16 @@ impl Session {
                     source_node_types: stmt.source_node_types.clone(),
                     target_node_types: stmt.target_node_types.clone(),
                 };
-                let result = if stmt.or_replace {
-                    let _ = self.catalog.drop_edge_type_def(&effective_name);
-                    self.catalog.register_edge_type_def(def)
-                } else {
-                    self.catalog.register_edge_type_def(def)
-                };
-                match result {
+                let replaced =
+                    stmt.or_replace && self.catalog.drop_edge_type_def(&effective_name).is_ok();
+                match self.catalog.register_edge_type_def(def) {
                     Ok(()) => {
-                        wal_log!(
+                        wal_log_replacing!(
                             self,
+                            replaced,
+                            WalRecord::DropEdgeType {
+                                name: effective_name.clone(),
+                            },
                             WalRecord::CreateEdgeType {
                                 name: effective_name.clone(),
                                 properties: props_for_wal,
@@ -1738,17 +1760,16 @@ impl Session {
                     allowed_edge_types: edge_types.clone(),
                     open,
                 };
-                let result = if stmt.or_replace {
-                    // Drop existing first, ignore error if not found
-                    let _ = self.catalog.drop_graph_type(&effective_name);
-                    self.catalog.register_graph_type(def)
-                } else {
-                    self.catalog.register_graph_type(def)
-                };
-                match result {
+                let replaced =
+                    stmt.or_replace && self.catalog.drop_graph_type(&effective_name).is_ok();
+                match self.catalog.register_graph_type(def) {
                     Ok(()) => {
-                        wal_log!(
+                        wal_log_replacing!(
                             self,
+                            replaced,
+                            WalRecord::DropGraphType {
+                                name: effective_name.clone(),
+                            },
                             WalRecord::CreateGraphType {
                                 name: effective_name.clone(),
                                 node_types,
@@ -1891,7 +1912,10 @@ impl Session {
             }
             SchemaStatement::AlterNodeType(stmt) => {
                 use grafeo_adapters::query::gql::ast::TypeAlteration;
+                #[cfg(feature = "wal")]
+                use grafeo_storage::wal::PropertyAlterationKind;
                 let effective_name = self.effective_type_key(&stmt.name);
+                #[cfg(feature = "wal")]
                 let mut wal_alts = Vec::new();
                 for alt in &stmt.alterations {
                     match alt {
@@ -1913,8 +1937,9 @@ impl Session {
                                         e.to_string(),
                                     ))
                                 })?;
+                            #[cfg(feature = "wal")]
                             wal_alts.push((
-                                "add".to_string(),
+                                PropertyAlterationKind::Add.as_str().to_string(),
                                 prop.name.clone(),
                                 prop.data_type.clone(),
                                 prop.nullable,
@@ -1929,7 +1954,13 @@ impl Session {
                                         e.to_string(),
                                     ))
                                 })?;
-                            wal_alts.push(("drop".to_string(), name.clone(), String::new(), false));
+                            #[cfg(feature = "wal")]
+                            wal_alts.push((
+                                PropertyAlterationKind::Drop.as_str().to_string(),
+                                name.clone(),
+                                String::new(),
+                                false,
+                            ));
                         }
                     }
                 }
@@ -1947,7 +1978,10 @@ impl Session {
             }
             SchemaStatement::AlterEdgeType(stmt) => {
                 use grafeo_adapters::query::gql::ast::TypeAlteration;
+                #[cfg(feature = "wal")]
+                use grafeo_storage::wal::PropertyAlterationKind;
                 let effective_name = self.effective_type_key(&stmt.name);
+                #[cfg(feature = "wal")]
                 let mut wal_alts = Vec::new();
                 for alt in &stmt.alterations {
                     match alt {
@@ -1969,8 +2003,9 @@ impl Session {
                                         e.to_string(),
                                     ))
                                 })?;
+                            #[cfg(feature = "wal")]
                             wal_alts.push((
-                                "add".to_string(),
+                                PropertyAlterationKind::Add.as_str().to_string(),
                                 prop.name.clone(),
                                 prop.data_type.clone(),
                                 prop.nullable,
@@ -1985,7 +2020,13 @@ impl Session {
                                         e.to_string(),
                                     ))
                                 })?;
-                            wal_alts.push(("drop".to_string(), name.clone(), String::new(), false));
+                            #[cfg(feature = "wal")]
+                            wal_alts.push((
+                                PropertyAlterationKind::Drop.as_str().to_string(),
+                                name.clone(),
+                                String::new(),
+                                false,
+                            ));
                         }
                     }
                 }
@@ -2003,7 +2044,10 @@ impl Session {
             }
             SchemaStatement::AlterGraphType(stmt) => {
                 use grafeo_adapters::query::gql::ast::GraphTypeAlteration;
+                #[cfg(feature = "wal")]
+                use grafeo_storage::wal::GraphTypeAlterationKind;
                 let effective_name = self.effective_type_key(&stmt.name);
+                #[cfg(feature = "wal")]
                 let mut wal_alts = Vec::new();
                 for alt in &stmt.alterations {
                     match alt {
@@ -2016,7 +2060,11 @@ impl Session {
                                         e.to_string(),
                                     ))
                                 })?;
-                            wal_alts.push(("add_node_type".to_string(), name.clone()));
+                            #[cfg(feature = "wal")]
+                            wal_alts.push((
+                                GraphTypeAlterationKind::AddNodeType.as_str().to_string(),
+                                name.clone(),
+                            ));
                         }
                         GraphTypeAlteration::DropNodeType(name) => {
                             self.catalog
@@ -2027,7 +2075,11 @@ impl Session {
                                         e.to_string(),
                                     ))
                                 })?;
-                            wal_alts.push(("drop_node_type".to_string(), name.clone()));
+                            #[cfg(feature = "wal")]
+                            wal_alts.push((
+                                GraphTypeAlterationKind::DropNodeType.as_str().to_string(),
+                                name.clone(),
+                            ));
                         }
                         GraphTypeAlteration::AddEdgeType(name) => {
                             self.catalog
@@ -2038,7 +2090,11 @@ impl Session {
                                         e.to_string(),
                                     ))
                                 })?;
-                            wal_alts.push(("add_edge_type".to_string(), name.clone()));
+                            #[cfg(feature = "wal")]
+                            wal_alts.push((
+                                GraphTypeAlterationKind::AddEdgeType.as_str().to_string(),
+                                name.clone(),
+                            ));
                         }
                         GraphTypeAlteration::DropEdgeType(name) => {
                             self.catalog
@@ -2049,7 +2105,11 @@ impl Session {
                                         e.to_string(),
                                     ))
                                 })?;
-                            wal_alts.push(("drop_edge_type".to_string(), name.clone()));
+                            #[cfg(feature = "wal")]
+                            wal_alts.push((
+                                GraphTypeAlterationKind::DropEdgeType.as_str().to_string(),
+                                name.clone(),
+                            ));
                         }
                     }
                 }
@@ -2083,6 +2143,7 @@ impl Session {
                     body: stmt.body.clone(),
                 };
 
+                let replaced = stmt.or_replace && self.catalog.get_procedure(&stmt.name).is_some();
                 if stmt.or_replace {
                     self.catalog.replace_procedure(def).map_err(|e| {
                         Error::Query(QueryError::new(QueryErrorKind::Semantic, e.to_string()))
@@ -2102,8 +2163,12 @@ impl Session {
                     }
                 }
 
-                wal_log!(
+                wal_log_replacing!(
                     self,
+                    replaced,
+                    WalRecord::DropProcedure {
+                        name: stmt.name.clone(),
+                    },
                     WalRecord::CreateProcedure {
                         name: stmt.name.clone(),
                         params: stmt

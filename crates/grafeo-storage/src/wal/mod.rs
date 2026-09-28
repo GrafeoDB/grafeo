@@ -50,6 +50,8 @@ pub use async_log::AsyncWalManager;
 pub use async_typed::{AsyncLpgWal, AsyncTypedWal};
 pub use flusher::{AdaptiveFlusher, FlusherStats};
 pub use log::{CheckpointMetadata, DurabilityMode, WalConfig, WalManager};
-pub use record::{WalEntry, WalRecord};
+pub use record::{
+    GraphTypeAlterationKind, PropertyAlterationKind, TypeConstraintKind, WalEntry, WalRecord,
+};
 pub use recovery::{RecoveredWal, WalRecovery};
 pub use typed::{LpgWal, TypedWal};

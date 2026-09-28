@@ -15,7 +15,9 @@ use std::sync::Arc;
 /// Operator that finds shortest paths between source and target nodes.
 ///
 /// For each input row containing source and target nodes, this operator
-/// computes the shortest path and outputs the path as a value.
+/// computes the shortest path within the hop bounds and outputs its length:
+/// one row per shortest path for `allShortestPaths`, one row otherwise, and no
+/// row when no path fits (`OPTIONAL MATCH` adds the nulls with a left join).
 pub struct ShortestPathOperator {
     /// The graph store.
     store: Arc<dyn GraphStoreSearch>,
@@ -31,6 +33,10 @@ pub struct ShortestPathOperator {
     direction: Direction,
     /// Whether to find all shortest paths (vs. just one).
     all_paths: bool,
+    /// Minimum number of edges in a path.
+    min_hops: u32,
+    /// Maximum number of edges in a path (`None` = unbounded).
+    max_hops: Option<u32>,
     /// Whether the operator has been exhausted.
     exhausted: bool,
 }
@@ -53,6 +59,8 @@ impl ShortestPathOperator {
             edge_types,
             direction,
             all_paths: false,
+            min_hops: 0,
+            max_hops: None,
             exhausted: false,
         }
     }
@@ -60,6 +68,15 @@ impl ShortestPathOperator {
     /// Sets whether to find all shortest paths.
     pub fn with_all_paths(mut self, all_paths: bool) -> Self {
         self.all_paths = all_paths;
+        self
+    }
+
+    /// Limits the paths to between `min_hops` and `max_hops` edges (`None` =
+    /// unbounded). The default is 0 to unbounded, so a node paired with
+    /// itself has a zero-length path.
+    pub fn with_hop_bounds(mut self, min_hops: u32, max_hops: Option<u32>) -> Self {
+        self.min_hops = min_hops;
+        self.max_hops = max_hops;
         self
     }
 
@@ -95,78 +112,107 @@ impl ShortestPathOperator {
         None // No path found
     }
 
-    /// Finds all shortest paths between source and target using BFS.
-    /// Returns a vector of path lengths (all will be the same minimum length).
-    /// For allShortestPaths, we return the count of paths with minimum length.
-    fn find_all_shortest_paths(&self, source: NodeId, target: NodeId) -> Vec<i64> {
-        if source == target {
-            return vec![0];
+    /// Finds the shortest paths from `source` to `target` within the hop
+    /// bounds: their length and how many there are, or `None` when there is
+    /// no such path.
+    ///
+    /// A path of at least `min_hops` edges starts with exactly `min_hops`
+    /// steps, so this first counts those walks per end node, then runs one
+    /// breadth-first search from all of their end nodes at once, adding up the
+    /// path counts per node. With `min_hops` 0 that is a plain BFS from
+    /// `source`; with `min_hops` 1 and `source == target` it finds the
+    /// shortest cycles through `source`. A shortest continuation never passes
+    /// another end node of the first steps, so each path is counted once.
+    fn find_shortest_walks(&self, source: NodeId, target: NodeId) -> Option<(i64, usize)> {
+        let min_hops = i64::from(self.min_hops);
+        let max_hops = self.max_hops.map(i64::from);
+        if max_hops.is_some_and(|max| max < min_hops) {
+            return None;
         }
 
-        // BFS that tracks number of paths to each node at each depth
-        let mut distances: FxHashMap<NodeId, i64> = FxHashMap::default();
-        let mut path_counts: FxHashMap<NodeId, usize> = FxHashMap::default();
-        let mut queue: VecDeque<NodeId> = VecDeque::new();
-
-        distances.insert(source, 0);
-        path_counts.insert(source, 1);
-        queue.push_back(source);
-
-        let mut target_depth: Option<i64> = None;
-        let mut target_path_count = 0;
-
-        while let Some(current) = queue.pop_front() {
-            let current_depth = *distances
-                .get(&current)
-                .expect("BFS: node dequeued has distance");
-            let current_paths = *path_counts
-                .get(&current)
-                .expect("BFS: node dequeued has path count");
-
-            // If we've found target and we're past its depth, stop
-            if let Some(td) = target_depth
-                && current_depth >= td
-            {
-                continue;
-            }
-
-            for neighbor in self.get_neighbors(current) {
-                let new_depth = current_depth + 1;
-
-                if neighbor == target {
-                    // Found target
-                    if target_depth.is_none() {
-                        target_depth = Some(new_depth);
-                        target_path_count = current_paths;
-                    } else if Some(new_depth) == target_depth {
-                        target_path_count += current_paths;
-                    }
-                    continue;
-                }
-
-                // If not visited or same depth (for counting all paths)
-                if let Some(&existing_depth) = distances.get(&neighbor) {
-                    if existing_depth == new_depth {
-                        // Same depth, add to path count
-                        *path_counts
-                            .get_mut(&neighbor)
-                            .expect("BFS: neighbor has path count at same depth") += current_paths;
-                    }
-                    // If existing_depth < new_depth, skip (already processed at shorter distance)
-                } else {
-                    // New node
-                    distances.insert(neighbor, new_depth);
-                    path_counts.insert(neighbor, current_paths);
-                    queue.push_back(neighbor);
+        // Walks of exactly `min_hops` edges, counted per end node
+        let mut counts: FxHashMap<NodeId, usize> = FxHashMap::default();
+        counts.insert(source, 1);
+        for _ in 0..self.min_hops {
+            let mut next: FxHashMap<NodeId, usize> = FxHashMap::default();
+            for (&node, &count) in &counts {
+                for neighbor in self.get_neighbors(node) {
+                    let entry = next.entry(neighbor).or_insert(0);
+                    *entry = entry.saturating_add(count);
                 }
             }
+            if next.is_empty() {
+                return None;
+            }
+            counts = next;
         }
 
-        // Return one entry per path
-        if let Some(depth) = target_depth {
-            vec![depth; target_path_count]
+        // Level-by-level BFS from all of them; `counts` holds the number of
+        // shortest paths to every node reached so far.
+        let mut lengths: FxHashMap<NodeId, i64> =
+            counts.keys().map(|&node| (node, min_hops)).collect();
+        let mut frontier: Vec<NodeId> = counts.keys().copied().collect();
+        let mut length = min_hops;
+        loop {
+            if let Some(&count) = counts.get(&target) {
+                return Some((length, count));
+            }
+            if frontier.is_empty() || max_hops.is_some_and(|max| length >= max) {
+                return None;
+            }
+            length += 1;
+
+            let mut next_frontier = Vec::new();
+            for node in frontier {
+                let count = counts[&node];
+                for neighbor in self.get_neighbors(node) {
+                    match lengths.get(&neighbor) {
+                        None => {
+                            lengths.insert(neighbor, length);
+                            counts.insert(neighbor, count);
+                            next_frontier.push(neighbor);
+                        }
+                        Some(&reached_at) if reached_at == length => {
+                            let paths = counts
+                                .get_mut(&neighbor)
+                                .expect("BFS: a reached node has a path count");
+                            *paths = paths.saturating_add(count);
+                        }
+                        // Already reached by a shorter path
+                        Some(_) => {}
+                    }
+                }
+            }
+            frontier = next_frontier;
+        }
+    }
+
+    /// Finds the length of one shortest path from `source` to `target` within
+    /// the hop bounds.
+    fn find_one_shortest_path(&self, source: NodeId, target: NodeId) -> Option<i64> {
+        // Without a minimum, or with a minimum of one hop between two different
+        // nodes, the plain shortest path has enough hops.
+        let plain = self.min_hops == 0 || (self.min_hops == 1 && source != target);
+        if !plain {
+            return self
+                .find_shortest_walks(source, target)
+                .map(|(length, _)| length);
+        }
+        self.find_shortest_path_bidirectional(source, target)
+            .filter(|&length| self.max_hops.is_none_or(|max| length <= i64::from(max)))
+    }
+
+    /// The lengths of the shortest paths from `source` to `target`: one per
+    /// path when finding all shortest paths, otherwise at most one, and none
+    /// when no path fits the hop bounds.
+    fn path_lengths(&self, source: NodeId, target: NodeId) -> Vec<i64> {
+        if self.all_paths {
+            self.find_shortest_walks(source, target)
+                .map_or_else(Vec::new, |(length, count)| vec![length; count])
         } else {
-            vec![]
+            self.find_one_shortest_path(source, target)
+                .into_iter()
+                .collect()
         }
     }
 
@@ -314,95 +360,80 @@ impl Operator for ShortestPathOperator {
             return Ok(None);
         }
 
-        // Get input chunk
-        let Some(input_chunk) = self.input.next()? else {
-            self.exhausted = true;
-            return Ok(None);
-        };
-
-        // Build output: input columns + path length
-        let num_input_cols = input_chunk.column_count();
-        let mut output_schema: Vec<LogicalType> = (0..num_input_cols)
-            .map(|i| {
-                input_chunk
-                    .column(i)
-                    .map_or(LogicalType::Any, |c| c.data_type().clone())
-            })
-            .collect();
-        output_schema.push(LogicalType::Any); // Path column (stores length as int)
-
-        // For allShortestPaths, we may need more rows than input
-        let initial_capacity = if self.all_paths {
-            input_chunk.row_count() * 4 // Estimate 4x for multiple paths
-        } else {
-            input_chunk.row_count()
-        };
-        let mut builder = DataChunkBuilder::with_capacity(&output_schema, initial_capacity);
-
-        for row in input_chunk.selected_indices() {
-            // Get source and target nodes
-            let source = input_chunk
-                .column(self.source_column)
-                .and_then(|c| c.get_node_id(row));
-            let target = input_chunk
-                .column(self.target_column)
-                .and_then(|c| c.get_node_id(row));
-
-            // Compute shortest path(s)
-            let path_lengths: Vec<Option<i64>> = match (source, target) {
-                (Some(s), Some(t)) => {
-                    if self.all_paths {
-                        let paths = self.find_all_shortest_paths(s, t);
-                        if paths.is_empty() {
-                            vec![None] // No path found, still output one row with null
-                        } else {
-                            paths.into_iter().map(Some).collect()
-                        }
-                    } else {
-                        // Use bidirectional BFS when possible (single shortest path)
-                        vec![self.find_shortest_path_bidirectional(s, t)]
-                    }
-                }
-                _ => vec![None],
+        // A pair without a path has no row, so a whole chunk can produce
+        // nothing: keep reading until one produces rows or the input ends.
+        loop {
+            let Some(input_chunk) = self.input.next()? else {
+                self.exhausted = true;
+                return Ok(None);
             };
 
-            // Output one row per path
-            for path_length in path_lengths {
-                // Copy input columns
-                for col_idx in 0..num_input_cols {
-                    if let Some(in_col) = input_chunk.column(col_idx)
-                        && let Some(out_col) = builder.column_mut(col_idx)
-                    {
-                        if let Some(node_id) = in_col.get_node_id(row) {
-                            out_col.push_node_id(node_id);
-                        } else if let Some(edge_id) = in_col.get_edge_id(row) {
-                            out_col.push_edge_id(edge_id);
-                        } else if let Some(value) = in_col.get_value(row) {
-                            out_col.push_value(value);
-                        } else {
-                            out_col.push_value(Value::Null);
+            // Build output: input columns + path length
+            let num_input_cols = input_chunk.column_count();
+            let mut output_schema: Vec<LogicalType> = (0..num_input_cols)
+                .map(|i| {
+                    input_chunk
+                        .column(i)
+                        .map_or(LogicalType::Any, |c| c.data_type().clone())
+                })
+                .collect();
+            output_schema.push(LogicalType::Any); // Path column (stores length as int)
+
+            // For allShortestPaths, we may need more rows than input
+            let initial_capacity = if self.all_paths {
+                input_chunk.row_count() * 4 // Estimate 4x for multiple paths
+            } else {
+                input_chunk.row_count()
+            };
+            let mut builder = DataChunkBuilder::with_capacity(&output_schema, initial_capacity);
+
+            for row in input_chunk.selected_indices() {
+                // Get source and target nodes
+                let source = input_chunk
+                    .column(self.source_column)
+                    .and_then(|c| c.get_node_id(row));
+                let target = input_chunk
+                    .column(self.target_column)
+                    .and_then(|c| c.get_node_id(row));
+
+                // A null endpoint (from an earlier OPTIONAL MATCH) has no path
+                let path_lengths = match (source, target) {
+                    (Some(s), Some(t)) => self.path_lengths(s, t),
+                    _ => Vec::new(),
+                };
+
+                // Output one row per path
+                for path_length in path_lengths {
+                    // Copy input columns
+                    for col_idx in 0..num_input_cols {
+                        if let Some(in_col) = input_chunk.column(col_idx)
+                            && let Some(out_col) = builder.column_mut(col_idx)
+                        {
+                            if let Some(node_id) = in_col.get_node_id(row) {
+                                out_col.push_node_id(node_id);
+                            } else if let Some(edge_id) = in_col.get_edge_id(row) {
+                                out_col.push_edge_id(edge_id);
+                            } else if let Some(value) = in_col.get_value(row) {
+                                out_col.push_value(value);
+                            } else {
+                                out_col.push_value(Value::Null);
+                            }
                         }
                     }
-                }
 
-                // Add path length column
-                if let Some(out_col) = builder.column_mut(num_input_cols) {
-                    match path_length {
-                        Some(len) => out_col.push_value(Value::Int64(len)),
-                        None => out_col.push_value(Value::Null),
+                    // Add path length column
+                    if let Some(out_col) = builder.column_mut(num_input_cols) {
+                        out_col.push_value(Value::Int64(path_length));
                     }
+
+                    builder.advance_row();
                 }
-
-                builder.advance_row();
             }
-        }
 
-        let chunk = builder.finish();
-        if chunk.row_count() > 0 {
-            Ok(Some(chunk))
-        } else {
-            self.exhausted = true;
-            Ok(None)
+            let chunk = builder.finish();
+            if chunk.row_count() > 0 {
+                return Ok(Some(chunk));
+            }
         }
     }
 
@@ -425,42 +456,48 @@ mod tests {
     use super::*;
     use crate::graph::lpg::LpgStore;
 
-    /// A mock operator that returns a single chunk with source/target node pairs.
+    /// A mock operator that returns source/target node pairs, one chunk per
+    /// inner vector (empty ones are skipped).
     struct MockPairOperator {
-        pairs: Vec<(NodeId, NodeId)>,
-        exhausted: bool,
+        chunks: Vec<Vec<(NodeId, NodeId)>>,
+        position: usize,
     }
 
     impl MockPairOperator {
         fn new(pairs: Vec<(NodeId, NodeId)>) -> Self {
+            Self::chunks(vec![pairs])
+        }
+
+        fn chunks(chunks: Vec<Vec<(NodeId, NodeId)>>) -> Self {
             Self {
-                pairs,
-                exhausted: false,
+                chunks,
+                position: 0,
             }
         }
     }
 
     impl Operator for MockPairOperator {
         fn next(&mut self) -> OperatorResult {
-            if self.exhausted || self.pairs.is_empty() {
-                return Ok(None);
+            while let Some(pairs) = self.chunks.get(self.position) {
+                self.position += 1;
+                if pairs.is_empty() {
+                    continue;
+                }
+
+                let schema = vec![LogicalType::Node, LogicalType::Node];
+                let mut builder = DataChunkBuilder::with_capacity(&schema, pairs.len());
+                for (source, target) in pairs {
+                    builder.column_mut(0).unwrap().push_node_id(*source);
+                    builder.column_mut(1).unwrap().push_node_id(*target);
+                    builder.advance_row();
+                }
+                return Ok(Some(builder.finish()));
             }
-            self.exhausted = true;
-
-            let schema = vec![LogicalType::Node, LogicalType::Node];
-            let mut builder = DataChunkBuilder::with_capacity(&schema, self.pairs.len());
-
-            for (source, target) in &self.pairs {
-                builder.column_mut(0).unwrap().push_node_id(*source);
-                builder.column_mut(1).unwrap().push_node_id(*target);
-                builder.advance_row();
-            }
-
-            Ok(Some(builder.finish()))
+            Ok(None)
         }
 
         fn reset(&mut self) {
-            self.exhausted = false;
+            self.position = 0;
         }
 
         fn name(&self) -> &'static str {
@@ -470,6 +507,41 @@ mod tests {
         fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
             self
         }
+    }
+
+    /// Runs the operator to the end: one `(source, target, length)` per row.
+    fn rows(op: &mut ShortestPathOperator) -> Vec<(NodeId, NodeId, Value)> {
+        let mut rows = Vec::new();
+        while let Some(chunk) = op.next().unwrap() {
+            for row in 0..chunk.row_count() {
+                rows.push((
+                    chunk.column(0).unwrap().get_node_id(row).unwrap(),
+                    chunk.column(1).unwrap().get_node_id(row).unwrap(),
+                    chunk.column(2).unwrap().get_value(row).unwrap(),
+                ));
+            }
+        }
+        rows
+    }
+
+    /// Searches outgoing paths of any edge type for the pairs in `chunks`.
+    fn search(
+        store: &Arc<LpgStore>,
+        chunks: Vec<Vec<(NodeId, NodeId)>>,
+        all_paths: bool,
+        (min_hops, max_hops): (u32, Option<u32>),
+    ) -> Vec<(NodeId, NodeId, Value)> {
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(store) as Arc<dyn GraphStoreSearch>,
+            Box::new(MockPairOperator::chunks(chunks)),
+            0,
+            1,
+            vec![],
+            Direction::Outgoing,
+        )
+        .with_all_paths(all_paths)
+        .with_hop_bounds(min_hops, max_hops);
+        rows(&mut op)
     }
 
     #[test]
@@ -571,13 +643,8 @@ mod tests {
             Direction::Outgoing,
         );
 
-        let chunk = op.next().unwrap().unwrap();
-        assert_eq!(chunk.row_count(), 1);
-
-        // Path length should be null (no path)
-        let path_col = chunk.column(2).unwrap();
-        let path_len = path_col.get_value(0).unwrap();
-        assert_eq!(path_len, Value::Null);
+        // No path, no row: MATCH drops the pair, OPTIONAL MATCH adds the nulls
+        assert!(op.next().unwrap().is_none());
     }
 
     #[test]
@@ -636,10 +703,7 @@ mod tests {
             Direction::Outgoing,
         );
 
-        let chunk = op.next().unwrap().unwrap();
-        let path_col = chunk.column(2).unwrap();
-        let path_len = path_col.get_value(0).unwrap();
-        assert_eq!(path_len, Value::Null); // Can't reach c via KNOWS only
+        assert!(op.next().unwrap().is_none()); // Can't reach c via KNOWS only
     }
 
     #[test]
@@ -726,13 +790,11 @@ mod tests {
             Direction::Outgoing,
         );
 
-        let chunk = op.next().unwrap().unwrap();
-        assert_eq!(chunk.row_count(), 3);
-
-        let path_col = chunk.column(2).unwrap();
-        assert_eq!(path_col.get_value(0).unwrap(), Value::Int64(1)); // a->b = 1
-        assert_eq!(path_col.get_value(1).unwrap(), Value::Int64(1)); // c->d = 1
-        assert_eq!(path_col.get_value(2).unwrap(), Value::Null); // a->d = no path
+        // a->d has no path, so it has no row
+        assert_eq!(
+            rows(&mut op),
+            vec![(a, b, Value::Int64(1)), (c, d, Value::Int64(1))]
+        );
     }
 
     #[test]
@@ -817,11 +879,7 @@ mod tests {
         )
         .with_all_paths(true);
 
-        let chunk = op.next().unwrap().unwrap();
-        assert_eq!(chunk.row_count(), 1); // Still returns one row with null
-
-        let path_col = chunk.column(2).unwrap();
-        assert_eq!(path_col.get_value(0).unwrap(), Value::Null);
+        assert!(op.next().unwrap().is_none());
     }
 
     #[test]
@@ -922,9 +980,7 @@ mod tests {
             Direction::Outgoing,
         );
 
-        let chunk = op.next().unwrap().unwrap();
-        let path_col = chunk.column(2).unwrap();
-        assert_eq!(path_col.get_value(0).unwrap(), Value::Null);
+        assert!(op.next().unwrap().is_none());
     }
 
     #[test]
@@ -1000,9 +1056,7 @@ mod tests {
             Direction::Outgoing,
         );
 
-        let chunk = op.next().unwrap().unwrap();
-        let path_col = chunk.column(2).unwrap();
-        assert_eq!(path_col.get_value(0).unwrap(), Value::Null);
+        assert!(op.next().unwrap().is_none());
     }
 
     #[test]
@@ -1047,5 +1101,175 @@ mod tests {
         );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<ShortestPathOperator>().is_ok());
+    }
+
+    // === Pairs without a path and hop bounds (#514) ===
+
+    #[test]
+    fn a_chunk_without_paths_does_not_end_the_output() {
+        // a -> b; c is isolated. No pair in the first input chunk has a path,
+        // the pair in the second one does.
+        let store = Arc::new(LpgStore::new().unwrap());
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
+        store.create_edge(a, b, "KNOWS");
+
+        for all_paths in [false, true] {
+            let chunks = vec![vec![(a, c), (c, b)], vec![(a, b)]];
+            assert_eq!(
+                search(&store, chunks, all_paths, (0, None)),
+                vec![(a, b, Value::Int64(1))],
+                "all_paths: {all_paths}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_hop_minimum_keeps_the_zero_length_self_path() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let a = store.create_node(&["Node"]);
+
+        for all_paths in [false, true] {
+            assert_eq!(
+                search(&store, vec![vec![(a, a)]], all_paths, (0, None)),
+                vec![(a, a, Value::Int64(0))],
+                "all_paths: {all_paths}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_hop_minimum_excludes_the_zero_length_self_path() {
+        // a has no edges, so no path of one or more hops leads back to it
+        let store = Arc::new(LpgStore::new().unwrap());
+        let a = store.create_node(&["Node"]);
+
+        for all_paths in [false, true] {
+            assert_eq!(
+                search(&store, vec![vec![(a, a)]], all_paths, (1, None)),
+                vec![],
+                "all_paths: {all_paths}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_hop_minimum_finds_the_shortest_cycle() {
+        // a -> b -> a (2 hops) and a -> c -> d -> a (3 hops)
+        let store = Arc::new(LpgStore::new().unwrap());
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
+        let d = store.create_node(&["Node"]);
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(b, a, "KNOWS");
+        store.create_edge(a, c, "KNOWS");
+        store.create_edge(c, d, "KNOWS");
+        store.create_edge(d, a, "KNOWS");
+
+        for all_paths in [false, true] {
+            assert_eq!(
+                search(&store, vec![vec![(a, a)]], all_paths, (1, None)),
+                vec![(a, a, Value::Int64(2))],
+                "all_paths: {all_paths}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_self_loop_is_a_one_hop_cycle() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let a = store.create_node(&["Node"]);
+        store.create_edge(a, a, "KNOWS");
+
+        for all_paths in [false, true] {
+            assert_eq!(
+                search(&store, vec![vec![(a, a)]], all_paths, (1, None)),
+                vec![(a, a, Value::Int64(1))],
+                "all_paths: {all_paths}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_shortest_cycles_are_returned() {
+        // a -> b -> d -> a and a -> c -> d -> a: two shortest cycles of 3 hops
+        let store = Arc::new(LpgStore::new().unwrap());
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
+        let d = store.create_node(&["Node"]);
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(a, c, "KNOWS");
+        store.create_edge(b, d, "KNOWS");
+        store.create_edge(c, d, "KNOWS");
+        store.create_edge(d, a, "KNOWS");
+
+        assert_eq!(
+            search(&store, vec![vec![(a, a)]], true, (1, None)),
+            vec![(a, a, Value::Int64(3)); 2]
+        );
+        assert_eq!(
+            search(&store, vec![vec![(a, a)]], false, (1, None)),
+            vec![(a, a, Value::Int64(3))]
+        );
+    }
+
+    #[test]
+    fn minimum_above_the_shortest_distance() {
+        // Triangle a -> b -> c -> a: b is 1 hop from a, and 4 hops when the
+        // path has to go around the triangle once more.
+        let store = Arc::new(LpgStore::new().unwrap());
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(b, c, "KNOWS");
+        store.create_edge(c, a, "KNOWS");
+
+        for all_paths in [false, true] {
+            let pairs = || vec![vec![(a, b)]];
+            assert_eq!(
+                search(&store, pairs(), all_paths, (1, None)),
+                vec![(a, b, Value::Int64(1))],
+                "all_paths: {all_paths}"
+            );
+            assert_eq!(
+                search(&store, pairs(), all_paths, (2, None)),
+                vec![(a, b, Value::Int64(4))],
+                "all_paths: {all_paths}"
+            );
+            assert_eq!(
+                search(&store, pairs(), all_paths, (2, Some(3))),
+                vec![],
+                "all_paths: {all_paths}"
+            );
+        }
+    }
+
+    #[test]
+    fn maximum_drops_longer_paths() {
+        // a -> b -> c
+        let store = Arc::new(LpgStore::new().unwrap());
+        let a = store.create_node(&["Node"]);
+        let b = store.create_node(&["Node"]);
+        let c = store.create_node(&["Node"]);
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(b, c, "KNOWS");
+
+        for all_paths in [false, true] {
+            let pairs = || vec![vec![(a, b), (a, c)]];
+            assert_eq!(
+                search(&store, pairs(), all_paths, (1, Some(1))),
+                vec![(a, b, Value::Int64(1))],
+                "all_paths: {all_paths}"
+            );
+            assert_eq!(
+                search(&store, pairs(), all_paths, (1, Some(2))),
+                vec![(a, b, Value::Int64(1)), (a, c, Value::Int64(2))],
+                "all_paths: {all_paths}"
+            );
+        }
     }
 }

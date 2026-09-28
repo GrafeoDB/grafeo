@@ -1,0 +1,112 @@
+# Rosetta: a node pattern with several labels requires all of them
+#
+# Every label of a node pattern must hold (AND semantics), wherever the node
+# appears: at the start of a pattern, as the target of an edge, or as an
+# endpoint of a shortest-path search. The first label is often the least
+# selective one (here every node is a Graph), so dropping the others returns
+# too many rows.
+#
+# Setup (GQL): d is a Graph:Directory with REL edges to c (Graph:Concept)
+# and t (Graph:Tech).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Multi-label node patterns cross-language equivalence
+  dataset: empty
+  requires: [cypher, sql-pgq]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Start node
+  # ---------------------------------------------------------------------------
+
+  - name: start_node_keeps_all_labels
+    setup:
+      - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"
+      - "MATCH (d:Directory) INSERT (d)-[:REL]->(:Graph:Tech {id: 't'})"
+    variants:
+      gql: "MATCH (n:Graph:Concept) RETURN n.id"
+      cypher: "MATCH (n:Graph:Concept) RETURN n.id"
+      sql-pgq: |
+        SELECT id FROM GRAPH_TABLE (
+          MATCH (n:Graph:Concept)
+          COLUMNS (n.id AS id)
+        )
+    expect:
+      rows:
+        - [c]
+
+  # ---------------------------------------------------------------------------
+  # Edge target
+  # ---------------------------------------------------------------------------
+
+  - name: expand_target_keeps_all_labels
+    setup:
+      - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"
+      - "MATCH (d:Directory) INSERT (d)-[:REL]->(:Graph:Tech {id: 't'})"
+    variants:
+      gql: "MATCH ()-[r]->(n:Graph:Concept) RETURN n.id"
+      cypher: "MATCH ()-[r]->(n:Graph:Concept) RETURN n.id"
+      sql-pgq: |
+        SELECT id FROM GRAPH_TABLE (
+          MATCH (s)-[r]->(n:Graph:Concept)
+          COLUMNS (n.id AS id)
+        )
+    expect:
+      rows:
+        - [c]
+
+  - name: variable_length_target_keeps_all_labels
+    setup:
+      - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"
+      - "MATCH (d:Directory) INSERT (d)-[:REL]->(:Graph:Tech {id: 't'})"
+    variants:
+      gql: "MATCH (s:Directory)-[:REL]->{1,2}(n:Graph:Tech) RETURN n.id"
+      cypher: "MATCH (s:Directory)-[:REL*1..2]->(n:Graph:Tech) RETURN n.id"
+      sql-pgq: |
+        SELECT id FROM GRAPH_TABLE (
+          MATCH (s:Directory)-[r:REL*1..2]->(n:Graph:Tech)
+          COLUMNS (n.id AS id)
+        )
+    expect:
+      rows:
+        - [t]
+
+  # ---------------------------------------------------------------------------
+  # Shortest-path endpoints
+  # ---------------------------------------------------------------------------
+
+  - name: shortest_path_source_keeps_all_labels
+    setup:
+      - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"
+      - "MATCH (d:Directory) INSERT (d)-[:REL]->(:Graph:Tech {id: 't'})"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:Graph:Directory)-[:REL]->+(b:Concept) RETURN a.id, length(p)"
+      cypher: "MATCH p = shortestPath((a:Graph:Directory)-[:REL*]->(b:Concept)) RETURN a.id, length(p)"
+    expect:
+      rows:
+        - [d, 1]
+
+  - name: shortest_path_target_keeps_all_labels
+    setup:
+      - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"
+      - "MATCH (d:Directory) INSERT (d)-[:REL]->(:Graph:Tech {id: 't'})"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:Directory)-[:REL]->+(b:Graph:Concept) RETURN b.id, length(p)"
+      cypher: "MATCH p = shortestPath((a:Directory)-[:REL*]->(b:Graph:Concept)) RETURN b.id, length(p)"
+    expect:
+      rows:
+        - [c, 1]
+
+  - name: all_shortest_paths_endpoints_keep_all_labels
+    setup:
+      - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"
+      - "MATCH (d:Directory) INSERT (d)-[:REL]->(:Graph:Tech {id: 't'})"
+    variants:
+      gql: "MATCH p = ALL SHORTEST (a:Graph:Directory)-[:REL]->+(b:Graph:Concept) RETURN a.id, b.id, length(p)"
+      cypher: "MATCH p = allShortestPaths((a:Graph:Directory)-[:REL*]->(b:Graph:Concept)) RETURN a.id, b.id, length(p)"
+    expect:
+      rows:
+        - [d, c, 1]

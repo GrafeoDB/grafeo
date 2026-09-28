@@ -4,9 +4,9 @@
 //! that can be optimized and executed.
 
 use super::common::{
-    build_left_join_with_predicates, check_union_columns, combine_with_and, is_aggregate_function,
-    to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
-    wrap_sort,
+    build_left_join_with_predicates, check_union_columns, combine_with_and, has_all_labels,
+    is_aggregate_function, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit,
+    wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
@@ -527,29 +527,8 @@ impl CypherTranslator {
         // Add hasLabel filters for additional labels (AND semantics).
         // First label is used in NodeScan for scan-time filtering; remaining
         // labels are checked via post-scan Filter.
-        if node.labels.len() > 1 {
-            let mut combined: Option<LogicalExpression> = None;
-            for extra_label in &node.labels[1..] {
-                let check = LogicalExpression::FunctionCall {
-                    name: "hasLabel".into(),
-                    args: vec![
-                        LogicalExpression::Variable(variable.clone()),
-                        LogicalExpression::Literal(Value::String(extra_label.clone().into())),
-                    ],
-                    distinct: false,
-                };
-                combined = Some(match combined {
-                    None => check,
-                    Some(prev) => LogicalExpression::Binary {
-                        left: Box::new(prev),
-                        op: crate::query::plan::BinaryOp::And,
-                        right: Box::new(check),
-                    },
-                });
-            }
-            if let Some(predicate) = combined {
-                plan = wrap_filter(plan, predicate);
-            }
+        if let Some(predicate) = has_all_labels(&variable, extra_labels(node)) {
+            plan = wrap_filter(plan, predicate);
         }
 
         // Add filter for inline properties (e.g., {city: 'NYC'})
@@ -691,6 +670,9 @@ impl CypherTranslator {
             label: source_label,
             input: input.map(Box::new),
         });
+        if let Some(predicate) = has_all_labels(&source_var, extra_labels(&path.start)) {
+            plan = wrap_filter(plan, predicate);
+        }
 
         // Apply property filters on the source node if any
         for (key, value) in &path.start.properties {
@@ -721,6 +703,9 @@ impl CypherTranslator {
                 label: target_label,
                 input: Some(Box::new(plan)),
             });
+            if let Some(predicate) = has_all_labels(&target_var, extra_labels(&rel.target)) {
+                plan = wrap_filter(plan, predicate);
+            }
 
             // Apply property filters on the target node if any
             for (key, value) in &rel.target.properties {
@@ -781,7 +766,6 @@ impl CypherTranslator {
             .variable
             .clone()
             .unwrap_or_else(|| self.next_anon_var());
-        let target_label = rel.target.labels.first().cloned();
 
         let direction = match rel.direction {
             ast::Direction::Outgoing => ExpandDirection::Outgoing,
@@ -849,20 +833,9 @@ impl CypherTranslator {
             expand
         };
 
-        let mut result = if let Some(label) = target_label {
-            wrap_filter(
-                expand,
-                LogicalExpression::FunctionCall {
-                    name: "hasLabel".into(),
-                    args: vec![
-                        LogicalExpression::Variable(to_variable.clone()),
-                        LogicalExpression::Literal(Value::from(label)),
-                    ],
-                    distinct: false,
-                },
-            )
-        } else {
-            expand
+        let mut result = match has_all_labels(&to_variable, &rel.target.labels) {
+            Some(predicate) => wrap_filter(expand, predicate),
+            None => expand,
         };
 
         // Apply property filters on the edge: -[r {since: 2020}]->
@@ -2574,6 +2547,12 @@ impl CypherTranslator {
 
         Ok((current_input, rewritten_items))
     }
+}
+
+/// The labels of a node pattern after the first. A `NodeScan` checks the first
+/// label; the others still have to be checked with a filter.
+fn extra_labels(node: &ast::NodePattern) -> &[String] {
+    node.labels.get(1..).unwrap_or_default()
 }
 
 /// Checks if an AST expression contains an aggregate function call.

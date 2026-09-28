@@ -5,8 +5,8 @@
 //! translation follows the GQL translator pattern.
 
 use super::common::{
-    combine_with_and, is_aggregate_function, to_aggregate_function, wrap_filter, wrap_limit,
-    wrap_return, wrap_skip, wrap_sort,
+    combine_with_and, has_all_labels, is_aggregate_function, to_aggregate_function, wrap_filter,
+    wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CallProcedureOp,
@@ -578,6 +578,12 @@ impl SqlPgqTranslator {
             input: input.map(Box::new),
         });
 
+        // The scan checks the first label; the others must hold too.
+        if let Some(predicate) = has_all_labels(&variable, node.labels.get(1..).unwrap_or_default())
+        {
+            plan = wrap_filter(plan, predicate);
+        }
+
         // Add filters for inline properties (e.g., {city: 'NYC'})
         if !node.properties.is_empty() {
             let predicate = self.build_property_predicate(&variable, &node.properties)?;
@@ -614,7 +620,6 @@ impl SqlPgqTranslator {
             .variable
             .clone()
             .unwrap_or_else(|| "_anon".to_string());
-        let target_label = edge.target.labels.first().cloned();
 
         let direction = match edge.direction {
             ast::EdgeDirection::Outgoing => ExpandDirection::Outgoing,
@@ -650,22 +655,11 @@ impl SqlPgqTranslator {
             path_mode: PathMode::Walk,
         });
 
-        // Add label filter on the target node if present
-        if let Some(label) = target_label {
-            Ok(wrap_filter(
-                expand,
-                LogicalExpression::FunctionCall {
-                    name: "hasLabel".into(),
-                    args: vec![
-                        LogicalExpression::Variable(to_variable),
-                        LogicalExpression::Literal(Value::from(label)),
-                    ],
-                    distinct: false,
-                },
-            ))
-        } else {
-            Ok(expand)
-        }
+        // Every label of the target node must hold
+        Ok(match has_all_labels(&to_variable, &edge.target.labels) {
+            Some(predicate) => wrap_filter(expand, predicate),
+            None => expand,
+        })
     }
 
     // ==================== COLUMNS Translation ====================

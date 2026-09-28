@@ -439,24 +439,14 @@ impl GqlTranslator {
     /// Wraps a plan with AND-combined `hasLabel` filters for extra labels beyond the
     /// first (which is already used in `NodeScan` for scan-time filtering).
     fn add_extra_label_filters(
-        mut plan: LogicalOperator,
+        plan: LogicalOperator,
         variable: &str,
         extra_labels: &[String],
     ) -> LogicalOperator {
-        for label in extra_labels {
-            plan = wrap_filter(
-                plan,
-                LogicalExpression::FunctionCall {
-                    name: "hasLabel".into(),
-                    args: vec![
-                        LogicalExpression::Variable(variable.to_string()),
-                        LogicalExpression::Literal(Value::String(label.clone().into())),
-                    ],
-                    distinct: false,
-                },
-            );
+        match has_all_labels(variable, extra_labels) {
+            Some(predicate) => wrap_filter(plan, predicate),
+            None => plan,
         }
-        plan
     }
 
     /// Builds a predicate expression for property filters like {name: 'Alix', age: 30}.

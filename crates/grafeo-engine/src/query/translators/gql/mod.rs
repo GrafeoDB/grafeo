@@ -10,9 +10,9 @@ use std::collections::{HashMap, HashSet};
 
 use super::common::{
     build_left_join_with_predicates, check_union_columns, combine_with_and, flatten_and_conjuncts,
-    is_aggregate_function, is_binary_set_function, join_and_conjuncts, references_any,
-    to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
-    wrap_sort,
+    has_all_labels, is_aggregate_function, is_binary_set_function, join_and_conjuncts,
+    references_any, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
+    wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,

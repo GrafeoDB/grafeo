@@ -11,6 +11,7 @@ use crate::query::plan::{
     AggregateFunction, BinaryOp, CountExpr, DistinctOp, FilterOp, LeftJoinOp, LimitOp,
     LogicalExpression, LogicalOperator, ReturnItem, ReturnOp, SkipOp, SortKey, SortOp, UnaryOp,
 };
+use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 
 /// Returns true if the function name is a recognized aggregate function.
@@ -214,6 +215,27 @@ pub(crate) fn combine_with_and(predicates: Vec<LogicalExpression>) -> Result<Log
                 QueryErrorKind::Semantic,
                 "Empty property predicate",
             ))
+        })
+}
+
+/// `hasLabel(variable, label)` for every label, combined with AND, or `None`
+/// when `labels` is empty. A node pattern with several labels requires all of
+/// them, wherever the node appears in a pattern.
+pub(crate) fn has_all_labels(variable: &str, labels: &[String]) -> Option<LogicalExpression> {
+    labels
+        .iter()
+        .map(|label| LogicalExpression::FunctionCall {
+            name: "hasLabel".into(),
+            args: vec![
+                LogicalExpression::Variable(variable.to_string()),
+                LogicalExpression::Literal(Value::String(label.clone().into())),
+            ],
+            distinct: false,
+        })
+        .reduce(|acc, check| LogicalExpression::Binary {
+            left: Box::new(acc),
+            op: BinaryOp::And,
+            right: Box::new(check),
         })
 }
 

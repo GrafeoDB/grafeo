@@ -28,6 +28,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Times with UTC offsets compared inconsistently**: `time('14:00+01:00') = time('13:00Z')` was false while `<=` and `>=` were true. Offset times now compare by instant, consistently for `=`, ordering, `DISTINCT` and grouping.
 - **Python: aware `datetime` values near year 1 failed to convert**, e.g. `datetime(1, 1, 1, 0, 30, tzinfo=timezone(timedelta(hours=1)))`.
 - **Very long `^` chains or runs of `-`/`+` signs could crash the process** with a stack overflow in the GQL and Cypher parsers; they now fail with the usual nesting-depth error.
+- **Rust API (`grafeo-core`): `PropertyColumn::get` returned `None` for compressed values**: after `force_compress()`, `force_compress_all()` or compression in `CompressionMode::Auto`, reading a single property of a compressed column returned `None`. It now reads the compressed copy. Removing a compressed value now removes it for good instead of leaving the compressed copy readable, and switching compression off keeps values written after compression instead of replacing them with the older compressed copy. The database does not compress property columns itself, so only code using `PropertyStorage` or `PropertyColumn` directly was affected.
 - **Docs**: the Discord invite on the docs site pointed to an expired link.
 
 ### Internal

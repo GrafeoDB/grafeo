@@ -1052,6 +1052,15 @@ impl<Id: EntityId> PropertyColumn<Id> {
 
     /// Removes a value for an entity.
     pub fn remove(&mut self, id: Id) -> Option<Value> {
+        // Compressed arrays can't drop a single entry, so fold them back
+        // into the hot buffer first; otherwise `get` would still find it.
+        if self
+            .compressed
+            .as_ref()
+            .is_some_and(|c| c.position(id.as_u64()).is_some())
+        {
+            self.decompress_all();
+        }
         let removed = self.values.remove(&id);
         if removed.is_some() {
             // Mark zone map as dirty - would need full rebuild for accurate min/max
@@ -1371,55 +1380,59 @@ impl<Id: EntityId> PropertyColumn<Id> {
 
     /// Decompresses all values back to the hot buffer.
     fn decompress_all(&mut self) {
-        let Some(compressed) = self.compressed.take() else {
+        let Some(compressed) = self.compressed.as_ref() else {
             return;
         };
 
-        match compressed {
+        // Decode before dropping the compressed data, so a decode error
+        // leaves the column intact instead of losing every compressed value.
+        let decoded: Vec<(u64, Value)> = match compressed {
             CompressedColumnData::Integers {
                 data, index_to_id, ..
             } => {
-                if let Ok(values) = TypeSpecificCompressor::decompress_integers(&data) {
-                    // Convert back to signed using zigzag decoding
-                    let signed: Vec<i64> = values
-                        .iter()
-                        .map(|&v| crate::codec::zigzag_decode(v))
-                        .collect();
-
-                    for (i, id_u64) in index_to_id.iter().enumerate() {
-                        if let Some(&value) = signed.get(i) {
-                            let id = Id::from_u64(*id_u64);
-                            self.values.insert(id, Value::Int64(value));
-                        }
-                    }
-                }
+                let Ok(values) = TypeSpecificCompressor::decompress_integers(data) else {
+                    return;
+                };
+                index_to_id
+                    .iter()
+                    .zip(values)
+                    .map(|(&id, v)| (id, Value::Int64(crate::codec::zigzag_decode(v))))
+                    .collect()
             }
             CompressedColumnData::Strings {
                 encoding,
                 index_to_id,
                 ..
-            } => {
-                for (i, id_u64) in index_to_id.iter().enumerate() {
-                    if let Some(s) = encoding.get(i) {
-                        let id = Id::from_u64(*id_u64);
-                        self.values.insert(id, Value::String(ArcStr::from(s)));
-                    }
-                }
-            }
+            } => index_to_id
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &id)| {
+                    encoding
+                        .get(i)
+                        .map(|s| (id, Value::String(ArcStr::from(s))))
+                })
+                .collect(),
             CompressedColumnData::Booleans {
                 data, index_to_id, ..
             } => {
-                if let Ok(values) = TypeSpecificCompressor::decompress_booleans(&data) {
-                    for (i, id_u64) in index_to_id.iter().enumerate() {
-                        if let Some(&value) = values.get(i) {
-                            let id = Id::from_u64(*id_u64);
-                            self.values.insert(id, Value::Bool(value));
-                        }
-                    }
-                }
+                let Ok(values) = TypeSpecificCompressor::decompress_booleans(data) else {
+                    return;
+                };
+                index_to_id
+                    .iter()
+                    .zip(values)
+                    .map(|(&id, v)| (id, Value::Bool(v)))
+                    .collect()
             }
+        };
+
+        // Hot entries were written after compression, so they win over
+        // the compressed copy.
+        for (id, value) in decoded {
+            self.values.entry(Id::from_u64(id)).or_insert(value);
         }
 
+        self.compressed = None;
         self.compressed_count = 0;
         self.block_zone_maps.clear();
     }
@@ -2267,6 +2280,44 @@ mod tests {
 
         col.set(gapped_id(7), Value::Int64(700));
         assert_eq!(col.get(gapped_id(7)), Some(Value::Int64(700)));
+    }
+
+    #[test]
+    fn test_remove_shadowed_compressed_value() {
+        let mut col = compressed_int_column();
+        col.set(gapped_id(7), Value::Int64(700));
+        col.set(gapped_id(8), Value::Int64(800));
+
+        assert_eq!(col.remove(gapped_id(7)), Some(Value::Int64(700)));
+        assert_eq!(col.get(gapped_id(7)), None);
+        assert_eq!(col.get(gapped_id(8)), Some(Value::Int64(800)));
+    }
+
+    #[test]
+    fn test_set_compression_mode_keeps_newer_hot_value() {
+        let mut col: PropertyColumn<NodeId> =
+            PropertyColumn::with_compression(CompressionMode::Auto);
+        for k in 0u64..100 {
+            col.set(gapped_id(k), Value::Int64(i64::try_from(k).unwrap()));
+        }
+        col.force_compress();
+        assert!(col.is_compressed());
+        col.set(gapped_id(7), Value::Int64(700));
+
+        col.set_compression_mode(CompressionMode::None);
+        assert!(!col.is_compressed());
+        assert_eq!(col.get(gapped_id(7)), Some(Value::Int64(700)));
+        assert_eq!(col.get(gapped_id(8)), Some(Value::Int64(8)));
+    }
+
+    #[test]
+    fn test_remove_compressed_value() {
+        let mut col = compressed_int_column();
+
+        assert_eq!(col.remove(gapped_id(7)), Some(Value::Int64(7)));
+        assert_eq!(col.get(gapped_id(7)), None);
+        assert_eq!(col.get(gapped_id(8)), Some(Value::Int64(8)));
+        assert_eq!(col.len(), 99);
     }
 
     #[test]

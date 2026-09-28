@@ -728,6 +728,9 @@ impl CypherTranslator {
 
             let edge_types = rel.types.clone();
             let all_paths = matches!(path_function, ast::PathFunction::AllShortestPaths);
+            // The path must fit the relationship's length: `[*]` needs at least
+            // one hop, and a relationship without `*` is a single hop.
+            let (min_hops, max_hops) = hop_bounds(rel);
 
             plan = LogicalOperator::ShortestPath(ShortestPathOp {
                 input: Box::new(plan),
@@ -737,6 +740,8 @@ impl CypherTranslator {
                 direction,
                 path_alias: path_alias.to_string(),
                 all_paths,
+                min_hops,
+                max_hops,
             });
         }
 
@@ -773,11 +778,7 @@ impl CypherTranslator {
             ast::Direction::Undirected => ExpandDirection::Both,
         };
 
-        let (min_hops, max_hops) = if let Some(range) = &rel.length {
-            (range.min.unwrap_or(1), range.max)
-        } else {
-            (1, Some(1))
-        };
+        let (min_hops, max_hops) = hop_bounds(rel);
 
         // A property map on a variable-length edge must hold for every hop, so
         // it is checked over the path's edges; that needs a path column.
@@ -2553,6 +2554,15 @@ impl CypherTranslator {
 /// label; the others still have to be checked with a filter.
 fn extra_labels(node: &ast::NodePattern) -> &[String] {
     node.labels.get(1..).unwrap_or_default()
+}
+
+/// The minimum and maximum number of hops (`None` = unbounded) a relationship
+/// pattern matches: `[*]` is one or more, and no `*` is exactly one hop.
+fn hop_bounds(rel: &ast::RelationshipPattern) -> (u32, Option<u32>) {
+    match &rel.length {
+        Some(range) => (range.min.unwrap_or(1), range.max),
+        None => (1, Some(1)),
+    }
 }
 
 /// Checks if an AST expression contains an aggregate function call.

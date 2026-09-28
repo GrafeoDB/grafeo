@@ -3477,6 +3477,8 @@ mod tests {
             direction: ExpandDirection::Outgoing,
             path_alias: "p".to_string(),
             all_paths: false,
+            min_hops: 1,
+            max_hops: None,
         }));
         let physical = planner.plan(&logical).unwrap();
         assert!(
@@ -3499,6 +3501,8 @@ mod tests {
             direction: ExpandDirection::Both,
             path_alias: "p".to_string(),
             all_paths: false,
+            min_hops: 1,
+            max_hops: None,
         }));
         let err = planner.plan(&logical).err().expect("plan should fail");
         assert!(format!("{err}").contains("Source variable"));

@@ -1932,8 +1932,9 @@ pub struct MergeRelationshipOp {
 
 /// Find shortest path between two nodes.
 ///
-/// This operator uses Dijkstra's algorithm to find the shortest path(s)
+/// This operator uses breadth-first search to find the shortest path(s)
 /// between a source node and a target node, optionally filtered by edge type.
+/// A pair without a path within the hop bounds produces no row.
 #[derive(Debug, Clone)]
 pub struct ShortestPathOp {
     /// Input operator providing source/target nodes.
@@ -1950,6 +1951,10 @@ pub struct ShortestPathOp {
     pub path_alias: String,
     /// Whether to find all shortest paths (vs. just one).
     pub all_paths: bool,
+    /// Minimum number of edges in a path, from the edge's quantifier.
+    pub min_hops: u32,
+    /// Maximum number of edges in a path (`None` = unbounded).
+    pub max_hops: Option<u32>,
 }
 
 // ==================== SPARQL Update Operators ====================
@@ -3806,6 +3811,8 @@ mod tests {
             direction: ExpandDirection::Outgoing,
             path_alias: "p".into(),
             all_paths: false,
+            min_hops: 1,
+            max_hops: None,
         });
         assert_eq!(sp.display_label(), "a -> b");
 
@@ -4268,6 +4275,8 @@ mod tests {
             direction: ExpandDirection::Outgoing,
             path_alias: "p".into(),
             all_paths: false,
+            min_hops: 1,
+            max_hops: None,
         });
         assert!(sp.explain_tree().contains("ShortestPath (a -> b)"));
     }

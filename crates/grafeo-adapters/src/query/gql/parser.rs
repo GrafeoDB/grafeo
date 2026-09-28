@@ -3160,7 +3160,10 @@ impl<'a> Parser<'a> {
     fn parse_not_expression(&mut self) -> Result<Expression> {
         if self.current.kind == TokenKind::Not {
             self.advance();
-            let operand = self.parse_not_expression()?;
+            self.enter_nesting()?;
+            let operand = self.parse_not_expression();
+            self.exit_nesting();
+            let operand = operand?;
             return Ok(Expression::Unary {
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
@@ -10684,6 +10687,7 @@ mod tests {
             format!("RETURN 2{}", " ^ 2".repeat(50_000)),
             format!("RETURN {}1", "- ".repeat(50_000)),
             format!("RETURN {}1", "+ ".repeat(50_000)),
+            format!("RETURN {}true", "NOT ".repeat(50_000)),
         ] {
             let err = Parser::new(&query).parse().unwrap_err().to_string();
             assert!(err.contains("nesting depth"), "got: {err}");
@@ -10695,6 +10699,7 @@ mod tests {
                 .is_ok()
         );
         assert!(Parser::new("RETURN - - 1").parse().is_ok());
+        assert!(Parser::new("RETURN NOT NOT true").parse().is_ok());
     }
 
     #[test]

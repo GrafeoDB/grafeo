@@ -10,7 +10,7 @@ use grafeo_common::types::{LogicalType, Value};
 use grafeo_engine::GrafeoDB;
 
 /// Seeds a small Person/KNOWS graph. Test data names follow the repo
-/// convention (Alix, Gus, Tarantino characters) from CODE_STYLE.md.
+/// convention (Alix, Gus, Tarantino characters).
 fn seed_people(db: &GrafeoDB) {
     let alix = db.create_node(&["Person"]);
     let gus = db.create_node(&["Person"]);

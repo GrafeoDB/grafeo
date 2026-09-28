@@ -93,16 +93,15 @@
 //! durability; see [#250][] for the unbounded-growth incident that
 //! motivated the retention knobs.
 //!
-//! The planned 0.6.x `reactive-event-bus` refactor (see
-//! `.claude/todo/6_rc/reactive-event-bus.md`) generalises this pattern:
-//! CDC becomes one [`MutationListener`][ml] among many, the recording
+//! The planned reactive event bus (see [#470][]) generalises this pattern:
+//! CDC becomes one `MutationListener` among many, the recording
 //! path moves behind a trait, and other listeners (cache invalidation,
 //! replication, scoring hooks) register alongside. The in-process API
 //! surface here is the one CDC binding that carries forward; the rest
 //! of the file is effectively "the first listener".
 //!
 //! [#250]: https://github.com/GrafeoDB/grafeo/issues/250
-//! [ml]: https://github.com/GrafeoDB/grafeo/blob/main/.claude/todo/6_rc/reactive-event-bus.md
+//! [#470]: https://github.com/GrafeoDB/grafeo/issues/470
 //!
 //! # Example
 //!

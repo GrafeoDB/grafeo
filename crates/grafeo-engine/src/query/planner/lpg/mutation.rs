@@ -675,7 +675,8 @@ impl super::Planner {
                 sp.edge_types.clone(),
                 direction,
             )
-            .with_all_paths(sp.all_paths),
+            .with_all_paths(sp.all_paths)
+            .with_hop_bounds(sp.min_hops, sp.max_hops),
         );
 
         // Add path length column with the expected naming convention

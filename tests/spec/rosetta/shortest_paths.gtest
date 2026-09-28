@@ -1,0 +1,152 @@
+# Rosetta: shortest-path searches in GQL and Cypher
+#
+# A shortest-path search returns a row only for a pair of nodes that has a
+# path, and the path must fit the hop bounds of the edge pattern: `->+`,
+# `-[*]->` (at least one hop), `->*`, `-[*0..]->` (zero or more),
+# `->{1,2}`, `-[*..2]->`. Without a quantifier the edge is a single hop.
+# OPTIONAL MATCH keeps a pair without a path, with a null path.
+#
+# Setup (GQL): Amsterdam -> Berlin -> Prague -> Amsterdam (a cycle of ROUTE
+# edges), and Paris without routes.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Shortest paths cross-language equivalence
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Pairs without a path
+  # ---------------------------------------------------------------------------
+
+  - name: no_path_has_no_row
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:City {name: 'Paris'})-[:ROUTE]->+(b:City {name: 'Berlin'}) RETURN a.name, b.name, length(p)"
+      cypher: "MATCH p = shortestPath((a:City {name: 'Paris'})-[:ROUTE*]->(b:City {name: 'Berlin'})) RETURN a.name, b.name, length(p)"
+    expect:
+      empty: true
+
+  - name: all_shortest_without_a_path_has_no_row
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH p = ALL SHORTEST (a:City {name: 'Paris'})-[:ROUTE]->+(b:City {name: 'Berlin'}) RETURN a.name, b.name, length(p)"
+      cypher: "MATCH p = allShortestPaths((a:City {name: 'Paris'})-[:ROUTE*]->(b:City {name: 'Berlin'})) RETURN a.name, b.name, length(p)"
+    expect:
+      empty: true
+
+  - name: optional_match_keeps_a_pair_without_a_path
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH (a:City), (b:City {name: 'Berlin'}) OPTIONAL MATCH p = ANY SHORTEST (a)-[:ROUTE]->+(b) RETURN a.name, b.name, length(p)"
+      cypher: "MATCH (a:City), (b:City {name: 'Berlin'}) OPTIONAL MATCH p = shortestPath((a)-[:ROUTE*]->(b)) RETURN a.name, b.name, length(p)"
+    expect:
+      rows:
+        - [Amsterdam, Berlin, 1]
+        - [Berlin, Berlin, 3]
+        - [Paris, Berlin, null]
+        - [Prague, Berlin, 2]
+
+  # ---------------------------------------------------------------------------
+  # A node paired with itself
+  # ---------------------------------------------------------------------------
+
+  - name: one_hop_minimum_finds_the_cycle_back
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:City {name: 'Amsterdam'})-[:ROUTE]->+(b:City {name: 'Amsterdam'}) RETURN length(p)"
+      cypher: "MATCH p = shortestPath((a:City {name: 'Amsterdam'})-[:ROUTE*]->(b:City {name: 'Amsterdam'})) RETURN length(p)"
+    expect:
+      rows:
+        - [3]
+
+  - name: one_hop_minimum_has_no_zero_length_self_path
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:City {name: 'Paris'})-[:ROUTE]->+(b:City {name: 'Paris'}) RETURN length(p)"
+      cypher: "MATCH p = shortestPath((a:City {name: 'Paris'})-[:ROUTE*]->(b:City {name: 'Paris'})) RETURN length(p)"
+    expect:
+      empty: true
+
+  - name: zero_hop_minimum_keeps_the_zero_length_self_path
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:City {name: 'Paris'})-[:ROUTE]->*(b:City {name: 'Paris'}) RETURN length(p)"
+      cypher: "MATCH p = shortestPath((a:City {name: 'Paris'})-[:ROUTE*0..]->(b:City {name: 'Paris'})) RETURN length(p)"
+    expect:
+      rows:
+        - [0]
+
+  - name: all_shortest_with_a_one_hop_minimum
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH p = ALL SHORTEST (a:City {name: 'Amsterdam'})-[:ROUTE]->+(b:City) RETURN b.name, length(p)"
+      cypher: "MATCH p = allShortestPaths((a:City {name: 'Amsterdam'})-[:ROUTE*]->(b:City)) RETURN b.name, length(p)"
+    expect:
+      rows:
+        - [Amsterdam, 3]
+        - [Berlin, 1]
+        - [Prague, 2]
+
+  # ---------------------------------------------------------------------------
+  # Hop bounds
+  # ---------------------------------------------------------------------------
+
+  - name: maximum_drops_a_longer_path
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:City {name: 'Amsterdam'})-[:ROUTE]->{1,1}(b:City {name: 'Prague'}) RETURN length(p)"
+      cypher: "MATCH p = shortestPath((a:City {name: 'Amsterdam'})-[:ROUTE*1..1]->(b:City {name: 'Prague'})) RETURN length(p)"
+    expect:
+      empty: true
+
+  - name: maximum_keeps_a_path_within_it
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:City {name: 'Amsterdam'})-[:ROUTE]->{1,2}(b:City {name: 'Prague'}) RETURN length(p)"
+      cypher: "MATCH p = shortestPath((a:City {name: 'Amsterdam'})-[:ROUTE*..2]->(b:City {name: 'Prague'})) RETURN length(p)"
+    expect:
+      rows:
+        - [2]
+
+  - name: no_quantifier_means_one_hop
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:City {name: 'Amsterdam'})-[:ROUTE]->(b:City) RETURN b.name, length(p)"
+      cypher: "MATCH p = shortestPath((a:City {name: 'Amsterdam'})-[:ROUTE]->(b:City)) RETURN b.name, length(p)"
+    expect:
+      rows:
+        - [Berlin, 1]

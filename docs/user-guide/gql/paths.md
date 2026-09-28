@@ -181,6 +181,8 @@ WHERE a.name = 'Alix' AND b.name = 'Dave'
 RETURN path, length(path)
 ```
 
+Shortest-path searches (these prefixes and `shortestPath`) only return paths that fit the edge's quantifier: `->+` or `-[:KNOWS*]->` is one or more hops, `->{1,3}` at most three, `->*` also pairs a node with itself (length 0), and an edge without a quantifier is a single hop. A pair of nodes without such a path has no row; use `OPTIONAL MATCH` to keep it with a null path.
+
 ## Path Predicate Functions
 
 Test structural properties of a captured path:

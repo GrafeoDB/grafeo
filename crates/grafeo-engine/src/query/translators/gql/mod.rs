@@ -1509,7 +1509,8 @@ impl GqlTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         // Extract source and target from the pattern
-        let (source_node, target_node, edge_types, direction) = match pattern {
+        let (source_node, target_node, edge_types, direction, (min_hops, max_hops)) = match pattern
+        {
             ast::Pattern::Path(path) => {
                 let target_node = if let Some(edge) = path.edges.last() {
                     &edge.target
@@ -1532,7 +1533,13 @@ impl GqlTranslator {
                             ast::EdgeDirection::Incoming => ExpandDirection::Incoming,
                             ast::EdgeDirection::Undirected => ExpandDirection::Both,
                         });
-                (&path.source, target_node, edge_types, direction)
+                // The path must fit the edge's quantifier: `->+` needs at least
+                // one hop, and an edge without one is a single hop.
+                let hop_bounds = path
+                    .edges
+                    .first()
+                    .map_or((1, Some(1)), pattern::edge_hop_bounds);
+                (&path.source, target_node, edge_types, direction, hop_bounds)
             }
             ast::Pattern::Node(_)
             | ast::Pattern::Quantified { .. }
@@ -1573,6 +1580,8 @@ impl GqlTranslator {
             direction,
             path_alias: alias.unwrap_or("_path").to_string(),
             all_paths: matches!(path_function, ast::PathFunction::AllShortestPaths),
+            min_hops,
+            max_hops,
         }))
     }
 

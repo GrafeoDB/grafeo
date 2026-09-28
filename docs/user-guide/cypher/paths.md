@@ -63,6 +63,8 @@ WHERE a.name = 'Alix' AND b.name = 'Dave'
 RETURN path
 ```
 
+The path must fit the relationship's length: `[*]` is one or more hops, `[*..3]` at most three, `[*0..]` also pairs a node with itself (length 0), and a relationship without `*` is a single hop. A pair of nodes without such a path has no row; use `OPTIONAL MATCH` to keep it with a null path.
+
 ## Path Filtering
 
 ```cypher

@@ -2179,6 +2179,8 @@ mod tests {
             direction: ExpandDirection::Both,
             path_alias: "p".to_string(),
             all_paths: false,
+            min_hops: 1,
+            max_hops: None,
         }));
 
         let mut binder = Binder::new();
@@ -2214,6 +2216,8 @@ mod tests {
             direction: ExpandDirection::Outgoing,
             path_alias: "p".to_string(),
             all_paths: false,
+            min_hops: 1,
+            max_hops: None,
         }));
 
         let mut binder = Binder::new();

@@ -559,12 +559,7 @@ impl GqlTranslator {
                 None
             };
 
-            let min_hops = edge.min_hops.unwrap_or(1);
-            let max_hops = if edge.min_hops.is_none() && edge.max_hops.is_none() {
-                Some(1)
-            } else {
-                edge.max_hops
-            };
+            let (min_hops, max_hops) = edge_hop_bounds(edge);
 
             let is_variable_length = min_hops != 1 || max_hops.is_none() || max_hops != Some(1);
 
@@ -727,4 +722,14 @@ impl GqlTranslator {
 /// endpoints used to be created, so `({id: 1})` failed as undefined.
 fn is_new_endpoint(node: &ast::NodePattern) -> bool {
     node.variable.is_none() || !node.labels.is_empty() || !node.properties.is_empty()
+}
+
+/// The minimum and maximum number of hops (`None` = unbounded) an edge pattern
+/// matches: an edge without a quantifier is exactly one hop.
+pub(super) fn edge_hop_bounds(edge: &ast::EdgePattern) -> (u32, Option<u32>) {
+    if edge.min_hops.is_none() && edge.max_hops.is_none() {
+        (1, Some(1))
+    } else {
+        (edge.min_hops.unwrap_or(1), edge.max_hops)
+    }
 }

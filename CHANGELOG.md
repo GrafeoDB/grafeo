@@ -25,6 +25,11 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Very long `^` chains or runs of `-`/`+` signs could crash the process** with a stack overflow in the GQL and Cypher parsers; they now fail with the usual nesting-depth error.
 - **Docs**: the Discord invite on the docs site pointed to an expired link.
 
+### Internal
+
+- **CI gate and policy checks** ([#511](https://github.com/GrafeoDB/grafeo/issues/511)): a `CI Gate` job fails when any required job fails, so one check can be required before merging, and a `Policy` job checks crate boundaries, workflow toolchain pins and public-text rules (`scripts/check_policy.py`). prek also checks staged lines and rejects AI co-author trailers in commit messages.
+- **CI toolchain pins restored** ([#509](https://github.com/GrafeoDB/grafeo/issues/509)): a Dependabot bump to a Rust version that does not exist stopped CI at its first job; Dependabot no longer bumps the toolchain.
+
 ## [0.5.43] - 2026-09-27
 
 Stabilization release. Fixes for silent wrong results (`ORDER BY` + `LIMIT`, `UNION`, aggregates, duplicate column names, SPARQL named graphs and property paths), queries whose trailing statements were ignored, rollbacks that did not undo changes on persistent databases or SPARQL updates, databases over 4 GiB written corrupt, edges lost after `compact()` and HNSW vector updates, plus dependency and security updates.

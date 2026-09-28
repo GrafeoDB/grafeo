@@ -180,6 +180,29 @@ def test_p3_ai_lines_need_the_ownership_box(repo: Path) -> None:
     assert (maintainer.returncode, found(maintainer)) == (0, ["P3 PR"])
 
 
+@pytest.mark.parametrize(
+    ("declaration", "expected"),
+    [
+        ("AI tools used: Claude Code for the tests", ["P3 PR"]),
+        ("ai tools used: copilot", ["P3 PR"]),
+        ("AI tools used: none", []),
+        ("AI tools used: n/a", []),
+        ("AI tools used: <!-- none, or which tools and for what -->", []),
+        ("AI tools used:", []),
+    ],
+)
+def test_p3_declared_ai_tools_need_the_ownership_box(
+    repo: Path, declaration: str, expected: list[str]
+) -> None:
+    commit(repo, {"README.md": "x\n"})
+    result = check(repo, body=f"Fixes #3\n\n{declaration}\n")
+    assert found(result) == expected
+    assert result.returncode == (1 if expected else 0)
+    if expected:
+        ticked = check(repo, body=f"Fixes #3\n\n{declaration}\n\n{BOX}\n")
+        assert (ticked.returncode, found(ticked)) == (0, ["P3 PR"])
+
+
 def test_p4_new_dependencies(repo: Path) -> None:
     manifest = (repo / "crates/grafeo-core/Cargo.toml").read_text()
     commit(

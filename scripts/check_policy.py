@@ -55,6 +55,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 DASH = re.compile("[\u2013\u2014]")
 PRIVATE_DIR = re.compile(r"(?<![\w])\.claude(?![\w.-])")
@@ -132,7 +133,8 @@ HINTS = {
     "P1": "open the pull request against the current release/<milestone> branch",
     "P2": 'link a planned issue with "Fixes #N" (it needs a milestone, or the "help wanted" '
     'or "good first issue" label); for anything else, open an issue or discussion first',
-    "P3": "land the change without AI co-author or generated-by lines",
+    "P3": "AI co-author lines are not kept in the history; remove the line and name the AI "
+    "tools in the pull request description instead (AI tools used: ...)",
     "P3PR": "tick the box in the PR description confirming you have read every line of this "
     "change, understand it and can explain it in review",
     "P4": 'new dependencies need a maintainer to agree and add the "approved: deps" label',
@@ -551,6 +553,11 @@ LINKED_ISSUE = re.compile(
 OWNERSHIP_BOX = re.compile(
     r"^\s*[-*]\s*\[[xX]\]\s*I have read every line of this change", re.MULTILINE
 )
+# The template's "AI tools used:" field; "none", "no" or "n/a" (or nothing) declares no AI help.
+AI_DECLARED = re.compile(
+    r"^\s*AI tools used:[ \t]*(?!(?:none|no|n/?a)\b[ \t.]*$)\S.*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 FIX_TITLE = re.compile(r"^fix(\([^)]*\))?!?:", re.IGNORECASE)
 TEST_PATH = re.compile(
@@ -667,7 +674,7 @@ def cargo_features(text: str | None) -> set[str]:
         return set()
 
 
-def gh_api(path: str) -> object:
+def gh_api(path: str) -> Any:
     result = subprocess.run(
         ["gh", "api", path], capture_output=True, text=True, encoding="utf-8"
     )
@@ -764,7 +771,7 @@ def pull_findings(context: dict, root: Path, base: str, head: str) -> list[Findi
         for line in message.splitlines()
         if not line.startswith("#")
         and (AI_TRAILER.search(line) or GENERATED.search(line))
-    ]
+    ] + [match.group(0).strip() for match in AI_DECLARED.finditer(body)]
     if ai_lines and author != "bot":
         ticked = bool(OWNERSHIP_BOX.search(body))
         detail = f"AI assistance noted ({ai_lines[0][:80]})"

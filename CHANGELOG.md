@@ -29,6 +29,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 - **CI gate and policy checks** ([#511](https://github.com/GrafeoDB/grafeo/issues/511)): a `CI Gate` job fails when any required job fails, so one check can be required before merging, and a `Policy` job checks crate boundaries, workflow toolchain pins and public-text rules (`scripts/check_policy.py`). prek also checks staged lines and rejects AI co-author trailers in commit messages.
 - **CI toolchain pins restored** ([#509](https://github.com/GrafeoDB/grafeo/issues/509)): a Dependabot bump to a Rust version that does not exist stopped CI at its first job; Dependabot no longer bumps the toolchain.
+- **Pull request eligibility check**: a `PR Policy` check asks contributor pull requests for a planned issue and the release branch as target, an ownership confirmation when AI tools helped, maintainer approval (by label) for new dependencies, CI changes, new crates and feature flags, and a test for every fix. The rules are listed in CONTRIBUTING.md.
 
 ## [0.5.43] - 2026-09-27
 

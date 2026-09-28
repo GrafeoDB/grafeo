@@ -1,7 +1,11 @@
 # Pre-commit hooks for Grafeo
 # Install: cargo install prek && prek install
+#   (installs the pre-commit and commit-msg hooks listed in default_install_hook_types)
 # Run manually: prek run --all-files
 # Docs: https://github.com/j178/prek
+
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
 
 repos:
   # Built-in prek hooks
@@ -19,7 +23,7 @@ repos:
 
   # Typo checker
   - repo: https://github.com/crate-ci/typos
-    rev: v1.29.4
+    rev: v1.50.3
     hooks:
       - id: typos
 
@@ -71,3 +75,19 @@ repos:
         entry: ruff format
         language: system
         types: [python]
+
+  # Repository policy (scripts/check_policy.py): rules on staged lines, and a commit
+  # message check that rejects AI co-author and "Generated with" lines
+  - repo: local
+    hooks:
+      - id: policy-diff
+        name: policy (staged lines)
+        entry: python scripts/check_policy.py diff --staged
+        language: system
+        pass_filenames: false
+
+      - id: policy-commit-msg
+        name: policy (commit message)
+        entry: python scripts/check_policy.py commit-msg
+        language: system
+        stages: [commit-msg]

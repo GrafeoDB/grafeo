@@ -296,7 +296,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Configure sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -341,7 +341,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Configure sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -416,7 +416,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Configure sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache cargo registry
         uses: actions/cache@v6

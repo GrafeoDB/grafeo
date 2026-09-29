@@ -1,11 +1,12 @@
 //! The direct node and edge API of GrafeoDB.
 //!
-//! Every write is one implicit transaction on the current graph (the one
+//! Every write goes to the current graph (the one
 //! [`set_current_graph`](super::GrafeoDB::set_current_graph) and
-//! [`set_current_schema`](super::GrafeoDB::set_current_schema) select): it is
-//! checked against the schema and constraints, logged to the WAL, reported to
-//! CDC and versioned exactly like the same write in a query, and it either
-//! applies completely or fails with an error. Reads see the current graph.
+//! [`set_current_schema`](super::GrafeoDB::set_current_schema) select) and
+//! commits at an epoch of its own: it is checked against the schema and
+//! constraints, logged to the WAL and reported to CDC like the same write in a
+//! query, and it either applies completely or fails with an error (see
+//! [`direct`](super::direct) for how). Reads see the current graph.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,6 +14,8 @@ use std::sync::Arc;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
+
+use super::direct::DirectTarget;
 
 impl super::GrafeoDB {
     /// The store of the current graph: the one `set_current_graph` and
@@ -64,7 +67,8 @@ impl super::GrafeoDB {
         labels: &[&str],
         properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
     ) -> Result<NodeId> {
-        self.session().create_node_with_props(labels, properties)
+        self.direct(DirectTarget::Current)
+            .create_node_with_props(labels, properties)
     }
 
     /// Gets a node by ID.
@@ -163,7 +167,7 @@ impl super::GrafeoDB {
     ///
     /// Returns an error if the node still has edges.
     pub fn delete_node(&self, id: NodeId) -> Result<bool> {
-        self.session().delete_node(id)
+        self.direct(DirectTarget::Current).delete_node(id)
     }
 
     /// Sets a property on a node.
@@ -173,7 +177,8 @@ impl super::GrafeoDB {
     /// Returns an error if the node does not exist or the value violates a
     /// constraint of its labels (type, `NOT NULL`, `UNIQUE`, vector index size).
     pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
-        self.session().set_node_property(id, key, value)
+        self.direct(DirectTarget::Current)
+            .set_node_property(id, key, value)
     }
 
     /// Adds a label to an existing node.
@@ -198,7 +203,7 @@ impl super::GrafeoDB {
     /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     pub fn add_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
-        self.session().add_node_label(id, label)
+        self.direct(DirectTarget::Current).add_node_label(id, label)
     }
 
     /// Removes a label from a node.
@@ -223,7 +228,8 @@ impl super::GrafeoDB {
     /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     pub fn remove_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
-        self.session().remove_node_label(id, label)
+        self.direct(DirectTarget::Current)
+            .remove_node_label(id, label)
     }
 
     /// Gets all labels for a node.
@@ -297,7 +303,7 @@ impl super::GrafeoDB {
         edge_type: &str,
         properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
     ) -> Result<EdgeId> {
-        self.session()
+        self.direct(DirectTarget::Current)
             .create_edge_with_props(src, dst, edge_type, properties)
     }
 
@@ -313,7 +319,7 @@ impl super::GrafeoDB {
     ///
     /// Returns an error if another transaction is writing the edge.
     pub fn delete_edge(&self, id: EdgeId) -> Result<bool> {
-        self.session().delete_edge(id)
+        self.direct(DirectTarget::Current).delete_edge(id)
     }
 
     /// Sets a property on an edge.
@@ -323,7 +329,8 @@ impl super::GrafeoDB {
     /// Returns an error if the edge does not exist or the value violates its
     /// type.
     pub fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
-        self.session().set_edge_property(id, key, value)
+        self.direct(DirectTarget::Current)
+            .set_edge_property(id, key, value)
     }
 
     /// Removes a property from a node.
@@ -335,7 +342,8 @@ impl super::GrafeoDB {
     /// Returns an error if a constraint requires the property (`NOT NULL`,
     /// `NODE KEY`).
     pub fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
-        self.session().remove_node_property(id, key)
+        self.direct(DirectTarget::Current)
+            .remove_node_property(id, key)
     }
 
     /// Removes a property from an edge.
@@ -346,7 +354,8 @@ impl super::GrafeoDB {
     ///
     /// Returns an error if the edge's type requires the property.
     pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
-        self.session().remove_edge_property(id, key)
+        self.direct(DirectTarget::Current)
+            .remove_edge_property(id, key)
     }
 
     /// Creates multiple nodes in bulk, each with a single vector property.
@@ -374,7 +383,8 @@ impl super::GrafeoDB {
         property: &str,
         vectors: Vec<Vec<f32>>,
     ) -> Result<Vec<NodeId>> {
-        self.session().batch_create_nodes(label, property, vectors)
+        self.direct(DirectTarget::Current)
+            .batch_create_nodes(label, property, vectors)
     }
 
     /// Batch-creates nodes with full property maps.
@@ -402,7 +412,7 @@ impl super::GrafeoDB {
         label: &str,
         properties_list: Vec<HashMap<PropertyKey, Value>>,
     ) -> Result<Vec<NodeId>> {
-        self.session()
+        self.direct(DirectTarget::Current)
             .batch_create_nodes_with_props(label, properties_list)
     }
 }

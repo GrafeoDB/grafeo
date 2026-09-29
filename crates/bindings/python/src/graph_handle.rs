@@ -8,8 +8,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use grafeo_common::types::{EdgeId, NodeId};
-use grafeo_engine::GrafeoDB;
 use grafeo_engine::session::Session;
+use grafeo_engine::{GrafeoDB, GraphHandle};
 
 use crate::database::PyTransaction;
 use crate::direct;
@@ -65,6 +65,16 @@ impl PyGraphHandle {
     fn with_session<T>(&self, call: impl FnOnce(&Session) -> PyResult<T>) -> PyResult<T> {
         let db = self.db.read();
         call(&self.session(&db)?)
+    }
+
+    /// Runs `call` with the engine's handle on this graph, whose direct calls
+    /// commit on their own without a session.
+    fn with_graph<T>(&self, call: impl FnOnce(&GraphHandle<'_>) -> PyResult<T>) -> PyResult<T> {
+        let db = self.db.read();
+        let graph = db
+            .graph_in(self.schema.as_deref(), &self.name)
+            .map_err(PyGrafeoError::from)?;
+        call(&graph)
     }
 }
 
@@ -122,7 +132,7 @@ impl PyGraphHandle {
         labels: Vec<String>,
         properties: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyNode> {
-        self.with_session(|session| direct::create_node(session, &labels, properties))
+        self.with_graph(|graph| direct::create_node(graph, &labels, properties))
     }
 
     /// Creates an edge; raises if an endpoint does not exist or the edge
@@ -135,9 +145,9 @@ impl PyGraphHandle {
         edge_type: &str,
         properties: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyEdge> {
-        self.with_session(|session| {
+        self.with_graph(|graph| {
             direct::create_edge(
-                session,
+                graph,
                 NodeId(source_id),
                 NodeId(target_id),
                 edge_type,
@@ -153,8 +163,8 @@ impl PyGraphHandle {
         properties_list: &Bound<'_, PyList>,
     ) -> PyResult<Vec<u64>> {
         let properties = direct::properties_list(properties_list)?;
-        self.with_session(|session| {
-            let ids = session
+        self.with_graph(|graph| {
+            let ids = graph
                 .batch_create_nodes_with_props(label, properties)
                 .map_err(PyGrafeoError::from)?;
             Ok(ids.into_iter().map(|id| id.as_u64()).collect())
@@ -163,20 +173,30 @@ impl PyGraphHandle {
 
     /// Gets a node by ID, or None.
     fn get_node(&self, id: u64) -> PyResult<Option<PyNode>> {
-        self.with_session(|session| Ok(session.get_node(NodeId(id)).map(direct::node)))
+        self.with_graph(|graph| {
+            Ok(graph
+                .get_node(NodeId(id))
+                .map_err(PyGrafeoError::from)?
+                .map(direct::node))
+        })
     }
 
     /// Gets an edge by ID, or None.
     fn get_edge(&self, id: u64) -> PyResult<Option<PyEdge>> {
-        self.with_session(|session| Ok(session.get_edge(EdgeId(id)).map(direct::edge)))
+        self.with_graph(|graph| {
+            Ok(graph
+                .get_edge(EdgeId(id))
+                .map_err(PyGrafeoError::from)?
+                .map(direct::edge))
+        })
     }
 
     /// Sets a node property; raises if the node does not exist or the value
     /// breaks a constraint.
     fn set_node_property(&self, node_id: u64, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let value = PyValue::from_py(value)?;
-        self.with_session(|session| {
-            Ok(session
+        self.with_graph(|graph| {
+            Ok(graph
                 .set_node_property(NodeId(node_id), key, value)
                 .map_err(PyGrafeoError::from)?)
         })
@@ -186,8 +206,8 @@ impl PyGraphHandle {
     /// breaks its edge type.
     fn set_edge_property(&self, edge_id: u64, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let value = PyValue::from_py(value)?;
-        self.with_session(|session| {
-            Ok(session
+        self.with_graph(|graph| {
+            Ok(graph
                 .set_edge_property(EdgeId(edge_id), key, value)
                 .map_err(PyGrafeoError::from)?)
         })
@@ -195,8 +215,8 @@ impl PyGraphHandle {
 
     /// Removes a node property; returns whether the node had it.
     fn remove_node_property(&self, node_id: u64, key: &str) -> PyResult<bool> {
-        self.with_session(|session| {
-            Ok(session
+        self.with_graph(|graph| {
+            Ok(graph
                 .remove_node_property(NodeId(node_id), key)
                 .map_err(PyGrafeoError::from)?)
         })
@@ -204,8 +224,8 @@ impl PyGraphHandle {
 
     /// Removes an edge property; returns whether the edge had it.
     fn remove_edge_property(&self, edge_id: u64, key: &str) -> PyResult<bool> {
-        self.with_session(|session| {
-            Ok(session
+        self.with_graph(|graph| {
+            Ok(graph
                 .remove_edge_property(EdgeId(edge_id), key)
                 .map_err(PyGrafeoError::from)?)
         })
@@ -213,8 +233,8 @@ impl PyGraphHandle {
 
     /// Adds a label; returns False if the node does not exist or has it.
     fn add_node_label(&self, node_id: u64, label: &str) -> PyResult<bool> {
-        self.with_session(|session| {
-            Ok(session
+        self.with_graph(|graph| {
+            Ok(graph
                 .add_node_label(NodeId(node_id), label)
                 .map_err(PyGrafeoError::from)?)
         })
@@ -222,8 +242,8 @@ impl PyGraphHandle {
 
     /// Removes a label; returns False if the node does not exist or lacks it.
     fn remove_node_label(&self, node_id: u64, label: &str) -> PyResult<bool> {
-        self.with_session(|session| {
-            Ok(session
+        self.with_graph(|graph| {
+            Ok(graph
                 .remove_node_label(NodeId(node_id), label)
                 .map_err(PyGrafeoError::from)?)
         })
@@ -232,20 +252,12 @@ impl PyGraphHandle {
     /// Deletes a node; returns False if it does not exist, raises if it
     /// still has edges.
     fn delete_node(&self, id: u64) -> PyResult<bool> {
-        self.with_session(|session| {
-            Ok(session
-                .delete_node(NodeId(id))
-                .map_err(PyGrafeoError::from)?)
-        })
+        self.with_graph(|graph| Ok(graph.delete_node(NodeId(id)).map_err(PyGrafeoError::from)?))
     }
 
     /// Deletes an edge; returns False if it does not exist.
     fn delete_edge(&self, id: u64) -> PyResult<bool> {
-        self.with_session(|session| {
-            Ok(session
-                .delete_edge(EdgeId(id))
-                .map_err(PyGrafeoError::from)?)
-        })
+        self.with_graph(|graph| Ok(graph.delete_edge(EdgeId(id)).map_err(PyGrafeoError::from)?))
     }
 
     /// Finds the IDs of the nodes in this graph with a property value.

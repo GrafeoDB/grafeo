@@ -785,7 +785,7 @@ impl PyGrafeoDB {
         properties: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyNode> {
         let db = self.inner.read();
-        crate::direct::create_node(&db.session(), &labels, properties)
+        crate::direct::create_node(&*db, &labels, properties)
     }
 
     /// Create an edge between two nodes.
@@ -802,7 +802,7 @@ impl PyGrafeoDB {
     ) -> PyResult<PyEdge> {
         let db = self.inner.read();
         crate::direct::create_edge(
-            &db.session(),
+            &*db,
             NodeId(source_id),
             NodeId(target_id),
             &edge_type,

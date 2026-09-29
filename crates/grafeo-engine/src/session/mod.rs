@@ -33,6 +33,8 @@ use grafeo_core::graph::{GraphStore, GraphStoreMut, GraphStoreSearch};
 use crate::catalog::{Catalog, CatalogConstraintValidator};
 use crate::config::{AdaptiveConfig, GraphModel};
 use crate::database::QueryResult;
+#[cfg(feature = "lpg")]
+use crate::database::direct;
 use crate::query::Executor;
 use crate::query::cache::QueryCache;
 use crate::transaction::TransactionManager;
@@ -5046,7 +5048,8 @@ impl Session {
     //
     // Each call writes through `write`: in the open transaction, or in an
     // implicit one of its own. The writes are checked, logged, versioned and
-    // reported to CDC exactly like the same write in a statement.
+    // reported to CDC exactly like the same write in a statement. The writes
+    // themselves are shared with the database's direct API (`database::direct`).
 
     /// Creates a node with the given labels and returns its ID.
     ///
@@ -5072,7 +5075,7 @@ impl Session {
         properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
     ) -> Result<NodeId> {
         let labels: Vec<String> = labels.iter().map(|label| (*label).to_string()).collect();
-        let properties = direct_properties(properties);
+        let properties = direct::direct_properties(properties);
         self.write(|writer| writer.create_node(&labels, properties))
     }
 
@@ -5106,15 +5109,8 @@ impl Session {
         edge_type: &str,
         properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
     ) -> Result<EdgeId> {
-        let properties = direct_properties(properties);
-        self.write(|writer| {
-            for endpoint in [src, dst] {
-                if !writer.has_node(endpoint) {
-                    return Err(missing_node(endpoint));
-                }
-            }
-            writer.create_edge(src, dst, edge_type, properties)
-        })
+        let properties = direct::direct_properties(properties);
+        self.write(|writer| direct::create_edge(writer, src, dst, edge_type, properties))
     }
 
     /// Sets a property on a node.
@@ -5126,12 +5122,7 @@ impl Session {
     /// vector index size).
     #[cfg(feature = "lpg")]
     pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
-        self.write(|writer| {
-            if !writer.has_node(id) {
-                return Err(missing_node(id));
-            }
-            writer.set_node_properties(id, &[(key.to_string(), value)], false)
-        })
+        self.write(|writer| direct::set_node_property(writer, id, key, value))
     }
 
     /// Sets a property on an edge.
@@ -5142,14 +5133,7 @@ impl Session {
     /// type.
     #[cfg(feature = "lpg")]
     pub fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
-        self.write(|writer| {
-            if !writer.has_edge(id) {
-                return Err(grafeo_core::execution::operators::OperatorError::Execution(
-                    format!("edge {} does not exist", id.as_u64()),
-                ));
-            }
-            writer.set_edge_properties(id, &[(key.to_string(), value)], false)
-        })
+        self.write(|writer| direct::set_edge_property(writer, id, key, value))
     }
 
     /// Removes a property from a node. Returns whether the node had it.
@@ -5181,7 +5165,7 @@ impl Session {
     /// Returns an error if the node violates a constraint of the new label.
     #[cfg(feature = "lpg")]
     pub fn add_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
-        self.write(|writer| Ok(writer.add_labels(id, &[label.to_string()])? == 1))
+        self.write(|writer| direct::add_node_label(writer, id, label))
     }
 
     /// Removes a label from a node. Returns `true` if the label was removed,
@@ -5192,7 +5176,7 @@ impl Session {
     /// Returns an error if another transaction is writing the node.
     #[cfg(feature = "lpg")]
     pub fn remove_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
-        self.write(|writer| Ok(writer.remove_labels(id, &[label.to_string()])? == 1))
+        self.write(|writer| direct::remove_node_label(writer, id, label))
     }
 
     /// Deletes a node and returns whether it existed.
@@ -5232,18 +5216,7 @@ impl Session {
         property: &str,
         vectors: Vec<Vec<f32>>,
     ) -> Result<Vec<NodeId>> {
-        let labels = [label.to_string()];
-        self.write(|writer| {
-            vectors
-                .into_iter()
-                .map(|vector| {
-                    writer.create_node(
-                        &labels,
-                        vec![(property.to_string(), Value::Vector(vector.into()))],
-                    )
-                })
-                .collect()
-        })
+        self.write(|writer| direct::create_vector_nodes(writer, label, property, vectors))
     }
 
     /// Creates one node with `label` per property map, in one transaction.
@@ -5260,13 +5233,7 @@ impl Session {
         label: &str,
         properties_list: Vec<std::collections::HashMap<PropertyKey, Value>>,
     ) -> Result<Vec<NodeId>> {
-        let labels = [label.to_string()];
-        self.write(|writer| {
-            properties_list
-                .into_iter()
-                .map(|properties| writer.create_node(&labels, direct_properties(properties)))
-                .collect()
-        })
+        self.write(|writer| direct::create_nodes(writer, label, properties_list))
     }
 
     /// Finds the nodes of the session's graph that have a property value.
@@ -5586,29 +5553,6 @@ impl Drop for Session {
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
-}
-
-/// The properties of a direct write as `(key, value)` pairs.
-#[cfg(feature = "lpg")]
-pub(crate) fn direct_properties(
-    properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
-) -> Vec<(String, Value)> {
-    properties
-        .into_iter()
-        .map(|(key, value)| {
-            let key: PropertyKey = key.into();
-            (key.as_str().to_string(), value.into())
-        })
-        .collect()
-}
-
-/// The error for a direct write to a node that does not exist.
-#[cfg(feature = "lpg")]
-fn missing_node(id: NodeId) -> grafeo_core::execution::operators::OperatorError {
-    grafeo_core::execution::operators::OperatorError::Execution(format!(
-        "node {} does not exist",
-        id.as_u64()
-    ))
 }
 
 #[cfg(test)]

@@ -342,3 +342,158 @@ fn a_create_event_carries_the_labels_and_properties() {
         );
     }
 }
+
+/// A direct write to a node that an open transaction has written is a
+/// conflict, so the transaction's rollback cannot erase it; direct writes to
+/// other nodes go through, and once the transaction ends so does the first.
+#[test]
+fn a_direct_write_conflicts_with_an_open_transaction() {
+    let db = GrafeoDB::new_in_memory();
+    let alix = db
+        .create_node_with_props(&["Person"], [("city", Value::from("Amsterdam"))])
+        .unwrap();
+    let gus = db.create_node(&["Person"]).unwrap();
+    let city = |id| db.get_node(id).unwrap().get_property("city").cloned();
+
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session
+        .set_node_property(alix, "city", Value::from("Berlin"))
+        .unwrap();
+    assert!(
+        db.set_node_property(alix, "city", Value::from("Paris"))
+            .is_err(),
+        "the transaction wrote Alix first"
+    );
+    db.set_node_property(gus, "city", Value::from("Prague"))
+        .unwrap();
+    session.rollback().unwrap();
+
+    assert_eq!(city(alix), Some(Value::from("Amsterdam")));
+    assert_eq!(city(gus), Some(Value::from("Prague")));
+    db.set_node_property(alix, "city", Value::from("Paris"))
+        .unwrap();
+    assert_eq!(city(alix), Some(Value::from("Paris")));
+}
+
+/// Direct writes from several threads next to transactions, all writing one
+/// shared node too: nothing hangs, every committed write lands, nothing of a
+/// rolled-back transaction remains, and a direct write that meets an open
+/// transaction's write fails instead of being lost.
+#[test]
+fn direct_writes_and_transactions_run_side_by_side() {
+    const THREADS: usize = 4;
+    const ROUNDS: usize = 60;
+    let db = GrafeoDB::new_in_memory();
+    let hub = db.create_node(&["Hub"]).unwrap();
+
+    std::thread::scope(|scope| {
+        for thread in 0..THREADS {
+            let db = &db;
+            scope.spawn(move || {
+                for round in 0..ROUNDS {
+                    loop {
+                        let mut session = db.session();
+                        session.begin_transaction().unwrap();
+                        let kept = round % 3 != 0;
+                        let label = if kept { "Kept" } else { "Dropped" };
+                        session.create_node(&[label]).unwrap();
+                        let wrote_hub = session
+                            .set_node_property(hub, "by", Value::from(format!("tx {thread}")))
+                            .is_ok();
+                        if !kept {
+                            session.rollback().unwrap();
+                            break;
+                        }
+                        if wrote_hub && session.commit().is_ok() {
+                            break;
+                        }
+                        let _ = session.rollback();
+                    }
+                }
+            });
+            scope.spawn(move || {
+                for _ in 0..ROUNDS {
+                    db.create_node(&["Mark"]).unwrap();
+                    while db
+                        .set_node_property(hub, "by", Value::from(format!("direct {thread}")))
+                        .is_err()
+                    {}
+                }
+            });
+        }
+    });
+
+    let count = |label: &str| {
+        db.execute(&format!("MATCH (n:{label}) RETURN count(n)"))
+            .unwrap()
+            .rows()[0][0]
+            .clone()
+    };
+    let kept = (0..ROUNDS).filter(|round| round % 3 != 0).count() * THREADS;
+    assert_eq!(count("Kept"), Value::Int64(i64::try_from(kept).unwrap()));
+    assert_eq!(count("Dropped"), Value::Int64(0));
+    assert_eq!(
+        count("Mark"),
+        Value::Int64(i64::try_from(THREADS * ROUNDS).unwrap())
+    );
+    assert!(db.get_node(hub).unwrap().get_property("by").is_some());
+}
+
+/// With versioned properties and labels, a reader pinned before a direct write
+/// still sees the values and labels from before it.
+#[cfg(feature = "temporal")]
+#[test]
+fn a_pinned_epoch_sees_the_properties_and_labels_it_had() {
+    let db = GrafeoDB::new_in_memory();
+    let alix = db
+        .create_node_with_props(&["Person"], [("city", Value::from("Amsterdam"))])
+        .unwrap();
+    let pinned = db.current_epoch();
+    db.set_node_property(alix, "city", Value::from("Berlin"))
+        .unwrap();
+    assert!(db.add_node_label(alix, "Employee").unwrap());
+
+    assert_eq!(
+        db.get_node_property_at_epoch(alix, "city", pinned),
+        Some(Value::from("Amsterdam"))
+    );
+    assert!(
+        !db.get_node_at_epoch(alix, pinned)
+            .unwrap()
+            .has_label("Employee")
+    );
+    assert_eq!(
+        db.get_node_property_at_epoch(alix, "city", db.current_epoch()),
+        Some(Value::from("Berlin"))
+    );
+    assert!(db.get_node(alix).unwrap().has_label("Employee"));
+}
+
+/// Each direct write is reported to CDC at the epoch it committed at.
+#[cfg(feature = "cdc")]
+#[test]
+fn direct_writes_are_reported_at_their_own_epochs() {
+    use grafeo_engine::cdc::ChangeKind;
+
+    let db = GrafeoDB::with_config(grafeo_engine::Config::in_memory().with_cdc()).unwrap();
+    let alix = db
+        .create_node_with_props(&["Person"], [("city", Value::from("Amsterdam"))])
+        .unwrap();
+    let created = db.current_epoch();
+    db.set_node_property(alix, "city", Value::from("Berlin"))
+        .unwrap();
+    let updated = db.current_epoch();
+
+    let history: Vec<_> = db
+        .history(alix)
+        .unwrap()
+        .into_iter()
+        .map(|event| (event.kind, event.epoch))
+        .collect();
+    assert!(updated > created);
+    assert_eq!(
+        history,
+        [(ChangeKind::Create, created), (ChangeKind::Update, updated)]
+    );
+}

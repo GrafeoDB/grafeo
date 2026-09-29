@@ -107,12 +107,13 @@ impl LpgStore {
 
         let record = EdgeRecord::new(id, src, dst, type_id, epoch);
 
-        // Allocate record in arena and get offset (create epoch if needed)
-        let arena = self
+        // Allocate the record in the epoch's arena (created if needed). The
+        // arena's lock is released at the end of this statement, before the
+        // version lock below: see the lock order on `arena_allocator`.
+        let (offset, _stored) = self
             .arena_allocator
             .arena_or_create(epoch)
-            .expect("failed to create arena for epoch");
-        let (offset, _stored) = arena
+            .expect("failed to create arena for epoch")
             .alloc_value_with_offset(record)
             .expect("arena allocation failed for edge record");
 
@@ -746,20 +747,21 @@ impl LpgStore {
         let base_id = self
             .next_edge_id
             .fetch_add(edges.len() as u64, Ordering::Relaxed);
-        let arena = self
-            .arena_allocator
-            .arena_or_create(epoch)
-            .expect("failed to create arena for epoch");
-
         let mut ids = Vec::with_capacity(edges.len());
+        let mut hot_refs = Vec::with_capacity(edges.len());
         let mut forward_batch = Vec::with_capacity(edges.len());
         let mut backward_batch = Vec::with_capacity(edges.len());
         let mut type_increments: grafeo_common::utils::hash::FxHashMap<u32, i64> =
             grafeo_common::utils::hash::FxHashMap::default();
 
-        // Create all edge records under a single versions write lock
+        // Allocate every record first, then index them under one version
+        // lock: the arena's lock is released before the version lock is
+        // taken (see the lock order on `arena_allocator`).
         {
-            let mut versions = self.edge_versions.write();
+            let arena = self
+                .arena_allocator
+                .arena_or_create(epoch)
+                .expect("failed to create arena for epoch");
             for (i, &(src, dst, edge_type)) in edges.iter().enumerate() {
                 let id = EdgeId::new(base_id + i as u64);
                 let type_id = self.get_or_create_edge_type_id(edge_type);
@@ -768,8 +770,10 @@ impl LpgStore {
                 let (offset, _stored) = arena
                     .alloc_value_with_offset(record)
                     .expect("arena allocation failed for edge record");
-                let hot_ref = HotVersionRef::new(epoch, epoch, offset, TransactionId::SYSTEM);
-                versions.insert(id, VersionIndex::with_initial(hot_ref));
+                hot_refs.push((
+                    id,
+                    HotVersionRef::new(epoch, epoch, offset, TransactionId::SYSTEM),
+                ));
 
                 forward_batch.push((src, dst, id));
                 if self.backward_adj.is_some() {
@@ -778,6 +782,12 @@ impl LpgStore {
                 *type_increments.entry(type_id).or_default() += 1;
 
                 ids.push(id);
+            }
+        }
+        {
+            let mut versions = self.edge_versions.write();
+            for (id, hot_ref) in hot_refs {
+                versions.insert(id, VersionIndex::with_initial(hot_ref));
             }
         }
 

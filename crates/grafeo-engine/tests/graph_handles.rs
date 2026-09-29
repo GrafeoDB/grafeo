@@ -271,3 +271,65 @@ fn the_same_node_in_one_graph_still_conflicts() {
         .unwrap_err();
     assert!(err.to_string().contains("in graph 'model'"), "{err}");
 }
+
+/// A handle's direct calls work in its graph, and once the graph is dropped
+/// they fail without writing anywhere else.
+#[test]
+fn direct_calls_on_a_handle_stay_in_its_graph() {
+    let db = db_with_graphs();
+    let model = db.graph("model").unwrap();
+    let billing = model
+        .create_node_with_props(&["Component"], [("id", Value::from("ac::billing"))])
+        .unwrap();
+    let ledger = model.create_node(&["Component"]).unwrap();
+    model
+        .set_node_property(ledger, "id", Value::from("ac::ledger"))
+        .unwrap();
+    let uses = model.create_edge(billing, ledger, "USES").unwrap();
+    model
+        .set_edge_property(uses, "weight", Value::from(2_i64))
+        .unwrap();
+    assert!(model.add_node_label(ledger, "Store").unwrap());
+    let ids_created = model
+        .batch_create_nodes_with_props(
+            "Component",
+            vec![
+                [("id".into(), Value::from("ac::audit"))]
+                    .into_iter()
+                    .collect(),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        ids(model.execute(ALL_IDS).unwrap()),
+        ["ac::audit", "ac::billing", "ac::ledger"]
+    );
+    assert_eq!(
+        model
+            .execute("MATCH (:Component)-[r:USES]->(:Store) RETURN r.weight")
+            .unwrap()
+            .rows(),
+        [vec![Value::from(2_i64)]]
+    );
+    assert_eq!(
+        model
+            .get_node(ids_created[0])
+            .unwrap()
+            .unwrap()
+            .get_property("id"),
+        Some(&Value::from("ac::audit"))
+    );
+    assert!(model.get_edge(uses).unwrap().is_some());
+    assert!(ids(db.execute(ALL_IDS).unwrap()).is_empty());
+    assert!(
+        db.get_node(billing).is_none(),
+        "the default graph got nothing"
+    );
+
+    db.execute("DROP GRAPH model").unwrap();
+    let err = model.create_node(&["Component"]).unwrap_err();
+    assert!(err.to_string().contains("does not exist"), "{err}");
+    assert!(model.get_node(billing).is_err());
+    assert!(ids(db.execute(ALL_IDS).unwrap()).is_empty());
+}

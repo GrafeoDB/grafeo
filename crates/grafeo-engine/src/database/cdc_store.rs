@@ -38,6 +38,9 @@ pub(crate) struct CdcGraphStore {
     cdc_log: Arc<CdcLog>,
     /// Buffered events for the current transaction.
     pending_events: Arc<Mutex<Vec<ChangeEvent>>>,
+    /// Whether the events of non-versioned writes are buffered too, instead
+    /// of being recorded as they happen.
+    buffer_all: bool,
 }
 
 impl CdcGraphStore {
@@ -47,6 +50,7 @@ impl CdcGraphStore {
             inner,
             cdc_log,
             pending_events: Arc::new(Mutex::new(Vec::new())),
+            buffer_all: false,
         }
     }
 
@@ -64,6 +68,24 @@ impl CdcGraphStore {
             inner,
             cdc_log,
             pending_events,
+            buffer_all: false,
+        }
+    }
+
+    /// Wraps a store sharing an existing event buffer, and buffers the events
+    /// of non-versioned writes there too: for a direct write outside any
+    /// transaction, which records all of its events at once, merged and
+    /// stamped with its epoch.
+    pub fn wrap_buffered(
+        inner: Arc<dyn GraphStoreMut>,
+        cdc_log: Arc<CdcLog>,
+        pending_events: Arc<Mutex<Vec<ChangeEvent>>>,
+    ) -> Self {
+        Self {
+            inner,
+            cdc_log,
+            pending_events,
+            buffer_all: true,
         }
     }
 
@@ -82,9 +104,14 @@ impl CdcGraphStore {
         self.pending_events.lock().push(event);
     }
 
-    /// Records a CDC event directly (for non-versioned/auto-commit mutations).
+    /// Records a CDC event directly (for non-versioned/auto-commit mutations),
+    /// or buffers it when the store buffers every event.
     fn record_directly(&self, event: ChangeEvent) {
-        self.cdc_log.record(event);
+        if self.buffer_all {
+            self.buffer_event(event);
+        } else {
+            self.cdc_log.record(event);
+        }
     }
 
     /// The node as a change sees it: through `transaction_id` for a

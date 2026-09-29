@@ -31,6 +31,8 @@ mod checkpoint_timer;
 pub mod compact_tiered;
 #[cfg(feature = "lpg")]
 mod crud;
+#[cfg(feature = "lpg")]
+pub(crate) mod direct;
 #[cfg(feature = "embed")]
 mod embed;
 #[cfg(feature = "grafeo-file")]
@@ -186,6 +188,9 @@ pub struct GrafeoDB {
     /// Whether this database is open in read-only mode.
     /// When true, sessions automatically enforce read-only transactions.
     read_only: bool,
+    /// Buffers of the direct calls made outside a transaction.
+    #[cfg(feature = "lpg")]
+    implicit_writes: direct::ImplicitWrites,
     /// Named graph projections (virtual subgraphs), shared with sessions.
     projections:
         Arc<RwLock<std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>>>,
@@ -700,6 +705,8 @@ impl GrafeoDB {
             current_graph: RwLock::new(None),
             current_schema: RwLock::new(None),
             read_only: is_read_only,
+            #[cfg(feature = "lpg")]
+            implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
             layered_store: None,
@@ -835,6 +842,8 @@ impl GrafeoDB {
             current_graph: RwLock::new(None),
             current_schema: RwLock::new(None),
             read_only: false,
+            #[cfg(feature = "lpg")]
+            implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
             layered_store: None,
@@ -928,6 +937,8 @@ impl GrafeoDB {
             current_graph: RwLock::new(None),
             current_schema: RwLock::new(None),
             read_only: true,
+            #[cfg(feature = "lpg")]
+            implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
             layered_store: None,

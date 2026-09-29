@@ -201,12 +201,13 @@ impl LpgStore {
         #[cfg(feature = "temporal")]
         self.register_node_labels(id, labels, version_epoch);
 
-        // Allocate record in arena and get offset (create epoch if needed)
-        let arena = self
+        // Allocate the record in the epoch's arena (created if needed). The
+        // arena's lock is released at the end of this statement, before the
+        // version lock below: see the lock order on `arena_allocator`.
+        let (offset, _stored) = self
             .arena_allocator
             .arena_or_create(epoch)
-            .expect("failed to create arena for epoch");
-        let (offset, _stored) = arena
+            .expect("failed to create arena for epoch")
             .alloc_value_with_offset(record)
             .expect("arena allocation failed for node record");
 

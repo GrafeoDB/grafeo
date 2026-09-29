@@ -40,6 +40,14 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Very long `^` chains or runs of `-`/`+` signs or `NOT`s could crash the process** with a stack overflow in the GQL, Cypher and SQL/PGQ parsers; they now fail with the usual nesting-depth error.
 - **Docs**: the Discord invite on the docs site pointed to an expired link, and the constraint examples of the GQL schema guide used Cypher's `REQUIRE ... IS UNIQUE` form, which GQL rejects; they now use `ON (p.email) UNIQUE` ([#344](https://github.com/GrafeoDB/grafeo/issues/344)).
 
+### Deriva
+
+Changes for [Deriva](https://github.com/StevenBtw/deriva), which generates ArchiMate models from software repositories and keeps its graph in an embedded Grafeo database through the Python binding.
+
+- **Louvain gives the same communities on every run**: `db.algorithms.louvain()` and `CALL grafeo.louvain()` returned different partitions of the same graph, with community ids numbered at random. The result is now the same on every run, communities are numbered 0, 1, 2 and so on by their smallest node id, and `CALL grafeo.louvain()` returns its rows in node id order.
+- **Python: `grafeo.features()` and `grafeo.build_info()`**: `features()` lists the query languages and capabilities compiled into the build (`['gql', 'cypher', ...]`), and `build_info()` adds the version, the git commit the module was built from, whether that tree had uncommitted changes, and the build profile. The installation guide shows how to build a wheel with the release's features: passing `--features` to maturin replaces that list.
+- **Dotted access into map-valued properties**: `n.meta.route` reads key `route` of the map in `n.meta`, like `n.meta['route']`, in GQL and Cypher, also chained (`n.meta.a.b`). It failed with a syntax error in GQL and with `Nested property access not supported` in Cypher. A missing key or a value that is not a map gives null.
+
 ### Internal
 
 - **CI gate and policy checks** ([#511](https://github.com/GrafeoDB/grafeo/issues/511)): a `CI Gate` job fails when any required job fails, so one check can be required before merging, and a `Policy` job checks crate boundaries, workflow toolchain pins and public-text rules (`scripts/check_policy.py`).

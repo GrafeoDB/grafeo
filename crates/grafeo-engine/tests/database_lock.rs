@@ -12,6 +12,7 @@
 
 #[cfg(feature = "wal")]
 mod tests {
+    use grafeo_common::testing::child_process;
     use grafeo_common::types::Value;
     use grafeo_engine::config::StorageFormat;
     use grafeo_engine::{Config, GrafeoDB};
@@ -133,12 +134,13 @@ mod tests {
             let first = open(&path, format).unwrap();
             insert(&first, "Alix");
 
-            let child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "tests::child_open_fails", "--nocapture"])
-                .env(CHILD_PATH_VAR, &path)
-                .env(CHILD_FORMAT_VAR, name)
-                .output()
-                .unwrap();
+            let child = child_process::output(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "tests::child_open_fails", "--nocapture"])
+                    .env(CHILD_PATH_VAR, &path)
+                    .env(CHILD_FORMAT_VAR, name),
+            )
+            .unwrap();
             let stdout = String::from_utf8_lossy(&child.stdout);
             assert!(
                 child.status.success(),

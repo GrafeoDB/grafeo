@@ -9,6 +9,7 @@
 
 use std::panic::AssertUnwindSafe;
 
+use grafeo_common::testing::child_process;
 use grafeo_common::testing::crash::{CrashResult, with_crash_at};
 use grafeo_common::types::Value;
 use grafeo_engine::{Config, GrafeoDB};
@@ -497,12 +498,13 @@ const CRASHED: i32 = 3;
 /// node and crashes at `crash_point` inside `close()`. Returns whether the
 /// close completed.
 fn close_in_child(crash_point: u64, path: &std::path::Path) -> bool {
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "close_child", "--nocapture"])
-        .env(CHILD_POINT_VAR, crash_point.to_string())
-        .env(CHILD_PATH_VAR, path)
-        .status()
-        .unwrap();
+    let status = child_process::run(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "close_child", "--nocapture"])
+            .env(CHILD_POINT_VAR, crash_point.to_string())
+            .env(CHILD_PATH_VAR, path),
+    )
+    .unwrap();
     match status.code() {
         Some(0) => true,
         Some(CRASHED) => false,

@@ -13,6 +13,7 @@
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod tests {
+    use grafeo_common::testing::child_process;
     use grafeo_common::types::{TransactionId, Value};
     use grafeo_engine::config::StorageFormat;
     use grafeo_engine::{Config, GrafeoDB};
@@ -42,12 +43,13 @@ mod tests {
     /// Runs `scenario` in a child process that exits without closing the
     /// database, like a crash.
     fn crash_after(scenario: &str, path: &Path) {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::crash_child", "--nocapture"])
-            .env(SCENARIO_VAR, scenario)
-            .env(PATH_VAR, path)
-            .status()
-            .unwrap();
+        let status = child_process::run(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::crash_child", "--nocapture"])
+                .env(SCENARIO_VAR, scenario)
+                .env(PATH_VAR, path),
+        )
+        .unwrap();
         assert!(status.success(), "scenario {scenario} failed");
     }
 

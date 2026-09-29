@@ -66,7 +66,9 @@ if (Should-Run "rust") {
 if (Should-Run "python") {
     Write-Header "Python Spec Tests"
     Push-Location "$root\crates\bindings\python"
-    $buildOut = maturin develop --release --features pyo3/extension-module 2>&1
+    # No --features: it would replace pyproject.toml's feature list ("full"),
+    # and the build would miss Cypher and the other languages.
+    $buildOut = maturin develop --release 2>&1
     $buildOk = $LASTEXITCODE -eq 0
     Pop-Location
     if ($buildOk) {

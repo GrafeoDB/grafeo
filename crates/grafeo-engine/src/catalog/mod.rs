@@ -2264,7 +2264,8 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 });
             if required && value.is_null() {
                 return Err(OperatorError::ConstraintViolation(format!(
-                    "property '{key}' on :{label} is required by a NOT NULL constraint,                      cannot remove it or set it to null"
+                    "property '{key}' on :{label} is required by a NOT NULL constraint, \
+                     cannot remove it or set it to null"
                 )));
             }
         }
@@ -2433,7 +2434,8 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     });
                 if duplicate {
                     return Err(OperatorError::ConstraintViolation(format!(
-                        "UNIQUE constraint violation: properties ({}) with values {values:?}                          already exist on :{label}",
+                        "UNIQUE constraint violation: properties ({}) with values {values:?} \
+                         already exist on :{label}",
                         keys.join(", ")
                     )));
                 }

@@ -16,6 +16,7 @@
 
 #[cfg(all(feature = "wal", feature = "gql"))]
 mod tests {
+    use grafeo_common::testing::child_process;
     use grafeo_common::types::{TransactionId, Value};
     use grafeo_engine::config::StorageFormat;
     use grafeo_engine::{Config, GrafeoDB};
@@ -405,11 +406,12 @@ mod tests {
     fn schema_changes_survive_a_crash_before_the_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db.grafeo");
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::crash_child", "--nocapture"])
-            .env(CRASH_PATH_VAR, &path)
-            .status()
-            .unwrap();
+        let status = child_process::run(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::crash_child", "--nocapture"])
+                .env(CRASH_PATH_VAR, &path),
+        )
+        .unwrap();
         assert!(status.success());
 
         let expected = {

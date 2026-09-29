@@ -287,3 +287,32 @@ fn write_cost_does_not_grow_with_the_database() {
         );
     }
 }
+
+/// Setting and then removing a property in one transaction panicked with
+/// temporal storage: the removal was written behind the pending set. (A null
+/// map entry removes the property; `REMOVE` writes a null instead.)
+#[test]
+fn a_transaction_can_set_and_remove_a_property() {
+    for commit in [false, true] {
+        let db = alix_knows_gus();
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        session
+            .execute("MATCH (a:Person {name: 'Alix'}) SET a.age = 30")
+            .unwrap();
+        session
+            .execute("MATCH (a:Person {name: 'Alix'}) SET a += {age: null}")
+            .unwrap();
+        if commit {
+            session.commit().unwrap();
+        } else {
+            session.rollback().unwrap();
+        }
+        let age = db
+            .execute("MATCH (a:Person {name: 'Alix'}) RETURN a.age")
+            .unwrap()
+            .rows()[0][0]
+            .clone();
+        assert_eq!(age, Value::Null, "commit: {commit}");
+    }
+}

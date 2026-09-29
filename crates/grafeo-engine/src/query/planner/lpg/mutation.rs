@@ -56,24 +56,16 @@ impl super::Planner {
         let mut output_schema = self.derive_schema_from_columns(&columns[..output_column]);
         output_schema.push(LogicalType::Node);
 
-        let mut op = CreateNodeOperator::new(
-            self.write_store()?,
+        let op = CreateNodeOperator::new(
+            self.graph_writer()?,
             input_op,
             create.labels.clone(),
             properties,
             output_schema,
             output_column,
         )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
         .with_search_store(Arc::clone(&self.store))
         .with_session_context(self.session_context.clone());
-
-        if let Some(ref tracker) = self.write_tracker {
-            op = op.with_write_tracker(Arc::clone(tracker));
-        }
-        if let Some(ref validator) = self.validator {
-            op = op.with_validator(Arc::clone(validator));
-        }
 
         let operator = Box::new(op);
         Ok((operator, columns))
@@ -123,7 +115,7 @@ impl super::Planner {
         let output_schema = self.derive_schema_from_columns(&columns);
 
         let mut operator = CreateEdgeOperator::new(
-            self.write_store()?,
+            self.graph_writer()?,
             input_op,
             from_column,
             to_column,
@@ -131,18 +123,11 @@ impl super::Planner {
             output_schema,
         )
         .with_properties(properties)
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
         .with_search_store(Arc::clone(&self.store))
         .with_session_context(self.session_context.clone());
 
-        if let Some(ref tracker) = self.write_tracker {
-            operator = operator.with_write_tracker(Arc::clone(tracker));
-        }
         if let Some(col) = output_column {
             operator = operator.with_output_column(col);
-        }
-        if let Some(ref validator) = self.validator {
-            operator = operator.with_validator(Arc::clone(validator));
         }
 
         let operator = Box::new(operator);
@@ -178,26 +163,13 @@ impl super::Planner {
         // Auto-detect edge variables and use the correct operator
         let is_edge = self.edge_columns.borrow().contains(&delete.variable);
 
+        let writer = self.graph_writer()?;
         if is_edge {
-            let mut op =
-                DeleteEdgeOperator::new(self.write_store()?, input_op, col_idx, output_schema)
-                    .with_transaction_context(self.viewing_epoch, self.transaction_id);
-            if let Some(ref tracker) = self.write_tracker {
-                op = op.with_write_tracker(Arc::clone(tracker));
-            }
+            let op = DeleteEdgeOperator::new(writer, input_op, col_idx, output_schema);
             Ok((Box::new(op), output_columns))
         } else {
-            let mut op = DeleteNodeOperator::new(
-                self.write_store()?,
-                input_op,
-                col_idx,
-                output_schema,
-                delete.detach,
-            )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id);
-            if let Some(ref tracker) = self.write_tracker {
-                op = op.with_write_tracker(Arc::clone(tracker));
-            }
+            let op =
+                DeleteNodeOperator::new(writer, input_op, col_idx, output_schema, delete.detach);
             Ok((Box::new(op), output_columns))
         }
     }
@@ -224,12 +196,8 @@ impl super::Planner {
         let output_schema = self.derive_schema_from_columns(&columns);
         let output_columns = columns.clone();
 
-        let mut op =
-            DeleteEdgeOperator::new(self.write_store()?, input_op, edge_column, output_schema)
-                .with_transaction_context(self.viewing_epoch, self.transaction_id);
-        if let Some(ref tracker) = self.write_tracker {
-            op = op.with_write_tracker(Arc::clone(tracker));
-        }
+        let op =
+            DeleteEdgeOperator::new(self.graph_writer()?, input_op, edge_column, output_schema);
 
         Ok((Box::new(op), output_columns))
     }
@@ -506,8 +474,8 @@ impl super::Planner {
         let mut output_schema = self.derive_schema_from_columns(input_cols);
         output_schema.push(LogicalType::Node);
 
-        let mut merge_op = MergeOperator::new(
-            self.write_store()?,
+        let merge_op = MergeOperator::new(
+            self.graph_writer()?,
             input_op,
             MergeConfig {
                 variable: merge.variable.clone(),
@@ -520,13 +488,8 @@ impl super::Planner {
                 bound_variable_column,
             },
         )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
         .with_search_store(Arc::clone(&self.store))
         .with_session_context(self.session_context.clone());
-
-        if let Some(ref validator) = self.validator {
-            merge_op = merge_op.with_validator(Arc::clone(validator));
-        }
 
         let operator: Box<dyn Operator> = Box::new(merge_op);
 
@@ -614,15 +577,9 @@ impl super::Planner {
             edge_output_column,
         };
 
-        let mut merge_rel_op =
-            MergeRelationshipOperator::new(self.write_store()?, input_op, config)
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
-                .with_search_store(Arc::clone(&self.store))
-                .with_session_context(self.session_context.clone());
-
-        if let Some(ref validator) = self.validator {
-            merge_rel_op = merge_rel_op.with_validator(Arc::clone(validator));
-        }
+        let merge_rel_op = MergeRelationshipOperator::new(self.graph_writer()?, input_op, config)
+            .with_search_store(Arc::clone(&self.store))
+            .with_session_context(self.session_context.clone());
 
         let operator: Box<dyn Operator> = Box::new(merge_rel_op);
 
@@ -926,17 +883,13 @@ impl super::Planner {
         let mut output_columns = columns.clone();
         output_columns.push("labels_added".to_string());
 
-        let mut op = AddLabelOperator::new(
-            self.write_store()?,
+        let op = AddLabelOperator::new(
+            self.graph_writer()?,
             input_op,
             node_column,
             add_label.labels.clone(),
             output_schema,
-        )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id);
-        if let Some(ref tracker) = self.write_tracker {
-            op = op.with_write_tracker(Arc::clone(tracker));
-        }
+        );
 
         Ok((Box::new(op), output_columns))
     }
@@ -965,17 +918,13 @@ impl super::Planner {
         let mut output_columns = columns.clone();
         output_columns.push("labels_removed".to_string());
 
-        let mut op = RemoveLabelOperator::new(
-            self.write_store()?,
+        let op = RemoveLabelOperator::new(
+            self.graph_writer()?,
             input_op,
             node_column,
             remove_label.labels.clone(),
             output_schema,
-        )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id);
-        if let Some(ref tracker) = self.write_tracker {
-            op = op.with_write_tracker(Arc::clone(tracker));
-        }
+        );
 
         Ok((Box::new(op), output_columns))
     }
@@ -1077,39 +1026,27 @@ impl super::Planner {
         // Determine if this is a node or edge using tracked edge columns
         let is_edge = set_prop.is_edge || self.edge_columns.borrow().contains(&set_prop.variable);
         let operator: Box<dyn Operator> = if is_edge {
-            let mut op = SetPropertyOperator::new_for_edge(
-                self.write_store()?,
-                actual_input,
-                entity_column,
-                properties,
-                output_schema,
+            Box::new(
+                SetPropertyOperator::new_for_edge(
+                    self.graph_writer()?,
+                    actual_input,
+                    entity_column,
+                    properties,
+                    output_schema,
+                )
+                .with_replace(set_prop.replace),
             )
-            .with_replace(set_prop.replace)
-            .with_transaction_context(self.viewing_epoch, self.transaction_id);
-            if let Some(ref tracker) = self.write_tracker {
-                op = op.with_write_tracker(Arc::clone(tracker));
-            }
-            if let Some(ref validator) = self.validator {
-                op = op.with_validator(Arc::clone(validator));
-            }
-            Box::new(op)
         } else {
-            let mut op = SetPropertyOperator::new_for_node(
-                self.write_store()?,
-                actual_input,
-                entity_column,
-                properties,
-                output_schema,
+            Box::new(
+                SetPropertyOperator::new_for_node(
+                    self.graph_writer()?,
+                    actual_input,
+                    entity_column,
+                    properties,
+                    output_schema,
+                )
+                .with_replace(set_prop.replace),
             )
-            .with_replace(set_prop.replace)
-            .with_transaction_context(self.viewing_epoch, self.transaction_id);
-            if let Some(ref tracker) = self.write_tracker {
-                op = op.with_write_tracker(Arc::clone(tracker));
-            }
-            if let Some(ref validator) = self.validator {
-                op = op.with_validator(Arc::clone(validator));
-            }
-            Box::new(op)
         };
 
         Ok((operator, output_columns))

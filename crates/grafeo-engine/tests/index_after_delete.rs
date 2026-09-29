@@ -37,7 +37,9 @@ fn deleted_node_leaves_the_property_index() {
         .unwrap();
     assert!(find(&db, "a").is_empty(), "deleted node must not be found");
 
-    let second = db.create_node_with_props(&["Graph", "File"], [("id", Value::from("a"))]);
+    let second = db
+        .create_node_with_props(&["Graph", "File"], [("id", Value::from("a"))])
+        .unwrap();
     assert_eq!(find(&db, "a"), vec![second]);
 }
 
@@ -45,7 +47,9 @@ fn deleted_node_leaves_the_property_index() {
 fn rolled_back_delete_is_found_again() {
     let db = GrafeoDB::new_in_memory();
     db.create_property_index("id");
-    let node = db.create_node_with_props(&["Graph"], [("id", Value::from("a"))]);
+    let node = db
+        .create_node_with_props(&["Graph"], [("id", Value::from("a"))])
+        .unwrap();
 
     let mut session = db.session();
     session.begin_transaction().unwrap();
@@ -82,20 +86,24 @@ mod vectors {
 
     fn vector_db_with_label(label: &str, quantization: Option<&str>) -> (GrafeoDB, NodeId, NodeId) {
         let db = GrafeoDB::new_in_memory();
-        let near = db.create_node_with_props(
-            &[label],
-            [
-                ("id", Value::from("near")),
-                ("emb", Value::Vector(vec![1.0f32, 0.0].into())),
-            ],
-        );
-        let far = db.create_node_with_props(
-            &[label],
-            [
-                ("id", Value::from("far")),
-                ("emb", Value::Vector(vec![0.0f32, 1.0].into())),
-            ],
-        );
+        let near = db
+            .create_node_with_props(
+                &[label],
+                [
+                    ("id", Value::from("near")),
+                    ("emb", Value::Vector(vec![1.0f32, 0.0].into())),
+                ],
+            )
+            .unwrap();
+        let far = db
+            .create_node_with_props(
+                &[label],
+                [
+                    ("id", Value::from("far")),
+                    ("emb", Value::Vector(vec![0.0f32, 1.0].into())),
+                ],
+            )
+            .unwrap();
         db.create_vector_index(
             label,
             "emb",

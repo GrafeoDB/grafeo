@@ -203,8 +203,9 @@ impl JsGrafeoDB {
                 props.push((grafeo_common::types::PropertyKey::new(key_str), val));
             }
             db.create_node_with_props(&label_refs, props)
+                .map_err(NodeGrafeoError::from)?
         } else {
-            db.create_node(&label_refs)
+            db.create_node(&label_refs).map_err(NodeGrafeoError::from)?
         };
 
         fetch_node(&db, id)
@@ -236,8 +237,10 @@ impl JsGrafeoDB {
                 props.push((grafeo_common::types::PropertyKey::new(key_str), val));
             }
             db.create_edge_with_props(src, dst, &edge_type, props)
+                .map_err(NodeGrafeoError::from)?
         } else {
             db.create_edge(src, dst, &edge_type)
+                .map_err(NodeGrafeoError::from)?
         };
 
         fetch_edge(&db, id)
@@ -277,7 +280,7 @@ impl JsGrafeoDB {
     pub fn delete_node(&self, id: f64) -> Result<bool> {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
-        Ok(db.delete_node(node_id))
+        Ok(db.delete_node(node_id).map_err(NodeGrafeoError::from)?)
     }
 
     /// Delete an edge by ID. Returns true if the edge existed.
@@ -285,7 +288,7 @@ impl JsGrafeoDB {
     pub fn delete_edge(&self, id: f64) -> Result<bool> {
         let edge_id = validate_edge_id(id)?;
         let db = self.inner.read();
-        Ok(db.delete_edge(edge_id))
+        Ok(db.delete_edge(edge_id).map_err(NodeGrafeoError::from)?)
     }
 
     /// Set a property on a node.
@@ -300,7 +303,8 @@ impl JsGrafeoDB {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
         let val = types::js_to_value(&env, value)?;
-        db.set_node_property(node_id, &key, val);
+        db.set_node_property(node_id, &key, val)
+            .map_err(NodeGrafeoError::from)?;
         Ok(())
     }
 
@@ -316,7 +320,8 @@ impl JsGrafeoDB {
         let edge_id = validate_edge_id(id)?;
         let db = self.inner.read();
         let val = types::js_to_value(&env, value)?;
-        db.set_edge_property(edge_id, &key, val);
+        db.set_edge_property(edge_id, &key, val)
+            .map_err(NodeGrafeoError::from)?;
         Ok(())
     }
 
@@ -438,7 +443,9 @@ impl JsGrafeoDB {
                 .into_iter()
                 .map(|v| v.into_iter().map(|x| x as f32).collect())
                 .collect();
-            let ids = db.batch_create_nodes(&label, &property, vecs_f32);
+            let ids = db
+                .batch_create_nodes(&label, &property, vecs_f32)
+                .map_err(NodeGrafeoError::from)?;
             Ok(ids
                 .into_iter()
                 .map(|id| id.as_u64() as f64)
@@ -453,7 +460,9 @@ impl JsGrafeoDB {
     pub fn remove_node_property(&self, id: f64, key: String) -> Result<bool> {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
-        Ok(db.remove_node_property(node_id, &key))
+        Ok(db
+            .remove_node_property(node_id, &key)
+            .map_err(NodeGrafeoError::from)?)
     }
 
     /// Remove a property from an edge. Returns true if the property existed.
@@ -461,7 +470,9 @@ impl JsGrafeoDB {
     pub fn remove_edge_property(&self, id: f64, key: String) -> Result<bool> {
         let edge_id = validate_edge_id(id)?;
         let db = self.inner.read();
-        Ok(db.remove_edge_property(edge_id, &key))
+        Ok(db
+            .remove_edge_property(edge_id, &key)
+            .map_err(NodeGrafeoError::from)?)
     }
 
     /// Add a label to an existing node. Returns true if the label was added.
@@ -469,7 +480,9 @@ impl JsGrafeoDB {
     pub fn add_node_label(&self, id: f64, label: String) -> Result<bool> {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
-        Ok(db.add_node_label(node_id, &label))
+        Ok(db
+            .add_node_label(node_id, &label)
+            .map_err(NodeGrafeoError::from)?)
     }
 
     /// Remove a label from a node. Returns true if the label was removed.
@@ -477,7 +490,9 @@ impl JsGrafeoDB {
     pub fn remove_node_label(&self, id: f64, label: String) -> Result<bool> {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
-        Ok(db.remove_node_label(node_id, &label))
+        Ok(db
+            .remove_node_label(node_id, &label)
+            .map_err(NodeGrafeoError::from)?)
     }
 
     /// Get all labels for a node. Returns null if the node doesn't exist.
@@ -1593,5 +1608,10 @@ fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::
         "timestamp": event.timestamp,
         "before": before,
         "after": after,
+        "labels": event.labels,
+        "before_labels": event.before_labels,
+        "edge_type": event.edge_type,
+        "src_id": event.src_id,
+        "dst_id": event.dst_id,
     })
 }

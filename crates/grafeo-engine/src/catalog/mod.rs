@@ -334,6 +334,15 @@ impl Catalog {
             .and_then(|s| s.resolved_node_type(name))
     }
 
+    /// Whether any node type is defined: without one, no property, NOT NULL
+    /// or UNIQUE constraint applies to nodes.
+    #[must_use]
+    pub fn has_node_types(&self) -> bool {
+        self.schema
+            .as_ref()
+            .is_some_and(SchemaCatalog::has_node_types)
+    }
+
     /// Returns all registered node type names.
     #[must_use]
     pub fn all_node_type_names(&self) -> Vec<String> {
@@ -1553,6 +1562,12 @@ impl SchemaCatalog {
         self.node_types.read().get(name).cloned()
     }
 
+    /// Whether any node type is defined.
+    #[must_use]
+    pub fn has_node_types(&self) -> bool {
+        !self.node_types.read().is_empty()
+    }
+
     /// Gets a resolved node type with inherited properties and constraints from parents.
     ///
     /// Walks the parent chain depth-first, collecting properties and constraints.
@@ -2181,10 +2196,16 @@ pub struct CatalogConstraintValidator {
     catalog: Arc<Catalog>,
     /// Optional graph name for graph-type-bound validation.
     graph_name: Option<String>,
-    /// Optional graph store for UNIQUE constraint enforcement via index lookup.
-    store: Option<Arc<dyn grafeo_core::graph::GraphStore>>,
+    /// Optional graph store for UNIQUE constraint enforcement via index lookup
+    /// and the dimensions of vector indexes.
+    store: Option<Arc<dyn grafeo_core::graph::GraphStoreSearch>>,
     /// Optional maximum property value size in bytes.
     max_property_size: Option<usize>,
+    /// The writing transaction: its uncommitted writes count for UNIQUE.
+    transaction: Option<(
+        grafeo_common::types::EpochId,
+        grafeo_common::types::TransactionId,
+    )>,
 }
 
 impl CatalogConstraintValidator {
@@ -2195,7 +2216,55 @@ impl CatalogConstraintValidator {
             graph_name: None,
             store: None,
             max_property_size: None,
+            transaction: None,
         }
+    }
+
+    /// Checks as `transaction_id` sees the data, reading at `epoch`: a UNIQUE
+    /// value the transaction already wrote counts as taken.
+    #[must_use]
+    pub fn with_transaction_context(
+        mut self,
+        epoch: grafeo_common::types::EpochId,
+        transaction_id: Option<grafeo_common::types::TransactionId>,
+    ) -> Self {
+        self.transaction = transaction_id.map(|id| (epoch, id));
+        self
+    }
+
+    /// The nodes with `label` whose `key` holds `value`, as the writing
+    /// transaction sees them: committed nodes and its own writes.
+    ///
+    /// Without a property index the candidates come from the label index,
+    /// which holds the transaction's pending nodes; the property scan only
+    /// sees committed nodes and would miss a value written earlier in the
+    /// same transaction.
+    fn nodes_with_value(
+        &self,
+        store: &dyn grafeo_core::graph::GraphStoreSearch,
+        label: &str,
+        key: &str,
+        value: &Value,
+    ) -> Vec<grafeo_core::graph::lpg::Node> {
+        let candidates = if store.has_property_index(key) {
+            store.find_nodes_by_property(key, value)
+        } else {
+            store.nodes_by_label(label)
+        };
+        let key = grafeo_common::types::PropertyKey::from(key);
+        candidates
+            .into_iter()
+            .filter_map(|id| match self.transaction {
+                Some((epoch, transaction_id)) => {
+                    store.get_node_versioned(id, epoch, transaction_id)
+                }
+                None => store.get_node(id),
+            })
+            .filter(|node| {
+                node.labels.iter().any(|l| l.as_str() == label)
+                    && node.properties.get(&key) == Some(value)
+            })
+            .collect()
     }
 
     /// Sets the graph name for graph-type-bound validation.
@@ -2204,8 +2273,9 @@ impl CatalogConstraintValidator {
         self
     }
 
-    /// Attaches a graph store for UNIQUE constraint enforcement.
-    pub fn with_store(mut self, store: Arc<dyn grafeo_core::graph::GraphStore>) -> Self {
+    /// Attaches a graph store for UNIQUE constraint enforcement and vector
+    /// index dimensions.
+    pub fn with_store(mut self, store: Arc<dyn grafeo_core::graph::GraphStoreSearch>) -> Self {
         self.store = Some(store);
         self
     }
@@ -2224,13 +2294,25 @@ impl ConstraintValidator for CatalogConstraintValidator {
         key: &str,
         value: &Value,
     ) -> Result<(), OperatorError> {
+        // A vector index on the property fixes the vector's size.
+        #[cfg(feature = "vector-index")]
+        if let (Value::Vector(vector), Some(store)) = (value, &self.store) {
+            for label in labels {
+                if let Some(config) = store.vector_index_config(label, key)
+                    && vector.len() != config.dimensions
+                {
+                    return Err(OperatorError::ConstraintViolation(format!(
+                        "property '{key}' on :{label} has a vector index of {} dimensions, got a vector of {}",
+                        config.dimensions,
+                        vector.len()
+                    )));
+                }
+            }
+        }
         if let Some(limit) = self.max_property_size {
             let size = value.estimated_size_bytes();
             if size > limit {
-                return Err(OperatorError::ConstraintViolation(format!(
-                    "property '{key}' value exceeds maximum size of {} MiB ({size} bytes)",
-                    limit / (1024 * 1024)
-                )));
+                return Err(property_size_error(key, size, limit));
             }
         }
         for label in labels {
@@ -2358,19 +2440,16 @@ impl ConstraintValidator for CatalogConstraintValidator {
                         }
                         _ => false,
                     };
-                    if is_unique && let Some(ref store) = self.store {
-                        let existing = store.find_nodes_by_property(key, value);
-                        for node_id in existing {
-                            if let Some(node) = store.get_node(node_id) {
-                                let has_label = node.labels.iter().any(|l| l.as_str() == label);
-                                if has_label {
-                                    return Err(OperatorError::ConstraintViolation(format!(
-                                        "UNIQUE constraint violation: property '{key}' \
-                                             with value {value:?} already exists on :{label}"
-                                    )));
-                                }
-                            }
-                        }
+                    if is_unique
+                        && let Some(ref store) = self.store
+                        && !self
+                            .nodes_with_value(store.as_ref(), label, key, value)
+                            .is_empty()
+                    {
+                        return Err(OperatorError::ConstraintViolation(format!(
+                            "UNIQUE constraint violation: property '{key}' \
+                             with value {value:?} already exists on :{label}"
+                        )));
                     }
                 }
             }
@@ -2415,22 +2494,17 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 else {
                     continue;
                 };
-                let duplicate = store
-                    .find_nodes_by_property(&keys[0], values[0])
+                let duplicate = self
+                    .nodes_with_value(store.as_ref(), label, &keys[0], values[0])
                     .into_iter()
-                    .filter(|other| Some(*other) != node)
-                    .filter_map(|other| store.get_node(other))
+                    .filter(|other| Some(other.id) != node)
                     .any(|other| {
-                        other.labels.iter().any(|l| l.as_str() == label)
-                            && keys.iter().zip(&values).all(|(key, value)| {
-                                store
-                                    .get_node_property(
-                                        other.id,
-                                        &grafeo_common::types::PropertyKey::from(key.as_str()),
-                                    )
-                                    .as_ref()
-                                    == Some(*value)
-                            })
+                        keys.iter().zip(&values).all(|(key, value)| {
+                            other
+                                .properties
+                                .get(&grafeo_common::types::PropertyKey::from(key.as_str()))
+                                == Some(*value)
+                        })
                     });
                 if duplicate {
                     return Err(OperatorError::ConstraintViolation(format!(
@@ -2453,10 +2527,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         if let Some(limit) = self.max_property_size {
             let size = value.estimated_size_bytes();
             if size > limit {
-                return Err(OperatorError::ConstraintViolation(format!(
-                    "property '{key}' value exceeds maximum size of {} MiB ({size} bytes)",
-                    limit / (1024 * 1024)
-                )));
+                return Err(property_size_error(key, size, limit));
             }
         }
         if let Some(type_def) = self.catalog.get_edge_type_def(edge_type)
@@ -2612,6 +2683,20 @@ impl ConstraintValidator for CatalogConstraintValidator {
         Ok(())
     }
 
+    fn constrains_edge_endpoints(&self, edge_type: &str) -> bool {
+        self.catalog
+            .get_edge_type_def(edge_type)
+            .is_some_and(|def| {
+                !def.source_node_types.is_empty() || !def.target_node_types.is_empty()
+            })
+    }
+
+    fn constrains_node_property(&self, _key: &str, value: &Value) -> bool {
+        // A vector index on (label, key) fixes a vector's size; the node
+        // types hold every other constraint.
+        matches!(value, Value::Vector(_)) || self.catalog.has_node_types()
+    }
+
     fn inject_defaults(&self, labels: &[String], properties: &mut Vec<(String, Value)>) {
         for label in labels {
             if let Some(type_def) = self.catalog.resolved_node_type(label) {
@@ -2626,6 +2711,22 @@ impl ConstraintValidator for CatalogConstraintValidator {
             }
         }
     }
+}
+
+/// The error for a property value over the size limit.
+fn property_size_error(key: &str, size: usize, limit: usize) -> OperatorError {
+    let limit_display = if limit >= 1024 * 1024 && limit.is_multiple_of(1024 * 1024) {
+        format!("{} MiB", limit / (1024 * 1024))
+    } else if limit >= 1024 && limit.is_multiple_of(1024) {
+        format!("{} KiB", limit / 1024)
+    } else {
+        format!("{limit} bytes")
+    };
+    OperatorError::ConstraintViolation(format!(
+        "property '{key}' value exceeds maximum size of {limit_display} ({size} bytes); \
+         raise it with Config::with_max_property_size() or disable it with \
+         Config::without_max_property_size()"
+    ))
 }
 
 #[cfg(test)]

@@ -70,15 +70,15 @@ fn social_graph() -> GrafeoDB {
         .unwrap();
 
     // KNOWS graph: Vincent -> Jules, Vincent -> Mia, Jules -> Mia, Beatrix -> Vincent
-    session.create_edge(vincent, jules, "KNOWS");
-    session.create_edge(vincent, mia, "KNOWS");
-    session.create_edge(jules, mia, "KNOWS");
-    session.create_edge(beatrix, vincent, "KNOWS");
+    session.create_edge(vincent, jules, "KNOWS").unwrap();
+    session.create_edge(vincent, mia, "KNOWS").unwrap();
+    session.create_edge(jules, mia, "KNOWS").unwrap();
+    session.create_edge(beatrix, vincent, "KNOWS").unwrap();
 
     // WORKS_AT: Vincent + Jules at Acme, Mia at Globex. Beatrix unemployed.
-    session.create_edge(vincent, acme, "WORKS_AT");
-    session.create_edge(jules, acme, "WORKS_AT");
-    session.create_edge(mia, globex, "WORKS_AT");
+    session.create_edge(vincent, acme, "WORKS_AT").unwrap();
+    session.create_edge(jules, acme, "WORKS_AT").unwrap();
+    session.create_edge(mia, globex, "WORKS_AT").unwrap();
 
     db
 }

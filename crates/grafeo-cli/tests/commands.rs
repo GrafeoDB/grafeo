@@ -8,16 +8,17 @@ fn create_test_db(dir: &Path) -> grafeo_engine::GrafeoDB {
     let db = grafeo_engine::GrafeoDB::open(dir).expect("Failed to create test database");
 
     // Add some test data
-    let n1 = db.create_node(&["Person"]);
-    let n2 = db.create_node(&["Person"]);
-    let n3 = db.create_node(&["Company"]);
+    let n1 = db.create_node(&["Person"]).unwrap();
+    let n2 = db.create_node(&["Person"]).unwrap();
+    let n3 = db.create_node(&["Company"]).unwrap();
 
-    db.set_node_property(n1, "name", "Alix".into());
-    db.set_node_property(n2, "name", "Gus".into());
-    db.set_node_property(n3, "name", "Acme Corp".into());
+    db.set_node_property(n1, "name", "Alix".into()).unwrap();
+    db.set_node_property(n2, "name", "Gus".into()).unwrap();
+    db.set_node_property(n3, "name", "Acme Corp".into())
+        .unwrap();
 
-    db.create_edge(n1, n2, "KNOWS");
-    db.create_edge(n1, n3, "WORKS_AT");
+    db.create_edge(n1, n2, "KNOWS").unwrap();
+    db.create_edge(n1, n3, "WORKS_AT").unwrap();
 
     db
 }
@@ -93,9 +94,9 @@ fn test_in_memory_database() {
 fn test_node_and_edge_creation() {
     let db = grafeo_engine::GrafeoDB::new_in_memory();
 
-    let n1 = db.create_node(&["Test"]);
-    let n2 = db.create_node(&["Test"]);
-    let e1 = db.create_edge(n1, n2, "LINKS");
+    let n1 = db.create_node(&["Test"]).unwrap();
+    let n2 = db.create_node(&["Test"]).unwrap();
+    let e1 = db.create_edge(n1, n2, "LINKS").unwrap();
 
     let info = db.info();
     assert_eq!(info.node_count, 2);
@@ -146,8 +147,8 @@ fn test_admin_service_trait() {
     use grafeo_engine::AdminService;
 
     let db = grafeo_engine::GrafeoDB::new_in_memory();
-    let n1 = db.create_node(&["Test"]);
-    db.set_node_property(n1, "key", "value".into());
+    let n1 = db.create_node(&["Test"]).unwrap();
+    db.set_node_property(n1, "key", "value".into()).unwrap();
 
     // AdminService methods should work
     let info = AdminService::info(&db);

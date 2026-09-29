@@ -100,6 +100,7 @@ mod join;
 mod mutation;
 mod project;
 mod scan;
+pub(crate) mod seek;
 
 #[cfg(feature = "algos")]
 use crate::query::plan::CallProcedureOp;
@@ -253,6 +254,23 @@ impl Planner {
         }
     }
 
+    /// Records the plan's writes, for conflict detection, as writes to the
+    /// graph with storage key `graph` (`None`: the default graph). Named
+    /// graphs number their entities on their own, so without this node 0 of
+    /// one graph would conflict with node 0 of another.
+    #[must_use]
+    pub fn with_write_graph(mut self, graph: Option<&str>) -> Self {
+        if self.write_tracker.is_some()
+            && let Some(manager) = &self.transaction_manager
+        {
+            self.write_tracker = Some(Arc::new(
+                crate::transaction::TransactionWriteTracker::new(Arc::clone(manager))
+                    .in_graph(graph),
+            ));
+        }
+        self
+    }
+
     /// Creates a new planner with transaction context for MVCC-aware planning.
     #[must_use]
     pub fn with_context(
@@ -315,6 +333,20 @@ impl Planner {
             .ok_or(Error::Transaction(
                 grafeo_common::utils::error::TransactionError::ReadOnly,
             ))
+    }
+
+    /// A writer for this statement's mutations: the writable store with the
+    /// transaction context, the write tracker and the constraint validator.
+    fn graph_writer(&self) -> Result<grafeo_core::execution::operators::GraphWriter> {
+        let mut writer = grafeo_core::execution::operators::GraphWriter::new(self.write_store()?)
+            .with_transaction_context(self.viewing_epoch, self.transaction_id);
+        if let Some(ref tracker) = self.write_tracker {
+            writer = writer.with_write_tracker(Arc::clone(tracker));
+        }
+        if let Some(ref validator) = self.validator {
+            writer = writer.with_validator(Arc::clone(validator));
+        }
+        Ok(writer)
     }
 
     /// Returns the viewing epoch for this planner.
@@ -990,7 +1022,8 @@ impl Planner {
         let index_metric = scan
             .label
             .as_ref()
-            .and_then(|label| self.store.vector_index_metric(label, &scan.property));
+            .and_then(|label| self.store.vector_index_config(label, &scan.property))
+            .map(|config| config.metric);
         let metric = requested_metric
             .or(index_metric)
             .unwrap_or(DistanceMetric::Cosine);

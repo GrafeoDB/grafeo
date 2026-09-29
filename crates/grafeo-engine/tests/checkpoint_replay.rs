@@ -257,9 +257,13 @@ mod tests {
             session
                 .execute("INSERT (:Person {name: 'Vincent'})")
                 .unwrap();
-            let mia = db.create_node_with_props(&["Person"], [("name", Value::from("Mia"))]);
-            let butch = db.create_node_with_props(&["Person"], [("name", Value::from("Butch"))]);
-            db.create_edge(mia, butch, "LIKES");
+            let mia = db
+                .create_node_with_props(&["Person"], [("name", Value::from("Mia"))])
+                .unwrap();
+            let butch = db
+                .create_node_with_props(&["Person"], [("name", Value::from("Butch"))])
+                .unwrap();
+            db.create_edge(mia, butch, "LIKES").unwrap();
 
             std::fs::create_dir(&blocker).unwrap();
             assert!(db.wal_checkpoint().is_err(), "the checkpoint must fail");
@@ -401,11 +405,16 @@ mod tests {
 
         let (alix, gus, knows, mia) = {
             let db = open(&path);
-            let alix = db.create_node_with_props(&["Person"], [("name", Value::from("Alix"))]);
-            db.add_node_label(alix, "Employee");
-            let gus = db.create_node_with_props(&["Person"], [("name", Value::from("Gus"))]);
-            let knows =
-                db.create_edge_with_props(alix, gus, "KNOWS", [("since", Value::from(2020_i64))]);
+            let alix = db
+                .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
+                .unwrap();
+            db.add_node_label(alix, "Employee").unwrap();
+            let gus = db
+                .create_node_with_props(&["Person"], [("name", Value::from("Gus"))])
+                .unwrap();
+            let knows = db
+                .create_edge_with_props(alix, gus, "KNOWS", [("since", Value::from(2020_i64))])
+                .unwrap();
             db.session().execute("CREATE GRAPH g").unwrap();
             let session = db.session();
             session.use_graph("g");

@@ -80,8 +80,8 @@ impl<'a> PreparedCommit<'a> {
             .transaction_manager()
             .get_write_set(transaction_id)?;
         let (mut nodes_written, mut edges_written) = (0, 0);
-        for entity in &write_set {
-            match entity {
+        for written in &write_set {
+            match written.entity {
                 EntityId::Node(_) => nodes_written += 1,
                 EntityId::Edge(_) => edges_written += 1,
             }

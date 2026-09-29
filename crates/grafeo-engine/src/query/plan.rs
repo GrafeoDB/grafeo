@@ -707,6 +707,7 @@ impl LogicalOperator {
                         format!(" [range: {property}]")
                     }
                     Some(PushdownHint::LabelFirst) => " [label-first]".to_string(),
+                    Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
                     None => String::new(),
                 };
                 format!("{}{hint}", fmt_expr(&op.predicate))
@@ -864,6 +865,7 @@ impl LogicalOperator {
                         format!(" [range: {property}]")
                     }
                     Some(PushdownHint::LabelFirst) => " [label-first]".to_string(),
+                    Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
                     None => String::new(),
                 };
                 let _ = writeln!(
@@ -1495,6 +1497,8 @@ pub enum PushdownHint {
     },
     /// No index available, but label narrows the scan before filtering.
     LabelFirst,
+    /// The node is looked up by ID for each input row.
+    IdSeek,
 }
 
 /// Filter rows based on a predicate.

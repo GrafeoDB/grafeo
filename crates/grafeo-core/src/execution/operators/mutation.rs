@@ -14,9 +14,9 @@ use grafeo_common::types::{
 };
 
 use super::filter::{ExpressionPredicate, FilterExpression};
-use super::{Operator, OperatorError, OperatorResult, SessionContext, SharedWriteTracker};
+use super::{GraphWriter, Operator, OperatorError, OperatorResult, SessionContext};
 use crate::execution::chunk::{DataChunk, DataChunkBuilder};
-use crate::graph::{GraphStore, GraphStoreMut, GraphStoreSearch};
+use crate::graph::{GraphStore, GraphStoreSearch};
 
 /// Trait for validating schema constraints during mutation operations.
 ///
@@ -140,6 +140,23 @@ pub trait ConstraintValidator: Send + Sync {
         Ok(())
     }
 
+    /// Whether [`validate_edge_endpoints`](Self::validate_edge_endpoints)
+    /// checks anything for `edge_type`. A writer reads the endpoints' labels
+    /// only when it does.
+    fn constrains_edge_endpoints(&self, edge_type: &str) -> bool {
+        let _ = edge_type;
+        true
+    }
+
+    /// Whether checking `value` for property `key` of an existing node needs
+    /// the node's labels or its other properties. When no value a SET writes
+    /// does, a writer checks each value on its own (with no labels) and does
+    /// not read the node.
+    fn constrains_node_property(&self, key: &str, value: &Value) -> bool {
+        let _ = (key, value);
+        true
+    }
+
     /// Injects default values for properties that are defined in a type but
     /// not explicitly provided.
     fn inject_defaults(&self, labels: &[String], properties: &mut Vec<(String, Value)>) {
@@ -152,8 +169,8 @@ pub trait ConstraintValidator: Send + Sync {
 /// For each input row, creates a new node with the specified labels
 /// and properties, then outputs the row with the new node.
 pub struct CreateNodeOperator {
-    /// The graph store to modify.
-    store: Arc<dyn GraphStoreMut>,
+    /// Validated, versioned writes.
+    writer: GraphWriter,
     /// Input operator.
     input: Option<Box<dyn Operator>>,
     /// Labels for the new nodes.
@@ -166,14 +183,6 @@ pub struct CreateNodeOperator {
     output_column: usize,
     /// Whether this operator has been executed (for no-input case).
     executed: bool,
-    /// Epoch for MVCC versioning.
-    viewing_epoch: Option<EpochId>,
-    /// Transaction ID for MVCC versioning.
-    transaction_id: Option<TransactionId>,
-    /// Optional constraint validator for schema enforcement.
-    validator: Option<Arc<dyn ConstraintValidator>>,
-    /// Optional write tracker for conflict detection.
-    write_tracker: Option<SharedWriteTracker>,
     /// Evaluates computed property values (`PropertySource::Expression`).
     expressions: PropertyExpressions,
 }
@@ -340,14 +349,15 @@ impl CreateNodeOperator {
     /// Creates a new node creation operator.
     ///
     /// # Arguments
-    /// * `store` - The graph store to modify.
+    /// * `writer` - Writes the nodes; a store alone writes without a
+    ///   transaction, checks or conflict tracking.
     /// * `input` - Optional input operator (None for standalone CREATE).
     /// * `labels` - Labels to assign to created nodes.
     /// * `properties` - Properties to set on created nodes.
     /// * `output_schema` - Schema of the output.
     /// * `output_column` - Column index where the created node ID goes.
     pub fn new(
-        store: Arc<dyn GraphStoreMut>,
+        writer: impl Into<GraphWriter>,
         input: Option<Box<dyn Operator>>,
         labels: Vec<String>,
         properties: Vec<(String, PropertySource)>,
@@ -355,42 +365,15 @@ impl CreateNodeOperator {
         output_column: usize,
     ) -> Self {
         Self {
-            store,
+            writer: writer.into(),
             input,
             labels,
             properties,
             output_schema,
             output_column,
             executed: false,
-            viewing_epoch: None,
-            transaction_id: None,
-            validator: None,
-            write_tracker: None,
             expressions: PropertyExpressions::default(),
         }
-    }
-
-    /// Sets the transaction context for MVCC versioning.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Sets the constraint validator for schema enforcement.
-    pub fn with_validator(mut self, validator: Arc<dyn ConstraintValidator>) -> Self {
-        self.validator = Some(validator);
-        self
-    }
-
-    /// Sets the write tracker for conflict detection.
-    pub fn with_write_tracker(mut self, tracker: SharedWriteTracker) -> Self {
-        self.write_tracker = Some(tracker);
-        self
     }
 
     /// Provides a search-store handle so computed property values
@@ -409,159 +392,66 @@ impl CreateNodeOperator {
     }
 }
 
-impl CreateNodeOperator {
-    /// Validates and sets properties on a newly created node.
-    fn validate_and_set_properties(
-        &self,
-        node_id: NodeId,
-        resolved_props: &mut Vec<(String, Value)>,
-    ) -> Result<(), OperatorError> {
-        // Phase 0: Validate that node labels are allowed by the bound graph type
-        if let Some(ref validator) = self.validator {
-            validator.validate_node_labels_allowed(&self.labels)?;
-        }
-
-        // Phase 0.5: Inject defaults for properties not explicitly provided
-        if let Some(ref validator) = self.validator {
-            validator.inject_defaults(&self.labels, resolved_props);
-        }
-
-        // Phase 1: Validate each property value
-        if let Some(ref validator) = self.validator {
-            for (name, value) in resolved_props.iter() {
-                validator.validate_node_property(&self.labels, name, value)?;
-                validator.check_unique_node_property(&self.labels, name, value)?;
-            }
-            // Phase 2: Validate completeness (NOT NULL checks for missing required properties)
-            validator.validate_node_complete(&self.labels, resolved_props)?;
-            validator.check_unique_node(&self.labels, resolved_props, Some(node_id))?;
-        }
-
-        // Phase 3: Write properties to the store
-        if let Some(tid) = self.transaction_id {
-            for (name, value) in resolved_props.iter() {
-                self.store
-                    .set_node_property_versioned(node_id, name, value.clone(), tid);
-            }
-        } else {
-            for (name, value) in resolved_props.iter() {
-                self.store.set_node_property(node_id, name, value.clone());
-            }
-        }
-        Ok(())
-    }
-}
-
 impl Operator for CreateNodeOperator {
     fn next(&mut self) -> OperatorResult {
-        // Get transaction context for versioned creation
-        let epoch = self
-            .viewing_epoch
-            .unwrap_or_else(|| self.store.current_epoch());
-        let tx = self.transaction_id.unwrap_or(TransactionId::SYSTEM);
-
         if let Some(ref mut input) = self.input {
             // For each input row, create a node
-            if let Some(chunk) = input.next()? {
-                let mut builder =
-                    DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
-
-                for row in chunk.selected_indices() {
-                    // Resolve all property values first (before creating node)
-                    let mut resolved_props = self.expressions.resolve_row(
-                        &self.properties,
-                        &chunk,
-                        row,
-                        self.store.as_ref() as &dyn GraphStore,
-                        self.viewing_epoch,
-                        self.transaction_id,
-                    )?;
-
-                    // Create the node with MVCC versioning
-                    let label_refs: Vec<&str> = self.labels.iter().map(String::as_str).collect();
-                    let node_id = self.store.create_node_versioned(&label_refs, epoch, tx);
-
-                    // Record write for conflict detection
-                    if let (Some(tracker), Some(tid)) = (&self.write_tracker, self.transaction_id) {
-                        tracker.record_node_write(tid, node_id)?;
-                    }
-
-                    // Validate and set properties
-                    self.validate_and_set_properties(node_id, &mut resolved_props)?;
-
-                    // Copy input columns to output
-                    for col_idx in 0..chunk.column_count() {
-                        if col_idx < self.output_column
-                            && let (Some(src), Some(dst)) =
-                                (chunk.column(col_idx), builder.column_mut(col_idx))
-                        {
-                            if let Some(val) = src.get_value(row) {
-                                dst.push_value(val);
-                            } else {
-                                dst.push_value(Value::Null);
-                            }
-                        }
-                    }
-
-                    // Add the new node ID
-                    if let Some(dst) = builder.column_mut(self.output_column) {
-                        // reason: entity IDs stored as i64, standard encoding
-                        #[allow(clippy::cast_possible_wrap)]
-                        // reason: entity IDs stored as i64, standard encoding
-                        #[allow(clippy::cast_possible_wrap)]
-                        dst.push_value(Value::Int64(node_id.0 as i64));
-                    }
-
-                    builder.advance_row();
-                }
-
-                return Ok(Some(builder.finish()));
-            }
-            Ok(None)
-        } else {
-            // No input - create a single node
-            if self.executed {
+            let Some(chunk) = input.next()? else {
                 return Ok(None);
-            }
-            self.executed = true;
+            };
+            let mut builder =
+                DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
 
-            // Resolve constant properties. Computed values need a row: the
-            // planner gives such a CREATE a single-row input instead.
-            let mut resolved_props: Vec<(String, Value)> = self
-                .properties
-                .iter()
-                .filter_map(|(name, source)| {
-                    if let PropertySource::Constant(value) = source {
-                        Some((name.clone(), value.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            for row in chunk.selected_indices() {
+                let properties = self.expressions.resolve_row(
+                    &self.properties,
+                    &chunk,
+                    row,
+                    self.writer.store().as_ref() as &dyn GraphStore,
+                    self.writer.viewing_epoch(),
+                    self.writer.transaction_id(),
+                )?;
+                let node_id = self.writer.create_node(&self.labels, properties)?;
 
-            // Create the node with MVCC versioning
-            let label_refs: Vec<&str> = self.labels.iter().map(String::as_str).collect();
-            let node_id = self.store.create_node_versioned(&label_refs, epoch, tx);
-
-            // Record write for conflict detection
-            if let (Some(tracker), Some(tid)) = (&self.write_tracker, self.transaction_id) {
-                tracker.record_node_write(tid, node_id)?;
+                // The input columns before the new node's column, then the node.
+                copy_columns(&chunk, row, &mut builder, self.output_column);
+                if let Some(dst) = builder.column_mut(self.output_column) {
+                    dst.push_value(id_value(node_id.0));
+                }
+                builder.advance_row();
             }
 
-            // Validate and set properties
-            self.validate_and_set_properties(node_id, &mut resolved_props)?;
-
-            // Build output chunk with just the node ID
-            let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
-            if let Some(dst) = builder.column_mut(self.output_column) {
-                // reason: entity IDs stored as i64, standard encoding
-                #[allow(clippy::cast_possible_wrap)]
-                dst.push_value(Value::Int64(node_id.0 as i64));
-            }
-            builder.advance_row();
-
-            Ok(Some(builder.finish()))
+            return Ok(Some(builder.finish()));
         }
+
+        // No input: create a single node
+        if self.executed {
+            return Ok(None);
+        }
+        self.executed = true;
+
+        // Resolve constant properties. Computed values need a row: the
+        // planner gives such a CREATE a single-row input instead.
+        let properties: Vec<(String, Value)> = self
+            .properties
+            .iter()
+            .filter_map(|(name, source)| {
+                if let PropertySource::Constant(value) = source {
+                    Some((name.clone(), value.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let node_id = self.writer.create_node(&self.labels, properties)?;
+
+        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
+        if let Some(dst) = builder.column_mut(self.output_column) {
+            dst.push_value(id_value(node_id.0));
+        }
+        builder.advance_row();
+
+        Ok(Some(builder.finish()))
     }
 
     fn reset(&mut self) {
@@ -580,10 +470,47 @@ impl Operator for CreateNodeOperator {
     }
 }
 
+/// Reads the entity id in `column` of `row`, for the error messages naming
+/// the column (`from`, `node`, ...) and the id kind (`node`, `edge`, ...).
+fn id_at(
+    chunk: &DataChunk,
+    column: usize,
+    row: usize,
+    column_name: &str,
+    id_kind: &str,
+) -> Result<u64, OperatorError> {
+    let value = chunk
+        .column(column)
+        .and_then(|c| c.get_value(row))
+        .ok_or_else(|| OperatorError::ColumnNotFound(format!("{column_name} column {column}")))?;
+    match value {
+        // Ids travel as the bits of an i64.
+        Value::Int64(id) => Ok(id.cast_unsigned()),
+        other => Err(OperatorError::TypeMismatch {
+            expected: format!("Int64 ({id_kind} ID)"),
+            found: format!("{other:?}"),
+        }),
+    }
+}
+
+/// Copies the first `columns` input columns of `row` to the output row.
+fn copy_columns(chunk: &DataChunk, row: usize, builder: &mut DataChunkBuilder, columns: usize) {
+    for col_idx in 0..columns.min(chunk.column_count()) {
+        if let (Some(src), Some(dst)) = (chunk.column(col_idx), builder.column_mut(col_idx)) {
+            dst.push_value(src.get_value(row).unwrap_or(Value::Null));
+        }
+    }
+}
+
+/// Encodes an entity id for an output column.
+fn id_value(id: u64) -> Value {
+    Value::Int64(id.cast_signed())
+}
+
 /// Operator that creates new edges.
 pub struct CreateEdgeOperator {
-    /// The graph store to modify.
-    store: Arc<dyn GraphStoreMut>,
+    /// Validated, versioned writes.
+    writer: GraphWriter,
     /// Input operator.
     input: Box<dyn Operator>,
     /// Column index for the source node.
@@ -598,14 +525,6 @@ pub struct CreateEdgeOperator {
     output_schema: Vec<LogicalType>,
     /// Column index for the created edge variable (if any).
     output_column: Option<usize>,
-    /// Epoch for MVCC versioning.
-    viewing_epoch: Option<EpochId>,
-    /// Transaction ID for MVCC versioning.
-    transaction_id: Option<TransactionId>,
-    /// Optional constraint validator for schema enforcement.
-    validator: Option<Arc<dyn ConstraintValidator>>,
-    /// Optional write tracker for conflict detection.
-    write_tracker: Option<SharedWriteTracker>,
     /// Evaluates computed property values (`PropertySource::Expression`).
     expressions: PropertyExpressions,
 }
@@ -616,9 +535,8 @@ impl CreateEdgeOperator {
     /// Use builder methods to set additional options:
     /// - [`with_properties`](Self::with_properties) - set edge properties
     /// - [`with_output_column`](Self::with_output_column) - output the created edge ID
-    /// - [`with_transaction_context`](Self::with_transaction_context) - set transaction context
     pub fn new(
-        store: Arc<dyn GraphStoreMut>,
+        writer: impl Into<GraphWriter>,
         input: Box<dyn Operator>,
         from_column: usize,
         to_column: usize,
@@ -626,7 +544,7 @@ impl CreateEdgeOperator {
         output_schema: Vec<LogicalType>,
     ) -> Self {
         Self {
-            store,
+            writer: writer.into(),
             input,
             from_column,
             to_column,
@@ -634,10 +552,6 @@ impl CreateEdgeOperator {
             properties: Vec::new(),
             output_schema,
             output_column: None,
-            viewing_epoch: None,
-            transaction_id: None,
-            validator: None,
-            write_tracker: None,
             expressions: PropertyExpressions::default(),
         }
     }
@@ -651,29 +565,6 @@ impl CreateEdgeOperator {
     /// Sets the output column for the created edge ID.
     pub fn with_output_column(mut self, column: usize) -> Self {
         self.output_column = Some(column);
-        self
-    }
-
-    /// Sets the transaction context for MVCC versioning.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Sets the constraint validator for schema enforcement.
-    pub fn with_validator(mut self, validator: Arc<dyn ConstraintValidator>) -> Self {
-        self.validator = Some(validator);
-        self
-    }
-
-    /// Sets the write tracker for conflict detection.
-    pub fn with_write_tracker(mut self, tracker: SharedWriteTracker) -> Self {
-        self.write_tracker = Some(tracker);
         self
     }
 
@@ -695,151 +586,36 @@ impl CreateEdgeOperator {
 
 impl Operator for CreateEdgeOperator {
     fn next(&mut self) -> OperatorResult {
-        // Get transaction context for versioned creation
-        let epoch = self
-            .viewing_epoch
-            .unwrap_or_else(|| self.store.current_epoch());
-        let tx = self.transaction_id.unwrap_or(TransactionId::SYSTEM);
+        let Some(chunk) = self.input.next()? else {
+            return Ok(None);
+        };
+        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
 
-        if let Some(chunk) = self.input.next()? {
-            let mut builder =
-                DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
+        for row in chunk.selected_indices() {
+            let from = NodeId(id_at(&chunk, self.from_column, row, "from", "node")?);
+            let to = NodeId(id_at(&chunk, self.to_column, row, "to", "node")?);
+            let properties = self.expressions.resolve_row(
+                &self.properties,
+                &chunk,
+                row,
+                self.writer.store().as_ref() as &dyn GraphStore,
+                self.writer.viewing_epoch(),
+                self.writer.transaction_id(),
+            )?;
+            let edge_id = self
+                .writer
+                .create_edge(from, to, &self.edge_type, properties)?;
 
-            for row in chunk.selected_indices() {
-                // Get source and target node IDs
-                let from_id = chunk
-                    .column(self.from_column)
-                    .and_then(|c| c.get_value(row))
-                    .ok_or_else(|| {
-                        OperatorError::ColumnNotFound(format!("from column {}", self.from_column))
-                    })?;
-
-                let to_id = chunk
-                    .column(self.to_column)
-                    .and_then(|c| c.get_value(row))
-                    .ok_or_else(|| {
-                        OperatorError::ColumnNotFound(format!("to column {}", self.to_column))
-                    })?;
-
-                // Extract node IDs
-                let from_node_id = match from_id {
-                    // reason: ID encoding: i64 <-> u64 round-trip
-                    #[allow(clippy::cast_sign_loss)]
-                    Value::Int64(id) => NodeId(id as u64),
-                    _ => {
-                        return Err(OperatorError::TypeMismatch {
-                            expected: "Int64 (node ID)".to_string(),
-                            found: format!("{from_id:?}"),
-                        });
-                    }
-                };
-
-                let to_node_id = match to_id {
-                    // reason: ID encoding: i64 <-> u64 round-trip
-                    #[allow(clippy::cast_sign_loss)]
-                    Value::Int64(id) => NodeId(id as u64),
-                    _ => {
-                        return Err(OperatorError::TypeMismatch {
-                            expected: "Int64 (node ID)".to_string(),
-                            found: format!("{to_id:?}"),
-                        });
-                    }
-                };
-
-                // Validate graph type and edge endpoint constraints
-                if let Some(ref validator) = self.validator {
-                    validator.validate_edge_type_allowed(&self.edge_type)?;
-
-                    // Look up source and target node labels for endpoint validation
-                    let source_labels: Vec<String> = self
-                        .store
-                        .get_node(from_node_id)
-                        .map(|n| n.labels.iter().map(|l| l.to_string()).collect())
-                        .unwrap_or_default();
-                    let target_labels: Vec<String> = self
-                        .store
-                        .get_node(to_node_id)
-                        .map(|n| n.labels.iter().map(|l| l.to_string()).collect())
-                        .unwrap_or_default();
-                    validator.validate_edge_endpoints(
-                        &self.edge_type,
-                        &source_labels,
-                        &target_labels,
-                    )?;
-                }
-
-                // Resolve property values
-                let resolved_props = self.expressions.resolve_row(
-                    &self.properties,
-                    &chunk,
-                    row,
-                    self.store.as_ref() as &dyn GraphStore,
-                    self.viewing_epoch,
-                    self.transaction_id,
-                )?;
-
-                // Validate constraints before writing
-                if let Some(ref validator) = self.validator {
-                    for (name, value) in &resolved_props {
-                        validator.validate_edge_property(&self.edge_type, name, value)?;
-                    }
-                    validator.validate_edge_complete(&self.edge_type, &resolved_props)?;
-                }
-
-                // Create the edge with MVCC versioning
-                let edge_id = self.store.create_edge_versioned(
-                    from_node_id,
-                    to_node_id,
-                    &self.edge_type,
-                    epoch,
-                    tx,
-                );
-
-                // Record write for conflict detection
-                if let (Some(tracker), Some(tid)) = (&self.write_tracker, self.transaction_id) {
-                    tracker.record_edge_write(tid, edge_id)?;
-                }
-
-                // Set properties
-                if let Some(tid) = self.transaction_id {
-                    for (name, value) in resolved_props {
-                        self.store
-                            .set_edge_property_versioned(edge_id, &name, value, tid);
-                    }
-                } else {
-                    for (name, value) in resolved_props {
-                        self.store.set_edge_property(edge_id, &name, value);
-                    }
-                }
-
-                // Copy input columns
-                for col_idx in 0..chunk.column_count() {
-                    if let (Some(src), Some(dst)) =
-                        (chunk.column(col_idx), builder.column_mut(col_idx))
-                    {
-                        if let Some(val) = src.get_value(row) {
-                            dst.push_value(val);
-                        } else {
-                            dst.push_value(Value::Null);
-                        }
-                    }
-                }
-
-                // Add edge ID if requested
-                if let Some(out_col) = self.output_column
-                    && let Some(dst) = builder.column_mut(out_col)
-                {
-                    // reason: entity IDs stored as i64, standard encoding
-                    #[allow(clippy::cast_possible_wrap)]
-                    dst.push_value(Value::Int64(edge_id.0 as i64));
-                }
-
-                builder.advance_row();
+            copy_columns(&chunk, row, &mut builder, chunk.column_count());
+            if let Some(out_col) = self.output_column
+                && let Some(dst) = builder.column_mut(out_col)
+            {
+                dst.push_value(id_value(edge_id.0));
             }
-
-            return Ok(Some(builder.finish()));
+            builder.advance_row();
         }
-        Ok(None)
+
+        Ok(Some(builder.finish()))
     }
 
     fn reset(&mut self) {
@@ -857,8 +633,8 @@ impl Operator for CreateEdgeOperator {
 
 /// Operator that deletes nodes.
 pub struct DeleteNodeOperator {
-    /// The graph store to modify.
-    store: Arc<dyn GraphStoreMut>,
+    /// Validated, versioned writes.
+    writer: GraphWriter,
     /// Input operator.
     input: Box<dyn Operator>,
     /// Column index for the node to delete.
@@ -867,140 +643,45 @@ pub struct DeleteNodeOperator {
     output_schema: Vec<LogicalType>,
     /// Whether to detach (delete connected edges) before deleting.
     detach: bool,
-    /// Epoch for MVCC versioning.
-    viewing_epoch: Option<EpochId>,
-    /// Transaction ID for MVCC versioning.
-    transaction_id: Option<TransactionId>,
-    /// Optional write tracker for conflict detection.
-    write_tracker: Option<SharedWriteTracker>,
 }
 
 impl DeleteNodeOperator {
     /// Creates a new node deletion operator.
     pub fn new(
-        store: Arc<dyn GraphStoreMut>,
+        writer: impl Into<GraphWriter>,
         input: Box<dyn Operator>,
         node_column: usize,
         output_schema: Vec<LogicalType>,
         detach: bool,
     ) -> Self {
         Self {
-            store,
+            writer: writer.into(),
             input,
             node_column,
             output_schema,
             detach,
-            viewing_epoch: None,
-            transaction_id: None,
-            write_tracker: None,
         }
-    }
-
-    /// Sets the transaction context for MVCC versioning.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Sets the write tracker for conflict detection.
-    pub fn with_write_tracker(mut self, tracker: SharedWriteTracker) -> Self {
-        self.write_tracker = Some(tracker);
-        self
     }
 }
 
 impl Operator for DeleteNodeOperator {
     fn next(&mut self) -> OperatorResult {
-        // Get transaction context for versioned deletion
-        let epoch = self
-            .viewing_epoch
-            .unwrap_or_else(|| self.store.current_epoch());
-        let tx = self.transaction_id.unwrap_or(TransactionId::SYSTEM);
+        let Some(chunk) = self.input.next()? else {
+            return Ok(None);
+        };
+        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
 
-        if let Some(chunk) = self.input.next()? {
-            let mut builder =
-                DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
+        for row in chunk.selected_indices() {
+            let node_id = NodeId(id_at(&chunk, self.node_column, row, "node", "node")?);
+            self.writer.delete_node(node_id, self.detach)?;
 
-            for row in chunk.selected_indices() {
-                let node_val = chunk
-                    .column(self.node_column)
-                    .and_then(|c| c.get_value(row))
-                    .ok_or_else(|| {
-                        OperatorError::ColumnNotFound(format!("node column {}", self.node_column))
-                    })?;
-
-                let node_id = match node_val {
-                    // reason: ID encoding: i64 <-> u64 round-trip
-                    #[allow(clippy::cast_sign_loss)]
-                    Value::Int64(id) => NodeId(id as u64),
-                    _ => {
-                        return Err(OperatorError::TypeMismatch {
-                            expected: "Int64 (node ID)".to_string(),
-                            found: format!("{node_val:?}"),
-                        });
-                    }
-                };
-
-                if self.detach {
-                    // Delete all connected edges first, using versioned deletion
-                    // so rollback can restore them
-                    let outgoing = self
-                        .store
-                        .edges_from(node_id, crate::graph::Direction::Outgoing);
-                    let incoming = self
-                        .store
-                        .edges_from(node_id, crate::graph::Direction::Incoming);
-                    for (_, edge_id) in outgoing.into_iter().chain(incoming) {
-                        self.store.delete_edge_versioned(edge_id, epoch, tx);
-                        if let (Some(tracker), Some(tid)) =
-                            (&self.write_tracker, self.transaction_id)
-                        {
-                            tracker.record_edge_write(tid, edge_id)?;
-                        }
-                    }
-                } else {
-                    // NODETACH: check that node has no connected edges
-                    let degree = self.store.out_degree(node_id) + self.store.in_degree(node_id);
-                    if degree > 0 {
-                        return Err(OperatorError::ConstraintViolation(format!(
-                            "Cannot delete node with {} connected edge(s). Use DETACH DELETE.",
-                            degree
-                        )));
-                    }
-                }
-
-                // Delete the node with MVCC versioning
-                self.store.delete_node_versioned(node_id, epoch, tx);
-
-                // Record write for conflict detection
-                if let (Some(tracker), Some(tid)) = (&self.write_tracker, self.transaction_id) {
-                    tracker.record_node_write(tid, node_id)?;
-                }
-
-                // Pass through all input columns so downstream RETURN can
-                // reference the variable (e.g., count(n) after DELETE n).
-                for col_idx in 0..chunk.column_count() {
-                    if let (Some(src), Some(dst)) =
-                        (chunk.column(col_idx), builder.column_mut(col_idx))
-                    {
-                        if let Some(val) = src.get_value(row) {
-                            dst.push_value(val);
-                        } else {
-                            dst.push_value(Value::Null);
-                        }
-                    }
-                }
-                builder.advance_row();
-            }
-
-            return Ok(Some(builder.finish()));
+            // Pass through all input columns so downstream RETURN can
+            // reference the variable (e.g., count(n) after DELETE n).
+            copy_columns(&chunk, row, &mut builder, chunk.column_count());
+            builder.advance_row();
         }
-        Ok(None)
+
+        Ok(Some(builder.finish()))
     }
 
     fn reset(&mut self) {
@@ -1018,117 +699,48 @@ impl Operator for DeleteNodeOperator {
 
 /// Operator that deletes edges.
 pub struct DeleteEdgeOperator {
-    /// The graph store to modify.
-    store: Arc<dyn GraphStoreMut>,
+    /// Validated, versioned writes.
+    writer: GraphWriter,
     /// Input operator.
     input: Box<dyn Operator>,
     /// Column index for the edge to delete.
     edge_column: usize,
     /// Output schema.
     output_schema: Vec<LogicalType>,
-    /// Epoch for MVCC versioning.
-    viewing_epoch: Option<EpochId>,
-    /// Transaction ID for MVCC versioning.
-    transaction_id: Option<TransactionId>,
-    /// Optional write tracker for conflict detection.
-    write_tracker: Option<SharedWriteTracker>,
 }
 
 impl DeleteEdgeOperator {
     /// Creates a new edge deletion operator.
     pub fn new(
-        store: Arc<dyn GraphStoreMut>,
+        writer: impl Into<GraphWriter>,
         input: Box<dyn Operator>,
         edge_column: usize,
         output_schema: Vec<LogicalType>,
     ) -> Self {
         Self {
-            store,
+            writer: writer.into(),
             input,
             edge_column,
             output_schema,
-            viewing_epoch: None,
-            transaction_id: None,
-            write_tracker: None,
         }
-    }
-
-    /// Sets the transaction context for MVCC versioning.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Sets the write tracker for conflict detection.
-    pub fn with_write_tracker(mut self, tracker: SharedWriteTracker) -> Self {
-        self.write_tracker = Some(tracker);
-        self
     }
 }
 
 impl Operator for DeleteEdgeOperator {
     fn next(&mut self) -> OperatorResult {
-        // Get transaction context for versioned deletion
-        let epoch = self
-            .viewing_epoch
-            .unwrap_or_else(|| self.store.current_epoch());
-        let tx = self.transaction_id.unwrap_or(TransactionId::SYSTEM);
+        let Some(chunk) = self.input.next()? else {
+            return Ok(None);
+        };
+        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
 
-        if let Some(chunk) = self.input.next()? {
-            let mut builder =
-                DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
-
-            for row in chunk.selected_indices() {
-                let edge_val = chunk
-                    .column(self.edge_column)
-                    .and_then(|c| c.get_value(row))
-                    .ok_or_else(|| {
-                        OperatorError::ColumnNotFound(format!("edge column {}", self.edge_column))
-                    })?;
-
-                let edge_id = match edge_val {
-                    // reason: ID encoding: i64 <-> u64 round-trip
-                    #[allow(clippy::cast_sign_loss)]
-                    Value::Int64(id) => EdgeId(id as u64),
-                    _ => {
-                        return Err(OperatorError::TypeMismatch {
-                            expected: "Int64 (edge ID)".to_string(),
-                            found: format!("{edge_val:?}"),
-                        });
-                    }
-                };
-
-                // Delete the edge with MVCC versioning
-                self.store.delete_edge_versioned(edge_id, epoch, tx);
-
-                // Record write for conflict detection
-                if let (Some(tracker), Some(tid)) = (&self.write_tracker, self.transaction_id) {
-                    tracker.record_edge_write(tid, edge_id)?;
-                }
-
-                // Pass through all input columns
-                for col_idx in 0..chunk.column_count() {
-                    if let (Some(src), Some(dst)) =
-                        (chunk.column(col_idx), builder.column_mut(col_idx))
-                    {
-                        if let Some(val) = src.get_value(row) {
-                            dst.push_value(val);
-                        } else {
-                            dst.push_value(Value::Null);
-                        }
-                    }
-                }
-                builder.advance_row();
-            }
-
-            return Ok(Some(builder.finish()));
+        for row in chunk.selected_indices() {
+            let edge_id = EdgeId(id_at(&chunk, self.edge_column, row, "edge", "edge")?);
+            self.writer.delete_edge(edge_id)?;
+            copy_columns(&chunk, row, &mut builder, chunk.column_count());
+            builder.advance_row();
         }
-        Ok(None)
+
+        Ok(Some(builder.finish()))
     }
 
     fn reset(&mut self) {
@@ -1146,8 +758,8 @@ impl Operator for DeleteEdgeOperator {
 
 /// Operator that adds labels to nodes.
 pub struct AddLabelOperator {
-    /// The graph store.
-    store: Arc<dyn GraphStoreMut>,
+    /// Validated, versioned writes.
+    writer: GraphWriter,
     /// Child operator providing nodes.
     input: Box<dyn Operator>,
     /// Column index containing node IDs.
@@ -1158,18 +770,12 @@ pub struct AddLabelOperator {
     output_schema: Vec<LogicalType>,
     /// Column index for the update count (last column).
     count_column: usize,
-    /// Epoch for MVCC versioning.
-    viewing_epoch: Option<EpochId>,
-    /// Transaction ID for undo log tracking.
-    transaction_id: Option<TransactionId>,
-    /// Optional write tracker for conflict detection.
-    write_tracker: Option<SharedWriteTracker>,
 }
 
 impl AddLabelOperator {
     /// Creates a new add label operator.
     pub fn new(
-        store: Arc<dyn GraphStoreMut>,
+        writer: impl Into<GraphWriter>,
         input: Box<dyn Operator>,
         node_column: usize,
         labels: Vec<String>,
@@ -1177,103 +783,35 @@ impl AddLabelOperator {
     ) -> Self {
         let count_column = output_schema.len() - 1;
         Self {
-            store,
+            writer: writer.into(),
             input,
             node_column,
             labels,
             count_column,
             output_schema,
-            viewing_epoch: None,
-            transaction_id: None,
-            write_tracker: None,
         }
-    }
-
-    /// Sets the transaction context for versioned label mutations.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Sets the write tracker for conflict detection.
-    pub fn with_write_tracker(mut self, tracker: SharedWriteTracker) -> Self {
-        self.write_tracker = Some(tracker);
-        self
     }
 }
 
 impl Operator for AddLabelOperator {
     fn next(&mut self) -> OperatorResult {
-        if let Some(chunk) = self.input.next()? {
-            let mut builder =
-                DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
+        let Some(chunk) = self.input.next()? else {
+            return Ok(None);
+        };
+        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
 
-            for row in chunk.selected_indices() {
-                let node_val = chunk
-                    .column(self.node_column)
-                    .and_then(|c| c.get_value(row))
-                    .ok_or_else(|| {
-                        OperatorError::ColumnNotFound(format!("node column {}", self.node_column))
-                    })?;
+        for row in chunk.selected_indices() {
+            let node_id = NodeId(id_at(&chunk, self.node_column, row, "node", "node")?);
+            let added = self.writer.add_labels(node_id, &self.labels)?;
 
-                let node_id = match node_val {
-                    // reason: ID encoding: i64 <-> u64 round-trip
-                    #[allow(clippy::cast_sign_loss)]
-                    Value::Int64(id) => NodeId(id as u64),
-                    _ => {
-                        return Err(OperatorError::TypeMismatch {
-                            expected: "Int64 (node ID)".to_string(),
-                            found: format!("{node_val:?}"),
-                        });
-                    }
-                };
-
-                // Record write for conflict detection
-                if let (Some(tracker), Some(tid)) = (&self.write_tracker, self.transaction_id) {
-                    tracker.record_node_write(tid, node_id)?;
-                }
-
-                // Add all labels
-                let mut row_count: i64 = 0;
-                for label in &self.labels {
-                    let added = if let Some(tid) = self.transaction_id {
-                        self.store.add_label_versioned(node_id, label, tid)
-                    } else {
-                        self.store.add_label(node_id, label)
-                    };
-                    if added {
-                        row_count += 1;
-                    }
-                }
-
-                // Copy input columns to output (pass-through)
-                for col_idx in 0..chunk.column_count() {
-                    if let (Some(src), Some(dst)) =
-                        (chunk.column(col_idx), builder.column_mut(col_idx))
-                    {
-                        if let Some(val) = src.get_value(row) {
-                            dst.push_value(val);
-                        } else {
-                            dst.push_value(Value::Null);
-                        }
-                    }
-                }
-                // Append the update count column
-                if let Some(dst) = builder.column_mut(self.count_column) {
-                    dst.push_value(Value::Int64(row_count));
-                }
-
-                builder.advance_row();
+            copy_columns(&chunk, row, &mut builder, chunk.column_count());
+            if let Some(dst) = builder.column_mut(self.count_column) {
+                dst.push_value(Value::Int64(i64::try_from(added).unwrap_or(i64::MAX)));
             }
-
-            return Ok(Some(builder.finish()));
+            builder.advance_row();
         }
-        Ok(None)
+
+        Ok(Some(builder.finish()))
     }
 
     fn reset(&mut self) {
@@ -1291,8 +829,8 @@ impl Operator for AddLabelOperator {
 
 /// Operator that removes labels from nodes.
 pub struct RemoveLabelOperator {
-    /// The graph store.
-    store: Arc<dyn GraphStoreMut>,
+    /// Validated, versioned writes.
+    writer: GraphWriter,
     /// Child operator providing nodes.
     input: Box<dyn Operator>,
     /// Column index containing node IDs.
@@ -1303,18 +841,12 @@ pub struct RemoveLabelOperator {
     output_schema: Vec<LogicalType>,
     /// Column index for the update count (last column).
     count_column: usize,
-    /// Epoch for MVCC versioning.
-    viewing_epoch: Option<EpochId>,
-    /// Transaction ID for undo log tracking.
-    transaction_id: Option<TransactionId>,
-    /// Optional write tracker for conflict detection.
-    write_tracker: Option<SharedWriteTracker>,
 }
 
 impl RemoveLabelOperator {
     /// Creates a new remove label operator.
     pub fn new(
-        store: Arc<dyn GraphStoreMut>,
+        writer: impl Into<GraphWriter>,
         input: Box<dyn Operator>,
         node_column: usize,
         labels: Vec<String>,
@@ -1322,103 +854,35 @@ impl RemoveLabelOperator {
     ) -> Self {
         let count_column = output_schema.len() - 1;
         Self {
-            store,
+            writer: writer.into(),
             input,
             node_column,
             labels,
             count_column,
             output_schema,
-            viewing_epoch: None,
-            transaction_id: None,
-            write_tracker: None,
         }
-    }
-
-    /// Sets the transaction context for versioned label mutations.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Sets the write tracker for conflict detection.
-    pub fn with_write_tracker(mut self, tracker: SharedWriteTracker) -> Self {
-        self.write_tracker = Some(tracker);
-        self
     }
 }
 
 impl Operator for RemoveLabelOperator {
     fn next(&mut self) -> OperatorResult {
-        if let Some(chunk) = self.input.next()? {
-            let mut builder =
-                DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
+        let Some(chunk) = self.input.next()? else {
+            return Ok(None);
+        };
+        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
 
-            for row in chunk.selected_indices() {
-                let node_val = chunk
-                    .column(self.node_column)
-                    .and_then(|c| c.get_value(row))
-                    .ok_or_else(|| {
-                        OperatorError::ColumnNotFound(format!("node column {}", self.node_column))
-                    })?;
+        for row in chunk.selected_indices() {
+            let node_id = NodeId(id_at(&chunk, self.node_column, row, "node", "node")?);
+            let removed = self.writer.remove_labels(node_id, &self.labels)?;
 
-                let node_id = match node_val {
-                    // reason: ID encoding: i64 <-> u64 round-trip
-                    #[allow(clippy::cast_sign_loss)]
-                    Value::Int64(id) => NodeId(id as u64),
-                    _ => {
-                        return Err(OperatorError::TypeMismatch {
-                            expected: "Int64 (node ID)".to_string(),
-                            found: format!("{node_val:?}"),
-                        });
-                    }
-                };
-
-                // Record write for conflict detection
-                if let (Some(tracker), Some(tid)) = (&self.write_tracker, self.transaction_id) {
-                    tracker.record_node_write(tid, node_id)?;
-                }
-
-                // Remove all labels
-                let mut row_count: i64 = 0;
-                for label in &self.labels {
-                    let removed = if let Some(tid) = self.transaction_id {
-                        self.store.remove_label_versioned(node_id, label, tid)
-                    } else {
-                        self.store.remove_label(node_id, label)
-                    };
-                    if removed {
-                        row_count += 1;
-                    }
-                }
-
-                // Copy input columns to output (pass-through)
-                for col_idx in 0..chunk.column_count() {
-                    if let (Some(src), Some(dst)) =
-                        (chunk.column(col_idx), builder.column_mut(col_idx))
-                    {
-                        if let Some(val) = src.get_value(row) {
-                            dst.push_value(val);
-                        } else {
-                            dst.push_value(Value::Null);
-                        }
-                    }
-                }
-                // Append the update count column
-                if let Some(dst) = builder.column_mut(self.count_column) {
-                    dst.push_value(Value::Int64(row_count));
-                }
-
-                builder.advance_row();
+            copy_columns(&chunk, row, &mut builder, chunk.column_count());
+            if let Some(dst) = builder.column_mut(self.count_column) {
+                dst.push_value(Value::Int64(i64::try_from(removed).unwrap_or(i64::MAX)));
             }
-
-            return Ok(Some(builder.finish()));
+            builder.advance_row();
         }
-        Ok(None)
+
+        Ok(Some(builder.finish()))
     }
 
     fn reset(&mut self) {
@@ -1439,8 +903,8 @@ impl Operator for RemoveLabelOperator {
 /// This operator reads node/edge IDs from a column and sets the
 /// specified properties on each entity.
 pub struct SetPropertyOperator {
-    /// The graph store.
-    store: Arc<dyn GraphStoreMut>,
+    /// Validated, versioned writes.
+    writer: GraphWriter,
     /// Child operator providing entities.
     input: Box<dyn Operator>,
     /// Column index containing entity IDs (node or edge).
@@ -1453,129 +917,44 @@ pub struct SetPropertyOperator {
     output_schema: Vec<LogicalType>,
     /// Whether to replace all properties (true) or merge (false) for map assignments.
     replace: bool,
-    /// Optional constraint validator for schema enforcement.
-    validator: Option<Arc<dyn ConstraintValidator>>,
-    /// Entity labels (for node constraint validation).
-    labels: Vec<String>,
-    /// Edge type (for edge constraint validation).
-    edge_type_name: Option<String>,
-    /// Epoch for MVCC versioning.
-    viewing_epoch: Option<EpochId>,
-    /// Transaction ID for undo log tracking.
-    transaction_id: Option<TransactionId>,
-    /// Optional write tracker for conflict detection.
-    write_tracker: Option<SharedWriteTracker>,
 }
 
 impl SetPropertyOperator {
-    /// Checks a SET on `node` against its constraints, with the node's own
-    /// labels (the operator is not given any). Map assignments count as one
-    /// assignment per key; `SET n = {...}` also removes the properties the
-    /// map leaves out.
-    fn validate_node_set(
-        &self,
-        validator: &dyn ConstraintValidator,
-        node: &crate::graph::lpg::Node,
-        resolved_props: &[(String, Value)],
-    ) -> Result<(), OperatorError> {
-        let labels: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
-        let mut assignments: Vec<(String, Value)> = Vec::new();
-        let mut replaces_all = false;
-        for (name, value) in resolved_props {
-            match (name.as_str(), value) {
-                ("*", Value::Map(map)) => {
-                    replaces_all |= self.replace;
-                    assignments.extend(
-                        map.iter()
-                            .map(|(key, value)| (key.as_str().to_string(), value.clone())),
-                    );
-                }
-                ("*", _) => {}
-                _ => assignments.push((name.clone(), value.clone())),
-            }
-        }
-        if replaces_all {
-            for (key, _) in node.properties.iter() {
-                if !assignments.iter().any(|(name, _)| name == key.as_str()) {
-                    assignments.push((key.as_str().to_string(), Value::Null));
-                }
-            }
-        }
-
-        for (name, value) in &assignments {
-            validator.validate_node_property(&labels, name, value)?;
-            // A value the node already has cannot make it a duplicate.
-            let unchanged = self
-                .store
-                .get_node_property(node.id, &PropertyKey::new(name.as_str()))
-                .as_ref()
-                == Some(value);
-            if !unchanged {
-                validator.check_unique_node_property(&labels, name, value)?;
-            }
-        }
-
-        // Constraints on several properties see the node's properties after
-        // this SET.
-        let mut after: Vec<(String, Value)> = node
-            .properties
-            .iter()
-            .map(|(key, value)| (key.as_str().to_string(), value.clone()))
-            .collect();
-        for (name, value) in assignments {
-            after.retain(|(key, _)| *key != name);
-            after.push((name, value));
-        }
-        validator.check_unique_node(&labels, &after, Some(node.id))
-    }
-
     /// Creates a new set property operator for nodes.
     pub fn new_for_node(
-        store: Arc<dyn GraphStoreMut>,
+        writer: impl Into<GraphWriter>,
         input: Box<dyn Operator>,
         node_column: usize,
         properties: Vec<(String, PropertySource)>,
         output_schema: Vec<LogicalType>,
     ) -> Self {
         Self {
-            store,
+            writer: writer.into(),
             input,
             entity_column: node_column,
             is_edge: false,
             properties,
             output_schema,
             replace: false,
-            validator: None,
-            labels: Vec::new(),
-            edge_type_name: None,
-            viewing_epoch: None,
-            transaction_id: None,
-            write_tracker: None,
         }
     }
 
     /// Creates a new set property operator for edges.
     pub fn new_for_edge(
-        store: Arc<dyn GraphStoreMut>,
+        writer: impl Into<GraphWriter>,
         input: Box<dyn Operator>,
         edge_column: usize,
         properties: Vec<(String, PropertySource)>,
         output_schema: Vec<LogicalType>,
     ) -> Self {
         Self {
-            store,
+            writer: writer.into(),
             input,
             entity_column: edge_column,
             is_edge: true,
             properties,
             output_schema,
             replace: false,
-            validator: None,
-            labels: Vec::new(),
-            edge_type_name: None,
-            viewing_epoch: None,
-            transaction_id: None,
-            write_tracker: None,
         }
     }
 
@@ -1584,258 +963,36 @@ impl SetPropertyOperator {
         self.replace = replace;
         self
     }
-
-    /// Sets the constraint validator for schema enforcement.
-    pub fn with_validator(mut self, validator: Arc<dyn ConstraintValidator>) -> Self {
-        self.validator = Some(validator);
-        self
-    }
-
-    /// Sets the entity labels (for node constraint validation).
-    pub fn with_labels(mut self, labels: Vec<String>) -> Self {
-        self.labels = labels;
-        self
-    }
-
-    /// Sets the edge type name (for edge constraint validation).
-    pub fn with_edge_type(mut self, edge_type: String) -> Self {
-        self.edge_type_name = Some(edge_type);
-        self
-    }
-
-    /// Sets the transaction context for versioned property mutations.
-    ///
-    /// When a transaction ID is provided, property changes are recorded in
-    /// an undo log so they can be restored on rollback.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Sets the write tracker for conflict detection.
-    pub fn with_write_tracker(mut self, tracker: SharedWriteTracker) -> Self {
-        self.write_tracker = Some(tracker);
-        self
-    }
 }
 
 impl Operator for SetPropertyOperator {
     fn next(&mut self) -> OperatorResult {
-        if let Some(chunk) = self.input.next()? {
-            let mut builder =
-                DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
+        let Some(chunk) = self.input.next()? else {
+            return Ok(None);
+        };
+        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
 
-            for row in chunk.selected_indices() {
-                let entity_val = chunk
-                    .column(self.entity_column)
-                    .and_then(|c| c.get_value(row))
-                    .ok_or_else(|| {
-                        OperatorError::ColumnNotFound(format!(
-                            "entity column {}",
-                            self.entity_column
-                        ))
-                    })?;
-
-                let entity_id = match entity_val {
-                    // reason: ID encoding: i64 <-> u64 round-trip
-                    #[allow(clippy::cast_sign_loss)]
-                    Value::Int64(id) => id as u64,
-                    _ => {
-                        return Err(OperatorError::TypeMismatch {
-                            expected: "Int64 (entity ID)".to_string(),
-                            found: format!("{entity_val:?}"),
-                        });
-                    }
-                };
-
-                // Record write for conflict detection
-                if let (Some(tracker), Some(tid)) = (&self.write_tracker, self.transaction_id) {
-                    if self.is_edge {
-                        tracker.record_edge_write(tid, EdgeId(entity_id))?;
-                    } else {
-                        tracker.record_node_write(tid, NodeId(entity_id))?;
-                    }
-                }
-
-                // Resolve all property values
-                let resolved_props: Vec<(String, Value)> = self
-                    .properties
-                    .iter()
-                    .map(|(name, source)| {
-                        let value =
-                            source.resolve(&chunk, row, self.store.as_ref() as &dyn GraphStore);
-                        (name.clone(), value)
-                    })
-                    .collect();
-
-                // Validate constraints before writing
-                if let Some(ref validator) = self.validator {
-                    if self.is_edge {
-                        if let Some(ref et) = self.edge_type_name {
-                            for (name, value) in &resolved_props {
-                                validator.validate_edge_property(et, name, value)?;
-                            }
-                        }
-                    } else if let Some(node) = self.store.get_node(NodeId(entity_id)) {
-                        self.validate_node_set(validator.as_ref(), &node, &resolved_props)?;
-                    }
-                }
-
-                // Write all properties (use versioned methods when inside a transaction)
-                let tx_id = self.transaction_id;
-                for (prop_name, value) in resolved_props {
-                    if prop_name == "*" {
-                        // Map assignment: value should be a Map
-                        if let Value::Map(map) = value {
-                            if self.replace {
-                                // Replace: remove all existing properties first
-                                if self.is_edge {
-                                    if let Some(edge) = self.store.get_edge(EdgeId(entity_id)) {
-                                        let keys: Vec<String> = edge
-                                            .properties
-                                            .iter()
-                                            .map(|(k, _)| k.as_str().to_string())
-                                            .collect();
-                                        for key in keys {
-                                            if let Some(tid) = tx_id {
-                                                self.store.remove_edge_property_versioned(
-                                                    EdgeId(entity_id),
-                                                    &key,
-                                                    tid,
-                                                );
-                                            } else {
-                                                self.store
-                                                    .remove_edge_property(EdgeId(entity_id), &key);
-                                            }
-                                        }
-                                    }
-                                } else if let Some(node) = self.store.get_node(NodeId(entity_id)) {
-                                    let keys: Vec<String> = node
-                                        .properties
-                                        .iter()
-                                        .map(|(k, _)| k.as_str().to_string())
-                                        .collect();
-                                    for key in keys {
-                                        if let Some(tid) = tx_id {
-                                            self.store.remove_node_property_versioned(
-                                                NodeId(entity_id),
-                                                &key,
-                                                tid,
-                                            );
-                                        } else {
-                                            self.store
-                                                .remove_node_property(NodeId(entity_id), &key);
-                                        }
-                                    }
-                                }
-                            }
-                            // Set each map entry (null values remove the property)
-                            for (key, val) in map.iter() {
-                                if val.is_null() {
-                                    // Null in SET += removes the property (Cypher/GQL semantics)
-                                    if self.is_edge {
-                                        if let Some(tid) = tx_id {
-                                            self.store.remove_edge_property_versioned(
-                                                EdgeId(entity_id),
-                                                key.as_str(),
-                                                tid,
-                                            );
-                                        } else {
-                                            self.store.remove_edge_property(
-                                                EdgeId(entity_id),
-                                                key.as_str(),
-                                            );
-                                        }
-                                    } else if let Some(tid) = tx_id {
-                                        self.store.remove_node_property_versioned(
-                                            NodeId(entity_id),
-                                            key.as_str(),
-                                            tid,
-                                        );
-                                    } else {
-                                        self.store
-                                            .remove_node_property(NodeId(entity_id), key.as_str());
-                                    }
-                                } else if self.is_edge {
-                                    if let Some(tid) = tx_id {
-                                        self.store.set_edge_property_versioned(
-                                            EdgeId(entity_id),
-                                            key.as_str(),
-                                            val.clone(),
-                                            tid,
-                                        );
-                                    } else {
-                                        self.store.set_edge_property(
-                                            EdgeId(entity_id),
-                                            key.as_str(),
-                                            val.clone(),
-                                        );
-                                    }
-                                } else if let Some(tid) = tx_id {
-                                    self.store.set_node_property_versioned(
-                                        NodeId(entity_id),
-                                        key.as_str(),
-                                        val.clone(),
-                                        tid,
-                                    );
-                                } else {
-                                    self.store.set_node_property(
-                                        NodeId(entity_id),
-                                        key.as_str(),
-                                        val.clone(),
-                                    );
-                                }
-                            }
-                        }
-                    } else if self.is_edge {
-                        if let Some(tid) = tx_id {
-                            self.store.set_edge_property_versioned(
-                                EdgeId(entity_id),
-                                &prop_name,
-                                value,
-                                tid,
-                            );
-                        } else {
-                            self.store
-                                .set_edge_property(EdgeId(entity_id), &prop_name, value);
-                        }
-                    } else if let Some(tid) = tx_id {
-                        self.store.set_node_property_versioned(
-                            NodeId(entity_id),
-                            &prop_name,
-                            value,
-                            tid,
-                        );
-                    } else {
-                        self.store
-                            .set_node_property(NodeId(entity_id), &prop_name, value);
-                    }
-                }
-
-                // Copy input columns to output
-                for col_idx in 0..chunk.column_count() {
-                    if let (Some(src), Some(dst)) =
-                        (chunk.column(col_idx), builder.column_mut(col_idx))
-                    {
-                        if let Some(val) = src.get_value(row) {
-                            dst.push_value(val);
-                        } else {
-                            dst.push_value(Value::Null);
-                        }
-                    }
-                }
-
-                builder.advance_row();
+        for row in chunk.selected_indices() {
+            let entity_id = id_at(&chunk, self.entity_column, row, "entity", "entity")?;
+            let store = self.writer.store().as_ref() as &dyn GraphStore;
+            let assignments: Vec<(String, Value)> = self
+                .properties
+                .iter()
+                .map(|(name, source)| (name.clone(), source.resolve(&chunk, row, store)))
+                .collect();
+            if self.is_edge {
+                self.writer
+                    .set_edge_properties(EdgeId(entity_id), &assignments, self.replace)?;
+            } else {
+                self.writer
+                    .set_node_properties(NodeId(entity_id), &assignments, self.replace)?;
             }
 
-            return Ok(Some(builder.finish()));
+            copy_columns(&chunk, row, &mut builder, chunk.column_count());
+            builder.advance_row();
         }
-        Ok(None)
+
+        Ok(Some(builder.finish()))
     }
 
     fn reset(&mut self) {
@@ -1856,6 +1013,7 @@ mod tests {
     use super::*;
     use crate::execution::DataChunk;
     use crate::execution::chunk::DataChunkBuilder;
+    use crate::graph::GraphStoreMut;
     use crate::graph::lpg::LpgStore;
 
     // ── Helpers ────────────────────────────────────────────────────
@@ -2645,7 +1803,7 @@ mod tests {
 
         // Valid property should succeed
         let mut op = CreateNodeOperator::new(
-            Arc::clone(&store),
+            GraphWriter::new(Arc::clone(&store)).with_validator(Arc::new(RejectAgeValidator)),
             None,
             vec!["Thing".to_string()],
             vec![(
@@ -2654,15 +1812,14 @@ mod tests {
             )],
             vec![LogicalType::Int64],
             0,
-        )
-        .with_validator(Arc::new(RejectAgeValidator));
+        );
 
         assert!(op.next().is_ok());
         assert_eq!(store.node_count(), 1);
 
         // Forbidden property should fail
         let mut op = CreateNodeOperator::new(
-            Arc::clone(&store),
+            GraphWriter::new(Arc::clone(&store)).with_validator(Arc::new(RejectAgeValidator)),
             None,
             vec!["Thing".to_string()],
             vec![(
@@ -2671,8 +1828,7 @@ mod tests {
             )],
             vec![LogicalType::Int64],
             0,
-        )
-        .with_validator(Arc::new(RejectAgeValidator));
+        );
 
         let err = op.next().unwrap_err();
         assert!(matches!(err, OperatorError::ConstraintViolation(_)));

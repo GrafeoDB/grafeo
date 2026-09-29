@@ -69,8 +69,10 @@ INTERNAL_PHRASES = re.compile(
 )
 ALLOW_ATTRIBUTE = re.compile(r"#!?\[\s*(?:cfg_attr\s*\(.*?,\s*)?allow\s*\(")
 IGNORE_ATTRIBUTE = re.compile(r"#\[\s*ignore\b")
+# An impl of a store trait itself (`impl<S> GraphStoreMut for X`), not an impl
+# that only mentions one (`impl From<Arc<dyn GraphStoreMut>> for X`).
 STORE_IMPL = re.compile(
-    r"^impl\b[^{]*\b(GraphStore|GraphStoreMut|GraphStoreSearch)\b[^{]*\bfor\b"
+    r"^impl\b(?:\s*<[^{]*?>)?\s+(?:[\w:]+::)?(GraphStore|GraphStoreMut|GraphStoreSearch)\s+for\b"
 )
 LET_UNDERSCORE = re.compile(r"\blet\s+_\s*(:[^=]*)?=")
 REPLAY_PATH = re.compile(

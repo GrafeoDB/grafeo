@@ -93,7 +93,7 @@ After switching, all subsequent queries in that session read from and write to t
 ### Python API
 
 ```python
-db.set_current_graph("friends")
+db.set_graph("friends")
 
 # Check which graph is active
 print(db.current_graph())  # "friends"
@@ -108,6 +108,47 @@ session.execute("USE GRAPH friends")?;
 
 assert_eq!(session.current_graph(), Some("friends".to_string()));
 ```
+
+## Working in Several Graphs at Once
+
+`db.set_graph()` selects one graph for the whole database object, so code that
+works in two graphs would have to switch back and forth, and threads would race
+on the switch. A graph handle works in one graph without switching: it has the
+query methods, the direct API and transactions of the database, and every call
+goes to its graph whatever `set_graph()` selects. One handle can be used from
+several threads at once. A call through a handle whose graph no longer exists
+raises an error; it never falls back to another graph.
+
+### Python API
+
+```python
+db.create_graph("extraction")
+db.create_graph("model")
+extraction, model = db.graph("extraction"), db.graph("model")
+
+source = extraction.create_node(["File"], {"path": "billing.py"})
+component = model.create_node(["Component"], {"name": "Billing"})
+model.execute("MATCH (c:Component) RETURN c.name")
+
+with model.begin_transaction() as tx:
+    tx.execute("INSERT (:Component {name: 'Ledger'})")
+    tx.commit()
+```
+
+### Rust API
+
+```rust
+let model = db.graph("model")?;
+model.execute("INSERT (:Component {name: 'Billing'})")?;
+
+// Direct writes and transactions go through a session in the graph
+let session = model.session()?;
+session.create_node_with_props(&["Component"], [("name", Value::from("Ledger"))])?;
+```
+
+Writes to different graphs never conflict with each other: every graph numbers
+its nodes and edges on its own, so node 0 of one graph and node 0 of another are
+different nodes.
 
 ## Listing and Dropping Graphs
 

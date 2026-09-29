@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use grafeo_common::grafeo_debug_span;
 #[cfg(feature = "lpg")]
 use grafeo_common::types::{EdgeId, NodeId};
-use grafeo_common::types::{EpochId, TransactionId, Value};
+use grafeo_common::types::{EpochId, PropertyKey, TransactionId, Value};
 use grafeo_common::utils::error::Result;
 use grafeo_common::{grafeo_info_span, grafeo_warn};
 #[cfg(feature = "lpg")]
@@ -40,6 +40,21 @@ use crate::transaction::TransactionManager;
 /// Storage key suffix for the implicit default graph within a schema.
 /// Auto-created by `CREATE SCHEMA` and auto-dropped by `DROP SCHEMA`.
 const SCHEMA_DEFAULT_GRAPH: &str = "__default__";
+
+/// The storage key of `graph` in `schema`, as graphs are stored in the root
+/// store: `None` is the default graph.
+pub(crate) fn graph_storage_key(schema: Option<&str>, graph: Option<&str>) -> Option<String> {
+    match (schema, graph) {
+        (None, None) => None,
+        (Some(s), None) => Some(format!("{s}/{SCHEMA_DEFAULT_GRAPH}")),
+        (None, Some(name)) if name.eq_ignore_ascii_case("default") => None,
+        (Some(s), Some(name)) if name.eq_ignore_ascii_case("default") => {
+            Some(format!("{s}/{SCHEMA_DEFAULT_GRAPH}"))
+        }
+        (None, Some(name)) => Some(name.to_string()),
+        (Some(s), Some(g)) => Some(format!("{s}/{g}")),
+    }
+}
 
 /// Parses a DDL default-value literal string into a [`Value`].
 ///
@@ -339,19 +354,6 @@ impl Session {
         self.wal = Some(buffer);
     }
 
-    /// Records a WAL record for the graph that direct writes go to (see
-    /// [`active_lpg_store`](Self::active_lpg_store)). No-op for in-memory
-    /// sessions.
-    ///
-    /// The record joins the current transaction's group. Callers outside a
-    /// transaction finish with [`flush_wal_outside_transaction`](Self::flush_wal_outside_transaction).
-    #[cfg(all(feature = "wal", feature = "lpg"))]
-    pub(crate) fn log_wal_record(&self, record: grafeo_storage::wal::WalRecord) {
-        if let Some(ref wal) = self.wal {
-            wal.push(self.active_lpg_graph_key(), record);
-        }
-    }
-
     /// Writes records made outside a transaction to the WAL as an implicit
     /// group with its own commit marker. Does nothing inside a transaction,
     /// whose records are written at commit.
@@ -527,16 +529,7 @@ impl Session {
     fn active_graph_storage_key(&self) -> Option<String> {
         let graph = self.current_graph.lock().clone();
         let schema = self.current_schema.lock().clone();
-        match (&schema, &graph) {
-            (None, None) => None,
-            (Some(s), None) => Some(format!("{s}/{SCHEMA_DEFAULT_GRAPH}")),
-            (None, Some(name)) if name.eq_ignore_ascii_case("default") => None,
-            (Some(s), Some(name)) if name.eq_ignore_ascii_case("default") => {
-                Some(format!("{s}/{SCHEMA_DEFAULT_GRAPH}"))
-            }
-            (None, Some(name)) => Some(name.clone()),
-            (Some(s), Some(g)) => Some(format!("{s}/{g}")),
-        }
+        graph_storage_key(schema.as_deref(), graph.as_deref())
     }
 
     /// Returns the graph store for the currently active graph.
@@ -547,18 +540,23 @@ impl Session {
     /// in a [`WalGraphStore`] so mutations are WAL-logged with the correct
     /// graph context.
     fn active_store(&self) -> Arc<dyn GraphStoreSearch> {
-        let key = self.active_graph_storage_key();
+        self.store_for_key(self.active_graph_storage_key().as_deref())
+    }
+
+    /// The graph store for the graph with storage key `key` (see
+    /// [`active_store`](Self::active_store)).
+    fn store_for_key(&self, key: Option<&str>) -> Arc<dyn GraphStoreSearch> {
         match key {
             None => Arc::clone(&self.graph_store),
             #[cfg(feature = "lpg")]
-            Some(ref name) => match self.store.graph(name) {
+            Some(name) => match self.store.graph(name) {
                 Some(named_store) => {
                     #[cfg(feature = "wal")]
                     if let Some(wal) = &self.wal {
                         return Arc::new(crate::database::wal_store::WalGraphStore::new_for_graph(
                             named_store,
                             Arc::clone(wal),
-                            name.clone(),
+                            name.to_string(),
                         )) as Arc<dyn GraphStoreSearch>;
                     }
                     named_store as Arc<dyn GraphStoreSearch>
@@ -575,11 +573,16 @@ impl Session {
     /// Returns `None` for read-only databases. For named graphs, wraps
     /// the store with WAL logging when durability is enabled.
     fn active_write_store(&self) -> Option<Arc<dyn GraphStoreMut>> {
-        let key = self.active_graph_storage_key();
+        self.write_store_for_key(self.active_graph_storage_key().as_deref())
+    }
+
+    /// The writable store for the graph with storage key `key` (see
+    /// [`active_write_store`](Self::active_write_store)).
+    fn write_store_for_key(&self, key: Option<&str>) -> Option<Arc<dyn GraphStoreMut>> {
         match key {
             None => self.graph_store_mut.as_ref().map(Arc::clone),
             #[cfg(feature = "lpg")]
-            Some(ref name) => match self.store.graph(name) {
+            Some(name) => match self.store.graph(name) {
                 Some(named_store) => {
                     let mut store: Arc<dyn GraphStoreMut> = named_store;
 
@@ -591,7 +594,7 @@ impl Session {
                                 .graph(name)
                                 .unwrap_or_else(|| Arc::clone(&self.store)),
                             Arc::clone(wal),
-                            name.clone(),
+                            name.to_string(),
                         ));
                     }
 
@@ -657,11 +660,16 @@ impl Session {
     /// setters do not need to invoke this directly.
     fn track_graph_touch(&self) {
         if self.current_transaction.lock().is_some() {
-            let key = self.active_graph_storage_key();
-            let mut touched = self.touched_graphs.lock();
-            if !touched.contains(&key) {
-                touched.push(key);
-            }
+            self.touch_graph(self.active_graph_storage_key());
+        }
+    }
+
+    /// Records the graph with storage key `key` as touched by the open
+    /// transaction (see [`track_graph_touch`](Self::track_graph_touch)).
+    fn touch_graph(&self, key: Option<String>) {
+        let mut touched = self.touched_graphs.lock();
+        if !touched.contains(&key) {
+            touched.push(key);
         }
     }
 
@@ -3451,7 +3459,7 @@ impl Session {
     /// let session = db.session();
     ///
     /// // Create some nodes first
-    /// session.create_node(&["Person"]);
+    /// session.create_node(&["Person"]).unwrap();
     ///
     /// // Query using Gremlin
     /// let result = session.execute_gremlin("g.V().hasLabel('Person')")?;
@@ -3584,7 +3592,7 @@ impl Session {
     /// let session = db.session();
     ///
     /// // Create some nodes first
-    /// session.create_node(&["User"]);
+    /// session.create_node(&["User"]).unwrap();
     ///
     /// // Query using GraphQL
     /// let result = session.execute_graphql("query { user { id name } }")?;
@@ -4192,6 +4200,10 @@ impl Session {
             let store = self.resolve_store(graph_name);
             store.finalize_version_epochs(transaction_id, commit_epoch);
         }
+        // The database has one epoch: the root store follows every commit,
+        // also one that only touched named graphs (a checkpoint saves the
+        // root's epoch for all of them).
+        self.store.sync_epoch(commit_epoch);
 
         // Commit succeeded: discard undo logs (make changes permanent)
         #[cfg(feature = "triple-store")]
@@ -4207,7 +4219,7 @@ impl Session {
         // Uses record_batch to acquire the write lock once per commit.
         #[cfg(feature = "cdc")]
         if let Some(ref pending) = self.cdc_pending_events {
-            let events: Vec<crate::cdc::ChangeEvent> = pending.lock().drain(..).collect();
+            let events = crate::cdc::fold_into_creates(pending.lock().drain(..).collect());
             self.cdc_log.record_batch(events.into_iter().map(|mut e| {
                 e.epoch = commit_epoch;
                 e
@@ -4640,9 +4652,9 @@ impl Session {
     /// Wraps `body` in an automatic begin/commit when [`needs_auto_commit`]
     /// returns `true`. On error the transaction is rolled back.
     #[cfg(feature = "lpg")]
-    fn with_auto_commit<F>(&self, has_mutations: bool, body: F) -> Result<QueryResult>
+    fn with_auto_commit<T, F>(&self, has_mutations: bool, body: F) -> Result<T>
     where
-        F: FnOnce() -> Result<QueryResult>,
+        F: FnOnce() -> Result<T>,
     {
         if self.needs_auto_commit(has_mutations) {
             self.begin_transaction_inner(false, None)?;
@@ -4666,9 +4678,9 @@ impl Session {
 
     /// Non-LPG stub: no auto-commit wrapping (SPARQL UPDATE is atomic).
     #[cfg(not(feature = "lpg"))]
-    fn with_auto_commit<F>(&self, _has_mutations: bool, body: F) -> Result<QueryResult>
+    fn with_auto_commit<T, F>(&self, _has_mutations: bool, body: F) -> Result<T>
     where
-        F: FnOnce() -> Result<QueryResult>,
+        F: FnOnce() -> Result<T>,
     {
         let result = body();
         #[cfg(feature = "wal")]
@@ -4752,34 +4764,6 @@ impl Session {
             std::sync::Arc::clone(bm),
             sm,
         ))
-    }
-
-    /// Checks that a property value does not exceed the configured size limit.
-    fn check_property_size(&self, key: &str, value: &Value) -> Result<()> {
-        if let Some(limit) = self.max_property_size {
-            let size = value.estimated_size_bytes();
-            if size > limit {
-                let limit_display = if limit >= 1024 * 1024 && limit % (1024 * 1024) == 0 {
-                    format!("{} MiB", limit / (1024 * 1024))
-                } else if limit >= 1024 && limit % 1024 == 0 {
-                    format!("{} KiB", limit / 1024)
-                } else {
-                    format!("{limit} bytes")
-                };
-                return Err(grafeo_common::utils::error::Error::Query(
-                    grafeo_common::utils::error::QueryError::new(
-                        grafeo_common::utils::error::QueryErrorKind::Execution,
-                        format!(
-                            "Property '{key}' value exceeds maximum size of {limit_display} ({size} bytes)"
-                        ),
-                    )
-                    .with_hint(
-                        "Increase with Config::with_max_property_size() or disable with Config::without_max_property_size()".to_string(),
-                    ),
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// Records query metrics for any language.
@@ -4905,6 +4889,11 @@ impl Session {
         .with_session_context(session_context)
         .with_read_only(read_only);
 
+        #[cfg(feature = "lpg")]
+        {
+            planner = planner.with_write_graph(self.active_lpg_graph_key().as_deref());
+        }
+
         // Attach the LPG store so CALL grafeo.search.* procedures can reach
         // HNSW / BM25 indexes. Skip when the session is backed by an external
         // store — `self.store` is an empty placeholder in that case and would
@@ -4915,12 +4904,84 @@ impl Session {
         }
 
         // Attach the constraint validator for schema enforcement and property size limits
-        let validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
-            .with_store(store)
-            .with_max_property_size(self.max_property_size);
-        planner = planner.with_validator(Arc::new(validator));
+        planner = planner.with_validator(Arc::new(self.constraint_validator(
+            store,
+            viewing_epoch,
+            transaction_id,
+        )));
 
         planner
+    }
+
+    /// The checks for writes to `store`: the catalog's schema and
+    /// constraints, and the property size limit.
+    fn constraint_validator(
+        &self,
+        store: Arc<dyn GraphStoreSearch>,
+        epoch: EpochId,
+        transaction_id: Option<TransactionId>,
+    ) -> CatalogConstraintValidator {
+        CatalogConstraintValidator::new(Arc::clone(&self.catalog))
+            .with_store(store)
+            .with_max_property_size(self.max_property_size)
+            .with_transaction_context(epoch, transaction_id)
+    }
+
+    /// Writes through a [`GraphWriter`](grafeo_core::execution::operators::GraphWriter)
+    /// for the active graph: inside the open transaction, or in an implicit
+    /// one that commits when `write` succeeds and rolls back when it fails.
+    ///
+    /// The database's direct write API goes through here, so its writes are
+    /// checked, logged, versioned and reported to CDC exactly like a
+    /// statement's.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of `write` (a constraint violation or a write
+    /// conflict), `ReadOnly` on a read-only session, or the commit's error.
+    #[cfg(feature = "lpg")]
+    pub(crate) fn write<T>(
+        &self,
+        write: impl FnOnce(
+            &grafeo_core::execution::operators::GraphWriter,
+        )
+            -> std::result::Result<T, grafeo_core::execution::operators::OperatorError>,
+    ) -> Result<T> {
+        use grafeo_core::execution::operators::GraphWriter;
+
+        self.with_auto_commit(true, || {
+            let key = self.active_graph_storage_key();
+            if self.current_transaction.lock().is_some() {
+                self.touch_graph(key.clone());
+            }
+            let store = self.write_store_for_key(key.as_deref()).ok_or(
+                grafeo_common::utils::error::Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::ReadOnly,
+                ),
+            )?;
+            let (epoch, transaction_id) = self.get_transaction_context();
+            let mut writer = GraphWriter::new(store)
+                .with_transaction_context(epoch, transaction_id)
+                .with_validator(Arc::new(self.constraint_validator(
+                    self.store_for_key(key.as_deref()),
+                    epoch,
+                    transaction_id,
+                )));
+            if transaction_id.is_some() {
+                // The graph the writes land in: the active one, or the
+                // default graph when no graph of that name exists.
+                let graph = key
+                    .as_deref()
+                    .filter(|name| self.store.graph(name).is_some());
+                writer = writer.with_write_tracker(Arc::new(
+                    crate::transaction::TransactionWriteTracker::new(Arc::clone(
+                        &self.transaction_manager,
+                    ))
+                    .in_graph(graph),
+                ));
+            }
+            write(&writer).map_err(crate::query::executor::convert_operator_error)
+        })
     }
 
     /// Builds a `Value::Map` for the `info()` introspection function.
@@ -4979,282 +5040,271 @@ impl Session {
         Value::Map(map.into())
     }
 
-    /// Creates a node directly (bypassing query execution).
-    ///
-    /// This is a low-level API for testing and direct manipulation.
-    /// If a transaction is active, the node will be versioned with the transaction ID.
-    #[cfg(feature = "lpg")]
-    pub fn create_node(&self, labels: &[&str]) -> NodeId {
-        let (epoch, transaction_id) = self.get_transaction_context();
-        let id = self.active_lpg_store().create_node_versioned(
-            labels,
-            epoch,
-            transaction_id.unwrap_or(TransactionId::SYSTEM),
-        );
+    // =========================================================================
+    // Direct write API (bypasses query planning, not the checks)
+    // =========================================================================
+    //
+    // Each call writes through `write`: in the open transaction, or in an
+    // implicit one of its own. The writes are checked, logged, versioned and
+    // reported to CDC exactly like the same write in a statement.
 
-        #[cfg(feature = "wal")]
-        self.log_wal_record(grafeo_storage::wal::WalRecord::CreateNode {
-            id,
-            labels: labels.iter().map(|s| (*s).to_string()).collect(),
-        });
-
-        #[cfg(feature = "wal")]
-        self.flush_wal_outside_transaction();
-
-        id
-    }
-
-    /// Creates a node with properties.
-    ///
-    /// If a transaction is active, the node will be versioned with the transaction ID.
+    /// Creates a node with the given labels and returns its ID.
     ///
     /// # Errors
     ///
-    /// Returns an error if any property value exceeds the configured `max_property_size`.
+    /// Returns an error if the node violates the schema, for example a label
+    /// a closed graph type does not allow or a `NOT NULL` property it lacks.
     #[cfg(feature = "lpg")]
-    pub fn create_node_with_props<'a>(
-        &self,
-        labels: &[&str],
-        properties: impl IntoIterator<Item = (&'a str, Value)>,
-    ) -> Result<NodeId> {
-        let props: Vec<(&str, Value)> = properties.into_iter().collect();
-        for (key, value) in &props {
-            self.check_property_size(key, value)?;
-        }
-
-        // Snapshot the props for WAL before passing them to the LPG store.
-        // The LPG store consumes `props` by value; we need owned copies for
-        // post-hoc WAL emission.
-        #[cfg(feature = "wal")]
-        let wal_props: Vec<(String, Value)> = props
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), v.clone()))
-            .collect();
-
-        let (epoch, transaction_id) = self.get_transaction_context();
-        let id = self.active_lpg_store().create_node_with_props_versioned(
-            labels,
-            props,
-            epoch,
-            transaction_id.unwrap_or(TransactionId::SYSTEM),
-        );
-
-        #[cfg(feature = "wal")]
-        {
-            self.log_wal_record(grafeo_storage::wal::WalRecord::CreateNode {
-                id,
-                labels: labels.iter().map(|s| (*s).to_string()).collect(),
-            });
-            for (key, value) in wal_props {
-                self.log_wal_record(grafeo_storage::wal::WalRecord::SetNodeProperty {
-                    id,
-                    key,
-                    value,
-                });
-            }
-        }
-
-        #[cfg(feature = "wal")]
-        self.flush_wal_outside_transaction();
-
-        Ok(id)
+    pub fn create_node(&self, labels: &[&str]) -> Result<NodeId> {
+        self.create_node_with_props(labels, std::iter::empty::<(PropertyKey, Value)>())
     }
 
-    /// Creates an edge between two nodes.
+    /// Creates a node with labels and properties and returns its ID.
     ///
-    /// This is a low-level API for testing and direct manipulation.
-    /// If a transaction is active, the edge will be versioned with the transaction ID.
+    /// # Errors
+    ///
+    /// Returns an error if the node violates the schema or a constraint, for
+    /// example a `UNIQUE` value another node already has.
     #[cfg(feature = "lpg")]
-    pub fn create_edge(
+    pub fn create_node_with_props(
         &self,
-        src: NodeId,
-        dst: NodeId,
-        edge_type: &str,
-    ) -> grafeo_common::types::EdgeId {
-        let (epoch, transaction_id) = self.get_transaction_context();
-        let eid = self.active_lpg_store().create_edge_versioned(
+        labels: &[&str],
+        properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
+    ) -> Result<NodeId> {
+        let labels: Vec<String> = labels.iter().map(|label| (*label).to_string()).collect();
+        let properties = direct_properties(properties);
+        self.write(|writer| writer.create_node(&labels, properties))
+    }
+
+    /// Creates an edge between two existing nodes and returns its ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an endpoint does not exist or the edge violates the
+    /// schema (its type or its endpoints' labels).
+    #[cfg(feature = "lpg")]
+    pub fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> Result<EdgeId> {
+        self.create_edge_with_props(
             src,
             dst,
             edge_type,
-            epoch,
-            transaction_id.unwrap_or(TransactionId::SYSTEM),
-        );
-
-        #[cfg(feature = "wal")]
-        self.log_wal_record(grafeo_storage::wal::WalRecord::CreateEdge {
-            id: eid,
-            src,
-            dst,
-            edge_type: edge_type.to_string(),
-        });
-
-        #[cfg(feature = "wal")]
-        self.flush_wal_outside_transaction();
-
-        eid
+            std::iter::empty::<(PropertyKey, Value)>(),
+        )
     }
 
-    /// Creates an edge with properties within the active transaction context.
+    /// Creates an edge with properties between two existing nodes.
     ///
     /// # Errors
     ///
-    /// Returns an error if any property value exceeds the configured `max_property_size`.
+    /// Returns an error if an endpoint does not exist or the edge violates the
+    /// schema.
     #[cfg(feature = "lpg")]
-    pub fn create_edge_with_props<'a>(
+    pub fn create_edge_with_props(
         &self,
         src: NodeId,
         dst: NodeId,
         edge_type: &str,
-        properties: impl IntoIterator<Item = (&'a str, Value)>,
-    ) -> Result<grafeo_common::types::EdgeId> {
-        let props: Vec<(&str, Value)> = properties.into_iter().collect();
-        for (key, value) in &props {
-            self.check_property_size(key, value)?;
-        }
-        let (epoch, transaction_id) = self.get_transaction_context();
-        let tid = transaction_id.unwrap_or(TransactionId::SYSTEM);
-        let store = self.active_lpg_store();
-        let eid = store.create_edge_versioned(src, dst, edge_type, epoch, tid);
-        for (key, value) in &props {
-            store.set_edge_property_versioned(eid, key, value.clone(), tid);
-        }
-
-        #[cfg(feature = "wal")]
-        {
-            self.log_wal_record(grafeo_storage::wal::WalRecord::CreateEdge {
-                id: eid,
-                src,
-                dst,
-                edge_type: edge_type.to_string(),
-            });
-            for (key, value) in props {
-                self.log_wal_record(grafeo_storage::wal::WalRecord::SetEdgeProperty {
-                    id: eid,
-                    key: key.to_string(),
-                    value,
-                });
+        properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
+    ) -> Result<EdgeId> {
+        let properties = direct_properties(properties);
+        self.write(|writer| {
+            for endpoint in [src, dst] {
+                if !writer.has_node(endpoint) {
+                    return Err(missing_node(endpoint));
+                }
             }
-        }
-
-        #[cfg(feature = "wal")]
-        self.flush_wal_outside_transaction();
-
-        Ok(eid)
+            writer.create_edge(src, dst, edge_type, properties)
+        })
     }
 
-    /// Sets a node property within the active transaction context.
+    /// Sets a property on a node.
     ///
     /// # Errors
     ///
-    /// Returns an error if the value exceeds the configured `max_property_size`.
+    /// Returns an error if the node does not exist or the value violates a
+    /// constraint of its labels (type, `NOT NULL`, `UNIQUE`, size limit,
+    /// vector index size).
     #[cfg(feature = "lpg")]
     pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
-        self.check_property_size(key, &value)?;
-        let (_, transaction_id) = self.get_transaction_context();
-
-        #[cfg(feature = "wal")]
-        let value_for_wal = value.clone();
-
-        if let Some(tid) = transaction_id {
-            self.active_lpg_store()
-                .set_node_property_versioned(id, key, value, tid);
-        } else {
-            self.active_lpg_store().set_node_property(id, key, value);
-        }
-
-        #[cfg(feature = "wal")]
-        self.log_wal_record(grafeo_storage::wal::WalRecord::SetNodeProperty {
-            id,
-            key: key.to_string(),
-            value: value_for_wal,
-        });
-
-        #[cfg(feature = "wal")]
-        self.flush_wal_outside_transaction();
-
-        Ok(())
+        self.write(|writer| {
+            if !writer.has_node(id) {
+                return Err(missing_node(id));
+            }
+            writer.set_node_properties(id, &[(key.to_string(), value)], false)
+        })
     }
 
-    /// Sets an edge property within the active transaction context.
+    /// Sets a property on an edge.
     ///
     /// # Errors
     ///
-    /// Returns an error if the value exceeds the configured `max_property_size`.
+    /// Returns an error if the edge does not exist or the value violates its
+    /// type.
     #[cfg(feature = "lpg")]
-    pub fn set_edge_property(
+    pub fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
+        self.write(|writer| {
+            if !writer.has_edge(id) {
+                return Err(grafeo_core::execution::operators::OperatorError::Execution(
+                    format!("edge {} does not exist", id.as_u64()),
+                ));
+            }
+            writer.set_edge_properties(id, &[(key.to_string(), value)], false)
+        })
+    }
+
+    /// Removes a property from a node. Returns whether the node had it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a constraint requires the property (`NOT NULL`,
+    /// `NODE KEY`).
+    #[cfg(feature = "lpg")]
+    pub fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
+        self.write(|writer| writer.remove_node_property(id, key))
+    }
+
+    /// Removes a property from an edge. Returns whether the edge had it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the edge's type requires the property.
+    #[cfg(feature = "lpg")]
+    pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
+        self.write(|writer| writer.remove_edge_property(id, key))
+    }
+
+    /// Adds a label to a node. Returns `true` if the label was added, `false`
+    /// if the node doesn't exist or already has it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node violates a constraint of the new label.
+    #[cfg(feature = "lpg")]
+    pub fn add_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
+        self.write(|writer| Ok(writer.add_labels(id, &[label.to_string()])? == 1))
+    }
+
+    /// Removes a label from a node. Returns `true` if the label was removed,
+    /// `false` if the node doesn't exist or doesn't have it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if another transaction is writing the node.
+    #[cfg(feature = "lpg")]
+    pub fn remove_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
+        self.write(|writer| Ok(writer.remove_labels(id, &[label.to_string()])? == 1))
+    }
+
+    /// Deletes a node and returns whether it existed.
+    ///
+    /// A node that still has edges is not deleted: delete them first with
+    /// [`delete_edge`](Self::delete_edge), or use `DETACH DELETE` in a query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node still has edges.
+    #[cfg(feature = "lpg")]
+    pub fn delete_node(&self, id: NodeId) -> Result<bool> {
+        self.write(|writer| writer.delete_node(id, false))
+    }
+
+    /// Deletes an edge and returns whether it existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if another transaction is writing the edge.
+    #[cfg(feature = "lpg")]
+    pub fn delete_edge(&self, id: EdgeId) -> Result<bool> {
+        self.write(|writer| writer.delete_edge(id))
+    }
+
+    /// Creates one node per vector, each with `label` and the vector as
+    /// `property`, in one transaction. Returns the IDs in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first node's error (for example a vector of another size
+    /// than the property's vector index); nothing of the batch is created then.
+    #[cfg(feature = "lpg")]
+    pub fn batch_create_nodes(
         &self,
-        id: grafeo_common::types::EdgeId,
-        key: &str,
-        value: Value,
-    ) -> Result<()> {
-        self.check_property_size(key, &value)?;
-        let (_, transaction_id) = self.get_transaction_context();
-
-        #[cfg(feature = "wal")]
-        let value_for_wal = value.clone();
-
-        if let Some(tid) = transaction_id {
-            self.active_lpg_store()
-                .set_edge_property_versioned(id, key, value, tid);
-        } else {
-            self.active_lpg_store().set_edge_property(id, key, value);
-        }
-
-        #[cfg(feature = "wal")]
-        self.log_wal_record(grafeo_storage::wal::WalRecord::SetEdgeProperty {
-            id,
-            key: key.to_string(),
-            value: value_for_wal,
-        });
-
-        #[cfg(feature = "wal")]
-        self.flush_wal_outside_transaction();
-
-        Ok(())
+        label: &str,
+        property: &str,
+        vectors: Vec<Vec<f32>>,
+    ) -> Result<Vec<NodeId>> {
+        let labels = [label.to_string()];
+        self.write(|writer| {
+            vectors
+                .into_iter()
+                .map(|vector| {
+                    writer.create_node(
+                        &labels,
+                        vec![(property.to_string(), Value::Vector(vector.into()))],
+                    )
+                })
+                .collect()
+        })
     }
 
-    /// Deletes a node within the active transaction context.
+    /// Creates one node with `label` per property map, in one transaction.
+    /// Returns the IDs in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first node's error (for example a `UNIQUE` value that
+    /// another node, or an earlier node of the batch, already has); nothing of
+    /// the batch is created then.
     #[cfg(feature = "lpg")]
-    pub fn delete_node(&self, id: NodeId) -> bool {
-        let (epoch, transaction_id) = self.get_transaction_context();
-        let deleted = if let Some(tid) = transaction_id {
-            self.active_lpg_store()
-                .delete_node_versioned(id, epoch, tid)
-        } else {
-            self.active_lpg_store().delete_node(id)
-        };
-
-        #[cfg(feature = "wal")]
-        if deleted {
-            self.log_wal_record(grafeo_storage::wal::WalRecord::DeleteNode { id });
-        }
-
-        #[cfg(feature = "wal")]
-        self.flush_wal_outside_transaction();
-
-        deleted
+    pub fn batch_create_nodes_with_props(
+        &self,
+        label: &str,
+        properties_list: Vec<std::collections::HashMap<PropertyKey, Value>>,
+    ) -> Result<Vec<NodeId>> {
+        let labels = [label.to_string()];
+        self.write(|writer| {
+            properties_list
+                .into_iter()
+                .map(|properties| writer.create_node(&labels, direct_properties(properties)))
+                .collect()
+        })
     }
 
-    /// Deletes an edge within the active transaction context.
+    /// Finds the nodes of the session's graph that have a property value.
+    ///
+    /// With a property index on `property` this is a lookup, otherwise a scan
+    /// of the committed nodes. Returns the nodes the session sees: in a
+    /// transaction, its own writes found through the index included.
     #[cfg(feature = "lpg")]
-    pub fn delete_edge(&self, id: grafeo_common::types::EdgeId) -> bool {
-        let (epoch, transaction_id) = self.get_transaction_context();
-        let deleted = if let Some(tid) = transaction_id {
-            self.active_lpg_store()
-                .delete_edge_versioned(id, epoch, tid)
-        } else {
-            self.active_lpg_store().delete_edge(id)
-        };
-
-        #[cfg(feature = "wal")]
-        if deleted {
-            self.log_wal_record(grafeo_storage::wal::WalRecord::DeleteEdge { id });
+    #[must_use]
+    pub fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
+        let store = self.active_lpg_store();
+        let candidates = store.find_nodes_by_property(property, value);
+        match self.get_transaction_context() {
+            (epoch, Some(transaction_id)) => {
+                store.filter_visible_node_ids_versioned(&candidates, epoch, transaction_id)
+            }
+            (epoch, None) => store.filter_visible_node_ids(&candidates, epoch),
         }
+    }
 
-        #[cfg(feature = "wal")]
-        self.flush_wal_outside_transaction();
+    /// Creates an index on a node property of the session's graph.
+    #[cfg(feature = "lpg")]
+    pub fn create_property_index(&self, property: &str) {
+        self.active_lpg_store().create_property_index(property);
+    }
 
-        deleted
+    /// Drops the index on a node property of the session's graph. Returns
+    /// whether there was one.
+    #[cfg(feature = "lpg")]
+    pub fn drop_property_index(&self, property: &str) -> bool {
+        self.active_lpg_store().drop_property_index(property)
+    }
+
+    /// Returns whether a node property of the session's graph has an index.
+    #[cfg(feature = "lpg")]
+    #[must_use]
+    pub fn has_property_index(&self, property: &str) -> bool {
+        self.active_lpg_store().has_property_index(property)
     }
 
     // =========================================================================
@@ -5278,7 +5328,7 @@ impl Session {
     /// # use grafeo_engine::GrafeoDB;
     /// # let db = GrafeoDB::new_in_memory();
     /// let session = db.session();
-    /// let node_id = session.create_node(&["Person"]);
+    /// let node_id = session.create_node(&["Person"]).unwrap();
     ///
     /// // Direct lookup - O(1), no query planning
     /// let node = session.get_node(node_id);
@@ -5312,7 +5362,7 @@ impl Session {
     /// # use grafeo_common::types::Value;
     /// # let db = GrafeoDB::new_in_memory();
     /// let session = db.session();
-    /// let id = session.create_node_with_props(&["Person"], [("name", "Alix".into())]).unwrap();
+    /// let id = session.create_node_with_props(&["Person"], [("name", Value::from("Alix"))]).unwrap();
     ///
     /// // Direct property access - O(1)
     /// let name = session.get_node_property(id, "name");
@@ -5358,9 +5408,9 @@ impl Session {
     /// # use grafeo_engine::GrafeoDB;
     /// # let db = GrafeoDB::new_in_memory();
     /// let session = db.session();
-    /// let alix = session.create_node(&["Person"]);
-    /// let gus = session.create_node(&["Person"]);
-    /// session.create_edge(alix, gus, "KNOWS");
+    /// let alix = session.create_node(&["Person"]).unwrap();
+    /// let gus = session.create_node(&["Person"]).unwrap();
+    /// session.create_edge(alix, gus, "KNOWS").unwrap();
     ///
     /// // Direct neighbor lookup - O(degree)
     /// let neighbors = session.get_neighbors_outgoing(alix);
@@ -5399,7 +5449,7 @@ impl Session {
     /// # use grafeo_engine::GrafeoDB;
     /// # let db = GrafeoDB::new_in_memory();
     /// # let session = db.session();
-    /// # let alix = session.create_node(&["Person"]);
+    /// # let alix = session.create_node(&["Person"]).unwrap();
     /// let neighbors = session.get_neighbors_outgoing_by_type(alix, "KNOWS");
     /// ```
     #[cfg(feature = "lpg")]
@@ -5538,6 +5588,29 @@ impl Drop for Session {
     }
 }
 
+/// The properties of a direct write as `(key, value)` pairs.
+#[cfg(feature = "lpg")]
+pub(crate) fn direct_properties(
+    properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
+) -> Vec<(String, Value)> {
+    properties
+        .into_iter()
+        .map(|(key, value)| {
+            let key: PropertyKey = key.into();
+            (key.as_str().to_string(), value.into())
+        })
+        .collect()
+}
+
+/// The error for a direct write to a node that does not exist.
+#[cfg(feature = "lpg")]
+fn missing_node(id: NodeId) -> grafeo_core::execution::operators::OperatorError {
+    grafeo_core::execution::operators::OperatorError::Execution(format!(
+        "node {} does not exist",
+        id.as_u64()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_default_literal;
@@ -5606,7 +5679,7 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
         let session = db.session();
 
-        let id = session.create_node(&["Person"]);
+        let id = session.create_node(&["Person"]).unwrap();
         assert!(id.is_valid());
         assert_eq!(db.node_count(), 1);
     }
@@ -5733,7 +5806,7 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
 
         // Create a node outside of any transaction
-        let node_before = db.create_node(&["Person"]);
+        let node_before = db.create_node(&["Person"]).unwrap();
         assert!(node_before.is_valid());
         assert_eq!(db.node_count(), 1, "Should have 1 node before transaction");
 
@@ -5743,7 +5816,7 @@ mod tests {
         let transaction_id = session.current_transaction.lock().unwrap();
 
         // Create a node through session.create_node() - should be versioned with tx
-        let node_in_tx = session.create_node(&["Person"]);
+        let node_in_tx = session.create_node(&["Person"]).unwrap();
         assert!(node_in_tx.is_valid());
 
         // Uncommitted nodes use EpochId::PENDING, so they are invisible to
@@ -5768,7 +5841,7 @@ mod tests {
         let count_after = db.node_count();
         assert_eq!(
             count_after, 1,
-            "Rollback should discard node created via session.create_node(), but got {count_after}"
+            "Rollback should discard node created via session.create_node().unwrap(), but got {count_after}"
         );
     }
 
@@ -5780,7 +5853,7 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
 
         // Create a node outside of any transaction
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
         assert_eq!(db.node_count(), 1, "Should have 1 node before transaction");
 
         // Start a transaction and create a node with properties
@@ -5829,9 +5902,9 @@ mod tests {
             let session = db.session();
 
             // Create some test data
-            session.create_node(&["Person"]);
-            session.create_node(&["Person"]);
-            session.create_node(&["Animal"]);
+            session.create_node(&["Person"]).unwrap();
+            session.create_node(&["Person"]).unwrap();
+            session.create_node(&["Animal"]).unwrap();
 
             // Execute a GQL query
             let result = session.execute("MATCH (n:Person) RETURN n").unwrap();
@@ -5870,12 +5943,12 @@ mod tests {
             let session = db.session();
 
             // Create a graph: Alix -> Gus, Alix -> Vincent
-            let alix = session.create_node(&["Person"]);
-            let gus = session.create_node(&["Person"]);
-            let vincent = session.create_node(&["Person"]);
+            let alix = session.create_node(&["Person"]).unwrap();
+            let gus = session.create_node(&["Person"]).unwrap();
+            let vincent = session.create_node(&["Person"]).unwrap();
 
-            session.create_edge(alix, gus, "KNOWS");
-            session.create_edge(alix, vincent, "KNOWS");
+            session.create_edge(alix, gus, "KNOWS").unwrap();
+            session.create_edge(alix, vincent, "KNOWS").unwrap();
 
             // Execute a path query: MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b
             let result = session
@@ -5895,12 +5968,12 @@ mod tests {
             let session = db.session();
 
             // Create a graph: Alix -KNOWS-> Gus, Alix -WORKS_WITH-> Vincent
-            let alix = session.create_node(&["Person"]);
-            let gus = session.create_node(&["Person"]);
-            let vincent = session.create_node(&["Person"]);
+            let alix = session.create_node(&["Person"]).unwrap();
+            let gus = session.create_node(&["Person"]).unwrap();
+            let vincent = session.create_node(&["Person"]).unwrap();
 
-            session.create_edge(alix, gus, "KNOWS");
-            session.create_edge(alix, vincent, "WORKS_WITH");
+            session.create_edge(alix, gus, "KNOWS").unwrap();
+            session.create_edge(alix, vincent, "WORKS_WITH").unwrap();
 
             // Query only KNOWS relationships
             let result = session
@@ -6066,9 +6139,9 @@ mod tests {
             let session = db.session();
 
             // Create some test data
-            session.create_node(&["Person"]);
-            session.create_node(&["Person"]);
-            session.create_node(&["Animal"]);
+            session.create_node(&["Person"]).unwrap();
+            session.create_node(&["Person"]).unwrap();
+            session.create_node(&["Animal"]).unwrap();
 
             // Execute a Cypher query
             let result = session.execute_cypher("MATCH (n:Person) RETURN n").unwrap();
@@ -6113,7 +6186,7 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            let id = session.create_node(&["Person"]);
+            let id = session.create_node(&["Person"]).unwrap();
             let node = session.get_node(id);
 
             assert!(node.is_some());
@@ -6155,9 +6228,9 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            let alix = session.create_node(&["Person"]);
-            let gus = session.create_node(&["Person"]);
-            let edge_id = session.create_edge(alix, gus, "KNOWS");
+            let alix = session.create_node(&["Person"]).unwrap();
+            let gus = session.create_node(&["Person"]).unwrap();
+            let edge_id = session.create_edge(alix, gus, "KNOWS").unwrap();
 
             let edge = session.get_edge(edge_id);
             assert!(edge.is_some());
@@ -6183,12 +6256,12 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            let alix = session.create_node(&["Person"]);
-            let gus = session.create_node(&["Person"]);
-            let harm = session.create_node(&["Person"]);
+            let alix = session.create_node(&["Person"]).unwrap();
+            let gus = session.create_node(&["Person"]).unwrap();
+            let harm = session.create_node(&["Person"]).unwrap();
 
-            session.create_edge(alix, gus, "KNOWS");
-            session.create_edge(alix, harm, "KNOWS");
+            session.create_edge(alix, gus, "KNOWS").unwrap();
+            session.create_edge(alix, harm, "KNOWS").unwrap();
 
             let neighbors = session.get_neighbors_outgoing(alix);
             assert_eq!(neighbors.len(), 2);
@@ -6203,12 +6276,12 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            let alix = session.create_node(&["Person"]);
-            let gus = session.create_node(&["Person"]);
-            let harm = session.create_node(&["Person"]);
+            let alix = session.create_node(&["Person"]).unwrap();
+            let gus = session.create_node(&["Person"]).unwrap();
+            let harm = session.create_node(&["Person"]).unwrap();
 
-            session.create_edge(gus, alix, "KNOWS");
-            session.create_edge(harm, alix, "KNOWS");
+            session.create_edge(gus, alix, "KNOWS").unwrap();
+            session.create_edge(harm, alix, "KNOWS").unwrap();
 
             let neighbors = session.get_neighbors_incoming(alix);
             assert_eq!(neighbors.len(), 2);
@@ -6223,12 +6296,12 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            let alix = session.create_node(&["Person"]);
-            let gus = session.create_node(&["Person"]);
-            let company = session.create_node(&["Company"]);
+            let alix = session.create_node(&["Person"]).unwrap();
+            let gus = session.create_node(&["Person"]).unwrap();
+            let company = session.create_node(&["Company"]).unwrap();
 
-            session.create_edge(alix, gus, "KNOWS");
-            session.create_edge(alix, company, "WORKS_AT");
+            session.create_edge(alix, gus, "KNOWS").unwrap();
+            session.create_edge(alix, company, "WORKS_AT").unwrap();
 
             let knows_neighbors = session.get_neighbors_outgoing_by_type(alix, "KNOWS");
             assert_eq!(knows_neighbors.len(), 1);
@@ -6250,7 +6323,7 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            let id = session.create_node(&["Person"]);
+            let id = session.create_node(&["Person"]).unwrap();
 
             assert!(session.node_exists(id));
             assert!(!session.node_exists(NodeId::new(9999)));
@@ -6263,9 +6336,9 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            let alix = session.create_node(&["Person"]);
-            let gus = session.create_node(&["Person"]);
-            let edge_id = session.create_edge(alix, gus, "KNOWS");
+            let alix = session.create_node(&["Person"]).unwrap();
+            let gus = session.create_node(&["Person"]).unwrap();
+            let edge_id = session.create_edge(alix, gus, "KNOWS").unwrap();
 
             assert!(session.edge_exists(edge_id));
             assert!(!session.edge_exists(EdgeId::new(9999)));
@@ -6276,22 +6349,22 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            let alix = session.create_node(&["Person"]);
-            let gus = session.create_node(&["Person"]);
-            let harm = session.create_node(&["Person"]);
+            let alix = session.create_node(&["Person"]).unwrap();
+            let gus = session.create_node(&["Person"]).unwrap();
+            let harm = session.create_node(&["Person"]).unwrap();
 
             // Alix knows Gus and Harm (2 outgoing)
-            session.create_edge(alix, gus, "KNOWS");
-            session.create_edge(alix, harm, "KNOWS");
+            session.create_edge(alix, gus, "KNOWS").unwrap();
+            session.create_edge(alix, harm, "KNOWS").unwrap();
             // Gus knows Alix (1 incoming for Alix)
-            session.create_edge(gus, alix, "KNOWS");
+            session.create_edge(gus, alix, "KNOWS").unwrap();
 
             let (out_degree, in_degree) = session.get_degree(alix);
             assert_eq!(out_degree, 2);
             assert_eq!(in_degree, 1);
 
             // Node with no edges
-            let lonely = session.create_node(&["Person"]);
+            let lonely = session.create_node(&["Person"]).unwrap();
             let (out, in_deg) = session.get_degree(lonely);
             assert_eq!(out, 0);
             assert_eq!(in_deg, 0);
@@ -6302,9 +6375,9 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            let alix = session.create_node(&["Person"]);
-            let gus = session.create_node(&["Person"]);
-            let harm = session.create_node(&["Person"]);
+            let alix = session.create_node(&["Person"]).unwrap();
+            let gus = session.create_node(&["Person"]).unwrap();
+            let harm = session.create_node(&["Person"]).unwrap();
 
             let nodes = session.get_nodes_batch(&[alix, gus, harm]);
             assert_eq!(nodes.len(), 3);
@@ -6375,12 +6448,12 @@ mod tests {
             let mut session = db.session();
 
             // Create nodes outside transaction
-            let alix = session.create_node(&["Person"]);
-            let gus = session.create_node(&["Person"]);
+            let alix = session.create_node(&["Person"]).unwrap();
+            let gus = session.create_node(&["Person"]).unwrap();
 
             // Create edge in transaction
             session.begin_transaction().unwrap();
-            let edge_id = session.create_edge(alix, gus, "KNOWS");
+            let edge_id = session.create_edge(alix, gus, "KNOWS").unwrap();
 
             // Edge should be visible in the transaction
             assert!(session.edge_exists(edge_id));
@@ -6397,7 +6470,7 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            let lonely = session.create_node(&["Person"]);
+            let lonely = session.create_node(&["Person"]).unwrap();
 
             assert!(session.get_neighbors_outgoing(lonely).is_empty());
             assert!(session.get_neighbors_incoming(lonely).is_empty());
@@ -6419,12 +6492,12 @@ mod tests {
 
         // First commit: counter = 1, no GC (not a multiple of 2)
         session.begin_transaction().unwrap();
-        session.create_node(&["A"]);
+        session.create_node(&["A"]).unwrap();
         session.commit().unwrap();
 
         // Second commit: counter = 2, GC should trigger (multiple of 2)
         session.begin_transaction().unwrap();
-        session.create_node(&["B"]);
+        session.create_node(&["B"]).unwrap();
         session.commit().unwrap();
 
         // Verify the database is still functional after GC
@@ -6482,7 +6555,7 @@ mod tests {
         let db = GrafeoDB::with_config(config).unwrap();
         let session = db.session();
 
-        let node = session.create_node(&["Test"]);
+        let node = session.create_node(&["Test"]).unwrap();
 
         // Small property should succeed
         session
@@ -6508,7 +6581,7 @@ mod tests {
         let db = GrafeoDB::with_config(config).unwrap();
         let session = db.session();
 
-        let node = session.create_node(&["Test"]);
+        let node = session.create_node(&["Test"]).unwrap();
 
         // Even large properties should succeed with no limit
         let big = "x".repeat(10_000);

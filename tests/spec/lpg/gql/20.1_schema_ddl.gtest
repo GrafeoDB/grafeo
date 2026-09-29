@@ -344,6 +344,80 @@ tests:
       rows:
         - [Alix B, alix@example.org]
 
+  # SET n:Label checks the node against the constraints of the label it gets,
+  # like INSERT with that label would.
+  - name: label_add_violates_a_not_null_constraint
+    setup:
+      - "CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) NOT NULL"
+      - "INSERT (:Guest {email: 'alix@example.org'})"
+    query: "MATCH (n:Guest) SET n:Person"
+    expect:
+      error: "constraint"
+
+  - name: label_add_violates_a_unique_constraint
+    setup:
+      - "CREATE CONSTRAINT person_email FOR (n:Person) ON (n.email) UNIQUE"
+      - "INSERT (:Person {name: 'Alix', email: 'alix@example.org'})"
+      - "INSERT (:Guest {name: 'Gus', email: 'alix@example.org'})"
+    query: "MATCH (n:Guest) SET n:Person"
+    expect:
+      error: "constraint"
+
+  - name: label_add_violates_a_composite_node_key
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (n:Person) ON (n.name, n.city) NODE KEY"
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'})"
+      - "INSERT (:Guest {name: 'Alix', city: 'Amsterdam'})"
+    query: "MATCH (n:Guest) SET n:Person"
+    expect:
+      error: "constraint"
+
+  - name: label_add_checks_the_node_type
+    setup:
+      - "CREATE NODE TYPE Sensor (id INTEGER NOT NULL)"
+      - "INSERT (:Device {id: 's-1'})"
+    query: "MATCH (n:Device) SET n:Sensor"
+    expect:
+      error: "property 'id' on :Sensor expects"
+
+  # UNIQUE holds within one statement: a value the same transaction wrote
+  # earlier counts as taken.
+  - name: unique_holds_within_one_statement
+    setup:
+      - "CREATE CONSTRAINT doc_id FOR (n:Doc) ON (n.id) UNIQUE"
+    query: "UNWIND ['a', 'a'] AS x INSERT (:Doc {id: x})"
+    expect:
+      error: "constraint"
+
+  - name: composite_unique_holds_within_one_statement
+    setup:
+      - "CREATE CONSTRAINT doc_key FOR (n:Doc) ON (n.id, n.lang) UNIQUE"
+    query: "UNWIND ['en', 'en'] AS l INSERT (:Doc {id: 'a', lang: l})"
+    expect:
+      error: "constraint"
+
+  # SET on an edge never checked the edge type's property types.
+  - name: set_on_an_edge_checks_the_edge_type
+    setup:
+      - "CREATE EDGE TYPE RATES (stars INTEGER)"
+      - "INSERT (:Person {name: 'Alix'})-[:RATES {stars: 5}]->(:Movie {title: 'Jackie Brown'})"
+    query: "MATCH ()-[r:RATES]->() SET r.stars = 'five'"
+    expect:
+      error: "property 'stars' on :RATES expects"
+
+  - name: label_add_within_the_constraints_succeeds
+    statements:
+      - "CREATE CONSTRAINT person_email FOR (n:Person) ON (n.email) UNIQUE"
+      - "CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) NOT NULL"
+      - "INSERT (:Person {name: 'Alix', email: 'alix@example.org'})"
+      - "INSERT (:Guest {name: 'Gus', email: 'gus@example.org'})"
+      - "MATCH (n:Guest) SET n:Person"
+      - "MATCH (n:Person) RETURN n.name ORDER BY n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
   - name: drop_constraint_removes_it
     statements:
       - "CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) UNIQUE"

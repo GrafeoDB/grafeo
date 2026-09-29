@@ -15,25 +15,29 @@ use grafeo_engine::GrafeoDB;
 /// `golden_format.rs`.
 pub fn build_fixture_db() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
+    // Written straight to the store, all at epoch 0, so the export matches the
+    // checked-in bytes: the database's write API commits each call and moves
+    // the epoch, which the exported property versions record.
+    let store = db.store();
 
     // 3 nodes with different labels and properties
-    let alix = db.create_node(&["Person"]);
-    db.set_node_property(alix, "name", Value::String("Alix".into()));
-    db.set_node_property(alix, "age", Value::Int64(30));
+    let alix = store.create_node(&["Person"]);
+    store.set_node_property(alix, "name", Value::String("Alix".into()));
+    store.set_node_property(alix, "age", Value::Int64(30));
 
-    let gus = db.create_node(&["Person", "Employee"]);
-    db.set_node_property(gus, "name", Value::String("Gus".into()));
-    db.set_node_property(gus, "age", Value::Int64(25));
+    let gus = store.create_node(&["Person", "Employee"]);
+    store.set_node_property(gus, "name", Value::String("Gus".into()));
+    store.set_node_property(gus, "age", Value::Int64(25));
 
-    let acme = db.create_node(&["Company"]);
-    db.set_node_property(acme, "name", Value::String("Acme Corp".into()));
+    let acme = store.create_node(&["Company"]);
+    store.set_node_property(acme, "name", Value::String("Acme Corp".into()));
 
     // 2 edges with properties
-    let knows = db.create_edge(alix, gus, "KNOWS");
-    db.set_edge_property(knows, "since", Value::Int64(2020));
+    let knows = store.create_edge(alix, gus, "KNOWS");
+    store.set_edge_property(knows, "since", Value::Int64(2020));
 
-    let works = db.create_edge(gus, acme, "WORKS_AT");
-    db.set_edge_property(works, "role", Value::String("Engineer".into()));
+    let works = store.create_edge(gus, acme, "WORKS_AT");
+    store.set_edge_property(works, "role", Value::String("Engineer".into()));
 
     db
 }

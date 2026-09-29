@@ -425,21 +425,21 @@ fn create_chain_graph(db: &GrafeoDB) {
         .unwrap();
 
     // Layer 0 -> Layer 1 edges
-    session.create_edge(r0, h1_0, "STEP");
-    session.create_edge(r0, h1_1, "STEP");
-    session.create_edge(r1, h1_2, "STEP");
+    session.create_edge(r0, h1_0, "STEP").unwrap();
+    session.create_edge(r0, h1_1, "STEP").unwrap();
+    session.create_edge(r1, h1_2, "STEP").unwrap();
 
     // Layer 1 -> Layer 2 edges
-    session.create_edge(h1_0, h2_0, "STEP");
-    session.create_edge(h1_0, h2_1, "STEP");
-    session.create_edge(h1_1, h2_2, "STEP");
-    session.create_edge(h1_2, h2_3, "STEP");
+    session.create_edge(h1_0, h2_0, "STEP").unwrap();
+    session.create_edge(h1_0, h2_1, "STEP").unwrap();
+    session.create_edge(h1_1, h2_2, "STEP").unwrap();
+    session.create_edge(h1_2, h2_3, "STEP").unwrap();
 
     // Layer 2 -> Layer 3 edges
-    session.create_edge(h2_0, h3_0, "STEP");
-    session.create_edge(h2_1, h3_0, "STEP");
-    session.create_edge(h2_1, h3_1, "STEP");
-    session.create_edge(h2_2, h3_1, "STEP");
+    session.create_edge(h2_0, h3_0, "STEP").unwrap();
+    session.create_edge(h2_1, h3_0, "STEP").unwrap();
+    session.create_edge(h2_1, h3_1, "STEP").unwrap();
+    session.create_edge(h2_2, h3_1, "STEP").unwrap();
     // H2_3 has no outgoing edges (dead end)
 }
 
@@ -562,11 +562,11 @@ fn test_asymmetric_fanout_two_hop() {
             .create_node_with_props(&["Sat"], [("name", Value::String("S5".into()))])
             .unwrap();
 
-        session.create_edge(star, s1, "ARM");
-        session.create_edge(star, s2, "ARM");
-        session.create_edge(star, s3, "ARM");
-        session.create_edge(star, s4, "ARM");
-        session.create_edge(star, s5, "ARM");
+        session.create_edge(star, s1, "ARM").unwrap();
+        session.create_edge(star, s2, "ARM").unwrap();
+        session.create_edge(star, s3, "ARM").unwrap();
+        session.create_edge(star, s4, "ARM").unwrap();
+        session.create_edge(star, s5, "ARM").unwrap();
 
         // Second-hop targets
         let t1 = session
@@ -591,14 +591,14 @@ fn test_asymmetric_fanout_two_hop() {
             .create_node_with_props(&["Tip"], [("name", Value::String("T7".into()))])
             .unwrap();
 
-        session.create_edge(s1, t1, "ARM");
-        session.create_edge(s1, t2, "ARM");
-        session.create_edge(s2, t3, "ARM");
-        session.create_edge(s3, t4, "ARM");
-        session.create_edge(s3, t5, "ARM");
-        session.create_edge(s3, t6, "ARM");
+        session.create_edge(s1, t1, "ARM").unwrap();
+        session.create_edge(s1, t2, "ARM").unwrap();
+        session.create_edge(s2, t3, "ARM").unwrap();
+        session.create_edge(s3, t4, "ARM").unwrap();
+        session.create_edge(s3, t5, "ARM").unwrap();
+        session.create_edge(s3, t6, "ARM").unwrap();
         // s4 has no outgoing edges
-        session.create_edge(s5, t7, "ARM");
+        session.create_edge(s5, t7, "ARM").unwrap();
     }
 
     let query = "MATCH (a:Hub)-[:ARM]->(b)-[:ARM]->(c) RETURN count(c) AS cnt";

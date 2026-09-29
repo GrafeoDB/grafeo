@@ -52,9 +52,9 @@ fn create_test_graph() -> GrafeoDB {
         )
         .unwrap();
 
-    session.create_edge(alix, gus, "KNOWS");
-    session.create_edge(alix, harm, "KNOWS");
-    session.create_edge(gus, harm, "KNOWS");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
+    session.create_edge(alix, harm, "KNOWS").unwrap();
+    session.create_edge(gus, harm, "KNOWS").unwrap();
 
     db
 }
@@ -186,9 +186,9 @@ fn create_mixed_label_graph() -> GrafeoDB {
         .create_node_with_props(&["Bot"], [("name", Value::String("Fritz".into()))])
         .unwrap();
 
-    session.create_edge(alix, gus, "MENTORS"); // Person -> Person
-    session.create_edge(fritz, gus, "MENTORS"); // Bot    -> Person
-    session.create_edge(alix, harm, "MENTORS"); // Person -> Person
+    session.create_edge(alix, gus, "MENTORS").unwrap(); // Person -> Person
+    session.create_edge(fritz, gus, "MENTORS").unwrap(); // Bot    -> Person
+    session.create_edge(alix, harm, "MENTORS").unwrap(); // Person -> Person
 
     drop(session);
     db
@@ -299,7 +299,7 @@ fn test_exists_source_label_not_leaked_to_end_labels() {
     let mia = session
         .create_node_with_props(&["Bot"], [("name", Value::String("Mia".into()))])
         .unwrap();
-    session.create_edge(jules, mia, "FOLLOWS");
+    session.create_edge(jules, mia, "FOLLOWS").unwrap();
     drop(session);
 
     let session = db.session();
@@ -387,15 +387,15 @@ fn create_multi_hop_graph() -> GrafeoDB {
         .unwrap();
 
     // KNOWS edges
-    session.create_edge(alix, gus, "KNOWS");
-    session.create_edge(alix, harm, "KNOWS");
-    session.create_edge(gus, harm, "KNOWS");
-    session.create_edge(dave, alix, "KNOWS");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
+    session.create_edge(alix, harm, "KNOWS").unwrap();
+    session.create_edge(gus, harm, "KNOWS").unwrap();
+    session.create_edge(dave, alix, "KNOWS").unwrap();
 
     // LIVES_IN edges
-    session.create_edge(alix, nyc, "LIVES_IN");
-    session.create_edge(gus, nyc, "LIVES_IN");
-    session.create_edge(harm, london, "LIVES_IN");
+    session.create_edge(alix, nyc, "LIVES_IN").unwrap();
+    session.create_edge(gus, nyc, "LIVES_IN").unwrap();
+    session.create_edge(harm, london, "LIVES_IN").unwrap();
     // Dave has no LIVES_IN edge
 
     drop(session);

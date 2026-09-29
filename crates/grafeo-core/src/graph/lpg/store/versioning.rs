@@ -4,6 +4,8 @@ use grafeo_common::memory::AllocError;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, TransactionId};
 #[cfg(feature = "tiered-storage")]
 use grafeo_common::utils::hash::FxHashMap;
+#[cfg(feature = "temporal")]
+use grafeo_common::{temporal::VersionLog, utils::hash::FxHashSet};
 use std::sync::atomic::Ordering;
 
 #[cfg(feature = "temporal")]
@@ -270,70 +272,99 @@ impl LpgStore {
         self.decrement_edge_type_count(record.type_id);
     }
 
-    /// Garbage collects old versions that are no longer visible to any transaction.
+    /// Garbage collects the versions no reader at `min_epoch` or later can
+    /// see.
     ///
-    /// Versions older than `min_epoch` are pruned from version chains, keeping
-    /// at most one old version per entity as a baseline. Empty chains are removed.
-    #[cfg(not(feature = "tiered-storage"))]
+    /// Visits only the entities that hold older versions, like undo-log
+    /// cleanup in DuckDB: with temporal properties, the property and label
+    /// logs written more than once; with tiered storage, the version indexes
+    /// of re-created entities. Any other node or edge has a single version
+    /// (created, perhaps marked deleted), so there is nothing to collect and
+    /// the cost does not grow with the store.
     #[doc(hidden)]
     pub fn gc_versions(&self, min_epoch: EpochId) {
+        #[cfg(feature = "tiered-storage")]
         {
-            let mut nodes = self.nodes.write();
-            for chain in nodes.values_mut() {
-                chain.gc(min_epoch);
+            let (nodes, edges) = {
+                let mut candidates = self.gc_candidates.lock();
+                (
+                    std::mem::take(&mut candidates.nodes),
+                    std::mem::take(&mut candidates.edges),
+                )
+            };
+            let mut still_nodes = Vec::new();
+            {
+                let mut versions = self.node_versions.write();
+                for id in nodes {
+                    if let Some(index) = versions.get_mut(&id) {
+                        index.gc(min_epoch);
+                        if index.is_empty() {
+                            versions.remove(&id);
+                        } else if index.version_count() > 1 {
+                            still_nodes.push(id);
+                        }
+                    }
+                }
             }
-            nodes.retain(|_, chain| !chain.is_empty());
-        }
-        {
-            let mut edges = self.edges.write();
-            for chain in edges.values_mut() {
-                chain.gc(min_epoch);
+            let mut still_edges = Vec::new();
+            {
+                let mut versions = self.edge_versions.write();
+                for id in edges {
+                    if let Some(index) = versions.get_mut(&id) {
+                        index.gc(min_epoch);
+                        if index.is_empty() {
+                            versions.remove(&id);
+                        } else if index.version_count() > 1 {
+                            still_edges.push(id);
+                        }
+                    }
+                }
             }
-            edges.retain(|_, chain| !chain.is_empty());
+            let mut candidates = self.gc_candidates.lock();
+            candidates.nodes.extend(still_nodes);
+            candidates.edges.extend(still_edges);
         }
 
-        // GC old property and label versions
         #[cfg(feature = "temporal")]
         {
             self.node_properties.gc(min_epoch);
             self.edge_properties.gc(min_epoch);
-            let mut labels = self.node_labels.write();
-            for log in labels.values_mut() {
-                log.gc(min_epoch);
+            let nodes = std::mem::take(&mut self.gc_candidates.lock().labels);
+            let mut still = Vec::new();
+            {
+                let mut labels = self.node_labels.write();
+                for id in nodes {
+                    if let Some(log) = labels.get_mut(&id) {
+                        log.gc(min_epoch);
+                        if log.is_empty() {
+                            labels.remove(&id);
+                        } else if log.len() > 1 {
+                            still.push(id);
+                        }
+                    }
+                }
             }
-            labels.retain(|_, log| !log.is_empty());
+            self.gc_candidates.lock().labels.extend(still);
         }
+
+        #[cfg(not(any(feature = "temporal", feature = "tiered-storage")))]
+        let _ = min_epoch;
     }
 
-    /// Garbage collects old versions (tiered storage variant).
-    #[cfg(feature = "tiered-storage")]
-    #[doc(hidden)]
-    pub fn gc_versions(&self, min_epoch: EpochId) {
-        {
-            let mut versions = self.node_versions.write();
-            for index in versions.values_mut() {
-                index.gc(min_epoch);
-            }
-            versions.retain(|_, index| !index.is_empty());
-        }
-        {
-            let mut versions = self.edge_versions.write();
-            for index in versions.values_mut() {
-                index.gc(min_epoch);
-            }
-            versions.retain(|_, index| !index.is_empty());
-        }
-
-        // GC old property and label versions
-        #[cfg(feature = "temporal")]
-        {
-            self.node_properties.gc(min_epoch);
-            self.edge_properties.gc(min_epoch);
-            let mut labels = self.node_labels.write();
-            for log in labels.values_mut() {
-                log.gc(min_epoch);
-            }
-            labels.retain(|_, log| !log.is_empty());
+    /// Appends a node's new label set to its label log, noting the node for
+    /// garbage collection once the log holds an older set.
+    #[cfg(feature = "temporal")]
+    pub(super) fn append_labels(
+        &self,
+        node_labels: &mut grafeo_common::utils::hash::FxHashMap<NodeId, VersionLog<FxHashSet<u32>>>,
+        node_id: NodeId,
+        epoch: EpochId,
+        labels: FxHashSet<u32>,
+    ) {
+        let log = node_labels.entry(node_id).or_default();
+        log.append(epoch, labels);
+        if log.len() > 1 {
+            self.gc_candidates.lock().labels.insert(node_id);
         }
     }
 

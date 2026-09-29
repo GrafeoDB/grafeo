@@ -14,7 +14,8 @@ impl super::GrafeoDB {
     // PROPERTY INDEX API
     // =========================================================================
 
-    /// Creates an index on a node property for O(1) lookups by value.
+    /// Creates an index on a node property of the current graph, for O(1)
+    /// lookups by value.
     ///
     /// After creating an index, calls to [`Self::find_nodes_by_property`] will be
     /// O(1) instead of O(n) for this property. The index is automatically
@@ -33,23 +34,23 @@ impl super::GrafeoDB {
     /// let nodes = db.find_nodes_by_property("email", &Value::from("alix@example.com"));
     /// ```
     pub fn create_property_index(&self, property: &str) {
-        self.lpg_store().create_property_index(property);
+        self.current_lpg_store().create_property_index(property);
     }
 
-    /// Drops an index on a node property.
+    /// Drops an index on a node property of the current graph.
     ///
     /// Returns `true` if the index existed and was removed.
     pub fn drop_property_index(&self, property: &str) -> bool {
-        self.lpg_store().drop_property_index(property)
+        self.current_lpg_store().drop_property_index(property)
     }
 
-    /// Returns `true` if the property has an index.
+    /// Returns `true` if the property has an index in the current graph.
     #[must_use]
     pub fn has_property_index(&self, property: &str) -> bool {
-        self.lpg_store().has_property_index(property)
+        self.current_lpg_store().has_property_index(property)
     }
 
-    /// Finds all nodes that have a specific property value.
+    /// Finds all nodes of the current graph that have a specific property value.
     ///
     /// If the property is indexed, this is O(1). Otherwise, it scans all nodes
     /// which is O(n). Use [`Self::create_property_index`] for frequently queried properties.
@@ -74,7 +75,7 @@ impl super::GrafeoDB {
     ) -> Vec<grafeo_common::types::NodeId> {
         // The index also holds nodes created by transactions that have not
         // committed yet; return only what a reader at the current epoch sees.
-        let store = self.lpg_store();
+        let store = self.current_lpg_store();
         let candidates = store.find_nodes_by_property(property, value);
         store.filter_visible_node_ids(&candidates, store.current_epoch())
     }

@@ -42,8 +42,10 @@ use pyo3::types::PyDict;
 
 mod bridges;
 mod database;
+mod direct;
 mod error;
 mod graph;
+mod graph_handle;
 mod quantization;
 mod query;
 mod stream;
@@ -159,6 +161,7 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<crate::error::GrafeoError>(),
     )?;
     m.add_class::<PyGrafeoDB>()?;
+    m.add_class::<graph_handle::PyGraphHandle>()?;
     m.add_class::<PyNode>()?;
     m.add_class::<PyEdge>()?;
     m.add_class::<PyQueryResult>()?;

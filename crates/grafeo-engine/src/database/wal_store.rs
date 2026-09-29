@@ -343,12 +343,12 @@ impl GraphStoreSearch for WalGraphStore {
     }
 
     #[cfg(feature = "vector-index")]
-    fn vector_index_metric(
+    fn vector_index_config(
         &self,
         label: &str,
         property: &str,
-    ) -> Option<grafeo_core::index::vector::DistanceMetric> {
-        self.inner.vector_index_metric(label, property)
+    ) -> Option<grafeo_core::index::vector::HnswConfig> {
+        self.inner.vector_index_config(label, property)
     }
 
     #[cfg(feature = "vector-index")]

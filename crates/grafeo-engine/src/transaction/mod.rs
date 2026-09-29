@@ -198,7 +198,7 @@ pub mod parallel;
 mod prepared;
 
 pub use manager::{
-    EntityId, IsolationLevel, TransactionInfo, TransactionManager, TransactionState,
+    EntityId, GraphEntity, IsolationLevel, TransactionInfo, TransactionManager, TransactionState,
 };
 #[doc(hidden)]
 pub use mvcc::{VersionChain, VersionInfo};

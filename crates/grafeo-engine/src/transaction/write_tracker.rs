@@ -5,7 +5,7 @@ use std::sync::Arc;
 use grafeo_common::types::{EdgeId, NodeId, TransactionId};
 use grafeo_core::execution::operators::{OperatorError, WriteTracker};
 
-use super::TransactionManager;
+use super::{GraphEntity, TransactionManager};
 
 /// Implements [`WriteTracker`] by forwarding to [`TransactionManager::record_write`].
 ///
@@ -13,12 +13,26 @@ use super::TransactionManager;
 /// mutation operator so it can record writes for conflict detection.
 pub struct TransactionWriteTracker {
     manager: Arc<TransactionManager>,
+    /// The storage key of the graph the writes go to; `None` for the default
+    /// graph.
+    graph: Option<Arc<str>>,
 }
 
 impl TransactionWriteTracker {
-    /// Creates a new write tracker backed by the given transaction manager.
+    /// Creates a write tracker for writes to the default graph.
     pub fn new(manager: Arc<TransactionManager>) -> Self {
-        Self { manager }
+        Self {
+            manager,
+            graph: None,
+        }
+    }
+
+    /// Records the writes as writes to the graph with storage key `graph`
+    /// (`None`: the default graph).
+    #[must_use]
+    pub fn in_graph(mut self, graph: Option<&str>) -> Self {
+        self.graph = graph.map(Arc::from);
+        self
     }
 }
 
@@ -29,7 +43,10 @@ impl WriteTracker for TransactionWriteTracker {
         node_id: NodeId,
     ) -> Result<(), OperatorError> {
         self.manager
-            .record_write(transaction_id, node_id)
+            .record_write(
+                transaction_id,
+                GraphEntity::new(self.graph.clone(), node_id),
+            )
             .map_err(|e| OperatorError::WriteConflict(e.to_string()))
     }
 
@@ -39,7 +56,10 @@ impl WriteTracker for TransactionWriteTracker {
         edge_id: EdgeId,
     ) -> Result<(), OperatorError> {
         self.manager
-            .record_write(transaction_id, edge_id)
+            .record_write(
+                transaction_id,
+                GraphEntity::new(self.graph.clone(), edge_id),
+            )
             .map_err(|e| OperatorError::WriteConflict(e.to_string()))
     }
 }

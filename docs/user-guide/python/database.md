@@ -135,6 +135,8 @@ db.set_graph("social")
 print(db.current_graph())  # 'social'
 print(db.list_graphs())    # ['social', 'work']
 db.reset_graph()           # Back to default graph
+social = db.graph("social")  # A handle: works in 'social' without switching
+social.execute("MATCH (n) RETURN count(n)")
 db.drop_graph("work")
 
 # Schema management

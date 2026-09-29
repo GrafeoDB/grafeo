@@ -65,11 +65,15 @@ mod tests {
 
     fn list_tests() -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());
-        command.arg("--list");
+        command
+            .arg("--list")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         command
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot start child processes")]
     fn run_returns_the_exit_status() {
         assert!(run(&mut list_tests()).unwrap().success());
         let failing = run(list_tests().arg("--no-such-option")).unwrap();
@@ -77,6 +81,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot start child processes")]
     fn output_captures_stdout() {
         let output = output(&mut list_tests()).unwrap();
         assert!(output.status.success());

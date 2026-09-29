@@ -32,6 +32,7 @@ use grafeo_common::types::{EpochId, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 
 use crate::Session;
+use crate::transaction::EntityId;
 
 /// Summary of pending transaction mutations.
 #[derive(Debug, Clone)]
@@ -74,11 +75,17 @@ impl<'a> PreparedCommit<'a> {
             .start_epoch(transaction_id)
             .unwrap_or(EpochId::new(0));
 
-        // Compute mutation counts from store deltas since begin_transaction.
-        let (start_nodes, current_nodes) = session.node_count_delta();
-        let (start_edges, current_edges) = session.edge_count_delta();
-        let nodes_written = current_nodes.saturating_sub(start_nodes) as u64;
-        let edges_written = current_edges.saturating_sub(start_edges) as u64;
+        // The entities the transaction created, changed or deleted.
+        let write_set = session
+            .transaction_manager()
+            .get_write_set(transaction_id)?;
+        let (mut nodes_written, mut edges_written) = (0, 0);
+        for entity in &write_set {
+            match entity {
+                EntityId::Node(_) => nodes_written += 1,
+                EntityId::Edge(_) => edges_written += 1,
+            }
+        }
 
         let info = CommitInfo {
             txn_id: transaction_id,
@@ -162,10 +169,8 @@ mod tests {
         let prepared = session.prepare_commit().unwrap();
         let info = prepared.info();
 
-        // Uncommitted versions use EpochId::PENDING, so they are invisible to
-        // node_count() which is used by node_count_delta(). The write set
-        // counter therefore reports 0 until the epochs are finalized at commit.
-        assert_eq!(info.edges_written, 0);
+        // The counts come from the transaction's write set.
+        assert_eq!((info.nodes_written, info.edges_written), (1, 0));
 
         let epoch = prepared.commit().unwrap();
         assert!(epoch.as_u64() > 0);

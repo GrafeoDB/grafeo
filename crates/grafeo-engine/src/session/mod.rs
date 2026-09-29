@@ -160,10 +160,6 @@ pub struct Session {
     commit_counter: Arc<AtomicUsize>,
     /// GC every N commits (0 = disabled).
     gc_interval: usize,
-    /// Node count at the start of the current transaction (for PreparedCommit stats).
-    transaction_start_node_count: AtomicUsize,
-    /// Edge count at the start of the current transaction (for PreparedCommit stats).
-    transaction_start_edge_count: AtomicUsize,
     /// This session's WAL records, written as one group per transaction
     /// (`None` without a WAL).
     #[cfg(feature = "wal")]
@@ -234,8 +230,7 @@ enum LpgBackend {
 #[derive(Clone)]
 struct GraphSavepoint {
     graph_name: Option<String>,
-    next_node_id: u64,
-    next_edge_id: u64,
+    /// Length of the transaction's change log in this graph's store.
     undo_log_position: usize,
 }
 
@@ -288,8 +283,6 @@ impl Session {
             buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
-            transaction_start_node_count: AtomicUsize::new(0),
-            transaction_start_edge_count: AtomicUsize::new(0),
             #[cfg(feature = "wal")]
             wal: None,
             #[cfg(feature = "cdc")]
@@ -439,8 +432,6 @@ impl Session {
             buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
-            transaction_start_node_count: AtomicUsize::new(0),
-            transaction_start_edge_count: AtomicUsize::new(0),
             #[cfg(feature = "wal")]
             wal: None,
             #[cfg(feature = "cdc")]
@@ -4087,11 +4078,6 @@ impl Session {
             grafeo_warn!("Session: failed to write WAL records: {}", e);
         }
 
-        let active = self.active_lpg_store();
-        self.transaction_start_node_count
-            .store(active.node_count(), Ordering::Relaxed);
-        self.transaction_start_edge_count
-            .store(active.edge_count(), Ordering::Relaxed);
         let transaction_id = if let Some(level) = isolation_level {
             self.transaction_manager.begin_with_isolation(level)
         } else {
@@ -4417,9 +4403,10 @@ impl Session {
 
     /// Creates a named savepoint within the current transaction.
     ///
-    /// The savepoint captures the current node/edge ID counters so that
-    /// [`rollback_to_savepoint`](Self::rollback_to_savepoint) can discard
-    /// entities created after this point.
+    /// The savepoint records how far the transaction's change log reaches in
+    /// every graph it touched, so
+    /// [`rollback_to_savepoint`](Self::rollback_to_savepoint) can undo the
+    /// changes made after this point.
     ///
     /// # Errors
     ///
@@ -4442,8 +4429,6 @@ impl Session {
                 let store = self.resolve_store(graph_name);
                 GraphSavepoint {
                     graph_name: graph_name.clone(),
-                    next_node_id: store.peek_next_node_id(),
-                    next_edge_id: store.peek_next_edge_id(),
                     undo_log_position: store.property_undo_log_position(tx_id),
                 }
             })
@@ -4467,7 +4452,6 @@ impl Session {
     /// Rolls back to a named savepoint, undoing all writes made after it.
     ///
     /// The savepoint and any savepoints created after it are removed.
-    /// Entities with IDs >= the savepoint snapshot are discarded.
     ///
     /// # Errors
     ///
@@ -4506,23 +4490,8 @@ impl Session {
         for gs in &sp_state.graph_snapshots {
             let store = self.resolve_store(&gs.graph_name);
 
-            // Replay property/label undo entries recorded after the savepoint
+            // Undo the changes recorded after the savepoint, creations included.
             store.rollback_transaction_properties_to(transaction_id, gs.undo_log_position);
-
-            // Discard entities created after the savepoint
-            let current_next_node = store.peek_next_node_id();
-            let current_next_edge = store.peek_next_edge_id();
-
-            let node_ids: Vec<NodeId> = (gs.next_node_id..current_next_node)
-                .map(NodeId::new)
-                .collect();
-            let edge_ids: Vec<EdgeId> = (gs.next_edge_id..current_next_edge)
-                .map(EdgeId::new)
-                .collect();
-
-            if !node_ids.is_empty() || !edge_ids.is_empty() {
-                store.discard_entities_by_id(transaction_id, &node_ids, &edge_ids);
-            }
         }
 
         // Also roll back any graphs that were touched AFTER the savepoint
@@ -4609,26 +4578,6 @@ impl Session {
     #[must_use]
     pub(crate) fn transaction_manager(&self) -> &TransactionManager {
         &self.transaction_manager
-    }
-
-    /// Returns the store's current node count and the count at transaction start.
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub(crate) fn node_count_delta(&self) -> (usize, usize) {
-        (
-            self.transaction_start_node_count.load(Ordering::Relaxed),
-            self.active_lpg_store().node_count(),
-        )
-    }
-
-    /// Returns the store's current edge count and the count at transaction start.
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub(crate) fn edge_count_delta(&self) -> (usize, usize) {
-        (
-            self.transaction_start_edge_count.load(Ordering::Relaxed),
-            self.active_lpg_store().edge_count(),
-        )
     }
 
     /// Prepares the current transaction for a two-phase commit.

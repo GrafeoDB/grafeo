@@ -300,6 +300,19 @@ impl<Id: EntityId> PropertyStorage<Id> {
         }
     }
 
+    /// Removes every property of an entity that never became visible, the
+    /// rollback of the transaction that created it. Unlike `remove_all`, it
+    /// keeps no history.
+    pub fn purge(&self, id: Id) {
+        let mut columns = self.columns.write();
+        for col in columns.values_mut() {
+            #[cfg(not(feature = "temporal"))]
+            col.remove(id);
+            #[cfg(feature = "temporal")]
+            col.purge(id);
+        }
+    }
+
     /// Gets all properties for an entity.
     #[must_use]
     pub fn get_all(&self, id: Id) -> FxHashMap<PropertyKey, Value> {
@@ -1866,6 +1879,19 @@ impl<Id: EntityId> PropertyColumn<Id> {
                 self.values.remove(&id);
             }
         }
+    }
+
+    /// Replaces PENDING epochs with the commit epoch for one entity (commit
+    /// of the transaction that wrote them).
+    pub fn finalize_pending_for(&mut self, id: Id, real_epoch: EpochId) {
+        if let Some(log) = self.values.get_mut(&id) {
+            log.finalize_pending(real_epoch);
+        }
+    }
+
+    /// Removes an entity's value and its history.
+    pub fn purge(&mut self, id: Id) {
+        self.values.remove(&id);
     }
 }
 

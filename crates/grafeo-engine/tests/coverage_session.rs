@@ -375,10 +375,9 @@ fn test_prepare_commit_lifecycle() {
     session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
 
     let mut prepared = session.prepare_commit().unwrap();
-    // Inspect commit info (nodes_written uses node_count_delta which cannot
-    // see PENDING-epoch nodes, so it reports 0 before finalization at commit)
+    // Inspect commit info: the nodes in the transaction's write set.
     let info = prepared.info();
-    assert_eq!(info.nodes_written, 0);
+    assert_eq!(info.nodes_written, 1);
 
     // Attach metadata
     prepared.set_metadata("audit_user", "admin");

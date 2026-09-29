@@ -40,7 +40,7 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use parking_lot::RwLock;
 use std::cmp::Ordering as CmpOrdering;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 #[cfg(feature = "vector-index")]
 use crate::index::vector::VectorIndexKind;
@@ -55,12 +55,23 @@ use grafeo_common::mvcc::VersionIndex;
 #[cfg(feature = "temporal")]
 use grafeo_common::temporal::VersionLog;
 
-/// Undo entry for a property mutation within a transaction.
+/// One change made by a transaction, with what rollback needs to undo it.
 ///
-/// Captures the previous state of a property so it can be restored on rollback.
+/// The entries of a transaction list everything it touched in this store, so
+/// commit and rollback walk them instead of scanning every entity.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum PropertyUndoEntry {
+    /// A node was created.
+    NodeCreated {
+        /// The new node.
+        node_id: NodeId,
+    },
+    /// An edge was created.
+    EdgeCreated {
+        /// The new edge.
+        edge_id: EdgeId,
+    },
     /// A node property was changed or added.
     NodeProperty {
         /// The node that was modified.
@@ -451,20 +462,17 @@ pub struct LpgStore {
     /// Lock order: 8 (always last)
     pub(super) statistics: RwLock<Arc<Statistics>>,
 
-    /// Whether statistics need full recomputation (e.g., after rollback).
-    pub(super) needs_stats_recompute: AtomicBool,
-
     /// Named graphs, each an independent `LpgStore` partition.
     /// Zero overhead for single-graph databases (empty HashMap).
     /// Lock order: 9 (after statistics)
     named_graphs: RwLock<FxHashMap<String, Arc<LpgStore>>>,
 
-    /// Undo log for property mutations within transactions.
+    /// What each open transaction changed in this store.
     ///
-    /// Maps transaction IDs to a list of undo entries that capture the
-    /// previous property values. On rollback, entries are replayed in
-    /// reverse order to restore properties. On commit, the entries are
-    /// simply discarded.
+    /// Maps transaction IDs to their changes in order: created and deleted
+    /// entities, property and label changes with the previous state. Commit
+    /// finalizes the versions of the entities listed there and discards the
+    /// entries; rollback replays them in reverse. Both cost O(changes).
     /// Lock order: 10 (after named_graphs, independent of other locks)
     property_undo_log: RwLock<FxHashMap<TransactionId, Vec<PropertyUndoEntry>>>,
 }
@@ -527,7 +535,6 @@ impl LpgStore {
             live_edge_count: AtomicI64::new(0),
             edge_type_live_counts: RwLock::new(Vec::new()),
             statistics: RwLock::new(Arc::new(Statistics::new())),
-            needs_stats_recompute: AtomicBool::new(false),
             named_graphs: RwLock::new(FxHashMap::default()),
             property_undo_log: RwLock::new(FxHashMap::default()),
         })
@@ -639,7 +646,6 @@ impl LpgStore {
         self.live_edge_count.store(0, Ordering::Release);
         self.edge_type_live_counts.write().clear();
         *self.statistics.write() = Arc::new(Statistics::new());
-        self.needs_stats_recompute.store(false, Ordering::Release);
 
         // Level 5: Undo log
         self.property_undo_log.write().clear();

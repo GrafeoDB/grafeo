@@ -460,6 +460,12 @@ impl LpgStore {
             // Replay in reverse order: latest change first
             for entry in entries.into_iter().rev() {
                 match entry {
+                    PropertyUndoEntry::NodeCreated { node_id } => {
+                        self.discard_created_node(node_id, transaction_id);
+                    }
+                    PropertyUndoEntry::EdgeCreated { edge_id } => {
+                        self.discard_created_edge(edge_id, transaction_id);
+                    }
                     PropertyUndoEntry::NodeProperty {
                         node_id,
                         key,
@@ -539,6 +545,12 @@ impl LpgStore {
             // First pass: collect touched entries and handle entity deletions
             for entry in entries.into_iter().rev() {
                 match entry {
+                    PropertyUndoEntry::NodeCreated { node_id } => {
+                        self.discard_created_node(node_id, transaction_id);
+                    }
+                    PropertyUndoEntry::EdgeCreated { edge_id } => {
+                        self.discard_created_edge(edge_id, transaction_id);
+                    }
                     PropertyUndoEntry::NodeProperty { node_id, key, .. } => {
                         node_props.insert((node_id, key));
                     }
@@ -681,6 +693,12 @@ impl LpgStore {
             // Replay in reverse order
             for entry in to_undo.into_iter().rev() {
                 match entry {
+                    PropertyUndoEntry::NodeCreated { node_id } => {
+                        self.discard_created_node(node_id, transaction_id);
+                    }
+                    PropertyUndoEntry::EdgeCreated { edge_id } => {
+                        self.discard_created_edge(edge_id, transaction_id);
+                    }
                     PropertyUndoEntry::NodeProperty {
                         node_id,
                         key,
@@ -766,6 +784,12 @@ impl LpgStore {
 
             for entry in to_undo.into_iter().rev() {
                 match entry {
+                    PropertyUndoEntry::NodeCreated { node_id } => {
+                        self.discard_created_node(node_id, transaction_id);
+                    }
+                    PropertyUndoEntry::EdgeCreated { edge_id } => {
+                        self.discard_created_edge(edge_id, transaction_id);
+                    }
                     PropertyUndoEntry::NodeProperty { node_id, key, .. } => {
                         *node_prop_counts.entry((node_id, key)).or_default() += 1;
                     }
@@ -900,8 +924,26 @@ impl LpgStore {
         }
 
         // Restore properties (this also restores property and text index entries)
+        #[cfg(not(feature = "temporal"))]
         for (key, value) in properties {
             self.set_node_property(node_id, key.as_str(), value);
+        }
+        // Temporal: the delete wrote one PENDING tombstone per value; dropping
+        // them brings the values back, and the index entries go back here.
+        #[cfg(feature = "temporal")]
+        {
+            let mut columns = self.node_properties.columns_write();
+            for (key, _) in &properties {
+                if let Some(column) = columns.get_mut(key) {
+                    column.pop_n_pending_for(node_id, 1);
+                }
+            }
+            drop(columns);
+            for (key, value) in &properties {
+                self.update_property_index_on_set(node_id, key, value);
+                #[cfg(feature = "text-index")]
+                self.update_text_index_on_set(node_id, key.as_str(), value);
+            }
         }
 
         // The delete removed the node from vector indexes; put it back.
@@ -946,8 +988,19 @@ impl LpgStore {
         }
 
         // Restore properties
+        #[cfg(not(feature = "temporal"))]
         for (key, value) in properties {
             self.set_edge_property(edge_id, key.as_str(), value);
+        }
+        // Temporal: drop the delete's PENDING tombstones, one per value.
+        #[cfg(feature = "temporal")]
+        {
+            let mut columns = self.edge_properties.columns_write();
+            for (key, _) in &properties {
+                if let Some(column) = columns.get_mut(key) {
+                    column.pop_n_pending_for(edge_id, 1);
+                }
+            }
         }
 
         self.live_edge_count.fetch_add(1, Ordering::Relaxed);

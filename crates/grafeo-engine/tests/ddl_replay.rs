@@ -103,6 +103,96 @@ mod tests {
         assert!(!properties.contains("unit"), "{properties}");
     }
 
+    /// Named constraints and their drops survive a reopen: through WAL replay
+    /// in a WAL-directory database (#421), and through the catalog section
+    /// of a `.grafeo` file (#420).
+    #[test]
+    fn constraints_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = vec![(
+            "wal-directory",
+            Config::persistent(dir.path().join("dir-db"))
+                .with_storage_format(StorageFormat::WalDirectory),
+        )];
+        #[cfg(feature = "grafeo-file")]
+        configs.push((
+            "single-file",
+            Config::persistent(dir.path().join("db.grafeo"))
+                .with_storage_format(StorageFormat::SingleFile),
+        ));
+
+        for (format, config) in configs {
+            {
+                let db = GrafeoDB::with_config(config.clone()).unwrap();
+                let session = db.session();
+                for statement in [
+                    "CREATE CONSTRAINT city_name FOR (c:City) ON (c.name) UNIQUE",
+                    "CREATE CONSTRAINT person_name FOR (p:Person) ON (p.name) UNIQUE",
+                    "DROP CONSTRAINT person_name",
+                ] {
+                    session.execute(statement).unwrap();
+                }
+                db.close().unwrap();
+            }
+
+            let db = GrafeoDB::with_config(config).unwrap();
+            assert_eq!(
+                rows(&db, "SHOW CONSTRAINTS"),
+                vec![vec![
+                    Value::from("city_name"),
+                    Value::from("UNIQUE"),
+                    Value::from("City"),
+                    Value::from("name"),
+                ]],
+                "{format}"
+            );
+            let session = db.session();
+            session.execute("INSERT (:City {name: 'Paris'})").unwrap();
+            assert!(
+                session.execute("INSERT (:City {name: 'Paris'})").is_err(),
+                "{format}: the constraint is enforced after reopen"
+            );
+            session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+            session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+            session.execute("DROP CONSTRAINT city_name").unwrap();
+            session.execute("INSERT (:City {name: 'Paris'})").unwrap();
+            db.close().unwrap();
+        }
+    }
+
+    /// An `ALTER` whose last alteration fails changes nothing. The ones before
+    /// it used to stay applied without a WAL record, so the live schema and
+    /// the one rebuilt from the WAL differed.
+    #[test]
+    fn failed_alter_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let before = {
+            let db = open_wal_dir(&path).unwrap();
+            let session = db.session();
+            for statement in [
+                "CREATE NODE TYPE Sensor (unit STRING)",
+                "CREATE EDGE TYPE READS (since INTEGER)",
+            ] {
+                session.execute(statement).unwrap();
+            }
+            let before = schema(&db);
+            // (Graph type alterations cannot fail midway: adding or dropping a
+            // member never fails.)
+            for failing in [
+                "ALTER NODE TYPE Sensor ADD PROPERTY location STRING DROP PROPERTY missing",
+                "ALTER EDGE TYPE READS DROP PROPERTY since ADD PROPERTY since STRING ADD PROPERTY since STRING",
+            ] {
+                assert!(session.execute(failing).is_err(), "{failing}");
+                assert_eq!(schema(&db), before, "live schema after {failing}");
+            }
+            db.close().unwrap();
+            before
+        };
+        let db = open_wal_dir(&path).unwrap();
+        assert_eq!(schema(&db), before, "schema after replay");
+    }
+
     #[test]
     fn create_or_replace_types_survive_replay() {
         let (_dir, db) = replayed(&[

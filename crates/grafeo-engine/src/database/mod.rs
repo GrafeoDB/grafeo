@@ -148,6 +148,10 @@ pub struct GrafeoDB {
     /// Wrapped in Mutex because `close()` takes `&self` but needs to stop the timer.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     checkpoint_timer: parking_lot::Mutex<Option<checkpoint_timer::CheckpointTimer>>,
+    /// Syncs the WAL in the background under `DurabilityMode::Adaptive`.
+    /// Wrapped in Mutex because `close()` takes `&self` but stops it.
+    #[cfg(feature = "wal")]
+    wal_flusher: parking_lot::Mutex<Option<grafeo_storage::wal::AdaptiveFlusher>>,
     /// Shared registry of spilled vector storages.
     /// Used by the search path to create `SpillableVectorAccessor` instances.
     #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
@@ -629,6 +633,19 @@ impl GrafeoDB {
             None
         };
 
+        // `Adaptive` leaves syncing the WAL to a background flusher.
+        #[cfg(feature = "wal")]
+        let wal_flusher = match (&wal, config.wal_durability) {
+            (Some(wal), crate::config::DurabilityMode::Adaptive { target_interval_ms }) => {
+                let wal = Arc::clone(wal);
+                Some(grafeo_storage::wal::AdaptiveFlusher::with_sync(
+                    move || wal.sync(),
+                    target_interval_ms,
+                )?)
+            }
+            _ => None,
+        };
+
         // Create query cache with default capacity (1000 queries)
         let query_cache = Arc::new(QueryCache::default());
 
@@ -668,6 +685,8 @@ impl GrafeoDB {
             file_manager,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
+            #[cfg(feature = "wal")]
+            wal_flusher: parking_lot::Mutex::new(wal_flusher),
             #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
             vector_spill_storages: None,
             external_read_store: None,
@@ -801,6 +820,8 @@ impl GrafeoDB {
             file_manager: None,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
+            #[cfg(feature = "wal")]
+            wal_flusher: parking_lot::Mutex::new(None),
             #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
             vector_spill_storages: None,
             external_read_store: Some(Arc::clone(&store) as Arc<dyn GraphStoreSearch>),
@@ -892,6 +913,8 @@ impl GrafeoDB {
             file_manager: None,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
+            #[cfg(feature = "wal")]
+            wal_flusher: parking_lot::Mutex::new(None),
             #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
             vector_spill_storages: None,
             external_read_store: Some(store),
@@ -1234,16 +1257,14 @@ impl GrafeoDB {
                 | WalRecord::AlterEdgeType { .. }
                 | WalRecord::AlterGraphType { .. }
                 | WalRecord::CreateProcedure { .. }
-                | WalRecord::DropProcedure { .. } => {
+                | WalRecord::DropProcedure { .. }
+                | WalRecord::CreateConstraint { .. }
+                | WalRecord::DropConstraint { .. } => {
                     schema_replay::apply_schema_record(catalog, record)?;
                 }
                 WalRecord::CreateIndex { .. } | WalRecord::DropIndex { .. } => {
                     // Index recreation is handled by the store on startup
                     // (indexes are rebuilt from data, not WAL)
-                }
-                WalRecord::CreateConstraint { .. } | WalRecord::DropConstraint { .. } => {
-                    // Constraint definitions are part of type definitions
-                    // and replayed via CreateNodeType/CreateEdgeType
                 }
 
                 // --- RDF triple replay ---
@@ -2148,6 +2169,15 @@ impl GrafeoDB {
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
         if let Some(mut timer) = self.checkpoint_timer.lock().take() {
             timer.stop();
+        }
+
+        // Stop the WAL flusher before the WAL is synced and closed below; its
+        // shutdown syncs once more.
+        #[cfg(feature = "wal")]
+        if let Some(mut flusher) = self.wal_flusher.lock().take()
+            && let Err(e) = flusher.shutdown()
+        {
+            grafeo_warn!("failed to stop the WAL flusher: {e}");
         }
 
         // Read-only databases: just release the shared lock, no checkpointing
@@ -3095,6 +3125,29 @@ impl FromValue for bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `DurabilityMode::Adaptive` syncs the WAL from a background flusher.
+    /// None was started, so an adaptive database never synced its WAL.
+    #[cfg(feature = "wal")]
+    #[test]
+    fn adaptive_durability_syncs_the_wal_in_the_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = GrafeoDB::with_config(
+            Config::persistent(dir.path().join("db"))
+                .with_storage_format(crate::config::StorageFormat::WalDirectory)
+                .with_wal_durability(crate::config::DurabilityMode::Adaptive {
+                    target_interval_ms: 10,
+                }),
+        )
+        .unwrap();
+        db.create_node(&["Person"]);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let mut flusher = db.wal_flusher.lock().take().expect("a flusher runs");
+        let stats = flusher.shutdown().unwrap();
+        assert!(stats.flush_count > 0, "{stats:?}");
+        db.close().unwrap();
+    }
 
     /// `compact()` makes a database opened read-only writable in memory, but
     /// its file stays read-only: no checkpoint timer may run against it.

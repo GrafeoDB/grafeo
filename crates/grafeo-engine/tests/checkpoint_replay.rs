@@ -234,7 +234,8 @@ mod tests {
 
     /// A checkpoint that fails partway (here its new image cannot be created,
     /// as on a full disk) leaves the database usable, and the data readable
-    /// after a reopen (#418).
+    /// after a reopen, once, for query writes and direct writes alike (#418,
+    /// #424).
     #[test]
     fn failed_checkpoint_keeps_the_database_readable() {
         let dir = tempfile::tempdir().unwrap();
@@ -254,6 +255,9 @@ mod tests {
             session
                 .execute("INSERT (:Person {name: 'Vincent'})")
                 .unwrap();
+            let mia = db.create_node_with_props(&["Person"], [("name", Value::from("Mia"))]);
+            let butch = db.create_node_with_props(&["Person"], [("name", Value::from("Butch"))]);
+            db.create_edge(mia, butch, "LIKES");
 
             std::fs::create_dir(&blocker).unwrap();
             assert!(db.wal_checkpoint().is_err(), "the checkpoint must fail");
@@ -273,8 +277,10 @@ mod tests {
             names,
             vec![
                 vec![Value::from("Alix")],
+                vec![Value::from("Butch")],
                 vec![Value::from("Gus")],
                 vec![Value::from("Jules")],
+                vec![Value::from("Mia")],
                 vec![Value::from("Vincent")],
             ]
         );
@@ -282,6 +288,7 @@ mod tests {
             knows(&db),
             vec![vec![Value::from("Alix"), Value::from("Gus")]]
         );
+        assert_eq!(db.edge_count(), 2, "KNOWS and LIKES, once each");
     }
 
     fn log_files(dir: &Path) -> Vec<PathBuf> {

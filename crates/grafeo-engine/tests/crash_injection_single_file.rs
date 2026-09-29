@@ -356,7 +356,6 @@ fn wal_disabled_config(path: &std::path::Path) -> Config {
 /// With WAL disabled, a clean close triggers `checkpoint_to_file` which writes
 /// the snapshot. On reopen the data should be fully intact.
 #[test]
-#[ignore = "crash injection test"]
 fn wal_disabled_checkpoint_preserves_data() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("wal_off_persist.grafeo");
@@ -418,11 +417,14 @@ fn wal_disabled_checkpoint_preserves_data() {
 ///   1. Write initial data, close cleanly (successful checkpoint).
 ///   2. Write more data, crash during the close checkpoint.
 ///
-/// On reopen, at least the first-round data must survive.
+/// On reopen, at least the first-round data must survive. The sweep covers
+/// every injection point of the checkpoint, including the install of the new
+/// image over the file (#418).
 #[test]
-#[ignore = "crash injection test"]
 fn wal_disabled_crash_during_checkpoint_recovers() {
-    for crash_point in 1..=3 {
+    let mut completed_runs = 0;
+    // More points than the close checkpoint has, so the last runs complete.
+    for crash_point in 1..=16 {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("wal_off_crash.grafeo");
 
@@ -438,24 +440,18 @@ fn wal_disabled_crash_during_checkpoint_recovers() {
         }
 
         // Round 2: Reopen, add more data, crash during close checkpoint
+        let mut completed = false;
         {
             let db = GrafeoDB::with_config(wal_disabled_config(&path)).unwrap();
             let session = db.session();
             session.execute("INSERT (:Person {name: 'Mia'})").unwrap();
 
             let db = AssertUnwindSafe(db);
-            let result = with_crash_at(crash_point, move || {
-                let _ = db.close();
-            });
-
-            match result {
-                CrashResult::Crashed => {
-                    // Expected: checkpoint was interrupted, no WAL fallback
-                }
-                CrashResult::Completed(()) => {
-                    // Close completed before crash point was reached
-                }
-                _ => {}
+            let result = with_crash_at(crash_point, move || db.close());
+            if let CrashResult::Completed(closed) = result {
+                closed.unwrap();
+                completed = true;
+                completed_runs += 1;
             }
         }
 
@@ -482,19 +478,24 @@ fn wal_disabled_crash_during_checkpoint_recovers() {
             "crash_point={crash_point}: Jules missing after crash"
         );
 
-        // Round-2 data (Mia) may or may not survive depending on whether
-        // the crash happened before or after the snapshot was written.
-        // We do not assert on Mia: either outcome is valid.
+        // Round-2 data (Mia) survives a close that completed; after a crash
+        // it depends on whether the new image was complete.
+        if completed {
+            assert!(
+                names.contains(&"Mia".to_string()),
+                "crash_point={crash_point}: Mia missing after a completed close"
+            );
+        }
 
         db.close().unwrap();
     }
+    assert!(completed_runs > 0, "no run got past the last crash point");
 }
 
 /// With WAL disabled, uncommitted transaction data should not be persisted.
 /// If the process crashes (or simply drops) before committing, the
 /// checkpoint-on-close only captures committed state.
 #[test]
-#[ignore = "crash injection test"]
 fn wal_disabled_uncommitted_data_lost_on_crash() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("wal_off_uncommitted.grafeo");

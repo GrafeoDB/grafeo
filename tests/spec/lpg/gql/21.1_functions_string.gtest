@@ -98,6 +98,26 @@ tests:
       rows:
         - [42]
 
+  # Temporal values and lists used to come back as the internal debug form,
+  # such as `Timestamp(Timestamp(1705329000000000μs))`.
+  - name: to_string_from_temporal_values
+    query: "RETURN toString(date('2024-01-15')) AS d, toString(datetime('2024-01-15T14:30:00')) AS dt, toString(duration('P1DT2H')) AS du"
+    expect:
+      rows:
+        - ["2024-01-15", "2024-01-15T14:30:00.000000Z", "P1DT2H"]
+
+  - name: to_string_from_time
+    query: "RETURN toString(time('14:30:00')) AS t"
+    expect:
+      rows:
+        - ["14:30:00"]
+
+  - name: to_string_from_list
+    query: "RETURN toString([1, 2]) AS l"
+    expect:
+      rows:
+        - ["[1, 2]"]
+
   - name: string_join_list
     setup:
       - "INSERT (:N {v: 1})"

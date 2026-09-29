@@ -398,6 +398,13 @@ impl Catalog {
         }
     }
 
+    /// Registers or replaces a graph type definition.
+    pub fn register_or_replace_graph_type(&self, def: GraphTypeDefinition) {
+        if let Some(schema) = &self.schema {
+            schema.register_or_replace_graph_type(def);
+        }
+    }
+
     /// Drops a graph type definition.
     ///
     /// # Errors
@@ -480,6 +487,97 @@ impl Catalog {
         match &self.schema {
             Some(schema) => schema.add_constraint_to_type(label, constraint),
             None => Err(CatalogError::SchemaNotEnabled),
+        }
+    }
+
+    /// Creates a named constraint: registers its name and adds the type
+    /// constraints that enforce it. `CREATE CONSTRAINT` and WAL replay both
+    /// call this.
+    ///
+    /// # Errors
+    ///
+    /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
+    /// * `CatalogError::ConstraintAlreadyExists` if the name is taken; nothing
+    ///   changes then.
+    pub fn create_constraint(&self, def: ConstraintDefinition) -> Result<(), CatalogError> {
+        let schema = self.schema.as_ref().ok_or(CatalogError::SchemaNotEnabled)?;
+        schema.insert_constraint(def.clone())?;
+        self.mark_constrained_properties(schema, &def);
+        for constraint in def.type_constraints() {
+            schema.add_constraint_to_type(&def.label, constraint)?;
+        }
+        Ok(())
+    }
+
+    /// Drops a named constraint and the type constraints it added.
+    /// `DROP CONSTRAINT` and WAL replay both call this.
+    ///
+    /// # Errors
+    ///
+    /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
+    /// * `CatalogError::ConstraintNotFound` if no constraint has this name.
+    pub fn drop_constraint(&self, name: &str) -> Result<(), CatalogError> {
+        let schema = self.schema.as_ref().ok_or(CatalogError::SchemaNotEnabled)?;
+        let def = schema.remove_constraint(name)?;
+        for constraint in def.type_constraints() {
+            schema.remove_constraint_from_type(&def.label, &constraint);
+        }
+        // Keep the unique and required markers that another constraint on
+        // the same label and property still needs.
+        let remaining = schema.all_constraints();
+        let label = self.get_or_create_label(&def.label);
+        for property in &def.properties {
+            let key = (label, self.get_or_create_property_key(property));
+            let covers = |check: fn(ConstraintType) -> bool| {
+                remaining.iter().any(|other| {
+                    other.label == def.label
+                        && check(other.kind)
+                        && other.properties.contains(property)
+                })
+            };
+            if def.kind.is_unique() && !covers(ConstraintType::is_unique) {
+                schema.unique_constraints.write().remove(&key);
+            }
+            if def.kind.is_required() && !covers(ConstraintType::is_required) {
+                schema.required_properties.write().remove(&key);
+            }
+        }
+        Ok(())
+    }
+
+    /// The named constraints, sorted by name.
+    #[must_use]
+    pub fn constraints(&self) -> Vec<ConstraintDefinition> {
+        self.schema
+            .as_ref()
+            .map(SchemaCatalog::all_constraints)
+            .unwrap_or_default()
+    }
+
+    /// Registers the names of constraints whose type constraints the loaded
+    /// node types already hold (loading a `.grafeo` catalog section).
+    pub fn restore_constraint_names(&self, constraints: Vec<ConstraintDefinition>) {
+        if let Some(schema) = &self.schema {
+            for def in constraints {
+                self.mark_constrained_properties(schema, &def);
+                schema.constraints.write().insert(def.name.clone(), def);
+            }
+        }
+    }
+
+    /// Marks the label's properties unique or required for
+    /// [`is_property_unique`](Self::is_property_unique) and
+    /// [`is_property_required`](Self::is_property_required).
+    fn mark_constrained_properties(&self, schema: &SchemaCatalog, def: &ConstraintDefinition) {
+        let label = self.get_or_create_label(&def.label);
+        for property in &def.properties {
+            let key = (label, self.get_or_create_property_key(property));
+            if def.kind.is_unique() {
+                schema.unique_constraints.write().insert(key);
+            }
+            if def.kind.is_required() {
+                schema.required_properties.write().insert(key);
+            }
         }
     }
 
@@ -1195,7 +1293,7 @@ pub struct TypedProperty {
 }
 
 /// A constraint on a node or edge type.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum TypeConstraint {
     /// Primary key (implies UNIQUE + NOT NULL).
@@ -1211,6 +1309,107 @@ pub enum TypeConstraint {
         /// Expression (stored as string for now).
         expression: String,
     },
+}
+
+/// What a named constraint (`CREATE CONSTRAINT`) requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum ConstraintType {
+    /// The properties are unique among nodes with the label.
+    Unique,
+    /// The properties are present and unique together.
+    NodeKey,
+    /// The properties are present (`NOT NULL`).
+    NotNull,
+    /// The properties are present (`EXISTS`, another spelling of `NOT NULL`).
+    Exists,
+}
+
+impl ConstraintType {
+    /// The name `SHOW CONSTRAINTS` reports.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Unique => "UNIQUE",
+            Self::NodeKey => "NODE KEY",
+            Self::NotNull => "NOT NULL",
+            Self::Exists => "EXISTS",
+        }
+    }
+
+    /// The last part of a constraint's default name, `Label_prop_unique`.
+    #[must_use]
+    pub const fn name_suffix(self) -> &'static str {
+        match self {
+            Self::Unique => "unique",
+            Self::NodeKey => "node_key",
+            Self::NotNull => "not_null",
+            Self::Exists => "exists",
+        }
+    }
+
+    fn is_unique(self) -> bool {
+        matches!(self, Self::Unique | Self::NodeKey)
+    }
+
+    fn is_required(self) -> bool {
+        matches!(self, Self::NodeKey | Self::NotNull | Self::Exists)
+    }
+}
+
+#[cfg(feature = "wal")]
+impl From<ConstraintType> for grafeo_storage::wal::NamedConstraintKind {
+    fn from(kind: ConstraintType) -> Self {
+        match kind {
+            ConstraintType::Unique => Self::Unique,
+            ConstraintType::NodeKey => Self::NodeKey,
+            ConstraintType::NotNull => Self::NotNull,
+            ConstraintType::Exists => Self::Exists,
+        }
+    }
+}
+
+#[cfg(feature = "wal")]
+impl From<grafeo_storage::wal::NamedConstraintKind> for ConstraintType {
+    fn from(kind: grafeo_storage::wal::NamedConstraintKind) -> Self {
+        use grafeo_storage::wal::NamedConstraintKind;
+        match kind {
+            NamedConstraintKind::Unique => Self::Unique,
+            NamedConstraintKind::NodeKey => Self::NodeKey,
+            NamedConstraintKind::NotNull => Self::NotNull,
+            NamedConstraintKind::Exists => Self::Exists,
+        }
+    }
+}
+
+/// A named constraint created with `CREATE CONSTRAINT` (#420). It is enforced
+/// through the [`TypeConstraint`]s it adds to the label's node type.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConstraintDefinition {
+    /// The constraint's name.
+    pub name: String,
+    /// The node label it applies to.
+    pub label: String,
+    /// The constrained properties.
+    pub properties: Vec<String>,
+    /// What it requires.
+    pub kind: ConstraintType,
+}
+
+impl ConstraintDefinition {
+    /// The type constraints that enforce it on the label's node type.
+    fn type_constraints(&self) -> Vec<TypeConstraint> {
+        match self.kind {
+            ConstraintType::Unique => vec![TypeConstraint::Unique(self.properties.clone())],
+            ConstraintType::NodeKey => vec![TypeConstraint::PrimaryKey(self.properties.clone())],
+            ConstraintType::NotNull | ConstraintType::Exists => self
+                .properties
+                .iter()
+                .cloned()
+                .map(TypeConstraint::NotNull)
+                .collect(),
+        }
+    }
 }
 
 /// Definition of a node type (label schema).
@@ -1287,6 +1486,8 @@ pub struct SchemaCatalog {
     graph_type_bindings: RwLock<HashMap<String, String>>,
     /// Stored procedure definitions.
     procedures: RwLock<HashMap<String, ProcedureDefinition>>,
+    /// Named constraints (`CREATE CONSTRAINT`), by name.
+    constraints: RwLock<HashMap<String, ConstraintDefinition>>,
 }
 
 impl SchemaCatalog {
@@ -1300,6 +1501,7 @@ impl SchemaCatalog {
             schemas: RwLock::new(Vec::new()),
             graph_type_bindings: RwLock::new(HashMap::new()),
             procedures: RwLock::new(HashMap::new()),
+            constraints: RwLock::new(HashMap::new()),
         }
     }
 
@@ -1479,6 +1681,11 @@ impl SchemaCatalog {
         }
         types.insert(def.name.clone(), def);
         Ok(())
+    }
+
+    /// Registers or replaces a graph type definition.
+    pub fn register_or_replace_graph_type(&self, def: GraphTypeDefinition) {
+        self.graph_types.write().insert(def.name.clone(), def);
     }
 
     /// Drops a graph type definition by name.
@@ -1856,6 +2063,40 @@ impl SchemaCatalog {
             .read()
             .contains(&(label, property_key))
     }
+
+    /// Registers a constraint name, failing when it is taken.
+    fn insert_constraint(&self, def: ConstraintDefinition) -> Result<(), CatalogError> {
+        let mut constraints = self.constraints.write();
+        if constraints.contains_key(&def.name) {
+            return Err(CatalogError::ConstraintAlreadyExists);
+        }
+        constraints.insert(def.name.clone(), def);
+        Ok(())
+    }
+
+    fn remove_constraint(&self, name: &str) -> Result<ConstraintDefinition, CatalogError> {
+        self.constraints
+            .write()
+            .remove(name)
+            .ok_or_else(|| CatalogError::ConstraintNotFound(name.to_string()))
+    }
+
+    /// Removes one occurrence of `constraint` from the node type `label`:
+    /// another named constraint may have added the same one.
+    fn remove_constraint_from_type(&self, label: &str, constraint: &TypeConstraint) {
+        if let Some(def) = self.node_types.write().get_mut(label)
+            && let Some(position) = def.constraints.iter().position(|c| c == constraint)
+        {
+            def.constraints.remove(position);
+        }
+    }
+
+    fn all_constraints(&self) -> Vec<ConstraintDefinition> {
+        let mut constraints: Vec<ConstraintDefinition> =
+            self.constraints.read().values().cloned().collect();
+        constraints.sort_by(|a, b| a.name.cmp(&b.name));
+        constraints
+    }
 }
 
 // === Errors ===
@@ -1866,6 +2107,8 @@ impl SchemaCatalog {
 pub enum CatalogError {
     /// Schema constraints are not enabled.
     SchemaNotEnabled,
+    /// No constraint with this name exists.
+    ConstraintNotFound(String),
     /// The constraint already exists.
     ConstraintAlreadyExists,
     /// The label does not exist.
@@ -1890,6 +2133,7 @@ impl std::fmt::Display for CatalogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SchemaNotEnabled => write!(f, "Schema constraints are not enabled"),
+            Self::ConstraintNotFound(name) => write!(f, "Constraint not found: {name}"),
             Self::ConstraintAlreadyExists => write!(f, "Constraint already exists"),
             Self::LabelNotFound(name) => write!(f, "Label not found: {name}"),
             Self::PropertyKeyNotFound(name) => write!(f, "Property key not found: {name}"),
@@ -2283,6 +2527,51 @@ impl ConstraintValidator for CatalogConstraintValidator {
 mod tests {
     use super::*;
     use std::thread;
+
+    /// Dropping one of two named constraints on a property removes only its
+    /// own type constraint, and keeps the unique and required markers that
+    /// the other one still needs.
+    #[test]
+    fn dropping_a_constraint_keeps_what_another_needs() {
+        let catalog = Catalog::new();
+        let email = |name: &str, kind| ConstraintDefinition {
+            name: name.to_string(),
+            label: "Person".to_string(),
+            properties: vec!["email".to_string()],
+            kind,
+        };
+        catalog
+            .create_constraint(email("unique_email", ConstraintType::Unique))
+            .unwrap();
+        catalog
+            .create_constraint(email("email_key", ConstraintType::NodeKey))
+            .unwrap();
+        let person = catalog.get_or_create_label("Person");
+        let email_key = catalog.get_or_create_property_key("email");
+
+        catalog.drop_constraint("unique_email").unwrap();
+        assert!(catalog.is_property_unique(person, email_key), "the key");
+        assert!(catalog.is_property_required(person, email_key));
+        assert_eq!(
+            catalog.get_node_type("Person").unwrap().constraints,
+            vec![TypeConstraint::PrimaryKey(vec!["email".to_string()])]
+        );
+
+        catalog.drop_constraint("email_key").unwrap();
+        assert!(!catalog.is_property_unique(person, email_key));
+        assert!(!catalog.is_property_required(person, email_key));
+        assert!(
+            catalog
+                .get_node_type("Person")
+                .unwrap()
+                .constraints
+                .is_empty()
+        );
+        assert_eq!(
+            catalog.drop_constraint("email_key"),
+            Err(CatalogError::ConstraintNotFound("email_key".to_string()))
+        );
+    }
 
     #[test]
     fn test_catalog_labels() {

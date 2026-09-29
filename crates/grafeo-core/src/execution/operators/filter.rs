@@ -2023,7 +2023,8 @@ impl ExpressionPredicate {
                     Value::Float64(f) => f.to_string(),
                     Value::Bool(b) => b.to_string(),
                     Value::Null => return Some(Value::Null),
-                    _ => format!("{val:?}"),
+                    // ISO 8601 for temporal values, `[1, 2]` for lists.
+                    _ => val.to_string(),
                 };
                 Some(Value::String(s.into()))
             }

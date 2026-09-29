@@ -132,10 +132,20 @@ tests:
       count: 0
 
   - name: drop_nonexistent_constraint
-    skip: "error on missing constraint"
     query: "DROP CONSTRAINT no_such_constraint"
     expect:
       error: "constraint"
+
+  - name: drop_constraint_removes_enforcement
+    setup:
+      - "CREATE CONSTRAINT unique_email FOR (p:Person) REQUIRE p.email IS UNIQUE"
+      - "DROP CONSTRAINT unique_email"
+      - "CREATE (:Person {name: 'Alix', email: 'alix@example.org'})"
+    query: |
+      CREATE (:Person {name: 'Gus', email: 'alix@example.org'})
+      RETURN count(*) AS cnt
+    expect:
+      count: 1
 
   - name: drop_constraint_if_exists
     query: "DROP CONSTRAINT no_such_constraint IF EXISTS"
@@ -147,7 +157,6 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: show_constraints_after_create
-    skip: "SHOW CONSTRAINTS not implemented"
     setup:
       - "CREATE CONSTRAINT unique_email FOR (p:Person) REQUIRE p.email IS UNIQUE"
     query: "SHOW CONSTRAINTS"

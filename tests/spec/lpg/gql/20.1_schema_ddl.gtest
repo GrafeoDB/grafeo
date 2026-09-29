@@ -219,6 +219,68 @@ tests:
   # Full lifecycle: type -> graph type -> bind
   # ---------------------------------------------------------------------------
 
+  # ---------------------------------------------------------------------------
+  # CREATE / DROP / SHOW CONSTRAINT: constraints are stored by name (#420)
+  # ---------------------------------------------------------------------------
+
+  - name: drop_constraint_removes_it
+    statements:
+      - "CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) UNIQUE"
+      - "DROP CONSTRAINT person_name"
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:Person {name: 'Alix'})"
+      - "MATCH (n:Person) RETURN count(n)"
+    expect:
+      rows:
+        - [2]
+
+  - name: dropping_one_constraint_keeps_the_others
+    setup:
+      - "CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) UNIQUE"
+      - "CREATE CONSTRAINT person_name_required FOR (n:Person) ON (n.name) NOT NULL"
+      - "DROP CONSTRAINT person_name"
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:Person {name: 'Alix'})"
+    query: "INSERT (:Person {age: 30})"
+    expect:
+      error: "constraint"
+
+  - name: drop_unknown_constraint_fails
+    query: "DROP CONSTRAINT no_such_name"
+    expect:
+      error: "constraint 'no_such_name' does not exist"
+
+  - name: drop_unknown_constraint_if_exists_succeeds
+    query: "DROP CONSTRAINT IF EXISTS no_such_name"
+    expect:
+      count: 0
+
+  - name: create_constraint_with_a_used_name_fails
+    setup:
+      - "CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) UNIQUE"
+    query: "CREATE CONSTRAINT person_name FOR (n:City) ON (n.name) UNIQUE"
+    expect:
+      error: "constraint 'person_name' already exists"
+
+  - name: create_constraint_if_not_exists_keeps_the_first
+    statements:
+      - "CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) UNIQUE"
+      - "CREATE CONSTRAINT IF NOT EXISTS person_name FOR (n:City) ON (n.name) UNIQUE"
+      - "SHOW CONSTRAINTS"
+    expect:
+      rows:
+        - [person_name, UNIQUE, Person, name]
+
+  - name: show_constraints_lists_them
+    statements:
+      - "CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) UNIQUE"
+      - "CREATE CONSTRAINT FOR (n:City) ON (n.name) NOT NULL"
+      - "SHOW CONSTRAINTS"
+    expect:
+      rows:
+        - [City_name_not_null, NOT NULL, City, name]
+        - [person_name, UNIQUE, Person, name]
+
   - name: full_schema_lifecycle
     statements:
       - "CREATE NODE TYPE Employee (name STRING NOT NULL)"

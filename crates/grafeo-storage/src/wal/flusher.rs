@@ -83,13 +83,27 @@ impl AdaptiveFlusher {
     ///
     /// Returns an error if the background flusher thread cannot be spawned.
     pub fn new(wal: Arc<WalManager>, target_interval_ms: u64) -> Result<Self, std::io::Error> {
+        Self::with_sync(move || wal.sync(), target_interval_ms)
+    }
+
+    /// Creates and starts a flusher that calls `sync` at about
+    /// `target_interval_ms` intervals, for a WAL that is not a bare
+    /// [`WalManager`] (a [`TypedWal`](super::TypedWal), for example).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the background flusher thread cannot be spawned.
+    pub fn with_sync(
+        sync: impl Fn() -> grafeo_common::utils::error::Result<()> + Send + 'static,
+        target_interval_ms: u64,
+    ) -> Result<Self, std::io::Error> {
         let target_interval = Duration::from_millis(target_interval_ms);
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
         let handle = thread::Builder::new()
             .name("grafeo-wal-flusher".to_string())
             .spawn(move || {
-                Self::flusher_loop(wal, target_interval, shutdown_rx);
+                Self::flusher_loop(&sync, target_interval, shutdown_rx);
             })?;
 
         Ok(Self {
@@ -135,7 +149,7 @@ impl AdaptiveFlusher {
 
     /// The main flusher loop running in the background thread.
     fn flusher_loop(
-        wal: Arc<WalManager>,
+        sync: &dyn Fn() -> grafeo_common::utils::error::Result<()>,
         target_interval: Duration,
         shutdown_rx: mpsc::Receiver<mpsc::Sender<FlusherStats>>,
     ) {
@@ -149,7 +163,7 @@ impl AdaptiveFlusher {
             match shutdown_rx.recv_timeout(timeout) {
                 Ok(ack_tx) => {
                     // Graceful shutdown requested - do final flush
-                    if let Err(e) = wal.sync() {
+                    if let Err(e) = sync() {
                         grafeo_warn!("Final WAL flush failed: {e}");
                     }
                     // Send stats back to acknowledge shutdown
@@ -160,7 +174,7 @@ impl AdaptiveFlusher {
                     // Time to flush
                     let start = Instant::now();
 
-                    if let Err(e) = wal.sync() {
+                    if let Err(e) = sync() {
                         grafeo_warn!("WAL flush failed: {e}");
                         // Still update timing to avoid spin loop on persistent errors
                         last_flush_duration = Duration::from_millis(10);

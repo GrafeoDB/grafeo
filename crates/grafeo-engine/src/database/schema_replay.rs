@@ -6,12 +6,13 @@
 
 use grafeo_common::utils::error::{Error, Result, StorageError};
 use grafeo_storage::wal::{
-    GraphTypeAlterationKind, PropertyAlterationKind, TypeConstraintKind, WalRecord,
+    GraphTypeAlterationKind, NamedConstraintKind, PropertyAlterationKind, TypeConstraintKind,
+    WalRecord,
 };
 
 use crate::catalog::{
-    Catalog, CatalogError, EdgeTypeDefinition, GraphTypeDefinition, NodeTypeDefinition,
-    ProcedureDefinition, PropertyDataType, TypeConstraint, TypedProperty,
+    Catalog, CatalogError, ConstraintDefinition, EdgeTypeDefinition, GraphTypeDefinition,
+    NodeTypeDefinition, ProcedureDefinition, PropertyDataType, TypeConstraint, TypedProperty,
 };
 
 /// Applies a schema record to `catalog`; other records are ignored.
@@ -135,6 +136,24 @@ pub(super) fn apply_schema_record(catalog: &Catalog, record: &WalRecord) -> Resu
             tolerate_repeat(record, catalog.register_procedure(def))
         }
         WalRecord::DropProcedure { name } => tolerate_repeat(record, catalog.drop_procedure(name)),
+        WalRecord::CreateConstraint {
+            name,
+            label,
+            properties,
+            kind,
+        } => {
+            let kind = parse_kind(record, kind, NamedConstraintKind::parse)?;
+            let def = ConstraintDefinition {
+                name: name.clone(),
+                label: label.clone(),
+                properties: properties.clone(),
+                kind: kind.into(),
+            };
+            tolerate_repeat(record, catalog.create_constraint(def))
+        }
+        WalRecord::DropConstraint { name } => {
+            tolerate_repeat(record, catalog.drop_constraint(name))
+        }
         _ => Ok(()),
     }
 }
@@ -157,7 +176,8 @@ fn tolerate_repeat(
             | CatalogError::TypeNotFound(_)
             | CatalogError::SchemaAlreadyExists(_)
             | CatalogError::SchemaNotFound(_)
-            | CatalogError::ConstraintAlreadyExists),
+            | CatalogError::ConstraintAlreadyExists
+            | CatalogError::ConstraintNotFound(_)),
         ) => {
             grafeo_common::grafeo_debug!("WAL replay skipped {record:?}: {error}");
             Ok(())

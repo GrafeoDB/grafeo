@@ -96,7 +96,7 @@ impl GrafeoFileManager {
         // Checkpoint side files next to a missing database file belong to a
         // deleted database: a pending image must not be installed over the
         // new one later.
-        remove_if_exists(&checkpoint_image_path(&path))?;
+        remove_image(&checkpoint_image_path(&path))?;
         remove_if_exists(&checkpoint_tmp_path(&path))?;
 
         let mut file = OpenOptions::new()
@@ -612,7 +612,7 @@ impl GrafeoFileManager {
         self.finish_install(file)?;
         let mut leftover = self.leftover_image.lock();
         if *leftover == LeftoverImage::NotRemoved {
-            remove_if_exists(&checkpoint_image_path(&self.path))?;
+            remove_image(&checkpoint_image_path(&self.path))?;
             *leftover = LeftoverImage::None;
         }
         Ok(())
@@ -623,7 +623,7 @@ impl GrafeoFileManager {
     fn remove_installed_image(&self) {
         let image_path = checkpoint_image_path(&self.path);
         let mut leftover = self.leftover_image.lock();
-        match remove_if_exists(&image_path) {
+        match remove_image(&image_path) {
             Ok(()) => *leftover = LeftoverImage::None,
             Err(e) => grafeo_common::grafeo_warn!(
                 "could not remove the installed checkpoint image {}, the next write retries: {e}",
@@ -1047,6 +1047,14 @@ fn remove_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+/// Removes a checkpoint image and makes the removal durable before the
+/// caller writes anything newer: an image that came back after a power loss
+/// would be installed over those writes at the next open.
+fn remove_image(image: &Path) -> Result<()> {
+    remove_if_exists(image)?;
+    sync_parent_dir(image)
+}
+
 /// Copies the complete image at `image` over the database file and syncs it.
 fn install_image(file: &mut File, image: &Path) -> Result<()> {
     use grafeo_common::testing::crash::maybe_crash;
@@ -1075,13 +1083,14 @@ fn finish_interrupted_checkpoint(path: &Path, file: &mut File) -> Result<()> {
             path.display()
         );
         install_image(file, &image)?;
-        fs::remove_file(&image)?;
+        remove_image(&image)?;
     }
     Ok(())
 }
 
-/// Makes a rename in the directory holding `path` durable. Windows has no
-/// directory handles to sync; its renames are metadata-journaled.
+/// Makes a rename or removal in the directory holding `path` durable.
+/// Windows has no directory handles to sync; its directory changes are
+/// metadata-journaled.
 fn sync_parent_dir(path: &Path) -> Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {

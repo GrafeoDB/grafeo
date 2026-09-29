@@ -27,6 +27,9 @@ impl LpgStore {
         self.node_properties
             .set(id, prop_key, value, self.current_epoch());
 
+        #[cfg(feature = "vector-index")]
+        self.sync_vector_indexes_for_property(id, key);
+
         // Update props_count in record
         #[cfg(not(feature = "temporal"))]
         {
@@ -57,6 +60,9 @@ impl LpgStore {
         #[cfg(feature = "temporal")]
         self.node_properties
             .set(id, prop_key, value, self.current_epoch());
+
+        #[cfg(feature = "vector-index")]
+        self.sync_vector_indexes_for_property(id, key);
     }
 
     /// Sets a property on an edge.
@@ -139,6 +145,8 @@ impl LpgStore {
         let result = self
             .node_properties
             .remove(id, &prop_key, self.current_epoch());
+        #[cfg(feature = "vector-index")]
+        self.sync_vector_indexes_for_property(id, key);
 
         // Update props_count in record
         #[cfg(not(feature = "temporal"))]
@@ -168,14 +176,14 @@ impl LpgStore {
         self.update_text_index_on_remove(id, key);
 
         #[cfg(not(feature = "temporal"))]
-        {
-            self.node_properties.remove(id, &prop_key)
-        }
+        let result = self.node_properties.remove(id, &prop_key);
         #[cfg(feature = "temporal")]
-        {
-            self.node_properties
-                .remove(id, &prop_key, self.current_epoch())
-        }
+        let result = self
+            .node_properties
+            .remove(id, &prop_key, self.current_epoch());
+        #[cfg(feature = "vector-index")]
+        self.sync_vector_indexes_for_property(id, key);
+        result
     }
 
     /// Removes a property from an edge.
@@ -349,6 +357,8 @@ impl LpgStore {
             self.update_text_index_on_set(id, key, &value);
             self.node_properties
                 .set(id, prop_key2, value, grafeo_common::types::EpochId::PENDING);
+            #[cfg(feature = "vector-index")]
+            self.sync_vector_indexes_for_property(id, key);
         }
     }
 
@@ -410,12 +420,26 @@ impl LpgStore {
                 .or_default()
                 .push(PropertyUndoEntry::NodeProperty {
                     node_id: id,
-                    key: prop_key,
+                    key: prop_key.clone(),
                     old_value: old_value.clone(),
                 });
         }
 
-        // Delegate to the normal (unversioned) remove
+        // Temporal: the tombstone is this transaction's write, PENDING
+        // until it commits.
+        #[cfg(feature = "temporal")]
+        {
+            self.update_property_index_on_remove(id, &prop_key);
+            #[cfg(feature = "text-index")]
+            self.update_text_index_on_remove(id, key);
+            let removed =
+                self.node_properties
+                    .remove(id, &prop_key, grafeo_common::types::EpochId::PENDING);
+            #[cfg(feature = "vector-index")]
+            self.sync_vector_indexes_for_property(id, key);
+            removed
+        }
+        #[cfg(not(feature = "temporal"))]
         self.remove_node_property(id, key)
     }
 
@@ -440,12 +464,19 @@ impl LpgStore {
                 .or_default()
                 .push(PropertyUndoEntry::EdgeProperty {
                     edge_id: id,
-                    key: prop_key,
+                    key: prop_key.clone(),
                     old_value: old_value.clone(),
                 });
         }
 
-        // Delegate to the normal (unversioned) remove
+        // Temporal: the tombstone is this transaction's write, PENDING
+        // until it commits.
+        #[cfg(feature = "temporal")]
+        {
+            self.edge_properties
+                .remove(id, &prop_key, grafeo_common::types::EpochId::PENDING)
+        }
+        #[cfg(not(feature = "temporal"))]
         self.remove_edge_property(id, key)
     }
 
@@ -460,6 +491,12 @@ impl LpgStore {
             // Replay in reverse order: latest change first
             for entry in entries.into_iter().rev() {
                 match entry {
+                    PropertyUndoEntry::NodeCreated { node_id } => {
+                        self.discard_created_node(node_id, transaction_id);
+                    }
+                    PropertyUndoEntry::EdgeCreated { edge_id } => {
+                        self.discard_created_edge(edge_id, transaction_id);
+                    }
                     PropertyUndoEntry::NodeProperty {
                         node_id,
                         key,
@@ -539,6 +576,12 @@ impl LpgStore {
             // First pass: collect touched entries and handle entity deletions
             for entry in entries.into_iter().rev() {
                 match entry {
+                    PropertyUndoEntry::NodeCreated { node_id } => {
+                        self.discard_created_node(node_id, transaction_id);
+                    }
+                    PropertyUndoEntry::EdgeCreated { edge_id } => {
+                        self.discard_created_edge(edge_id, transaction_id);
+                    }
                     PropertyUndoEntry::NodeProperty { node_id, key, .. } => {
                         node_props.insert((node_id, key));
                     }
@@ -681,6 +724,12 @@ impl LpgStore {
             // Replay in reverse order
             for entry in to_undo.into_iter().rev() {
                 match entry {
+                    PropertyUndoEntry::NodeCreated { node_id } => {
+                        self.discard_created_node(node_id, transaction_id);
+                    }
+                    PropertyUndoEntry::EdgeCreated { edge_id } => {
+                        self.discard_created_edge(edge_id, transaction_id);
+                    }
                     PropertyUndoEntry::NodeProperty {
                         node_id,
                         key,
@@ -766,6 +815,12 @@ impl LpgStore {
 
             for entry in to_undo.into_iter().rev() {
                 match entry {
+                    PropertyUndoEntry::NodeCreated { node_id } => {
+                        self.discard_created_node(node_id, transaction_id);
+                    }
+                    PropertyUndoEntry::EdgeCreated { edge_id } => {
+                        self.discard_created_edge(edge_id, transaction_id);
+                    }
                     PropertyUndoEntry::NodeProperty { node_id, key, .. } => {
                         *node_prop_counts.entry((node_id, key)).or_default() += 1;
                     }
@@ -900,8 +955,26 @@ impl LpgStore {
         }
 
         // Restore properties (this also restores property and text index entries)
+        #[cfg(not(feature = "temporal"))]
         for (key, value) in properties {
             self.set_node_property(node_id, key.as_str(), value);
+        }
+        // Temporal: the delete wrote one PENDING tombstone per value; dropping
+        // them brings the values back, and the index entries go back here.
+        #[cfg(feature = "temporal")]
+        {
+            let mut columns = self.node_properties.columns_write();
+            for (key, _) in &properties {
+                if let Some(column) = columns.get_mut(key) {
+                    column.pop_n_pending_for(node_id, 1);
+                }
+            }
+            drop(columns);
+            for (key, value) in &properties {
+                self.update_property_index_on_set(node_id, key, value);
+                #[cfg(feature = "text-index")]
+                self.update_text_index_on_set(node_id, key.as_str(), value);
+            }
         }
 
         // The delete removed the node from vector indexes; put it back.
@@ -946,8 +1019,19 @@ impl LpgStore {
         }
 
         // Restore properties
+        #[cfg(not(feature = "temporal"))]
         for (key, value) in properties {
             self.set_edge_property(edge_id, key.as_str(), value);
+        }
+        // Temporal: drop the delete's PENDING tombstones, one per value.
+        #[cfg(feature = "temporal")]
+        {
+            let mut columns = self.edge_properties.columns_write();
+            for (key, _) in &properties {
+                if let Some(column) = columns.get_mut(key) {
+                    column.pop_n_pending_for(edge_id, 1);
+                }
+            }
         }
 
         self.live_edge_count.fetch_add(1, Ordering::Relaxed);

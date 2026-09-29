@@ -21,6 +21,10 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps(actions)"
+    ignore:
+      # The ref is the compiler version, not an action version. Bump it by hand
+      # together with rust-toolchain.toml (and the MSRV job with rust-version).
+      - dependency-name: "dtolnay/rust-toolchain"
 
   # Python dependencies
   - package-ecosystem: "pip"

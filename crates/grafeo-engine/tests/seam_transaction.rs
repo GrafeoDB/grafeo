@@ -731,7 +731,7 @@ mod multi_schema_atomicity {
     // `partial_failure_rolls_back_all_schemas` was removed in 0.5.40:
     // forcing a failure mid-tx depended on a NOT NULL constraint firing
     // in a schema-scoped type after `SESSION SET SCHEMA`, which is
-    // itself a bug (see .claude/todo/5_beta/bug-multi-schema-commit-atomicity.md).
+    // itself a bug.
     // The two tests below use a UNIQUE constraint declared in the default
     // schema, which fires deterministically at statement execution time
     // (`check_unique_node_property` in the catalog validator) regardless of

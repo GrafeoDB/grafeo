@@ -227,3 +227,105 @@ tests:
     expect:
       rows:
         - [3]
+
+  # Endpoints without labels used to be treated as bound variables, so these
+  # failed with "Undefined variable".
+  - name: insert_path_with_unlabeled_endpoints
+    statements:
+      - "INSERT (a)-[:T]->(b)"
+      - "MATCH (n) OPTIONAL MATCH (n)-[t:T]->() RETURN count(DISTINCT n) AS nodes, count(t) AS edges"
+    expect:
+      rows:
+        - [2, 1]
+
+  - name: insert_path_with_property_only_endpoints
+    statements:
+      - "INSERT ({id: 1})-[:T]->({id: 2})-[:T]->(:C {id: 3})"
+      - "MATCH (x)-[:T]->(y) RETURN x.id, y.id"
+    expect:
+      rows:
+        - [1, 2]
+        - [2, 3]
+
+  - name: insert_path_reuses_variable_created_earlier
+    statements:
+      - "INSERT (a:A {id: 1}), (a)-[:T]->(b {id: 2})"
+      - "MATCH (n) RETURN count(n) AS nodes"
+    expect:
+      rows:
+        - [2]
+
+  - name: later_insert_creates_property_only_endpoint
+    statements:
+      - "INSERT (x:A {id: 1}) INSERT ({id: 2})-[:T]->(x)"
+      - "MATCH (s)-[:T]->(t:A) RETURN s.id, t.id"
+    expect:
+      rows:
+        - [2, 1]
+
+  # An INSERT after MATCH created an incoming edge to a new endpoint from an
+  # undefined variable, and attached every edge of a chain to its first node.
+  - name: insert_incoming_edge_to_a_new_endpoint_after_match
+    statements:
+      - "INSERT (:A {id: 1})"
+      - "MATCH (a:A) INSERT (a)<-[:T]-(:B {id: 2})"
+      - "MATCH (b:B)-[:T]->(a:A) RETURN b.id, a.id"
+    expect:
+      rows:
+        - [2, 1]
+
+  - name: insert_chain_after_match_follows_the_path
+    statements:
+      - "INSERT (:A {id: 1})"
+      - "MATCH (a:A) INSERT (a)-[:R]->(:C {id: 3})-[:S]->(:D {id: 4})"
+      - "MATCH (x)-[r]->(y) RETURN type(r), x.id, y.id"
+    expect:
+      rows:
+        - [R, 1, 3]
+        - [S, 3, 4]
+
+  - name: insert_incoming_chain_after_match_follows_the_path
+    statements:
+      - "INSERT (:A {id: 1})"
+      - "MATCH (a:A) INSERT (a)<-[:R]-(:C {id: 3})<-[:S]-(:D {id: 4})"
+      - "MATCH (x)-[r]->(y) RETURN type(r), x.id, y.id"
+    expect:
+      rows:
+        - [R, 3, 1]
+        - [S, 4, 3]
+
+  # A bound variable refers to its node: INSERT cannot add labels or
+  # properties to it (use SET). They used to be dropped silently, or a second
+  # node was created under the same name.
+  - name: insert_cannot_relabel_a_variable_it_created
+    query: "INSERT (n:E {id: 5}), (n:F)-[:T]->(:G {id: 6})"
+    expect:
+      error: "use SET"
+
+  - name: insert_cannot_relabel_a_matched_variable
+    setup:
+      - "INSERT (:A {id: 1})"
+    query: "MATCH (a:A) INSERT (a:X)-[:T]->(:B)"
+    expect:
+      error: "use SET"
+
+  - name: insert_cannot_relabel_a_variable_from_an_earlier_insert
+    query: "INSERT (n:E {id: 5}) INSERT (n:F)-[:T]->(:G {id: 6})"
+    expect:
+      error: "use SET"
+
+  - name: insert_cannot_relabel_a_merged_variable
+    setup:
+      - "INSERT (:A {id: 1})"
+    query: "MERGE (a:A {id: 1}) INSERT (a:X)-[:T]->(:B)"
+    expect:
+      error: "use SET"
+
+  - name: insert_after_merge_uses_the_merged_node
+    statements:
+      - "INSERT (:A {id: 1})"
+      - "MERGE (a:A {id: 1}) INSERT (a)-[:T]->(:B {id: 2})"
+      - "MATCH (n) OPTIONAL MATCH (n)-[:T]->(b) RETURN count(n), count(b)"
+    expect:
+      rows:
+        - [2, 1]

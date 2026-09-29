@@ -75,18 +75,24 @@ fn create_rich_network() -> GrafeoDB {
         )
         .unwrap();
 
-    let e1 = session.create_edge(alix, gus, "KNOWS");
-    db.set_edge_property(e1, "since", Value::Int64(2020));
-    let e2 = session.create_edge(alix, harm, "KNOWS");
-    db.set_edge_property(e2, "since", Value::Int64(2018));
-    let e3 = session.create_edge(gus, harm, "KNOWS");
-    db.set_edge_property(e3, "since", Value::Int64(2021));
-    let e4 = session.create_edge(vincent, mia, "KNOWS");
-    db.set_edge_property(e4, "since", Value::Int64(2019));
-    let e5 = session.create_edge(alix, vincent, "FOLLOWS");
-    db.set_edge_property(e5, "since", Value::Int64(2022));
-    let e6 = session.create_edge(gus, alix, "FOLLOWS");
-    db.set_edge_property(e6, "since", Value::Int64(2023));
+    let e1 = session.create_edge(alix, gus, "KNOWS").unwrap();
+    db.set_edge_property(e1, "since", Value::Int64(2020))
+        .unwrap();
+    let e2 = session.create_edge(alix, harm, "KNOWS").unwrap();
+    db.set_edge_property(e2, "since", Value::Int64(2018))
+        .unwrap();
+    let e3 = session.create_edge(gus, harm, "KNOWS").unwrap();
+    db.set_edge_property(e3, "since", Value::Int64(2021))
+        .unwrap();
+    let e4 = session.create_edge(vincent, mia, "KNOWS").unwrap();
+    db.set_edge_property(e4, "since", Value::Int64(2019))
+        .unwrap();
+    let e5 = session.create_edge(alix, vincent, "FOLLOWS").unwrap();
+    db.set_edge_property(e5, "since", Value::Int64(2022))
+        .unwrap();
+    let e6 = session.create_edge(gus, alix, "FOLLOWS").unwrap();
+    db.set_edge_property(e6, "since", Value::Int64(2023))
+        .unwrap();
 
     db
 }

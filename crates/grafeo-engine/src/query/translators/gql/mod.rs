@@ -10,9 +10,9 @@ use std::collections::{HashMap, HashSet};
 
 use super::common::{
     build_left_join_with_predicates, check_union_columns, combine_with_and, flatten_and_conjuncts,
-    is_aggregate_function, is_binary_set_function, join_and_conjuncts, references_any,
-    to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
-    wrap_sort,
+    has_all_labels, is_aggregate_function, is_binary_set_function, join_and_conjuncts,
+    references_any, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
+    wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,
@@ -1509,7 +1509,8 @@ impl GqlTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         // Extract source and target from the pattern
-        let (source_node, target_node, edge_types, direction) = match pattern {
+        let (source_node, target_node, edge_types, direction, (min_hops, max_hops)) = match pattern
+        {
             ast::Pattern::Path(path) => {
                 let target_node = if let Some(edge) = path.edges.last() {
                     &edge.target
@@ -1532,7 +1533,13 @@ impl GqlTranslator {
                             ast::EdgeDirection::Incoming => ExpandDirection::Incoming,
                             ast::EdgeDirection::Undirected => ExpandDirection::Both,
                         });
-                (&path.source, target_node, edge_types, direction)
+                // The path must fit the edge's quantifier: `->+` needs at least
+                // one hop, and an edge without one is a single hop.
+                let hop_bounds = path
+                    .edges
+                    .first()
+                    .map_or((1, Some(1)), pattern::edge_hop_bounds);
+                (&path.source, target_node, edge_types, direction, hop_bounds)
             }
             ast::Pattern::Node(_)
             | ast::Pattern::Quantified { .. }
@@ -1573,6 +1580,8 @@ impl GqlTranslator {
             direction,
             path_alias: alias.unwrap_or("_path").to_string(),
             all_paths: matches!(path_function, ast::PathFunction::AllShortestPaths),
+            min_hops,
+            max_hops,
         }))
     }
 
@@ -1821,81 +1830,48 @@ impl GqlTranslator {
         // First pattern gets input: None, subsequent ones chain via input: Some(prev).
         let mut plan: Option<LogicalOperator> = None;
         let mut last_variable = String::new();
+        // With no input rows, a variable is bound only if this INSERT created
+        // it earlier: `INSERT (a:A), (a)-[:T]->(b)` creates `a` once and `b`.
+        let mut bound: HashSet<String> = HashSet::new();
 
         for pattern in patterns {
             match pattern {
                 ast::Pattern::Node(node) => {
-                    let variable = node
-                        .variable
-                        .clone()
-                        .unwrap_or_else(|| format!("_anon_{}", rand_id()));
-
-                    let properties = node
-                        .properties
-                        .iter()
-                        .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                        .collect::<Result<Vec<_>>>()?;
-
-                    plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
-                        variable: variable.clone(),
-                        labels: node.labels.clone(),
-                        properties,
-                        input: plan.map(Box::new),
-                    }));
+                    let (variable, is_new) = pattern::insert_endpoint(node, &mut bound, true)?;
+                    if is_new {
+                        plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
+                            variable: variable.clone(),
+                            labels: node.labels.clone(),
+                            properties: self.insert_properties(&node.properties)?,
+                            input: plan.map(Box::new),
+                        }));
+                    }
                     last_variable = variable;
                 }
                 ast::Pattern::Path(path) => {
-                    // Decompose path into CreateNode + CreateEdge chain
-                    let source_var = path
-                        .source
-                        .variable
-                        .clone()
-                        .unwrap_or_else(|| format!("_anon_{}", rand_id()));
-
-                    if !path.source.labels.is_empty() {
-                        let source_props: Vec<(String, LogicalExpression)> = path
-                            .source
-                            .properties
-                            .iter()
-                            .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                            .collect::<Result<Vec<_>>>()?;
+                    let (source_var, is_new) =
+                        pattern::insert_endpoint(&path.source, &mut bound, true)?;
+                    if is_new {
                         plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
                             variable: source_var.clone(),
                             labels: path.source.labels.clone(),
-                            properties: source_props,
+                            properties: self.insert_properties(&path.source.properties)?,
                             input: plan.map(Box::new),
                         }));
                     }
 
                     let mut current_src = source_var;
                     for edge in &path.edges {
-                        let target_var = edge
-                            .target
-                            .variable
-                            .clone()
-                            .unwrap_or_else(|| format!("_anon_{}", rand_id()));
-
-                        if !edge.target.labels.is_empty() {
-                            let target_props: Vec<(String, LogicalExpression)> = edge
-                                .target
-                                .properties
-                                .iter()
-                                .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                                .collect::<Result<Vec<_>>>()?;
+                        let (target_var, is_new) =
+                            pattern::insert_endpoint(&edge.target, &mut bound, true)?;
+                        if is_new {
                             plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
                                 variable: target_var.clone(),
                                 labels: edge.target.labels.clone(),
-                                properties: target_props,
+                                properties: self.insert_properties(&edge.target.properties)?,
                                 input: plan.map(Box::new),
                             }));
                         }
-
-                        let edge_type = edge.types.first().cloned().unwrap_or_default();
-                        let edge_props: Vec<(String, LogicalExpression)> = edge
-                            .properties
-                            .iter()
-                            .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                            .collect::<Result<Vec<_>>>()?;
 
                         let (from, to) = match edge.direction {
                             ast::EdgeDirection::Incoming => (target_var.clone(), current_src),
@@ -1904,10 +1880,10 @@ impl GqlTranslator {
 
                         plan = Some(LogicalOperator::CreateEdge(CreateEdgeOp {
                             variable: edge.variable.clone(),
-                            edge_type,
+                            edge_type: edge.types.first().cloned().unwrap_or_default(),
                             from_variable: from,
                             to_variable: to,
-                            properties: edge_props,
+                            properties: self.insert_properties(&edge.properties)?,
                             input: Box::new(plan.unwrap_or(LogicalOperator::Empty)),
                         }));
                         last_variable.clone_from(&target_var);

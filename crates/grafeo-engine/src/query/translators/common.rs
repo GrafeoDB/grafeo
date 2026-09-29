@@ -11,6 +11,7 @@ use crate::query::plan::{
     AggregateFunction, BinaryOp, CountExpr, DistinctOp, FilterOp, LeftJoinOp, LimitOp,
     LogicalExpression, LogicalOperator, ReturnItem, ReturnOp, SkipOp, SortKey, SortOp, UnaryOp,
 };
+use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 
 /// Returns true if the function name is a recognized aggregate function.
@@ -217,9 +218,49 @@ pub(crate) fn combine_with_and(predicates: Vec<LogicalExpression>) -> Result<Log
         })
 }
 
+/// `hasLabel(variable, label)` for every label, combined with AND, or `None`
+/// when `labels` is empty. A node pattern with several labels requires all of
+/// them, wherever the node appears in a pattern.
+pub(crate) fn has_all_labels(variable: &str, labels: &[String]) -> Option<LogicalExpression> {
+    labels
+        .iter()
+        .map(|label| LogicalExpression::FunctionCall {
+            name: "hasLabel".into(),
+            args: vec![
+                LogicalExpression::Variable(variable.to_string()),
+                LogicalExpression::Literal(Value::String(label.clone().into())),
+            ],
+            distinct: false,
+        })
+        .reduce(|acc, check| LogicalExpression::Binary {
+            left: Box::new(acc),
+            op: BinaryOp::And,
+            right: Box::new(check),
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Variable extraction
 // ---------------------------------------------------------------------------
+
+/// `all(hop IN edges(path) WHERE predicate)`: a property map on a
+/// variable-length edge must hold for every edge of the path.
+pub(crate) fn every_edge_matches(
+    path: String,
+    hop: String,
+    predicate: LogicalExpression,
+) -> LogicalExpression {
+    LogicalExpression::ListPredicate {
+        kind: crate::query::plan::ListPredicateKind::All,
+        variable: hop,
+        list_expr: Box::new(LogicalExpression::FunctionCall {
+            name: "edges".into(),
+            args: vec![LogicalExpression::Variable(path)],
+            distinct: false,
+        }),
+        predicate: Box::new(predicate),
+    }
+}
 
 /// Collects all variable names referenced by a logical expression.
 pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut HashSet<String>) {

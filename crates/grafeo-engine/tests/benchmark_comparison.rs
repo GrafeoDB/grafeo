@@ -27,7 +27,9 @@ fn setup_graph_with_config(node_count: usize, avg_degree: usize, config: Config)
         let src_idx = i % node_count;
         let dst_idx = (src_idx + 1 + (i / node_count)) % node_count;
         if src_idx != dst_idx {
-            session.create_edge(nodes[src_idx], nodes[dst_idx], "KNOWS");
+            session
+                .create_edge(nodes[src_idx], nodes[dst_idx], "KNOWS")
+                .unwrap();
         }
     }
 

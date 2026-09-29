@@ -2,7 +2,7 @@
 #
 # Covers: temporal literal value assertions, hour/minute/second extraction,
 # date arithmetic, date comparison in WHERE, timestamp/current_date/current_time,
-# date_trunc, date minus date.
+# date_trunc, date minus date, temporal equality in expressions (=, <>, IN).
 
 meta:
   language: gql
@@ -348,3 +348,9 @@ tests:
     expect:
       rows:
         - [launch]
+
+  - name: offset_time_equality_compares_instants
+    query: "RETURN time('14:00:00+01:00') = time('13:00:00Z') AS same_instant, time('14:00:00+01:00') = time('14:00:00Z') AS different, time('14:00:00') = time('14:00:00+01:00') AS local_vs_offset"
+    expect:
+      rows:
+        - [true, false, false]

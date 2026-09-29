@@ -77,12 +77,12 @@ fn create_call_test_graph() -> GrafeoDB {
         )
         .unwrap();
 
-    session.create_edge(alix, gus, "KNOWS");
-    session.create_edge(alix, vincent, "KNOWS");
-    session.create_edge(gus, vincent, "KNOWS");
-    session.create_edge(vincent, mia, "KNOWS");
-    session.create_edge(alix, jules, "FOLLOWS");
-    session.create_edge(jules, gus, "FOLLOWS");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
+    session.create_edge(alix, vincent, "KNOWS").unwrap();
+    session.create_edge(gus, vincent, "KNOWS").unwrap();
+    session.create_edge(vincent, mia, "KNOWS").unwrap();
+    session.create_edge(alix, jules, "FOLLOWS").unwrap();
+    session.create_edge(jules, gus, "FOLLOWS").unwrap();
 
     db
 }
@@ -500,7 +500,7 @@ fn test_call_connected_components_disconnected() {
     session
         .create_node_with_props(&["Person"], [("name", Value::String("Vincent".into()))])
         .unwrap();
-    session.create_edge(alix, gus, "KNOWS");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
 
     let result = session
         .execute_sql("CALL grafeo.connected_components()")

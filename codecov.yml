@@ -56,16 +56,20 @@ component_management:
     - component_id: grafeo-common
       name: Common (types, allocators, hashing)
       paths:
-        - crates/common/src/**
+        - crates/grafeo-common/src/**
     - component_id: grafeo-core
       name: Core (storage, indexes, execution)
       paths:
-        - crates/core/src/**
+        - crates/grafeo-core/src/**
+    - component_id: grafeo-storage
+      name: Storage (WAL, container, crash safety)
+      paths:
+        - crates/grafeo-storage/src/**
     - component_id: grafeo-adapters
       name: Adapters (parsers, algorithms, plugins)
       paths:
-        - crates/adapters/src/**
+        - crates/grafeo-adapters/src/**
     - component_id: grafeo-engine
       name: Engine (database, sessions, transactions)
       paths:
-        - crates/engine/src/**
+        - crates/grafeo-engine/src/**

@@ -1,7 +1,7 @@
 name: Feature Request
 description: Suggest a new feature for Grafeo
 title: "[Feature]: "
-labels: ["enhancement"]
+type: Feature
 body:
   - type: textarea
     id: description

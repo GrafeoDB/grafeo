@@ -15,20 +15,25 @@ fn setup_db() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
 
     // Create 5 nodes with varied vectors
-    let n1 = db.create_node(&["Doc"]);
-    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0));
+    let n1 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0))
+        .unwrap();
 
-    let n2 = db.create_node(&["Doc"]);
-    db.set_node_property(n2, "emb", vec3(0.95, 0.05, 0.0)); // very similar to n1
+    let n2 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n2, "emb", vec3(0.95, 0.05, 0.0))
+        .unwrap(); // very similar to n1
 
-    let n3 = db.create_node(&["Doc"]);
-    db.set_node_property(n3, "emb", vec3(0.0, 1.0, 0.0)); // orthogonal
+    let n3 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n3, "emb", vec3(0.0, 1.0, 0.0))
+        .unwrap(); // orthogonal
 
-    let n4 = db.create_node(&["Doc"]);
-    db.set_node_property(n4, "emb", vec3(0.0, 0.0, 1.0)); // orthogonal
+    let n4 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n4, "emb", vec3(0.0, 0.0, 1.0))
+        .unwrap(); // orthogonal
 
-    let n5 = db.create_node(&["Doc"]);
-    db.set_node_property(n5, "emb", vec3(0.9, 0.1, 0.0)); // similar to n1
+    let n5 = db.create_node(&["Doc"]).unwrap();
+    db.set_node_property(n5, "emb", vec3(0.9, 0.1, 0.0))
+        .unwrap(); // similar to n1
 
     db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
         .expect("create index");

@@ -14,7 +14,8 @@ use grafeo_common::storage::section::{Section, SectionType};
 use grafeo_common::utils::error::{Error, Result};
 
 use crate::catalog::{
-    Catalog, EdgeTypeDefinition, GraphTypeDefinition, NodeTypeDefinition, ProcedureDefinition,
+    Catalog, ConstraintDefinition, EdgeTypeDefinition, GraphTypeDefinition, NodeTypeDefinition,
+    ProcedureDefinition,
 };
 
 /// Current catalog section format version.
@@ -38,6 +39,16 @@ struct SnapshotSchema {
     procedures: Vec<ProcedureDefinition>,
     schemas: Vec<String>,
     graph_type_bindings: Vec<(String, String)>,
+}
+
+/// Named constraints, appended after the version 1 snapshot when there are
+/// any (#420). Readers before 0.5.44 decode the snapshot and ignore the bytes
+/// after it, so they still open the file; their constraints keep working
+/// through the node types, without names. The version 2 layout (#517) holds
+/// them explicitly.
+#[derive(Serialize, Deserialize)]
+struct ConstraintNames {
+    constraints: Vec<ConstraintDefinition>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -169,24 +180,36 @@ impl Section for CatalogSection {
     }
 
     fn serialize(&self) -> Result<Vec<u8>> {
+        // The names and the node types that enforce them, from one moment.
+        let (schema, constraints) = self
+            .catalog
+            .with_constraints(|constraints| (self.collect_schema(), constraints));
         let snapshot = CatalogSnapshot {
             version: CATALOG_SECTION_VERSION,
-            schema: self.collect_schema(),
+            schema,
             indexes: self.collect_indexes(),
             epoch: (self.epoch_fn)(),
         };
 
         let config = bincode::config::standard();
-        bincode::serde::encode_to_vec(&snapshot, config)
-            .map_err(|e| Error::Internal(format!("Catalog section serialization failed: {e}")))
+        let mut bytes = bincode::serde::encode_to_vec(&snapshot, config)
+            .map_err(|e| Error::Internal(format!("Catalog section serialization failed: {e}")))?;
+        if !constraints.is_empty() {
+            let names = bincode::serde::encode_to_vec(ConstraintNames { constraints }, config)
+                .map_err(|e| {
+                    Error::Internal(format!("Constraint name serialization failed: {e}"))
+                })?;
+            bytes.extend_from_slice(&names);
+        }
+        Ok(bytes)
     }
 
     fn deserialize(&mut self, data: &[u8]) -> Result<()> {
         let config = bincode::config::standard();
-        let (snapshot, _): (CatalogSnapshot, _) = bincode::serde::decode_from_slice(data, config)
-            .map_err(|e| {
-            Error::Serialization(format!("Catalog section deserialization failed: {e}"))
-        })?;
+        let (snapshot, read): (CatalogSnapshot, _) =
+            bincode::serde::decode_from_slice(data, config).map_err(|e| {
+                Error::Serialization(format!("Catalog section deserialization failed: {e}"))
+            })?;
 
         // Restore schema definitions
         for def in &snapshot.schema.node_types {
@@ -208,6 +231,14 @@ impl Section for CatalogSection {
         }
         for (graph_name, type_name) in &snapshot.schema.graph_type_bindings {
             let _ = self.catalog.bind_graph_type(graph_name, type_name.clone());
+        }
+        // The node types restored above already hold the constraints.
+        if read < data.len() {
+            let (names, _): (ConstraintNames, _) =
+                bincode::serde::decode_from_slice(&data[read..], config).map_err(|e| {
+                    Error::Serialization(format!("Constraint names deserialization failed: {e}"))
+                })?;
+            self.catalog.restore_constraint_names(names.constraints);
         }
 
         // Index metadata is stored for reference. Actual index rebuilding
@@ -254,6 +285,101 @@ mod tests {
         section2
             .deserialize(&bytes)
             .expect("deserialize empty catalog");
+    }
+
+    /// Named constraints follow the version 1 snapshot: they come back with
+    /// their names, and a reader that only knows the snapshot (0.5.43)
+    /// still decodes it (#420).
+    #[test]
+    fn constraint_names_follow_the_v1_snapshot() {
+        use crate::catalog::{ConstraintType, TypeConstraint};
+
+        let section = make_section();
+        let city_name = ConstraintDefinition {
+            name: "city_name".to_string(),
+            label: "City".to_string(),
+            properties: vec!["name".to_string()],
+            kind: ConstraintType::Unique,
+        };
+        section
+            .catalog
+            .create_constraint(city_name.clone())
+            .unwrap();
+        let bytes = section.serialize().unwrap();
+
+        let config = bincode::config::standard();
+        let (_, read): (CatalogSnapshot, _) =
+            bincode::serde::decode_from_slice(&bytes, config).unwrap();
+        assert!(read < bytes.len(), "the names follow the snapshot");
+
+        let catalog = Arc::new(Catalog::new());
+        let store = Arc::new(grafeo_core::graph::lpg::LpgStore::new().unwrap());
+        let mut reopened = CatalogSection::new(Arc::clone(&catalog), store, || 0);
+        reopened.deserialize(&bytes).unwrap();
+        assert_eq!(catalog.constraints(), vec![city_name]);
+        assert_eq!(
+            catalog.get_node_type("City").unwrap().constraints,
+            vec![TypeConstraint::Unique(vec!["name".to_string()])],
+            "the constraint comes back once, from the node type"
+        );
+        catalog.drop_constraint("city_name").unwrap();
+        assert!(
+            catalog
+                .get_node_type("City")
+                .unwrap()
+                .constraints
+                .is_empty()
+        );
+    }
+
+    /// A checkpoint sees the constraint names and the node types that enforce
+    /// them from one moment: with `CREATE CONSTRAINT` running at the same
+    /// time, a name saved without its type constraint would be unenforced
+    /// after a reopen, and one saved without its name could not be dropped.
+    #[test]
+    fn serialized_constraint_names_match_the_node_types() {
+        use crate::catalog::{ConstraintType, TypeConstraint};
+
+        let section = make_section();
+        let catalog = Arc::clone(&section.catalog);
+        let writer = std::thread::spawn(move || {
+            for _ in 0..3_000 {
+                catalog
+                    .create_constraint(ConstraintDefinition {
+                        name: "city_name".to_string(),
+                        label: "City".to_string(),
+                        properties: vec!["name".to_string()],
+                        kind: ConstraintType::Unique,
+                    })
+                    .unwrap();
+                catalog.drop_constraint("city_name").unwrap();
+            }
+        });
+
+        let config = bincode::config::standard();
+        let unique_name = TypeConstraint::Unique(vec!["name".to_string()]);
+        while !writer.is_finished() {
+            let bytes = section.serialize().unwrap();
+            let (snapshot, read): (CatalogSnapshot, _) =
+                bincode::serde::decode_from_slice(&bytes, config).unwrap();
+            let names = if read < bytes.len() {
+                let (names, _): (ConstraintNames, _) =
+                    bincode::serde::decode_from_slice(&bytes[read..], config).unwrap();
+                names.constraints.len()
+            } else {
+                0
+            };
+            let enforced = snapshot
+                .schema
+                .node_types
+                .iter()
+                .filter(|def| def.name == "City")
+                .flat_map(|def| &def.constraints)
+                .filter(|constraint| **constraint == unique_name)
+                .count();
+            assert_eq!(names, enforced, "names and type constraints differ");
+        }
+        writer.join().unwrap();
     }
 
     #[test]

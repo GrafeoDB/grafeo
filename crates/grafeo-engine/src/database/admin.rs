@@ -379,7 +379,8 @@ impl super::GrafeoDB {
 
     /// Forces a WAL checkpoint.
     ///
-    /// Flushes all pending WAL records to the main storage.
+    /// Flushes all pending WAL records to the main storage. In WAL-directory
+    /// databases the WAL is the only copy of the data, so this only syncs it.
     ///
     /// # Errors
     ///
@@ -391,21 +392,28 @@ impl super::GrafeoDB {
             return Ok(());
         }
 
+        // WAL-directory mode: a checkpoint record would make recovery skip,
+        // and truncation delete, WAL files that exist nowhere else (#419).
         #[cfg(feature = "wal")]
-        if let Some(ref wal) = self.wal {
-            let epoch = self.lpg_store().current_epoch();
-            let transaction_id = self
-                .transaction_manager
-                .last_assigned_transaction_id()
-                .unwrap_or_else(|| self.transaction_manager.begin());
-            wal.checkpoint(transaction_id, epoch)?;
-            wal.sync()?;
+        {
+            #[cfg(feature = "grafeo-file")]
+            let has_snapshot = self.file_manager.is_some();
+            #[cfg(not(feature = "grafeo-file"))]
+            let has_snapshot = false;
+
+            if !has_snapshot {
+                if let Some(ref wal) = self.wal {
+                    wal.sync()?;
+                }
+                return Ok(());
+            }
         }
 
-        // Flush all sections to .grafeo file (explicit checkpoint)
+        // Flush all sections to the .grafeo file. The flush marks and truncates
+        // the WAL only once the file is durable (#417).
         #[cfg(feature = "grafeo-file")]
         if let Some(ref fm) = self.file_manager {
-            let _ = self.checkpoint_to_file(fm, super::flush::FlushReason::Explicit)?;
+            let _ = self.checkpoint_to_file(fm)?;
         }
 
         Ok(())

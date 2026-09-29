@@ -12,17 +12,14 @@ impl LpgStore {
         Arc::clone(&self.statistics.read())
     }
 
-    /// Recomputes statistics if they are stale (i.e., after mutations).
+    /// Rebuilds the statistics from the live counters.
     ///
-    /// Call this before reading statistics for query optimization.
-    /// Avoids redundant recomputation if no mutations occurred.
+    /// Call this before reading statistics for query optimization. The
+    /// counters are exact after commits and rollbacks, so this never scans
+    /// the store.
     #[doc(hidden)]
     pub fn ensure_statistics_fresh(&self) {
-        if self.needs_stats_recompute.swap(false, Ordering::Relaxed) {
-            self.recompute_statistics_full();
-        } else {
-            self.compute_statistics();
-        }
+        self.compute_statistics();
     }
 
     /// Recomputes statistics from incremental counters.
@@ -90,106 +87,6 @@ impl LpgStore {
         *self.statistics.write() = Arc::new(stats);
     }
 
-    /// Full recomputation from storage: used after rollback when counters
-    /// may be out of sync. Also resyncs the atomic counters.
-    #[cfg(not(feature = "tiered-storage"))]
-    fn recompute_statistics_full(&self) {
-        let epoch = self.current_epoch();
-
-        // Full-scan node count
-        let total_nodes = self
-            .nodes
-            .read()
-            .values()
-            .filter_map(|chain| chain.visible_at(epoch))
-            .filter(|r| !r.is_deleted())
-            .count();
-
-        // Full-scan edge count and per-type counts
-        let edges = self.edges.read();
-        let mut total_edges: i64 = 0;
-        let id_to_edge_type = self.id_to_edge_type.read();
-        let mut type_counts = vec![0i64; id_to_edge_type.len()];
-
-        for chain in edges.values() {
-            if let Some(record) = chain.visible_at(epoch)
-                && !record.is_deleted()
-            {
-                total_edges += 1;
-                if (record.type_id as usize) < type_counts.len() {
-                    type_counts[record.type_id as usize] += 1;
-                }
-            }
-        }
-
-        // Resync the atomic counters
-        self.live_node_count.store(
-            i64::try_from(total_nodes).unwrap_or(i64::MAX),
-            Ordering::Relaxed,
-        );
-        self.live_edge_count.store(total_edges, Ordering::Relaxed);
-        *self.edge_type_live_counts.write() = type_counts;
-
-        drop(edges);
-        drop(id_to_edge_type);
-
-        // Now use the normal incremental path to build statistics
-        self.compute_statistics();
-    }
-
-    /// Full recomputation from storage: used after rollback when counters
-    /// may be out of sync. Also resyncs the atomic counters.
-    /// (Tiered storage version)
-    #[cfg(feature = "tiered-storage")]
-    fn recompute_statistics_full(&self) {
-        let epoch = self.current_epoch();
-
-        // Full-scan node count
-        let versions = self.node_versions.read();
-        let total_nodes = versions
-            .iter()
-            .filter(|(_, index)| {
-                index.visible_at(epoch).map_or(false, |vref| {
-                    self.read_node_record(&vref)
-                        .map_or(false, |r| !r.is_deleted())
-                })
-            })
-            .count();
-        drop(versions);
-
-        // Full-scan edge count and per-type counts
-        let edge_versions = self.edge_versions.read();
-        let id_to_edge_type = self.id_to_edge_type.read();
-        let mut total_edges: i64 = 0;
-        let mut type_counts = vec![0i64; id_to_edge_type.len()];
-
-        for index in edge_versions.values() {
-            if let Some(vref) = index.visible_at(epoch)
-                && let Some(record) = self.read_edge_record(&vref)
-                && !record.is_deleted()
-            {
-                total_edges += 1;
-                if (record.type_id as usize) < type_counts.len() {
-                    type_counts[record.type_id as usize] += 1;
-                }
-            }
-        }
-
-        // Resync the atomic counters
-        self.live_node_count.store(
-            i64::try_from(total_nodes).unwrap_or(i64::MAX),
-            Ordering::Relaxed,
-        );
-        self.live_edge_count.store(total_edges, Ordering::Relaxed);
-        *self.edge_type_live_counts.write() = type_counts;
-
-        drop(edge_versions);
-        drop(id_to_edge_type);
-
-        // Now use the normal incremental path to build statistics
-        self.compute_statistics();
-    }
-
     /// Estimates cardinality for a label scan.
     #[must_use]
     pub fn estimate_label_cardinality(&self, label: &str) -> f64 {
@@ -235,30 +132,11 @@ mod tests {
     }
 
     #[test]
-    fn ensure_statistics_fresh_uses_incremental_path_when_not_stale() {
+    fn ensure_statistics_fresh_counts_live_nodes() {
         let store = make_store();
         store.create_node(&["X"]);
-        // No mutation flag set, should use incremental path
         store.ensure_statistics_fresh();
         assert_eq!(store.statistics().total_nodes, 1);
-    }
-
-    #[test]
-    fn ensure_statistics_fresh_does_full_recompute_when_stale() {
-        let store = make_store();
-        store.create_node(&["Y"]);
-        // Force the stale flag
-        store
-            .needs_stats_recompute
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        store.ensure_statistics_fresh();
-        assert_eq!(store.statistics().total_nodes, 1);
-        // Flag should now be cleared
-        assert!(
-            !store
-                .needs_stats_recompute
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
     }
 
     #[test]

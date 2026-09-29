@@ -259,10 +259,10 @@ class TestPropertyIndex:
         # A deleted node used to stay in the index, and a re-created node with
         # the same key was returned together with the deleted one.
         db.create_property_index("id")
-        db.execute_cypher("CREATE (:Graph:File {id: 'a'})", {})
+        db.execute("INSERT (:Graph:File {id: 'a'})")
         assert len(db.find_nodes_by_property("id", "a")) == 1
 
-        db.execute_cypher("MATCH (n:Graph) WHERE n.id = 'a' DETACH DELETE n", {})
+        db.execute("MATCH (n:Graph) WHERE n.id = 'a' DETACH DELETE n")
         assert db.find_nodes_by_property("id", "a") == []
 
         node = db.create_node(["Graph", "File"], {"id": "a"})
@@ -365,6 +365,7 @@ class TestEdgeCrud:
     def test_delete_node(self, populated_db):
         db = populated_db["db"]
         nid = populated_db["gus"].id
+        assert db.delete_edge(populated_db["edge"].id) is True
         deleted = db.delete_node(nid)
         assert deleted is True
         assert db.get_node(nid) is None
@@ -515,6 +516,27 @@ class TestDatetimeConversion:
         dt = datetime(2024, 6, 15, 14, 30, 0, tzinfo=amsterdam_summer)
         assert self.roundtrip(db, dt) == datetime(2024, 6, 15, 12, 30, 0)
 
+    def test_aware_datetime_near_the_limits_roundtrips(self, db):
+        dt = datetime(1, 1, 1, 2, 30, 0, tzinfo=timezone(timedelta(hours=1)))
+        assert self.roundtrip(db, dt) == datetime(1, 1, 1, 1, 30, 0)
+        dt = datetime(9999, 12, 31, 21, 30, 0, tzinfo=timezone(timedelta(hours=-2)))
+        assert self.roundtrip(db, dt) == datetime(9999, 12, 31, 23, 30, 0)
+
+    @pytest.mark.parametrize(
+        "dt",
+        [
+            datetime(1, 1, 1, 0, 30, 0, tzinfo=timezone(timedelta(hours=1))),
+            datetime(9999, 12, 31, 23, 30, 0, tzinfo=timezone(timedelta(hours=-1))),
+        ],
+    )
+    def test_aware_datetime_outside_python_range_is_rejected(self, db, dt):
+        # Its UTC time falls in year 0 or 10000: it could never be read back.
+        with pytest.raises(ValueError, match="year 1 to 9999"):
+            db.create_node(["T"], {"val": dt})
+        with pytest.raises(ValueError, match="year 1 to 9999"):
+            db.execute("RETURN $t AS t", {"t": dt})
+        assert db.node_count == 0
+
     def test_microseconds_are_kept(self, db):
         dt = datetime(2024, 6, 15, 12, 30, 0, 123457)
         assert self.roundtrip(db, dt) == dt
@@ -549,13 +571,27 @@ class TestErrorHandling:
         node = db.get_node(999999)
         assert node is None
 
-    def test_set_property_nonexistent_node_silent(self, db):
-        # Setting property on nonexistent node succeeds silently
-        db.set_node_property(999999, "key", "value")
+    def test_set_property_nonexistent_node_raises(self, db):
+        with pytest.raises(Exception, match="node 999999 does not exist"):
+            db.set_node_property(999999, "key", "value")
 
-    def test_set_property_nonexistent_edge_silent(self, db):
-        # Setting property on nonexistent edge succeeds silently
-        db.set_edge_property(999999, "key", "value")
+    def test_set_property_nonexistent_edge_raises(self, db):
+        with pytest.raises(Exception, match="edge 999999 does not exist"):
+            db.set_edge_property(999999, "key", "value")
+
+    def test_create_edge_to_a_nonexistent_node_raises(self, db):
+        alix = db.create_node(["Person"], {"name": "Alix"})
+        with pytest.raises(Exception, match="node 999999 does not exist"):
+            db.create_edge(alix.id, 999999, "KNOWS")
+        assert db.edge_count == 0
+
+    def test_delete_node_with_edges_raises(self, db):
+        alix = db.create_node(["Person"], {"name": "Alix"})
+        gus = db.create_node(["Person"], {"name": "Gus"})
+        db.create_edge(alix.id, gus.id, "KNOWS")
+        with pytest.raises(Exception, match="DETACH DELETE"):
+            db.delete_node(alix.id)
+        assert db.get_node(alix.id) is not None
 
     def test_double_close(self, db):
         db.close()

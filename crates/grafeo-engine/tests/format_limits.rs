@@ -33,8 +33,8 @@ mod tests {
             // direct `db.create_node` writes are covered by the WAL tests.
             let mut session = db.session();
             session.begin_transaction().unwrap();
-            let node = session.create_node(&label_refs);
-            session.create_node(&["Person"]);
+            let node = session.create_node(&label_refs).unwrap();
+            session.create_node(&["Person"]).unwrap();
             session.commit().unwrap();
 
             let err = db

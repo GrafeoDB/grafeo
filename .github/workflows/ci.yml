@@ -140,7 +140,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -166,7 +166,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.22'
           cache: false
@@ -251,7 +251,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -296,7 +296,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Configure sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -341,7 +341,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Configure sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -416,7 +416,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Configure sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -527,8 +527,8 @@ jobs:
           verbose: true
 
   # Python tests
-  # Default profile: maturin builds grafeo-python with its crate-level default
-  # features, which pull in "full" (all languages + AI) via grafeo-engine.
+  # Release profile: maturin builds grafeo-python with the feature list of
+  # pyproject.toml ("full": all languages + AI), like the published wheels.
   python-test:
     name: Python Test (${{ matrix.os }}, Python ${{ matrix.python }})
     needs: [python-spec]
@@ -577,6 +577,9 @@ jobs:
           uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor
 
       - name: Run Python tests
+        env:
+          # The wheel above has the release features: check every language is in.
+          GRAFEO_RELEASE_BUILD: "1"
         run: pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py
 
   # Node.js tests
@@ -595,7 +598,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
 
@@ -640,7 +643,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.22'
           cache: false
@@ -1004,4 +1007,74 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: crate-ci/typos@v1.48.0
+      - uses: crate-ci/typos@v1.50.3
+
+  # Repository policy (scripts/check_policy.py): crate boundaries from cargo metadata,
+  # workflow toolchain pins that match rust-toolchain.toml and the MSRV, and the
+  # public-text rules, plus the script's own tests. Rules on added lines run locally
+  # (prek) and on pull requests.
+  policy:
+    name: Policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - uses: astral-sh/setup-uv@v7
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-registry-
+      - name: Whole-tree rules
+        run: python scripts/check_policy.py tree
+      - name: Policy script tests
+        run: |
+          uv pip install --system pytest
+          pytest scripts/tests -q
+
+  # The one check to require on main and release/*: fails when any job it needs failed
+  # or was cancelled. Skipped jobs pass (they skip when an earlier job already failed,
+  # which fails this gate through that job). Coverage and benchmarks stay informational.
+  ci-gate:
+    name: CI Gate
+    if: always()
+    needs:
+      - rust-check
+      - rust-spec
+      - python-spec
+      - node-spec
+      - go-spec
+      - csharp-spec
+      - dart-spec
+      - wasm-spec
+      - rust-test
+      - rust-test-release
+      - rust-feature-matrix
+      - miri
+      - python-test
+      - node-test
+      - go-test
+      - csharp-test
+      - dart-test
+      - wasm-build
+      - supply-chain
+      - msrv
+      - typos
+      - policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check required jobs
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' | sort
+          failed=$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')
+          if [ -n "$failed" ]; then
+            echo "::error::Required jobs failed or were cancelled: $(echo $failed | tr '\n' ' ')"
+            exit 1
+          fi

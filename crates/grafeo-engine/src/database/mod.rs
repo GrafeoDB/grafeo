@@ -36,6 +36,10 @@ mod embed;
 #[cfg(feature = "grafeo-file")]
 pub(crate) mod flush;
 #[cfg(feature = "lpg")]
+mod graph_handle;
+#[cfg(feature = "lpg")]
+pub use graph_handle::GraphHandle;
+#[cfg(feature = "lpg")]
 mod import;
 #[cfg(feature = "lpg")]
 mod index;
@@ -44,6 +48,8 @@ mod persistence;
 mod query;
 #[cfg(feature = "triple-store")]
 mod rdf_ops;
+#[cfg(all(feature = "wal", feature = "lpg"))]
+mod schema_replay;
 #[cfg(feature = "lpg")]
 mod search;
 pub(crate) mod section_consumer;
@@ -118,11 +124,11 @@ pub struct GrafeoDB {
     /// Write-ahead log manager (if durability is enabled).
     #[cfg(feature = "wal")]
     pub(super) wal: Option<Arc<LpgWal>>,
-    /// Shared WAL graph context tracker. Tracks which named graph was last
-    /// written to the WAL, so concurrent sessions can emit `SwitchGraph`
-    /// records only when the context actually changes.
+    /// Exclusive lock on a WAL-directory database, held until `close()` so a
+    /// second open cannot overwrite this one's data (#405). `.grafeo` files
+    /// lock themselves through the file manager.
     #[cfg(feature = "wal")]
-    pub(super) wal_graph_context: Arc<parking_lot::Mutex<Option<String>>>,
+    directory_lock: parking_lot::Mutex<Option<grafeo_storage::lock::DirectoryLock>>,
     /// Query cache for parsed and optimized plans.
     pub(super) query_cache: Arc<QueryCache>,
     /// Shared commit counter for auto-GC across sessions.
@@ -146,6 +152,10 @@ pub struct GrafeoDB {
     /// Wrapped in Mutex because `close()` takes `&self` but needs to stop the timer.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     checkpoint_timer: parking_lot::Mutex<Option<checkpoint_timer::CheckpointTimer>>,
+    /// Syncs the WAL in the background under `DurabilityMode::Adaptive`.
+    /// Wrapped in Mutex because `close()` takes `&self` but stops it.
+    #[cfg(feature = "wal")]
+    wal_flusher: parking_lot::Mutex<Option<grafeo_storage::wal::AdaptiveFlusher>>,
     /// Shared registry of spilled vector storages.
     /// Used by the search path to create `SpillableVectorAccessor` instances.
     #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
@@ -397,6 +407,15 @@ impl GrafeoDB {
             Vec<grafeo_common::types::EdgeId>,
         )> = None;
 
+        // What WAL recovery found at the end of the log, applied once the WAL
+        // is open (#411): a torn tail must be sealed before anything new is
+        // logged, and a log that ends inside a named graph must switch back
+        // to the default graph, where every new group starts.
+        #[cfg(all(feature = "wal", feature = "lpg"))]
+        let mut wal_torn_tail = false;
+        #[cfg(all(feature = "wal", feature = "lpg"))]
+        let mut wal_in_named_graph = false;
+
         // --- Single-file format (.grafeo) ---
         #[cfg(feature = "grafeo-file")]
         let file_manager: Option<Arc<GrafeoFileManager>> = if is_read_only {
@@ -494,14 +513,16 @@ impl GrafeoDB {
                 #[cfg(all(feature = "wal", feature = "lpg"))]
                 if config.wal_enabled && fm.has_sidecar_wal() {
                     let recovery = WalRecovery::new(fm.sidecar_wal_path());
-                    let records = recovery.recover()?;
+                    let recovered = recovery.recover_with_tail()?;
                     Self::apply_wal_records(
                         &store,
                         &catalog,
                         #[cfg(feature = "triple-store")]
                         &rdf_store,
-                        &records,
+                        &recovered.records,
                     )?;
+                    wal_torn_tail = recovered.torn_tail;
+                    wal_in_named_graph = Self::ends_in_named_graph(&recovered.records);
                 }
 
                 Some(Arc::new(fm))
@@ -510,6 +531,25 @@ impl GrafeoDB {
             }
         } else {
             None
+        };
+
+        // WAL-directory databases have no file to lock: lock the directory
+        // before recovery so a second open fails instead of later overwriting
+        // this one's data (#405).
+        #[cfg(feature = "wal")]
+        let directory_lock = match config.path {
+            Some(ref db_path) if !is_read_only && config.wal_enabled => {
+                #[cfg(feature = "grafeo-file")]
+                let is_single_file = file_manager.is_some();
+                #[cfg(not(feature = "grafeo-file"))]
+                let is_single_file = false;
+                if is_single_file {
+                    None
+                } else {
+                    Some(grafeo_storage::lock::DirectoryLock::acquire(db_path)?)
+                }
+            }
+            _ => None,
         };
 
         // Determine whether to use the WAL directory path (legacy) or sidecar
@@ -543,17 +583,21 @@ impl GrafeoDB {
                 #[cfg(all(feature = "lpg", not(feature = "grafeo-file")))]
                 let is_single_file = false;
 
+                // The WAL is the only copy of the data here, so replay every
+                // file even if an older version left checkpoint metadata (#419).
                 #[cfg(feature = "lpg")]
                 if !is_single_file && wal_path.exists() {
                     let recovery = WalRecovery::new(&wal_path);
-                    let records = recovery.recover()?;
+                    let recovered = recovery.recover_all_with_tail()?;
                     Self::apply_wal_records(
                         &store,
                         &catalog,
                         #[cfg(feature = "triple-store")]
                         &rdf_store,
-                        &records,
+                        &recovered.records,
                     )?;
+                    wal_torn_tail = recovered.torn_tail;
+                    wal_in_named_graph = Self::ends_in_named_graph(&recovered.records);
                 }
 
                 // Open/create WAL manager with configured durability
@@ -576,12 +620,34 @@ impl GrafeoDB {
                     ..WalConfig::default()
                 };
                 let wal_manager = LpgWal::with_config(&wal_path, wal_config)?;
+                #[cfg(feature = "lpg")]
+                {
+                    if wal_torn_tail {
+                        wal_manager.seal_torn_tail()?;
+                    }
+                    if wal_in_named_graph {
+                        wal_manager.log(&WalRecord::SwitchGraph { name: None })?;
+                    }
+                }
                 Some(Arc::new(wal_manager))
             } else {
                 None
             }
         } else {
             None
+        };
+
+        // `Adaptive` leaves syncing the WAL to a background flusher.
+        #[cfg(feature = "wal")]
+        let wal_flusher = match (&wal, config.wal_durability) {
+            (Some(wal), crate::config::DurabilityMode::Adaptive { target_interval_ms }) => {
+                let wal = Arc::clone(wal);
+                Some(grafeo_storage::wal::AdaptiveFlusher::with_sync(
+                    move || wal.sync(),
+                    target_interval_ms,
+                )?)
+            }
+            _ => None,
         };
 
         // Create query cache with default capacity (1000 queries)
@@ -597,21 +663,6 @@ impl GrafeoDB {
         #[cfg(feature = "cdc")]
         let cdc_retention = config.cdc_retention.clone();
 
-        // Clone Arcs for the checkpoint timer before moving originals into the struct.
-        // The timer captures its own references and runs in a background thread.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        let checkpoint_interval = config.checkpoint_interval;
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        let timer_store = Arc::clone(&store);
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        let timer_catalog = Arc::clone(&catalog);
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        let timer_tm = Arc::clone(&transaction_manager);
-        #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "triple-store"))]
-        let timer_rdf = Arc::clone(&rdf_store);
-        #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "wal"))]
-        let timer_wal = wal.clone();
-
         let mut db = Self {
             config,
             #[cfg(feature = "lpg")]
@@ -624,7 +675,7 @@ impl GrafeoDB {
             #[cfg(feature = "wal")]
             wal,
             #[cfg(feature = "wal")]
-            wal_graph_context: Arc::new(parking_lot::Mutex::new(None)),
+            directory_lock: parking_lot::Mutex::new(directory_lock),
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
@@ -638,6 +689,8 @@ impl GrafeoDB {
             file_manager,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
+            #[cfg(feature = "wal")]
+            wal_flusher: parking_lot::Mutex::new(wal_flusher),
             #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
             vector_spill_storages: None,
             external_read_store: None,
@@ -667,23 +720,10 @@ impl GrafeoDB {
             db.wire_layered_after_load(compact_base, loaded_overlay_deletions)?;
         }
 
-        // Start periodic checkpoint timer if configured
+        // Start periodic checkpoint timer if configured (after the layered
+        // store is wired, so its checkpoints include the compacted base)
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        if let (Some(interval), Some(fm)) = (checkpoint_interval, &db.file_manager)
-            && !is_read_only
-        {
-            *db.checkpoint_timer.lock() = Some(checkpoint_timer::CheckpointTimer::start(
-                interval,
-                Arc::clone(fm),
-                timer_store,
-                timer_catalog,
-                timer_tm,
-                #[cfg(feature = "triple-store")]
-                timer_rdf,
-                #[cfg(feature = "wal")]
-                timer_wal,
-            ));
-        }
+        db.start_checkpoint_timer();
 
         // Discover existing spill files from a previous session.
         // If vectors were spilled before close, the spill files persist on disk
@@ -770,7 +810,7 @@ impl GrafeoDB {
             #[cfg(feature = "wal")]
             wal: None,
             #[cfg(feature = "wal")]
-            wal_graph_context: Arc::new(parking_lot::Mutex::new(None)),
+            directory_lock: parking_lot::Mutex::new(None),
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
@@ -784,6 +824,8 @@ impl GrafeoDB {
             file_manager: None,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
+            #[cfg(feature = "wal")]
+            wal_flusher: parking_lot::Mutex::new(None),
             #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
             vector_spill_storages: None,
             external_read_store: Some(Arc::clone(&store) as Arc<dyn GraphStoreSearch>),
@@ -861,7 +903,7 @@ impl GrafeoDB {
             #[cfg(feature = "wal")]
             wal: None,
             #[cfg(feature = "wal")]
-            wal_graph_context: Arc::new(parking_lot::Mutex::new(None)),
+            directory_lock: parking_lot::Mutex::new(None),
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
@@ -875,6 +917,8 @@ impl GrafeoDB {
             file_manager: None,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
+            #[cfg(feature = "wal")]
+            wal_flusher: parking_lot::Mutex::new(None),
             #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
             vector_spill_storages: None,
             external_read_store: Some(store),
@@ -911,6 +955,26 @@ impl GrafeoDB {
     /// [`CompactStore`]: grafeo_core::graph::compact::CompactStore
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
     pub fn compact(&mut self) -> Result<()> {
+        self.with_checkpoint_timer_paused(Self::compact_into_layers)
+    }
+
+    /// Runs `change`, which replaces the store, with the periodic checkpoint
+    /// timer stopped (a checkpoint running meanwhile would write the old
+    /// store), then restarts the timer on the new state, also when `change`
+    /// fails.
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    fn with_checkpoint_timer_paused(&mut self, change: fn(&mut Self) -> Result<()>) -> Result<()> {
+        #[cfg(feature = "grafeo-file")]
+        self.stop_checkpoint_timer();
+        let result = change(self);
+        #[cfg(feature = "grafeo-file")]
+        self.start_checkpoint_timer();
+        result
+    }
+
+    /// [`compact()`](Self::compact) without the checkpoint timer handling.
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    fn compact_into_layers(&mut self) -> Result<()> {
         use grafeo_core::graph::compact::from_graph_store_preserving_ids;
         use grafeo_core::graph::compact::layered::LayeredStore;
 
@@ -1004,6 +1068,12 @@ impl GrafeoDB {
     /// the merge fails.
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
     pub fn recompact(&mut self) -> Result<()> {
+        self.with_checkpoint_timer_paused(Self::merge_overlay_into_base)
+    }
+
+    /// [`recompact()`](Self::recompact) without the checkpoint timer handling.
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    fn merge_overlay_into_base(&mut self) -> Result<()> {
         use grafeo_core::graph::compact::from_graph_store_preserving_ids;
         use grafeo_core::graph::compact::layered::LayeredStore;
 
@@ -1071,6 +1141,22 @@ impl GrafeoDB {
         Ok(())
     }
 
+    /// Whether replaying `records` leaves the graph cursor on a named graph.
+    ///
+    /// Logs written before 0.5.44 could end inside a named graph; new groups
+    /// assume they start in the default graph.
+    #[cfg(all(feature = "wal", feature = "lpg"))]
+    fn ends_in_named_graph(records: &[WalRecord]) -> bool {
+        records
+            .iter()
+            .rev()
+            .find_map(|record| match record {
+                WalRecord::SwitchGraph { name } => Some(name.is_some()),
+                _ => None,
+            })
+            .unwrap_or(false)
+    }
+
     /// Applies WAL records to restore the database state.
     ///
     /// Data mutation records are routed through a graph cursor that tracks
@@ -1083,9 +1169,6 @@ impl GrafeoDB {
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
         records: &[WalRecord],
     ) -> Result<()> {
-        use crate::catalog::{
-            EdgeTypeDefinition, NodeTypeDefinition, PropertyDataType, TypeConstraint, TypedProperty,
-        };
         use grafeo_common::utils::error::Error;
 
         // Graph cursor: tracks which named graph receives data mutations.
@@ -1118,9 +1201,17 @@ impl GrafeoDB {
                 }
 
                 // --- Data mutations: routed through target_store ---
+                //
+                // Replay can see records the checkpoint container already
+                // holds, so every record must be safe to apply twice.
+                // Properties and labels are set operations; creating a node
+                // or edge that exists would duplicate its label and adjacency
+                // entries and counters, so those are skipped (#417).
                 WalRecord::CreateNode { id, labels } => {
-                    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-                    target_store.create_node_with_id(*id, &label_refs)?;
+                    if target_store.get_node(*id).is_none() {
+                        let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+                        target_store.create_node_with_id(*id, &label_refs)?;
+                    }
                 }
                 WalRecord::DeleteNode { id } => {
                     target_store.delete_node(*id);
@@ -1131,7 +1222,9 @@ impl GrafeoDB {
                     dst,
                     edge_type,
                 } => {
-                    target_store.create_edge_with_id(*id, *src, *dst, edge_type)?;
+                    if target_store.get_edge(*id).is_none() {
+                        target_store.create_edge_with_id(*id, *src, *dst, edge_type)?;
+                    }
                 }
                 WalRecord::DeleteEdge { id } => {
                     target_store.delete_edge(*id);
@@ -1156,185 +1249,26 @@ impl GrafeoDB {
                 }
 
                 // --- Schema DDL replay (always on root catalog) ---
-                WalRecord::CreateNodeType {
-                    name,
-                    properties,
-                    constraints,
-                } => {
-                    let def = NodeTypeDefinition {
-                        name: name.clone(),
-                        properties: properties
-                            .iter()
-                            .map(|(n, t, nullable)| TypedProperty {
-                                name: n.clone(),
-                                data_type: PropertyDataType::from_type_name(t),
-                                nullable: *nullable,
-                                default_value: None,
-                            })
-                            .collect(),
-                        constraints: constraints
-                            .iter()
-                            .map(|(kind, props)| match kind.as_str() {
-                                "unique" => TypeConstraint::Unique(props.clone()),
-                                "primary_key" => TypeConstraint::PrimaryKey(props.clone()),
-                                "not_null" if !props.is_empty() => {
-                                    TypeConstraint::NotNull(props[0].clone())
-                                }
-                                _ => TypeConstraint::Unique(props.clone()),
-                            })
-                            .collect(),
-                        parent_types: Vec::new(),
-                    };
-                    let _ = catalog.register_node_type(def);
-                }
-                WalRecord::DropNodeType { name } => {
-                    let _ = catalog.drop_node_type(name);
-                }
-                WalRecord::CreateEdgeType {
-                    name,
-                    properties,
-                    constraints,
-                } => {
-                    let def = EdgeTypeDefinition {
-                        name: name.clone(),
-                        properties: properties
-                            .iter()
-                            .map(|(n, t, nullable)| TypedProperty {
-                                name: n.clone(),
-                                data_type: PropertyDataType::from_type_name(t),
-                                nullable: *nullable,
-                                default_value: None,
-                            })
-                            .collect(),
-                        constraints: constraints
-                            .iter()
-                            .map(|(kind, props)| match kind.as_str() {
-                                "unique" => TypeConstraint::Unique(props.clone()),
-                                "primary_key" => TypeConstraint::PrimaryKey(props.clone()),
-                                "not_null" if !props.is_empty() => {
-                                    TypeConstraint::NotNull(props[0].clone())
-                                }
-                                _ => TypeConstraint::Unique(props.clone()),
-                            })
-                            .collect(),
-                        source_node_types: Vec::new(),
-                        target_node_types: Vec::new(),
-                    };
-                    let _ = catalog.register_edge_type_def(def);
-                }
-                WalRecord::DropEdgeType { name } => {
-                    let _ = catalog.drop_edge_type_def(name);
+                WalRecord::CreateNodeType { .. }
+                | WalRecord::DropNodeType { .. }
+                | WalRecord::CreateEdgeType { .. }
+                | WalRecord::DropEdgeType { .. }
+                | WalRecord::CreateGraphType { .. }
+                | WalRecord::DropGraphType { .. }
+                | WalRecord::CreateSchema { .. }
+                | WalRecord::DropSchema { .. }
+                | WalRecord::AlterNodeType { .. }
+                | WalRecord::AlterEdgeType { .. }
+                | WalRecord::AlterGraphType { .. }
+                | WalRecord::CreateProcedure { .. }
+                | WalRecord::DropProcedure { .. }
+                | WalRecord::CreateConstraint { .. }
+                | WalRecord::DropConstraint { .. } => {
+                    schema_replay::apply_schema_record(catalog, record)?;
                 }
                 WalRecord::CreateIndex { .. } | WalRecord::DropIndex { .. } => {
                     // Index recreation is handled by the store on startup
                     // (indexes are rebuilt from data, not WAL)
-                }
-                WalRecord::CreateConstraint { .. } | WalRecord::DropConstraint { .. } => {
-                    // Constraint definitions are part of type definitions
-                    // and replayed via CreateNodeType/CreateEdgeType
-                }
-                WalRecord::CreateGraphType {
-                    name,
-                    node_types,
-                    edge_types,
-                    open,
-                } => {
-                    use crate::catalog::GraphTypeDefinition;
-                    let def = GraphTypeDefinition {
-                        name: name.clone(),
-                        allowed_node_types: node_types.clone(),
-                        allowed_edge_types: edge_types.clone(),
-                        open: *open,
-                    };
-                    let _ = catalog.register_graph_type(def);
-                }
-                WalRecord::DropGraphType { name } => {
-                    let _ = catalog.drop_graph_type(name);
-                }
-                WalRecord::CreateSchema { name } => {
-                    let _ = catalog.register_schema_namespace(name.clone());
-                }
-                WalRecord::DropSchema { name } => {
-                    let _ = catalog.drop_schema_namespace(name);
-                }
-
-                WalRecord::AlterNodeType { name, alterations } => {
-                    for (action, prop_name, type_name, nullable) in alterations {
-                        match action.as_str() {
-                            "add" => {
-                                let prop = TypedProperty {
-                                    name: prop_name.clone(),
-                                    data_type: PropertyDataType::from_type_name(type_name),
-                                    nullable: *nullable,
-                                    default_value: None,
-                                };
-                                let _ = catalog.alter_node_type_add_property(name, prop);
-                            }
-                            "drop" => {
-                                let _ = catalog.alter_node_type_drop_property(name, prop_name);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                WalRecord::AlterEdgeType { name, alterations } => {
-                    for (action, prop_name, type_name, nullable) in alterations {
-                        match action.as_str() {
-                            "add" => {
-                                let prop = TypedProperty {
-                                    name: prop_name.clone(),
-                                    data_type: PropertyDataType::from_type_name(type_name),
-                                    nullable: *nullable,
-                                    default_value: None,
-                                };
-                                let _ = catalog.alter_edge_type_add_property(name, prop);
-                            }
-                            "drop" => {
-                                let _ = catalog.alter_edge_type_drop_property(name, prop_name);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                WalRecord::AlterGraphType { name, alterations } => {
-                    for (action, type_name) in alterations {
-                        match action.as_str() {
-                            "add_node" => {
-                                let _ =
-                                    catalog.alter_graph_type_add_node_type(name, type_name.clone());
-                            }
-                            "drop_node" => {
-                                let _ = catalog.alter_graph_type_drop_node_type(name, type_name);
-                            }
-                            "add_edge" => {
-                                let _ =
-                                    catalog.alter_graph_type_add_edge_type(name, type_name.clone());
-                            }
-                            "drop_edge" => {
-                                let _ = catalog.alter_graph_type_drop_edge_type(name, type_name);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                WalRecord::CreateProcedure {
-                    name,
-                    params,
-                    returns,
-                    body,
-                } => {
-                    use crate::catalog::ProcedureDefinition;
-                    let def = ProcedureDefinition {
-                        name: name.clone(),
-                        params: params.clone(),
-                        returns: returns.clone(),
-                        body: body.clone(),
-                    };
-                    let _ = catalog.register_procedure(def);
-                }
-                WalRecord::DropProcedure { name } => {
-                    let _ = catalog.drop_procedure(name);
                 }
 
                 // --- RDF triple replay ---
@@ -1821,7 +1755,7 @@ impl GrafeoDB {
 
         #[cfg(all(feature = "wal", feature = "lpg"))]
         if let Some(ref wal) = self.wal {
-            session.set_wal(Arc::clone(wal), Arc::clone(&self.wal_graph_context));
+            session.set_wal(Arc::clone(wal));
         }
 
         #[cfg(feature = "cdc")]
@@ -2241,6 +2175,15 @@ impl GrafeoDB {
             timer.stop();
         }
 
+        // Stop the WAL flusher before the WAL is synced and closed below; its
+        // shutdown syncs once more.
+        #[cfg(feature = "wal")]
+        if let Some(mut flusher) = self.wal_flusher.lock().take()
+            && let Err(e) = flusher.shutdown()
+        {
+            grafeo_warn!("failed to stop the WAL flusher: {e}");
+        }
+
         // Read-only databases: just release the shared lock, no checkpointing
         if self.read_only {
             #[cfg(feature = "grafeo-file")]
@@ -2266,31 +2209,7 @@ impl GrafeoDB {
             if let Some(ref wal) = self.wal {
                 wal.sync()?;
             }
-            let flush_result = self.checkpoint_to_file(fm, flush::FlushReason::Explicit)?;
-
-            // Safety check: if WAL has records but the checkpoint was a no-op
-            // (zero sections written), the container file may not contain the
-            // latest data. This can happen when sections are not marked dirty
-            // despite mutations going through the WAL. Force-dirty all sections
-            // and retry before removing the sidecar.
-            #[cfg(feature = "wal")]
-            let flush_result = if flush_result.sections_written == 0 {
-                if let Some(ref wal) = self.wal {
-                    if wal.record_count() > 0 {
-                        grafeo_warn!(
-                            "WAL has {} records but checkpoint wrote 0 sections; retrying with forced flush",
-                            wal.record_count()
-                        );
-                        self.checkpoint_to_file(fm, flush::FlushReason::Explicit)?
-                    } else {
-                        flush_result
-                    }
-                } else {
-                    flush_result
-                }
-            } else {
-                flush_result
-            };
+            let flush_result = self.checkpoint_to_file(fm)?;
 
             // Release WAL file handles before removing sidecar directory.
             // On Windows, open handles prevent directory deletion.
@@ -2341,6 +2260,10 @@ impl GrafeoDB {
 
             wal.sync()?;
         }
+
+        // Release the directory lock last, after the WAL is synced.
+        #[cfg(feature = "wal")]
+        drop(self.directory_lock.lock().take());
 
         *is_open = false;
         Ok(())
@@ -2633,97 +2556,51 @@ impl GrafeoDB {
         }
     }
 
-    /// Builds section objects for the current database state.
+    /// What a checkpoint writes: the complete current state (see
+    /// [`flush::CheckpointSources`]).
     #[cfg(feature = "grafeo-file")]
-    fn build_sections(&self) -> Vec<Box<dyn grafeo_common::storage::Section>> {
-        let mut sections: Vec<Box<dyn grafeo_common::storage::Section>> = Vec::new();
-
-        // Layered store: serialize both the compact base and the overlay.
-        #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        if let Some(ref layered) = self.layered_store {
-            // Compact base section.
-            let compact_section = grafeo_core::graph::compact::section::CompactStoreSection::new(
-                layered.base_store_arc(),
-            );
-            sections.push(Box::new(compact_section));
-
-            // Overlay LPG section.
-            let overlay = layered.overlay_store();
-            let overlay_section = grafeo_core::graph::lpg::LpgStoreSection::new(overlay);
-            sections.push(Box::new(overlay_section));
-
-            // Overlay deletion log: persists base-node/edge tombstones
-            // that have not yet been merged into the base. Without this,
-            // close+reopen silently un-deletes those entities. Only push
-            // when there is actually something to record so we don't
-            // emit an empty section on every checkpoint.
-            let deletions = grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection::from_layered(
-                Arc::clone(layered),
-            );
-            if !deletions.is_empty() {
-                sections.push(Box::new(deletions));
-            } else {
-                // The set may have transitioned from non-empty to empty
-                // (e.g. a compact merged the deletes); make sure the
-                // dirty flag is cleared so subsequent checkpoints don't
-                // think they need to keep flushing.
-                layered.mark_deletions_clean();
-            }
-
-            return sections;
+    fn checkpoint_sources(&self) -> flush::CheckpointSources {
+        flush::CheckpointSources {
+            #[cfg(feature = "lpg")]
+            store: self.store.clone(),
+            #[cfg(all(feature = "compact-store", feature = "lpg"))]
+            layered: self.layered_store.clone(),
+            #[cfg(feature = "lpg")]
+            catalog: Arc::clone(&self.catalog),
+            transaction_manager: Arc::clone(&self.transaction_manager),
+            #[cfg(feature = "triple-store")]
+            rdf_store: Arc::clone(&self.rdf_store),
         }
+    }
 
-        // LPG sections: store, catalog, vector indexes, text indexes
-        #[cfg(feature = "lpg")]
-        if let Some(store) = self.store.as_ref() {
-            let lpg = grafeo_core::graph::lpg::LpgStoreSection::new(Arc::clone(store));
-
-            let catalog = catalog_section::CatalogSection::new(
-                Arc::clone(&self.catalog),
-                Arc::clone(store),
-                {
-                    let tm = Arc::clone(&self.transaction_manager);
-                    move || tm.current_epoch().as_u64()
-                },
-            );
-
-            sections.push(Box::new(catalog));
-            sections.push(Box::new(lpg));
-
-            // Vector indexes: persist HNSW topology to avoid rebuild on load
-            #[cfg(feature = "vector-index")]
-            {
-                let indexes = store.vector_index_entries();
-                if !indexes.is_empty() {
-                    let vector = grafeo_core::index::vector::VectorStoreSection::new(indexes);
-                    sections.push(Box::new(vector));
-                }
-            }
-
-            // Text indexes: persist BM25 postings to avoid rebuild on load
-            #[cfg(feature = "text-index")]
-            {
-                let indexes = store.text_index_entries();
-                if !indexes.is_empty() {
-                    let text = grafeo_core::index::text::TextIndexSection::new(indexes);
-                    sections.push(Box::new(text));
-                }
-            }
+    /// Starts the periodic checkpoint timer when one is configured, replacing
+    /// a running one. Its checkpoints must cover the current state, which
+    /// changes shape when the database is compacted.
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    fn start_checkpoint_timer(&self) {
+        self.stop_checkpoint_timer();
+        // `compact()` clears `read_only`, but a file opened read-only stays so.
+        if let (Some(interval), Some(fm)) = (self.config.checkpoint_interval, &self.file_manager)
+            && !self.read_only
+            && !fm.is_read_only()
+        {
+            *self.checkpoint_timer.lock() = Some(checkpoint_timer::CheckpointTimer::start(
+                interval,
+                Arc::clone(fm),
+                self.checkpoint_sources(),
+                #[cfg(feature = "wal")]
+                self.wal.clone(),
+            ));
         }
+    }
 
-        #[cfg(feature = "triple-store")]
-        if !self.rdf_store.is_empty() || self.rdf_store.graph_count() > 0 {
-            let rdf = grafeo_core::graph::rdf::RdfStoreSection::new(Arc::clone(&self.rdf_store));
-            sections.push(Box::new(rdf));
+    /// Stops the periodic checkpoint timer, if one is running.
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    fn stop_checkpoint_timer(&self) {
+        let running = self.checkpoint_timer.lock().take();
+        if let Some(mut timer) = running {
+            timer.stop();
         }
-
-        #[cfg(feature = "ring-index")]
-        if self.rdf_store.ring().is_some() {
-            let ring = grafeo_core::index::ring::RdfRingSection::new(Arc::clone(&self.rdf_store));
-            sections.push(Box::new(ring));
-        }
-
-        sections
     }
 
     // =========================================================================
@@ -2750,11 +2627,10 @@ impl GrafeoDB {
         // Skip for read-only databases: the on-disk file is already a valid
         // snapshot and the file manager rejects writes.
         if !self.read_only {
-            let _ = self.checkpoint_to_file(fm, flush::FlushReason::Explicit)?;
+            let _ = self.checkpoint_to_file(fm)?;
         }
 
-        let current_epoch = self.transaction_manager.current_epoch();
-        backup::do_backup_full(backup_dir, fm, self.wal.as_deref(), current_epoch)
+        backup::do_backup_full(backup_dir, fm, self.wal.as_deref())
     }
 
     /// Creates an incremental backup containing WAL records since the last backup.
@@ -2826,24 +2702,16 @@ impl GrafeoDB {
     /// the sidecar (e.g. `close()`) should call `fm.remove_sidecar_wal()`
     /// separately after this returns.
     #[cfg(feature = "grafeo-file")]
-    fn checkpoint_to_file(
-        &self,
-        fm: &GrafeoFileManager,
-        reason: flush::FlushReason,
-    ) -> Result<flush::FlushResult> {
-        let sections = self.build_sections();
+    fn checkpoint_to_file(&self, fm: &GrafeoFileManager) -> Result<flush::FlushResult> {
+        let sources = self.checkpoint_sources();
+        let sections = sources.sections();
         let section_refs: Vec<&dyn grafeo_common::storage::Section> =
             sections.iter().map(|s| s.as_ref()).collect();
-        #[cfg(feature = "lpg")]
-        let context = flush::build_context(self.lpg_store(), &self.transaction_manager);
-        #[cfg(not(feature = "lpg"))]
-        let context = flush::build_context_minimal(&self.transaction_manager);
 
         flush::flush(
             fm,
             &section_refs,
-            &context,
-            reason,
+            &sources.context(),
             #[cfg(feature = "wal")]
             self.wal.as_deref(),
         )
@@ -3245,6 +3113,49 @@ impl FromValue for bool {
 mod tests {
     use super::*;
 
+    /// `DurabilityMode::Adaptive` syncs the WAL from a background flusher.
+    /// None was started, so an adaptive database never synced its WAL.
+    #[cfg(feature = "wal")]
+    #[test]
+    fn adaptive_durability_syncs_the_wal_in_the_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = GrafeoDB::with_config(
+            Config::persistent(dir.path().join("db"))
+                .with_storage_format(crate::config::StorageFormat::WalDirectory)
+                .with_wal_durability(crate::config::DurabilityMode::Adaptive {
+                    target_interval_ms: 10,
+                }),
+        )
+        .unwrap();
+        db.create_node(&["Person"]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let mut flusher = db.wal_flusher.lock().take().expect("a flusher runs");
+        let stats = flusher.shutdown().unwrap();
+        assert!(stats.flush_count > 0, "{stats:?}");
+        db.close().unwrap();
+    }
+
+    /// `compact()` makes a database opened read-only writable in memory, but
+    /// its file stays read-only: no checkpoint timer may run against it.
+    #[cfg(all(feature = "compact-store", feature = "grafeo-file", feature = "lpg"))]
+    #[test]
+    fn compacting_a_read_only_database_starts_no_checkpoint_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        {
+            let db = GrafeoDB::open(&path).unwrap();
+            db.create_node(&["Person"]).unwrap();
+            db.close().unwrap();
+        }
+        let mut db = GrafeoDB::with_config(
+            Config::read_only(&path).with_checkpoint_interval(std::time::Duration::from_secs(60)),
+        )
+        .unwrap();
+        db.compact().unwrap();
+        assert!(db.checkpoint_timer.lock().is_none());
+    }
+
     #[test]
     fn test_create_in_memory_database() {
         let db = GrafeoDB::new_in_memory();
@@ -3281,13 +3192,15 @@ mod tests {
         {
             let db = GrafeoDB::open(&db_path).unwrap();
 
-            let alix = db.create_node(&["Person"]);
-            db.set_node_property(alix, "name", Value::from("Alix"));
+            let alix = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(alix, "name", Value::from("Alix"))
+                .unwrap();
 
-            let gus = db.create_node(&["Person"]);
-            db.set_node_property(gus, "name", Value::from("Gus"));
+            let gus = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(gus, "name", Value::from("Gus"))
+                .unwrap();
 
-            let _edge = db.create_edge(alix, gus, "KNOWS");
+            let _edge = db.create_edge(alix, gus, "KNOWS").unwrap();
 
             // Explicitly close to flush WAL
             db.close().unwrap();
@@ -3320,8 +3233,8 @@ mod tests {
         let db = GrafeoDB::open(&db_path).unwrap();
 
         // Create some data
-        let node = db.create_node(&["Test"]);
-        db.delete_node(node);
+        let node = db.create_node(&["Test"]).unwrap();
+        db.delete_node(node).unwrap();
 
         // WAL should have records
         if let Some(wal) = db.wal() {
@@ -3344,8 +3257,9 @@ mod tests {
         // Session 1: Create initial data
         {
             let db = GrafeoDB::open(&db_path).unwrap();
-            let alix = db.create_node(&["Person"]);
-            db.set_node_property(alix, "name", Value::from("Alix"));
+            let alix = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(alix, "name", Value::from("Alix"))
+                .unwrap();
             db.close().unwrap();
         }
 
@@ -3353,8 +3267,9 @@ mod tests {
         {
             let db = GrafeoDB::open(&db_path).unwrap();
             assert_eq!(db.node_count(), 1); // Previous data recovered
-            let gus = db.create_node(&["Person"]);
-            db.set_node_property(gus, "name", Value::from("Gus"));
+            let gus = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(gus, "name", Value::from("Gus"))
+                .unwrap();
             db.close().unwrap();
         }
 
@@ -3386,21 +3301,22 @@ mod tests {
             let db = GrafeoDB::open(&db_path).unwrap();
 
             // Create nodes
-            let a = db.create_node(&["Node"]);
-            let b = db.create_node(&["Node"]);
-            let c = db.create_node(&["Node"]);
+            let a = db.create_node(&["Node"]).unwrap();
+            let b = db.create_node(&["Node"]).unwrap();
+            let c = db.create_node(&["Node"]).unwrap();
 
             // Create edges
-            let e1 = db.create_edge(a, b, "LINKS");
-            let _e2 = db.create_edge(b, c, "LINKS");
+            let e1 = db.create_edge(a, b, "LINKS").unwrap();
+            let e2 = db.create_edge(b, c, "LINKS").unwrap();
 
-            // Delete middle node and its edge
-            db.delete_edge(e1);
-            db.delete_node(b);
+            // Delete the middle node's edges, then the node
+            db.delete_edge(e1).unwrap();
+            db.delete_edge(e2).unwrap();
+            db.delete_node(b).unwrap();
 
             // Set properties on remaining nodes
-            db.set_node_property(a, "value", Value::Int64(1));
-            db.set_node_property(c, "value", Value::Int64(3));
+            db.set_node_property(a, "value", Value::Int64(1)).unwrap();
+            db.set_node_property(c, "value", Value::Int64(3)).unwrap();
 
             db.close().unwrap();
         }
@@ -3434,7 +3350,7 @@ mod tests {
         let db_path = dir.path().join("close_test_db");
 
         let db = GrafeoDB::open(&db_path).unwrap();
-        db.create_node(&["Test"]);
+        db.create_node(&["Test"]).unwrap();
 
         // First close should succeed
         assert!(db.close().is_ok());
@@ -3484,8 +3400,8 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
 
         // Perform some operations
-        db.create_node(&["Person"]);
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
+        db.create_node(&["Person"]).unwrap();
 
         // Check that metrics snapshot returns data
         let snap = db.metrics();
@@ -3497,8 +3413,8 @@ mod tests {
     fn test_query_result_has_metrics() {
         // Verifies that query results include execution metrics
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
+        db.create_node(&["Person"]).unwrap();
 
         #[cfg(feature = "gql")]
         {
@@ -3516,7 +3432,7 @@ mod tests {
     fn test_empty_query_result_metrics() {
         // Verifies metrics are correct for queries returning no results
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
 
         #[cfg(feature = "gql")]
         {
@@ -3543,12 +3459,12 @@ mod tests {
             let db = cdc_db();
 
             // Create
-            let id = db.create_node(&["Person"]);
+            let id = db.create_node(&["Person"]).unwrap();
             // Update
-            db.set_node_property(id, "name", "Alix".into());
-            db.set_node_property(id, "name", "Gus".into());
+            db.set_node_property(id, "name", "Alix".into()).unwrap();
+            db.set_node_property(id, "name", "Gus".into()).unwrap();
             // Delete
-            db.delete_node(id);
+            db.delete_node(id).unwrap();
 
             let history = db.history(id).unwrap();
             assert_eq!(history.len(), 4); // create + 2 updates + delete
@@ -3564,11 +3480,11 @@ mod tests {
         fn test_edge_lifecycle_history() {
             let db = cdc_db();
 
-            let alix = db.create_node(&["Person"]);
-            let gus = db.create_node(&["Person"]);
-            let edge = db.create_edge(alix, gus, "KNOWS");
-            db.set_edge_property(edge, "since", 2024i64.into());
-            db.delete_edge(edge);
+            let alix = db.create_node(&["Person"]).unwrap();
+            let gus = db.create_node(&["Person"]).unwrap();
+            let edge = db.create_edge(alix, gus, "KNOWS").unwrap();
+            db.set_edge_property(edge, "since", 2024i64.into()).unwrap();
+            db.delete_edge(edge).unwrap();
 
             let history = db.history(edge).unwrap();
             assert_eq!(history.len(), 3); // create + update + delete
@@ -3581,13 +3497,15 @@ mod tests {
         fn test_create_node_with_props_cdc() {
             let db = cdc_db();
 
-            let id = db.create_node_with_props(
-                &["Person"],
-                vec![
-                    ("name", grafeo_common::types::Value::from("Alix")),
-                    ("age", grafeo_common::types::Value::from(30i64)),
-                ],
-            );
+            let id = db
+                .create_node_with_props(
+                    &["Person"],
+                    vec![
+                        ("name", grafeo_common::types::Value::from("Alix")),
+                        ("age", grafeo_common::types::Value::from(30i64)),
+                    ],
+                )
+                .unwrap();
 
             let history = db.history(id).unwrap();
             assert_eq!(history.len(), 1);
@@ -3601,9 +3519,9 @@ mod tests {
         fn test_changes_between() {
             let db = cdc_db();
 
-            let id1 = db.create_node(&["A"]);
-            let _id2 = db.create_node(&["B"]);
-            db.set_node_property(id1, "x", 1i64.into());
+            let id1 = db.create_node(&["A"]).unwrap();
+            let _id2 = db.create_node(&["B"]).unwrap();
+            db.set_node_property(id1, "x", 1i64.into()).unwrap();
 
             // All events should be at the same epoch (in-memory, epoch doesn't advance without tx)
             let changes = db
@@ -3620,8 +3538,8 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             assert!(!db.is_cdc_enabled());
 
-            let id = db.create_node(&["Person"]);
-            db.set_node_property(id, "name", "Alix".into());
+            let id = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(id, "name", "Alix".into()).unwrap();
 
             let history = db.history(id).unwrap();
             assert!(history.is_empty(), "CDC off by default: no events recorded");
@@ -3673,13 +3591,13 @@ mod tests {
             db.set_cdc_enabled(true);
             assert!(db.is_cdc_enabled());
 
-            let id = db.create_node(&["Person"]);
+            let id = db.create_node(&["Person"]).unwrap();
             let history = db.history(id).unwrap();
             assert_eq!(history.len(), 1, "CDC enabled at runtime records events");
 
             // Disable again
             db.set_cdc_enabled(false);
-            let id2 = db.create_node(&["Person"]);
+            let id2 = db.create_node(&["Person"]).unwrap();
             let history2 = db.history(id2).unwrap();
             assert!(
                 history2.is_empty(),
@@ -3993,7 +3911,7 @@ mod tests {
     #[test]
     fn test_database_gc() {
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
         db.gc();
         // Verify no panic, node still accessible
         assert_eq!(db.node_count(), 1);
@@ -4105,7 +4023,7 @@ mod tests {
     #[test]
     fn test_graph_store_returns_lpg_by_default() {
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
         let store = db.graph_store();
         assert_eq!(store.node_count(), 1);
     }
@@ -4160,7 +4078,7 @@ mod tests {
     #[allow(deprecated)]
     fn test_session_read_only() {
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
 
         let session = db.session_read_only();
         // Read queries should work
@@ -4178,7 +4096,7 @@ mod tests {
     #[test]
     fn test_close_in_memory_database() {
         let db = GrafeoDB::new_in_memory();
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
         assert!(db.close().is_ok());
         // Second close should also be fine (idempotent)
         assert!(db.close().is_ok());

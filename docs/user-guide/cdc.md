@@ -71,15 +71,26 @@ bool enabled = grafeo_is_cdc_enabled(db);
 
 Once CDC is enabled, every mutation records a `ChangeEvent` with:
 
-| Field       | Description                                   |
-|-------------|-----------------------------------------------|
-| `entity_id` | Node or edge ID                              |
-| `kind`       | `Create`, `Update`, or `Delete`              |
-| `epoch`      | Commit epoch (monotonically increasing)      |
-| `timestamp`  | HLC timestamp (hybrid logical clock)         |
-| `before`     | Property snapshot before the change (if any) |
-| `after`      | Property snapshot after the change (if any)  |
-| `labels`     | Labels at create time (nodes only)           |
+| Field           | Description                                                                 |
+|-----------------|-----------------------------------------------------------------------------|
+| `entity_id`     | Node or edge ID                                                             |
+| `kind`          | `Create`, `Update`, or `Delete`                                             |
+| `epoch`         | Commit epoch (monotonically increasing)                                     |
+| `timestamp`     | HLC timestamp (hybrid logical clock)                                        |
+| `before`        | Properties before the change; on a delete, the last properties              |
+| `after`         | Properties after the change                                                 |
+| `labels`        | Nodes: the labels on create and delete, the labels after a label change     |
+| `before_labels` | Nodes: the labels before a label change                                     |
+| `edge_type`     | Edges: the type, on create and delete                                       |
+| `src_id`        | Edges: the source node, on create and delete                                |
+| `dst_id`        | Edges: the destination node, on create and delete                           |
+
+A field that does not apply is `None` (Rust, Python) or `null` (Node.js). Adding
+or removing a label is an `Update` event with `labels` and `before_labels`.
+
+A node or edge created in a transaction has one `Create` event that shows it as
+the transaction left it: property and label changes made later in the same
+transaction are part of that event rather than events of their own.
 
 ### Per-entity history
 

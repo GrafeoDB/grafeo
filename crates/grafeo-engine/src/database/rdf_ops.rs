@@ -57,16 +57,36 @@ impl GrafeoDB {
             return Ok(physical_explain_result(&optimized_plan, entries));
         }
 
+        // No transaction here: each statement's WAL records are written as
+        // one implicit group once it has run.
+        #[cfg(feature = "wal")]
+        let wal_buffer = self.wal.as_ref().map(|wal| {
+            Arc::new(crate::transaction::wal_buffer::WalBuffer::new(Arc::clone(
+                wal,
+            )))
+        });
+        #[cfg(feature = "wal")]
+        let flush_wal = || {
+            if let Some(ref buffer) = wal_buffer
+                && let Err(e) = buffer.flush_implicit()
+            {
+                grafeo_common::grafeo_warn!("Failed to write SPARQL update to WAL: {}", e);
+            }
+        };
+
         // EXPLAIN ANALYZE: execute with profiling, report actual stats
         if optimized_plan.profile {
             let planner = RdfPlanner::new(Arc::clone(&self.rdf_store));
             #[cfg(feature = "wal")]
-            let planner = planner.with_wal(self.wal.as_ref().map(Arc::clone));
+            let planner = planner.with_wal(wal_buffer.clone());
             let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
             let start = std::time::Instant::now();
             let executor = Executor::with_columns(physical_plan.columns.clone());
-            let _result = executor.execute(physical_plan.operator.as_mut())?;
+            let result = executor.execute(physical_plan.operator.as_mut());
+            #[cfg(feature = "wal")]
+            flush_wal();
+            let _result = result?;
             let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             let tree = crate::query::profile::build_profile_tree(
@@ -79,12 +99,15 @@ impl GrafeoDB {
         // Convert to physical plan using RDF planner
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store));
         #[cfg(feature = "wal")]
-        let planner = planner.with_wal(self.wal.as_ref().map(Arc::clone));
+        let planner = planner.with_wal(wal_buffer.clone());
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         // Execute the plan
         let executor = Executor::with_columns(physical_plan.columns.clone());
-        executor.execute(physical_plan.operator.as_mut())
+        let result = executor.execute(physical_plan.operator.as_mut());
+        #[cfg(feature = "wal")]
+        flush_wal();
+        result
     }
 
     /// Returns the RDF store.

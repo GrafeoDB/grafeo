@@ -93,16 +93,15 @@
 //! durability; see [#250][] for the unbounded-growth incident that
 //! motivated the retention knobs.
 //!
-//! The planned 0.6.x `reactive-event-bus` refactor (see
-//! `.claude/todo/6_rc/reactive-event-bus.md`) generalises this pattern:
-//! CDC becomes one [`MutationListener`][ml] among many, the recording
+//! The planned reactive event bus (see [#470][]) generalises this pattern:
+//! CDC becomes one `MutationListener` among many, the recording
 //! path moves behind a trait, and other listeners (cache invalidation,
 //! replication, scoring hooks) register alongside. The in-process API
 //! surface here is the one CDC binding that carries forward; the rest
 //! of the file is effectively "the first listener".
 //!
 //! [#250]: https://github.com/GrafeoDB/grafeo/issues/250
-//! [ml]: https://github.com/GrafeoDB/grafeo/blob/main/.claude/todo/6_rc/reactive-event-bus.md
+//! [#470]: https://github.com/GrafeoDB/grafeo/issues/470
 //!
 //! # Example
 //!
@@ -112,9 +111,9 @@
 //! use grafeo_common::types::Value;
 //!
 //! let db = GrafeoDB::new_in_memory();
-//! let id = db.create_node(&["Person"]);
-//! db.set_node_property(id, "name", Value::from("Alix"));
-//! db.set_node_property(id, "name", Value::from("Gus"));
+//! let id = db.create_node(&["Person"])?;
+//! db.set_node_property(id, "name", Value::from("Alix"))?;
+//! db.set_node_property(id, "name", Value::from("Gus"))?;
 //!
 //! let history = db.history(id)?;
 //! assert_eq!(history.len(), 3); // create + 2 updates
@@ -210,17 +209,21 @@ pub struct ChangeEvent {
     pub before: Option<HashMap<String, Value>>,
     /// Properties after the change (None for Delete and for triple events).
     pub after: Option<HashMap<String, Value>>,
-    /// Node labels. Present only on node Create events.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Node labels: on a Create event the node's labels, on a Delete event
+    /// the labels it had, on a label change the labels after the change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
-    /// Edge relationship type. Present only on edge Create events.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Node labels before a label change. Present only on label changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_labels: Option<Vec<String>>,
+    /// Edge relationship type. Present on edge Create and Delete events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge_type: Option<String>,
-    /// Edge source node ID. Present only on edge Create events.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Edge source node ID. Present on edge Create and Delete events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub src_id: Option<u64>,
-    /// Edge destination node ID. Present only on edge Create events.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Edge destination node ID. Present on edge Create and Delete events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dst_id: Option<u64>,
     /// RDF triple subject (N-Triples encoded). Present only on triple events.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -344,6 +347,7 @@ impl CdcLog {
             before: None,
             after: props,
             labels,
+            before_labels: None,
             edge_type: None,
             src_id: None,
             dst_id: None,
@@ -372,6 +376,7 @@ impl CdcLog {
             before: None,
             after: props,
             labels: None,
+            before_labels: None,
             edge_type: Some(edge_type),
             src_id: Some(src_id),
             dst_id: Some(dst_id),
@@ -403,6 +408,7 @@ impl CdcLog {
             before: None,
             after: None,
             labels: None,
+            before_labels: None,
             edge_type: None,
             src_id: None,
             dst_id: None,
@@ -433,6 +439,7 @@ impl CdcLog {
             before: None,
             after: None,
             labels: None,
+            before_labels: None,
             edge_type: None,
             src_id: None,
             dst_id: None,
@@ -468,6 +475,7 @@ impl CdcLog {
             before,
             after: Some(after_map),
             labels: None,
+            before_labels: None,
             edge_type: None,
             src_id: None,
             dst_id: None,
@@ -493,6 +501,7 @@ impl CdcLog {
             before: props,
             after: None,
             labels: None,
+            before_labels: None,
             edge_type: None,
             src_id: None,
             dst_id: None,
@@ -725,6 +734,52 @@ fn triple_hash(subject: &str, predicate: &str, object: &str, graph: Option<&str>
     object.hash(&mut h);
     graph.hash(&mut h);
     h.finish()
+}
+
+/// Folds a transaction's changes to the entities it created into their
+/// create events, so a create event carries the entity as the transaction
+/// left it: its final labels and properties.
+///
+/// Statements and the direct API both create an entity and then set its
+/// properties and labels one by one; without this, a consumer saw a create
+/// event without properties followed by one update per property.
+/// Changes to entities that existed before the transaction stay as they are.
+pub(crate) fn fold_into_creates(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
+    let mut folded: Vec<ChangeEvent> = Vec::with_capacity(events.len());
+    let mut created: HashMap<EntityId, usize> = HashMap::new();
+    for event in events {
+        let Some(&at) = created.get(&event.entity_id) else {
+            if event.kind == ChangeKind::Create {
+                created.insert(event.entity_id, folded.len());
+            }
+            folded.push(event);
+            continue;
+        };
+        if event.kind != ChangeKind::Update {
+            folded.push(event);
+            continue;
+        }
+        let create = &mut folded[at];
+        // A label change lists the labels after it.
+        if let Some(labels) = event.labels {
+            create.labels = Some(labels);
+        }
+        match (event.before, event.after) {
+            (_, Some(after)) => create.after.get_or_insert_with(HashMap::new).extend(after),
+            (Some(removed), None) => {
+                if let Some(properties) = create.after.as_mut() {
+                    for key in removed.keys() {
+                        properties.remove(key);
+                    }
+                }
+            }
+            (None, None) => {}
+        }
+        if create.after.as_ref().is_some_and(HashMap::is_empty) {
+            create.after = None;
+        }
+    }
+    folded
 }
 
 #[cfg(test)]

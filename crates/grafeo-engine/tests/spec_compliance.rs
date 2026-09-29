@@ -65,15 +65,18 @@ fn social_network() -> GrafeoDB {
         )
         .unwrap();
 
-    let e1 = session.create_edge(alix, gus, "KNOWS");
-    db.set_edge_property(e1, "since", Value::Int64(2020));
-    let e2 = session.create_edge(alix, harm, "KNOWS");
-    db.set_edge_property(e2, "since", Value::Int64(2019));
-    let e3 = session.create_edge(gus, harm, "KNOWS");
-    db.set_edge_property(e3, "since", Value::Int64(2021));
-    session.create_edge(alix, techcorp, "WORKS_AT");
-    session.create_edge(gus, techcorp, "WORKS_AT");
-    session.create_edge(dave, techcorp, "WORKS_AT");
+    let e1 = session.create_edge(alix, gus, "KNOWS").unwrap();
+    db.set_edge_property(e1, "since", Value::Int64(2020))
+        .unwrap();
+    let e2 = session.create_edge(alix, harm, "KNOWS").unwrap();
+    db.set_edge_property(e2, "since", Value::Int64(2019))
+        .unwrap();
+    let e3 = session.create_edge(gus, harm, "KNOWS").unwrap();
+    db.set_edge_property(e3, "since", Value::Int64(2021))
+        .unwrap();
+    session.create_edge(alix, techcorp, "WORKS_AT").unwrap();
+    session.create_edge(gus, techcorp, "WORKS_AT").unwrap();
+    session.create_edge(dave, techcorp, "WORKS_AT").unwrap();
 
     // Verify setup: 4 Person + 1 Company = 5 nodes, 3 KNOWS + 3 WORKS_AT = 6 edges
     assert_eq!(db.node_count(), 5, "social_network: expected 5 nodes");

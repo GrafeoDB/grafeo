@@ -14,20 +14,21 @@ You'll need **Rust 1.91.1+** and optionally **Python 3.12+** / **Node.js 20+** f
 
 ## Branching
 
-We use feature branches off `main`:
+Each release has its own branch, `release/<version>` (for example `release/0.5.44`), and work for
+that release lands there. `main` receives the release branch when the release ships. The current
+release branch belongs to the lowest open [milestone](https://github.com/GrafeoDB/grafeo/milestones).
 
-- `feature/<description>` for new functionality
-- `fix/<description>` for bug fixes
-- `release/<version>` for release stabilization
-
-Create your branch from `main`, open a PR back to `main` when ready.
+- Branch from the current release branch: `fix/<issue>-<description>` for bug fixes,
+  `feat/<issue>-<description>` for features.
+- Open your pull request against that release branch, not `main`.
 
 ## Making Changes
 
-1. Create a branch: `git checkout -b feature/my-thing`
+1. Create a branch: `git switch -c fix/123-short-name origin/release/0.5.44`
 2. Write code and tests
-3. Run checks: `./scripts/ci-local.sh` (or `.\scripts\ci-local.ps1` on Windows)
-4. Push and open a PR
+3. Run checks: `./scripts/ci-local.sh` (or `.\scripts\ci-local.ps1` on Windows), and the policy
+   checks on your changes: `python scripts/check_policy.py diff --base origin/release/0.5.44`
+4. Push and open a pull request against the release branch
 
 You can also run checks individually:
 
@@ -41,6 +42,34 @@ cargo test --all-features --workspace     # Test
 
 We use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `perf:`, `ci:`.
 
+## Pull Request Eligibility
+
+Every pull request runs the **PR Policy** check (`scripts/check_policy.py pr`). For contributor
+pull requests the rules below are required; for maintainers most of them are warnings. Editing
+the description or the labels runs the check again.
+
+| Rule | What it asks | How to satisfy it |
+| ---- | ------------ | ----------------- |
+| Target branch | The pull request targets the current `release/<version>` branch | Change the base branch of the pull request |
+| Planned issue | The description links an issue (`Fixes #123`) that has a milestone or the `help wanted` or `good first issue` label | Open an issue or a discussion first and wait until it is planned |
+| AI assistance | AI help is welcome and declared: when the description names AI tools (`AI tools used: ...`) or a commit or the description credits one ("Co-authored-by", "Generated with", "Made with"), the ownership box in the description is ticked | Tick "I have read every line of this change, I understand it, and I can explain and defend it in review". AI co-author lines are not kept in the history: such changes are landed as one squashed commit |
+| New dependencies | No new Rust, npm, Python, Go, NuGet or Dart dependency | Agree on it in the issue; a maintainer adds `approved: deps` |
+| Infrastructure | No changes to `.github/`, `scripts/`, the root `Cargo.toml` or other root configuration | Only when the issue asks for it; a maintainer adds `approved: infra` |
+| Structure | No new crate, feature flag or `GraphStore` wrapper | Agree on the design in the issue; a maintainer adds `approved: arch` |
+| Tests | A fix (a `fix:` title or a linked bug) changes or adds a test | Add a regression test; a maintainer can add `no-test-needed` |
+| Changelog (warning) | Changes under `crates/` come with a `CHANGELOG.md` entry | Add one line under the unreleased version |
+| Size (warning) | At most about 1,500 added lines outside tests | Split the change into smaller pull requests |
+
+The check also applies these rules to the lines your pull request adds (existing code is never
+flagged): a new `#[allow(...)]` states a `reason = "..."`; docs and code comments use no em or en
+dashes; public text does not reference internal planning notes; crash-injection tests are not
+marked `#[ignore]`; WAL and recovery code does not drop results with `let _ =`. Run them locally
+before you push:
+
+```bash
+python scripts/check_policy.py diff --base origin/release/0.5.44
+```
+
 ## Architecture
 
 | Crate | What it does |
@@ -48,6 +77,7 @@ We use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `pe
 | `grafeo` | Top-level facade, re-exports public API |
 | `grafeo-common` | Foundation types, memory, utilities |
 | `grafeo-core` | Graph storage, indexes, execution |
+| `grafeo-storage` | Persistence: WAL, `.grafeo` container, crash safety |
 | `grafeo-adapters` | Query parsers (GQL, Cypher, Gremlin, GraphQL, SPARQL, SQL/PGQ) |
 | `grafeo-engine` | Database facade, sessions, transactions |
 | `grafeo-cli` | CLI with interactive shell, query execution, import/export, backup, WAL management |
@@ -212,7 +242,9 @@ cargo install prek
 prek install
 ```
 
-This runs format, lint and license checks automatically before each commit.
+This runs format, lint, typo and policy checks on the staged changes before each commit. It also
+keeps AI co-author lines out of commit messages: name the AI tools you used in the pull request
+description instead (see Pull Request Eligibility).
 
 ## Links
 

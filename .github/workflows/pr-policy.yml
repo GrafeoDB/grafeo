@@ -1,0 +1,50 @@
+name: PR Policy
+
+# Pull request eligibility (scripts/check_policy.py pr): target branch, linked planned issue,
+# AI-assistance ownership box, new dependencies, CI and root configuration, new crates and
+# feature flags, tests for fixes, plus the added-line rules. See CONTRIBUTING.md.
+#
+# Security: pull_request_target runs the workflow and script from the BASE branch with a
+# read-only token, so it also works for pull requests from forks. The pull request's commits
+# are fetched as git data and read with `git diff` and `git show`; nothing from the pull
+# request is checked out, built or executed, so a pull request cannot change its own verdict.
+# Never add a step here that runs code from the pull request.
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    branches: [main, 'release/*']
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: pr-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-policy:
+    name: PR Policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the base branch (trusted policy script)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the pull request head as data
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: git fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      - name: Check the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python scripts/check_policy.py pr --number "$PR_NUMBER" --head refs/remotes/pr/head

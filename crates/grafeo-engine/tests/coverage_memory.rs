@@ -41,7 +41,7 @@ fn test_memory_usage_with_data() {
             let prev = session
                 .create_node_with_props(&["Marker"], [("idx", Value::Int64(i))])
                 .unwrap();
-            session.create_edge(prev, n, "LINKS_TO");
+            session.create_edge(prev, n, "LINKS_TO").unwrap();
         }
     }
 

@@ -1718,3 +1718,109 @@ fn test_clear() {
     assert_eq!(store.node_count(), 1);
     assert!(store.get_node(n3).is_some());
 }
+
+// === Version garbage collection (temporal) ===
+
+/// Garbage collection drops the history no reader at or after the GC epoch
+/// can see, keeps the rest, and trims the same log again on a later run.
+#[cfg(feature = "temporal")]
+mod version_gc {
+    use super::*;
+
+    #[test]
+    fn gc_trims_property_history_and_keeps_what_readers_see() {
+        let store = LpgStore::new().unwrap();
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        store.set_node_property(gus, "city", Value::from("Berlin"));
+        let mut epochs = Vec::new();
+        for city in ["Amsterdam", "Paris", "Prague", "Barcelona"] {
+            epochs.push(store.new_epoch());
+            store.set_node_property(alix, "city", Value::from(city));
+        }
+        let key = PropertyKey::new("city");
+        let at = |epoch| store.get_node_property_at_epoch(alix, &key, epoch);
+        let history = |id| -> Vec<Value> {
+            store
+                .node_property_history_for_key(id, "city")
+                .into_iter()
+                .map(|(_, value)| value)
+                .collect()
+        };
+        assert_eq!(at(epochs[0]), Some(Value::from("Amsterdam")));
+
+        // Readers at Prague's epoch or later keep what they see, and the
+        // value just before it stays as their baseline.
+        store.gc_versions(epochs[2]);
+        assert_eq!(
+            history(alix),
+            [
+                Value::from("Paris"),
+                Value::from("Prague"),
+                Value::from("Barcelona")
+            ]
+        );
+        assert_eq!(at(epochs[0]), None);
+        assert_eq!(at(epochs[2]), Some(Value::from("Prague")));
+        assert_eq!(at(epochs[3]), Some(Value::from("Barcelona")));
+
+        let later = store.new_epoch();
+        store.gc_versions(later);
+        assert_eq!(history(alix), [Value::from("Barcelona")]);
+        assert_eq!(
+            store.get_node_property(alix, &key),
+            Some(Value::from("Barcelona"))
+        );
+        assert_eq!(history(gus), [Value::from("Berlin")]);
+    }
+
+    #[test]
+    fn gc_trims_label_history_and_keeps_what_readers_see() {
+        let store = LpgStore::new().unwrap();
+        let vincent = store.create_node(&["Person"]);
+        let jules = store.create_node(&["Person"]);
+        let mut epochs = vec![store.current_epoch()];
+        epochs.push(store.new_epoch());
+        assert!(store.add_label(vincent, "Employee"));
+        epochs.push(store.new_epoch());
+        assert!(store.remove_label(vincent, "Employee"));
+        epochs.push(store.new_epoch());
+        assert!(store.add_label(vincent, "Manager"));
+        let labels_at = |id, epoch| -> Vec<String> {
+            let mut labels: Vec<String> = store
+                .get_node_at_epoch(id, epoch)
+                .unwrap()
+                .labels
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            labels.sort();
+            labels
+        };
+        assert_eq!(labels_at(vincent, epochs[0]), ["Person"]);
+        assert_eq!(
+            store
+                .gc_candidates
+                .lock()
+                .labels
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [vincent],
+            "only the node whose labels changed has history to collect"
+        );
+
+        store.gc_versions(epochs[2]);
+        assert!(labels_at(vincent, epochs[0]).is_empty());
+        assert_eq!(labels_at(vincent, epochs[1]), ["Employee", "Person"]);
+        assert_eq!(labels_at(vincent, epochs[2]), ["Person"]);
+        assert_eq!(labels_at(vincent, epochs[3]), ["Manager", "Person"]);
+
+        let later = store.new_epoch();
+        store.gc_versions(later);
+        assert!(labels_at(vincent, epochs[1]).is_empty());
+        assert_eq!(labels_at(vincent, later), ["Manager", "Person"]);
+        assert_eq!(labels_at(jules, epochs[0]), ["Person"]);
+        assert!(store.gc_candidates.lock().labels.is_empty());
+    }
+}

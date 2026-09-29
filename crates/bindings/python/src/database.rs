@@ -13,7 +13,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use grafeo_common::storage::{SectionMemoryConfig, SectionType, TierOverride};
 use grafeo_common::types::{EdgeId, LogicalType, NodeId, Value};
 use grafeo_engine::config::Config;
-use grafeo_engine::database::{GrafeoDB, QueryResult};
+use grafeo_engine::database::GrafeoDB;
 
 /// Parses a section name string ("LpgStore", "VectorStore", etc.) into a
 /// [`SectionType`]. Returns `Err` for unknown names.
@@ -298,32 +298,10 @@ impl PyGrafeoDB {
         params: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyQueryResult> {
         let db = self.inner.read();
-        let param_map = if let Some(p) = params {
-            let mut map = HashMap::new();
-            for (key, value) in p.iter() {
-                let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value)?;
-                map.insert(key_str, val);
-            }
-            Some(map)
-        } else {
-            None
-        };
-        let mut result = db
-            .execute_language(query, language, param_map)
+        let result = db
+            .execute_language(query, language, crate::direct::params(params)?)
             .map_err(PyGrafeoError::from)?;
-        let (nodes, edges) = extract_entities(&result, &db);
-        let columns = std::mem::take(&mut result.columns);
-        let exec_time = result.execution_time_ms;
-        let scanned = result.rows_scanned;
-        Ok(PyQueryResult::with_metrics(
-            columns,
-            result.into_rows(),
-            nodes,
-            edges,
-            exec_time,
-            scanned,
-        ))
+        Ok(crate::direct::query_result(result))
     }
 }
 
@@ -518,37 +496,15 @@ impl PyGrafeoDB {
         params: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyQueryResult> {
         let db = self.inner.read();
-        let session = db.session();
-        let param_map = if let Some(p) = params {
-            let mut map = HashMap::new();
-            for (key, value) in p.iter() {
-                let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value)?;
-                map.insert(key_str, val);
-            }
-            Some(map)
-        } else {
-            None
-        };
-        let mut result = session
+        let result = db
+            .session()
             .execute_at_epoch_with_params(
                 query,
                 grafeo_common::types::EpochId::new(epoch),
-                param_map,
+                crate::direct::params(params)?,
             )
             .map_err(PyGrafeoError::from)?;
-        let (nodes, edges) = extract_entities(&result, &db);
-        let columns = std::mem::take(&mut result.columns);
-        let exec_time = result.execution_time_ms;
-        let scanned = result.rows_scanned;
-        Ok(PyQueryResult::with_metrics(
-            columns,
-            result.into_rows(),
-            nodes,
-            edges,
-            exec_time,
-            scanned,
-        ))
+        Ok(crate::direct::query_result(result))
     }
 
     /// Execute a query and return a query builder.
@@ -817,7 +773,11 @@ impl PyGrafeoDB {
         self.execute_language_impl(language, query, params)
     }
 
-    /// Create a node.
+    /// Create a node in the selected graph.
+    ///
+    /// Checked like a query `INSERT`: raises if the node breaks a constraint
+    /// or node type of its labels (a duplicate `UNIQUE` value, a missing
+    /// `NOT NULL` property, a value of the wrong type).
     #[pyo3(signature = (labels, properties=None))]
     fn create_node(
         &self,
@@ -825,41 +785,13 @@ impl PyGrafeoDB {
         properties: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyNode> {
         let db = self.inner.read();
-
-        // Convert labels from Vec<String> to Vec<&str>
-        let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-
-        // Create node with or without properties
-        let id = if let Some(p) = properties {
-            // Convert properties
-            let mut props: Vec<(
-                grafeo_common::types::PropertyKey,
-                grafeo_common::types::Value,
-            )> = Vec::new();
-            for (key, value) in p.iter() {
-                let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value)?;
-                props.push((grafeo_common::types::PropertyKey::new(key_str), val));
-            }
-            db.create_node_with_props(&label_refs, props)
-        } else {
-            db.create_node(&label_refs)
-        };
-
-        // Fetch the node back to get the full representation
-        if let Some(node) = db.get_node(id) {
-            let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
-            let properties: HashMap<
-                grafeo_common::types::PropertyKey,
-                grafeo_common::types::Value,
-            > = node.properties.into_iter().collect();
-            Ok(PyNode::new(id, labels, properties))
-        } else {
-            Err(PyGrafeoError::database("Failed to create node").into())
-        }
+        crate::direct::create_node(&db.session(), &labels, properties)
     }
 
     /// Create an edge between two nodes.
+    ///
+    /// Raises if either node does not exist or the edge breaks its edge
+    /// type.
     #[pyo3(signature = (source_id, target_id, edge_type, properties=None))]
     fn create_edge(
         &self,
@@ -869,81 +801,25 @@ impl PyGrafeoDB {
         properties: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyEdge> {
         let db = self.inner.read();
-        let src = NodeId(source_id);
-        let dst = NodeId(target_id);
-
-        // Create edge with or without properties
-        let id = if let Some(p) = properties {
-            // Convert properties
-            let mut props: Vec<(
-                grafeo_common::types::PropertyKey,
-                grafeo_common::types::Value,
-            )> = Vec::new();
-            for (key, value) in p.iter() {
-                let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value)?;
-                props.push((grafeo_common::types::PropertyKey::new(key_str), val));
-            }
-            db.create_edge_with_props(src, dst, &edge_type, props)
-        } else {
-            db.create_edge(src, dst, &edge_type)
-        };
-
-        // Fetch the edge back to get the full representation
-        if let Some(edge) = db.get_edge(id) {
-            let properties: HashMap<
-                grafeo_common::types::PropertyKey,
-                grafeo_common::types::Value,
-            > = edge.properties.into_iter().collect();
-            Ok(PyEdge::new(
-                id,
-                edge.edge_type.to_string(),
-                edge.src,
-                edge.dst,
-                properties,
-            ))
-        } else {
-            Err(PyGrafeoError::database("Failed to create edge").into())
-        }
+        crate::direct::create_edge(
+            &db.session(),
+            NodeId(source_id),
+            NodeId(target_id),
+            &edge_type,
+            properties,
+        )
     }
 
     /// Get a node by ID.
     fn get_node(&self, id: u64) -> PyResult<Option<PyNode>> {
         let db = self.inner.read();
-        let node_id = NodeId(id);
-
-        if let Some(node) = db.get_node(node_id) {
-            let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
-            let properties: HashMap<
-                grafeo_common::types::PropertyKey,
-                grafeo_common::types::Value,
-            > = node.properties.into_iter().collect();
-            Ok(Some(PyNode::new(node_id, labels, properties)))
-        } else {
-            Ok(None)
-        }
+        Ok(db.get_node(NodeId(id)).map(crate::direct::node))
     }
 
     /// Get an edge by ID.
     fn get_edge(&self, id: u64) -> PyResult<Option<PyEdge>> {
         let db = self.inner.read();
-        let edge_id = EdgeId(id);
-
-        if let Some(edge) = db.get_edge(edge_id) {
-            let properties: HashMap<
-                grafeo_common::types::PropertyKey,
-                grafeo_common::types::Value,
-            > = edge.properties.into_iter().collect();
-            Ok(Some(PyEdge::new(
-                edge_id,
-                edge.edge_type.to_string(),
-                edge.src,
-                edge.dst,
-                properties,
-            )))
-        } else {
-            Ok(None)
-        }
+        Ok(db.get_edge(EdgeId(id)).map(crate::direct::edge))
     }
 
     /// Get a node at a specific historical epoch.
@@ -1225,18 +1101,24 @@ impl PyGrafeoDB {
     }
 
     /// Delete a node by ID.
+    ///
+    /// Returns False if the node does not exist. Raises if the node still
+    /// has edges: delete them first, or use `DETACH DELETE` in a query.
     fn delete_node(&self, id: u64) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.delete_node(NodeId(id)))
+        Ok(db.delete_node(NodeId(id)).map_err(PyGrafeoError::from)?)
     }
 
     /// Delete an edge by ID.
     fn delete_edge(&self, id: u64) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.delete_edge(EdgeId(id)))
+        Ok(db.delete_edge(EdgeId(id)).map_err(PyGrafeoError::from)?)
     }
 
     /// Set a property on a node.
+    ///
+    /// Raises if the node does not exist or the value breaks a constraint or
+    /// node type of its labels.
     ///
     /// Example:
     /// ```python
@@ -1251,14 +1133,16 @@ impl PyGrafeoDB {
     ) -> PyResult<()> {
         let db = self.inner.read();
         let val = PyValue::from_py(value)?;
-        db.set_node_property(NodeId(node_id), key, val);
+        db.set_node_property(NodeId(node_id), key, val)
+            .map_err(PyGrafeoError::from)?;
         Ok(())
     }
 
     /// Add a label to an existing node.
     ///
     /// Returns True if the label was added, False if the node doesn't exist
-    /// or already has the label.
+    /// or already has the label. Raises if the node breaks a constraint or
+    /// node type of the new label.
     ///
     /// Example:
     /// ```python
@@ -1267,7 +1151,9 @@ impl PyGrafeoDB {
     /// ```
     fn add_node_label(&self, node_id: u64, label: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.add_node_label(NodeId(node_id), label))
+        Ok(db
+            .add_node_label(NodeId(node_id), label)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Remove a label from a node.
@@ -1281,7 +1167,9 @@ impl PyGrafeoDB {
     /// ```
     fn remove_node_label(&self, node_id: u64, label: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.remove_node_label(NodeId(node_id), label))
+        Ok(db
+            .remove_node_label(NodeId(node_id), label)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Get all labels for a node.
@@ -1301,6 +1189,8 @@ impl PyGrafeoDB {
 
     /// Set a property on an edge.
     ///
+    /// Raises if the edge does not exist or the value breaks its edge type.
+    ///
     /// Example:
     /// ```python
     /// db.set_edge_property(edge_id, "weight", 1.5)
@@ -1314,7 +1204,8 @@ impl PyGrafeoDB {
     ) -> PyResult<()> {
         let db = self.inner.read();
         let val = PyValue::from_py(value)?;
-        db.set_edge_property(EdgeId(edge_id), key, val);
+        db.set_edge_property(EdgeId(edge_id), key, val)
+            .map_err(PyGrafeoError::from)?;
         Ok(())
     }
 
@@ -1329,7 +1220,9 @@ impl PyGrafeoDB {
     /// ```
     fn remove_node_property(&self, node_id: u64, key: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.remove_node_property(NodeId(node_id), key))
+        Ok(db
+            .remove_node_property(NodeId(node_id), key)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Remove a property from an edge.
@@ -1343,7 +1236,9 @@ impl PyGrafeoDB {
     /// ```
     fn remove_edge_property(&self, edge_id: u64, key: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.remove_edge_property(EdgeId(edge_id), key))
+        Ok(db
+            .remove_edge_property(EdgeId(edge_id), key)
+            .map_err(PyGrafeoError::from)?)
     }
 
     // =========================================================================
@@ -1522,7 +1417,9 @@ impl PyGrafeoDB {
         vectors: Vec<Vec<f32>>,
     ) -> PyResult<Vec<u64>> {
         let db = self.inner.read();
-        let ids = db.batch_create_nodes(label, property, vectors);
+        let ids = db
+            .batch_create_nodes(label, property, vectors)
+            .map_err(PyGrafeoError::from)?;
         Ok(ids.into_iter().map(|id| id.as_u64()).collect())
     }
 
@@ -1530,7 +1427,8 @@ impl PyGrafeoDB {
     ///
     /// Each dict in `properties_list` is a complete set of properties for one
     /// node. Vector values (list of floats) are automatically inserted into
-    /// matching vector indexes.
+    /// matching vector indexes. The nodes are created in one transaction: if
+    /// one breaks a constraint, the call raises and creates none of them.
     ///
     /// Args:
     ///     label: Node label for all created nodes.
@@ -1551,18 +1449,9 @@ impl PyGrafeoDB {
         properties_list: &Bound<'_, pyo3::types::PyList>,
     ) -> PyResult<Vec<u64>> {
         let db = self.inner.read();
-        let mut props_vec = Vec::with_capacity(properties_list.len());
-        for item in properties_list.iter() {
-            let py_dict: &Bound<'_, pyo3::types::PyDict> = item.cast()?;
-            let mut props = std::collections::HashMap::new();
-            for (key, value) in py_dict.iter() {
-                let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value)?;
-                props.insert(grafeo_common::types::PropertyKey::new(key_str), val);
-            }
-            props_vec.push(props);
-        }
-        let ids = db.batch_create_nodes_with_props(label, props_vec);
+        let ids = db
+            .batch_create_nodes_with_props(label, crate::direct::properties_list(properties_list)?)
+            .map_err(PyGrafeoError::from)?;
         Ok(ids.into_iter().map(|id| id.as_u64()).collect())
     }
 
@@ -2004,7 +1893,8 @@ impl PyGrafeoDB {
         isolation_level: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyTransaction> {
         let level_str = extract_isolation_level(isolation_level)?;
-        PyTransaction::new(self.inner.clone(), level_str.as_deref(), None)
+        let session = self.inner.read().session();
+        PyTransaction::begin(self.inner.clone(), session, level_str.as_deref())
     }
 
     /// Begin a transaction with an explicit CDC override.
@@ -2027,7 +1917,8 @@ impl PyGrafeoDB {
         cdc_enabled: bool,
         isolation_level: Option<&str>,
     ) -> PyResult<PyTransaction> {
-        PyTransaction::new(self.inner.clone(), isolation_level, Some(cdc_enabled))
+        let session = self.inner.read().session_with_cdc(cdc_enabled);
+        PyTransaction::begin(self.inner.clone(), session, isolation_level)
     }
 
     /// Trigger manual garbage collection of old MVCC versions.
@@ -3030,7 +2921,8 @@ impl PyGrafeoDB {
                         })
                         .collect();
 
-                    db.create_node_with_props(&label_refs, props);
+                    db.create_node_with_props(&label_refs, props)
+                        .map_err(PyGrafeoError::from)?;
                     count += 1;
                 }
             }
@@ -3074,7 +2966,8 @@ impl PyGrafeoDB {
                         })
                         .collect();
 
-                    db.create_edge_with_props(src_id, dst_id, edge_type_str, props);
+                    db.create_edge_with_props(src_id, dst_id, edge_type_str, props)
+                        .map_err(PyGrafeoError::from)?;
                     count += 1;
                 }
             }
@@ -3429,6 +3322,23 @@ impl PyGrafeoDB {
         self.inner.read().list_projections()
     }
 
+    /// Returns a handle on a named graph.
+    ///
+    /// The handle has ``execute()``, ``execute_cypher()``, the direct API and
+    /// ``begin_transaction()``, all working in that graph without changing the
+    /// graph ``set_graph()`` selects, so several graphs can be used side by
+    /// side and from several threads. Raises if the graph does not exist.
+    ///
+    /// Example:
+    ///     db.create_graph("model")
+    ///     model = db.graph("model")
+    ///     model.create_node(["Component"], {"name": "Billing"})
+    ///     model.execute("MATCH (n) RETURN count(n)")  # 1
+    ///     db.execute("MATCH (n) RETURN count(n)")     # 0: the default graph
+    fn graph(&self, name: &str) -> PyResult<crate::graph_handle::PyGraphHandle> {
+        crate::graph_handle::PyGraphHandle::open(Arc::clone(&self.inner), name)
+    }
+
     /// Sets the current graph for subsequent ``execute()`` calls.
     ///
     /// Equivalent to running ``USE GRAPH <name>`` but persists across calls.
@@ -3551,7 +3461,8 @@ impl PyIsolationLevel {
 /// Other connections see a consistent snapshot while you work.
 #[pyclass(name = "Transaction")]
 pub struct PyTransaction {
-    db: Arc<RwLock<GrafeoDB>>,
+    /// Keeps the database open while the transaction lives.
+    _db: Arc<RwLock<GrafeoDB>>,
     session: parking_lot::Mutex<Option<grafeo_engine::session::Session>>,
     committed: bool,
     rolled_back: bool,
@@ -3572,45 +3483,18 @@ impl PyTransaction {
             ));
         }
 
-        let db = self.db.read();
-        let mut session_guard = self.session.lock();
-        let session = session_guard.as_mut().ok_or_else(|| {
+        let session_guard = self.session.lock();
+        let session = session_guard.as_ref().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("Transaction session not available")
         })?;
-
-        let param_map = if let Some(p) = params {
-            let mut map = HashMap::new();
-            for (key, value) in p.iter() {
-                let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value)?;
-                map.insert(key_str, val);
-            }
-            Some(map)
-        } else {
-            None
-        };
-        let mut result = session
-            .execute_language(query, language, param_map)
-            .map_err(PyGrafeoError::from)?;
-        let (nodes, edges) = extract_entities(&result, &db);
-        let columns = std::mem::take(&mut result.columns);
-        let exec_time = result.execution_time_ms;
-        let scanned = result.rows_scanned;
-        Ok(PyQueryResult::with_metrics(
-            columns,
-            result.into_rows(),
-            nodes,
-            edges,
-            exec_time,
-            scanned,
-        ))
+        crate::direct::run(session, language, query, params)
     }
 
-    /// Create a new transaction with an optional isolation level and CDC override.
-    fn new(
+    /// Begins a transaction on `session` with an optional isolation level.
+    pub(crate) fn begin(
         db: Arc<RwLock<GrafeoDB>>,
+        mut session: grafeo_engine::session::Session,
         isolation_level: Option<&str>,
-        _cdc_override: Option<bool>,
     ) -> PyResult<Self> {
         // Parse isolation level string
         let (level, level_name) = match isolation_level {
@@ -3631,22 +3515,6 @@ impl PyTransaction {
             }
         };
 
-        // Create session from db, using CDC override when available
-        let mut session = {
-            let db_guard = db.read();
-            #[cfg(feature = "cdc")]
-            {
-                match _cdc_override {
-                    Some(cdc) => db_guard.session_with_cdc(cdc),
-                    None => db_guard.session(),
-                }
-            }
-            #[cfg(not(feature = "cdc"))]
-            {
-                db_guard.session()
-            }
-        };
-
         // Begin the transaction with the specified isolation level
         if let Some(level) = level {
             session
@@ -3657,7 +3525,7 @@ impl PyTransaction {
         }
 
         Ok(Self {
-            db,
+            _db: db,
             session: parking_lot::Mutex::new(Some(session)),
             committed: false,
             rolled_back: false,
@@ -3944,15 +3812,6 @@ impl PyDatabaseStats {
     }
 }
 
-/// Pulls nodes and edges out of query results so Python can work with them.
-fn extract_entities(result: &QueryResult, _db: &GrafeoDB) -> (Vec<PyNode>, Vec<PyEdge>) {
-    grafeo_bindings_common::entity::extract_and_map(
-        result,
-        |n| PyNode::new(n.id, n.labels, n.properties),
-        |e| PyEdge::new(e.id, e.edge_type, e.source_id, e.target_id, e.properties),
-    )
-}
-
 /// Converts a CDC ChangeEvent to a Python dict-like HashMap.
 #[cfg(feature = "cdc")]
 fn change_event_to_dict(
@@ -4040,6 +3899,40 @@ fn change_event_to_dict(
         None => py.None(),
     };
     map.insert("after".to_string(), after_py);
+
+    // What the entity is: a node's labels (after a label change, and
+    // before_labels before it), an edge's type and endpoints.
+    let labels_py = |labels: &Option<Vec<String>>| match labels {
+        Some(labels) => labels
+            .clone()
+            .into_py_any(py)
+            .expect("list to Python conversion"),
+        None => py.None(),
+    };
+    map.insert("labels".to_string(), labels_py(&event.labels));
+    map.insert("before_labels".to_string(), labels_py(&event.before_labels));
+    map.insert(
+        "edge_type".to_string(),
+        event
+            .edge_type
+            .clone()
+            .into_py_any(py)
+            .expect("str to Python conversion"),
+    );
+    map.insert(
+        "src_id".to_string(),
+        event
+            .src_id
+            .into_py_any(py)
+            .expect("u64 to Python conversion"),
+    );
+    map.insert(
+        "dst_id".to_string(),
+        event
+            .dst_id
+            .into_py_any(py)
+            .expect("u64 to Python conversion"),
+    );
 
     map
 }

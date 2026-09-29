@@ -1,7 +1,7 @@
 name: Bug Report
 description: Report a bug in Grafeo
 title: "[Bug]: "
-labels: ["bug"]
+type: Bug
 body:
   - type: textarea
     id: description

@@ -40,9 +40,11 @@ fn setup_euclidean_fixture() -> GrafeoDB {
         ("d07", 0.7),
         ("d09", 0.9),
     ] {
-        let n = db.create_node(&["Item"]);
-        db.set_node_property(n, "label", Value::String(label.into()));
-        db.set_node_property(n, "vec", Value::Vector(vec![d, 0.0, 0.0].into()));
+        let n = db.create_node(&["Item"]).unwrap();
+        db.set_node_property(n, "label", Value::String(label.into()))
+            .unwrap();
+        db.set_node_property(n, "vec", Value::Vector(vec![d, 0.0, 0.0].into()))
+            .unwrap();
     }
     db.create_vector_index("Item", "vec", Some(3), Some("euclidean"), None, None, None)
         .expect("create vector index");
@@ -95,9 +97,11 @@ fn setup_manhattan_fixture() -> GrafeoDB {
         ("d07", 0.7),
         ("d09", 0.9),
     ] {
-        let n = db.create_node(&["Item"]);
-        db.set_node_property(n, "label", Value::String(label.into()));
-        db.set_node_property(n, "vec", Value::Vector(vec![d, 0.0, 0.0].into()));
+        let n = db.create_node(&["Item"]).unwrap();
+        db.set_node_property(n, "label", Value::String(label.into()))
+            .unwrap();
+        db.set_node_property(n, "vec", Value::Vector(vec![d, 0.0, 0.0].into()))
+            .unwrap();
     }
     db.create_vector_index("Item", "vec", Some(3), Some("manhattan"), None, None, None)
         .expect("create vector index");

@@ -310,9 +310,13 @@ impl GraphStoreSearch for LpgStore {
     }
 
     #[cfg(feature = "vector-index")]
-    fn vector_index_metric(&self, label: &str, property: &str) -> Option<DistanceMetric> {
+    fn vector_index_config(
+        &self,
+        label: &str,
+        property: &str,
+    ) -> Option<crate::index::vector::HnswConfig> {
         self.get_vector_index(label, property)
-            .map(|idx| idx.config().metric)
+            .map(|idx| idx.config().clone())
     }
 
     #[cfg(feature = "vector-index")]

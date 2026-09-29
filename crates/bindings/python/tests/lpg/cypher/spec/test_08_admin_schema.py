@@ -1,7 +1,7 @@
 """Cypher spec: Administration and Schema (openCypher 9 sec 8, 9).
 
 Covers: CREATE/DROP INDEX, CREATE/DROP CONSTRAINT, SHOW commands,
-EXPLAIN, PROFILE. All currently MISSING in implementation.
+EXPLAIN, PROFILE. The xfail cases are not implemented yet.
 """
 
 import pytest
@@ -38,18 +38,27 @@ class TestIndex:
 
 
 class TestConstraint:
-    """CREATE/DROP CONSTRAINT (not implemented in Cypher)."""
+    """CREATE/DROP CONSTRAINT (Cypher requires a constraint name)."""
 
-    @pytest.mark.xfail(reason="Constraint DDL not implemented in Cypher")
+    @pytest.mark.xfail(reason="Cypher CREATE CONSTRAINT requires a name")
     def test_create_unique_constraint(self, db):
         db.execute_cypher("CREATE CONSTRAINT FOR (n:Person) REQUIRE n.email IS UNIQUE")
 
-    @pytest.mark.xfail(reason="Constraint DDL not implemented in Cypher")
+    @pytest.mark.xfail(reason="Cypher CREATE CONSTRAINT requires a name")
     def test_create_exists_constraint(self, db):
         db.execute_cypher("CREATE CONSTRAINT FOR (n:Person) REQUIRE n.name IS NOT NULL")
 
     def test_drop_constraint(self, db):
-        db.execute_cypher("DROP CONSTRAINT my_constraint")
+        db.execute_cypher("CREATE CONSTRAINT unique_email FOR (p:Person) REQUIRE p.email IS UNIQUE")
+        db.execute_cypher("DROP CONSTRAINT unique_email")
+        assert list(db.execute_cypher("SHOW CONSTRAINTS")) == []
+        # Duplicates are accepted again once the constraint is gone.
+        db.execute_cypher("CREATE (:Person {email: 'alix@example.com'})")
+        db.execute_cypher("CREATE (:Person {email: 'alix@example.com'})")
+
+    def test_drop_unknown_constraint_fails(self, db):
+        with pytest.raises(Exception, match="constraint 'my_constraint' does not exist"):
+            db.execute_cypher("DROP CONSTRAINT my_constraint")
 
     def test_drop_constraint_if_exists(self, db):
         db.execute_cypher("DROP CONSTRAINT my_constraint IF EXISTS")

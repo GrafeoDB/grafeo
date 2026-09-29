@@ -1,0 +1,66 @@
+name: Epic
+description: A larger body of work made up of multiple issues
+title: "[Epic]: "
+type: Epic
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Epics are for large architectural work that spans many issues. Smaller one-sided work is a
+        Feature. After creating the epic, attach work through the **Sub-issues** section. Set the
+        epic's milestone to the release where it is expected to finish; sub-issues get their own.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What this is and why it matters to users.
+    validations:
+      required: true
+
+  - type: textarea
+    id: goals
+    attributes:
+      label: Goals
+      description: What is in scope. The epic is done when these are met.
+      placeholder: |
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+      description: What is explicitly out of scope.
+      placeholder: |
+        - ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: design
+    attributes:
+      label: Design
+      description: Approach, tradeoffs and open questions. Link an RFC issue if there is one.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: profiles
+    attributes:
+      label: Affected profiles
+      description: Which feature profiles (and therefore which products) this touches.
+      options:
+        - label: embedded (facade, Python, Node.js, C and friends)
+        - label: edge (WASM, grafeo-web)
+        - label: server (grafeo-server)
+
+  - type: input
+    id: target
+    attributes:
+      label: Target
+      description: Release(s) this is expected to land in. Leave empty if not yet planned.
+      placeholder: "0.6.0"
+    validations:
+      required: false

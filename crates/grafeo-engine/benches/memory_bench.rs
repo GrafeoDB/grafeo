@@ -89,10 +89,13 @@ fn setup_social_graph(node_count: usize, edge_multiplier: usize) -> GrafeoDB {
     // Create nodes via CRUD API, collecting their IDs
     let mut node_ids = Vec::with_capacity(node_count);
     for i in 0..node_count {
-        let id = db.create_node(&["Person"]);
-        db.set_node_property(id, "id", Value::Int64(i as i64));
-        db.set_node_property(id, "name", Value::String(format!("User{i}").into()));
-        db.set_node_property(id, "age", Value::Int64((20 + (i % 50)) as i64));
+        let id = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(id, "id", Value::Int64(i as i64))
+            .unwrap();
+        db.set_node_property(id, "name", Value::String(format!("User{i}").into()))
+            .unwrap();
+        db.set_node_property(id, "age", Value::Int64((20 + (i % 50)) as i64))
+            .unwrap();
         node_ids.push(id);
     }
 
@@ -102,7 +105,8 @@ fn setup_social_graph(node_count: usize, edge_multiplier: usize) -> GrafeoDB {
         let src = i % node_count;
         let dst = (i * 7 + 13) % node_count;
         if src != dst {
-            db.create_edge(node_ids[src], node_ids[dst], "KNOWS");
+            db.create_edge(node_ids[src], node_ids[dst], "KNOWS")
+                .unwrap();
         }
     }
 

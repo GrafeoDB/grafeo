@@ -148,6 +148,27 @@ fn build_result(result: &grafeo_engine::database::QueryResult) -> *mut GrafeoRes
 // Lifecycle
 // =========================================================================
 
+/// The id of a created node or edge, or `u64::MAX` with the error recorded
+/// for `grafeo_last_error`.
+fn created_id(result: grafeo_common::utils::error::Result<u64>) -> u64 {
+    result.unwrap_or_else(|e| {
+        set_last_error(&e.to_string());
+        u64::MAX
+    })
+}
+
+/// `1` or `0` for a yes-or-no result, or `-1` with the error recorded for
+/// `grafeo_last_error`.
+fn flag(result: grafeo_common::utils::error::Result<bool>) -> i32 {
+    match result {
+        Ok(done) => i32::from(done),
+        Err(e) => {
+            set_last_error(&e.to_string());
+            -1
+        }
+    }
+}
+
 /// Create a new in-memory database.
 ///
 /// Returns an opaque pointer, or null on error (check `grafeo_last_error()`).
@@ -782,12 +803,14 @@ pub extern "C" fn grafeo_create_node(
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
     let guard = db.inner.read();
-    let id = if let Some(props) = crate::types::parse_properties(properties_json) {
-        guard.create_node_with_props(&label_refs, props)
-    } else {
-        guard.create_node(&label_refs)
-    };
-    id.as_u64()
+    created_id(
+        if let Some(props) = crate::types::parse_properties(properties_json) {
+            guard.create_node_with_props(&label_refs, props)
+        } else {
+            guard.create_node(&label_refs)
+        }
+        .map(|id| id.as_u64()),
+    )
 }
 
 /// Get a node by ID. Writes into `out`. Returns `Ok` or an error status.
@@ -842,7 +865,7 @@ pub extern "C" fn grafeo_delete_node(db: *mut GrafeoDatabase, id: u64) -> i32 {
     }
     // SAFETY: Caller guarantees valid pointer.
     let db = unsafe { &*db };
-    i32::from(db.inner.read().delete_node(NodeId::new(id)))
+    flag(db.inner.read().delete_node(NodeId::new(id)))
 }
 
 /// Set a property on a node. `value_json` is a JSON-encoded value.
@@ -862,10 +885,14 @@ pub extern "C" fn grafeo_set_node_property(
         set_last_error("Invalid JSON value");
         return GrafeoStatus::ErrorSerialization;
     };
-    db.inner
+    match db
+        .inner
         .read()
-        .set_node_property(NodeId::new(id), key_str, value);
-    GrafeoStatus::Ok
+        .set_node_property(NodeId::new(id), key_str, value)
+    {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(e) => set_error(&e),
+    }
 }
 
 /// Remove a property from a node. Returns 1 if removed, 0 if not found.
@@ -884,7 +911,7 @@ pub extern "C" fn grafeo_remove_node_property(
     let Ok(key_str) = str_from_ptr(key) else {
         return -1;
     };
-    i32::from(
+    flag(
         db.inner
             .read()
             .remove_node_property(NodeId::new(id), key_str),
@@ -907,7 +934,7 @@ pub extern "C" fn grafeo_add_node_label(
     let Ok(label_str) = str_from_ptr(label) else {
         return -1;
     };
-    i32::from(db.inner.read().add_node_label(NodeId::new(id), label_str))
+    flag(db.inner.read().add_node_label(NodeId::new(id), label_str))
 }
 
 /// Remove a label from a node. Returns 1 if removed, 0 if not present.
@@ -926,7 +953,7 @@ pub extern "C" fn grafeo_remove_node_label(
     let Ok(label_str) = str_from_ptr(label) else {
         return -1;
     };
-    i32::from(
+    flag(
         db.inner
             .read()
             .remove_node_label(NodeId::new(id), label_str),
@@ -1018,12 +1045,14 @@ pub extern "C" fn grafeo_create_edge(
     let dst = NodeId::new(target_id);
     let guard = db.inner.read();
 
-    let id = if let Some(props) = crate::types::parse_properties(properties_json) {
-        guard.create_edge_with_props(src, dst, type_str, props)
-    } else {
-        guard.create_edge(src, dst, type_str)
-    };
-    id.as_u64()
+    created_id(
+        if let Some(props) = crate::types::parse_properties(properties_json) {
+            guard.create_edge_with_props(src, dst, type_str, props)
+        } else {
+            guard.create_edge(src, dst, type_str)
+        }
+        .map(|id| id.as_u64()),
+    )
 }
 
 /// Get an edge by ID. Writes into `out`. Returns `Ok` or error status.
@@ -1074,7 +1103,7 @@ pub extern "C" fn grafeo_delete_edge(db: *mut GrafeoDatabase, id: u64) -> i32 {
     }
     // SAFETY: Caller guarantees valid pointer.
     let db = unsafe { &*db };
-    i32::from(db.inner.read().delete_edge(EdgeId(id)))
+    flag(db.inner.read().delete_edge(EdgeId(id)))
 }
 
 /// Set a property on an edge.
@@ -1094,10 +1123,14 @@ pub extern "C" fn grafeo_set_edge_property(
         set_last_error("Invalid JSON value");
         return GrafeoStatus::ErrorSerialization;
     };
-    db.inner
+    match db
+        .inner
         .read()
-        .set_edge_property(EdgeId(id), key_str, value);
-    GrafeoStatus::Ok
+        .set_edge_property(EdgeId(id), key_str, value)
+    {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(e) => set_error(&e),
+    }
 }
 
 /// Remove a property from an edge. Returns 1 if removed, 0 if not found.
@@ -1116,7 +1149,7 @@ pub extern "C" fn grafeo_remove_edge_property(
     let Ok(key_str) = str_from_ptr(key) else {
         return -1;
     };
-    i32::from(db.inner.read().remove_edge_property(EdgeId(id), key_str))
+    flag(db.inner.read().remove_edge_property(EdgeId(id), key_str))
 }
 
 /// Free a `GrafeoEdge` returned by `grafeo_get_edge`.
@@ -1590,10 +1623,14 @@ pub extern "C" fn grafeo_batch_create_nodes(
     let flat = unsafe { std::slice::from_raw_parts(vectors, vector_count * dimensions) };
     let vecs: Vec<Vec<f32>> = flat.chunks(dimensions).map(|c| c.to_vec()).collect();
 
-    let node_ids = db
+    let node_ids = match db
         .inner
         .read()
-        .batch_create_nodes(label_str, prop_str, vecs);
+        .batch_create_nodes(label_str, prop_str, vecs)
+    {
+        Ok(ids) => ids,
+        Err(e) => return set_error(&e),
+    };
     let mut raw_ids: Vec<u64> = node_ids.iter().map(|id| id.as_u64()).collect();
     raw_ids.shrink_to_fit();
     let count = raw_ids.len();

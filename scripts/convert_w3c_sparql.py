@@ -14,7 +14,7 @@ Usage:
     python scripts/convert_w3c_sparql.py --all
 
 Requirements:
-    pip install rdflib
+    uv pip install rdflib
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Optional
 
 try:
-    import rdflib
     from rdflib import Graph, Namespace, URIRef
     from rdflib.namespace import RDF
 except ImportError:

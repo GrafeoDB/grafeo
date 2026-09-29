@@ -164,6 +164,10 @@ impl LpgStore {
         let chain = VersionChain::with_initial(record, version_epoch, transaction_id);
         self.nodes.write().insert(id, chain);
         self.live_node_count.fetch_add(1, Ordering::Relaxed);
+        self.record_change(
+            transaction_id,
+            super::PropertyUndoEntry::NodeCreated { node_id: id },
+        );
         id
     }
 
@@ -213,11 +217,17 @@ impl LpgStore {
         let mut versions = self.node_versions.write();
         if let Some(index) = versions.get_mut(&id) {
             index.add_hot(hot_ref);
+            self.gc_candidates.lock().nodes.insert(id);
         } else {
             versions.insert(id, VersionIndex::with_initial(hot_ref));
         }
+        drop(versions);
 
         self.live_node_count.fetch_add(1, Ordering::Relaxed);
+        self.record_change(
+            transaction_id,
+            super::PropertyUndoEntry::NodeCreated { node_id: id },
+        );
         id
     }
 
@@ -632,7 +642,7 @@ impl LpgStore {
     ) -> bool {
         let mut nodes = self.nodes.write();
         if let Some(chain) = nodes.get_mut(&id) {
-            if let Some(record) = chain.visible_at(epoch) {
+            if let Some(record) = chain.visible_to(epoch, transaction_id) {
                 if record.is_deleted() {
                     return false;
                 }
@@ -707,7 +717,9 @@ impl LpgStore {
             #[cfg(not(feature = "temporal"))]
             self.node_properties.remove_all(id);
             #[cfg(feature = "temporal")]
-            self.node_properties.remove_all(id, self.current_epoch());
+            // Tombstones are this transaction's writes: PENDING until it commits.
+            self.node_properties
+                .remove_all(id, grafeo_common::types::EpochId::PENDING);
             self.live_node_count.fetch_sub(1, Ordering::Relaxed);
 
             // Record undo entry for rollback
@@ -738,7 +750,7 @@ impl LpgStore {
     ) -> bool {
         let mut versions = self.node_versions.write();
         if let Some(index) = versions.get_mut(&id) {
-            if let Some(version_ref) = index.visible_at(epoch) {
+            if let Some(version_ref) = index.visible_to(epoch, transaction_id) {
                 if let Some(record) = self.read_node_record(&version_ref) {
                     if record.is_deleted() {
                         return false;
@@ -817,7 +829,9 @@ impl LpgStore {
             #[cfg(not(feature = "temporal"))]
             self.node_properties.remove_all(id);
             #[cfg(feature = "temporal")]
-            self.node_properties.remove_all(id, self.current_epoch());
+            // Tombstones are this transaction's writes: PENDING until it commits.
+            self.node_properties
+                .remove_all(id, grafeo_common::types::EpochId::PENDING);
             self.live_node_count.fetch_sub(1, Ordering::Relaxed);
 
             // Record undo entry for rollback

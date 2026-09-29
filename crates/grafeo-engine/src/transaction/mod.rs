@@ -198,7 +198,7 @@ pub mod parallel;
 mod prepared;
 
 pub use manager::{
-    EntityId, IsolationLevel, TransactionInfo, TransactionManager, TransactionState,
+    EntityId, GraphEntity, IsolationLevel, TransactionInfo, TransactionManager, TransactionState,
 };
 #[doc(hidden)]
 pub use mvcc::{VersionChain, VersionInfo};
@@ -207,6 +207,9 @@ pub use prepared::{CommitInfo, PreparedCommit};
 pub use write_tracker::TransactionWriteTracker;
 
 mod write_tracker;
+
+#[cfg(feature = "wal")]
+pub(crate) mod wal_buffer;
 
 #[cfg(feature = "parallel")]
 pub use parallel::{BatchRequest, BatchResult, ExecutionStatus, ParallelExecutor};

@@ -19,20 +19,24 @@ use grafeo_engine::GrafeoDB;
 fn build_bench_db() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     for i in 0..50u64 {
-        let n = db.create_node(&["Person"]);
-        db.set_node_property(n, "name", Value::String(format!("User{i}").into()));
-        db.set_node_property(n, "age", Value::Int64(20 + (i % 50) as i64));
+        let n = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(n, "name", Value::String(format!("User{i}").into()))
+            .unwrap();
+        db.set_node_property(n, "age", Value::Int64(20 + (i % 50) as i64))
+            .unwrap();
         db.set_node_property(
             n,
             "bio",
             Value::String("A short biography for benchmarking serialization throughput.".into()),
-        );
+        )
+        .unwrap();
     }
     for i in 0..100u64 {
         let src = grafeo_common::types::NodeId::new(i % 50);
         let dst = grafeo_common::types::NodeId::new((i * 7 + 13) % 50);
-        let e = db.create_edge(src, dst, "KNOWS");
-        db.set_edge_property(e, "weight", Value::Float64(i as f64 * 0.1));
+        let e = db.create_edge(src, dst, "KNOWS").unwrap();
+        db.set_edge_property(e, "weight", Value::Float64(i as f64 * 0.1))
+            .unwrap();
     }
     db
 }

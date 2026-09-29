@@ -83,6 +83,10 @@ impl LpgStore {
 
         self.live_edge_count.fetch_add(1, Ordering::Relaxed);
         self.increment_edge_type_count(type_id);
+        self.record_change(
+            transaction_id,
+            super::PropertyUndoEntry::EdgeCreated { edge_id: id },
+        );
         id
     }
 
@@ -127,9 +131,11 @@ impl LpgStore {
         let mut versions = self.edge_versions.write();
         if let Some(index) = versions.get_mut(&id) {
             index.add_hot(hot_ref);
+            self.gc_candidates.lock().edges.insert(id);
         } else {
             versions.insert(id, VersionIndex::with_initial(hot_ref));
         }
+        drop(versions);
 
         // Update adjacency
         self.forward_adj.add_edge(src, dst, id);
@@ -139,6 +145,10 @@ impl LpgStore {
 
         self.live_edge_count.fetch_add(1, Ordering::Relaxed);
         self.increment_edge_type_count(type_id);
+        self.record_change(
+            transaction_id,
+            super::PropertyUndoEntry::EdgeCreated { edge_id: id },
+        );
         id
     }
 
@@ -474,7 +484,7 @@ impl LpgStore {
         let mut edges = self.edges.write();
         if let Some(chain) = edges.get_mut(&id) {
             let (src, dst, type_id) = {
-                match chain.visible_at(epoch) {
+                match chain.visible_to(epoch, transaction_id) {
                     Some(record) => {
                         if record.is_deleted() {
                             return false;
@@ -512,7 +522,9 @@ impl LpgStore {
             #[cfg(not(feature = "temporal"))]
             self.edge_properties.remove_all(id);
             #[cfg(feature = "temporal")]
-            self.edge_properties.remove_all(id, self.current_epoch());
+            // Tombstones are this transaction's writes: PENDING until it commits.
+            self.edge_properties
+                .remove_all(id, grafeo_common::types::EpochId::PENDING);
 
             self.live_edge_count.fetch_sub(1, Ordering::Relaxed);
             self.decrement_edge_type_count(type_id);
@@ -548,7 +560,7 @@ impl LpgStore {
         let mut versions = self.edge_versions.write();
         if let Some(index) = versions.get_mut(&id) {
             let (src, dst, type_id) = {
-                match index.visible_at(epoch) {
+                match index.visible_to(epoch, transaction_id) {
                     Some(version_ref) => {
                         if let Some(record) = self.read_edge_record(&version_ref) {
                             if record.is_deleted() {
@@ -590,7 +602,9 @@ impl LpgStore {
             #[cfg(not(feature = "temporal"))]
             self.edge_properties.remove_all(id);
             #[cfg(feature = "temporal")]
-            self.edge_properties.remove_all(id, self.current_epoch());
+            // Tombstones are this transaction's writes: PENDING until it commits.
+            self.edge_properties
+                .remove_all(id, grafeo_common::types::EpochId::PENDING);
 
             self.live_edge_count.fetch_sub(1, Ordering::Relaxed);
             self.decrement_edge_type_count(type_id);

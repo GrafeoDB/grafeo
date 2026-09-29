@@ -68,10 +68,10 @@ fn create_social_network() -> GrafeoDB {
         )
         .unwrap();
 
-    session.create_edge(alix, gus, "KNOWS");
-    session.create_edge(alix, vincent, "KNOWS");
-    session.create_edge(gus, vincent, "KNOWS");
-    session.create_edge(alix, acme, "WORKS_AT");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
+    session.create_edge(alix, vincent, "KNOWS").unwrap();
+    session.create_edge(gus, vincent, "KNOWS").unwrap();
+    session.create_edge(alix, acme, "WORKS_AT").unwrap();
 
     db
 }

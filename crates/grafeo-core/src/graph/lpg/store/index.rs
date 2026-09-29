@@ -96,14 +96,7 @@ impl LpgStore {
         if let Some(index) = indexes.get(key) {
             // Get old value to remove from index
             if let Some(old_value) = self.node_properties.get(node_id, key) {
-                let old_hv = HashableValue::new(old_value);
-                if let Some(mut nodes) = index.get_mut(&old_hv) {
-                    nodes.remove(&node_id);
-                    if nodes.is_empty() {
-                        drop(nodes);
-                        index.remove(&old_hv);
-                    }
-                }
+                Self::remove_index_entry(index, &HashableValue::new(old_value), node_id);
             }
 
             // Add new value to index
@@ -113,6 +106,147 @@ impl LpgStore {
                 .or_insert_with(FxHashSet::default)
                 .insert(node_id);
         }
+    }
+
+    /// Inserts `vector` into `index` when its size fits the index. A vector
+    /// of another size cannot be indexed, so the node is taken out instead:
+    /// writes through the engine reject such a vector before it gets here
+    /// (the schema checks), which leaves replayed and internal writes.
+    #[cfg(feature = "vector-index")]
+    fn insert_into_vector_index(
+        index: &VectorIndexKind,
+        node_id: NodeId,
+        vector: &[f32],
+        accessor: &impl crate::index::vector::VectorAccessor,
+    ) {
+        let dimensions = index.config().dimensions;
+        if vector.len() == dimensions {
+            index.insert(node_id, vector, accessor);
+        } else {
+            index.remove(node_id);
+        }
+    }
+
+    /// The node's current labels.
+    #[cfg(feature = "vector-index")]
+    fn node_label_names(&self, node_id: NodeId) -> Vec<String> {
+        let registry = self.label_registry.read();
+        let node_labels = self.node_labels.read();
+        #[cfg(not(feature = "temporal"))]
+        let label_ids = node_labels.get(&node_id);
+        #[cfg(feature = "temporal")]
+        let label_ids = node_labels.get(&node_id).and_then(|log| log.latest());
+        label_ids
+            .into_iter()
+            .flatten()
+            .filter_map(|&label_id| registry.get_name(label_id).map(|name| name.to_string()))
+            .collect()
+    }
+
+    /// Brings the vector indexes on `key` of the node's labels in line with
+    /// the node's current value: a vector is inserted (or replaces the old
+    /// one), anything else, or no value, takes the node out.
+    #[cfg(feature = "vector-index")]
+    pub(super) fn sync_vector_indexes_for_property(&self, node_id: NodeId, key: &str) {
+        let indexes: Vec<Arc<VectorIndexKind>> = {
+            let all = self.vector_indexes.read();
+            if all.is_empty() {
+                return;
+            }
+            self.node_label_names(node_id)
+                .iter()
+                .filter_map(|label| all.get(&format!("{label}:{key}")).cloned())
+                .collect()
+        };
+        if indexes.is_empty() {
+            return;
+        }
+        let accessor = crate::index::vector::PropertyVectorAccessor::new(self, key);
+        let vector = crate::index::vector::VectorAccessor::get_vector(&accessor, node_id);
+        for index in indexes {
+            match &vector {
+                Some(vector) => Self::insert_into_vector_index(&index, node_id, vector, &accessor),
+                None => {
+                    index.remove(node_id);
+                }
+            }
+        }
+    }
+
+    /// Adds a node to the text and vector indexes of `label`, which it just
+    /// got, with its current values.
+    pub(super) fn index_node_under_label(&self, node_id: NodeId, label: &str) {
+        let prefix = format!("{label}:");
+        #[cfg(feature = "text-index")]
+        {
+            let indexes: Vec<(String, Arc<RwLock<crate::index::text::InvertedIndex>>)> = self
+                .text_indexes
+                .read()
+                .iter()
+                .filter_map(|(key, index)| {
+                    let property = key.strip_prefix(&prefix)?;
+                    Some((property.to_string(), Arc::clone(index)))
+                })
+                .collect();
+            for (property, index) in indexes {
+                if let Some(Value::String(text)) = self
+                    .node_properties
+                    .get(node_id, &PropertyKey::new(property.as_str()))
+                {
+                    index.write().insert(node_id, &text);
+                }
+            }
+        }
+        #[cfg(feature = "vector-index")]
+        {
+            let indexes: Vec<(String, Arc<VectorIndexKind>)> = self
+                .vector_indexes
+                .read()
+                .iter()
+                .filter_map(|(key, index)| {
+                    let property = key.strip_prefix(&prefix)?;
+                    Some((property.to_string(), Arc::clone(index)))
+                })
+                .collect();
+            for (property, index) in indexes {
+                let accessor =
+                    crate::index::vector::PropertyVectorAccessor::new(self, property.as_str());
+                if let Some(vector) =
+                    crate::index::vector::VectorAccessor::get_vector(&accessor, node_id)
+                {
+                    Self::insert_into_vector_index(&index, node_id, &vector, &accessor);
+                }
+            }
+        }
+        #[cfg(not(any(feature = "text-index", feature = "vector-index")))]
+        let _ = (node_id, prefix);
+    }
+
+    /// Takes a node out of the text and vector indexes of `label`, which it
+    /// just lost.
+    pub(super) fn unindex_node_under_label(&self, node_id: NodeId, label: &str) {
+        let prefix = format!("{label}:");
+        #[cfg(feature = "text-index")]
+        for (key, index) in self.text_indexes.read().iter() {
+            if key.starts_with(&prefix) {
+                index.write().remove(node_id);
+            }
+        }
+        #[cfg(feature = "vector-index")]
+        {
+            let indexes: Vec<Arc<VectorIndexKind>> = self
+                .vector_indexes
+                .read()
+                .iter()
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .map(|(_, index)| Arc::clone(index))
+                .collect();
+            for index in indexes {
+                index.remove(node_id);
+            }
+        }
+        #[cfg(not(any(feature = "text-index", feature = "vector-index")))]
+        let _ = (node_id, prefix);
     }
 
     /// Removes a deleted node from every vector index, so it can no longer be
@@ -139,17 +273,20 @@ impl LpgStore {
             .map(|(key, index)| (key.clone(), Arc::clone(index)))
             .collect();
         for (key, index) in indexes {
-            let Some((label, property)) = key.split_once(':') else {
+            // Match the key against the node's labels rather than splitting
+            // on ':', which labels (`` :`a:b` ``) and properties may contain.
+            let Some(property) = labels
+                .iter()
+                .filter_map(|label| key.strip_prefix(label.as_str())?.strip_prefix(':'))
+                .min_by_key(|property| property.len())
+            else {
                 continue;
             };
-            if !labels.iter().any(|l| l == label) {
-                continue;
-            }
             let accessor = crate::index::vector::PropertyVectorAccessor::new(self, property);
             if let Some(vector) =
                 crate::index::vector::VectorAccessor::get_vector(&accessor, node_id)
             {
-                index.insert(node_id, &vector, &accessor);
+                Self::insert_into_vector_index(&index, node_id, &vector, &accessor);
             }
         }
     }
@@ -174,11 +311,10 @@ impl LpgStore {
     ) {
         if let Some(mut nodes) = index.get_mut(value) {
             nodes.remove(&node_id);
-            if nodes.is_empty() {
-                drop(nodes);
-                index.remove(value);
-            }
         }
+        // Checked again under the shard lock: between releasing the bucket and
+        // removing it, another writer may have added a node to it.
+        index.remove_if(value, |_, nodes| nodes.is_empty());
     }
 
     /// The current values of the indexed `(node, key)` pairs, taken before a
@@ -237,14 +373,7 @@ impl LpgStore {
         if let Some(index) = indexes.get(key) {
             // Get old value to remove from index
             if let Some(old_value) = self.node_properties.get(node_id, key) {
-                let old_hv = HashableValue::new(old_value);
-                if let Some(mut nodes) = index.get_mut(&old_hv) {
-                    nodes.remove(&node_id);
-                    if nodes.is_empty() {
-                        drop(nodes);
-                        index.remove(&old_hv);
-                    }
-                }
+                Self::remove_index_entry(index, &HashableValue::new(old_value), node_id);
             }
         }
     }

@@ -36,6 +36,7 @@ mod load_data;
 mod map_collect;
 mod merge;
 mod mutation;
+mod node_seek;
 mod parameter_scan;
 mod project;
 pub mod push;
@@ -55,6 +56,7 @@ mod unwind;
 pub mod value_utils;
 mod variable_length_expand;
 mod vector_join;
+mod writer;
 
 pub use accumulator::{AggregateExpr, AggregateFunction, HashableValue};
 pub use aggregate::{HashAggregateOperator, SimpleAggregateOperator};
@@ -90,6 +92,7 @@ pub use mutation::{
     DeleteEdgeOperator, DeleteNodeOperator, PropertySource, RemoveLabelOperator,
     SetPropertyOperator,
 };
+pub use node_seek::{NodeSeekOperator, SeekKey};
 pub use parameter_scan::{ParameterScanOperator, ParameterState};
 pub use project::{ProjectExpr, ProjectOperator};
 pub use push::{
@@ -114,6 +117,7 @@ pub use union::UnionOperator;
 pub use unwind::UnwindOperator;
 pub use variable_length_expand::{PathMode as ExecutionPathMode, VariableLengthExpandOperator};
 pub use vector_join::VectorJoinOperator;
+pub use writer::GraphWriter;
 
 use std::sync::Arc;
 

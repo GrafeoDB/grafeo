@@ -93,6 +93,11 @@ impl super::Planner {
             return Ok((empty_op, columns));
         }
 
+        // A key from the input row, or an ID: look the node up per row
+        if let Some(result) = self.try_plan_filter_with_node_seek(filter)? {
+            return Ok(result);
+        }
+
         // Try to use property index for equality predicates on indexed properties
         if let Some(result) = self.try_plan_filter_with_property_index(filter)? {
             return Ok(result);

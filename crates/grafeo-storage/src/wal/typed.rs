@@ -85,6 +85,27 @@ impl<R: WalEntry> TypedWal<R> {
         self.manager.write_frame(&data, force_sync)
     }
 
+    /// Logs typed records as one contiguous group.
+    ///
+    /// No other writer's records can land between them, and the group is
+    /// synced once if any record requires it (see [`WalEntry::requires_sync`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization or writing fails.
+    pub fn log_batch(&self, records: &[R]) -> Result<()> {
+        let frames = records
+            .iter()
+            .map(|record| {
+                bincode::serde::encode_to_vec(record, bincode::config::standard())
+                    .map_err(|e| Error::Serialization(e.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let frame_refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+        let force_sync = records.iter().any(WalEntry::requires_sync);
+        self.manager.write_frames(&frame_refs, force_sync)
+    }
+
     /// Writes a checkpoint marker and persists checkpoint metadata.
     ///
     /// Creates a checkpoint record via [`WalEntry::make_checkpoint`], logs it,
@@ -97,6 +118,32 @@ impl<R: WalEntry> TypedWal<R> {
         let checkpoint_record = R::make_checkpoint(current_transaction);
         self.log(&checkpoint_record)?;
         self.manager.complete_checkpoint(current_transaction, epoch)
+    }
+
+    /// Records that a durable checkpoint image holds everything logged in
+    /// files below `log_sequence`. See [`WalManager::mark_checkpoint`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the metadata cannot be written.
+    pub fn mark_checkpoint(
+        &self,
+        log_sequence: u64,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> Result<()> {
+        self.manager
+            .mark_checkpoint(log_sequence, epoch, transaction_id)
+    }
+
+    /// Deletes the log files below `sequence`, never the active file. See
+    /// [`WalManager::remove_files_before`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a file cannot be deleted.
+    pub fn remove_files_before(&self, sequence: u64) -> Result<usize> {
+        self.manager.remove_files_before(sequence)
     }
 
     /// Syncs the WAL to disk (fsync).
@@ -213,6 +260,29 @@ impl<R: WalEntry> TypedWal<R> {
 /// Type alias for the LPG (labeled property graph) WAL.
 pub type LpgWal = TypedWal<WalRecord>;
 
+impl TypedWal<WalRecord> {
+    /// Seals a torn tail left by a crash, so a later commit marker cannot
+    /// commit the torn records on replay.
+    ///
+    /// Starts a new log file (new records appended after a partially written
+    /// frame would be unreadable) and writes an abort marker there, which makes
+    /// recovery discard the records that no marker closed.
+    ///
+    /// Call this at open, before logging anything, when recovery reported a
+    /// torn tail.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the new log file or the marker cannot be written.
+    pub fn seal_torn_tail(&self) -> Result<()> {
+        self.manager.rotate()?;
+        self.manager.log(&WalRecord::TransactionAbort {
+            transaction_id: TransactionId::INVALID,
+        })?;
+        self.manager.sync()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +366,98 @@ mod tests {
 
         let _path = wal.path();
         let _mode = wal.durability_mode();
+    }
+
+    fn log_files_with_data(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "log"))
+            .filter(|p| std::fs::metadata(p).unwrap().len() > 0)
+            .count()
+    }
+
+    #[test]
+    fn test_log_batch_groups_do_not_interleave() {
+        use super::super::WalRecovery;
+        use std::sync::Arc;
+
+        /// Records per group, and the same count as an id offset.
+        const GROUP: usize = 5;
+        const GROUP_IDS: u64 = 5;
+        let dir = tempdir().unwrap();
+        {
+            let wal: Arc<LpgWal> = Arc::new(TypedWal::open(dir.path()).unwrap());
+            let writers: Vec<_> = (0..4u64)
+                .map(|writer| {
+                    let wal = Arc::clone(&wal);
+                    std::thread::spawn(move || {
+                        for group in 0..50u64 {
+                            let base = (writer * 1000 + group) * 10;
+                            let mut records: Vec<WalRecord> = (0..GROUP_IDS)
+                                .map(|k| WalRecord::CreateNode {
+                                    id: NodeId::new(base + k),
+                                    labels: vec!["N".to_string()],
+                                })
+                                .collect();
+                            records.push(WalRecord::TransactionCommit {
+                                transaction_id: TransactionId::new(base),
+                            });
+                            wal.log_batch(&records).unwrap();
+                        }
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer.join().unwrap();
+            }
+            wal.sync().unwrap();
+        }
+
+        // Every commit marker must directly follow its own group's records.
+        let records = WalRecovery::new(dir.path()).recover().unwrap();
+        assert_eq!(records.len(), 4 * 50 * (GROUP + 1));
+        for chunk in records.chunks(GROUP + 1) {
+            let WalRecord::TransactionCommit { transaction_id } = chunk[GROUP] else {
+                panic!("group not closed by its commit marker: {chunk:?}");
+            };
+            let ids: Vec<u64> = chunk[..GROUP]
+                .iter()
+                .map(|r| match r {
+                    WalRecord::CreateNode { id, .. } => id.as_u64(),
+                    other => panic!("unexpected record {other:?}"),
+                })
+                .collect();
+            let base = transaction_id.as_u64();
+            assert_eq!(ids, (base..base + GROUP_IDS).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn test_log_batch_rotates_only_between_groups() {
+        let dir = tempdir().unwrap();
+        let wal: LpgWal = TypedWal::with_config(
+            dir.path(),
+            WalConfig {
+                max_log_size: 100,
+                ..WalConfig::default()
+            },
+        )
+        .unwrap();
+        let group: Vec<WalRecord> = (0..10)
+            .map(|i| WalRecord::CreateNode {
+                id: NodeId::new(i),
+                labels: vec!["Rotation".to_string()],
+            })
+            .chain(std::iter::once(WalRecord::TransactionCommit {
+                transaction_id: TransactionId::new(1),
+            }))
+            .collect();
+
+        // Each group is far over the size limit, yet stays in one file.
+        wal.log_batch(&group).unwrap();
+        assert_eq!(log_files_with_data(dir.path()), 1);
+        wal.log_batch(&group).unwrap();
+        assert_eq!(log_files_with_data(dir.path()), 2);
     }
 }

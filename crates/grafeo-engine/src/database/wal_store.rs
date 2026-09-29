@@ -1,87 +1,59 @@
 //! WAL-aware graph store wrapper.
 //!
-//! Wraps an [`LpgStore`] and logs every mutation to the WAL so that
-//! query-engine mutations (INSERT, DELETE, SET via GQL/Cypher/etc.)
-//! survive a close/reopen cycle.
+//! Wraps an [`LpgStore`] and records every mutation in the session's
+//! [`WalBuffer`] so that query-engine mutations (INSERT, DELETE, SET via
+//! GQL/Cypher/etc.) survive a close/reopen cycle. The buffer writes them to
+//! the WAL as one group when the transaction commits.
 
 use std::sync::Arc;
 
-use grafeo_common::grafeo_warn;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::lpg::{CompareOp, Edge, LpgStore, Node};
 use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut, GraphStoreSearch};
 use grafeo_core::statistics::Statistics;
-use grafeo_storage::wal::{LpgWal, WalRecord};
+use grafeo_storage::wal::WalRecord;
+
+use crate::transaction::wal_buffer::WalBuffer;
 
 use arcstr::ArcStr;
 
 /// A [`GraphStoreMut`] decorator that delegates every call to an inner
-/// [`LpgStore`] and additionally logs mutation operations to the WAL.
+/// [`LpgStore`] and additionally records mutation operations in the
+/// session's [`WalBuffer`].
 ///
-/// Read-only methods are forwarded without any WAL interaction.
-///
-/// For named graphs, emits a [`WalRecord::SwitchGraph`] before data mutations
-/// when the WAL context differs from this store's graph. The shared
-/// `wal_graph_context` mutex ensures atomicity of context-switch + mutation
-/// pairs across concurrent sessions.
+/// Read-only methods are forwarded without any WAL interaction. Records are
+/// tagged with this store's graph; the buffer adds the `SwitchGraph` records
+/// when it writes the group.
 pub(crate) struct WalGraphStore {
     inner: Arc<LpgStore>,
-    wal: Arc<LpgWal>,
+    wal: Arc<WalBuffer>,
     /// Which named graph this store represents (`None` = default graph).
     graph_name: Option<String>,
-    /// Shared tracker: the last graph context emitted to the WAL.
-    /// Held across a (SwitchGraph + mutation) pair to prevent interleaving.
-    wal_graph_context: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 impl WalGraphStore {
     /// Creates a new WAL-aware store wrapper for the default graph.
-    pub fn new(
-        inner: Arc<LpgStore>,
-        wal: Arc<LpgWal>,
-        wal_graph_context: Arc<parking_lot::Mutex<Option<String>>>,
-    ) -> Self {
+    pub fn new(inner: Arc<LpgStore>, wal: Arc<WalBuffer>) -> Self {
         Self {
             inner,
             wal,
             graph_name: None,
-            wal_graph_context,
         }
     }
 
     /// Creates a new WAL-aware store wrapper for a named graph.
-    pub fn new_for_graph(
-        inner: Arc<LpgStore>,
-        wal: Arc<LpgWal>,
-        graph_name: String,
-        wal_graph_context: Arc<parking_lot::Mutex<Option<String>>>,
-    ) -> Self {
+    pub fn new_for_graph(inner: Arc<LpgStore>, wal: Arc<WalBuffer>, graph_name: String) -> Self {
         Self {
             inner,
             wal,
             graph_name: Some(graph_name),
-            wal_graph_context,
         }
     }
 
-    /// Logs a WAL record with graph context tracking.
-    ///
-    /// Acquires the shared context lock, emits a `SwitchGraph` record if the
-    /// WAL context differs from this store's graph, then logs the data record.
-    /// Both writes happen under the same lock to prevent concurrent sessions
-    /// from interleaving context switches with unrelated mutations.
-    fn log_with_context(&self, record: &WalRecord) {
-        let mut ctx = self.wal_graph_context.lock();
-        if *ctx != self.graph_name {
-            let _ = self.wal.log(&WalRecord::SwitchGraph {
-                name: self.graph_name.clone(),
-            });
-            (*ctx).clone_from(&self.graph_name);
-        }
-        if let Err(e) = self.wal.log(record) {
-            grafeo_warn!("WAL log failed: {e}");
-        }
+    /// Records a mutation for this store's graph in the session buffer.
+    fn log_with_context(&self, record: WalRecord) {
+        self.wal.push(self.graph_name.clone(), record);
     }
 }
 
@@ -371,12 +343,12 @@ impl GraphStoreSearch for WalGraphStore {
     }
 
     #[cfg(feature = "vector-index")]
-    fn vector_index_metric(
+    fn vector_index_config(
         &self,
         label: &str,
         property: &str,
-    ) -> Option<grafeo_core::index::vector::DistanceMetric> {
-        self.inner.vector_index_metric(label, property)
+    ) -> Option<grafeo_core::index::vector::HnswConfig> {
+        self.inner.vector_index_config(label, property)
     }
 
     #[cfg(feature = "vector-index")]
@@ -412,7 +384,7 @@ impl GraphStoreSearch for WalGraphStore {
 impl GraphStoreMut for WalGraphStore {
     fn create_node(&self, labels: &[&str]) -> NodeId {
         let id = self.inner.create_node(labels);
-        self.log_with_context(&WalRecord::CreateNode {
+        self.log_with_context(WalRecord::CreateNode {
             id,
             labels: labels.iter().map(|s| (*s).to_string()).collect(),
         });
@@ -428,7 +400,7 @@ impl GraphStoreMut for WalGraphStore {
         let id = self
             .inner
             .create_node_versioned(labels, epoch, transaction_id);
-        self.log_with_context(&WalRecord::CreateNode {
+        self.log_with_context(WalRecord::CreateNode {
             id,
             labels: labels.iter().map(|s| (*s).to_string()).collect(),
         });
@@ -437,7 +409,7 @@ impl GraphStoreMut for WalGraphStore {
 
     fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> EdgeId {
         let id = self.inner.create_edge(src, dst, edge_type);
-        self.log_with_context(&WalRecord::CreateEdge {
+        self.log_with_context(WalRecord::CreateEdge {
             id,
             src,
             dst,
@@ -457,7 +429,7 @@ impl GraphStoreMut for WalGraphStore {
         let id = self
             .inner
             .create_edge_versioned(src, dst, edge_type, epoch, transaction_id);
-        self.log_with_context(&WalRecord::CreateEdge {
+        self.log_with_context(WalRecord::CreateEdge {
             id,
             src,
             dst,
@@ -469,7 +441,7 @@ impl GraphStoreMut for WalGraphStore {
     fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
         let ids = self.inner.batch_create_edges(edges);
         for (id, (src, dst, edge_type)) in ids.iter().zip(edges) {
-            self.log_with_context(&WalRecord::CreateEdge {
+            self.log_with_context(WalRecord::CreateEdge {
                 id: *id,
                 src: *src,
                 dst: *dst,
@@ -482,7 +454,7 @@ impl GraphStoreMut for WalGraphStore {
     fn delete_node(&self, id: NodeId) -> bool {
         let deleted = self.inner.delete_node(id);
         if deleted {
-            self.log_with_context(&WalRecord::DeleteNode { id });
+            self.log_with_context(WalRecord::DeleteNode { id });
         }
         deleted
     }
@@ -495,7 +467,7 @@ impl GraphStoreMut for WalGraphStore {
     ) -> bool {
         let deleted = self.inner.delete_node_versioned(id, epoch, transaction_id);
         if deleted {
-            self.log_with_context(&WalRecord::DeleteNode { id });
+            self.log_with_context(WalRecord::DeleteNode { id });
         }
         deleted
     }
@@ -516,14 +488,14 @@ impl GraphStoreMut for WalGraphStore {
         self.inner.delete_node_edges(node_id);
 
         for id in outgoing.into_iter().chain(incoming) {
-            self.log_with_context(&WalRecord::DeleteEdge { id });
+            self.log_with_context(WalRecord::DeleteEdge { id });
         }
     }
 
     fn delete_edge(&self, id: EdgeId) -> bool {
         let deleted = self.inner.delete_edge(id);
         if deleted {
-            self.log_with_context(&WalRecord::DeleteEdge { id });
+            self.log_with_context(WalRecord::DeleteEdge { id });
         }
         deleted
     }
@@ -536,7 +508,7 @@ impl GraphStoreMut for WalGraphStore {
     ) -> bool {
         let deleted = self.inner.delete_edge_versioned(id, epoch, transaction_id);
         if deleted {
-            self.log_with_context(&WalRecord::DeleteEdge { id });
+            self.log_with_context(WalRecord::DeleteEdge { id });
         }
         deleted
     }
@@ -545,7 +517,7 @@ impl GraphStoreMut for WalGraphStore {
         // Store first, WAL second: consistent lock ordering with create/delete
         // methods to prevent ABBA deadlock between store locks and WAL locks.
         self.inner.set_node_property(id, key, value.clone());
-        self.log_with_context(&WalRecord::SetNodeProperty {
+        self.log_with_context(WalRecord::SetNodeProperty {
             id,
             key: key.to_string(),
             value,
@@ -554,7 +526,7 @@ impl GraphStoreMut for WalGraphStore {
 
     fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) {
         self.inner.set_edge_property(id, key, value.clone());
-        self.log_with_context(&WalRecord::SetEdgeProperty {
+        self.log_with_context(WalRecord::SetEdgeProperty {
             id,
             key: key.to_string(),
             value,
@@ -564,7 +536,7 @@ impl GraphStoreMut for WalGraphStore {
     fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
         let removed = self.inner.remove_node_property(id, key);
         if removed.is_some() {
-            self.log_with_context(&WalRecord::RemoveNodeProperty {
+            self.log_with_context(WalRecord::RemoveNodeProperty {
                 id,
                 key: key.to_string(),
             });
@@ -575,7 +547,7 @@ impl GraphStoreMut for WalGraphStore {
     fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value> {
         let removed = self.inner.remove_edge_property(id, key);
         if removed.is_some() {
-            self.log_with_context(&WalRecord::RemoveEdgeProperty {
+            self.log_with_context(WalRecord::RemoveEdgeProperty {
                 id,
                 key: key.to_string(),
             });
@@ -586,7 +558,7 @@ impl GraphStoreMut for WalGraphStore {
     fn add_label(&self, node_id: NodeId, label: &str) -> bool {
         let added = self.inner.add_label(node_id, label);
         if added {
-            self.log_with_context(&WalRecord::AddNodeLabel {
+            self.log_with_context(WalRecord::AddNodeLabel {
                 id: node_id,
                 label: label.to_string(),
             });
@@ -597,7 +569,7 @@ impl GraphStoreMut for WalGraphStore {
     fn remove_label(&self, node_id: NodeId, label: &str) -> bool {
         let removed = self.inner.remove_label(node_id, label);
         if removed {
-            self.log_with_context(&WalRecord::RemoveNodeLabel {
+            self.log_with_context(WalRecord::RemoveNodeLabel {
                 id: node_id,
                 label: label.to_string(),
             });
@@ -618,7 +590,7 @@ impl GraphStoreMut for WalGraphStore {
     ) {
         self.inner
             .set_node_property_versioned(id, key, value.clone(), transaction_id);
-        self.log_with_context(&WalRecord::SetNodeProperty {
+        self.log_with_context(WalRecord::SetNodeProperty {
             id,
             key: key.to_string(),
             value,
@@ -634,7 +606,7 @@ impl GraphStoreMut for WalGraphStore {
     ) {
         self.inner
             .set_edge_property_versioned(id, key, value.clone(), transaction_id);
-        self.log_with_context(&WalRecord::SetEdgeProperty {
+        self.log_with_context(WalRecord::SetEdgeProperty {
             id,
             key: key.to_string(),
             value,
@@ -651,7 +623,7 @@ impl GraphStoreMut for WalGraphStore {
             .inner
             .remove_node_property_versioned(id, key, transaction_id);
         if removed.is_some() {
-            self.log_with_context(&WalRecord::RemoveNodeProperty {
+            self.log_with_context(WalRecord::RemoveNodeProperty {
                 id,
                 key: key.to_string(),
             });
@@ -669,7 +641,7 @@ impl GraphStoreMut for WalGraphStore {
             .inner
             .remove_edge_property_versioned(id, key, transaction_id);
         if removed.is_some() {
-            self.log_with_context(&WalRecord::RemoveEdgeProperty {
+            self.log_with_context(WalRecord::RemoveEdgeProperty {
                 id,
                 key: key.to_string(),
             });
@@ -687,7 +659,7 @@ impl GraphStoreMut for WalGraphStore {
             .inner
             .add_label_versioned(node_id, label, transaction_id);
         if added {
-            self.log_with_context(&WalRecord::AddNodeLabel {
+            self.log_with_context(WalRecord::AddNodeLabel {
                 id: node_id,
                 label: label.to_string(),
             });
@@ -705,7 +677,7 @@ impl GraphStoreMut for WalGraphStore {
             .inner
             .remove_label_versioned(node_id, label, transaction_id);
         if removed {
-            self.log_with_context(&WalRecord::RemoveNodeLabel {
+            self.log_with_context(WalRecord::RemoveNodeLabel {
                 id: node_id,
                 label: label.to_string(),
             });
@@ -719,13 +691,14 @@ mod tests {
     use super::*;
     use grafeo_storage::wal::TypedWal;
 
-    fn setup() -> (WalGraphStore, Arc<LpgWal>) {
+    /// Store plus its session buffer; `wal.len()` counts buffered records.
+    fn setup() -> (WalGraphStore, Arc<WalBuffer>) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(LpgStore::new().unwrap());
-        let wal = Arc::new(TypedWal::open(dir.path()).unwrap());
-        let wal_ref = Arc::clone(&wal);
-        let ctx = Arc::new(parking_lot::Mutex::new(None));
-        (WalGraphStore::new(store, wal, ctx), wal_ref)
+        let wal = Arc::new(WalBuffer::new(Arc::new(
+            TypedWal::open(dir.path()).unwrap(),
+        )));
+        (WalGraphStore::new(store, Arc::clone(&wal)), wal)
     }
 
     #[test]
@@ -735,7 +708,7 @@ mod tests {
 
         assert!(ws.get_node(id).is_some());
         assert_eq!(ws.node_count(), 1);
-        assert_eq!(wal.record_count(), 1);
+        assert_eq!(wal.len(), 1);
     }
 
     #[test]
@@ -748,7 +721,7 @@ mod tests {
         assert!(ws.get_edge(eid).is_some());
         assert_eq!(ws.edge_count(), 1);
         // 2 CreateNode + 1 CreateEdge
-        assert_eq!(wal.record_count(), 3);
+        assert_eq!(wal.len(), 3);
     }
 
     #[test]
@@ -762,7 +735,7 @@ mod tests {
             Some(Value::String("Alix".into()))
         );
         // CreateNode + SetNodeProperty
-        assert_eq!(wal.record_count(), 2);
+        assert_eq!(wal.len(), 2);
 
         let a = ws.create_node(&["Node"]);
         let b = ws.create_node(&["Node"]);
@@ -774,22 +747,22 @@ mod tests {
             Some(Value::Int64(42))
         );
         // +2 CreateNode + 1 CreateEdge + 1 SetEdgeProperty = 6 total
-        assert_eq!(wal.record_count(), 6);
+        assert_eq!(wal.len(), 6);
     }
 
     #[test]
     fn delete_node_only_logs_on_success() {
         let (ws, wal) = setup();
         let id = ws.create_node(&["Person"]);
-        assert_eq!(wal.record_count(), 1);
+        assert_eq!(wal.len(), 1);
 
         // Delete nonexistent: no new record
         assert!(!ws.delete_node(NodeId::new(999)));
-        assert_eq!(wal.record_count(), 1);
+        assert_eq!(wal.len(), 1);
 
         // Delete real node: logs
         assert!(ws.delete_node(id));
-        assert_eq!(wal.record_count(), 2);
+        assert_eq!(wal.len(), 2);
         assert!(ws.get_node(id).is_none());
     }
 
@@ -799,15 +772,15 @@ mod tests {
         let a = ws.create_node(&["Node"]);
         let b = ws.create_node(&["Node"]);
         let eid = ws.create_edge(a, b, "LINK");
-        assert_eq!(wal.record_count(), 3);
+        assert_eq!(wal.len(), 3);
 
         // Delete nonexistent: no new record
         assert!(!ws.delete_edge(EdgeId::new(999)));
-        assert_eq!(wal.record_count(), 3);
+        assert_eq!(wal.len(), 3);
 
         // Delete real edge: logs
         assert!(ws.delete_edge(eid));
-        assert_eq!(wal.record_count(), 4);
+        assert_eq!(wal.len(), 4);
         assert!(ws.get_edge(eid).is_none());
     }
 
@@ -816,51 +789,51 @@ mod tests {
         let (ws, wal) = setup();
         let id = ws.create_node(&["Person"]);
         ws.set_node_property(id, "age", Value::Int64(30));
-        assert_eq!(wal.record_count(), 2);
+        assert_eq!(wal.len(), 2);
 
         // Remove nonexistent: no log
         assert!(ws.remove_node_property(id, "missing").is_none());
-        assert_eq!(wal.record_count(), 2);
+        assert_eq!(wal.len(), 2);
 
         // Remove real property: logs
         assert_eq!(ws.remove_node_property(id, "age"), Some(Value::Int64(30)));
-        assert_eq!(wal.record_count(), 3);
+        assert_eq!(wal.len(), 3);
 
         // Edge property variant
         let a = ws.create_node(&["Node"]);
         let b = ws.create_node(&["Node"]);
         let eid = ws.create_edge(a, b, "X");
         ws.set_edge_property(eid, "w", Value::Int64(1));
-        let before = wal.record_count();
+        let before = wal.len();
 
         assert!(ws.remove_edge_property(eid, "missing").is_none());
-        assert_eq!(wal.record_count(), before);
+        assert_eq!(wal.len(), before);
 
         assert_eq!(ws.remove_edge_property(eid, "w"), Some(Value::Int64(1)));
-        assert_eq!(wal.record_count(), before + 1);
+        assert_eq!(wal.len(), before + 1);
     }
 
     #[test]
     fn add_remove_label_conditional_logging() {
         let (ws, wal) = setup();
         let id = ws.create_node(&["Person"]);
-        assert_eq!(wal.record_count(), 1);
+        assert_eq!(wal.len(), 1);
 
         // Add duplicate label: no log
         assert!(!ws.add_label(id, "Person"));
-        assert_eq!(wal.record_count(), 1);
+        assert_eq!(wal.len(), 1);
 
         // Add new label: logs
         assert!(ws.add_label(id, "Employee"));
-        assert_eq!(wal.record_count(), 2);
+        assert_eq!(wal.len(), 2);
 
         // Remove label: logs
         assert!(ws.remove_label(id, "Employee"));
-        assert_eq!(wal.record_count(), 3);
+        assert_eq!(wal.len(), 3);
 
         // Remove absent label: no log
         assert!(!ws.remove_label(id, "Employee"));
-        assert_eq!(wal.record_count(), 3);
+        assert_eq!(wal.len(), 3);
     }
 
     #[test]
@@ -869,13 +842,13 @@ mod tests {
         let a = ws.create_node(&["Node"]);
         let b = ws.create_node(&["Node"]);
         let c = ws.create_node(&["Node"]);
-        assert_eq!(wal.record_count(), 3);
+        assert_eq!(wal.len(), 3);
 
         let eids = ws.batch_create_edges(&[(a, b, "X"), (b, c, "Y")]);
         assert_eq!(eids.len(), 2);
         assert_eq!(ws.edge_count(), 2);
         // One WAL record per edge
-        assert_eq!(wal.record_count(), 5);
+        assert_eq!(wal.len(), 5);
     }
 
     #[test]
@@ -886,45 +859,53 @@ mod tests {
         let c = ws.create_node(&["Node"]);
         ws.create_edge(a, b, "X");
         ws.create_edge(c, a, "Y");
-        assert_eq!(wal.record_count(), 5);
+        assert_eq!(wal.len(), 5);
 
         ws.delete_node_edges(a);
         // 2 DeleteEdge records (one outgoing, one incoming)
-        assert_eq!(wal.record_count(), 7);
+        assert_eq!(wal.len(), 7);
         assert_eq!(ws.edge_count(), 0);
     }
 
-    fn setup_named_graph() -> (WalGraphStore, Arc<LpgWal>) {
+    fn setup_named_graph() -> (WalGraphStore, Arc<WalBuffer>) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(LpgStore::new().unwrap());
-        let wal = Arc::new(TypedWal::open(dir.path()).unwrap());
-        let wal_ref = Arc::clone(&wal);
-        let ctx = Arc::new(parking_lot::Mutex::new(None));
+        let wal = Arc::new(WalBuffer::new(Arc::new(
+            TypedWal::open(dir.path()).unwrap(),
+        )));
         (
-            WalGraphStore::new_for_graph(store, wal, "social".to_string(), ctx),
-            wal_ref,
+            WalGraphStore::new_for_graph(store, Arc::clone(&wal), "social".to_string()),
+            wal,
         )
     }
 
-    #[test]
-    fn named_graph_emits_switch_graph_record() {
-        let (ws, wal) = setup_named_graph();
-        let _id = ws.create_node(&["Person"]);
+    fn commit_marker() -> WalRecord {
+        WalRecord::TransactionCommit {
+            transaction_id: TransactionId::new(1),
+        }
+    }
 
-        // Should have SwitchGraph + CreateNode = 2 records
-        assert_eq!(wal.record_count(), 2);
+    #[test]
+    fn named_graph_group_switches_in_and_out() {
+        let (ws, wal) = setup_named_graph();
+        ws.create_node(&["Person"]);
+        assert_eq!(wal.len(), 1, "nothing is written before commit");
+        assert_eq!(wal.wal().record_count(), 0);
+
+        // SwitchGraph(social) + CreateNode + SwitchGraph(None) + commit
+        wal.flush(&[commit_marker()]).unwrap();
+        assert_eq!(wal.wal().record_count(), 4);
     }
 
     #[test]
     fn named_graph_context_not_repeated() {
         let (ws, wal) = setup_named_graph();
-        // First mutation: emits SwitchGraph + CreateNode
         ws.create_node(&["Person"]);
-        assert_eq!(wal.record_count(), 2);
+        ws.create_node(&["Person"]);
 
-        // Second mutation: context already set, no extra SwitchGraph
-        ws.create_node(&["Person"]);
-        assert_eq!(wal.record_count(), 3); // just CreateNode
+        // One SwitchGraph for both nodes, one back to default, then commit
+        wal.flush(&[commit_marker()]).unwrap();
+        assert_eq!(wal.wal().record_count(), 5);
     }
 
     #[test]
@@ -935,7 +916,7 @@ mod tests {
         let id = ws.create_node_versioned(&["Person"], epoch, tx);
 
         assert!(id.is_valid());
-        assert_eq!(wal.record_count(), 1);
+        assert_eq!(wal.len(), 1);
     }
 
     #[test]
@@ -949,7 +930,7 @@ mod tests {
 
         assert!(eid.is_valid());
         // 2 CreateNode + 1 CreateEdge
-        assert_eq!(wal.record_count(), 3);
+        assert_eq!(wal.len(), 3);
     }
 
     /// The versioned property and label mutators must record undo entries in
@@ -964,7 +945,7 @@ mod tests {
         ws.set_node_property(a, "x", Value::from("keep"));
         ws.set_edge_property(e, "w", Value::Int64(5));
         ws.set_edge_property(e, "note", Value::from("n"));
-        let logged = wal.record_count();
+        let logged = wal.len();
 
         let tx = TransactionId::new(7);
         ws.set_node_property_versioned(a, "v", Value::Int64(2), tx);
@@ -979,12 +960,12 @@ mod tests {
         );
         assert!(ws.add_label_versioned(a, "Extra", tx));
         assert!(ws.remove_label_versioned(a, "Base", tx));
-        assert_eq!(wal.record_count(), logged + 6, "each change is logged");
+        assert_eq!(wal.len(), logged + 6, "each change is logged");
 
         // No-op changes are not logged.
         assert_eq!(ws.remove_node_property_versioned(a, "missing", tx), None);
         assert!(!ws.add_label_versioned(a, "Extra", tx));
-        assert_eq!(wal.record_count(), logged + 6);
+        assert_eq!(wal.len(), logged + 6);
 
         // Undo-log replay (without `temporal`; temporal rollback pops pending
         // versions and is covered end to end by the
@@ -1014,15 +995,15 @@ mod tests {
         let epoch = ws.current_epoch();
         let tx = TransactionId::new(1);
         let id = ws.create_node_versioned(&["Person"], epoch, tx);
-        assert_eq!(wal.record_count(), 1);
+        assert_eq!(wal.len(), 1);
 
         // Delete nonexistent: no log
         assert!(!ws.delete_node_versioned(NodeId::new(999), epoch, tx));
-        assert_eq!(wal.record_count(), 1);
+        assert_eq!(wal.len(), 1);
 
         // Delete real node: logs
         assert!(ws.delete_node_versioned(id, epoch, tx));
-        assert_eq!(wal.record_count(), 2);
+        assert_eq!(wal.len(), 2);
     }
 
     #[test]
@@ -1033,15 +1014,15 @@ mod tests {
         let a = ws.create_node(&["Node"]);
         let b = ws.create_node(&["Node"]);
         let eid = ws.create_edge_versioned(a, b, "LINK", epoch, tx);
-        assert_eq!(wal.record_count(), 3);
+        assert_eq!(wal.len(), 3);
 
         // Delete nonexistent: no log
         assert!(!ws.delete_edge_versioned(EdgeId::new(999), epoch, tx));
-        assert_eq!(wal.record_count(), 3);
+        assert_eq!(wal.len(), 3);
 
         // Delete real edge: logs
         assert!(ws.delete_edge_versioned(eid, epoch, tx));
-        assert_eq!(wal.record_count(), 4);
+        assert_eq!(wal.len(), 4);
     }
 
     #[test]
@@ -1060,7 +1041,7 @@ mod tests {
 
         assert!(ws.get_node(id).is_some());
         // 1 CreateNode + 2 SetNodeProperty
-        assert_eq!(wal.record_count(), 3);
+        assert_eq!(wal.len(), 3);
 
         assert_eq!(
             ws.get_node_property(id, &PropertyKey::from("name")),
@@ -1089,7 +1070,7 @@ mod tests {
 
         assert!(ws.get_edge(eid).is_some());
         // 2 CreateNode + 1 CreateEdge + 1 SetEdgeProperty
-        assert_eq!(wal.record_count(), 4);
+        assert_eq!(wal.len(), 4);
 
         assert_eq!(
             ws.get_edge_property(eid, &PropertyKey::from("since")),
@@ -1102,7 +1083,7 @@ mod tests {
         let (ws, wal) = setup();
         let id = ws.create_node(&["Person"]);
         ws.set_node_property(id, "name", Value::String("Alix".into()));
-        assert_eq!(wal.record_count(), 2);
+        assert_eq!(wal.len(), 2);
 
         // Exercise read-only methods
         let _ = ws.get_node(id);
@@ -1118,6 +1099,6 @@ mod tests {
         let _ = ws.statistics();
 
         // No additional records
-        assert_eq!(wal.record_count(), 2);
+        assert_eq!(wal.len(), 2);
     }
 }

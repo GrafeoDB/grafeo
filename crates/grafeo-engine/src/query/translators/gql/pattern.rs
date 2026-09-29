@@ -209,113 +209,69 @@ impl GqlTranslator {
         }))
     }
 
-    /// Translates CREATE patterns to create operators.
+    /// Translates the patterns of an INSERT (or CREATE) that follows other
+    /// clauses, so `plan` produces the input rows.
     pub(super) fn translate_create_patterns(
         &self,
         patterns: &[ast::Pattern],
         mut plan: LogicalOperator,
     ) -> Result<LogicalOperator> {
+        let mut bound = insert_input_variables(&plan);
         for pattern in patterns {
             match pattern {
                 ast::Pattern::Node(node) => {
-                    let variable = node
-                        .variable
-                        .clone()
-                        .unwrap_or_else(|| format!("_anon_{}", rand_id()));
-                    let properties: Vec<(String, LogicalExpression)> = node
-                        .properties
-                        .iter()
-                        .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                        .collect::<Result<_>>()?;
-
-                    plan = LogicalOperator::CreateNode(CreateNodeOp {
-                        variable,
-                        labels: node.labels.clone(),
-                        properties,
-                        input: Some(Box::new(plan)),
-                    });
+                    let (variable, is_new) = insert_endpoint(node, &mut bound, true)?;
+                    if is_new {
+                        plan = LogicalOperator::CreateNode(CreateNodeOp {
+                            variable,
+                            labels: node.labels.clone(),
+                            properties: self.insert_properties(&node.properties)?,
+                            input: Some(Box::new(plan)),
+                        });
+                    }
                 }
                 ast::Pattern::Path(path) => {
-                    // First create the source node if it has labels (new node)
-                    let source_var = path
-                        .source
-                        .variable
-                        .clone()
-                        .unwrap_or_else(|| format!("_anon_{}", rand_id()));
-
-                    // If source has labels, it's a new node to create
-                    if !path.source.labels.is_empty() {
-                        let source_props: Vec<(String, LogicalExpression)> = path
-                            .source
-                            .properties
-                            .iter()
-                            .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                            .collect::<Result<_>>()?;
-
+                    // A bare variable of a path refers to a node of the input
+                    // rows, even one `bound` does not list.
+                    let (mut source_var, is_new) =
+                        insert_endpoint(&path.source, &mut bound, false)?;
+                    if is_new {
                         plan = LogicalOperator::CreateNode(CreateNodeOp {
                             variable: source_var.clone(),
                             labels: path.source.labels.clone(),
-                            properties: source_props,
+                            properties: self.insert_properties(&path.source.properties)?,
                             input: Some(Box::new(plan)),
                         });
                     }
 
-                    // Create edges and target nodes
                     for edge in &path.edges {
-                        let target_var = edge
-                            .target
-                            .variable
-                            .clone()
-                            .unwrap_or_else(|| format!("_anon_{}", rand_id()));
-
-                        // If target has labels, create it
-                        if !edge.target.labels.is_empty() {
-                            let target_props: Vec<(String, LogicalExpression)> = edge
-                                .target
-                                .properties
-                                .iter()
-                                .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                                .collect::<Result<_>>()?;
-
+                        let (target_var, is_new) =
+                            insert_endpoint(&edge.target, &mut bound, false)?;
+                        if is_new {
                             plan = LogicalOperator::CreateNode(CreateNodeOp {
                                 variable: target_var.clone(),
                                 labels: edge.target.labels.clone(),
-                                properties: target_props,
+                                properties: self.insert_properties(&edge.target.properties)?,
                                 input: Some(Box::new(plan)),
                             });
                         }
 
-                        // Create the edge
-                        let edge_type = edge.types.first().cloned().unwrap_or_default();
-                        let edge_var = edge.variable.clone();
-                        let edge_props: Vec<(String, LogicalExpression)> = edge
-                            .properties
-                            .iter()
-                            .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                            .collect::<Result<_>>()?;
-
-                        // Determine direction
-                        let (from_var, to_var) = match edge.direction {
-                            ast::EdgeDirection::Outgoing => (source_var.clone(), target_var),
-                            ast::EdgeDirection::Incoming => {
-                                let tv = edge
-                                    .target
-                                    .variable
-                                    .clone()
-                                    .unwrap_or_else(|| format!("_anon_{}", rand_id()));
-                                (tv, source_var.clone())
+                        let (from_variable, to_variable) = match edge.direction {
+                            ast::EdgeDirection::Incoming => (target_var.clone(), source_var),
+                            ast::EdgeDirection::Outgoing | ast::EdgeDirection::Undirected => {
+                                (source_var, target_var.clone())
                             }
-                            ast::EdgeDirection::Undirected => (source_var.clone(), target_var),
                         };
-
                         plan = LogicalOperator::CreateEdge(CreateEdgeOp {
-                            variable: edge_var,
-                            from_variable: from_var,
-                            to_variable: to_var,
-                            edge_type,
-                            properties: edge_props,
+                            variable: edge.variable.clone(),
+                            from_variable,
+                            to_variable,
+                            edge_type: edge.types.first().cloned().unwrap_or_default(),
+                            properties: self.insert_properties(&edge.properties)?,
                             input: Box::new(plan),
                         });
+                        // The next edge of the path starts at this target.
+                        source_var = target_var;
                     }
                 }
                 ast::Pattern::Quantified { .. }
@@ -439,24 +395,14 @@ impl GqlTranslator {
     /// Wraps a plan with AND-combined `hasLabel` filters for extra labels beyond the
     /// first (which is already used in `NodeScan` for scan-time filtering).
     fn add_extra_label_filters(
-        mut plan: LogicalOperator,
+        plan: LogicalOperator,
         variable: &str,
         extra_labels: &[String],
     ) -> LogicalOperator {
-        for label in extra_labels {
-            plan = wrap_filter(
-                plan,
-                LogicalExpression::FunctionCall {
-                    name: "hasLabel".into(),
-                    args: vec![
-                        LogicalExpression::Variable(variable.to_string()),
-                        LogicalExpression::Literal(Value::String(label.clone().into())),
-                    ],
-                    distinct: false,
-                },
-            );
+        match has_all_labels(variable, extra_labels) {
+            Some(predicate) => wrap_filter(plan, predicate),
+            None => plan,
         }
-        plan
     }
 
     /// Builds a predicate expression for property filters like {name: 'Alix', age: 30}.
@@ -569,12 +515,7 @@ impl GqlTranslator {
                 None
             };
 
-            let min_hops = edge.min_hops.unwrap_or(1);
-            let max_hops = if edge.min_hops.is_none() && edge.max_hops.is_none() {
-                Some(1)
-            } else {
-                edge.max_hops
-            };
+            let (min_hops, max_hops) = edge_hop_bounds(edge);
 
             let is_variable_length = min_hops != 1 || max_hops.is_none() || max_hops != Some(1);
 
@@ -616,6 +557,7 @@ impl GqlTranslator {
                 target_var.clone()
             };
 
+            let property_path = expand_path_alias.clone();
             plan = LogicalOperator::Expand(ExpandOp {
                 from_variable: current_source,
                 to_variable: expand_target.clone(),
@@ -653,7 +595,19 @@ impl GqlTranslator {
             if !edge.properties.is_empty()
                 && let Some(ref ev) = edge_var_for_filter
             {
-                let predicate = self.build_property_predicate(ev, &edge.properties)?;
+                let predicate = match property_path.filter(|_| is_variable_length) {
+                    // `all(e IN edges(path) WHERE e.k = v ...)`: the edge column
+                    // of a variable-length expand only holds the last hop.
+                    Some(path) => {
+                        let hop = format!("_anon_{}", rand_id());
+                        crate::query::translators::common::every_edge_matches(
+                            path,
+                            hop.clone(),
+                            self.build_property_predicate(&hop, &edge.properties)?,
+                        )
+                    }
+                    None => self.build_property_predicate(ev, &edge.properties)?,
+                };
                 plan = wrap_filter(plan, predicate);
             }
 
@@ -716,5 +670,96 @@ impl GqlTranslator {
         }
 
         Ok(plan)
+    }
+
+    /// Translates the property map of an inserted node or edge.
+    pub(super) fn insert_properties(
+        &self,
+        properties: &[(String, ast::Expression)],
+    ) -> Result<Vec<(String, LogicalExpression)>> {
+        properties
+            .iter()
+            .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
+            .collect()
+    }
+}
+
+/// How an INSERT treats a node pattern: returns its variable and whether it is
+/// a new node.
+///
+/// A variable in `bound` (bound by the input rows or created earlier in this
+/// INSERT) refers to its node, and INSERT cannot add labels or properties to
+/// it: they used to be dropped, or a second node was created under the same
+/// name. Anonymous, labeled and property-carrying endpoints are new nodes
+/// (only labeled ones used to be, so `({id: 1})` failed as undefined), and so
+/// is a bare variable when `bare_is_new`.
+pub(super) fn insert_endpoint(
+    node: &ast::NodePattern,
+    bound: &mut HashSet<String>,
+    bare_is_new: bool,
+) -> Result<(String, bool)> {
+    let Some(variable) = &node.variable else {
+        return Ok((format!("_anon_{}", rand_id()), true));
+    };
+    let declares = !node.labels.is_empty() || !node.properties.is_empty();
+    if bound.contains(variable) {
+        if declares {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "INSERT cannot add labels or properties to the bound variable '{variable}': \
+                     use SET"
+                ),
+            )));
+        }
+        return Ok((variable.clone(), false));
+    }
+    let is_new = declares || bare_is_new;
+    if is_new {
+        bound.insert(variable.clone());
+    }
+    Ok((variable.clone(), is_new))
+}
+
+/// The variables the rows of `plan` bind: pattern variables, and the nodes
+/// and edges created by an earlier INSERT clause of the same query.
+fn insert_input_variables(plan: &LogicalOperator) -> HashSet<String> {
+    fn collect(op: &LogicalOperator, vars: &mut HashSet<String>) {
+        match op {
+            LogicalOperator::CreateNode(create) => {
+                vars.insert(create.variable.clone());
+                if let Some(input) = &create.input {
+                    collect(input, vars);
+                }
+            }
+            LogicalOperator::CreateEdge(create) => {
+                if let Some(variable) = &create.variable {
+                    vars.insert(variable.clone());
+                }
+                collect(&create.input, vars);
+            }
+            LogicalOperator::Merge(merge) => {
+                vars.insert(merge.variable.clone());
+                collect(&merge.input, vars);
+            }
+            LogicalOperator::MergeRelationship(merge) => {
+                vars.insert(merge.variable.clone());
+                collect(&merge.input, vars);
+            }
+            other => crate::query::translators::common::collect_operator_variables(other, vars),
+        }
+    }
+    let mut vars = HashSet::new();
+    collect(plan, &mut vars);
+    vars
+}
+
+/// The minimum and maximum number of hops (`None` = unbounded) an edge pattern
+/// matches: an edge without a quantifier is exactly one hop.
+pub(super) fn edge_hop_bounds(edge: &ast::EdgePattern) -> (u32, Option<u32>) {
+    if edge.min_hops.is_none() && edge.max_hops.is_none() {
+        (1, Some(1))
+    } else {
+        (edge.min_hops.unwrap_or(1), edge.max_hops)
     }
 }

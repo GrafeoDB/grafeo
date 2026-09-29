@@ -213,7 +213,7 @@ tests:
 
   # Computed match properties used to become NULL, so every row matched or
   # created the same node.
-  - name: merge_computed_properties_create_distinct_nodes
+  - name: gql_merge_computed_properties_create_distinct_nodes
     statements:
       - "FOR i IN [1, 2, 3] MERGE (:X {id: 'x' || CAST(i AS STRING)})"
       - "FOR i IN [1, 2, 3] MERGE (:X {id: 'x' || CAST(i AS STRING)})"
@@ -223,3 +223,24 @@ tests:
         - [x1]
         - [x2]
         - [x3]
+
+  # MERGE writes through the same checks as INSERT and SET: ON MATCH SET used
+  # to check only property types, and the nodes it created lacked the type's
+  # default values.
+  - name: merge_on_match_set_checks_unique
+    setup:
+      - "CREATE CONSTRAINT person_email FOR (n:Person) ON (n.email) UNIQUE"
+      - "INSERT (:Person {name: 'Alix', email: 'alix@example.org'})"
+      - "INSERT (:Person {name: 'Gus', email: 'gus@example.org'})"
+    query: "MERGE (n:Person {name: 'Gus'}) ON MATCH SET n.email = 'alix@example.org'"
+    expect:
+      error: "constraint"
+
+  - name: merge_create_gets_the_type_defaults
+    statements:
+      - "CREATE NODE TYPE Account (owner STRING NOT NULL, balance INTEGER DEFAULT 0)"
+      - "MERGE (a:Account {owner: 'Alix'})"
+      - "MATCH (a:Account) RETURN a.owner, a.balance"
+    expect:
+      rows:
+        - [Alix, 0]

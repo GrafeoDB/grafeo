@@ -42,10 +42,10 @@ fn positive_only_sum_returns_int64() {
     // went through BitPacked and round-tripped correctly. Guards against
     // regressions from the RawI64 wiring.
     let mut db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["A"]);
-    let b = db.create_node(&["A"]);
-    db.set_node_property(a, "num", Value::Int64(100));
-    db.set_node_property(b, "num", Value::Int64(200));
+    let a = db.create_node(&["A"]).unwrap();
+    let b = db.create_node(&["A"]).unwrap();
+    db.set_node_property(a, "num", Value::Int64(100)).unwrap();
+    db.set_node_property(b, "num", Value::Int64(200)).unwrap();
 
     let pre = scalar(&db, "MATCH (n) RETURN sum(n.num)");
     db.compact().unwrap();
@@ -61,10 +61,10 @@ fn mixed_signs_sum_returns_int64() {
     // The diagnostic case from GrafeoDB/grafeo#301. Pre-fix this returned
     // Float64(50.0) post-compact.
     let mut db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["A"]);
-    let b = db.create_node(&["A"]);
-    db.set_node_property(a, "num", Value::Int64(100));
-    db.set_node_property(b, "num", Value::Int64(-50));
+    let a = db.create_node(&["A"]).unwrap();
+    let b = db.create_node(&["A"]).unwrap();
+    db.set_node_property(a, "num", Value::Int64(100)).unwrap();
+    db.set_node_property(b, "num", Value::Int64(-50)).unwrap();
 
     let pre = scalar(&db, "MATCH (n) RETURN sum(n.num)");
     db.compact().unwrap();
@@ -79,8 +79,8 @@ fn mixed_signs_sum_returns_int64() {
 fn i64_extremes_roundtrip() {
     let mut db = GrafeoDB::new_in_memory();
     for v in [i64::MIN + 1, -1, 0, 1, i64::MAX] {
-        let n = db.create_node(&["A"]);
-        db.set_node_property(n, "val", Value::Int64(v));
+        let n = db.create_node(&["A"]).unwrap();
+        db.set_node_property(n, "val", Value::Int64(v)).unwrap();
     }
     db.compact().unwrap();
 
@@ -102,10 +102,10 @@ fn i64_extremes_roundtrip() {
 #[test]
 fn where_matches_negative_int() {
     let mut db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["A"]);
-    let b = db.create_node(&["A"]);
-    db.set_node_property(a, "num", Value::Int64(42));
-    db.set_node_property(b, "num", Value::Int64(-17));
+    let a = db.create_node(&["A"]).unwrap();
+    let b = db.create_node(&["A"]).unwrap();
+    db.set_node_property(a, "num", Value::Int64(42)).unwrap();
+    db.set_node_property(b, "num", Value::Int64(-17)).unwrap();
     db.compact().unwrap();
 
     assert_eq!(row_count(&db, "MATCH (n:A) WHERE n.num = 42 RETURN n"), 1);
@@ -117,8 +117,8 @@ fn where_matches_negative_int() {
 fn where_range_matches_across_zero() {
     let mut db = GrafeoDB::new_in_memory();
     for v in [-10i64, -5, 0, 5, 10, -100, 100] {
-        let n = db.create_node(&["A"]);
-        db.set_node_property(n, "val", Value::Int64(v));
+        let n = db.create_node(&["A"]).unwrap();
+        db.set_node_property(n, "val", Value::Int64(v)).unwrap();
     }
     db.compact().unwrap();
 
@@ -143,12 +143,12 @@ fn where_range_matches_across_zero() {
 fn per_label_sum_preserves_int64_across_compact() {
     let mut db = GrafeoDB::new_in_memory();
     for v in [10, -20, 30] {
-        let n = db.create_node(&["A"]);
-        db.set_node_property(n, "num", Value::Int64(v));
+        let n = db.create_node(&["A"]).unwrap();
+        db.set_node_property(n, "num", Value::Int64(v)).unwrap();
     }
     for v in [1, 2] {
-        let n = db.create_node(&["B"]);
-        db.set_node_property(n, "num", Value::Int64(v));
+        let n = db.create_node(&["B"]).unwrap();
+        db.set_node_property(n, "num", Value::Int64(v)).unwrap();
     }
 
     let pre_a = scalar(&db, "MATCH (n:A) RETURN sum(n.num)");

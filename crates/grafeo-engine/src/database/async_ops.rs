@@ -83,8 +83,7 @@ impl GrafeoDB {
                     "no file manager configured for snapshot write".to_string(),
                 ));
             };
-            db.checkpoint_to_file(fm, super::flush::FlushReason::Checkpoint)
-                .map(|_| ())
+            db.checkpoint_to_file(fm).map(|_| ())
         })
         .await
         .map_err(|e| Error::Internal(format!("async snapshot task failed: {e}")))?
@@ -150,6 +149,24 @@ mod tests {
             .await
             .expect("async_write_snapshot on read-only should be a no-op");
         assert_eq!(db.node_count(), 1);
+    }
+
+    /// The snapshot itself must reach the file: the roundtrip test below
+    /// passes through `close()`, which checkpoints anyway.
+    #[cfg(feature = "grafeo-file")]
+    #[tokio::test]
+    async fn async_write_snapshot_writes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.grafeo");
+        let db = Arc::new(GrafeoDB::open(&path).unwrap());
+        db.session()
+            .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+            .unwrap();
+
+        db.async_write_snapshot().await.unwrap();
+
+        let header = db.file_manager.as_ref().unwrap().active_header();
+        assert_eq!((header.node_count, header.edge_count), (2, 1));
     }
 
     #[cfg(feature = "grafeo-file")]

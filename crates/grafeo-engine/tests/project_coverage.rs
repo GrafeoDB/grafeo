@@ -112,10 +112,10 @@ fn chain_graph() -> GrafeoDB {
         .create_node_with_props(&["Person"], [("name", Value::String("Mia".into()))])
         .unwrap();
 
-    session.create_edge(alix, gus, "KNOWS");
-    session.create_edge(gus, vincent, "KNOWS");
-    session.create_edge(vincent, jules, "KNOWS");
-    session.create_edge(jules, mia, "KNOWS");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
+    session.create_edge(gus, vincent, "KNOWS").unwrap();
+    session.create_edge(vincent, jules, "KNOWS").unwrap();
+    session.create_edge(jules, mia, "KNOWS").unwrap();
 
     db
 }

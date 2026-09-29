@@ -15,6 +15,9 @@
 
 #![cfg(all(feature = "cdc", feature = "gql"))]
 
+use std::collections::HashMap;
+
+use grafeo_common::types::Value;
 use grafeo_engine::cdc::{ChangeKind, EntityId};
 use grafeo_engine::{Config, GrafeoDB};
 
@@ -488,12 +491,11 @@ fn detach_delete_through_session_generates_cdc() {
 #[test]
 fn multiple_property_updates_in_transaction_generate_cdc() {
     let db = db();
+    db.execute("INSERT (:Person {name: 'Alix', age: 30})")
+        .unwrap();
     let mut session = db.session();
 
     session.begin_transaction().unwrap();
-    session
-        .execute("INSERT (:Person {name: 'Alix', age: 30})")
-        .unwrap();
     session
         .execute("MATCH (n:Person {name: 'Alix'}) SET n.age = 31, n.city = 'Amsterdam'")
         .unwrap();
@@ -506,12 +508,123 @@ fn multiple_property_updates_in_transaction_generate_cdc() {
         )
         .unwrap();
 
-    let update_count = changes
+    let mut updates: Vec<_> = changes
         .iter()
         .filter(|e| e.kind == ChangeKind::Update)
-        .count();
-    assert!(
-        update_count >= 1,
-        "Should have Update events for property changes, got {update_count}"
+        .map(|e| (e.before.clone(), e.after.clone()))
+        .collect();
+    updates.sort_by_key(|(_, after)| format!("{after:?}"));
+    let single = |key: &str, value: Value| Some(HashMap::from([(key.to_string(), value)]));
+    assert_eq!(
+        updates,
+        [
+            (
+                single("age", Value::Int64(30)),
+                single("age", Value::Int64(31))
+            ),
+            (None, single("city", Value::from("Amsterdam"))),
+        ]
     );
+}
+
+/// A node created and then changed in one transaction gets one create event
+/// that shows it as the transaction left it.
+#[test]
+fn updates_to_a_node_created_in_the_same_transaction_fold_into_its_create() {
+    let db = db();
+    let mut session = db.session();
+
+    session.begin_transaction().unwrap();
+    session
+        .execute("INSERT (:Person {name: 'Alix', age: 30})")
+        .unwrap();
+    session
+        .execute("MATCH (n:Person {name: 'Alix'}) SET n.age = 31, n.city = 'Amsterdam', n:Admin")
+        .unwrap();
+    session.commit().unwrap();
+
+    let changes = db
+        .changes_between(
+            grafeo_common::types::EpochId::new(0),
+            grafeo_common::types::EpochId::new(u64::MAX),
+        )
+        .unwrap();
+
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    let create = &changes[0];
+    assert_eq!(create.kind, ChangeKind::Create);
+    let mut labels = create.labels.clone().unwrap_or_default();
+    labels.sort();
+    assert_eq!(labels, ["Admin", "Person"]);
+    assert_eq!(create.before_labels, None);
+    assert_eq!(
+        create.after,
+        Some(HashMap::from([
+            ("name".to_string(), Value::from("Alix")),
+            ("age".to_string(), Value::Int64(31)),
+            ("city".to_string(), Value::from("Amsterdam")),
+        ]))
+    );
+}
+
+/// Create and delete events say what was created or deleted: a node's labels,
+/// an edge's type and endpoints, and on a delete the last properties.
+#[test]
+fn events_describe_the_entity() {
+    let db = db();
+    let alix = db
+        .create_node_with_props(&["Graph", "File"], [("id", Value::from("a"))])
+        .unwrap();
+    let gus = db
+        .create_node_with_props(&["Graph", "Concept"], [("id", Value::from("b"))])
+        .unwrap();
+    let edge = db
+        .create_edge_with_props(alix, gus, "REFERENCES", [("id", Value::from("e1"))])
+        .unwrap();
+    assert!(db.remove_node_label(alix, "File").unwrap());
+    assert!(db.delete_edge(edge).unwrap());
+    assert!(db.delete_node(gus).unwrap());
+
+    let changes = db
+        .changes_between(
+            grafeo_common::types::EpochId::new(0),
+            grafeo_common::types::EpochId::new(u64::MAX),
+        )
+        .unwrap();
+    let find = |entity: EntityId, kind: ChangeKind| {
+        changes
+            .iter()
+            .find(|e| e.entity_id == entity && e.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind:?} event for {entity:?} in {changes:?}"))
+    };
+    let sorted = |labels: &Option<Vec<String>>| {
+        let mut labels = labels.clone().unwrap_or_default();
+        labels.sort();
+        labels
+    };
+    let endpoints = |e: &grafeo_engine::cdc::ChangeEvent| (e.edge_type.clone(), e.src_id, e.dst_id);
+    let expected_edge = (
+        Some("REFERENCES".to_string()),
+        Some(alix.as_u64()),
+        Some(gus.as_u64()),
+    );
+    let only_id = |id: &str| Some(HashMap::from([("id".to_string(), Value::from(id))]));
+
+    let gus_created = find(EntityId::Node(gus), ChangeKind::Create);
+    assert_eq!(sorted(&gus_created.labels), ["Concept", "Graph"]);
+
+    let edge_created = find(EntityId::Edge(edge), ChangeKind::Create);
+    assert_eq!(endpoints(edge_created), expected_edge);
+
+    let label_removed = find(EntityId::Node(alix), ChangeKind::Update);
+    assert_eq!(sorted(&label_removed.before_labels), ["File", "Graph"]);
+    assert_eq!(sorted(&label_removed.labels), ["Graph"]);
+
+    let edge_deleted = find(EntityId::Edge(edge), ChangeKind::Delete);
+    assert_eq!(endpoints(edge_deleted), expected_edge);
+    assert_eq!(edge_deleted.before, only_id("e1"));
+
+    let gus_deleted = find(EntityId::Node(gus), ChangeKind::Delete);
+    assert_eq!(sorted(&gus_deleted.labels), ["Concept", "Graph"]);
+    assert_eq!(gus_deleted.before, only_id("b"));
 }

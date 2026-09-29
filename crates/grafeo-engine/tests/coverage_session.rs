@@ -234,7 +234,7 @@ fn test_optional_match_with_where() {
     let b = session
         .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
         .unwrap();
-    session.create_edge(a, b, "KNOWS");
+    session.create_edge(a, b, "KNOWS").unwrap();
 
     let r = session
         .execute(
@@ -375,10 +375,9 @@ fn test_prepare_commit_lifecycle() {
     session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
 
     let mut prepared = session.prepare_commit().unwrap();
-    // Inspect commit info (nodes_written uses node_count_delta which cannot
-    // see PENDING-epoch nodes, so it reports 0 before finalization at commit)
+    // Inspect commit info: the nodes in the transaction's write set.
     let info = prepared.info();
-    assert_eq!(info.nodes_written, 0);
+    assert_eq!(info.nodes_written, 1);
 
     // Attach metadata
     prepared.set_metadata("audit_user", "admin");
@@ -598,8 +597,9 @@ mod cdc_tests {
     #[test]
     fn test_cdc_history_records_create() {
         let db = cdc_db();
-        let node_id = db.create_node(&["Person"]);
-        db.set_node_property(node_id, "name", Value::String("Alix".into()));
+        let node_id = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(node_id, "name", Value::String("Alix".into()))
+            .unwrap();
 
         let session = db.session();
         let history = session.history(node_id).unwrap();
@@ -619,9 +619,11 @@ mod cdc_tests {
     #[test]
     fn test_cdc_history_records_update() {
         let db = cdc_db();
-        let node_id = db.create_node(&["Person"]);
-        db.set_node_property(node_id, "name", Value::String("Alix".into()));
-        db.set_node_property(node_id, "name", Value::String("Gus".into()));
+        let node_id = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(node_id, "name", Value::String("Alix".into()))
+            .unwrap();
+        db.set_node_property(node_id, "name", Value::String("Gus".into()))
+            .unwrap();
 
         let session = db.session();
         let history = session.history(node_id).unwrap();
@@ -638,8 +640,9 @@ mod cdc_tests {
     #[test]
     fn test_cdc_history_since_filters_by_epoch() {
         let db = cdc_db();
-        let node_id = db.create_node(&["Person"]);
-        db.set_node_property(node_id, "name", Value::String("Alix".into()));
+        let node_id = db.create_node(&["Person"]).unwrap();
+        db.set_node_property(node_id, "name", Value::String("Alix".into()))
+            .unwrap();
 
         let session = db.session();
         // history_since with a very high epoch should return nothing
@@ -662,8 +665,8 @@ mod cdc_tests {
     #[test]
     fn test_cdc_changes_between_epoch_range() {
         let db = cdc_db();
-        db.create_node(&["Person"]);
-        db.create_node(&["Person"]);
+        db.create_node(&["Person"]).unwrap();
+        db.create_node(&["Person"]).unwrap();
 
         let session = db.session();
         // Get all changes from epoch 0 to a large epoch
@@ -696,7 +699,7 @@ fn setup_questioned_edge() -> GrafeoDB {
         .create_node_with_props(&["Person"], [("name", Value::String("Vincent".into()))])
         .unwrap();
 
-    session.create_edge(alix, gus, "KNOWS");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
     let _ = vincent;
     db
 }
@@ -765,8 +768,8 @@ fn test_questioned_edge_with_target_label_filter() {
         .unwrap();
 
     // Alix -> Amsterdam (LIVES_IN) and Alix -> Gus (KNOWS)
-    session.create_edge(alix, amsterdam, "LIVES_IN");
-    session.create_edge(alix, gus, "KNOWS");
+    session.create_edge(alix, amsterdam, "LIVES_IN").unwrap();
+    session.create_edge(alix, gus, "KNOWS").unwrap();
 
     // Questioned edge with label filter: only Person targets
     let result = session

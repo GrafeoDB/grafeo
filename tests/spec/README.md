@@ -179,7 +179,7 @@ cd tests/spec/runners/dart && dart test spec_runner_test.dart
 
 ## Dataset naming conventions
 
-- **Person names**: Alix, Gus, then Tarantino characters (Vincent, Jules, Mia, Butch, Django, Shosanna, Hans, Beatrix)
+- **Person names**: Alix, Gus, Vincent, Jules, Mia, Butch, Django, Shosanna, Hans, Beatrix, Harm, Maxence, Lucas, Marcus.
 - **Cities**: European (Amsterdam, Berlin, Paris, Prague, Barcelona)
 - **Never**: Alice, Bob, Charlie or US-centric defaults
 

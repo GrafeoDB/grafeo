@@ -6,11 +6,11 @@
 //! 3. If not found, create the element (optionally apply ON CREATE SET)
 
 use super::{
-    ConstraintValidator, ExpressionPredicate, Operator, OperatorError, OperatorResult,
-    PropertySource, SessionContext,
+    ExpressionPredicate, GraphWriter, Operator, OperatorError, OperatorResult, PropertySource,
+    SessionContext,
 };
 use crate::execution::chunk::{DataChunk, DataChunkBuilder};
-use crate::graph::{GraphStore, GraphStoreMut, GraphStoreSearch};
+use crate::graph::{GraphStore, GraphStoreSearch};
 use grafeo_common::types::{
     EdgeId, EpochId, LogicalType, NodeId, PropertyKey, TransactionId, Value,
 };
@@ -46,24 +46,20 @@ pub struct MergeConfig {
 /// When an input operator is provided (chained MERGE), input rows are
 /// passed through with the merged node ID appended as an additional column.
 pub struct MergeOperator {
-    /// The graph store.
-    store: Arc<dyn GraphStoreMut>,
+    /// Validated, versioned writes.
+    writer: GraphWriter,
     /// Optional input operator (for chained MERGE patterns).
     input: Option<Box<dyn Operator>>,
     /// Merge configuration.
     config: MergeConfig,
     /// Whether we've already executed (standalone mode only).
     executed: bool,
-    /// Epoch for MVCC versioning.
-    viewing_epoch: Option<EpochId>,
-    /// Transaction ID for undo log tracking.
-    transaction_id: Option<TransactionId>,
-    /// Optional constraint validator for schema enforcement.
-    validator: Option<Arc<dyn ConstraintValidator>>,
     /// Search-store handle used to evaluate `PropertySource::Expression`
     /// runtime expressions in `ON CREATE` / `ON MATCH SET`. None when no
     /// expression sources are present (the planner skips threading it).
     search_store: Option<Arc<dyn GraphStoreSearch>>,
+    /// Compiled computed match properties, built on first use.
+    match_expressions: Option<super::mutation::PropertyExpressions>,
     /// Session context for expression evaluation (info, schema, etc.).
     session_context: SessionContext,
 }
@@ -71,19 +67,17 @@ pub struct MergeOperator {
 impl MergeOperator {
     /// Creates a new merge operator.
     pub fn new(
-        store: Arc<dyn GraphStoreMut>,
+        writer: impl Into<GraphWriter>,
         input: Option<Box<dyn Operator>>,
         config: MergeConfig,
     ) -> Self {
         Self {
-            store,
+            writer: writer.into(),
             input,
             config,
             executed: false,
-            viewing_epoch: None,
-            transaction_id: None,
-            validator: None,
             search_store: None,
+            match_expressions: None,
             session_context: SessionContext::default(),
         }
     }
@@ -92,23 +86,6 @@ impl MergeOperator {
     #[must_use]
     pub fn variable(&self) -> &str {
         &self.config.variable
-    }
-
-    /// Sets the transaction context for versioned mutations.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Sets the constraint validator for schema enforcement.
-    pub fn with_validator(mut self, validator: Arc<dyn ConstraintValidator>) -> Self {
-        self.validator = Some(validator);
-        self
     }
 
     /// Provides a search-store handle so `PropertySource::Expression`
@@ -212,7 +189,7 @@ impl MergeOperator {
                 props,
                 chunk,
                 row,
-                self.store.as_ref(),
+                self.writer.store().as_ref(),
             ));
         }
 
@@ -236,12 +213,13 @@ impl MergeOperator {
                         Arc::clone(search_store),
                     )
                     .with_session_context(self.session_context.clone());
-                    if let Some(epoch) = self.viewing_epoch {
-                        predicate = predicate.with_transaction_context(epoch, self.transaction_id);
+                    if let Some(epoch) = self.writer.viewing_epoch() {
+                        predicate =
+                            predicate.with_transaction_context(epoch, self.writer.transaction_id());
                     }
                     predicate.eval_at(&augmented, 0).unwrap_or(Value::Null)
                 }
-                _ => source.resolve(&augmented, 0, self.store.as_ref()),
+                _ => source.resolve(&augmented, 0, self.writer.store().as_ref()),
             };
             out.push((name.clone(), value));
         }
@@ -254,7 +232,7 @@ impl MergeOperator {
         // Null conditions are excluded from the index query and verified in the loop.
         let use_index = resolved_match_props
             .iter()
-            .any(|(k, v)| !v.is_null() && self.store.has_property_index(k));
+            .any(|(k, v)| !v.is_null() && self.writer.store().has_property_index(k));
 
         let candidates: Vec<NodeId> = if use_index {
             let conditions: Vec<(&str, Value)> = resolved_match_props
@@ -262,11 +240,11 @@ impl MergeOperator {
                 .filter(|(_, v)| !v.is_null())
                 .map(|(k, v)| (k.as_str(), v.clone()))
                 .collect();
-            self.store.find_nodes_by_properties(&conditions)
+            self.writer.store().find_nodes_by_properties(&conditions)
         } else if let Some(first_label) = self.config.labels.first() {
-            self.store.nodes_by_label(first_label)
+            self.writer.store().nodes_by_label(first_label)
         } else {
-            self.store.node_ids()
+            self.writer.store().node_ids()
         };
 
         for node_id in candidates {
@@ -276,9 +254,11 @@ impl MergeOperator {
             // just created. UNWIND-driven MERGE relies on seeing those rows
             // to dedupe, so route through the versioned read when we have a
             // transaction context attached.
-            let node_opt = match (self.viewing_epoch, self.transaction_id) {
-                (Some(epoch), Some(tid)) => self.store.get_node_versioned(node_id, epoch, tid),
-                _ => self.store.get_node(node_id),
+            let node_opt = match (self.writer.viewing_epoch(), self.writer.transaction_id()) {
+                (Some(epoch), Some(tid)) => {
+                    self.writer.store().get_node_versioned(node_id, epoch, tid)
+                }
+                _ => self.writer.store().get_node(node_id),
             };
             let Some(node) = node_opt else { continue };
 
@@ -322,133 +302,13 @@ impl MergeOperator {
         merged
     }
 
-    /// Writes a freshly-created node's properties through the versioned
-    /// API when the operator is participating in a transaction, so that
-    /// rollback can undo them via the MVCC undo log. Falls back to the
-    /// non-versioned setter only when no transaction context is attached
-    /// (test paths and standalone operator construction).
-    fn write_node_props(&self, id: NodeId, props: &[(PropertyKey, Value)]) {
-        if let Some(tid) = self.transaction_id {
-            for (key, value) in props {
-                self.store
-                    .set_node_property_versioned(id, key.as_str(), value.clone(), tid);
-            }
-        } else {
-            for (key, value) in props {
-                self.store
-                    .set_node_property(id, key.as_str(), value.clone());
-            }
-        }
-    }
-
-    /// Creates a node through the versioned API so the create itself is
-    /// tagged with the operator's transaction (when one is attached) and
-    /// can be undone by transaction rollback. The non-versioned
-    /// `create_node_with_props` would tag the create with
-    /// [`TransactionId::SYSTEM`], leaving the node visible after the
-    /// surrounding session transaction rolls back.
-    fn store_create_node(&self, label_refs: &[&str]) -> NodeId {
-        let epoch = self
-            .viewing_epoch
-            .unwrap_or_else(|| self.store.current_epoch());
-        let tx = self.transaction_id.unwrap_or(TransactionId::SYSTEM);
-        self.store.create_node_versioned(label_refs, epoch, tx)
-    }
-
-    /// Creates a new node with the specified labels and resolved properties.
-    fn create_node(
-        &self,
-        resolved_match_props: &[(String, Value)],
-        resolved_create_props: &[(String, Value)],
-    ) -> Result<NodeId, super::OperatorError> {
-        let all_props = Self::merge_node_props(resolved_match_props, resolved_create_props);
-
-        // Validate constraints before creating the node
-        if let Some(ref validator) = self.validator {
-            validator.validate_node_labels_allowed(&self.config.labels)?;
-            for (name, value) in &all_props {
-                validator.validate_node_property(&self.config.labels, name, value)?;
-                validator.check_unique_node_property(&self.config.labels, name, value)?;
-            }
-            validator.validate_node_complete(&self.config.labels, &all_props)?;
-        }
-
-        let prop_pairs: Vec<(PropertyKey, Value)> = all_props
-            .into_iter()
-            .map(|(k, v)| (PropertyKey::new(k.as_str()), v))
-            .collect();
-
-        let labels: Vec<&str> = self.config.labels.iter().map(String::as_str).collect();
-        let id = self.store_create_node(&labels);
-        self.write_node_props(id, &prop_pairs);
-        Ok(id)
-    }
-
-    /// Phase one of the two-phase create path: creates the node from match
-    /// properties only, deferring the completeness check until ON CREATE
-    /// expression properties are resolved (since those properties may
-    /// satisfy NOT NULL / PRIMARY KEY requirements that match props alone
-    /// would fail). Per-property type checks and uniqueness checks for the
-    /// match properties still run here.
-    ///
-    /// Both the create and the property writes go through the versioned
-    /// API, so a failure in phase two (or in `apply_on_match`) is undone
-    /// when the surrounding session transaction rolls back. Without that,
-    /// the node would persist as an orphan visible to later queries.
-    fn create_node_phase_one(
-        &self,
-        resolved_match_props: &[(String, Value)],
-    ) -> Result<NodeId, super::OperatorError> {
-        if let Some(ref validator) = self.validator {
-            validator.validate_node_labels_allowed(&self.config.labels)?;
-            for (name, value) in resolved_match_props {
-                validator.validate_node_property(&self.config.labels, name, value)?;
-                validator.check_unique_node_property(&self.config.labels, name, value)?;
-            }
-        }
-
-        let prop_pairs: Vec<(PropertyKey, Value)> = resolved_match_props
-            .iter()
-            .map(|(k, v)| (PropertyKey::new(k.as_str()), v.clone()))
-            .collect();
-
-        let labels: Vec<&str> = self.config.labels.iter().map(String::as_str).collect();
-        let id = self.store_create_node(&labels);
-        self.write_node_props(id, &prop_pairs);
-        Ok(id)
-    }
-
-    /// Phase two of the two-phase create path: validates ON CREATE
-    /// properties (type, uniqueness) and the full property set
-    /// (completeness) after expressions have been evaluated against the
-    /// freshly created node, but before the values are written. The just
-    /// created node holds only match properties at this point, so a
-    /// uniqueness check on an ON CREATE property cannot conflict with the
-    /// node itself.
-    fn validate_on_create_phase_two(
-        &self,
-        resolved_match_props: &[(String, Value)],
-        resolved_create_props: &[(String, Value)],
-    ) -> Result<(), super::OperatorError> {
-        let Some(ref validator) = self.validator else {
-            return Ok(());
-        };
-        for (name, value) in resolved_create_props {
-            validator.validate_node_property(&self.config.labels, name, value)?;
-            validator.check_unique_node_property(&self.config.labels, name, value)?;
-        }
-        let all_props = Self::merge_node_props(resolved_match_props, resolved_create_props);
-        validator.validate_node_complete(&self.config.labels, &all_props)?;
-        Ok(())
-    }
-
     /// Finds or creates a matching node for a single row, applying ON MATCH/ON CREATE.
     fn merge_node_for_row(
-        &self,
+        &mut self,
         chunk: Option<&DataChunk>,
         row: usize,
     ) -> Result<NodeId, super::OperatorError> {
-        let store_ref: &dyn GraphStore = self.store.as_ref();
+        let store_ref: &dyn GraphStore = self.writer.store().as_ref();
         // Match properties cannot reference the MERGE variable (ISO §15.5),
         // so they resolve against the input chunk directly.
         let resolved_match = resolve_match_properties(
@@ -459,8 +319,9 @@ impl MergeOperator {
             MatchContext {
                 search_store: self.search_store.as_ref(),
                 session_context: &self.session_context,
-                viewing_epoch: self.viewing_epoch,
-                transaction_id: self.transaction_id,
+                viewing_epoch: self.writer.viewing_epoch(),
+                transaction_id: self.writer.transaction_id(),
+                cache: &mut self.match_expressions,
             },
         )?;
 
@@ -473,55 +334,31 @@ impl MergeOperator {
                 row,
                 existing_id,
             )?;
-            self.apply_on_match(existing_id, &resolved_on_match)?;
+            self.writer
+                .set_node_properties(existing_id, &resolved_on_match, false)?;
             Ok(existing_id)
         } else if Self::has_expression_source(&self.config.on_create_properties) {
-            // Two-phase create: build the node from match properties first so
-            // the new id exists, then evaluate ON CREATE against an augmented
-            // row referencing it, then write those properties via the same
-            // path used for ON MATCH SET. Completeness and uniqueness on the
-            // ON CREATE properties are validated between phases via
-            // `validate_on_create_phase_two` so neither premature rejection
-            // (when ON CREATE supplies a NOT NULL / PRIMARY KEY property) nor
-            // silent constraint bypass (UNIQUE on an ON CREATE property)
-            // occurs.
-            let new_id = self.create_node_phase_one(&resolved_match)?;
-            let resolved_on_create = self.resolve_action_properties(
-                &self.config.on_create_properties,
-                chunk,
-                row,
-                new_id,
-            )?;
-            self.validate_on_create_phase_two(&resolved_match, &resolved_on_create)?;
-            self.apply_on_match(new_id, &resolved_on_create)?;
-            Ok(new_id)
+            // ON CREATE expressions read the new node, so it is created from
+            // the match properties first; the whole property set is checked
+            // before the ON CREATE values are written.
+            self.writer
+                .create_node_with(&self.config.labels, resolved_match, |new_id| {
+                    self.resolve_action_properties(
+                        &self.config.on_create_properties,
+                        chunk,
+                        row,
+                        new_id,
+                    )
+                })
         } else {
-            // Fast path: no runtime expressions; create with all properties at once.
+            // No runtime expressions: create with all properties at once.
             let resolved_on_create =
                 Self::resolve_properties(&self.config.on_create_properties, chunk, row, store_ref);
-            self.create_node(&resolved_match, &resolved_on_create)
+            self.writer.create_node(
+                &self.config.labels,
+                Self::merge_node_props(&resolved_match, &resolved_on_create),
+            )
         }
-    }
-
-    /// Applies ON MATCH properties to an existing node.
-    fn apply_on_match(
-        &self,
-        node_id: NodeId,
-        resolved_on_match: &[(String, Value)],
-    ) -> Result<(), super::OperatorError> {
-        for (key, value) in resolved_on_match {
-            if let Some(ref validator) = self.validator {
-                validator.validate_node_property(&self.config.labels, key, value)?;
-            }
-            if let Some(tid) = self.transaction_id {
-                self.store
-                    .set_node_property_versioned(node_id, key.as_str(), value.clone(), tid);
-            } else {
-                self.store
-                    .set_node_property(node_id, key.as_str(), value.clone());
-            }
-        }
-        Ok(())
     }
 }
 
@@ -642,20 +479,16 @@ pub struct MergeRelationshipConfig {
 /// 2. If found, applies ON MATCH properties and returns the existing edge
 /// 3. If not found, creates a new relationship and applies ON CREATE properties
 pub struct MergeRelationshipOperator {
-    /// The graph store.
-    store: Arc<dyn GraphStoreMut>,
+    /// Validated, versioned writes.
+    writer: GraphWriter,
     /// Input operator providing rows with source/target node columns.
     input: Box<dyn Operator>,
     /// Merge configuration.
     config: MergeRelationshipConfig,
-    /// Epoch for MVCC versioning.
-    viewing_epoch: Option<EpochId>,
-    /// Transaction ID for undo log tracking.
-    transaction_id: Option<TransactionId>,
-    /// Optional constraint validator for schema enforcement.
-    validator: Option<Arc<dyn ConstraintValidator>>,
     /// Search-store handle for evaluating `PropertySource::Expression`.
     search_store: Option<Arc<dyn GraphStoreSearch>>,
+    /// Compiled computed match properties, built on first use.
+    match_expressions: Option<super::mutation::PropertyExpressions>,
     /// Session context for expression evaluation.
     session_context: SessionContext,
 }
@@ -663,37 +496,18 @@ pub struct MergeRelationshipOperator {
 impl MergeRelationshipOperator {
     /// Creates a new merge relationship operator.
     pub fn new(
-        store: Arc<dyn GraphStoreMut>,
+        writer: impl Into<GraphWriter>,
         input: Box<dyn Operator>,
         config: MergeRelationshipConfig,
     ) -> Self {
         Self {
-            store,
+            writer: writer.into(),
             input,
             config,
-            viewing_epoch: None,
-            transaction_id: None,
-            validator: None,
             search_store: None,
+            match_expressions: None,
             session_context: SessionContext::default(),
         }
-    }
-
-    /// Sets the transaction context for versioned mutations.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Sets the constraint validator for schema enforcement.
-    pub fn with_validator(mut self, validator: Arc<dyn ConstraintValidator>) -> Self {
-        self.validator = Some(validator);
-        self
     }
 
     /// Provides a search-store handle for runtime expression evaluation.
@@ -750,7 +564,7 @@ impl MergeRelationshipOperator {
                 props,
                 Some(chunk),
                 row,
-                self.store.as_ref(),
+                self.writer.store().as_ref(),
             ));
         }
 
@@ -774,12 +588,13 @@ impl MergeRelationshipOperator {
                         Arc::clone(search_store),
                     )
                     .with_session_context(self.session_context.clone());
-                    if let Some(epoch) = self.viewing_epoch {
-                        predicate = predicate.with_transaction_context(epoch, self.transaction_id);
+                    if let Some(epoch) = self.writer.viewing_epoch() {
+                        predicate =
+                            predicate.with_transaction_context(epoch, self.writer.transaction_id());
                     }
                     predicate.eval_at(&augmented, 0).unwrap_or(Value::Null)
                 }
-                _ => source.resolve(&augmented, 0, self.store.as_ref()),
+                _ => source.resolve(&augmented, 0, self.writer.store().as_ref()),
             };
             out.push((name.clone(), value));
         }
@@ -795,7 +610,7 @@ impl MergeRelationshipOperator {
     ) -> Option<EdgeId> {
         use crate::graph::Direction;
 
-        for (target, edge_id) in self.store.edges_from(src, Direction::Outgoing) {
+        for (target, edge_id) in self.writer.store().edges_from(src, Direction::Outgoing) {
             if target != dst {
                 continue;
             }
@@ -804,9 +619,11 @@ impl MergeRelationshipOperator {
             // earlier in the statement sit at `EpochId::PENDING`, so the
             // unversioned read would hide them and every repeated row would
             // create another edge.
-            let edge_opt = match (self.viewing_epoch, self.transaction_id) {
-                (Some(epoch), Some(tid)) => self.store.get_edge_versioned(edge_id, epoch, tid),
-                _ => self.store.get_edge(edge_id),
+            let edge_opt = match (self.writer.viewing_epoch(), self.writer.transaction_id()) {
+                (Some(epoch), Some(tid)) => {
+                    self.writer.store().get_edge_versioned(edge_id, epoch, tid)
+                }
+                _ => self.writer.store().get_edge(edge_id),
             };
             if let Some(edge) = edge_opt {
                 if edge.edge_type.as_str() != self.config.edge_type {
@@ -830,137 +647,6 @@ impl MergeRelationshipOperator {
         }
 
         None
-    }
-
-    /// Versioned-API edge create. See [`MergeOperator::store_create_node`]
-    /// for the rationale: the create itself must be tagged with the
-    /// operator's transaction so that rollback can undo it.
-    fn store_create_edge(&self, src: NodeId, dst: NodeId) -> EdgeId {
-        let epoch = self
-            .viewing_epoch
-            .unwrap_or_else(|| self.store.current_epoch());
-        let tx = self.transaction_id.unwrap_or(TransactionId::SYSTEM);
-        self.store
-            .create_edge_versioned(src, dst, &self.config.edge_type, epoch, tx)
-    }
-
-    /// Writes a freshly-created edge's properties through the versioned
-    /// setter when a transaction is attached, mirroring
-    /// [`MergeOperator::write_node_props`].
-    fn write_edge_props(&self, id: EdgeId, props: &[(PropertyKey, Value)]) {
-        if let Some(tid) = self.transaction_id {
-            for (key, value) in props {
-                self.store
-                    .set_edge_property_versioned(id, key.as_str(), value.clone(), tid);
-            }
-        } else {
-            for (key, value) in props {
-                self.store
-                    .set_edge_property(id, key.as_str(), value.clone());
-            }
-        }
-    }
-
-    /// Creates a new edge with resolved match and on_create properties.
-    fn create_edge(
-        &self,
-        src: NodeId,
-        dst: NodeId,
-        resolved_match_props: &[(String, Value)],
-        resolved_create_props: &[(String, Value)],
-    ) -> Result<EdgeId, super::OperatorError> {
-        let all_props =
-            MergeOperator::merge_node_props(resolved_match_props, resolved_create_props);
-
-        // Validate constraints before creating the edge
-        if let Some(ref validator) = self.validator {
-            validator.validate_edge_type_allowed(&self.config.edge_type)?;
-            for (name, value) in &all_props {
-                validator.validate_edge_property(&self.config.edge_type, name, value)?;
-            }
-            validator.validate_edge_complete(&self.config.edge_type, &all_props)?;
-        }
-
-        let prop_pairs: Vec<(PropertyKey, Value)> = all_props
-            .into_iter()
-            .map(|(k, v)| (PropertyKey::new(k.as_str()), v))
-            .collect();
-
-        let id = self.store_create_edge(src, dst);
-        self.write_edge_props(id, &prop_pairs);
-        Ok(id)
-    }
-
-    /// Phase one of the two-phase edge create path: validates per-property
-    /// types on match props and writes the edge, deferring the completeness
-    /// check until ON CREATE expression properties are resolved. See
-    /// [`MergeOperator::create_node_phase_one`] for the rationale.
-    ///
-    /// Both the create and the property writes go through the versioned
-    /// API, so a failure in phase two (or in `apply_on_match_edge`) is
-    /// undone when the surrounding session transaction rolls back.
-    fn create_edge_phase_one(
-        &self,
-        src: NodeId,
-        dst: NodeId,
-        resolved_match_props: &[(String, Value)],
-    ) -> Result<EdgeId, super::OperatorError> {
-        if let Some(ref validator) = self.validator {
-            validator.validate_edge_type_allowed(&self.config.edge_type)?;
-            for (name, value) in resolved_match_props {
-                validator.validate_edge_property(&self.config.edge_type, name, value)?;
-            }
-        }
-
-        let prop_pairs: Vec<(PropertyKey, Value)> = resolved_match_props
-            .iter()
-            .map(|(k, v)| (PropertyKey::new(k.as_str()), v.clone()))
-            .collect();
-
-        let id = self.store_create_edge(src, dst);
-        self.write_edge_props(id, &prop_pairs);
-        Ok(id)
-    }
-
-    /// Phase two of the two-phase edge create path: validates ON CREATE
-    /// edge properties and the full property set for completeness after
-    /// expressions have been evaluated against the freshly created edge.
-    fn validate_on_create_edge_phase_two(
-        &self,
-        resolved_match_props: &[(String, Value)],
-        resolved_create_props: &[(String, Value)],
-    ) -> Result<(), super::OperatorError> {
-        let Some(ref validator) = self.validator else {
-            return Ok(());
-        };
-        for (name, value) in resolved_create_props {
-            validator.validate_edge_property(&self.config.edge_type, name, value)?;
-        }
-        let all_props =
-            MergeOperator::merge_node_props(resolved_match_props, resolved_create_props);
-        validator.validate_edge_complete(&self.config.edge_type, &all_props)?;
-        Ok(())
-    }
-
-    /// Applies ON MATCH properties to an existing edge.
-    fn apply_on_match_edge(
-        &self,
-        edge_id: EdgeId,
-        resolved_on_match: &[(String, Value)],
-    ) -> Result<(), super::OperatorError> {
-        for (key, value) in resolved_on_match {
-            if let Some(ref validator) = self.validator {
-                validator.validate_edge_property(&self.config.edge_type, key, value)?;
-            }
-            if let Some(tid) = self.transaction_id {
-                self.store
-                    .set_edge_property_versioned(edge_id, key.as_str(), value.clone(), tid);
-            } else {
-                self.store
-                    .set_edge_property(edge_id, key.as_str(), value.clone());
-            }
-        }
-        Ok(())
     }
 }
 
@@ -995,7 +681,7 @@ impl Operator for MergeRelationshipOperator {
                         found: "None".to_string(),
                     })?;
 
-                let store_ref: &dyn GraphStore = self.store.as_ref();
+                let store_ref: &dyn GraphStore = self.writer.store().as_ref();
                 let resolved_match = resolve_match_properties(
                     &self.config.match_properties,
                     Some(&chunk),
@@ -1004,8 +690,9 @@ impl Operator for MergeRelationshipOperator {
                     MatchContext {
                         search_store: self.search_store.as_ref(),
                         session_context: &self.session_context,
-                        viewing_epoch: self.viewing_epoch,
-                        transaction_id: self.transaction_id,
+                        viewing_epoch: self.writer.viewing_epoch(),
+                        transaction_id: self.writer.transaction_id(),
+                        cache: &mut self.match_expressions,
                     },
                 )?;
 
@@ -1018,24 +705,25 @@ impl Operator for MergeRelationshipOperator {
                         row,
                         existing,
                     )?;
-                    self.apply_on_match_edge(existing, &resolved_on_match)?;
+                    self.writer
+                        .set_edge_properties(existing, &resolved_on_match, false)?;
                     existing
                 } else if MergeOperator::has_expression_source(&self.config.on_create_properties) {
-                    // Two-phase create so ON CREATE expressions can reference
-                    // the new edge. Completeness validation is deferred to
-                    // `validate_on_create_edge_phase_two` so an ON CREATE
-                    // property is allowed to satisfy a NOT NULL constraint
-                    // that match properties alone would fail.
-                    let new_id = self.create_edge_phase_one(src_val, dst_val, &resolved_match)?;
-                    let resolved_on_create = self.resolve_action_properties(
-                        &self.config.on_create_properties,
-                        &chunk,
-                        row,
-                        new_id,
-                    )?;
-                    self.validate_on_create_edge_phase_two(&resolved_match, &resolved_on_create)?;
-                    self.apply_on_match_edge(new_id, &resolved_on_create)?;
-                    new_id
+                    // ON CREATE expressions read the new edge: see MergeOperator.
+                    self.writer.create_edge_with(
+                        src_val,
+                        dst_val,
+                        &self.config.edge_type,
+                        resolved_match,
+                        |new_id| {
+                            self.resolve_action_properties(
+                                &self.config.on_create_properties,
+                                &chunk,
+                                row,
+                                new_id,
+                            )
+                        },
+                    )?
                 } else {
                     let resolved_on_create = MergeOperator::resolve_properties(
                         &self.config.on_create_properties,
@@ -1043,7 +731,12 @@ impl Operator for MergeRelationshipOperator {
                         row,
                         store_ref,
                     );
-                    self.create_edge(src_val, dst_val, &resolved_match, &resolved_on_create)?
+                    self.writer.create_edge(
+                        src_val,
+                        dst_val,
+                        &self.config.edge_type,
+                        MergeOperator::merge_node_props(&resolved_match, &resolved_on_create),
+                    )?
                 };
 
                 // Copy input columns to output, then add the edge column
@@ -1088,6 +781,8 @@ struct MatchContext<'a> {
     session_context: &'a SessionContext,
     viewing_epoch: Option<EpochId>,
     transaction_id: Option<TransactionId>,
+    /// The operator's compiled evaluators, reused across rows.
+    cache: &'a mut Option<super::mutation::PropertyExpressions>,
 }
 
 /// Resolves MERGE match properties for one row. Computed values such as
@@ -1108,23 +803,29 @@ fn resolve_match_properties(
             "computed MERGE property without an input row; planner did not provide one".to_string(),
         )
     })?;
-    super::mutation::PropertyExpressions::new(
-        context.search_store.cloned(),
-        context.session_context.clone(),
-    )
-    .resolve_row(
-        props,
-        chunk,
-        row,
-        store,
-        context.viewing_epoch,
-        context.transaction_id,
-    )
+    context
+        .cache
+        .get_or_insert_with(|| {
+            super::mutation::PropertyExpressions::new(
+                context.search_store.cloned(),
+                context.session_context.clone(),
+            )
+        })
+        .resolve_row(
+            props,
+            chunk,
+            row,
+            store,
+            context.viewing_epoch,
+            context.transaction_id,
+        )
 }
 
 #[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
+    use crate::execution::operators::ConstraintValidator;
+    use crate::graph::GraphStoreMut;
     use crate::graph::lpg::LpgStore;
 
     fn const_props(props: Vec<(&str, Value)>) -> Vec<(String, PropertySource)> {
@@ -1513,8 +1214,6 @@ mod tests {
     // match properties. The fix routes the two phases through dedicated
     // helpers that validate the full property set at the right time.
 
-    use super::ConstraintValidator;
-
     /// Minimal validator that enforces NOT NULL on a single named property.
     struct RequirePropertyValidator {
         required_property: &'static str,
@@ -1663,7 +1362,11 @@ mod tests {
         variable_columns.insert("n".to_string(), 0_usize);
 
         let mut merge = MergeOperator::new(
-            Arc::clone(&store),
+            GraphWriter::new(Arc::clone(&store)).with_validator(Arc::new(
+                RequirePropertyValidator {
+                    required_property: "x",
+                },
+            )),
             None,
             MergeConfig {
                 variable: "n".to_string(),
@@ -1683,10 +1386,7 @@ mod tests {
                 bound_variable_column: None,
             },
         )
-        .with_search_store(Arc::clone(&search))
-        .with_validator(Arc::new(RequirePropertyValidator {
-            required_property: "x",
-        }));
+        .with_search_store(Arc::clone(&search));
 
         merge
             .next()
@@ -1721,7 +1421,8 @@ mod tests {
         let recorder = Arc::new(RecordingUniqueValidator::new());
 
         let mut merge = MergeOperator::new(
-            Arc::clone(&store),
+            GraphWriter::new(Arc::clone(&store))
+                .with_validator(Arc::clone(&recorder) as Arc<dyn ConstraintValidator>),
             None,
             MergeConfig {
                 variable: "n".to_string(),
@@ -1740,8 +1441,7 @@ mod tests {
                 bound_variable_column: None,
             },
         )
-        .with_search_store(Arc::clone(&search))
-        .with_validator(Arc::clone(&recorder) as Arc<dyn ConstraintValidator>);
+        .with_search_store(Arc::clone(&search));
 
         merge.next().unwrap();
 
@@ -1811,7 +1511,11 @@ mod tests {
         variable_columns.insert("r".to_string(), 2_usize);
 
         let mut merge_rel = MergeRelationshipOperator::new(
-            Arc::clone(&store),
+            GraphWriter::new(Arc::clone(&store)).with_validator(Arc::new(
+                RequirePropertyValidator {
+                    required_property: "x",
+                },
+            )),
             Box::new(OneShot(Some(chunk))),
             MergeRelationshipConfig {
                 source_column: 0,
@@ -1832,10 +1536,7 @@ mod tests {
                 edge_output_column: 2,
             },
         )
-        .with_search_store(Arc::clone(&search))
-        .with_validator(Arc::new(RequirePropertyValidator {
-            required_property: "x",
-        }));
+        .with_search_store(Arc::clone(&search));
 
         merge_rel.next().expect(
             "MERGE relationship must succeed because ON CREATE supplies the required property",
@@ -1894,7 +1595,8 @@ mod tests {
         // Use a non-SYSTEM transaction so versioned creates land at PENDING.
         let tx = TransactionId::new(1);
         let mut merge = MergeOperator::new(
-            Arc::clone(&store),
+            GraphWriter::new(Arc::clone(&store))
+                .with_transaction_context(EpochId::INITIAL, Some(tx)),
             Some(Box::new(OneShot(Some(chunk)))),
             MergeConfig {
                 variable: "n".to_string(),
@@ -1906,8 +1608,7 @@ mod tests {
                 output_column: 1,
                 bound_variable_column: None,
             },
-        )
-        .with_transaction_context(EpochId::INITIAL, Some(tx));
+        );
 
         while merge.next().unwrap().is_some() {}
 

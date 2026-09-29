@@ -65,9 +65,9 @@ fn tarantino_graph() -> GrafeoDB {
         )
         .unwrap();
 
-    session.create_edge(vincent, jules, "KNOWS");
-    session.create_edge(jules, mia, "KNOWS");
-    session.create_edge(vincent, mia, "KNOWS");
+    session.create_edge(vincent, jules, "KNOWS").unwrap();
+    session.create_edge(jules, mia, "KNOWS").unwrap();
+    session.create_edge(vincent, mia, "KNOWS").unwrap();
 
     drop(session);
     db
@@ -799,8 +799,8 @@ fn order_by_on_edge_type_function() {
     let c = session
         .create_node_with_props(&["Person"], [("name", Value::String("Beatrix".into()))])
         .unwrap();
-    session.create_edge(a, b, "LIKES");
-    session.create_edge(a, c, "ADMIRES");
+    session.create_edge(a, b, "LIKES").unwrap();
+    session.create_edge(a, c, "ADMIRES").unwrap();
     drop(session);
     let session = db.session();
 

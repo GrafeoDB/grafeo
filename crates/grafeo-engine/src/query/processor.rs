@@ -631,13 +631,27 @@ fn infer_pushdown(
     #[allow(clippy::wildcard_imports)]
     use crate::query::plan::*;
 
+    // The seek the planner makes: an ID, or an indexed property per input row
+    if let Some(seek) = crate::query::planner::lpg::seek::choose_seek(predicate, scan, |p| {
+        store.has_property_index(p)
+    }) {
+        return Some(match seek.key {
+            grafeo_core::execution::operators::SeekKey::Id => PushdownHint::IdSeek,
+            grafeo_core::execution::operators::SeekKey::Property(property) => {
+                PushdownHint::IndexLookup { property }
+            }
+        });
+    }
+
     match predicate {
-        // Equality: n.prop = value
+        // Equality with a constant: the plan-time index lookup
         LogicalExpression::Binary { left, op, right } if *op == BinaryOp::Eq => {
             if let Some(prop) = extract_property_name(left, &scan.variable)
                 .or_else(|| extract_property_name(right, &scan.variable))
             {
-                if store.has_property_index(&prop) {
+                let constant = matches!(left.as_ref(), LogicalExpression::Literal(_))
+                    || matches!(right.as_ref(), LogicalExpression::Literal(_));
+                if scan.input.is_none() && constant && store.has_property_index(&prop) {
                     return Some(PushdownHint::IndexLookup { property: prop });
                 }
                 if scan.label.is_some() {

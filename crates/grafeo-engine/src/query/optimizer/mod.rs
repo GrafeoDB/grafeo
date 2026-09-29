@@ -22,7 +22,8 @@ pub use cost::{Cost, CostModel};
 pub use join_order::{BitSet, DPccp, JoinGraph, JoinGraphBuilder, JoinPlan};
 
 use crate::query::plan::{
-    FilterOp, JoinCondition, LogicalExpression, LogicalOperator, LogicalPlan, MultiWayJoinOp,
+    BinaryOp, FilterOp, JoinCondition, LogicalExpression, LogicalOperator, LogicalPlan,
+    MultiWayJoinOp,
 };
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::utils::error::Result;
@@ -1031,14 +1032,29 @@ impl Optimizer {
                 if !uses_introduced_vars {
                     // Predicate doesn't use vars from this expand, so push through
                     expand.input = Box::new(self.try_push_filter_into(predicate, *expand.input));
-                    LogicalOperator::Expand(expand)
-                } else {
-                    // Keep filter after expand
-                    LogicalOperator::Filter(FilterOp {
+                    return LogicalOperator::Expand(expand);
+                }
+
+                // Push the conjuncts that don't use the expand's variables
+                // below it and keep the others after it: in
+                // `id(s) = $s AND id(d) = $d` the first pins `s` before the
+                // expand walks its edges.
+                let introduced: HashSet<String> = introduced_vars.into_iter().cloned().collect();
+                let (below, after): (Vec<_>, Vec<_>) =
+                    conjuncts(predicate).into_iter().partition(|conjunct| {
+                        self.extract_variables(conjunct).is_disjoint(&introduced)
+                    });
+                if let Some(below) = conjunction(below) {
+                    expand.input = Box::new(self.try_push_filter_into(below, *expand.input));
+                }
+                let expand = LogicalOperator::Expand(expand);
+                match conjunction(after) {
+                    Some(predicate) => LogicalOperator::Filter(FilterOp {
                         predicate,
                         pushdown_hint: None,
-                        input: Box::new(LogicalOperator::Expand(expand)),
-                    })
+                        input: Box::new(expand),
+                    }),
+                    None => expand,
                 }
             }
 
@@ -1426,6 +1442,33 @@ impl Default for Optimizer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The conjuncts of an `AND` chain, in order.
+fn conjuncts(predicate: LogicalExpression) -> Vec<LogicalExpression> {
+    match predicate {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => {
+            let mut all = conjuncts(*left);
+            all.extend(conjuncts(*right));
+            all
+        }
+        other => vec![other],
+    }
+}
+
+/// The `AND` of the conjuncts, or `None` when there are none.
+fn conjunction(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
+    conjuncts
+        .into_iter()
+        .reduce(|left, right| LogicalExpression::Binary {
+            left: Box::new(left),
+            op: BinaryOp::And,
+            right: Box::new(right),
+        })
 }
 
 #[cfg(test)]

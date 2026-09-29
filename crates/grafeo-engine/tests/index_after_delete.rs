@@ -37,7 +37,9 @@ fn deleted_node_leaves_the_property_index() {
         .unwrap();
     assert!(find(&db, "a").is_empty(), "deleted node must not be found");
 
-    let second = db.create_node_with_props(&["Graph", "File"], [("id", Value::from("a"))]);
+    let second = db
+        .create_node_with_props(&["Graph", "File"], [("id", Value::from("a"))])
+        .unwrap();
     assert_eq!(find(&db, "a"), vec![second]);
 }
 
@@ -45,7 +47,9 @@ fn deleted_node_leaves_the_property_index() {
 fn rolled_back_delete_is_found_again() {
     let db = GrafeoDB::new_in_memory();
     db.create_property_index("id");
-    let node = db.create_node_with_props(&["Graph"], [("id", Value::from("a"))]);
+    let node = db
+        .create_node_with_props(&["Graph"], [("id", Value::from("a"))])
+        .unwrap();
 
     let mut session = db.session();
     session.begin_transaction().unwrap();
@@ -77,23 +81,31 @@ mod vectors {
     use super::*;
 
     fn vector_db(quantization: Option<&str>) -> (GrafeoDB, NodeId, NodeId) {
+        vector_db_with_label("Doc", quantization)
+    }
+
+    fn vector_db_with_label(label: &str, quantization: Option<&str>) -> (GrafeoDB, NodeId, NodeId) {
         let db = GrafeoDB::new_in_memory();
-        let near = db.create_node_with_props(
-            &["Doc"],
-            [
-                ("id", Value::from("near")),
-                ("emb", Value::Vector(vec![1.0f32, 0.0].into())),
-            ],
-        );
-        let far = db.create_node_with_props(
-            &["Doc"],
-            [
-                ("id", Value::from("far")),
-                ("emb", Value::Vector(vec![0.0f32, 1.0].into())),
-            ],
-        );
+        let near = db
+            .create_node_with_props(
+                &[label],
+                [
+                    ("id", Value::from("near")),
+                    ("emb", Value::Vector(vec![1.0f32, 0.0].into())),
+                ],
+            )
+            .unwrap();
+        let far = db
+            .create_node_with_props(
+                &[label],
+                [
+                    ("id", Value::from("far")),
+                    ("emb", Value::Vector(vec![0.0f32, 1.0].into())),
+                ],
+            )
+            .unwrap();
         db.create_vector_index(
-            "Doc",
+            label,
             "emb",
             Some(2),
             Some("euclidean"),
@@ -106,7 +118,11 @@ mod vectors {
     }
 
     fn search(db: &GrafeoDB) -> Vec<NodeId> {
-        db.vector_search("Doc", "emb", &[1.0, 0.0], 5, None, None)
+        search_label(db, "Doc")
+    }
+
+    fn search_label(db: &GrafeoDB, label: &str) -> Vec<NodeId> {
+        db.vector_search(label, "emb", &[1.0, 0.0], 5, None, None)
             .unwrap()
             .into_iter()
             .map(|(id, _)| id)
@@ -128,13 +144,35 @@ mod vectors {
 
     #[test]
     fn rolled_back_delete_is_returned_by_vector_search_again() {
-        let (db, near, far) = vector_db(None);
-        let mut session = db.session();
-        session.begin_transaction().unwrap();
-        session
-            .execute_cypher("MATCH (n:Doc {id: 'near'}) DETACH DELETE n")
-            .unwrap();
-        session.rollback().unwrap();
-        assert_eq!(search(&db), vec![near, far]);
+        for quantization in [None, Some("scalar")] {
+            let (db, near, far) = vector_db(quantization);
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session
+                .execute_cypher("MATCH (n:Doc {id: 'near'}) DETACH DELETE n")
+                .unwrap();
+            session.rollback().unwrap();
+            assert_eq!(search(&db), vec![near, far], "{quantization:?}");
+        }
+    }
+
+    #[test]
+    fn rolled_back_delete_restores_vector_entry_for_label_with_colon() {
+        // Index keys are `label:property`; a ':' in the label used to break
+        // the lookup, so the node was not re-inserted.
+        for quantization in [None, Some("scalar")] {
+            let (db, near, far) = vector_db_with_label("Doc:Draft", quantization);
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session
+                .execute_cypher("MATCH (n:`Doc:Draft` {id: 'near'}) DETACH DELETE n")
+                .unwrap();
+            session.rollback().unwrap();
+            assert_eq!(
+                search_label(&db, "Doc:Draft"),
+                vec![near, far],
+                "{quantization:?}"
+            );
+        }
     }
 }

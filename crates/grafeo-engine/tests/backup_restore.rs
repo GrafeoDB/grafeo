@@ -149,7 +149,7 @@ fn backup_manifest_tracks_segments() {
     let backup_dir = dir.path().join("backups");
 
     let db = GrafeoDB::open(&db_path).expect("open");
-    db.create_node(&["Test"]);
+    db.create_node(&["Test"]).unwrap();
 
     let segment = db.backup_full(&backup_dir).expect("full backup");
 
@@ -172,7 +172,7 @@ fn incremental_without_full_fails() {
     let backup_dir = dir.path().join("backups");
 
     let db = GrafeoDB::open(&db_path).expect("open");
-    db.create_node(&["Test"]);
+    db.create_node(&["Test"]).unwrap();
 
     let result = db.backup_incremental(&backup_dir);
     assert!(result.is_err(), "incremental without full should fail");
@@ -358,6 +358,49 @@ fn incremental_backup_works_without_manual_rotation() {
     db.close().expect("close");
 }
 
+/// An incremental backup with nothing new to back up fails without touching
+/// the WAL: polling for backups must not leave an empty log file each time.
+#[test]
+fn incremental_backup_without_new_records_leaves_the_wal_alone() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let db_path = dir.path().join("idle.grafeo");
+    let backup_dir = dir.path().join("backups");
+    let wal_dir = dir.path().join("idle.grafeo.wal");
+    let log_files = || {
+        std::fs::read_dir(&wal_dir)
+            .expect("read WAL directory")
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .is_ok_and(|entry| entry.path().extension().is_some_and(|ext| ext == "log"))
+            })
+            .count()
+    };
+
+    let db = GrafeoDB::open(&db_path).expect("open");
+    db.session()
+        .execute("INSERT (:Person {name: 'Alix'})")
+        .expect("insert");
+    db.backup_full(&backup_dir).expect("full backup");
+    let before = log_files();
+
+    for _ in 0..3 {
+        let err = db
+            .backup_incremental(&backup_dir)
+            .expect_err("nothing to back up");
+        assert!(err.to_string().contains("no new WAL records"), "{err}");
+    }
+    assert_eq!(log_files(), before);
+
+    // The next write is still backed up.
+    db.session()
+        .execute("INSERT (:Person {name: 'Gus'})")
+        .expect("insert");
+    db.backup_incremental(&backup_dir)
+        .expect("incremental after a write");
+    db.close().expect("close");
+}
+
 /// Regression for GrafeoDB/grafeo#267: two consecutive incremental backups
 /// with writes between them must both succeed.
 ///
@@ -405,5 +448,69 @@ fn multiple_incremental_backups_in_sequence() {
         "should have 1 full + 2 incremental segments"
     );
 
+    db.close().expect("close");
+}
+
+// ── Backups while other sessions write ────────────────────────────
+
+/// Records written while a backup ran belonged to neither the backup nor the
+/// next one: a full backup copied the file of its checkpoint and then took
+/// the WAL file active at that point as backed up, and an incremental backup
+/// read the active WAL file and rotated only afterwards. A restore then
+/// missed those records.
+#[test]
+fn backups_during_writes_lose_nothing() {
+    use std::sync::Arc;
+
+    const NODES: i64 = 3000;
+
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let db_path = dir.path().join("busy.grafeo");
+    let backup_dir = dir.path().join("backups");
+    let restore_path = dir.path().join("restored.grafeo");
+
+    let db = Arc::new(GrafeoDB::open(&db_path).expect("open"));
+    db.session()
+        .execute("INSERT (:N {i: -1})")
+        .expect("seed insert");
+
+    let writer = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || {
+            let session = db.session();
+            for i in 0..NODES {
+                session
+                    .execute(&format!("INSERT (:N {{i: {i}}})"))
+                    .expect("insert");
+            }
+        })
+    };
+
+    db.backup_full(&backup_dir).expect("full backup");
+    // Until the writer is done, or has panicked: `join()` below reports that.
+    while !writer.is_finished() {
+        // "no new WAL records" is fine while the writer is between inserts
+        let _ = db.backup_incremental(&backup_dir);
+    }
+    writer.join().expect("writer thread");
+    // One more write, so the final incremental has content and its epoch is
+    // past every insert above.
+    db.session()
+        .execute("INSERT (:N {i: -2})")
+        .expect("last insert");
+    let last = db
+        .backup_incremental(&backup_dir)
+        .expect("final incremental");
+
+    GrafeoDB::restore_to_epoch(&backup_dir, last.end_epoch, &restore_path).expect("restore");
+    let restored = GrafeoDB::open(&restore_path).expect("open restored");
+    let count = restored
+        .session()
+        .execute("MATCH (n:N) RETURN count(n) AS c")
+        .expect("count")
+        .rows()[0][0]
+        .clone();
+    assert_eq!(count, grafeo_common::types::Value::Int64(NODES + 2));
+    restored.close().expect("close restored");
     db.close().expect("close");
 }

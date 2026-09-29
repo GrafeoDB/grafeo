@@ -257,20 +257,26 @@ impl Catalog {
         }
     }
 
-    /// Checks if a property is required for a label.
+    /// Checks if a property is required for a label, through
+    /// [`add_required_property`](Self::add_required_property) or a named
+    /// constraint.
     #[must_use]
     pub fn is_property_required(&self, label: LabelId, property_key: PropertyKeyId) -> bool {
-        self.schema
-            .as_ref()
-            .is_some_and(|s| s.is_property_required(label, property_key))
+        self.schema.as_ref().is_some_and(|s| {
+            s.is_property_required(label, property_key)
+                || self.named_constraint_covers(s, label, property_key, ConstraintType::is_required)
+        })
     }
 
-    /// Checks if a property must be unique for a label.
+    /// Checks if a property must be unique for a label, through
+    /// [`add_unique_constraint`](Self::add_unique_constraint) or a named
+    /// constraint.
     #[must_use]
     pub fn is_property_unique(&self, label: LabelId, property_key: PropertyKeyId) -> bool {
-        self.schema
-            .as_ref()
-            .is_some_and(|s| s.is_property_unique(label, property_key))
+        self.schema.as_ref().is_some_and(|s| {
+            s.is_property_unique(label, property_key)
+                || self.named_constraint_covers(s, label, property_key, ConstraintType::is_unique)
+        })
     }
 
     // === Type Definition Operations ===
@@ -326,6 +332,15 @@ impl Catalog {
         self.schema
             .as_ref()
             .and_then(|s| s.resolved_node_type(name))
+    }
+
+    /// Whether any node type is defined: without one, no property, NOT NULL
+    /// or UNIQUE constraint applies to nodes.
+    #[must_use]
+    pub fn has_node_types(&self) -> bool {
+        self.schema
+            .as_ref()
+            .is_some_and(SchemaCatalog::has_node_types)
     }
 
     /// Returns all registered node type names.
@@ -395,6 +410,13 @@ impl Catalog {
         match &self.schema {
             Some(schema) => schema.register_graph_type(def),
             None => Err(CatalogError::SchemaNotEnabled),
+        }
+    }
+
+    /// Registers or replaces a graph type definition.
+    pub fn register_or_replace_graph_type(&self, def: GraphTypeDefinition) {
+        if let Some(schema) = &self.schema {
+            schema.register_or_replace_graph_type(def);
         }
     }
 
@@ -481,6 +503,99 @@ impl Catalog {
             Some(schema) => schema.add_constraint_to_type(label, constraint),
             None => Err(CatalogError::SchemaNotEnabled),
         }
+    }
+
+    /// Creates a named constraint: registers its name and adds the type
+    /// constraints that enforce it. `CREATE CONSTRAINT` and WAL replay both
+    /// call this.
+    ///
+    /// # Errors
+    ///
+    /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
+    /// * `CatalogError::ConstraintAlreadyExists` if the name is taken; nothing
+    ///   changes then.
+    pub fn create_constraint(&self, def: ConstraintDefinition) -> Result<(), CatalogError> {
+        self.schema
+            .as_ref()
+            .ok_or(CatalogError::SchemaNotEnabled)?
+            .create_constraint(def)
+    }
+
+    /// Drops a named constraint and the type constraints it added.
+    /// `DROP CONSTRAINT` and WAL replay both call this.
+    ///
+    /// # Errors
+    ///
+    /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
+    /// * `CatalogError::ConstraintNotFound` if no constraint has this name.
+    pub fn drop_constraint(&self, name: &str) -> Result<(), CatalogError> {
+        self.schema
+            .as_ref()
+            .ok_or(CatalogError::SchemaNotEnabled)?
+            .drop_constraint(name)
+    }
+
+    /// Calls `f` with the named constraints (sorted by name) while none can
+    /// be created or dropped, so what `f` reads from the node types that
+    /// enforce them is from the same moment (a checkpoint).
+    pub fn with_constraints<R>(&self, f: impl FnOnce(Vec<ConstraintDefinition>) -> R) -> R {
+        let Some(schema) = &self.schema else {
+            return f(Vec::new());
+        };
+        let registry = schema.constraints.read();
+        let mut constraints: Vec<ConstraintDefinition> = registry.values().cloned().collect();
+        constraints.sort_by(|a, b| a.name.cmp(&b.name));
+        let result = f(constraints);
+        drop(registry);
+        result
+    }
+
+    /// The named constraint called `name`, if any.
+    #[must_use]
+    pub fn constraint(&self, name: &str) -> Option<ConstraintDefinition> {
+        self.schema
+            .as_ref()
+            .and_then(|schema| schema.constraints.read().get(name).cloned())
+    }
+
+    /// The named constraints, sorted by name.
+    #[must_use]
+    pub fn constraints(&self) -> Vec<ConstraintDefinition> {
+        self.schema
+            .as_ref()
+            .map(SchemaCatalog::all_constraints)
+            .unwrap_or_default()
+    }
+
+    /// Registers the names of constraints whose type constraints the loaded
+    /// node types already hold (loading a `.grafeo` catalog section).
+    pub fn restore_constraint_names(&self, constraints: Vec<ConstraintDefinition>) {
+        if let Some(schema) = &self.schema {
+            let mut registry = schema.constraints.write();
+            for def in constraints {
+                registry.insert(def.name.clone(), def);
+            }
+        }
+    }
+
+    /// Whether a named constraint on `label` makes `property_key` pass `check`
+    /// (see [`is_property_unique`](Self::is_property_unique)).
+    fn named_constraint_covers(
+        &self,
+        schema: &SchemaCatalog,
+        label: LabelId,
+        property_key: PropertyKeyId,
+        check: fn(ConstraintType) -> bool,
+    ) -> bool {
+        let (Some(label), Some(property)) = (
+            self.get_label_name(label),
+            self.get_property_key_name(property_key),
+        ) else {
+            return false;
+        };
+        schema.constraints.read().values().any(|def| {
+            def.label == *label && check(def.kind) && def.properties.iter().any(|p| *p == *property)
+        })
     }
 
     /// Adds a property to a node type.
@@ -1195,7 +1310,7 @@ pub struct TypedProperty {
 }
 
 /// A constraint on a node or edge type.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum TypeConstraint {
     /// Primary key (implies UNIQUE + NOT NULL).
@@ -1211,6 +1326,107 @@ pub enum TypeConstraint {
         /// Expression (stored as string for now).
         expression: String,
     },
+}
+
+/// What a named constraint (`CREATE CONSTRAINT`) requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum ConstraintType {
+    /// The properties are unique among nodes with the label.
+    Unique,
+    /// The properties are present and unique together.
+    NodeKey,
+    /// The properties are present (`NOT NULL`).
+    NotNull,
+    /// The properties are present (`EXISTS`, another spelling of `NOT NULL`).
+    Exists,
+}
+
+impl ConstraintType {
+    /// The name `SHOW CONSTRAINTS` reports.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Unique => "UNIQUE",
+            Self::NodeKey => "NODE KEY",
+            Self::NotNull => "NOT NULL",
+            Self::Exists => "EXISTS",
+        }
+    }
+
+    /// The last part of a constraint's default name, `Label_prop_unique`.
+    #[must_use]
+    pub const fn name_suffix(self) -> &'static str {
+        match self {
+            Self::Unique => "unique",
+            Self::NodeKey => "node_key",
+            Self::NotNull => "not_null",
+            Self::Exists => "exists",
+        }
+    }
+
+    fn is_unique(self) -> bool {
+        matches!(self, Self::Unique | Self::NodeKey)
+    }
+
+    fn is_required(self) -> bool {
+        matches!(self, Self::NodeKey | Self::NotNull | Self::Exists)
+    }
+}
+
+#[cfg(feature = "wal")]
+impl From<ConstraintType> for grafeo_storage::wal::NamedConstraintKind {
+    fn from(kind: ConstraintType) -> Self {
+        match kind {
+            ConstraintType::Unique => Self::Unique,
+            ConstraintType::NodeKey => Self::NodeKey,
+            ConstraintType::NotNull => Self::NotNull,
+            ConstraintType::Exists => Self::Exists,
+        }
+    }
+}
+
+#[cfg(feature = "wal")]
+impl From<grafeo_storage::wal::NamedConstraintKind> for ConstraintType {
+    fn from(kind: grafeo_storage::wal::NamedConstraintKind) -> Self {
+        use grafeo_storage::wal::NamedConstraintKind;
+        match kind {
+            NamedConstraintKind::Unique => Self::Unique,
+            NamedConstraintKind::NodeKey => Self::NodeKey,
+            NamedConstraintKind::NotNull => Self::NotNull,
+            NamedConstraintKind::Exists => Self::Exists,
+        }
+    }
+}
+
+/// A named constraint created with `CREATE CONSTRAINT` (#420). It is enforced
+/// through the [`TypeConstraint`]s it adds to the label's node type.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConstraintDefinition {
+    /// The constraint's name.
+    pub name: String,
+    /// The node label it applies to.
+    pub label: String,
+    /// The constrained properties.
+    pub properties: Vec<String>,
+    /// What it requires.
+    pub kind: ConstraintType,
+}
+
+impl ConstraintDefinition {
+    /// The type constraints that enforce it on the label's node type.
+    fn type_constraints(&self) -> Vec<TypeConstraint> {
+        match self.kind {
+            ConstraintType::Unique => vec![TypeConstraint::Unique(self.properties.clone())],
+            ConstraintType::NodeKey => vec![TypeConstraint::PrimaryKey(self.properties.clone())],
+            ConstraintType::NotNull | ConstraintType::Exists => self
+                .properties
+                .iter()
+                .cloned()
+                .map(TypeConstraint::NotNull)
+                .collect(),
+        }
+    }
 }
 
 /// Definition of a node type (label schema).
@@ -1287,6 +1503,8 @@ pub struct SchemaCatalog {
     graph_type_bindings: RwLock<HashMap<String, String>>,
     /// Stored procedure definitions.
     procedures: RwLock<HashMap<String, ProcedureDefinition>>,
+    /// Named constraints (`CREATE CONSTRAINT`), by name.
+    constraints: RwLock<HashMap<String, ConstraintDefinition>>,
 }
 
 impl SchemaCatalog {
@@ -1300,6 +1518,7 @@ impl SchemaCatalog {
             schemas: RwLock::new(Vec::new()),
             graph_type_bindings: RwLock::new(HashMap::new()),
             procedures: RwLock::new(HashMap::new()),
+            constraints: RwLock::new(HashMap::new()),
         }
     }
 
@@ -1341,6 +1560,12 @@ impl SchemaCatalog {
     #[must_use]
     pub fn get_node_type(&self, name: &str) -> Option<NodeTypeDefinition> {
         self.node_types.read().get(name).cloned()
+    }
+
+    /// Whether any node type is defined.
+    #[must_use]
+    pub fn has_node_types(&self) -> bool {
+        !self.node_types.read().is_empty()
     }
 
     /// Gets a resolved node type with inherited properties and constraints from parents.
@@ -1479,6 +1704,11 @@ impl SchemaCatalog {
         }
         types.insert(def.name.clone(), def);
         Ok(())
+    }
+
+    /// Registers or replaces a graph type definition.
+    pub fn register_or_replace_graph_type(&self, def: GraphTypeDefinition) {
+        self.graph_types.write().insert(def.name.clone(), def);
     }
 
     /// Drops a graph type definition by name.
@@ -1856,6 +2086,51 @@ impl SchemaCatalog {
             .read()
             .contains(&(label, property_key))
     }
+
+    /// Registers a named constraint and adds its type constraints. The
+    /// registry stays locked until both are done, so a reader holding it
+    /// (a checkpoint) sees names and type constraints from one moment.
+    fn create_constraint(&self, def: ConstraintDefinition) -> Result<(), CatalogError> {
+        let mut constraints = self.constraints.write();
+        if constraints.contains_key(&def.name) {
+            return Err(CatalogError::ConstraintAlreadyExists);
+        }
+        for constraint in def.type_constraints() {
+            self.add_constraint_to_type(&def.label, constraint)?;
+        }
+        constraints.insert(def.name.clone(), def);
+        Ok(())
+    }
+
+    /// Removes a named constraint and its type constraints, under the same
+    /// lock as [`create_constraint`](Self::create_constraint).
+    fn drop_constraint(&self, name: &str) -> Result<(), CatalogError> {
+        let mut constraints = self.constraints.write();
+        let def = constraints
+            .remove(name)
+            .ok_or_else(|| CatalogError::ConstraintNotFound(name.to_string()))?;
+        for constraint in def.type_constraints() {
+            self.remove_constraint_from_type(&def.label, &constraint);
+        }
+        Ok(())
+    }
+
+    /// Removes one occurrence of `constraint` from the node type `label`:
+    /// another named constraint may have added the same one.
+    fn remove_constraint_from_type(&self, label: &str, constraint: &TypeConstraint) {
+        if let Some(def) = self.node_types.write().get_mut(label)
+            && let Some(position) = def.constraints.iter().position(|c| c == constraint)
+        {
+            def.constraints.remove(position);
+        }
+    }
+
+    fn all_constraints(&self) -> Vec<ConstraintDefinition> {
+        let mut constraints: Vec<ConstraintDefinition> =
+            self.constraints.read().values().cloned().collect();
+        constraints.sort_by(|a, b| a.name.cmp(&b.name));
+        constraints
+    }
 }
 
 // === Errors ===
@@ -1866,6 +2141,8 @@ impl SchemaCatalog {
 pub enum CatalogError {
     /// Schema constraints are not enabled.
     SchemaNotEnabled,
+    /// No constraint with this name exists.
+    ConstraintNotFound(String),
     /// The constraint already exists.
     ConstraintAlreadyExists,
     /// The label does not exist.
@@ -1890,6 +2167,7 @@ impl std::fmt::Display for CatalogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SchemaNotEnabled => write!(f, "Schema constraints are not enabled"),
+            Self::ConstraintNotFound(name) => write!(f, "Constraint not found: {name}"),
             Self::ConstraintAlreadyExists => write!(f, "Constraint already exists"),
             Self::LabelNotFound(name) => write!(f, "Label not found: {name}"),
             Self::PropertyKeyNotFound(name) => write!(f, "Property key not found: {name}"),
@@ -1918,10 +2196,16 @@ pub struct CatalogConstraintValidator {
     catalog: Arc<Catalog>,
     /// Optional graph name for graph-type-bound validation.
     graph_name: Option<String>,
-    /// Optional graph store for UNIQUE constraint enforcement via index lookup.
-    store: Option<Arc<dyn grafeo_core::graph::GraphStore>>,
+    /// Optional graph store for UNIQUE constraint enforcement via index lookup
+    /// and the dimensions of vector indexes.
+    store: Option<Arc<dyn grafeo_core::graph::GraphStoreSearch>>,
     /// Optional maximum property value size in bytes.
     max_property_size: Option<usize>,
+    /// The writing transaction: its uncommitted writes count for UNIQUE.
+    transaction: Option<(
+        grafeo_common::types::EpochId,
+        grafeo_common::types::TransactionId,
+    )>,
 }
 
 impl CatalogConstraintValidator {
@@ -1932,7 +2216,55 @@ impl CatalogConstraintValidator {
             graph_name: None,
             store: None,
             max_property_size: None,
+            transaction: None,
         }
+    }
+
+    /// Checks as `transaction_id` sees the data, reading at `epoch`: a UNIQUE
+    /// value the transaction already wrote counts as taken.
+    #[must_use]
+    pub fn with_transaction_context(
+        mut self,
+        epoch: grafeo_common::types::EpochId,
+        transaction_id: Option<grafeo_common::types::TransactionId>,
+    ) -> Self {
+        self.transaction = transaction_id.map(|id| (epoch, id));
+        self
+    }
+
+    /// The nodes with `label` whose `key` holds `value`, as the writing
+    /// transaction sees them: committed nodes and its own writes.
+    ///
+    /// Without a property index the candidates come from the label index,
+    /// which holds the transaction's pending nodes; the property scan only
+    /// sees committed nodes and would miss a value written earlier in the
+    /// same transaction.
+    fn nodes_with_value(
+        &self,
+        store: &dyn grafeo_core::graph::GraphStoreSearch,
+        label: &str,
+        key: &str,
+        value: &Value,
+    ) -> Vec<grafeo_core::graph::lpg::Node> {
+        let candidates = if store.has_property_index(key) {
+            store.find_nodes_by_property(key, value)
+        } else {
+            store.nodes_by_label(label)
+        };
+        let key = grafeo_common::types::PropertyKey::from(key);
+        candidates
+            .into_iter()
+            .filter_map(|id| match self.transaction {
+                Some((epoch, transaction_id)) => {
+                    store.get_node_versioned(id, epoch, transaction_id)
+                }
+                None => store.get_node(id),
+            })
+            .filter(|node| {
+                node.labels.iter().any(|l| l.as_str() == label)
+                    && node.properties.get(&key) == Some(value)
+            })
+            .collect()
     }
 
     /// Sets the graph name for graph-type-bound validation.
@@ -1941,8 +2273,9 @@ impl CatalogConstraintValidator {
         self
     }
 
-    /// Attaches a graph store for UNIQUE constraint enforcement.
-    pub fn with_store(mut self, store: Arc<dyn grafeo_core::graph::GraphStore>) -> Self {
+    /// Attaches a graph store for UNIQUE constraint enforcement and vector
+    /// index dimensions.
+    pub fn with_store(mut self, store: Arc<dyn grafeo_core::graph::GraphStoreSearch>) -> Self {
         self.store = Some(store);
         self
     }
@@ -1961,19 +2294,32 @@ impl ConstraintValidator for CatalogConstraintValidator {
         key: &str,
         value: &Value,
     ) -> Result<(), OperatorError> {
+        // A vector index on the property fixes the vector's size.
+        #[cfg(feature = "vector-index")]
+        if let (Value::Vector(vector), Some(store)) = (value, &self.store) {
+            for label in labels {
+                if let Some(config) = store.vector_index_config(label, key)
+                    && vector.len() != config.dimensions
+                {
+                    return Err(OperatorError::ConstraintViolation(format!(
+                        "property '{key}' on :{label} has a vector index of {} dimensions, got a vector of {}",
+                        config.dimensions,
+                        vector.len()
+                    )));
+                }
+            }
+        }
         if let Some(limit) = self.max_property_size {
             let size = value.estimated_size_bytes();
             if size > limit {
-                return Err(OperatorError::ConstraintViolation(format!(
-                    "property '{key}' value exceeds maximum size of {} MiB ({size} bytes)",
-                    limit / (1024 * 1024)
-                )));
+                return Err(property_size_error(key, size, limit));
             }
         }
         for label in labels {
-            if let Some(type_def) = self.catalog.resolved_node_type(label)
-                && let Some(typed_prop) = type_def.properties.iter().find(|p| p.name == key)
-            {
+            let Some(type_def) = self.catalog.resolved_node_type(label) else {
+                continue;
+            };
+            if let Some(typed_prop) = type_def.properties.iter().find(|p| p.name == key) {
                 // Check NOT NULL
                 if !typed_prop.nullable && *value == Value::Null {
                     return Err(OperatorError::ConstraintViolation(format!(
@@ -1987,6 +2333,22 @@ impl ConstraintValidator for CatalogConstraintValidator {
                         typed_prop.data_type, value
                     )));
                 }
+            }
+            // A null removes the property (`SET n.p = NULL`, `REMOVE n.p`),
+            // which a NOT NULL or NODE KEY constraint forbids.
+            let required = type_def
+                .constraints
+                .iter()
+                .any(|constraint| match constraint {
+                    TypeConstraint::NotNull(property) => property == key,
+                    TypeConstraint::PrimaryKey(properties) => properties.iter().any(|p| p == key),
+                    _ => false,
+                });
+            if required && value.is_null() {
+                return Err(OperatorError::ConstraintViolation(format!(
+                    "property '{key}' on :{label} is required by a NOT NULL constraint, \
+                     cannot remove it or set it to null"
+                )));
             }
         }
         Ok(())
@@ -2070,25 +2432,86 @@ impl ConstraintValidator for CatalogConstraintValidator {
         for label in labels {
             if let Some(type_def) = self.catalog.resolved_node_type(label) {
                 for constraint in &type_def.constraints {
+                    // A constraint on several properties holds for the
+                    // combination of values: see `check_unique_node`.
                     let is_unique = match constraint {
-                        TypeConstraint::Unique(props) => props.iter().any(|p| p == key),
-                        TypeConstraint::PrimaryKey(props) => props.iter().any(|p| p == key),
+                        TypeConstraint::Unique(props) | TypeConstraint::PrimaryKey(props) => {
+                            matches!(props.as_slice(), [only] if only == key)
+                        }
                         _ => false,
                     };
-                    if is_unique && let Some(ref store) = self.store {
-                        let existing = store.find_nodes_by_property(key, value);
-                        for node_id in existing {
-                            if let Some(node) = store.get_node(node_id) {
-                                let has_label = node.labels.iter().any(|l| l.as_str() == label);
-                                if has_label {
-                                    return Err(OperatorError::ConstraintViolation(format!(
-                                        "UNIQUE constraint violation: property '{key}' \
-                                             with value {value:?} already exists on :{label}"
-                                    )));
-                                }
-                            }
-                        }
+                    if is_unique
+                        && let Some(ref store) = self.store
+                        && !self
+                            .nodes_with_value(store.as_ref(), label, key, value)
+                            .is_empty()
+                    {
+                        return Err(OperatorError::ConstraintViolation(format!(
+                            "UNIQUE constraint violation: property '{key}' \
+                             with value {value:?} already exists on :{label}"
+                        )));
                     }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_unique_node(
+        &self,
+        labels: &[String],
+        properties: &[(String, Value)],
+        node: Option<grafeo_common::types::NodeId>,
+    ) -> Result<(), OperatorError> {
+        let Some(ref store) = self.store else {
+            return Ok(());
+        };
+        let value_of = |key: &str| {
+            properties
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value)
+                .filter(|value| !value.is_null())
+        };
+        for label in labels {
+            let Some(type_def) = self.catalog.resolved_node_type(label) else {
+                continue;
+            };
+            for constraint in &type_def.constraints {
+                let (TypeConstraint::Unique(keys) | TypeConstraint::PrimaryKey(keys)) = constraint
+                else {
+                    continue;
+                };
+                if keys.len() < 2 {
+                    continue;
+                }
+                // NULLs are never duplicates: a combination with a missing
+                // value cannot collide.
+                let Some(values) = keys
+                    .iter()
+                    .map(|key| value_of(key))
+                    .collect::<Option<Vec<&Value>>>()
+                else {
+                    continue;
+                };
+                let duplicate = self
+                    .nodes_with_value(store.as_ref(), label, &keys[0], values[0])
+                    .into_iter()
+                    .filter(|other| Some(other.id) != node)
+                    .any(|other| {
+                        keys.iter().zip(&values).all(|(key, value)| {
+                            other
+                                .properties
+                                .get(&grafeo_common::types::PropertyKey::from(key.as_str()))
+                                == Some(*value)
+                        })
+                    });
+                if duplicate {
+                    return Err(OperatorError::ConstraintViolation(format!(
+                        "UNIQUE constraint violation: properties ({}) with values {values:?} \
+                         already exist on :{label}",
+                        keys.join(", ")
+                    )));
                 }
             }
         }
@@ -2104,10 +2527,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         if let Some(limit) = self.max_property_size {
             let size = value.estimated_size_bytes();
             if size > limit {
-                return Err(OperatorError::ConstraintViolation(format!(
-                    "property '{key}' value exceeds maximum size of {} MiB ({size} bytes)",
-                    limit / (1024 * 1024)
-                )));
+                return Err(property_size_error(key, size, limit));
             }
         }
         if let Some(type_def) = self.catalog.get_edge_type_def(edge_type)
@@ -2263,6 +2683,20 @@ impl ConstraintValidator for CatalogConstraintValidator {
         Ok(())
     }
 
+    fn constrains_edge_endpoints(&self, edge_type: &str) -> bool {
+        self.catalog
+            .get_edge_type_def(edge_type)
+            .is_some_and(|def| {
+                !def.source_node_types.is_empty() || !def.target_node_types.is_empty()
+            })
+    }
+
+    fn constrains_node_property(&self, _key: &str, value: &Value) -> bool {
+        // A vector index on (label, key) fixes a vector's size; the node
+        // types hold every other constraint.
+        matches!(value, Value::Vector(_)) || self.catalog.has_node_types()
+    }
+
     fn inject_defaults(&self, labels: &[String], properties: &mut Vec<(String, Value)>) {
         for label in labels {
             if let Some(type_def) = self.catalog.resolved_node_type(label) {
@@ -2279,10 +2713,95 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 }
 
+/// The error for a property value over the size limit.
+fn property_size_error(key: &str, size: usize, limit: usize) -> OperatorError {
+    let limit_display = if limit >= 1024 * 1024 && limit.is_multiple_of(1024 * 1024) {
+        format!("{} MiB", limit / (1024 * 1024))
+    } else if limit >= 1024 && limit.is_multiple_of(1024) {
+        format!("{} KiB", limit / 1024)
+    } else {
+        format!("{limit} bytes")
+    };
+    OperatorError::ConstraintViolation(format!(
+        "property '{key}' value exceeds maximum size of {limit_display} ({size} bytes); \
+         raise it with Config::with_max_property_size() or disable it with \
+         Config::without_max_property_size()"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::thread;
+
+    /// Dropping one of two named constraints on a property removes only its
+    /// own type constraint, and keeps the unique and required markers that
+    /// the other one still needs.
+    /// A marker set through `add_unique_constraint` or
+    /// `add_required_property` is not a named constraint: dropping one on
+    /// the same property leaves it.
+    #[test]
+    fn dropping_a_constraint_keeps_markers_set_directly() {
+        let catalog = Catalog::new();
+        let person = catalog.get_or_create_label("Person");
+        let email = catalog.get_or_create_property_key("email");
+        catalog.add_unique_constraint(person, email).unwrap();
+        catalog.add_required_property(person, email).unwrap();
+        catalog
+            .create_constraint(ConstraintDefinition {
+                name: "email_key".to_string(),
+                label: "Person".to_string(),
+                properties: vec!["email".to_string()],
+                kind: ConstraintType::NodeKey,
+            })
+            .unwrap();
+
+        catalog.drop_constraint("email_key").unwrap();
+        assert!(catalog.is_property_unique(person, email));
+        assert!(catalog.is_property_required(person, email));
+    }
+
+    #[test]
+    fn dropping_a_constraint_keeps_what_another_needs() {
+        let catalog = Catalog::new();
+        let email = |name: &str, kind| ConstraintDefinition {
+            name: name.to_string(),
+            label: "Person".to_string(),
+            properties: vec!["email".to_string()],
+            kind,
+        };
+        catalog
+            .create_constraint(email("unique_email", ConstraintType::Unique))
+            .unwrap();
+        catalog
+            .create_constraint(email("email_key", ConstraintType::NodeKey))
+            .unwrap();
+        let person = catalog.get_or_create_label("Person");
+        let email_key = catalog.get_or_create_property_key("email");
+
+        catalog.drop_constraint("unique_email").unwrap();
+        assert!(catalog.is_property_unique(person, email_key), "the key");
+        assert!(catalog.is_property_required(person, email_key));
+        assert_eq!(
+            catalog.get_node_type("Person").unwrap().constraints,
+            vec![TypeConstraint::PrimaryKey(vec!["email".to_string()])]
+        );
+
+        catalog.drop_constraint("email_key").unwrap();
+        assert!(!catalog.is_property_unique(person, email_key));
+        assert!(!catalog.is_property_required(person, email_key));
+        assert!(
+            catalog
+                .get_node_type("Person")
+                .unwrap()
+                .constraints
+                .is_empty()
+        );
+        assert_eq!(
+            catalog.drop_constraint("email_key"),
+            Err(CatalogError::ConstraintNotFound("email_key".to_string()))
+        );
+    }
 
     #[test]
     fn test_catalog_labels() {

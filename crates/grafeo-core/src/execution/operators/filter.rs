@@ -424,6 +424,75 @@ pub enum FilterExpression {
     },
 }
 
+impl FilterExpression {
+    /// Whether the expression uses the variable `name` anywhere, also inside
+    /// nested list expressions that bind their own variable (so a shadowed
+    /// name counts as used).
+    fn mentions(&self, name: &str) -> bool {
+        fn any<'a>(mut exprs: impl Iterator<Item = &'a FilterExpression>, name: &str) -> bool {
+            exprs.any(|expr| expr.mentions(name))
+        }
+        match self {
+            Self::Literal(_) => false,
+            Self::Variable(variable)
+            | Self::Property { variable, .. }
+            | Self::Id(variable)
+            | Self::Labels(variable)
+            | Self::Type(variable)
+            | Self::ExistsSubquery {
+                start_var: variable,
+                ..
+            }
+            | Self::CountSubquery {
+                start_var: variable,
+                ..
+            } => variable == name,
+            Self::Binary { left, right, .. } => left.mentions(name) || right.mentions(name),
+            Self::Unary { operand, .. } => operand.mentions(name),
+            Self::FunctionCall { args, .. } | Self::List(args) => any(args.iter(), name),
+            Self::Map(entries) => any(entries.iter().map(|(_, value)| value), name),
+            Self::IndexAccess { base, index } => base.mentions(name) || index.mentions(name),
+            Self::SliceAccess { base, start, end } => {
+                base.mentions(name) || any(start.iter().chain(end).map(AsRef::as_ref), name)
+            }
+            Self::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => {
+                any(operand.iter().chain(else_clause).map(AsRef::as_ref), name)
+                    || any(
+                        when_clauses.iter().flat_map(|(when, then)| [when, then]),
+                        name,
+                    )
+            }
+            Self::ListComprehension {
+                list_expr,
+                filter_expr,
+                map_expr,
+                ..
+            } => {
+                list_expr.mentions(name)
+                    || map_expr.mentions(name)
+                    || filter_expr
+                        .as_ref()
+                        .is_some_and(|filter| filter.mentions(name))
+            }
+            Self::ListPredicate {
+                list_expr,
+                predicate,
+                ..
+            } => list_expr.mentions(name) || predicate.mentions(name),
+            Self::Reduce {
+                initial,
+                list,
+                expression,
+                ..
+            } => initial.mentions(name) || list.mentions(name) || expression.mentions(name),
+        }
+    }
+}
+
 /// The kind of list predicate function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -877,6 +946,7 @@ impl ExpressionPredicate {
                 map_expr,
             } => {
                 // Evaluate the source list (accept both List and Vector)
+                let kind = ItemKind::of(list_expr);
                 let list_val = self.eval_expr(list_expr, chunk, row)?;
                 let owned_items: Vec<Value>;
                 let items: &[Value] = match &list_val {
@@ -900,7 +970,16 @@ impl ExpressionPredicate {
                         // Simplified: evaluate filter with item as context
                         // This works for simple cases like x > 5
                         matches!(
-                            self.eval_comprehension_expr(filter, item, variable),
+                            self.eval_comprehension_expr(
+                                filter,
+                                ComprehensionScope {
+                                    item,
+                                    variable,
+                                    kind,
+                                    chunk,
+                                    row
+                                }
+                            ),
                             Some(Value::Bool(true))
                         )
                     } else {
@@ -909,8 +988,16 @@ impl ExpressionPredicate {
 
                     if passes_filter {
                         // Apply the mapping expression
-                        if let Some(mapped) = self.eval_comprehension_expr(map_expr, item, variable)
-                        {
+                        if let Some(mapped) = self.eval_comprehension_expr(
+                            map_expr,
+                            ComprehensionScope {
+                                item,
+                                variable,
+                                kind,
+                                chunk,
+                                row,
+                            },
+                        ) {
                             result.push(mapped);
                         }
                     }
@@ -924,6 +1011,7 @@ impl ExpressionPredicate {
                 list_expr,
                 predicate,
             } => {
+                let item_kind = ItemKind::of(list_expr);
                 let list_val = self.eval_expr(list_expr, chunk, row)?;
                 // Accept both List and Vector as iterable sequences
                 let vec_items: Vec<Value>;
@@ -938,7 +1026,16 @@ impl ExpressionPredicate {
 
                 let mut match_count: u32 = 0;
                 for item in &items {
-                    let result = self.eval_comprehension_expr(predicate, item, variable);
+                    let result = self.eval_comprehension_expr(
+                        predicate,
+                        ComprehensionScope {
+                            item,
+                            variable,
+                            kind: item_kind,
+                            chunk,
+                            row,
+                        },
+                    );
                     if matches!(result, Some(Value::Bool(true))) {
                         match_count += 1;
                     }
@@ -1200,22 +1297,21 @@ impl ExpressionPredicate {
         }
     }
 
-    /// Evaluates an expression in the context of a list comprehension.
-    /// The `item` is the current iteration value bound to `variable`.
+    /// Evaluates an expression for one element of a list comprehension or
+    /// list predicate (see [`ComprehensionScope`]).
     fn eval_comprehension_expr(
         &self,
         expr: &FilterExpression,
-        item: &Value,
-        variable: &str,
+        scope: ComprehensionScope<'_>,
     ) -> Option<Value> {
         match expr {
-            FilterExpression::Variable(name) if name == variable => Some(item.clone()),
+            FilterExpression::Variable(name) if name == scope.variable => Some(scope.item.clone()),
             FilterExpression::Literal(v) => Some(v.clone()),
             FilterExpression::Binary { left, op, right } => {
                 // IN operator needs special handling: right side is a list
                 if *op == BinaryFilterOp::In {
-                    let left_val = self.eval_comprehension_expr(left, item, variable)?;
-                    let right_val = self.eval_comprehension_expr(right, item, variable)?;
+                    let left_val = self.eval_comprehension_expr(left, scope)?;
+                    let right_val = self.eval_comprehension_expr(right, scope)?;
                     return match right_val {
                         Value::List(items) => {
                             if left_val.is_null() {
@@ -1238,30 +1334,36 @@ impl ExpressionPredicate {
                         _ => None,
                     };
                 }
-                let left_val = self.eval_comprehension_expr(left, item, variable)?;
-                let right_val = self.eval_comprehension_expr(right, item, variable)?;
+                let left_val = self.eval_comprehension_expr(left, scope)?;
+                let right_val = self.eval_comprehension_expr(right, scope)?;
                 self.eval_binary_op(&left_val, *op, &right_val)
             }
             FilterExpression::Unary { op, operand } => {
-                let val = self.eval_comprehension_expr(operand, item, variable);
+                let val = self.eval_comprehension_expr(operand, scope);
                 self.eval_unary_op(*op, val)
             }
             FilterExpression::Property {
                 variable: var,
                 property,
-            } if var == variable => {
+            } if var == scope.variable => {
                 // Property access on the iteration variable
-                if let Value::Map(m) = item {
-                    let key = PropertyKey::new(property.as_str());
-                    m.get(&key).cloned()
-                } else {
-                    None
+                match (scope.item, scope.kind) {
+                    (Value::Map(m), _) => {
+                        let key = PropertyKey::new(property.as_str());
+                        m.get(&key).cloned()
+                    }
+                    // `all(e IN edges(p) WHERE e.w = 1)`: path functions yield ids
+                    (Value::Int64(id), ItemKind::Edge) => {
+                        let edge = self.resolve_edge(EdgeId::new(u64::try_from(*id).ok()?))?;
+                        edge.get_property(property).cloned()
+                    }
+                    _ => None,
                 }
             }
             FilterExpression::List(items) => {
                 let values: Vec<Value> = items
                     .iter()
-                    .filter_map(|i| self.eval_comprehension_expr(i, item, variable))
+                    .filter_map(|i| self.eval_comprehension_expr(i, scope))
                     .collect();
                 Some(Value::List(values.into()))
             }
@@ -1273,10 +1375,14 @@ impl ExpressionPredicate {
                 operand.as_deref(),
                 when_clauses,
                 else_clause.as_deref(),
-                item,
-                variable,
+                scope,
             ),
-            // For other expression types, return None (unsupported in comprehension)
+            // Anything that does not use the iteration variable belongs to the
+            // row: `all(e IN edges(p) WHERE e.w = n.limit)`. An
+            // expression that does use it is not supported here.
+            other if !other.mentions(scope.variable) => {
+                self.eval_expr(other, scope.chunk, scope.row)
+            }
             _ => None,
         }
     }
@@ -1287,34 +1393,33 @@ impl ExpressionPredicate {
         operand: Option<&FilterExpression>,
         when_clauses: &[(FilterExpression, FilterExpression)],
         else_clause: Option<&FilterExpression>,
-        item: &Value,
-        variable: &str,
+        scope: ComprehensionScope<'_>,
     ) -> Option<Value> {
         if let Some(test_expr) = operand {
             let test_val = self
-                .eval_comprehension_expr(test_expr, item, variable)
+                .eval_comprehension_expr(test_expr, scope)
                 .unwrap_or(Value::Null);
             for (when_expr, then_expr) in when_clauses {
                 let when_val = self
-                    .eval_comprehension_expr(when_expr, item, variable)
+                    .eval_comprehension_expr(when_expr, scope)
                     .unwrap_or(Value::Null);
                 if !test_val.is_null()
                     && !when_val.is_null()
                     && Self::values_equal(&test_val, &when_val)
                 {
-                    return self.eval_comprehension_expr(then_expr, item, variable);
+                    return self.eval_comprehension_expr(then_expr, scope);
                 }
             }
         } else {
             for (when_expr, then_expr) in when_clauses {
-                let when_val = self.eval_comprehension_expr(when_expr, item, variable)?;
+                let when_val = self.eval_comprehension_expr(when_expr, scope)?;
                 if when_val.as_bool() == Some(true) {
-                    return self.eval_comprehension_expr(then_expr, item, variable);
+                    return self.eval_comprehension_expr(then_expr, scope);
                 }
             }
         }
         if let Some(else_expr) = else_clause {
-            self.eval_comprehension_expr(else_expr, item, variable)
+            self.eval_comprehension_expr(else_expr, scope)
         } else {
             Some(Value::Null)
         }
@@ -1918,7 +2023,8 @@ impl ExpressionPredicate {
                     Value::Float64(f) => f.to_string(),
                     Value::Bool(b) => b.to_string(),
                     Value::Null => return Some(Value::Null),
-                    _ => format!("{val:?}"),
+                    // ISO 8601 for temporal values, `[1, 2]` for lists.
+                    _ => val.to_string(),
                 };
                 Some(Value::String(s.into()))
             }
@@ -3822,6 +3928,42 @@ impl ExpressionPredicate {
             (Value::Date(a), Value::Date(b)) => Some(a.cmp(b) as i32),
             (Value::Time(a), Value::Time(b)) => Some(a.cmp(b) as i32),
             _ => None,
+        }
+    }
+}
+
+/// What the items of a list comprehension or list predicate refer to.
+///
+/// `edges(p)` / `relationships(p)` return edge ids, so `e.w` in
+/// `all(e IN edges(p) WHERE e.w = 1)` must look the property up on the edge.
+/// It used to evaluate to NULL, so such predicates silently matched nothing.
+/// One element of a list comprehension or list predicate being evaluated: the
+/// element bound to the iteration variable, the kind of items the list holds,
+/// and the row the whole expression is evaluated for (other variables come
+/// from there).
+#[derive(Clone, Copy)]
+struct ComprehensionScope<'a> {
+    item: &'a Value,
+    variable: &'a str,
+    kind: ItemKind,
+    chunk: &'a DataChunk,
+    row: usize,
+}
+
+#[derive(Clone, Copy)]
+enum ItemKind {
+    Value,
+    Edge,
+}
+
+impl ItemKind {
+    fn of(list_expr: &FilterExpression) -> Self {
+        match list_expr {
+            FilterExpression::FunctionCall { name, .. } => match name.to_lowercase().as_str() {
+                "edges" | "relationships" => Self::Edge,
+                _ => Self::Value,
+            },
+            _ => Self::Value,
         }
     }
 }

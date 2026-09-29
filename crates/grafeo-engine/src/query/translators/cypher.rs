@@ -4,9 +4,9 @@
 //! that can be optimized and executed.
 
 use super::common::{
-    build_left_join_with_predicates, check_union_columns, combine_with_and, is_aggregate_function,
-    to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
-    wrap_sort,
+    build_left_join_with_predicates, check_union_columns, combine_with_and, has_all_labels,
+    is_aggregate_function, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit,
+    wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
@@ -527,29 +527,8 @@ impl CypherTranslator {
         // Add hasLabel filters for additional labels (AND semantics).
         // First label is used in NodeScan for scan-time filtering; remaining
         // labels are checked via post-scan Filter.
-        if node.labels.len() > 1 {
-            let mut combined: Option<LogicalExpression> = None;
-            for extra_label in &node.labels[1..] {
-                let check = LogicalExpression::FunctionCall {
-                    name: "hasLabel".into(),
-                    args: vec![
-                        LogicalExpression::Variable(variable.clone()),
-                        LogicalExpression::Literal(Value::String(extra_label.clone().into())),
-                    ],
-                    distinct: false,
-                };
-                combined = Some(match combined {
-                    None => check,
-                    Some(prev) => LogicalExpression::Binary {
-                        left: Box::new(prev),
-                        op: crate::query::plan::BinaryOp::And,
-                        right: Box::new(check),
-                    },
-                });
-            }
-            if let Some(predicate) = combined {
-                plan = wrap_filter(plan, predicate);
-            }
+        if let Some(predicate) = has_all_labels(&variable, extra_labels(node)) {
+            plan = wrap_filter(plan, predicate);
         }
 
         // Add filter for inline properties (e.g., {city: 'NYC'})
@@ -691,6 +670,9 @@ impl CypherTranslator {
             label: source_label,
             input: input.map(Box::new),
         });
+        if let Some(predicate) = has_all_labels(&source_var, extra_labels(&path.start)) {
+            plan = wrap_filter(plan, predicate);
+        }
 
         // Apply property filters on the source node if any
         for (key, value) in &path.start.properties {
@@ -721,6 +703,9 @@ impl CypherTranslator {
                 label: target_label,
                 input: Some(Box::new(plan)),
             });
+            if let Some(predicate) = has_all_labels(&target_var, extra_labels(&rel.target)) {
+                plan = wrap_filter(plan, predicate);
+            }
 
             // Apply property filters on the target node if any
             for (key, value) in &rel.target.properties {
@@ -743,6 +728,9 @@ impl CypherTranslator {
 
             let edge_types = rel.types.clone();
             let all_paths = matches!(path_function, ast::PathFunction::AllShortestPaths);
+            // The path must fit the relationship's length: `[*]` needs at least
+            // one hop, and a relationship without `*` is a single hop.
+            let (min_hops, max_hops) = hop_bounds(rel);
 
             plan = LogicalOperator::ShortestPath(ShortestPathOp {
                 input: Box::new(plan),
@@ -752,6 +740,8 @@ impl CypherTranslator {
                 direction,
                 path_alias: path_alias.to_string(),
                 all_paths,
+                min_hops,
+                max_hops,
             });
         }
 
@@ -781,7 +771,6 @@ impl CypherTranslator {
             .variable
             .clone()
             .unwrap_or_else(|| self.next_anon_var());
-        let target_label = rel.target.labels.first().cloned();
 
         let direction = match rel.direction {
             ast::Direction::Outgoing => ExpandDirection::Outgoing,
@@ -789,11 +778,17 @@ impl CypherTranslator {
             ast::Direction::Undirected => ExpandDirection::Both,
         };
 
-        let (min_hops, max_hops) = if let Some(range) = &rel.length {
-            (range.min.unwrap_or(1), range.max)
+        let (min_hops, max_hops) = hop_bounds(rel);
+
+        // A property map on a variable-length edge must hold for every hop, so
+        // it is checked over the path's edges; that needs a path column.
+        let per_hop_properties = rel.length.is_some() && !rel.properties.is_empty();
+        let path_alias = if per_hop_properties {
+            path_alias.or_else(|| Some(self.next_anon_var()))
         } else {
-            (1, Some(1))
+            path_alias
         };
+        let property_path = path_alias.clone();
 
         // Detect cycle pattern: (s)-[*]->(s) where source == target variable.
         // The expand must use a temporary target, then filter for equality.
@@ -839,27 +834,28 @@ impl CypherTranslator {
             expand
         };
 
-        let mut result = if let Some(label) = target_label {
-            wrap_filter(
-                expand,
-                LogicalExpression::FunctionCall {
-                    name: "hasLabel".into(),
-                    args: vec![
-                        LogicalExpression::Variable(to_variable.clone()),
-                        LogicalExpression::Literal(Value::from(label)),
-                    ],
-                    distinct: false,
-                },
-            )
-        } else {
-            expand
+        let mut result = match has_all_labels(&to_variable, &rel.target.labels) {
+            Some(predicate) => wrap_filter(expand, predicate),
+            None => expand,
         };
 
         // Apply property filters on the edge: -[r {since: 2020}]->
         if !rel.properties.is_empty()
             && let Some(ref ev) = edge_variable_for_filter
         {
-            let predicate = self.build_property_predicate(ev, &rel.properties)?;
+            let predicate = match property_path.filter(|_| per_hop_properties) {
+                // `all(e IN edges(path) WHERE e.k = v ...)`: the edge column of a
+                // variable-length expand only holds the last hop.
+                Some(path) => {
+                    let hop = self.next_anon_var();
+                    crate::query::translators::common::every_edge_matches(
+                        path,
+                        hop.clone(),
+                        self.build_property_predicate(&hop, &rel.properties)?,
+                    )
+                }
+                None => self.build_property_predicate(ev, &rel.properties)?,
+            };
             result = wrap_filter(result, predicate);
         }
 
@@ -2063,10 +2059,11 @@ impl CypherTranslator {
                         property: property.clone(),
                     })
                 } else {
-                    Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        "Nested property access not supported",
-                    )))
+                    // Key access into a map value: `n.meta.route` is `n.meta['route']`.
+                    Ok(LogicalExpression::IndexAccess {
+                        base: Box::new(self.translate_expression(base)?),
+                        index: Box::new(LogicalExpression::Literal(Value::from(property.as_str()))),
+                    })
                 }
             }
             ast::Expression::IndexAccess { base, index } => {
@@ -2554,6 +2551,21 @@ impl CypherTranslator {
     }
 }
 
+/// The labels of a node pattern after the first. A `NodeScan` checks the first
+/// label; the others still have to be checked with a filter.
+fn extra_labels(node: &ast::NodePattern) -> &[String] {
+    node.labels.get(1..).unwrap_or_default()
+}
+
+/// The minimum and maximum number of hops (`None` = unbounded) a relationship
+/// pattern matches: `[*]` is one or more, and no `*` is exactly one hop.
+fn hop_bounds(rel: &ast::RelationshipPattern) -> (u32, Option<u32>) {
+    match &rel.length {
+        Some(range) => (range.min.unwrap_or(1), range.max),
+        None => (1, Some(1)),
+    }
+}
+
 /// Checks if an AST expression contains an aggregate function call.
 fn contains_aggregate(expr: &ast::Expression) -> bool {
     match expr {
@@ -2608,6 +2620,26 @@ mod tests {
         } else {
             panic!("Expected Return");
         }
+    }
+
+    #[test]
+    fn test_translate_dotted_map_key_access_is_subscript() {
+        let return_expression = |query: &str| {
+            let plan = translate(query).unwrap();
+            let LogicalOperator::Return(ret) = &plan.root else {
+                panic!("Expected Return");
+            };
+            format!("{:?}", ret.items[0].expression)
+        };
+        // `n.meta.route` reads key `route` of the map in `n.meta`, and chains.
+        assert_eq!(
+            return_expression("MATCH (n) RETURN n.meta.route"),
+            return_expression("MATCH (n) RETURN n.meta['route']")
+        );
+        assert_eq!(
+            return_expression("MATCH (n) RETURN n.meta.a.b"),
+            return_expression("MATCH (n) RETURN n.meta['a']['b']")
+        );
     }
 
     #[test]

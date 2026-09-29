@@ -190,6 +190,13 @@ impl PyValue {
         if obj.is_instance_of::<PyDateTime>() {
             let micros = datetime_to_utc_micros(obj)
                 .map_err(|e| PyGrafeoError::Type(format!("Failed to convert datetime: {}", e)))?;
+            // An aware datetime can fall in year 0 or 10000 in UTC, which the
+            // naive UTC datetime it is returned as cannot hold.
+            if !(MIN_PYTHON_MICROS..=MAX_PYTHON_MICROS).contains(&micros) {
+                return Err(PyGrafeoError::Type(format!(
+                    "datetime {obj} is outside year 1 to 9999 in UTC, so it could not be read back"
+                )));
+            }
             return Ok(Value::Timestamp(Timestamp::from_micros(micros)));
         }
 
@@ -392,23 +399,34 @@ fn unix_epoch(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         .call1((1970, 1, 1))
 }
 
+/// Microseconds since the Unix epoch for `0001-01-01T00:00:00` and
+/// `9999-12-31T23:59:59.999999`, the range a Python datetime can hold.
+const MIN_PYTHON_MICROS: i64 = -62_135_596_800 * MICROS_PER_SECOND;
+const MAX_PYTHON_MICROS: i64 = 253_402_300_800 * MICROS_PER_SECOND - 1;
+
 /// Microseconds since the Unix epoch for a Python datetime. A naive datetime
-/// is read as UTC; an aware one is converted to UTC first.
+/// is read as UTC; an aware one has its UTC offset subtracted.
 ///
 /// Uses exact integer arithmetic (`datetime.timestamp()` reads naive values
-/// as local time and goes through a float).
+/// as local time and goes through a float), and never builds the UTC
+/// datetime itself, which can fall outside years 1-9999 near the limits.
 fn datetime_to_utc_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     let py = obj.py();
-    let naive_utc = if obj.call_method0("utcoffset")?.is_none() {
-        obj.clone()
+    let offset = obj.call_method0("utcoffset")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tzinfo", py.None())?;
+    let wall_clock = obj.call_method("replace", (), Some(&kwargs))?;
+    let since_epoch = wall_clock.call_method1("__sub__", (unix_epoch(py)?,))?;
+    let offset_micros = if offset.is_none() {
+        0
     } else {
-        let utc = py.import("datetime")?.getattr("timezone")?.getattr("utc")?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("tzinfo", py.None())?;
-        obj.call_method1("astimezone", (utc,))?
-            .call_method("replace", (), Some(&kwargs))?
+        timedelta_micros(&offset)?
     };
-    let delta = naive_utc.call_method1("__sub__", (unix_epoch(py)?,))?;
+    Ok(timedelta_micros(&since_epoch)? - offset_micros)
+}
+
+/// Total microseconds of a Python `timedelta`.
+fn timedelta_micros(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
     let days: i64 = delta.getattr("days")?.extract()?;
     let seconds: i64 = delta.getattr("seconds")?.extract()?;
     let micros: i64 = delta.getattr("microseconds")?.extract()?;

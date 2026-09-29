@@ -30,11 +30,11 @@ fn chain_graph() -> GrafeoDB {
         .create_node_with_props(&["Node", "Special"], [("name", Value::String("E".into()))])
         .unwrap();
 
-    session.create_edge(na, nb, "LINK");
-    session.create_edge(nb, nc, "LINK");
-    session.create_edge(nc, and, "LINK");
-    session.create_edge(and, ne, "LINK");
-    session.create_edge(na, nc, "SHORTCUT");
+    session.create_edge(na, nb, "LINK").unwrap();
+    session.create_edge(nb, nc, "LINK").unwrap();
+    session.create_edge(nc, and, "LINK").unwrap();
+    session.create_edge(and, ne, "LINK").unwrap();
+    session.create_edge(na, nc, "SHORTCUT").unwrap();
 
     // Verify setup data
     assert_eq!(db.node_count(), 5, "chain_graph: expected 5 nodes");
@@ -287,8 +287,8 @@ fn test_edge_property_filter() {
     let b = session
         .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
         .unwrap();
-    let e = session.create_edge(a, b, "RATED");
-    db.set_edge_property(e, "stars", Value::Int64(5));
+    let e = session.create_edge(a, b, "RATED").unwrap();
+    db.set_edge_property(e, "stars", Value::Int64(5)).unwrap();
 
     let r = session
         .execute("MATCH (a:Person)-[r:RATED]->(b:Person) WHERE r.stars >= 4 RETURN b.name AS name")

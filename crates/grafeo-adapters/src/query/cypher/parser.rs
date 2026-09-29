@@ -1186,7 +1186,10 @@ impl<'a> Parser<'a> {
     fn parse_not_expression(&mut self) -> Result<Expression> {
         if self.current.kind == TokenKind::Not {
             self.advance();
-            let operand = self.parse_not_expression()?;
+            self.enter_nesting()?;
+            let operand = self.parse_not_expression();
+            self.exit_nesting();
+            let operand = operand?;
             Ok(Expression::Unary {
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
@@ -1323,7 +1326,11 @@ impl<'a> Parser<'a> {
 
         if self.current.kind == TokenKind::Caret {
             self.advance();
-            let right = self.parse_power_expression()?; // Right associative
+            // Right associative: each `^` nests one level, so bound the depth.
+            self.enter_nesting()?;
+            let right = self.parse_power_expression();
+            self.exit_nesting();
+            let right = right?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op: BinaryOp::Pow,
@@ -1353,7 +1360,10 @@ impl<'a> Parser<'a> {
                         return Ok(Expression::Literal(Literal::Float(val)));
                     }
                 }
-                let operand = self.parse_unary_expression()?;
+                self.enter_nesting()?;
+                let operand = self.parse_unary_expression();
+                self.exit_nesting();
+                let operand = operand?;
                 Ok(Expression::Unary {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
@@ -1361,7 +1371,10 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Plus => {
                 self.advance();
-                let operand = self.parse_unary_expression()?;
+                self.enter_nesting()?;
+                let operand = self.parse_unary_expression();
+                self.exit_nesting();
+                let operand = operand?;
                 Ok(Expression::Unary {
                     op: UnaryOp::Pos,
                     operand: Box::new(operand),
@@ -4107,6 +4120,25 @@ mod tests {
             err.contains("nesting depth"),
             "Expected nesting depth error, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_long_power_and_sign_chains_error_not_stack_overflow() {
+        for query in [
+            format!("RETURN 2{}", " ^ 2".repeat(50_000)),
+            format!("RETURN {}1", "- ".repeat(50_000)),
+            format!("RETURN {}1", "+ ".repeat(50_000)),
+            format!("RETURN {}true", "NOT ".repeat(50_000)),
+        ] {
+            let err = Parser::new(&query).parse().unwrap_err().to_string();
+            assert!(err.contains("nesting depth"), "got: {err}");
+        }
+        assert!(
+            Parser::new(&format!("RETURN 2{}", " ^ 1".repeat(20)))
+                .parse()
+                .is_ok()
+        );
+        assert!(Parser::new("RETURN NOT NOT true").parse().is_ok());
     }
 
     #[test]

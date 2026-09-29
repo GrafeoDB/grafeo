@@ -291,10 +291,52 @@ tests:
       - "INSERT (:Person {name: 'Vincent'})"
       - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)"
       - "MATCH (a:Person {name: 'Gus'}), (b:Person {name: 'Vincent'}) INSERT (a)-[:KNOWS]->(b)"
+    query: "CALL grafeo.louvain() YIELD community_id"
+    expect:
+      columns: [community_id]
+      ordered: true
+      rows:
+        - [0]
+        - [0]
+        - [0]
+
+  - name: louvain_columns
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})"
     query: "CALL grafeo.louvain()"
     expect:
       columns: [node_id, community_id, modularity]
-      count: 3
+      count: 2
+
+  # Rows come in node id order (here: insertion order). Two triangles whose
+  # members alternate, joined by one edge: community ids follow each
+  # community's smallest node id.
+  - name: louvain_community_ids_follow_smallest_node
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:Person {name: 'Gus'})"
+      - "INSERT (:Person {name: 'Vincent'})"
+      - "INSERT (:Person {name: 'Jules'})"
+      - "INSERT (:Person {name: 'Mia'})"
+      - "INSERT (:Person {name: 'Butch'})"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Vincent'}) INSERT (a)-[:KNOWS]->(b)"
+      - "MATCH (a:Person {name: 'Vincent'}), (b:Person {name: 'Mia'}) INSERT (a)-[:KNOWS]->(b)"
+      - "MATCH (a:Person {name: 'Mia'}), (b:Person {name: 'Alix'}) INSERT (a)-[:KNOWS]->(b)"
+      - "MATCH (a:Person {name: 'Gus'}), (b:Person {name: 'Jules'}) INSERT (a)-[:KNOWS]->(b)"
+      - "MATCH (a:Person {name: 'Jules'}), (b:Person {name: 'Butch'}) INSERT (a)-[:KNOWS]->(b)"
+      - "MATCH (a:Person {name: 'Butch'}), (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)"
+      - "MATCH (a:Person {name: 'Mia'}), (b:Person {name: 'Butch'}) INSERT (a)-[:KNOWS]->(b)"
+    query: "CALL grafeo.louvain() YIELD community_id"
+    expect:
+      columns: [community_id]
+      ordered: true
+      rows:
+        - [0]
+        - [1]
+        - [0]
+        - [1]
+        - [0]
+        - [1]
 
   - name: label_propagation
     setup:

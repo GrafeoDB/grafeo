@@ -232,14 +232,14 @@ CREATE VECTOR INDEX FOR (d:Document) ON (d.embedding)
 
 ## Constraints
 
-Constraints enforce data integrity rules on writes.
+Constraints enforce data integrity rules on writes. In GQL a constraint names its label with `FOR` and its properties with `ON`; Cypher writes the same constraints as `REQUIRE p.email IS UNIQUE` (see the [Cypher guide](../cypher/mutations.md)).
 
 ### UNIQUE
 
 Ensure a property value is unique across all nodes with a given label:
 
 ```sql
-CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE
+CREATE CONSTRAINT FOR (p:Person) ON (p.email) UNIQUE
 ```
 
 ### NODE KEY
@@ -247,7 +247,7 @@ CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE
 Composite uniqueness across multiple properties:
 
 ```sql
-CREATE CONSTRAINT FOR (p:Person) REQUIRE (p.firstName, p.lastName) IS NODE KEY
+CREATE CONSTRAINT FOR (p:Person) ON (p.firstName, p.lastName) NODE KEY
 ```
 
 ### NOT NULL
@@ -255,7 +255,7 @@ CREATE CONSTRAINT FOR (p:Person) REQUIRE (p.firstName, p.lastName) IS NODE KEY
 Require a property to always have a value:
 
 ```sql
-CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL
+CREATE CONSTRAINT FOR (p:Person) ON (p.name) NOT NULL
 ```
 
 ### EXISTS
@@ -263,7 +263,7 @@ CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL
 Require a property to exist on every node with the label:
 
 ```sql
-CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email EXISTS
+CREATE CONSTRAINT FOR (p:Person) ON (p.email) EXISTS
 ```
 
 ### Naming, Listing and Dropping Constraints

@@ -36,7 +36,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Times with UTC offsets compared inconsistently**: `time('14:00+01:00') = time('13:00Z')` was false while `<=` and `>=` were true. Offset times now compare by instant, consistently for `=`, ordering, `DISTINCT` and grouping. A time without an offset compares as if it were UTC (it used to compare by clock time against offset times), and never equals an offset time.
 - **`toString()` returned an internal form for dates, times, durations, lists and maps**: `toString(datetime('2024-01-15T14:30:00'))` gave `Timestamp(Timestamp(1705329000000000μs))`, and `CAST(... AS STRING)` the same. Temporal values now become ISO 8601 text (`2024-01-15T14:30:00.000000Z`), lists and maps their literal form (`[1, 2]`).
 - **Very long `^` chains or runs of `-`/`+` signs or `NOT`s could crash the process** with a stack overflow in the GQL, Cypher and SQL/PGQ parsers; they now fail with the usual nesting-depth error.
-- **Docs**: the Discord invite on the docs site pointed to an expired link.
+- **Docs**: the Discord invite on the docs site pointed to an expired link, and the constraint examples of the GQL schema guide used Cypher's `REQUIRE ... IS UNIQUE` form, which GQL rejects; they now use `ON (p.email) UNIQUE` ([#344](https://github.com/GrafeoDB/grafeo/issues/344)).
 
 ### Internal
 

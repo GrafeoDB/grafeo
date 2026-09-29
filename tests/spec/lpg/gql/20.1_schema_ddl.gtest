@@ -223,6 +223,22 @@ tests:
   # CREATE / DROP / SHOW CONSTRAINT: constraints are stored by name (#420)
   # ---------------------------------------------------------------------------
 
+  # The examples of the GQL schema guide (docs/user-guide/gql/schema.md), which
+  # showed the Cypher `REQUIRE ... IS UNIQUE` form (#344).
+  - name: schema_guide_constraint_examples
+    statements:
+      - "CREATE CONSTRAINT FOR (p:Person) ON (p.email) UNIQUE"
+      - "CREATE CONSTRAINT FOR (p:Person) ON (p.firstName, p.lastName) NODE KEY"
+      - "CREATE CONSTRAINT FOR (p:Person) ON (p.name) NOT NULL"
+      - "CREATE CONSTRAINT FOR (p:Person) ON (p.email) EXISTS"
+      - "SHOW CONSTRAINTS"
+    expect:
+      rows:
+        - [Person_email_exists, EXISTS, Person, email]
+        - [Person_email_unique, UNIQUE, Person, email]
+        - [Person_firstName_lastName_node_key, NODE KEY, Person, "firstName, lastName"]
+        - [Person_name_not_null, NOT NULL, Person, name]
+
   - name: drop_constraint_removes_it
     statements:
       - "CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) UNIQUE"

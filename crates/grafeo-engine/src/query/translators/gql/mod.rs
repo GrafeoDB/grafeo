@@ -1832,85 +1832,46 @@ impl GqlTranslator {
         let mut last_variable = String::new();
         // With no input rows, a variable is bound only if this INSERT created
         // it earlier: `INSERT (a:A), (a)-[:T]->(b)` creates `a` once and `b`.
-        let mut created: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut bound: HashSet<String> = HashSet::new();
 
         for pattern in patterns {
             match pattern {
                 ast::Pattern::Node(node) => {
-                    let variable = node
-                        .variable
-                        .clone()
-                        .unwrap_or_else(|| format!("_anon_{}", rand_id()));
-
-                    let properties = node
-                        .properties
-                        .iter()
-                        .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                        .collect::<Result<Vec<_>>>()?;
-
-                    plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
-                        variable: variable.clone(),
-                        labels: node.labels.clone(),
-                        properties,
-                        input: plan.map(Box::new),
-                    }));
-                    created.insert(variable.clone());
+                    let (variable, is_new) = pattern::insert_endpoint(node, &mut bound, true)?;
+                    if is_new {
+                        plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
+                            variable: variable.clone(),
+                            labels: node.labels.clone(),
+                            properties: self.insert_properties(&node.properties)?,
+                            input: plan.map(Box::new),
+                        }));
+                    }
                     last_variable = variable;
                 }
                 ast::Pattern::Path(path) => {
-                    // Decompose path into CreateNode + CreateEdge chain
-                    let source_var = path
-                        .source
-                        .variable
-                        .clone()
-                        .unwrap_or_else(|| format!("_anon_{}", rand_id()));
-
-                    // Endpoints used to be created only when labeled, so
-                    // `INSERT (a)-[:T]->(b)` failed with an undefined variable.
-                    if created.insert(source_var.clone()) {
-                        let source_props: Vec<(String, LogicalExpression)> = path
-                            .source
-                            .properties
-                            .iter()
-                            .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                            .collect::<Result<Vec<_>>>()?;
+                    let (source_var, is_new) =
+                        pattern::insert_endpoint(&path.source, &mut bound, true)?;
+                    if is_new {
                         plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
                             variable: source_var.clone(),
                             labels: path.source.labels.clone(),
-                            properties: source_props,
+                            properties: self.insert_properties(&path.source.properties)?,
                             input: plan.map(Box::new),
                         }));
                     }
 
                     let mut current_src = source_var;
                     for edge in &path.edges {
-                        let target_var = edge
-                            .target
-                            .variable
-                            .clone()
-                            .unwrap_or_else(|| format!("_anon_{}", rand_id()));
-
-                        if created.insert(target_var.clone()) {
-                            let target_props: Vec<(String, LogicalExpression)> = edge
-                                .target
-                                .properties
-                                .iter()
-                                .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                                .collect::<Result<Vec<_>>>()?;
+                        let (target_var, is_new) =
+                            pattern::insert_endpoint(&edge.target, &mut bound, true)?;
+                        if is_new {
                             plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
                                 variable: target_var.clone(),
                                 labels: edge.target.labels.clone(),
-                                properties: target_props,
+                                properties: self.insert_properties(&edge.target.properties)?,
                                 input: plan.map(Box::new),
                             }));
                         }
-
-                        let edge_type = edge.types.first().cloned().unwrap_or_default();
-                        let edge_props: Vec<(String, LogicalExpression)> = edge
-                            .properties
-                            .iter()
-                            .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                            .collect::<Result<Vec<_>>>()?;
 
                         let (from, to) = match edge.direction {
                             ast::EdgeDirection::Incoming => (target_var.clone(), current_src),
@@ -1919,10 +1880,10 @@ impl GqlTranslator {
 
                         plan = Some(LogicalOperator::CreateEdge(CreateEdgeOp {
                             variable: edge.variable.clone(),
-                            edge_type,
+                            edge_type: edge.types.first().cloned().unwrap_or_default(),
                             from_variable: from,
                             to_variable: to,
-                            properties: edge_props,
+                            properties: self.insert_properties(&edge.properties)?,
                             input: Box::new(plan.unwrap_or(LogicalOperator::Empty)),
                         }));
                         last_variable.clone_from(&target_var);

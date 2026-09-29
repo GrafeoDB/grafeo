@@ -6,12 +6,13 @@
 
 use grafeo_common::utils::error::{Error, Result, StorageError};
 use grafeo_storage::wal::{
-    GraphTypeAlterationKind, PropertyAlterationKind, TypeConstraintKind, WalRecord,
+    GraphTypeAlterationKind, NamedConstraintKind, PropertyAlterationKind, TypeConstraintKind,
+    WalRecord,
 };
 
 use crate::catalog::{
-    Catalog, CatalogError, EdgeTypeDefinition, GraphTypeDefinition, NodeTypeDefinition,
-    ProcedureDefinition, PropertyDataType, TypeConstraint, TypedProperty,
+    Catalog, CatalogError, ConstraintDefinition, EdgeTypeDefinition, GraphTypeDefinition,
+    NodeTypeDefinition, ProcedureDefinition, PropertyDataType, TypeConstraint, TypedProperty,
 };
 
 /// Applies a schema record to `catalog`; other records are ignored.
@@ -135,6 +136,24 @@ pub(super) fn apply_schema_record(catalog: &Catalog, record: &WalRecord) -> Resu
             tolerate_repeat(record, catalog.register_procedure(def))
         }
         WalRecord::DropProcedure { name } => tolerate_repeat(record, catalog.drop_procedure(name)),
+        WalRecord::CreateConstraint {
+            name,
+            label,
+            properties,
+            kind,
+        } => {
+            let kind = parse_kind(record, kind, NamedConstraintKind::parse)?;
+            let def = ConstraintDefinition {
+                name: name.clone(),
+                label: label.clone(),
+                properties: properties.clone(),
+                kind: kind.into(),
+            };
+            tolerate_repeat(record, catalog.create_constraint(def))
+        }
+        WalRecord::DropConstraint { name } => {
+            tolerate_repeat(record, catalog.drop_constraint(name))
+        }
         _ => Ok(()),
     }
 }
@@ -143,21 +162,26 @@ pub(super) fn apply_schema_record(catalog: &Catalog, record: &WalRecord) -> Resu
 /// crash between writing the checkpoint and moving the WAL's checkpoint
 /// marker), and the replayed WAL can start in the middle of a type's history.
 /// So a create can find its type already there, and a drop or alter can find
-/// it gone. Those outcomes leave the catalog as the records meant it; any
-/// other error fails the open.
+/// it gone. Those outcomes leave the catalog as the records meant it, and are
+/// logged at debug level so a recovery that went another way leaves a trace;
+/// any other error fails the open.
 fn tolerate_repeat(
     record: &WalRecord,
     result: std::result::Result<(), CatalogError>,
 ) -> Result<()> {
     match result {
-        Ok(())
-        | Err(
-            CatalogError::TypeAlreadyExists(_)
+        Ok(()) => Ok(()),
+        Err(
+            error @ (CatalogError::TypeAlreadyExists(_)
             | CatalogError::TypeNotFound(_)
             | CatalogError::SchemaAlreadyExists(_)
             | CatalogError::SchemaNotFound(_)
-            | CatalogError::ConstraintAlreadyExists,
-        ) => Ok(()),
+            | CatalogError::ConstraintAlreadyExists
+            | CatalogError::ConstraintNotFound(_)),
+        ) => {
+            grafeo_common::grafeo_debug!("WAL replay skipped {record:?}: {error}");
+            Ok(())
+        }
         Err(error) => Err(replay_failed(record, &error.to_string())),
     }
 }

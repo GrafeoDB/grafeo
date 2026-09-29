@@ -291,6 +291,24 @@ uv add maturin
 maturin develop --release
 ```
 
+This build has the same features as the published wheel: maturin reads them from `[tool.maturin] features` in `crates/bindings/python/pyproject.toml`. A `--features` option replaces that list instead of adding to it, so `maturin develop --features pyo3/extension-module` builds only the default set, without Cypher, SPARQL, Gremlin, GraphQL and SQL/PGQ.
+
+To test another project against an unreleased version, build a wheel the way the release does (from the repository root) and install it into that project's environment:
+
+```bash
+maturin build --release --out dist -m crates/bindings/python/Cargo.toml
+uv pip install --python /path/to/project/.venv dist/grafeo-*.whl
+```
+
+Check what a build contains with `grafeo.features()` and `grafeo.build_info()`:
+
+```python
+import grafeo
+
+print(grafeo.features())    # ['gql', 'cypher', 'sparql', ...]
+print(grafeo.build_info())  # version, git commit, dirty, features, profile
+```
+
 ### Build Node.js Package
 
 ```bash

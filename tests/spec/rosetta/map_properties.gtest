@@ -1,0 +1,85 @@
+# Rosetta: access into map-valued properties
+#
+# `n.meta.route` reads key `route` of the map stored in property `meta`, the
+# same as `n.meta['route']`, in GQL and Cypher. A missing key, or a property
+# that is not a map, gives null.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Map-valued property access
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: nested_map_property_dot_access
+    setup:
+      - "INSERT (:A {id: 'a', meta: {route: 'directory', score: 0.5}})"
+      - "INSERT (:A {id: 'b', meta: {route: 'llm', score: 0.9}})"
+    variants:
+      gql: "MATCH (n:A) WHERE n.meta.route = 'directory' RETURN n.id, n.meta.score"
+      cypher: "MATCH (n:A) WHERE n.meta.route = 'directory' RETURN n.id, n.meta.score"
+    expect:
+      rows:
+        - [a, 0.5]
+
+  - name: nested_map_property_dot_access_missing_key_is_null
+    setup:
+      - "INSERT (:A {id: 'a', meta: {route: 'directory'}})"
+    variants:
+      gql: "MATCH (n:A) RETURN n.meta.missing"
+      cypher: "MATCH (n:A) RETURN n.meta.missing"
+    expect:
+      rows:
+        - [null]
+
+  - name: nested_map_property_dot_access_two_levels
+    setup:
+      - "INSERT (:A {id: 'a', meta: {a: {b: 'deep'}}})"
+      - "INSERT (:A {id: 'b', meta: {a: {b: 'shallow'}}})"
+    variants:
+      gql: "MATCH (n:A) WHERE n.meta.a.b = 'deep' RETURN n.id, n.meta.a.b, n.meta.a.missing"
+      cypher: "MATCH (n:A) WHERE n.meta.a.b = 'deep' RETURN n.id, n.meta.a.b, n.meta.a.missing"
+    expect:
+      rows:
+        - [a, deep, null]
+
+  - name: nested_map_property_dot_access_matches_subscript
+    setup:
+      - "INSERT (:A {id: 'a', meta: {route: 'directory'}})"
+      - "INSERT (:A {id: 'b', meta: 'plain text'})"
+      - "INSERT (:A {id: 'c'})"
+    variants:
+      gql: "MATCH (n:A) RETURN n.id, n.meta.route AS dotted, n.meta['route'] AS subscript"
+      cypher: "MATCH (n:A) RETURN n.id, n.meta.route AS dotted, n.meta['route'] AS subscript"
+    expect:
+      rows:
+        - [a, directory, directory]
+        - [b, null, null]
+        - [c, null, null]
+
+  - name: nested_map_property_dot_access_on_edge
+    setup:
+      - "INSERT (:A {id: 'a'})-[:R {meta: {route: 'directory'}}]->(:A {id: 'b'})"
+    variants:
+      gql: "MATCH (:A)-[r:R]->(:A) RETURN r.meta.route"
+      cypher: "MATCH (:A)-[r:R]->(:A) RETURN r.meta.route"
+    expect:
+      rows:
+        - [directory]
+
+  - name: nested_map_property_dot_access_in_order_by
+    setup:
+      - "INSERT (:A {id: 'a', meta: {score: 0.5}})"
+      - "INSERT (:A {id: 'b', meta: {score: 0.9}})"
+      - "INSERT (:A {id: 'c', meta: {score: 0.7}})"
+    variants:
+      gql: "MATCH (n:A) RETURN n.id ORDER BY n.meta.score DESC"
+      cypher: "MATCH (n:A) RETURN n.id ORDER BY n.meta.score DESC"
+    expect:
+      ordered: true
+      rows:
+        - [b]
+        - [c]
+        - [a]

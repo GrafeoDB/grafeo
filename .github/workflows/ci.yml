@@ -527,8 +527,8 @@ jobs:
           verbose: true
 
   # Python tests
-  # Default profile: maturin builds grafeo-python with its crate-level default
-  # features, which pull in "full" (all languages + AI) via grafeo-engine.
+  # Release profile: maturin builds grafeo-python with the feature list of
+  # pyproject.toml ("full": all languages + AI), like the published wheels.
   python-test:
     name: Python Test (${{ matrix.os }}, Python ${{ matrix.python }})
     needs: [python-spec]
@@ -577,6 +577,9 @@ jobs:
           uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor
 
       - name: Run Python tests
+        env:
+          # The wheel above has the release features: check every language is in.
+          GRAFEO_RELEASE_BUILD: "1"
         run: pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py
 
   # Node.js tests

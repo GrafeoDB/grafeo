@@ -515,23 +515,51 @@ tests:
 
   # An edge property map without an edge variable used to be ignored.
   # A property map on a variable-length edge must hold for every hop, not
-  # only for the last one. a -[w:7]-> b -[w:50]-> c -[w:50]-> d
+  # only for the last one (nor only for the first).
+  # a -[w:50]-> b -[w:7]-> c -[w:50]-> d
   - name: anonymous_variable_length_edge_property_map_filters
     setup:
-      - "CREATE (:N {id: 'a'})-[:T {w: 7}]->(:N {id: 'b'})-[:T {w: 50}]->(:N {id: 'c'})-[:T {w: 50}]->(:N {id: 'd'})"
+      - "CREATE (:N {id: 'a'})-[:T {w: 50}]->(:N {id: 'b'})-[:T {w: 7}]->(:N {id: 'c'})-[:T {w: 50}]->(:N {id: 'd'})"
     query: "MATCH (x)-[*1..3 {w: 50}]->(y) RETURN x.id, y.id"
     expect:
       rows:
-        - [b, c]
-        - [b, d]
+        - [a, b]
         - [c, d]
 
   - name: named_variable_length_edge_property_map_checks_every_hop
     setup:
-      - "CREATE (:N {id: 'a'})-[:T {w: 7}]->(:N {id: 'b'})-[:T {w: 50}]->(:N {id: 'c'})-[:T {w: 50}]->(:N {id: 'd'})"
+      - "CREATE (:N {id: 'a'})-[:T {w: 50}]->(:N {id: 'b'})-[:T {w: 7}]->(:N {id: 'c'})-[:T {w: 50}]->(:N {id: 'd'})"
     query: "MATCH (x {id: 'a'})-[r*1..3 {w: 50}]->(y) RETURN y.id"
     expect:
-      empty: true
+      rows:
+        - [b]
+
+  # Variables of the row can be used per hop; `x.lim` used to be NULL
+  # inside the check, so no path matched.
+  - name: variable_length_edge_property_map_uses_row_variables
+    setup:
+      - "CREATE (:N {id: 'a', lim: 50})-[:T {w: 50}]->(:N {id: 'b'})-[:T {w: 50}]->(:N {id: 'c'})-[:T {w: 7}]->(:N {id: 'd'})"
+    query: "MATCH (x {id: 'a'})-[*1..3 {w: x.lim}]->(y) RETURN y.id"
+    expect:
+      rows:
+        - [b]
+        - [c]
+
+  # Comprehensions and list predicates could not read variables of the
+  # row: `lim` evaluated to nothing, so every element was dropped.
+  - name: plain_list_comprehension_and_predicate_use_row_variables
+    query: "WITH 2 AS lim RETURN [v IN [1, 2, 3] WHERE v >= lim | v * lim] AS vs, any(v IN [1, 2, 3] WHERE v = lim) AS hit"
+    expect:
+      rows:
+        - ["[4, 6]", true]
+
+  - name: list_comprehension_uses_row_variables
+    setup:
+      - "CREATE (:N {id: 'a', lim: 50})-[:T {w: 50}]->(:N {id: 'b'})-[:T {w: 50}]->(:N {id: 'c'})-[:T {w: 7}]->(:N {id: 'd'})"
+    query: "MATCH p = (x {id: 'a'})-[*3]->(y) RETURN [e IN relationships(p) WHERE e.w = x.lim | e.w] AS ws"
+    expect:
+      rows:
+        - ["[50, 50]"]
 
   - name: variable_length_edge_property_map_after_fixed_hop
     setup:

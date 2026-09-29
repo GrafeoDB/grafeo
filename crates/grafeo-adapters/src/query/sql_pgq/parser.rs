@@ -788,7 +788,10 @@ impl<'a> Parser<'a> {
     fn parse_not_expression(&mut self) -> Result<Expression> {
         if self.current.kind == TokenKind::Not {
             self.advance();
-            let operand = self.parse_not_expression()?;
+            self.enter_nesting()?;
+            let operand = self.parse_not_expression();
+            self.exit_nesting();
+            let operand = operand?;
             Ok(Expression::Unary {
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
@@ -914,7 +917,10 @@ impl<'a> Parser<'a> {
         match self.current.kind {
             TokenKind::Minus => {
                 self.advance();
-                let operand = self.parse_unary_expression()?;
+                self.enter_nesting()?;
+                let operand = self.parse_unary_expression();
+                self.exit_nesting();
+                let operand = operand?;
                 Ok(Expression::Unary {
                     op: UnaryOp::Neg,
                     operand: Box::new(operand),
@@ -2352,6 +2358,25 @@ mod tests {
             err.contains("nesting depth"),
             "Expected nesting depth error, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_long_not_and_sign_chains_error_not_stack_overflow() {
+        let in_columns =
+            |expr: &str| format!("SELECT * FROM GRAPH_TABLE (MATCH (n) COLUMNS ({expr} AS val))");
+        for expr in [
+            format!("{}TRUE", "NOT ".repeat(50_000)),
+            format!("{}1", "- ".repeat(50_000)),
+        ] {
+            let err = Parser::new(&in_columns(&expr))
+                .parse()
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("nesting depth"), "got: {err}");
+        }
+        // Short chains are unaffected.
+        assert!(Parser::new(&in_columns("NOT NOT TRUE")).parse().is_ok());
+        assert!(Parser::new(&in_columns("- - 1")).parse().is_ok());
     }
 
     #[test]

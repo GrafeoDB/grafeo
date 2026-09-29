@@ -16,6 +16,7 @@
 
 #[cfg(all(feature = "wal", feature = "gql"))]
 mod tests {
+    use grafeo_common::testing::child_process;
     use grafeo_common::types::{TransactionId, Value};
     use grafeo_engine::config::StorageFormat;
     use grafeo_engine::{Config, GrafeoDB};
@@ -46,9 +47,10 @@ mod tests {
     }
 
     /// Runs `statements` on a new WAL-directory database, then reopens it and
-    /// checks that replay rebuilt the same schema. Returns the reopened
-    /// database (declared first, so it closes before the directory goes).
-    fn replayed(statements: &[&str]) -> (GrafeoDB, tempfile::TempDir) {
+    /// checks that replay rebuilt the same schema. Returns the directory and
+    /// the reopened database: bind them as `(_dir, db)`, since bindings drop
+    /// in reverse order and the database must close before the directory goes.
+    fn replayed(statements: &[&str]) -> (tempfile::TempDir, GrafeoDB) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
         let before = {
@@ -63,7 +65,7 @@ mod tests {
         };
         let db = open_wal_dir(&path).unwrap();
         assert_eq!(schema(&db), before, "schema after replay");
-        (db, dir)
+        (dir, db)
     }
 
     fn graph_type(db: &GrafeoDB, name: &str) -> Vec<Value> {
@@ -72,7 +74,7 @@ mod tests {
 
     #[test]
     fn alter_graph_type_survives_replay() {
-        let (db, _dir) = replayed(&[
+        let (_dir, db) = replayed(&[
             "CREATE NODE TYPE Device (serial STRING)",
             "CREATE NODE TYPE Sensor (unit STRING)",
             "CREATE EDGE TYPE CONNECTS",
@@ -88,7 +90,7 @@ mod tests {
 
     #[test]
     fn alter_node_and_edge_types_survive_replay() {
-        let (db, _dir) = replayed(&[
+        let (_dir, db) = replayed(&[
             "CREATE NODE TYPE Sensor (unit STRING)",
             "ALTER NODE TYPE Sensor ADD PROPERTY location STRING",
             "ALTER NODE TYPE Sensor DROP PROPERTY unit",
@@ -102,9 +104,99 @@ mod tests {
         assert!(!properties.contains("unit"), "{properties}");
     }
 
+    /// Named constraints and their drops survive a reopen: through WAL replay
+    /// in a WAL-directory database (#421), and through the catalog section
+    /// of a `.grafeo` file (#420).
+    #[test]
+    fn constraints_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = vec![(
+            "wal-directory",
+            Config::persistent(dir.path().join("dir-db"))
+                .with_storage_format(StorageFormat::WalDirectory),
+        )];
+        #[cfg(feature = "grafeo-file")]
+        configs.push((
+            "single-file",
+            Config::persistent(dir.path().join("db.grafeo"))
+                .with_storage_format(StorageFormat::SingleFile),
+        ));
+
+        for (format, config) in configs {
+            {
+                let db = GrafeoDB::with_config(config.clone()).unwrap();
+                let session = db.session();
+                for statement in [
+                    "CREATE CONSTRAINT city_name FOR (c:City) ON (c.name) UNIQUE",
+                    "CREATE CONSTRAINT person_name FOR (p:Person) ON (p.name) UNIQUE",
+                    "DROP CONSTRAINT person_name",
+                ] {
+                    session.execute(statement).unwrap();
+                }
+                db.close().unwrap();
+            }
+
+            let db = GrafeoDB::with_config(config).unwrap();
+            assert_eq!(
+                rows(&db, "SHOW CONSTRAINTS"),
+                vec![vec![
+                    Value::from("city_name"),
+                    Value::from("UNIQUE"),
+                    Value::from("City"),
+                    Value::from("name"),
+                ]],
+                "{format}"
+            );
+            let session = db.session();
+            session.execute("INSERT (:City {name: 'Paris'})").unwrap();
+            assert!(
+                session.execute("INSERT (:City {name: 'Paris'})").is_err(),
+                "{format}: the constraint is enforced after reopen"
+            );
+            session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+            session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+            session.execute("DROP CONSTRAINT city_name").unwrap();
+            session.execute("INSERT (:City {name: 'Paris'})").unwrap();
+            db.close().unwrap();
+        }
+    }
+
+    /// An `ALTER` whose last alteration fails changes nothing. The ones before
+    /// it used to stay applied without a WAL record, so the live schema and
+    /// the one rebuilt from the WAL differed.
+    #[test]
+    fn failed_alter_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let before = {
+            let db = open_wal_dir(&path).unwrap();
+            let session = db.session();
+            for statement in [
+                "CREATE NODE TYPE Sensor (unit STRING)",
+                "CREATE EDGE TYPE READS (since INTEGER)",
+            ] {
+                session.execute(statement).unwrap();
+            }
+            let before = schema(&db);
+            // (Graph type alterations cannot fail midway: adding or dropping a
+            // member never fails.)
+            for failing in [
+                "ALTER NODE TYPE Sensor ADD PROPERTY location STRING DROP PROPERTY missing",
+                "ALTER EDGE TYPE READS DROP PROPERTY since ADD PROPERTY since STRING ADD PROPERTY since STRING",
+            ] {
+                assert!(session.execute(failing).is_err(), "{failing}");
+                assert_eq!(schema(&db), before, "live schema after {failing}");
+            }
+            db.close().unwrap();
+            before
+        };
+        let db = open_wal_dir(&path).unwrap();
+        assert_eq!(schema(&db), before, "schema after replay");
+    }
+
     #[test]
     fn create_or_replace_types_survive_replay() {
-        let (db, _dir) = replayed(&[
+        let (_dir, db) = replayed(&[
             "CREATE NODE TYPE Widget (name STRING)",
             "CREATE OR REPLACE NODE TYPE Widget (name STRING, color STRING)",
             "CREATE EDGE TYPE HOLDS (since INTEGER)",
@@ -129,7 +221,7 @@ mod tests {
     #[test]
     #[cfg(feature = "algos")]
     fn create_or_replace_procedure_survives_replay() {
-        let (db, _dir) = replayed(&[
+        let (_dir, db) = replayed(&[
             "INSERT (:Person {name: 'Alix'})",
             "CREATE PROCEDURE people() RETURNS (n INTEGER) AS { MATCH (p:Person) RETURN count(p) AS n }",
             "CREATE OR REPLACE PROCEDURE people() RETURNS (n INTEGER) AS { MATCH (p:Person) RETURN count(p) + 10 AS n }",
@@ -314,11 +406,12 @@ mod tests {
     fn schema_changes_survive_a_crash_before_the_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db.grafeo");
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::crash_child", "--nocapture"])
-            .env(CRASH_PATH_VAR, &path)
-            .status()
-            .unwrap();
+        let status = child_process::run(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::crash_child", "--nocapture"])
+                .env(CRASH_PATH_VAR, &path),
+        )
+        .unwrap();
         assert!(status.success());
 
         let expected = {

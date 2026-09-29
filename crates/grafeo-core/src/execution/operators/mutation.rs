@@ -62,6 +62,26 @@ pub trait ConstraintValidator: Send + Sync {
         value: &Value,
     ) -> Result<(), OperatorError>;
 
+    /// Checks the UNIQUE and NODE KEY constraints on several properties,
+    /// which hold for the combination of values, against the full set of
+    /// properties a node gets. `node` is the node itself, which the check
+    /// leaves out. ([`check_unique_node_property`](Self::check_unique_node_property)
+    /// covers constraints on one property.)
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if another node with the constraint's label has the same
+    /// values for all of its properties.
+    fn check_unique_node(
+        &self,
+        labels: &[String],
+        properties: &[(String, Value)],
+        node: Option<NodeId>,
+    ) -> Result<(), OperatorError> {
+        let _ = (labels, properties, node);
+        Ok(())
+    }
+
     /// Validates a single property value for an edge of the given type.
     ///
     /// # Errors
@@ -414,6 +434,7 @@ impl CreateNodeOperator {
             }
             // Phase 2: Validate completeness (NOT NULL checks for missing required properties)
             validator.validate_node_complete(&self.labels, resolved_props)?;
+            validator.check_unique_node(&self.labels, resolved_props, Some(node_id))?;
         }
 
         // Phase 3: Write properties to the store
@@ -1447,6 +1468,67 @@ pub struct SetPropertyOperator {
 }
 
 impl SetPropertyOperator {
+    /// Checks a SET on `node` against its constraints, with the node's own
+    /// labels (the operator is not given any). Map assignments count as one
+    /// assignment per key; `SET n = {...}` also removes the properties the
+    /// map leaves out.
+    fn validate_node_set(
+        &self,
+        validator: &dyn ConstraintValidator,
+        node: &crate::graph::lpg::Node,
+        resolved_props: &[(String, Value)],
+    ) -> Result<(), OperatorError> {
+        let labels: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
+        let mut assignments: Vec<(String, Value)> = Vec::new();
+        let mut replaces_all = false;
+        for (name, value) in resolved_props {
+            match (name.as_str(), value) {
+                ("*", Value::Map(map)) => {
+                    replaces_all |= self.replace;
+                    assignments.extend(
+                        map.iter()
+                            .map(|(key, value)| (key.as_str().to_string(), value.clone())),
+                    );
+                }
+                ("*", _) => {}
+                _ => assignments.push((name.clone(), value.clone())),
+            }
+        }
+        if replaces_all {
+            for (key, _) in node.properties.iter() {
+                if !assignments.iter().any(|(name, _)| name == key.as_str()) {
+                    assignments.push((key.as_str().to_string(), Value::Null));
+                }
+            }
+        }
+
+        for (name, value) in &assignments {
+            validator.validate_node_property(&labels, name, value)?;
+            // A value the node already has cannot make it a duplicate.
+            let unchanged = self
+                .store
+                .get_node_property(node.id, &PropertyKey::new(name.as_str()))
+                .as_ref()
+                == Some(value);
+            if !unchanged {
+                validator.check_unique_node_property(&labels, name, value)?;
+            }
+        }
+
+        // Constraints on several properties see the node's properties after
+        // this SET.
+        let mut after: Vec<(String, Value)> = node
+            .properties
+            .iter()
+            .map(|(key, value)| (key.as_str().to_string(), value.clone()))
+            .collect();
+        for (name, value) in assignments {
+            after.retain(|(key, _)| *key != name);
+            after.push((name, value));
+        }
+        validator.check_unique_node(&labels, &after, Some(node.id))
+    }
+
     /// Creates a new set property operator for nodes.
     pub fn new_for_node(
         store: Arc<dyn GraphStoreMut>,
@@ -1599,11 +1681,8 @@ impl Operator for SetPropertyOperator {
                                 validator.validate_edge_property(et, name, value)?;
                             }
                         }
-                    } else {
-                        for (name, value) in &resolved_props {
-                            validator.validate_node_property(&self.labels, name, value)?;
-                            validator.check_unique_node_property(&self.labels, name, value)?;
-                        }
+                    } else if let Some(node) = self.store.get_node(NodeId(entity_id)) {
+                        self.validate_node_set(validator.as_ref(), &node, &resolved_props)?;
                     }
                 }
 

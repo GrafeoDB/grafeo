@@ -148,6 +148,10 @@ pub struct GrafeoDB {
     /// Wrapped in Mutex because `close()` takes `&self` but needs to stop the timer.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     checkpoint_timer: parking_lot::Mutex<Option<checkpoint_timer::CheckpointTimer>>,
+    /// Syncs the WAL in the background under `DurabilityMode::Adaptive`.
+    /// Wrapped in Mutex because `close()` takes `&self` but stops it.
+    #[cfg(feature = "wal")]
+    wal_flusher: parking_lot::Mutex<Option<grafeo_storage::wal::AdaptiveFlusher>>,
     /// Shared registry of spilled vector storages.
     /// Used by the search path to create `SpillableVectorAccessor` instances.
     #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
@@ -629,6 +633,19 @@ impl GrafeoDB {
             None
         };
 
+        // `Adaptive` leaves syncing the WAL to a background flusher.
+        #[cfg(feature = "wal")]
+        let wal_flusher = match (&wal, config.wal_durability) {
+            (Some(wal), crate::config::DurabilityMode::Adaptive { target_interval_ms }) => {
+                let wal = Arc::clone(wal);
+                Some(grafeo_storage::wal::AdaptiveFlusher::with_sync(
+                    move || wal.sync(),
+                    target_interval_ms,
+                )?)
+            }
+            _ => None,
+        };
+
         // Create query cache with default capacity (1000 queries)
         let query_cache = Arc::new(QueryCache::default());
 
@@ -641,21 +658,6 @@ impl GrafeoDB {
         let cdc_enabled_val = config.cdc_enabled;
         #[cfg(feature = "cdc")]
         let cdc_retention = config.cdc_retention.clone();
-
-        // Clone Arcs for the checkpoint timer before moving originals into the struct.
-        // The timer captures its own references and runs in a background thread.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        let checkpoint_interval = config.checkpoint_interval;
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        let timer_store = Arc::clone(&store);
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        let timer_catalog = Arc::clone(&catalog);
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        let timer_tm = Arc::clone(&transaction_manager);
-        #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "triple-store"))]
-        let timer_rdf = Arc::clone(&rdf_store);
-        #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "wal"))]
-        let timer_wal = wal.clone();
 
         let mut db = Self {
             config,
@@ -683,6 +685,8 @@ impl GrafeoDB {
             file_manager,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
+            #[cfg(feature = "wal")]
+            wal_flusher: parking_lot::Mutex::new(wal_flusher),
             #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
             vector_spill_storages: None,
             external_read_store: None,
@@ -712,23 +716,10 @@ impl GrafeoDB {
             db.wire_layered_after_load(compact_base, loaded_overlay_deletions)?;
         }
 
-        // Start periodic checkpoint timer if configured
+        // Start periodic checkpoint timer if configured (after the layered
+        // store is wired, so its checkpoints include the compacted base)
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        if let (Some(interval), Some(fm)) = (checkpoint_interval, &db.file_manager)
-            && !is_read_only
-        {
-            *db.checkpoint_timer.lock() = Some(checkpoint_timer::CheckpointTimer::start(
-                interval,
-                Arc::clone(fm),
-                timer_store,
-                timer_catalog,
-                timer_tm,
-                #[cfg(feature = "triple-store")]
-                timer_rdf,
-                #[cfg(feature = "wal")]
-                timer_wal,
-            ));
-        }
+        db.start_checkpoint_timer();
 
         // Discover existing spill files from a previous session.
         // If vectors were spilled before close, the spill files persist on disk
@@ -829,6 +820,8 @@ impl GrafeoDB {
             file_manager: None,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
+            #[cfg(feature = "wal")]
+            wal_flusher: parking_lot::Mutex::new(None),
             #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
             vector_spill_storages: None,
             external_read_store: Some(Arc::clone(&store) as Arc<dyn GraphStoreSearch>),
@@ -920,6 +913,8 @@ impl GrafeoDB {
             file_manager: None,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
+            #[cfg(feature = "wal")]
+            wal_flusher: parking_lot::Mutex::new(None),
             #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
             vector_spill_storages: None,
             external_read_store: Some(store),
@@ -956,6 +951,26 @@ impl GrafeoDB {
     /// [`CompactStore`]: grafeo_core::graph::compact::CompactStore
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
     pub fn compact(&mut self) -> Result<()> {
+        self.with_checkpoint_timer_paused(Self::compact_into_layers)
+    }
+
+    /// Runs `change`, which replaces the store, with the periodic checkpoint
+    /// timer stopped (a checkpoint running meanwhile would write the old
+    /// store), then restarts the timer on the new state, also when `change`
+    /// fails.
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    fn with_checkpoint_timer_paused(&mut self, change: fn(&mut Self) -> Result<()>) -> Result<()> {
+        #[cfg(feature = "grafeo-file")]
+        self.stop_checkpoint_timer();
+        let result = change(self);
+        #[cfg(feature = "grafeo-file")]
+        self.start_checkpoint_timer();
+        result
+    }
+
+    /// [`compact()`](Self::compact) without the checkpoint timer handling.
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    fn compact_into_layers(&mut self) -> Result<()> {
         use grafeo_core::graph::compact::from_graph_store_preserving_ids;
         use grafeo_core::graph::compact::layered::LayeredStore;
 
@@ -1049,6 +1064,12 @@ impl GrafeoDB {
     /// the merge fails.
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
     pub fn recompact(&mut self) -> Result<()> {
+        self.with_checkpoint_timer_paused(Self::merge_overlay_into_base)
+    }
+
+    /// [`recompact()`](Self::recompact) without the checkpoint timer handling.
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    fn merge_overlay_into_base(&mut self) -> Result<()> {
         use grafeo_core::graph::compact::from_graph_store_preserving_ids;
         use grafeo_core::graph::compact::layered::LayeredStore;
 
@@ -1236,16 +1257,14 @@ impl GrafeoDB {
                 | WalRecord::AlterEdgeType { .. }
                 | WalRecord::AlterGraphType { .. }
                 | WalRecord::CreateProcedure { .. }
-                | WalRecord::DropProcedure { .. } => {
+                | WalRecord::DropProcedure { .. }
+                | WalRecord::CreateConstraint { .. }
+                | WalRecord::DropConstraint { .. } => {
                     schema_replay::apply_schema_record(catalog, record)?;
                 }
                 WalRecord::CreateIndex { .. } | WalRecord::DropIndex { .. } => {
                     // Index recreation is handled by the store on startup
                     // (indexes are rebuilt from data, not WAL)
-                }
-                WalRecord::CreateConstraint { .. } | WalRecord::DropConstraint { .. } => {
-                    // Constraint definitions are part of type definitions
-                    // and replayed via CreateNodeType/CreateEdgeType
                 }
 
                 // --- RDF triple replay ---
@@ -2152,6 +2171,15 @@ impl GrafeoDB {
             timer.stop();
         }
 
+        // Stop the WAL flusher before the WAL is synced and closed below; its
+        // shutdown syncs once more.
+        #[cfg(feature = "wal")]
+        if let Some(mut flusher) = self.wal_flusher.lock().take()
+            && let Err(e) = flusher.shutdown()
+        {
+            grafeo_warn!("failed to stop the WAL flusher: {e}");
+        }
+
         // Read-only databases: just release the shared lock, no checkpointing
         if self.read_only {
             #[cfg(feature = "grafeo-file")]
@@ -2177,31 +2205,7 @@ impl GrafeoDB {
             if let Some(ref wal) = self.wal {
                 wal.sync()?;
             }
-            let flush_result = self.checkpoint_to_file(fm, flush::FlushReason::Explicit)?;
-
-            // Safety check: if WAL has records but the checkpoint was a no-op
-            // (zero sections written), the container file may not contain the
-            // latest data. This can happen when sections are not marked dirty
-            // despite mutations going through the WAL. Force-dirty all sections
-            // and retry before removing the sidecar.
-            #[cfg(feature = "wal")]
-            let flush_result = if flush_result.sections_written == 0 {
-                if let Some(ref wal) = self.wal {
-                    if wal.record_count() > 0 {
-                        grafeo_warn!(
-                            "WAL has {} records but checkpoint wrote 0 sections; retrying with forced flush",
-                            wal.record_count()
-                        );
-                        self.checkpoint_to_file(fm, flush::FlushReason::Explicit)?
-                    } else {
-                        flush_result
-                    }
-                } else {
-                    flush_result
-                }
-            } else {
-                flush_result
-            };
+            let flush_result = self.checkpoint_to_file(fm)?;
 
             // Release WAL file handles before removing sidecar directory.
             // On Windows, open handles prevent directory deletion.
@@ -2565,97 +2569,51 @@ impl GrafeoDB {
         }
     }
 
-    /// Builds section objects for the current database state.
+    /// What a checkpoint writes: the complete current state (see
+    /// [`flush::CheckpointSources`]).
     #[cfg(feature = "grafeo-file")]
-    fn build_sections(&self) -> Vec<Box<dyn grafeo_common::storage::Section>> {
-        let mut sections: Vec<Box<dyn grafeo_common::storage::Section>> = Vec::new();
-
-        // Layered store: serialize both the compact base and the overlay.
-        #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        if let Some(ref layered) = self.layered_store {
-            // Compact base section.
-            let compact_section = grafeo_core::graph::compact::section::CompactStoreSection::new(
-                layered.base_store_arc(),
-            );
-            sections.push(Box::new(compact_section));
-
-            // Overlay LPG section.
-            let overlay = layered.overlay_store();
-            let overlay_section = grafeo_core::graph::lpg::LpgStoreSection::new(overlay);
-            sections.push(Box::new(overlay_section));
-
-            // Overlay deletion log: persists base-node/edge tombstones
-            // that have not yet been merged into the base. Without this,
-            // close+reopen silently un-deletes those entities. Only push
-            // when there is actually something to record so we don't
-            // emit an empty section on every checkpoint.
-            let deletions = grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection::from_layered(
-                Arc::clone(layered),
-            );
-            if !deletions.is_empty() {
-                sections.push(Box::new(deletions));
-            } else {
-                // The set may have transitioned from non-empty to empty
-                // (e.g. a compact merged the deletes); make sure the
-                // dirty flag is cleared so subsequent checkpoints don't
-                // think they need to keep flushing.
-                layered.mark_deletions_clean();
-            }
-
-            return sections;
+    fn checkpoint_sources(&self) -> flush::CheckpointSources {
+        flush::CheckpointSources {
+            #[cfg(feature = "lpg")]
+            store: self.store.clone(),
+            #[cfg(all(feature = "compact-store", feature = "lpg"))]
+            layered: self.layered_store.clone(),
+            #[cfg(feature = "lpg")]
+            catalog: Arc::clone(&self.catalog),
+            transaction_manager: Arc::clone(&self.transaction_manager),
+            #[cfg(feature = "triple-store")]
+            rdf_store: Arc::clone(&self.rdf_store),
         }
+    }
 
-        // LPG sections: store, catalog, vector indexes, text indexes
-        #[cfg(feature = "lpg")]
-        if let Some(store) = self.store.as_ref() {
-            let lpg = grafeo_core::graph::lpg::LpgStoreSection::new(Arc::clone(store));
-
-            let catalog = catalog_section::CatalogSection::new(
-                Arc::clone(&self.catalog),
-                Arc::clone(store),
-                {
-                    let tm = Arc::clone(&self.transaction_manager);
-                    move || tm.current_epoch().as_u64()
-                },
-            );
-
-            sections.push(Box::new(catalog));
-            sections.push(Box::new(lpg));
-
-            // Vector indexes: persist HNSW topology to avoid rebuild on load
-            #[cfg(feature = "vector-index")]
-            {
-                let indexes = store.vector_index_entries();
-                if !indexes.is_empty() {
-                    let vector = grafeo_core::index::vector::VectorStoreSection::new(indexes);
-                    sections.push(Box::new(vector));
-                }
-            }
-
-            // Text indexes: persist BM25 postings to avoid rebuild on load
-            #[cfg(feature = "text-index")]
-            {
-                let indexes = store.text_index_entries();
-                if !indexes.is_empty() {
-                    let text = grafeo_core::index::text::TextIndexSection::new(indexes);
-                    sections.push(Box::new(text));
-                }
-            }
+    /// Starts the periodic checkpoint timer when one is configured, replacing
+    /// a running one. Its checkpoints must cover the current state, which
+    /// changes shape when the database is compacted.
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    fn start_checkpoint_timer(&self) {
+        self.stop_checkpoint_timer();
+        // `compact()` clears `read_only`, but a file opened read-only stays so.
+        if let (Some(interval), Some(fm)) = (self.config.checkpoint_interval, &self.file_manager)
+            && !self.read_only
+            && !fm.is_read_only()
+        {
+            *self.checkpoint_timer.lock() = Some(checkpoint_timer::CheckpointTimer::start(
+                interval,
+                Arc::clone(fm),
+                self.checkpoint_sources(),
+                #[cfg(feature = "wal")]
+                self.wal.clone(),
+            ));
         }
+    }
 
-        #[cfg(feature = "triple-store")]
-        if !self.rdf_store.is_empty() || self.rdf_store.graph_count() > 0 {
-            let rdf = grafeo_core::graph::rdf::RdfStoreSection::new(Arc::clone(&self.rdf_store));
-            sections.push(Box::new(rdf));
+    /// Stops the periodic checkpoint timer, if one is running.
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    fn stop_checkpoint_timer(&self) {
+        let running = self.checkpoint_timer.lock().take();
+        if let Some(mut timer) = running {
+            timer.stop();
         }
-
-        #[cfg(feature = "ring-index")]
-        if self.rdf_store.ring().is_some() {
-            let ring = grafeo_core::index::ring::RdfRingSection::new(Arc::clone(&self.rdf_store));
-            sections.push(Box::new(ring));
-        }
-
-        sections
     }
 
     // =========================================================================
@@ -2682,11 +2640,10 @@ impl GrafeoDB {
         // Skip for read-only databases: the on-disk file is already a valid
         // snapshot and the file manager rejects writes.
         if !self.read_only {
-            let _ = self.checkpoint_to_file(fm, flush::FlushReason::Explicit)?;
+            let _ = self.checkpoint_to_file(fm)?;
         }
 
-        let current_epoch = self.transaction_manager.current_epoch();
-        backup::do_backup_full(backup_dir, fm, self.wal.as_deref(), current_epoch)
+        backup::do_backup_full(backup_dir, fm, self.wal.as_deref())
     }
 
     /// Creates an incremental backup containing WAL records since the last backup.
@@ -2758,24 +2715,16 @@ impl GrafeoDB {
     /// the sidecar (e.g. `close()`) should call `fm.remove_sidecar_wal()`
     /// separately after this returns.
     #[cfg(feature = "grafeo-file")]
-    fn checkpoint_to_file(
-        &self,
-        fm: &GrafeoFileManager,
-        reason: flush::FlushReason,
-    ) -> Result<flush::FlushResult> {
-        let sections = self.build_sections();
+    fn checkpoint_to_file(&self, fm: &GrafeoFileManager) -> Result<flush::FlushResult> {
+        let sources = self.checkpoint_sources();
+        let sections = sources.sections();
         let section_refs: Vec<&dyn grafeo_common::storage::Section> =
             sections.iter().map(|s| s.as_ref()).collect();
-        #[cfg(feature = "lpg")]
-        let context = flush::build_context(self.lpg_store(), &self.transaction_manager);
-        #[cfg(not(feature = "lpg"))]
-        let context = flush::build_context_minimal(&self.transaction_manager);
 
         flush::flush(
             fm,
             &section_refs,
-            &context,
-            reason,
+            &sources.context(),
             #[cfg(feature = "wal")]
             self.wal.as_deref(),
         )
@@ -3176,6 +3125,49 @@ impl FromValue for bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `DurabilityMode::Adaptive` syncs the WAL from a background flusher.
+    /// None was started, so an adaptive database never synced its WAL.
+    #[cfg(feature = "wal")]
+    #[test]
+    fn adaptive_durability_syncs_the_wal_in_the_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = GrafeoDB::with_config(
+            Config::persistent(dir.path().join("db"))
+                .with_storage_format(crate::config::StorageFormat::WalDirectory)
+                .with_wal_durability(crate::config::DurabilityMode::Adaptive {
+                    target_interval_ms: 10,
+                }),
+        )
+        .unwrap();
+        db.create_node(&["Person"]);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let mut flusher = db.wal_flusher.lock().take().expect("a flusher runs");
+        let stats = flusher.shutdown().unwrap();
+        assert!(stats.flush_count > 0, "{stats:?}");
+        db.close().unwrap();
+    }
+
+    /// `compact()` makes a database opened read-only writable in memory, but
+    /// its file stays read-only: no checkpoint timer may run against it.
+    #[cfg(all(feature = "compact-store", feature = "grafeo-file", feature = "lpg"))]
+    #[test]
+    fn compacting_a_read_only_database_starts_no_checkpoint_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        {
+            let db = GrafeoDB::open(&path).unwrap();
+            db.create_node(&["Person"]);
+            db.close().unwrap();
+        }
+        let mut db = GrafeoDB::with_config(
+            Config::read_only(&path).with_checkpoint_interval(std::time::Duration::from_secs(60)),
+        )
+        .unwrap();
+        db.compact().unwrap();
+        assert!(db.checkpoint_timer.lock().is_none());
+    }
 
     #[test]
     fn test_create_in_memory_database() {

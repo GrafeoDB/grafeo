@@ -9,6 +9,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
+use grafeo_common::testing::child_process;
 use grafeo_common::utils::error::{Error, Result};
 
 /// Name of the lock file inside the database directory.
@@ -40,13 +41,16 @@ impl DirectoryLock {
             .truncate(false)
             .open(&path)?;
 
-        file.try_lock().map_err(|e| match e {
-            std::fs::TryLockError::WouldBlock => Error::Internal(format!(
-                "database is locked by another process: {}",
-                dir.display()
-            )),
-            std::fs::TryLockError::Error(e) => Error::Io(e),
-        })?;
+        {
+            let _no_child_start = child_process::lock_acquisition();
+            file.try_lock().map_err(|e| match e {
+                std::fs::TryLockError::WouldBlock => Error::Internal(format!(
+                    "database is locked by another process: {}",
+                    dir.display()
+                )),
+                std::fs::TryLockError::Error(e) => Error::Io(e),
+            })?;
+        }
 
         Ok(Self { _file: file, path })
     }

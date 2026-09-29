@@ -2059,10 +2059,11 @@ impl CypherTranslator {
                         property: property.clone(),
                     })
                 } else {
-                    Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        "Nested property access not supported",
-                    )))
+                    // Key access into a map value: `n.meta.route` is `n.meta['route']`.
+                    Ok(LogicalExpression::IndexAccess {
+                        base: Box::new(self.translate_expression(base)?),
+                        index: Box::new(LogicalExpression::Literal(Value::from(property.as_str()))),
+                    })
                 }
             }
             ast::Expression::IndexAccess { base, index } => {
@@ -2619,6 +2620,26 @@ mod tests {
         } else {
             panic!("Expected Return");
         }
+    }
+
+    #[test]
+    fn test_translate_dotted_map_key_access_is_subscript() {
+        let return_expression = |query: &str| {
+            let plan = translate(query).unwrap();
+            let LogicalOperator::Return(ret) = &plan.root else {
+                panic!("Expected Return");
+            };
+            format!("{:?}", ret.items[0].expression)
+        };
+        // `n.meta.route` reads key `route` of the map in `n.meta`, and chains.
+        assert_eq!(
+            return_expression("MATCH (n) RETURN n.meta.route"),
+            return_expression("MATCH (n) RETURN n.meta['route']")
+        );
+        assert_eq!(
+            return_expression("MATCH (n) RETURN n.meta.a.b"),
+            return_expression("MATCH (n) RETURN n.meta['a']['b']")
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@
 
 #[cfg(feature = "wal")]
 mod tests {
+    use grafeo_common::testing::child_process;
     use grafeo_common::types::{NodeId, TransactionId, Value};
     use grafeo_engine::config::StorageFormat;
     use grafeo_engine::session::Session;
@@ -63,13 +64,14 @@ mod tests {
     /// Runs `scenario` in a child process that exits without closing the
     /// database, like a crash.
     fn crash_after(scenario: &str, path: &Path, format: &str) {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::crash_child", "--nocapture"])
-            .env(SCENARIO_VAR, scenario)
-            .env(PATH_VAR, path)
-            .env(FORMAT_VAR, format)
-            .status()
-            .unwrap();
+        let status = child_process::run(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::crash_child", "--nocapture"])
+                .env(SCENARIO_VAR, scenario)
+                .env(PATH_VAR, path)
+                .env(FORMAT_VAR, format),
+        )
+        .unwrap();
         assert!(status.success(), "{format}: scenario {scenario} failed");
     }
 
@@ -180,6 +182,16 @@ mod tests {
                 // The group above ended in graph g; this one is in the
                 // default graph and must replay there.
                 insert(&db.session(), "Jules");
+            }
+            // A direct write after `use_graph` named a graph that does not
+            // exist lands in the default graph, like a query does.
+            "direct_write_to_unknown_graph" => {
+                let session = db.session();
+                session.use_graph("missing");
+                session
+                    .create_node_with_props(&["Person"], [("name", Value::from("Butch"))])
+                    .unwrap();
+                assert_eq!(names(db), strings(&["Butch"]));
             }
             // Same interleaving as "abort_between", through SPARQL updates.
             #[cfg(all(feature = "sparql", feature = "triple-store"))]
@@ -360,6 +372,20 @@ mod tests {
                 strings(&["Hans"]),
                 "{format}: graph g"
             );
+        }
+    }
+
+    /// The WAL records the graph a direct write went to, not the name the
+    /// session asked for: replay must not create that graph and move the
+    /// node there.
+    #[test]
+    fn direct_write_to_an_unknown_graph_replays_where_it_went() {
+        let dir = tempfile::tempdir().unwrap();
+        for (format, path) in formats(dir.path()) {
+            crash_after("direct_write_to_unknown_graph", &path, format);
+            let db = open(&path, format);
+            assert_eq!(names(&db), strings(&["Butch"]), "{format}: default graph");
+            assert_eq!(db.list_graphs(), Vec::<String>::new(), "{format}");
         }
     }
 

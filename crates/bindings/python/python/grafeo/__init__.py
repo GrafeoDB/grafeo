@@ -22,6 +22,8 @@ from grafeo.grafeo import (
     ResultStream,
     Value,
     __version__,
+    build_info,
+    features,
     simd_support,
     vector,
 )
@@ -35,6 +37,8 @@ __all__ = [
     "ResultStream",
     "Value",
     "__version__",
+    "build_info",
+    "features",
     "simd_support",
     "vector",
 ]

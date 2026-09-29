@@ -1,32 +1,18 @@
-//! Unified flush: one code path for checkpoint, eviction, and explicit CHECKPOINT.
+//! Unified flush: one code path for every checkpoint.
 //!
-//! The [`FlushManager`] replaces separate checkpoint/snapshot/close paths with
-//! a single `flush()` method. Three triggers, one implementation:
-//!
-//! | Trigger | What gets written | RAM after flush |
-//! |---------|-------------------|-----------------|
-//! | Periodic checkpoint | All dirty sections | Kept |
-//! | Memory pressure | Lowest-priority section | Mmap back, release RAM |
-//! | Explicit CHECKPOINT | All sections | Kept |
-//!
-//! Future phases will add memory pressure integration with BufferManager.
+//! Periodic checkpoints, `wal_checkpoint()`, `close()` and the async snapshot
+//! all write every section. A checkpoint writes a complete new container that
+//! holds only the sections it was given, so leaving an unchanged section out
+//! would drop it from the file. Writing only what changed needs a container
+//! that keeps the other sections (incremental checkpoints, #430).
+
+use std::sync::Arc;
 
 use grafeo_common::storage::{Section, SectionType};
 use grafeo_common::utils::error::Result;
 
 #[cfg(feature = "grafeo-file")]
 use grafeo_storage::file::GrafeoFileManager;
-
-/// Reason for triggering a flush.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum FlushReason {
-    /// Periodic checkpoint (timer-driven) or database close.
-    #[allow(dead_code)] // Used by async_ops (async-storage feature)
-    Checkpoint,
-    /// User-initiated `CHECKPOINT` command or `wal_checkpoint()` API.
-    Explicit,
-}
 
 /// Context needed by each section during serialization.
 pub(super) struct FlushContext {
@@ -42,7 +28,8 @@ pub(super) struct FlushResult {
     pub sections_written: usize,
 }
 
-/// Executes the unified flush: serialize dirty sections, write to container, truncate WAL.
+/// Executes the unified flush: serialize every section, write the container,
+/// truncate the WAL.
 ///
 /// This is the single write path for all persistence operations. With a WAL,
 /// the order is what makes a crash at any point safe (#417):
@@ -64,7 +51,6 @@ pub(super) fn flush(
     fm: &GrafeoFileManager,
     sections: &[&dyn Section],
     context: &FlushContext,
-    reason: FlushReason,
     #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::LpgWal>,
 ) -> Result<FlushResult> {
     use grafeo_common::testing::crash::maybe_crash;
@@ -75,15 +61,7 @@ pub(super) fn flush(
 
     maybe_crash("flush:before_serialize");
 
-    // Write all sections for Explicit, only dirty ones for Checkpoint. If
-    // nothing is dirty on a periodic checkpoint, skip the write entirely:
-    // previous sections remain intact in the container.
-    let selected: Vec<&dyn Section> = sections
-        .iter()
-        .copied()
-        .filter(|section| reason == FlushReason::Explicit || section.is_dirty())
-        .collect();
-    if selected.is_empty() {
+    if sections.is_empty() {
         return Ok(FlushResult {
             sections_written: 0,
         });
@@ -103,8 +81,8 @@ pub(super) fn flush(
     maybe_crash("flush:after_rotate");
 
     // Step 2: serialize.
-    let mut targets: Vec<(SectionType, Vec<u8>)> = Vec::with_capacity(selected.len());
-    for section in &selected {
+    let mut targets: Vec<(SectionType, Vec<u8>)> = Vec::with_capacity(sections.len());
+    for section in sections {
         targets.push((section.section_type(), section.serialize()?));
     }
 
@@ -124,11 +102,8 @@ pub(super) fn flush(
         context.edge_count,
     )?;
 
-    // Mark all written sections as clean
     for section in sections {
-        if targets.iter().any(|(t, _)| *t == section.section_type()) {
-            section.mark_clean();
-        }
+        section.mark_clean();
     }
 
     maybe_crash("flush:after_write");
@@ -165,33 +140,260 @@ pub(super) fn flush(
     Ok(FlushResult { sections_written })
 }
 
-/// Builds the flush context from the current database state.
-#[cfg(feature = "lpg")]
-pub(super) fn build_context(
-    store: &grafeo_core::graph::lpg::LpgStore,
-    transaction_manager: &crate::transaction::TransactionManager,
-) -> FlushContext {
-    FlushContext {
-        epoch: store.current_epoch().0,
-        transaction_id: transaction_manager
+/// Everything a checkpoint writes: the database's complete state.
+///
+/// A checkpoint's container holds only the sections built here, so every
+/// checkpoint path (`close()`, `wal_checkpoint()`, backups, the async
+/// snapshot and the periodic timer) builds them from these sources.
+#[derive(Clone)]
+pub(super) struct CheckpointSources {
+    /// The LPG store; the overlay after `compact()`.
+    #[cfg(feature = "lpg")]
+    pub store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
+    /// The compacted base and overlay, after `compact()`.
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    pub layered: Option<Arc<grafeo_core::graph::compact::layered::LayeredStore>>,
+    #[cfg(feature = "lpg")]
+    pub catalog: Arc<crate::catalog::Catalog>,
+    pub transaction_manager: Arc<crate::transaction::TransactionManager>,
+    #[cfg(feature = "triple-store")]
+    pub rdf_store: Arc<grafeo_core::graph::rdf::RdfStore>,
+}
+
+impl CheckpointSources {
+    /// Builds every section of the database.
+    pub fn sections(&self) -> Vec<Box<dyn Section>> {
+        #[cfg_attr(
+            not(any(feature = "lpg", feature = "triple-store")),
+            expect(
+                unused_mut,
+                reason = "only the lpg and triple-store features add sections"
+            )
+        )]
+        let mut sections: Vec<Box<dyn Section>> = Vec::new();
+
+        #[cfg(feature = "lpg")]
+        if let Some(store) = &self.store {
+            let transaction_manager = Arc::clone(&self.transaction_manager);
+            sections.push(Box::new(super::catalog_section::CatalogSection::new(
+                Arc::clone(&self.catalog),
+                Arc::clone(store),
+                move || transaction_manager.current_epoch().as_u64(),
+            )));
+
+            #[cfg(feature = "compact-store")]
+            let layered = self.push_layered(&mut sections);
+            #[cfg(not(feature = "compact-store"))]
+            let layered = false;
+            if !layered {
+                sections.push(Box::new(grafeo_core::graph::lpg::LpgStoreSection::new(
+                    Arc::clone(store),
+                )));
+            }
+
+            // Vector indexes: persist HNSW topology to avoid rebuild on load
+            #[cfg(feature = "vector-index")]
+            {
+                let indexes = store.vector_index_entries();
+                if !indexes.is_empty() {
+                    sections.push(Box::new(
+                        grafeo_core::index::vector::VectorStoreSection::new(indexes),
+                    ));
+                }
+            }
+
+            // Text indexes: persist BM25 postings to avoid rebuild on load
+            #[cfg(feature = "text-index")]
+            {
+                let indexes = store.text_index_entries();
+                if !indexes.is_empty() {
+                    sections.push(Box::new(grafeo_core::index::text::TextIndexSection::new(
+                        indexes,
+                    )));
+                }
+            }
+        }
+
+        #[cfg(feature = "triple-store")]
+        if !self.rdf_store.is_empty() || self.rdf_store.graph_count() > 0 {
+            sections.push(Box::new(grafeo_core::graph::rdf::RdfStoreSection::new(
+                Arc::clone(&self.rdf_store),
+            )));
+        }
+
+        #[cfg(feature = "ring-index")]
+        if self.rdf_store.ring().is_some() {
+            sections.push(Box::new(grafeo_core::index::ring::RdfRingSection::new(
+                Arc::clone(&self.rdf_store),
+            )));
+        }
+
+        sections
+    }
+
+    /// Adds the compacted base, the overlay and the overlay's deletions, or
+    /// returns `false` when the database is not compacted.
+    #[cfg(all(feature = "lpg", feature = "compact-store"))]
+    fn push_layered(&self, sections: &mut Vec<Box<dyn Section>>) -> bool {
+        use grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection;
+        use grafeo_core::graph::compact::section::CompactStoreSection;
+
+        let Some(layered) = &self.layered else {
+            return false;
+        };
+        sections.push(Box::new(CompactStoreSection::new(layered.base_store_arc())));
+        sections.push(Box::new(grafeo_core::graph::lpg::LpgStoreSection::new(
+            layered.overlay_store(),
+        )));
+        // Tombstones for base nodes and edges not yet merged into the base:
+        // without them a reopen would bring deleted entities back.
+        let deletions = OverlayDeletionsSection::from_layered(Arc::clone(layered));
+        if deletions.is_empty() {
+            layered.mark_deletions_clean();
+        } else {
+            sections.push(Box::new(deletions));
+        }
+        true
+    }
+
+    /// The header values of the checkpoint.
+    pub fn context(&self) -> FlushContext {
+        let transaction_id = self
+            .transaction_manager
             .last_assigned_transaction_id()
-            .map_or(0, |t| t.0),
-        node_count: store.node_count() as u64,
-        edge_count: store.edge_count() as u64,
+            .map_or(0, |t| t.0);
+        #[cfg(feature = "lpg")]
+        if let Some(store) = &self.store {
+            // After `compact()` the store is the overlay: count the base too.
+            #[cfg(feature = "compact-store")]
+            if let Some(layered) = &self.layered {
+                use grafeo_core::graph::GraphStore;
+                return FlushContext {
+                    epoch: store.current_epoch().0,
+                    transaction_id,
+                    node_count: layered.node_count() as u64,
+                    edge_count: layered.edge_count() as u64,
+                };
+            }
+            return FlushContext {
+                epoch: store.current_epoch().0,
+                transaction_id,
+                node_count: store.node_count() as u64,
+                edge_count: store.edge_count() as u64,
+            };
+        }
+        FlushContext {
+            epoch: 0,
+            transaction_id,
+            node_count: 0,
+            edge_count: 0,
+        }
     }
 }
 
-/// Builds a minimal flush context when no LPG store is available.
-#[cfg(not(feature = "lpg"))]
-pub(super) fn build_context_minimal(
-    transaction_manager: &crate::transaction::TransactionManager,
-) -> FlushContext {
-    FlushContext {
-        epoch: 0,
-        transaction_id: transaction_manager
-            .last_assigned_transaction_id()
-            .map_or(0, |t| t.0),
-        node_count: 0,
-        edge_count: 0,
+#[cfg(all(test, feature = "grafeo-file"))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A section holding fixed bytes, with its own dirty flag.
+    struct FixedSection {
+        section_type: SectionType,
+        data: Vec<u8>,
+        dirty: AtomicBool,
+    }
+
+    impl FixedSection {
+        fn new(section_type: SectionType, data: &[u8], dirty: bool) -> Self {
+            Self {
+                section_type,
+                data: data.to_vec(),
+                dirty: AtomicBool::new(dirty),
+            }
+        }
+    }
+
+    impl Section for FixedSection {
+        fn section_type(&self) -> SectionType {
+            self.section_type
+        }
+
+        fn serialize(&self) -> Result<Vec<u8>> {
+            Ok(self.data.clone())
+        }
+
+        fn deserialize(&mut self, data: &[u8]) -> Result<()> {
+            self.data = data.to_vec();
+            Ok(())
+        }
+
+        fn is_dirty(&self) -> bool {
+            self.dirty.load(Ordering::Acquire)
+        }
+
+        fn mark_clean(&self) {
+            self.dirty.store(false, Ordering::Release);
+        }
+
+        fn memory_usage(&self) -> usize {
+            self.data.len()
+        }
+    }
+
+    fn run(fm: &GrafeoFileManager, sections: &[&dyn Section]) -> usize {
+        let context = FlushContext {
+            epoch: 1,
+            transaction_id: 1,
+            node_count: 0,
+            edge_count: 0,
+        };
+        #[cfg(feature = "wal")]
+        let result = flush(fm, sections, &context, None);
+        #[cfg(not(feature = "wal"))]
+        let result = flush(fm, sections, &context);
+        result.unwrap().sections_written
+    }
+
+    fn stored(fm: &GrafeoFileManager, section_type: SectionType) -> Option<Vec<u8>> {
+        let directory = fm.read_section_directory().unwrap()?;
+        let entry = directory.find(section_type)?;
+        Some(fm.read_section_data(entry).unwrap())
+    }
+
+    /// Each checkpoint writes a complete file holding only the sections it
+    /// was given. The async snapshot used to write only the changed sections:
+    /// that dropped the others from the file (and then deleted the WAL files
+    /// that held them), and with nothing marked changed it wrote nothing.
+    #[test]
+    fn a_checkpoint_keeps_every_section_in_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let fm = GrafeoFileManager::create(dir.path().join("db.grafeo")).unwrap();
+        let catalog = FixedSection::new(SectionType::Catalog, b"catalog", false);
+        let store = FixedSection::new(SectionType::LpgStore, b"store", false);
+
+        // Twice: the second checkpoint has nothing marked changed.
+        for checkpoint in 0..2 {
+            assert_eq!(run(&fm, &[&catalog, &store]), 2, "checkpoint {checkpoint}");
+            assert_eq!(
+                stored(&fm, SectionType::Catalog).as_deref(),
+                Some(&b"catalog"[..])
+            );
+            assert_eq!(
+                stored(&fm, SectionType::LpgStore).as_deref(),
+                Some(&b"store"[..])
+            );
+        }
+
+        let changed = FixedSection::new(SectionType::LpgStore, b"changed", true);
+        assert_eq!(run(&fm, &[&catalog, &changed]), 2);
+        assert_eq!(
+            stored(&fm, SectionType::Catalog).as_deref(),
+            Some(&b"catalog"[..]),
+            "the unchanged section is still in the file"
+        );
+        assert_eq!(
+            stored(&fm, SectionType::LpgStore).as_deref(),
+            Some(&b"changed"[..])
+        );
     }
 }

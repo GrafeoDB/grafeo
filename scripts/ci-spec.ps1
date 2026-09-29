@@ -66,14 +66,20 @@ if (Should-Run "rust") {
 if (Should-Run "python") {
     Write-Header "Python Spec Tests"
     Push-Location "$root\crates\bindings\python"
-    maturin develop --release --features pyo3/extension-module 2>&1 | Out-Null
+    # No --features: it would replace pyproject.toml's feature list ("full"),
+    # and the build would miss Cypher and the other languages.
+    $buildOut = maturin develop --release 2>&1
+    $buildOk = $LASTEXITCODE -eq 0
     Pop-Location
-    if ($LASTEXITCODE -eq 0) {
+    if ($buildOk) {
         Push-Location $root
-        pytest tests/spec/ -v 2>&1 | Tee-Object -Variable pyOut
+        # `python -m pytest`: the `pytest` launcher of a moved venv exits 1
+        # without output.
+        python -m pytest tests/spec/ -v 2>&1 | Tee-Object -Variable pyOut
         if ($LASTEXITCODE -eq 0) { $passed += "python" } else { $failures += "python" }
         Pop-Location
     } else {
+        $buildOut | ForEach-Object { Write-Host $_ }
         Write-Host "  Python build failed" -ForegroundColor Red
         $failures += "python"
     }

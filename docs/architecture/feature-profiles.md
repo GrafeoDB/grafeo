@@ -110,10 +110,10 @@ Production operations. In the engine this enables observability and the async st
 
 | Deprecated name | Use instead | Notes |
 | --- | --- | --- |
-| `embedded` | `lpg` + `ai` + `algos` + `parallel` | Currently still the default of the facade and the Python, Node.js and C bindings |
+| `embedded` | `lpg` + `ai` + `algos` + `parallel` + `arrow-export` | Currently still the default of the facade and the Python, Node.js and C bindings. `lpg` adds Cypher, Gremlin, SQL/PGQ and the rest of `storage`; the bindings' `embedded` also includes `compact-store` |
 | `browser` | `edge` | Currently still the default of the WASM binding |
-| `server` | `lpg` + `rdf` + `ai` + `enterprise` | Approximate |
-| `full` | `lpg` + `rdf` + `analytics` + `ai` | Everything except `enterprise` and `embed` |
+| `server` | `lpg` + `rdf` + `ai` + `algos` + `parallel` + `arrow-export` + `async-storage` + `tracing` | `enterprise` without `metrics`; no bulk import |
+| `full` | same as `server` | In the facade, `full` is an alias of `server`. The bindings' `full` is all languages, `ai`, `algos` and the RDF triple store |
 
 The binding defaults move to persona names before the aliases are removed, so depending on `grafeo` without features keeps working.
 
@@ -133,13 +133,19 @@ The profile names are consistent across every project. The table below shows whi
 
 | Project | LPG | RDF | Analytics | AI | Edge | Enterprise | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| **Python** (grafeo-py) | flag | flag | flag | flag | n/a | n/a | Default: `embedded` (deprecated alias) |
-| **Node.js** (grafeo-node) | flag | flag | flag | flag | n/a | n/a | Default: `embedded` (deprecated alias) |
-| **WASM** (grafeo-wasm) | flag | flag | flag | n/a | flag (default) | n/a | Default: `browser` (deprecated alias for `edge`) |
-| **C** (grafeo-c) | flag | flag | flag | flag | n/a | n/a | Bridge for C#, Dart, Go. Default: `embedded` (deprecated alias) |
-| **C#** | via C | via C | via C | via C | n/a | n/a | Feature selection at C build time |
-| **Dart** | via C | via C | via C | via C | n/a | n/a | Feature selection at C build time |
-| **Go** | via C | via C | via C | via C | n/a | n/a | Feature selection at C build time |
+| **Python** (grafeo-py) | flag | flag | flag | flag | flag | n/a | Default: `embedded` (deprecated alias) |
+| **Node.js** (grafeo-node) | flag | flag | flag | flag | flag | n/a | Default: `embedded` (deprecated alias) |
+| **WASM** (grafeo-wasm) | flag | flag | flag | flag | flag (default) | n/a | Default: `browser` (deprecated alias for `edge`) |
+| **C** (grafeo-c) | flag | flag | flag | flag | flag | n/a | Bridge for C#, Dart, Go. Default: `embedded` (deprecated alias) |
+| **C#** | via C | via C | via C | via C | via C | n/a | Feature selection at C build time |
+| **Dart** | via C | via C | via C | via C | via C | n/a | Feature selection at C build time |
+| **Go** | via C | via C | via C | via C | via C | n/a | Feature selection at C build time |
+
+The bindings use the same profile names, with a few differences from the facade:
+
+- **C** (and C#, Dart, Go): `rdf` has no SHACL validation.
+- **WASM**: `lpg` and `rdf` have no storage, `rdf` has no SHACL and uses the lightweight regex engine, `ai` has no change data capture, `analytics` is `ai` plus `algos` (no bulk import), and `edge` includes `compact-store`.
+- **Python, Node.js, C**: `embedded` also includes `compact-store`.
 
 ### AI / Agent Ecosystem
 
@@ -183,7 +189,7 @@ The profile names are consistent across every project. The table below shows whi
 
 ## Atom Reference
 
-The individual feature flags (Layer 2) that profiles are composed from. "(standalone)" means the atom is not part of any profile and is enabled on its own.
+The individual feature flags (Layer 2) that profiles are composed from. "(standalone)" means the atom is not part of any persona profile and is enabled on its own; some of those are part of the deprecated `embedded` default, as noted.
 
 ### Query Languages
 
@@ -206,7 +212,7 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 | `spill` | (storage) | Out-of-core disk spilling | Implemented |
 | `mmap` | (storage) | Memory-mapped file storage | Implemented |
 | `async-storage` | Enterprise | Async WAL backend (tokio) | Implemented |
-| `compact-store` | (standalone) | Columnar store for read-mostly datasets | Implemented |
+| `compact-store` | (standalone); in the bindings' `embedded` and in WASM `edge` | Columnar store for read-mostly datasets | Implemented |
 
 ### Graph Model
 
@@ -242,13 +248,13 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 | --- | --- | --- | --- |
 | `jsonl-import` | Analytics | JSON Lines file import | Implemented |
 | `parquet-import` | Analytics | Apache Parquet import | Implemented |
-| `arrow-export` | (standalone) | Arrow IPC export for DuckDB, Polars, pandas | Implemented |
+| `arrow-export` | (standalone); in `embedded` (not in C or WASM) | Arrow IPC export for DuckDB, Polars, pandas | Implemented |
 
 ### Execution
 
 | Atom | Profile | Description | Status |
 | --- | --- | --- | --- |
-| `parallel` | (standalone) | Parallel execution (rayon) | Implemented |
+| `parallel` | (standalone); in `embedded` | Parallel execution (rayon) | Implemented |
 | `tiered-storage` | (standalone) | Hot/cold version storage with epochs | Implemented |
 
 > **Note:** Block-STM parallel transaction execution is compiled unconditionally. It is not gated behind a feature flag.

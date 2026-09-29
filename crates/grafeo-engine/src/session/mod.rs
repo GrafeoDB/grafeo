@@ -346,14 +346,16 @@ impl Session {
         self.wal = Some(buffer);
     }
 
-    /// Records a WAL record for the active graph. No-op for in-memory sessions.
+    /// Records a WAL record for the graph that direct writes go to (see
+    /// [`active_lpg_store`](Self::active_lpg_store)). No-op for in-memory
+    /// sessions.
     ///
     /// The record joins the current transaction's group. Callers outside a
     /// transaction finish with [`flush_wal_outside_transaction`](Self::flush_wal_outside_transaction).
     #[cfg(all(feature = "wal", feature = "lpg"))]
     pub(crate) fn log_wal_record(&self, record: grafeo_storage::wal::WalRecord) {
         if let Some(ref wal) = self.wal {
-            wal.push(self.active_graph_storage_key(), record);
+            wal.push(self.active_lpg_graph_key(), record);
         }
     }
 
@@ -626,14 +628,18 @@ impl Session {
     /// for versioned operations.
     #[cfg(feature = "lpg")]
     fn active_lpg_store(&self) -> Arc<LpgStore> {
-        let key = self.active_graph_storage_key();
-        match key {
-            None => Arc::clone(&self.store),
-            Some(ref name) => self
-                .store
-                .graph(name)
-                .unwrap_or_else(|| Arc::clone(&self.store)),
-        }
+        self.active_lpg_graph_key()
+            .and_then(|name| self.store.graph(&name))
+            .unwrap_or_else(|| Arc::clone(&self.store))
+    }
+
+    /// The storage key of the graph [`active_lpg_store`](Self::active_lpg_store)
+    /// writes to: the active graph, or `None` (the default graph) when no
+    /// graph of that name exists, which is where writes then go.
+    #[cfg(feature = "lpg")]
+    fn active_lpg_graph_key(&self) -> Option<String> {
+        self.active_graph_storage_key()
+            .filter(|name| self.store.graph(name).is_some())
     }
 
     /// Resolves a graph name to a concrete `LpgStore`.
@@ -1520,74 +1526,104 @@ impl Session {
                 }
             }
             SchemaStatement::CreateConstraint(stmt) => {
-                use crate::catalog::TypeConstraint;
+                use crate::catalog::{CatalogError, ConstraintDefinition, ConstraintType};
                 use grafeo_adapters::query::gql::ast::ConstraintKind;
-                let kind_str = match stmt.constraint_kind {
-                    ConstraintKind::Unique => "unique",
-                    ConstraintKind::NodeKey => "node_key",
-                    ConstraintKind::NotNull => "not_null",
-                    ConstraintKind::Exists => "exists",
+                let kind = match stmt.constraint_kind {
+                    ConstraintKind::Unique => ConstraintType::Unique,
+                    ConstraintKind::NodeKey => ConstraintType::NodeKey,
+                    ConstraintKind::NotNull => ConstraintType::NotNull,
+                    ConstraintKind::Exists => ConstraintType::Exists,
                 };
-                let constraint_name = stmt
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("{}_{kind_str}", stmt.label));
-
-                // Register constraint in catalog type definitions
-                match stmt.constraint_kind {
-                    ConstraintKind::Unique => {
-                        for prop in &stmt.properties {
-                            let label_id = self.catalog.get_or_create_label(&stmt.label);
-                            let prop_id = self.catalog.get_or_create_property_key(prop);
-                            let _ = self.catalog.add_unique_constraint(label_id, prop_id);
-                        }
-                        let _ = self.catalog.add_constraint_to_type(
-                            &stmt.label,
-                            TypeConstraint::Unique(stmt.properties.clone()),
+                let name = match &stmt.name {
+                    Some(name) => name.clone(),
+                    None => {
+                        // The default name joins the properties with `_`, so a
+                        // property `a_b` and the pair `(a, b)` share it: a
+                        // different constraint that has it moves this one to
+                        // the next free suffix. The same constraint keeps it,
+                        // so creating it twice still fails.
+                        let base = format!(
+                            "{}_{}_{}",
+                            stmt.label,
+                            stmt.properties.join("_"),
+                            kind.name_suffix()
                         );
-                    }
-                    ConstraintKind::NodeKey => {
-                        for prop in &stmt.properties {
-                            let label_id = self.catalog.get_or_create_label(&stmt.label);
-                            let prop_id = self.catalog.get_or_create_property_key(prop);
-                            let _ = self.catalog.add_unique_constraint(label_id, prop_id);
-                            let _ = self.catalog.add_required_property(label_id, prop_id);
+                        let mut name = base.clone();
+                        let mut suffix = 2;
+                        while let Some(other) = self.catalog.constraint(&name) {
+                            if other.label == stmt.label
+                                && other.properties == stmt.properties
+                                && other.kind == kind
+                            {
+                                break;
+                            }
+                            name = format!("{base}_{suffix}");
+                            suffix += 1;
                         }
-                        let _ = self.catalog.add_constraint_to_type(
-                            &stmt.label,
-                            TypeConstraint::PrimaryKey(stmt.properties.clone()),
-                        );
+                        name
                     }
-                    ConstraintKind::NotNull | ConstraintKind::Exists => {
-                        for prop in &stmt.properties {
-                            let label_id = self.catalog.get_or_create_label(&stmt.label);
-                            let prop_id = self.catalog.get_or_create_property_key(prop);
-                            let _ = self.catalog.add_required_property(label_id, prop_id);
-                            let _ = self.catalog.add_constraint_to_type(
-                                &stmt.label,
-                                TypeConstraint::NotNull(prop.clone()),
-                            );
-                        }
+                };
+                let def = ConstraintDefinition {
+                    name: name.clone(),
+                    label: stmt.label.clone(),
+                    properties: stmt.properties.clone(),
+                    kind,
+                };
+                match self.catalog.create_constraint(def) {
+                    Ok(()) => {}
+                    Err(CatalogError::ConstraintAlreadyExists) if stmt.if_not_exists => {
+                        return Ok(QueryResult::status(format!(
+                            "Constraint '{name}' already exists"
+                        )));
+                    }
+                    Err(CatalogError::ConstraintAlreadyExists) => {
+                        return Err(Error::Query(QueryError::new(
+                            QueryErrorKind::Semantic,
+                            format!("constraint '{name}' already exists"),
+                        )));
+                    }
+                    Err(e) => {
+                        return Err(Error::Query(QueryError::new(
+                            QueryErrorKind::Semantic,
+                            e.to_string(),
+                        )));
                     }
                 }
-
                 wal_log!(
                     self,
                     WalRecord::CreateConstraint {
-                        name: constraint_name.clone(),
+                        name: name.clone(),
                         label: stmt.label.clone(),
                         properties: stmt.properties.clone(),
-                        kind: kind_str.to_string(),
+                        kind: grafeo_storage::wal::NamedConstraintKind::from(kind)
+                            .as_str()
+                            .to_string(),
                     }
                 );
                 Ok(QueryResult::status(format!(
-                    "Created {kind_str} constraint '{constraint_name}'"
+                    "Created {} constraint '{name}'",
+                    kind.name_suffix()
                 )))
             }
             SchemaStatement::DropConstraint { name, if_exists } => {
-                let _ = if_exists;
-                wal_log!(self, WalRecord::DropConstraint { name: name.clone() });
-                Ok(QueryResult::status(format!("Dropped constraint '{name}'")))
+                use crate::catalog::CatalogError;
+                match self.catalog.drop_constraint(&name) {
+                    Ok(()) => {
+                        wal_log!(self, WalRecord::DropConstraint { name: name.clone() });
+                        Ok(QueryResult::status(format!("Dropped constraint '{name}'")))
+                    }
+                    Err(CatalogError::ConstraintNotFound(_)) if if_exists => Ok(
+                        QueryResult::status(format!("No constraint '{name}' to drop")),
+                    ),
+                    Err(CatalogError::ConstraintNotFound(_)) => Err(Error::Query(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        format!("constraint '{name}' does not exist"),
+                    ))),
+                    Err(e) => Err(Error::Query(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        e.to_string(),
+                    ))),
+                }
             }
             SchemaStatement::CreateGraphType(stmt) => {
                 use crate::catalog::GraphTypeDefinition;
@@ -1917,52 +1953,64 @@ impl Session {
                 let effective_name = self.effective_type_key(&stmt.name);
                 #[cfg(feature = "wal")]
                 let mut wal_alts = Vec::new();
-                for alt in &stmt.alterations {
-                    match alt {
-                        TypeAlteration::AddProperty(prop) => {
-                            let typed = TypedProperty {
-                                name: prop.name.clone(),
-                                data_type: PropertyDataType::from_type_name(&prop.data_type),
-                                nullable: prop.nullable,
-                                default_value: prop
-                                    .default_value
-                                    .as_ref()
-                                    .map(|s| parse_default_literal(s)),
-                            };
-                            self.catalog
-                                .alter_node_type_add_property(&effective_name, typed)
-                                .map_err(|e| {
-                                    Error::Query(QueryError::new(
-                                        QueryErrorKind::Semantic,
-                                        e.to_string(),
-                                    ))
-                                })?;
-                            #[cfg(feature = "wal")]
-                            wal_alts.push((
-                                PropertyAlterationKind::Add.as_str().to_string(),
-                                prop.name.clone(),
-                                prop.data_type.clone(),
-                                prop.nullable,
-                            ));
-                        }
-                        TypeAlteration::DropProperty(name) => {
-                            self.catalog
-                                .alter_node_type_drop_property(&effective_name, name)
-                                .map_err(|e| {
-                                    Error::Query(QueryError::new(
-                                        QueryErrorKind::Semantic,
-                                        e.to_string(),
-                                    ))
-                                })?;
-                            #[cfg(feature = "wal")]
-                            wal_alts.push((
-                                PropertyAlterationKind::Drop.as_str().to_string(),
-                                name.clone(),
-                                String::new(),
-                                false,
-                            ));
+                // The whole statement or nothing: undo the alterations
+                // applied before one that fails.
+                let before = self.catalog.get_node_type(&effective_name);
+                let applied = (|| -> Result<()> {
+                    for alt in &stmt.alterations {
+                        match alt {
+                            TypeAlteration::AddProperty(prop) => {
+                                let typed = TypedProperty {
+                                    name: prop.name.clone(),
+                                    data_type: PropertyDataType::from_type_name(&prop.data_type),
+                                    nullable: prop.nullable,
+                                    default_value: prop
+                                        .default_value
+                                        .as_ref()
+                                        .map(|s| parse_default_literal(s)),
+                                };
+                                self.catalog
+                                    .alter_node_type_add_property(&effective_name, typed)
+                                    .map_err(|e| {
+                                        Error::Query(QueryError::new(
+                                            QueryErrorKind::Semantic,
+                                            e.to_string(),
+                                        ))
+                                    })?;
+                                #[cfg(feature = "wal")]
+                                wal_alts.push((
+                                    PropertyAlterationKind::Add.as_str().to_string(),
+                                    prop.name.clone(),
+                                    prop.data_type.clone(),
+                                    prop.nullable,
+                                ));
+                            }
+                            TypeAlteration::DropProperty(name) => {
+                                self.catalog
+                                    .alter_node_type_drop_property(&effective_name, name)
+                                    .map_err(|e| {
+                                        Error::Query(QueryError::new(
+                                            QueryErrorKind::Semantic,
+                                            e.to_string(),
+                                        ))
+                                    })?;
+                                #[cfg(feature = "wal")]
+                                wal_alts.push((
+                                    PropertyAlterationKind::Drop.as_str().to_string(),
+                                    name.clone(),
+                                    String::new(),
+                                    false,
+                                ));
+                            }
                         }
                     }
+                    Ok(())
+                })();
+                if let Err(e) = applied {
+                    if let Some(def) = before {
+                        self.catalog.register_or_replace_node_type(def);
+                    }
+                    return Err(e);
                 }
                 wal_log!(
                     self,
@@ -1983,52 +2031,64 @@ impl Session {
                 let effective_name = self.effective_type_key(&stmt.name);
                 #[cfg(feature = "wal")]
                 let mut wal_alts = Vec::new();
-                for alt in &stmt.alterations {
-                    match alt {
-                        TypeAlteration::AddProperty(prop) => {
-                            let typed = TypedProperty {
-                                name: prop.name.clone(),
-                                data_type: PropertyDataType::from_type_name(&prop.data_type),
-                                nullable: prop.nullable,
-                                default_value: prop
-                                    .default_value
-                                    .as_ref()
-                                    .map(|s| parse_default_literal(s)),
-                            };
-                            self.catalog
-                                .alter_edge_type_add_property(&effective_name, typed)
-                                .map_err(|e| {
-                                    Error::Query(QueryError::new(
-                                        QueryErrorKind::Semantic,
-                                        e.to_string(),
-                                    ))
-                                })?;
-                            #[cfg(feature = "wal")]
-                            wal_alts.push((
-                                PropertyAlterationKind::Add.as_str().to_string(),
-                                prop.name.clone(),
-                                prop.data_type.clone(),
-                                prop.nullable,
-                            ));
-                        }
-                        TypeAlteration::DropProperty(name) => {
-                            self.catalog
-                                .alter_edge_type_drop_property(&effective_name, name)
-                                .map_err(|e| {
-                                    Error::Query(QueryError::new(
-                                        QueryErrorKind::Semantic,
-                                        e.to_string(),
-                                    ))
-                                })?;
-                            #[cfg(feature = "wal")]
-                            wal_alts.push((
-                                PropertyAlterationKind::Drop.as_str().to_string(),
-                                name.clone(),
-                                String::new(),
-                                false,
-                            ));
+                // The whole statement or nothing: undo the alterations
+                // applied before one that fails.
+                let before = self.catalog.get_edge_type_def(&effective_name);
+                let applied = (|| -> Result<()> {
+                    for alt in &stmt.alterations {
+                        match alt {
+                            TypeAlteration::AddProperty(prop) => {
+                                let typed = TypedProperty {
+                                    name: prop.name.clone(),
+                                    data_type: PropertyDataType::from_type_name(&prop.data_type),
+                                    nullable: prop.nullable,
+                                    default_value: prop
+                                        .default_value
+                                        .as_ref()
+                                        .map(|s| parse_default_literal(s)),
+                                };
+                                self.catalog
+                                    .alter_edge_type_add_property(&effective_name, typed)
+                                    .map_err(|e| {
+                                        Error::Query(QueryError::new(
+                                            QueryErrorKind::Semantic,
+                                            e.to_string(),
+                                        ))
+                                    })?;
+                                #[cfg(feature = "wal")]
+                                wal_alts.push((
+                                    PropertyAlterationKind::Add.as_str().to_string(),
+                                    prop.name.clone(),
+                                    prop.data_type.clone(),
+                                    prop.nullable,
+                                ));
+                            }
+                            TypeAlteration::DropProperty(name) => {
+                                self.catalog
+                                    .alter_edge_type_drop_property(&effective_name, name)
+                                    .map_err(|e| {
+                                        Error::Query(QueryError::new(
+                                            QueryErrorKind::Semantic,
+                                            e.to_string(),
+                                        ))
+                                    })?;
+                                #[cfg(feature = "wal")]
+                                wal_alts.push((
+                                    PropertyAlterationKind::Drop.as_str().to_string(),
+                                    name.clone(),
+                                    String::new(),
+                                    false,
+                                ));
+                            }
                         }
                     }
+                    Ok(())
+                })();
+                if let Err(e) = applied {
+                    if let Some(def) = before {
+                        self.catalog.register_or_replace_edge_type_def(def);
+                    }
+                    return Err(e);
                 }
                 wal_log!(
                     self,
@@ -2049,69 +2109,81 @@ impl Session {
                 let effective_name = self.effective_type_key(&stmt.name);
                 #[cfg(feature = "wal")]
                 let mut wal_alts = Vec::new();
-                for alt in &stmt.alterations {
-                    match alt {
-                        GraphTypeAlteration::AddNodeType(name) => {
-                            self.catalog
-                                .alter_graph_type_add_node_type(&effective_name, name.clone())
-                                .map_err(|e| {
-                                    Error::Query(QueryError::new(
-                                        QueryErrorKind::Semantic,
-                                        e.to_string(),
-                                    ))
-                                })?;
-                            #[cfg(feature = "wal")]
-                            wal_alts.push((
-                                GraphTypeAlterationKind::AddNodeType.as_str().to_string(),
-                                name.clone(),
-                            ));
-                        }
-                        GraphTypeAlteration::DropNodeType(name) => {
-                            self.catalog
-                                .alter_graph_type_drop_node_type(&effective_name, name)
-                                .map_err(|e| {
-                                    Error::Query(QueryError::new(
-                                        QueryErrorKind::Semantic,
-                                        e.to_string(),
-                                    ))
-                                })?;
-                            #[cfg(feature = "wal")]
-                            wal_alts.push((
-                                GraphTypeAlterationKind::DropNodeType.as_str().to_string(),
-                                name.clone(),
-                            ));
-                        }
-                        GraphTypeAlteration::AddEdgeType(name) => {
-                            self.catalog
-                                .alter_graph_type_add_edge_type(&effective_name, name.clone())
-                                .map_err(|e| {
-                                    Error::Query(QueryError::new(
-                                        QueryErrorKind::Semantic,
-                                        e.to_string(),
-                                    ))
-                                })?;
-                            #[cfg(feature = "wal")]
-                            wal_alts.push((
-                                GraphTypeAlterationKind::AddEdgeType.as_str().to_string(),
-                                name.clone(),
-                            ));
-                        }
-                        GraphTypeAlteration::DropEdgeType(name) => {
-                            self.catalog
-                                .alter_graph_type_drop_edge_type(&effective_name, name)
-                                .map_err(|e| {
-                                    Error::Query(QueryError::new(
-                                        QueryErrorKind::Semantic,
-                                        e.to_string(),
-                                    ))
-                                })?;
-                            #[cfg(feature = "wal")]
-                            wal_alts.push((
-                                GraphTypeAlterationKind::DropEdgeType.as_str().to_string(),
-                                name.clone(),
-                            ));
+                // The whole statement or nothing: undo the alterations
+                // applied before one that fails.
+                let before = self.catalog.get_graph_type_def(&effective_name);
+                let applied = (|| -> Result<()> {
+                    for alt in &stmt.alterations {
+                        match alt {
+                            GraphTypeAlteration::AddNodeType(name) => {
+                                self.catalog
+                                    .alter_graph_type_add_node_type(&effective_name, name.clone())
+                                    .map_err(|e| {
+                                        Error::Query(QueryError::new(
+                                            QueryErrorKind::Semantic,
+                                            e.to_string(),
+                                        ))
+                                    })?;
+                                #[cfg(feature = "wal")]
+                                wal_alts.push((
+                                    GraphTypeAlterationKind::AddNodeType.as_str().to_string(),
+                                    name.clone(),
+                                ));
+                            }
+                            GraphTypeAlteration::DropNodeType(name) => {
+                                self.catalog
+                                    .alter_graph_type_drop_node_type(&effective_name, name)
+                                    .map_err(|e| {
+                                        Error::Query(QueryError::new(
+                                            QueryErrorKind::Semantic,
+                                            e.to_string(),
+                                        ))
+                                    })?;
+                                #[cfg(feature = "wal")]
+                                wal_alts.push((
+                                    GraphTypeAlterationKind::DropNodeType.as_str().to_string(),
+                                    name.clone(),
+                                ));
+                            }
+                            GraphTypeAlteration::AddEdgeType(name) => {
+                                self.catalog
+                                    .alter_graph_type_add_edge_type(&effective_name, name.clone())
+                                    .map_err(|e| {
+                                        Error::Query(QueryError::new(
+                                            QueryErrorKind::Semantic,
+                                            e.to_string(),
+                                        ))
+                                    })?;
+                                #[cfg(feature = "wal")]
+                                wal_alts.push((
+                                    GraphTypeAlterationKind::AddEdgeType.as_str().to_string(),
+                                    name.clone(),
+                                ));
+                            }
+                            GraphTypeAlteration::DropEdgeType(name) => {
+                                self.catalog
+                                    .alter_graph_type_drop_edge_type(&effective_name, name)
+                                    .map_err(|e| {
+                                        Error::Query(QueryError::new(
+                                            QueryErrorKind::Semantic,
+                                            e.to_string(),
+                                        ))
+                                    })?;
+                                #[cfg(feature = "wal")]
+                                wal_alts.push((
+                                    GraphTypeAlterationKind::DropEdgeType.as_str().to_string(),
+                                    name.clone(),
+                                ));
+                            }
                         }
                     }
+                    Ok(())
+                })();
+                if let Err(e) = applied {
+                    if let Some(def) = before {
+                        self.catalog.register_or_replace_graph_type(def);
+                    }
+                    return Err(e);
                 }
                 wal_log!(
                     self,
@@ -2383,8 +2455,19 @@ impl Session {
 
     /// Returns a table of all constraints (currently metadata-only).
     fn execute_show_constraints(&self) -> Result<QueryResult> {
-        // Constraints are tracked in WAL but not yet in a queryable catalog.
-        // Return an empty table with the expected schema.
+        let rows = self
+            .catalog
+            .constraints()
+            .into_iter()
+            .map(|def| {
+                vec![
+                    Value::from(def.name),
+                    Value::from(def.kind.display_name()),
+                    Value::from(def.label),
+                    Value::from(def.properties.join(", ")),
+                ]
+            })
+            .collect();
         Ok(QueryResult {
             columns: vec![
                 "name".to_string(),
@@ -2393,7 +2476,7 @@ impl Session {
                 "properties".to_string(),
             ],
             column_types: Vec::new(),
-            rows: Vec::new(),
+            rows,
             ..QueryResult::empty()
         })
     }

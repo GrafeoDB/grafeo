@@ -186,7 +186,7 @@ pub enum WalRecord {
         label: String,
         /// Target properties.
         properties: Vec<String>,
-        /// Constraint kind: "unique", "node_key", "not_null", "exists".
+        /// Constraint kind, a [`NamedConstraintKind`].
         kind: String,
     },
 
@@ -447,6 +447,20 @@ wal_kind! {
         PrimaryKey => "primary_key",
         /// The (single) property must be present.
         NotNull => "not_null",
+    }
+}
+
+wal_kind! {
+    /// Kind of a named constraint in a [`WalRecord::CreateConstraint`] record.
+    NamedConstraintKind {
+        /// The properties are unique among nodes with the label.
+        Unique => "unique",
+        /// The properties are present and unique together.
+        NodeKey => "node_key",
+        /// The properties are present (`NOT NULL`).
+        NotNull => "not_null",
+        /// The properties are present (`EXISTS`, another spelling of `NOT NULL`).
+        Exists => "exists",
     }
 }
 

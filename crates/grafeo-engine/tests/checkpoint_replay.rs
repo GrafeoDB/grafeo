@@ -13,6 +13,7 @@
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod tests {
+    use grafeo_common::testing::child_process;
     use grafeo_common::types::{TransactionId, Value};
     use grafeo_engine::config::StorageFormat;
     use grafeo_engine::{Config, GrafeoDB};
@@ -42,12 +43,13 @@ mod tests {
     /// Runs `scenario` in a child process that exits without closing the
     /// database, like a crash.
     fn crash_after(scenario: &str, path: &Path) {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::crash_child", "--nocapture"])
-            .env(SCENARIO_VAR, scenario)
-            .env(PATH_VAR, path)
-            .status()
-            .unwrap();
+        let status = child_process::run(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::crash_child", "--nocapture"])
+                .env(SCENARIO_VAR, scenario)
+                .env(PATH_VAR, path),
+        )
+        .unwrap();
         assert!(status.success(), "scenario {scenario} failed");
     }
 
@@ -81,9 +83,10 @@ mod tests {
                     .execute("INSERT (:N {i: 5})-[:E]->(:N {i: 6})")
                     .unwrap();
             }
-            // Reopen (replaying the WAL) and crash again.
+            // Reopen (replaying the WAL), check the edges and crash again.
             "reopen" => {
-                session.execute("MATCH (n) RETURN count(n)").unwrap();
+                assert_eq!(edge_rows(&db), (Value::Int64(3), Value::Int64(3)));
+                assert_eq!(db.edge_count(), 3);
             }
             // Crash at injection point N inside the first checkpoint
             // (`first:N`) or inside a second one after more writes (`second:N`).
@@ -147,27 +150,24 @@ mod tests {
     }
 
     /// The server scenario from the issue: a full backup, more writes, then
-    /// repeated crash and reopen cycles.
+    /// repeated crash and reopen cycles. Each reopen replays the same WAL
+    /// over the backup's checkpoint and crashes before a clean close could
+    /// checkpoint again and drop the WAL.
     #[test]
     fn crash_after_full_backup_does_not_duplicate_edges() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db.grafeo");
         crash_after("backup_then_write", &path);
-
-        for cycle in 0..2 {
-            let db = open(&path);
-            assert_eq!(
-                edge_rows(&db),
-                (Value::Int64(3), Value::Int64(3)),
-                "cycle {cycle}"
-            );
-            assert_eq!(db.edge_count(), 3, "cycle {cycle}");
-            assert_eq!(db.node_count(), 6, "cycle {cycle}");
-            drop(db);
-            if cycle == 0 {
-                crash_after("reopen", &path);
-            }
+        for _ in 0..2 {
+            crash_after("reopen", &path);
         }
+        assert!(sidecar_wal(&path).exists(), "no WAL left to replay");
+
+        let db = open(&path);
+        assert_eq!(edge_rows(&db), (Value::Int64(3), Value::Int64(3)));
+        assert_eq!(db.edge_count(), 3);
+        assert_eq!(db.node_count(), 6);
+        drop(db);
 
         // The full backup restores to its two edges.
         let manifest = GrafeoDB::read_backup_manifest(&backup_dir(&path))
@@ -236,7 +236,8 @@ mod tests {
 
     /// A checkpoint that fails partway (here its new image cannot be created,
     /// as on a full disk) leaves the database usable, and the data readable
-    /// after a reopen (#418).
+    /// after a reopen, once, for query writes and direct writes alike (#418,
+    /// #424).
     #[test]
     fn failed_checkpoint_keeps_the_database_readable() {
         let dir = tempfile::tempdir().unwrap();
@@ -256,6 +257,9 @@ mod tests {
             session
                 .execute("INSERT (:Person {name: 'Vincent'})")
                 .unwrap();
+            let mia = db.create_node_with_props(&["Person"], [("name", Value::from("Mia"))]);
+            let butch = db.create_node_with_props(&["Person"], [("name", Value::from("Butch"))]);
+            db.create_edge(mia, butch, "LIKES");
 
             std::fs::create_dir(&blocker).unwrap();
             assert!(db.wal_checkpoint().is_err(), "the checkpoint must fail");
@@ -275,8 +279,10 @@ mod tests {
             names,
             vec![
                 vec![Value::from("Alix")],
+                vec![Value::from("Butch")],
                 vec![Value::from("Gus")],
                 vec![Value::from("Jules")],
+                vec![Value::from("Mia")],
                 vec![Value::from("Vincent")],
             ]
         );
@@ -284,6 +290,7 @@ mod tests {
             knows(&db),
             vec![vec![Value::from("Alix"), Value::from("Gus")]]
         );
+        assert_eq!(db.edge_count(), 2, "KNOWS and LIKES, once each");
     }
 
     fn log_files(dir: &Path) -> Vec<PathBuf> {

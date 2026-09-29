@@ -3832,58 +3832,73 @@ mod tests {
     /// the test stays bounded.
     #[test]
     fn jules_concurrent_readers_survive_repeated_base_swaps() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::{Arc, Barrier};
         use std::thread;
+        use std::time::{Duration, Instant};
 
         const READERS: usize = 4;
+        const MIN_SWAPS: usize = 200;
         let layered = Arc::new(build_test_layered());
         let stop = Arc::new(AtomicBool::new(false));
-        // The swapper starts only once every reader is running, so reads
-        // overlap the swaps. Without it a fast swapper could finish before a
-        // reader was scheduled, and that reader never read at all.
         let start = Arc::new(Barrier::new(READERS + 1));
+        // Reads each reader has finished since the barrier.
+        let reads: Arc<Vec<AtomicUsize>> =
+            Arc::new((0..READERS).map(|_| AtomicUsize::new(0)).collect());
 
         let mut readers = Vec::new();
-        for _ in 0..READERS {
+        for reader in 0..READERS {
             let l = Arc::clone(&layered);
             let s = Arc::clone(&stop);
             let b = Arc::clone(&start);
+            let r = Arc::clone(&reads);
             readers.push(thread::spawn(move || {
                 b.wait();
-                let mut total = 0u64;
-                // Read at least once, then until the swapper is done.
                 loop {
                     let people = l.nodes_by_label("Person");
                     // Person count is base(2) + overlay(0..many); never less than base.
                     assert!(people.len() >= 2, "lost a base node mid-swap");
-                    total += people.len() as u64;
+                    r[reader].fetch_add(1, Ordering::Relaxed);
                     if s.load(Ordering::Relaxed) {
                         break;
                     }
                 }
-                total
             }));
         }
 
-        // Swapper builds a fresh base with one extra Person each round.
+        // Swapper builds a fresh base with one extra Person each round. It
+        // keeps swapping until every reader has finished a read after the
+        // first swap, so each reader read while bases were being replaced:
+        // a barrier alone let a late reader do all its reads after the last
+        // swap.
         let l = Arc::clone(&layered);
         let b = Arc::clone(&start);
+        let r = Arc::clone(&reads);
         let swapper = thread::spawn(move || {
             b.wait();
-            for _ in 0..200 {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let mut after_first_swap: Option<Vec<usize>> = None;
+            for swaps in 1.. {
                 // Read the current combined view, build a new compact base.
                 let new_base = from_graph_store_preserving_ids(&*l).unwrap();
                 l.swap_base(Arc::new(new_base));
+
+                let now: Vec<usize> = r.iter().map(|c| c.load(Ordering::Relaxed)).collect();
+                let first = after_first_swap.get_or_insert_with(|| now.clone());
+                if swaps >= MIN_SWAPS && now.iter().zip(first.iter()).all(|(n, f)| n > f) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "a reader made no progress during the swaps: {now:?}"
+                );
             }
         });
 
         swapper.join().unwrap();
         stop.store(true, Ordering::Relaxed);
-        let totals: Vec<u64> = readers.into_iter().map(|h| h.join().unwrap()).collect();
-        // Sanity: every reader observed at least one snapshot.
-        for t in totals {
-            assert!(t > 0, "reader saw zero snapshots");
+        for reader in readers {
+            reader.join().unwrap();
         }
     }
 

@@ -76,7 +76,6 @@ tests:
       error: "constraint"
 
   - name: not_null_constraint_violation_on_set
-    skip: "constraint check on REMOVE"
     setup:
       - "CREATE CONSTRAINT person_name_not_null FOR (p:Person) REQUIRE p.name IS NOT NULL"
       - "CREATE (:Person {name: 'Alix'})"
@@ -94,7 +93,6 @@ tests:
       count: 0
 
   - name: node_key_allows_different_combinations
-    skip: "NODE KEY constraint not implemented"
     setup:
       - "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE (p.name, p.city) IS NODE KEY"
       - "CREATE (:Person {name: 'Alix', city: 'Amsterdam'})"
@@ -113,12 +111,11 @@ tests:
       error: "constraint"
 
   - name: node_key_violation_missing_property
-    skip: "NODE KEY constraint not implemented"
     setup:
       - "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE (p.name, p.city) IS NODE KEY"
     query: "CREATE (:Person {name: 'Alix'})"
     expect:
-      error: "constraint"
+      error: "missing primary key property"
 
   # ---------------------------------------------------------------------------
   # DROP CONSTRAINT
@@ -132,10 +129,20 @@ tests:
       count: 0
 
   - name: drop_nonexistent_constraint
-    skip: "error on missing constraint"
     query: "DROP CONSTRAINT no_such_constraint"
     expect:
       error: "constraint"
+
+  - name: drop_constraint_removes_enforcement
+    setup:
+      - "CREATE CONSTRAINT unique_email FOR (p:Person) REQUIRE p.email IS UNIQUE"
+      - "DROP CONSTRAINT unique_email"
+      - "CREATE (:Person {name: 'Alix', email: 'alix@example.org'})"
+    query: |
+      CREATE (:Person {name: 'Gus', email: 'alix@example.org'})
+      RETURN count(*) AS cnt
+    expect:
+      count: 1
 
   - name: drop_constraint_if_exists
     query: "DROP CONSTRAINT no_such_constraint IF EXISTS"
@@ -147,7 +154,6 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: show_constraints_after_create
-    skip: "SHOW CONSTRAINTS not implemented"
     setup:
       - "CREATE CONSTRAINT unique_email FOR (p:Person) REQUIRE p.email IS UNIQUE"
     query: "SHOW CONSTRAINTS"

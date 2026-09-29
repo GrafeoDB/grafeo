@@ -3160,7 +3160,10 @@ impl<'a> Parser<'a> {
     fn parse_not_expression(&mut self) -> Result<Expression> {
         if self.current.kind == TokenKind::Not {
             self.advance();
-            let operand = self.parse_not_expression()?;
+            self.enter_nesting()?;
+            let operand = self.parse_not_expression();
+            self.exit_nesting();
+            let operand = operand?;
             return Ok(Expression::Unary {
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
@@ -3623,6 +3626,20 @@ impl<'a> Parser<'a> {
                             };
                         }
                     }
+                }
+                // Key access into a map value: `n.meta.route` is `n.meta['route']`
+                // (the primary expression already consumed `n.meta`).
+                TokenKind::Dot => {
+                    self.advance();
+                    if !self.is_label_or_type_name() {
+                        return Err(self.error("Expected map key after '.'"));
+                    }
+                    let key = self.get_identifier_name();
+                    self.advance();
+                    expr = Expression::IndexAccess {
+                        base: Box::new(expr),
+                        index: Box::new(Expression::Literal(Literal::String(key))),
+                    };
                 }
                 // n:Label label-check syntax (compact form of IS LABELED).
                 // Multiple labels (n:Person:Actor) are ANDead together.
@@ -8037,6 +8054,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_parse_dotted_map_key_access_is_subscript() {
+        let return_expression = |query: &str| {
+            let Statement::Query(q) = Parser::new(query).parse().unwrap() else {
+                panic!("Expected Query statement");
+            };
+            format!("{:?}", q.return_clause.items[0].expression)
+        };
+        // `n.meta.route` reads key `route` of the map in `n.meta`, and chains.
+        assert_eq!(
+            return_expression("MATCH (n) RETURN n.meta.route"),
+            return_expression("MATCH (n) RETURN n.meta['route']")
+        );
+        assert_eq!(
+            return_expression("MATCH (n) RETURN n.meta.a.b"),
+            return_expression("MATCH (n) RETURN n.meta['a']['b']")
+        );
+        // Keywords are valid keys, as they are valid property names.
+        assert_eq!(
+            return_expression("MATCH (n) RETURN n.meta.type"),
+            return_expression("MATCH (n) RETURN n.meta['type']")
+        );
+        let err = Parser::new("MATCH (n) RETURN n.meta.")
+            .parse()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Expected map key"), "got: {err}");
+    }
+
     // --- CAST expressions ---
 
     #[test]
@@ -10684,6 +10730,7 @@ mod tests {
             format!("RETURN 2{}", " ^ 2".repeat(50_000)),
             format!("RETURN {}1", "- ".repeat(50_000)),
             format!("RETURN {}1", "+ ".repeat(50_000)),
+            format!("RETURN {}true", "NOT ".repeat(50_000)),
         ] {
             let err = Parser::new(&query).parse().unwrap_err().to_string();
             assert!(err.contains("nesting depth"), "got: {err}");
@@ -10695,6 +10742,7 @@ mod tests {
                 .is_ok()
         );
         assert!(Parser::new("RETURN - - 1").parse().is_ok());
+        assert!(Parser::new("RETURN NOT NOT true").parse().is_ok());
     }
 
     #[test]

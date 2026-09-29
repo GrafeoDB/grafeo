@@ -413,7 +413,7 @@ impl super::GrafeoDB {
         // the WAL only once the file is durable (#417).
         #[cfg(feature = "grafeo-file")]
         if let Some(ref fm) = self.file_manager {
-            let _ = self.checkpoint_to_file(fm, super::flush::FlushReason::Explicit)?;
+            let _ = self.checkpoint_to_file(fm)?;
         }
 
         Ok(())

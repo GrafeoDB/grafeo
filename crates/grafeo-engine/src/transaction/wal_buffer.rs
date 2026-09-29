@@ -58,11 +58,6 @@ impl WalBuffer {
         self.pending.lock().len()
     }
 
-    /// Whether no records are buffered.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.pending.lock().is_empty()
-    }
-
     /// Drops the records added after position `len` (savepoint rollback).
     pub(crate) fn truncate(&self, len: usize) {
         self.pending.lock().truncate(len);
@@ -82,12 +77,7 @@ impl WalBuffer {
     /// Returns an error if the WAL write fails. The buffered records are
     /// dropped either way.
     pub(crate) fn flush(&self, markers: &[WalRecord]) -> Result<()> {
-        let pending = std::mem::take(&mut *self.pending.lock());
-        let group = build_group(pending, markers);
-        if group.is_empty() {
-            return Ok(());
-        }
-        self.wal.log_batch(&group)
+        self.write_group(&mut self.pending.lock(), markers)
     }
 
     /// Writes buffered records from outside a transaction as an implicit
@@ -97,12 +87,27 @@ impl WalBuffer {
     ///
     /// Returns an error if the WAL write fails.
     pub(crate) fn flush_implicit(&self) -> Result<()> {
-        if self.is_empty() {
+        let mut pending = self.pending.lock();
+        if pending.is_empty() {
             return Ok(());
         }
-        self.flush(&[WalRecord::TransactionCommit {
-            transaction_id: TransactionId::SYSTEM,
-        }])
+        self.write_group(
+            &mut pending,
+            &[WalRecord::TransactionCommit {
+                transaction_id: TransactionId::SYSTEM,
+            }],
+        )
+    }
+
+    /// Writes `pending` as a group closed by `markers` and empties it. The
+    /// caller holds the buffer lock through the write, so a flush from
+    /// another thread cannot write later records first.
+    fn write_group(&self, pending: &mut Vec<PendingRecord>, markers: &[WalRecord]) -> Result<()> {
+        let group = build_group(std::mem::take(pending), markers);
+        if group.is_empty() {
+            return Ok(());
+        }
+        self.wal.log_batch(&group)
     }
 }
 
@@ -213,9 +218,56 @@ mod tests {
         buffer.truncate(savepoint);
         assert_eq!(buffer.len(), 1);
         buffer.clear();
-        assert!(buffer.is_empty());
+        assert_eq!(buffer.len(), 0);
         // Nothing buffered: an implicit flush writes nothing.
         buffer.flush_implicit().unwrap();
         assert_eq!(buffer.wal().record_count(), 0);
+    }
+
+    /// Threads writing through one buffer: a flush can take another thread's
+    /// records, but every record still reaches the WAL in the order it was
+    /// pushed. A stress test: with the lock released before the write, about
+    /// two runs in five failed.
+    #[test]
+    fn concurrent_flushes_keep_the_push_order() {
+        const PER_THREAD: u64 = 20_000;
+
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = Arc::new(WalBuffer::new(Arc::new(LpgWal::open(dir.path()).unwrap())));
+        let writers: Vec<_> = (0..8)
+            .map(|thread| {
+                let buffer = Arc::clone(&buffer);
+                std::thread::spawn(move || {
+                    for i in 0..PER_THREAD {
+                        buffer.push(None, create(thread * PER_THREAD + i));
+                        buffer.flush_implicit().unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        buffer.wal().flush().unwrap();
+
+        let ids: Vec<u64> = grafeo_storage::wal::WalRecovery::new(dir.path())
+            .recover()
+            .unwrap()
+            .into_iter()
+            .filter_map(|record| match record {
+                WalRecord::CreateNode { id, .. } => Some(id.as_u64()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len() as u64, 8 * PER_THREAD);
+        for thread in 0..8 {
+            let own: Vec<u64> = ids
+                .iter()
+                .copied()
+                .filter(|id| id / PER_THREAD == thread)
+                .collect();
+            let out_of_order = own.windows(2).find(|pair| pair[0] > pair[1]);
+            assert_eq!(out_of_order, None, "thread {thread}");
+        }
     }
 }

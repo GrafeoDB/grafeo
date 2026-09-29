@@ -146,6 +146,70 @@ fn writes_are_checked_against_constraints() {
     );
 }
 
+/// An edge type that declares its endpoints' labels holds for direct writes;
+/// an undeclared edge type connects any nodes.
+#[test]
+fn edge_endpoint_types_are_checked() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("CREATE EDGE TYPE WORKS_AT CONNECTING (Person) TO (Company)")
+        .unwrap();
+    let alix = db.create_node(&["Person"]).unwrap();
+    let company = db.create_node(&["Company"]).unwrap();
+    let city = db.create_node(&["City"]).unwrap();
+
+    assert!(db.create_edge(alix, company, "WORKS_AT").is_ok());
+    assert!(
+        db.create_edge(alix, city, "WORKS_AT").is_err(),
+        "the target lacks the declared label"
+    );
+    assert!(
+        db.create_edge(company, alix, "WORKS_AT").is_err(),
+        "the source lacks the declared label"
+    );
+    assert!(db.create_edge(city, alix, "LIVES_IN").is_ok());
+    assert_eq!(
+        db.execute("MATCH ()-[r]->() RETURN count(r)")
+            .unwrap()
+            .rows()[0][0],
+        Value::Int64(2)
+    );
+}
+
+/// With no schema at all a property value is still held to the size limit,
+/// whichever way it is set, and a rejected write leaves the node as it was.
+#[test]
+fn the_size_limit_holds_without_a_schema() {
+    let db = GrafeoDB::with_config(grafeo_engine::Config::in_memory().with_max_property_size(64))
+        .unwrap();
+    let alix = db
+        .create_node_with_props(&["Person"], [("bio", Value::from("short"))])
+        .unwrap();
+    let long = "x".repeat(1000);
+
+    let err = db
+        .set_node_property(alix, "bio", Value::from(long.as_str()))
+        .unwrap_err();
+    assert!(err.to_string().contains("exceeds maximum size"), "{err}");
+    for set in [
+        format!("n.bio = '{long}'"),
+        format!("n += {{bio: '{long}'}}"),
+        format!("n = {{bio: '{long}'}}"),
+    ] {
+        let err = db
+            .execute(&format!("MATCH (n:Person) SET {set}"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum size"),
+            "SET {}: {err}",
+            &set[..10]
+        );
+    }
+    assert_eq!(
+        db.get_node(alix).unwrap().get_property("bio"),
+        Some(&Value::from("short"))
+    );
+}
+
 #[test]
 fn a_failing_batch_creates_nothing() {
     // With a property index the UNIQUE check finds candidates through the

@@ -100,6 +100,7 @@ mod join;
 mod mutation;
 mod project;
 mod scan;
+pub(crate) mod seek;
 
 #[cfg(feature = "algos")]
 use crate::query::plan::CallProcedureOp;

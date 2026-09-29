@@ -334,6 +334,15 @@ impl Catalog {
             .and_then(|s| s.resolved_node_type(name))
     }
 
+    /// Whether any node type is defined: without one, no property, NOT NULL
+    /// or UNIQUE constraint applies to nodes.
+    #[must_use]
+    pub fn has_node_types(&self) -> bool {
+        self.schema
+            .as_ref()
+            .is_some_and(SchemaCatalog::has_node_types)
+    }
+
     /// Returns all registered node type names.
     #[must_use]
     pub fn all_node_type_names(&self) -> Vec<String> {
@@ -1553,6 +1562,12 @@ impl SchemaCatalog {
         self.node_types.read().get(name).cloned()
     }
 
+    /// Whether any node type is defined.
+    #[must_use]
+    pub fn has_node_types(&self) -> bool {
+        !self.node_types.read().is_empty()
+    }
+
     /// Gets a resolved node type with inherited properties and constraints from parents.
     ///
     /// Walks the parent chain depth-first, collecting properties and constraints.
@@ -2666,6 +2681,20 @@ impl ConstraintValidator for CatalogConstraintValidator {
             }
         }
         Ok(())
+    }
+
+    fn constrains_edge_endpoints(&self, edge_type: &str) -> bool {
+        self.catalog
+            .get_edge_type_def(edge_type)
+            .is_some_and(|def| {
+                !def.source_node_types.is_empty() || !def.target_node_types.is_empty()
+            })
+    }
+
+    fn constrains_node_property(&self, _key: &str, value: &Value) -> bool {
+        // A vector index on (label, key) fixes a vector's size; the node
+        // types hold every other constraint.
+        matches!(value, Value::Vector(_)) || self.catalog.has_node_types()
     }
 
     fn inject_defaults(&self, labels: &[String], properties: &mut Vec<(String, Value)>) {

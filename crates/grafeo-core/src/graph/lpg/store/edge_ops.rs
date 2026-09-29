@@ -131,6 +131,7 @@ impl LpgStore {
         let mut versions = self.edge_versions.write();
         if let Some(index) = versions.get_mut(&id) {
             index.add_hot(hot_ref);
+            self.gc_candidates.lock().edges.insert(id);
         } else {
             versions.insert(id, VersionIndex::with_initial(hot_ref));
         }

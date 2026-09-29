@@ -271,6 +271,21 @@ impl LabelRegistry {
     }
 }
 
+/// The entities whose history garbage collection has to trim.
+#[cfg(any(feature = "temporal", feature = "tiered-storage"))]
+#[derive(Default)]
+pub(super) struct GcCandidates {
+    /// Nodes whose label log holds an older label set.
+    #[cfg(feature = "temporal")]
+    pub(super) labels: FxHashSet<NodeId>,
+    /// Nodes whose version index holds more than one version (re-created).
+    #[cfg(feature = "tiered-storage")]
+    pub(super) nodes: FxHashSet<NodeId>,
+    /// Edges whose version index holds more than one version (re-created).
+    #[cfg(feature = "tiered-storage")]
+    pub(super) edges: FxHashSet<EdgeId>,
+}
+
 /// The core in-memory graph storage.
 ///
 /// Everything lives here: nodes, edges, properties, adjacency indexes, and
@@ -449,6 +464,12 @@ pub struct LpgStore {
     /// Avoids O(n) full scan in `compute_statistics()`.
     pub(super) live_node_count: AtomicI64,
 
+    /// The entities that hold older versions, the only ones garbage
+    /// collection has work for (see `gc_versions`). A leaf lock: nothing is
+    /// acquired while it is held.
+    #[cfg(any(feature = "temporal", feature = "tiered-storage"))]
+    pub(super) gc_candidates: parking_lot::Mutex<GcCandidates>,
+
     /// Live (non-deleted) edge count, maintained incrementally.
     /// Avoids O(m) full scan in `compute_statistics()`.
     pub(super) live_edge_count: AtomicI64,
@@ -532,6 +553,8 @@ impl LpgStore {
             next_edge_id: AtomicU64::new(0),
             current_epoch: AtomicU64::new(0),
             live_node_count: AtomicI64::new(0),
+            #[cfg(any(feature = "temporal", feature = "tiered-storage"))]
+            gc_candidates: parking_lot::Mutex::new(GcCandidates::default()),
             live_edge_count: AtomicI64::new(0),
             edge_type_live_counts: RwLock::new(Vec::new()),
             statistics: RwLock::new(Arc::new(Statistics::new())),

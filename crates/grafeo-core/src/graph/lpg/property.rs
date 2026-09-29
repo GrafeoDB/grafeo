@@ -34,6 +34,8 @@ use grafeo_common::temporal::VersionLog;
 use grafeo_common::types::EpochId;
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::hash::FxHashMap;
+#[cfg(feature = "temporal")]
+use grafeo_common::utils::hash::FxHashSet;
 use parking_lot::RwLock;
 use std::cmp::Ordering;
 use std::hash::Hash;
@@ -889,6 +891,10 @@ pub struct PropertyColumn<Id: EntityId = NodeId> {
     /// Each value is tagged with the epoch it was written in.
     #[cfg(feature = "temporal")]
     values: FxHashMap<Id, VersionLog<Value>>,
+    /// Entities whose log holds more than one entry: the only ones garbage
+    /// collection has work for, so it visits these instead of every log.
+    #[cfg(feature = "temporal")]
+    gc_candidates: FxHashSet<Id>,
     /// Zone map tracking min/max/null_count for predicate pushdown.
     zone_map: ZoneMapEntry,
     /// Whether zone map needs rebuild (after removes).
@@ -1611,6 +1617,7 @@ impl<Id: EntityId> PropertyColumn<Id> {
     pub fn new() -> Self {
         Self {
             values: FxHashMap::default(),
+            gc_candidates: FxHashSet::default(),
             zone_map: ZoneMapEntry::new(),
             zone_map_dirty: false,
             compression_mode: CompressionMode::None,
@@ -1623,6 +1630,7 @@ impl<Id: EntityId> PropertyColumn<Id> {
     pub fn with_compression(mode: CompressionMode) -> Self {
         Self {
             values: FxHashMap::default(),
+            gc_candidates: FxHashSet::default(),
             zone_map: ZoneMapEntry::new(),
             zone_map_dirty: false,
             compression_mode: mode,
@@ -1647,7 +1655,17 @@ impl<Id: EntityId> PropertyColumn<Id> {
     /// For transactional writes, pass `EpochId::PENDING`.
     pub fn set(&mut self, id: Id, value: Value, epoch: EpochId) {
         self.update_zone_map_on_insert(&value);
-        self.values.entry(id).or_default().append(epoch, value);
+        self.append(id, epoch, value);
+    }
+
+    /// Appends to an entity's log, noting it for garbage collection once it
+    /// holds an older version.
+    fn append(&mut self, id: Id, epoch: EpochId, value: Value) {
+        let log = self.values.entry(id).or_default();
+        log.append(epoch, value);
+        if log.len() > 1 {
+            self.gc_candidates.insert(id);
+        }
     }
 
     /// Updates zone map when inserting a value.
@@ -1692,10 +1710,7 @@ impl<Id: EntityId> PropertyColumn<Id> {
     pub fn remove(&mut self, id: Id, epoch: EpochId) -> Option<Value> {
         let previous = self.get(id);
         if previous.is_some() {
-            self.values
-                .entry(id)
-                .or_default()
-                .append(epoch, Value::Null);
+            self.append(id, epoch, Value::Null);
             self.zone_map_dirty = true;
         }
         previous
@@ -1850,12 +1865,22 @@ impl<Id: EntityId> PropertyColumn<Id> {
         self.values.retain(|_, log| !log.is_empty());
     }
 
-    /// Garbage-collects old versions from all version logs.
+    /// Garbage-collects old versions, visiting only the logs that hold more
+    /// than one entry. A log keeps the version visible at `min_epoch` and
+    /// every later one, and stays a candidate while it has more than one.
     pub fn gc(&mut self, min_epoch: EpochId) {
-        for log in self.values.values_mut() {
+        let candidates = std::mem::take(&mut self.gc_candidates);
+        for id in candidates {
+            let Some(log) = self.values.get_mut(&id) else {
+                continue;
+            };
             log.gc(min_epoch);
+            if log.is_empty() {
+                self.values.remove(&id);
+            } else if log.len() > 1 {
+                self.gc_candidates.insert(id);
+            }
         }
-        self.values.retain(|_, log| !log.is_empty());
     }
 
     /// Removes PENDING entries for a specific entity (targeted rollback).
@@ -2621,5 +2646,59 @@ mod tests {
         assert_eq!(blocks[0].null_count, 0, "NaN is not null");
         assert_eq!(blocks[0].min, Some(Value::Float64(0.0)));
         assert_eq!(blocks[0].max, Some(Value::Float64(49.0)));
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "temporal")]
+mod temporal_tests {
+    use super::*;
+
+    /// Garbage collection visits only the entities with history, so its cost
+    /// follows the changes and not the size of the column; a log stays on the
+    /// list until it is down to one entry.
+    #[test]
+    fn gc_visits_only_entities_with_history() {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        for i in 0u64..1000 {
+            col.set(
+                NodeId::new(i),
+                Value::Int64(i64::try_from(i).unwrap()),
+                EpochId::new(1),
+            );
+        }
+        assert!(
+            col.gc_candidates.is_empty(),
+            "single versions: nothing to visit"
+        );
+
+        let (alix, gus) = (NodeId::new(7), NodeId::new(8));
+        col.set(alix, Value::from("Paris"), EpochId::new(2));
+        col.set(alix, Value::from("Prague"), EpochId::new(3));
+        assert_eq!(col.remove(gus, EpochId::new(3)), Some(Value::Int64(8)));
+        let candidates = |col: &PropertyColumn<NodeId>| {
+            let mut ids: Vec<u64> = col.gc_candidates.iter().map(|id| id.as_u64()).collect();
+            ids.sort_unstable();
+            ids
+        };
+        assert_eq!(candidates(&col), [7, 8]);
+
+        // Readers at epoch 3 still need the value before it: both logs keep
+        // two entries and stay candidates; only Alix's first value goes.
+        col.gc(EpochId::new(3));
+        assert_eq!(candidates(&col), [7, 8]);
+        assert_eq!(col.get_at(alix, EpochId::new(1)), None);
+        assert_eq!(
+            col.get_at(alix, EpochId::new(2)),
+            Some(Value::from("Paris"))
+        );
+        assert_eq!(col.get_at(gus, EpochId::new(2)), Some(Value::Int64(8)));
+
+        col.gc(EpochId::new(4));
+        assert!(col.gc_candidates.is_empty());
+        assert_eq!(col.get(alix), Some(Value::from("Prague")));
+        assert_eq!(col.get(gus), None);
+        assert_eq!(col.get_at(gus, EpochId::new(2)), None);
+        assert_eq!(col.get(NodeId::new(9)), Some(Value::Int64(9)));
     }
 }

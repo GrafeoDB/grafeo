@@ -133,6 +133,36 @@ impl GraphWriter {
         }
     }
 
+    /// Whether this writer's transaction sees the node, without reading its
+    /// labels and properties.
+    #[must_use]
+    pub fn has_node(&self, id: NodeId) -> bool {
+        match (self.viewing_epoch, self.transaction_id) {
+            (Some(epoch), Some(transaction_id)) => {
+                self.store
+                    .is_node_visible_versioned(id, epoch, transaction_id)
+            }
+            _ => self
+                .store
+                .is_node_visible_at_epoch(id, self.store.current_epoch()),
+        }
+    }
+
+    /// Whether this writer's transaction sees the edge, without reading its
+    /// properties.
+    #[must_use]
+    pub fn has_edge(&self, id: EdgeId) -> bool {
+        match (self.viewing_epoch, self.transaction_id) {
+            (Some(epoch), Some(transaction_id)) => {
+                self.store
+                    .is_edge_visible_versioned(id, epoch, transaction_id)
+            }
+            _ => self
+                .store
+                .is_edge_visible_at_epoch(id, self.store.current_epoch()),
+        }
+    }
+
     fn record(&self, entity: Entity) -> Result<(), OperatorError> {
         if let (Some(tracker), Some(transaction_id)) = (&self.write_tracker, self.transaction_id) {
             match entity {
@@ -219,10 +249,17 @@ impl GraphWriter {
         replace: bool,
     ) -> Result<(), OperatorError> {
         self.record(Entity::Node(id))?;
-        if let Some(validator) = &self.validator
-            && let Some(node) = self.node(id)
-        {
-            self.check_node_set(validator.as_ref(), &node, assignments, replace)?;
+        if let Some(validator) = &self.validator {
+            let needs_node = replace
+                || assigned_values(assignments)
+                    .any(|(key, value)| validator.constrains_node_property(key, value));
+            if !needs_node {
+                for (key, value) in assigned_values(assignments) {
+                    validator.validate_node_property(&[], key, value)?;
+                }
+            } else if let Some(node) = self.node(id) {
+                self.check_node_set(validator.as_ref(), &node, assignments, replace)?;
+            }
         }
         self.apply_set(Entity::Node(id), assignments, replace);
         Ok(())
@@ -519,6 +556,9 @@ impl GraphWriter {
         edge_type: &str,
     ) -> Result<(), OperatorError> {
         validator.validate_edge_type_allowed(edge_type)?;
+        if !validator.constrains_edge_endpoints(edge_type) {
+            return Ok(());
+        }
         let labels_of = |id| {
             self.node(id)
                 .map(|node| node_labels(&node))
@@ -648,6 +688,23 @@ fn property_list(properties: &PropertyMap) -> Vec<(String, Value)> {
         .iter()
         .map(|(key, value)| (key.as_str().to_string(), value.clone()))
         .collect()
+}
+
+/// The `(key, value)` pairs a SET writes: the entries of a map assignment,
+/// and every other assignment itself.
+fn assigned_values(assignments: &[(String, Value)]) -> impl Iterator<Item = (&str, &Value)> {
+    assignments.iter().flat_map(|(name, value)| {
+        let single = (name != MAP_ASSIGNMENT).then_some((name.as_str(), value));
+        let entries = match value {
+            Value::Map(map) if name == MAP_ASSIGNMENT => Some(map),
+            _ => None,
+        };
+        single.into_iter().chain(
+            entries
+                .into_iter()
+                .flat_map(|map| map.iter().map(|(key, value)| (key.as_str(), value))),
+        )
+    })
 }
 
 /// The property changes a SET makes: map assignments count as one change

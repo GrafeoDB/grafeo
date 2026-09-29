@@ -53,10 +53,7 @@ impl LpgStore {
             }
             let mut new_set = current;
             new_set.insert(label_id);
-            node_labels
-                .entry(node_id)
-                .or_default()
-                .append(self.current_epoch(), new_set);
+            self.append_labels(&mut node_labels, node_id, self.current_epoch(), new_set);
         }
 
         drop(node_labels);
@@ -134,10 +131,7 @@ impl LpgStore {
             }
             let mut new_set = current;
             new_set.insert(label_id);
-            node_labels
-                .entry(node_id)
-                .or_default()
-                .append(self.current_epoch(), new_set);
+            self.append_labels(&mut node_labels, node_id, self.current_epoch(), new_set);
         }
 
         drop(node_labels);
@@ -208,10 +202,7 @@ impl LpgStore {
             }
             let mut new_set = current;
             new_set.remove(&label_id);
-            node_labels
-                .entry(node_id)
-                .or_default()
-                .append(self.current_epoch(), new_set);
+            self.append_labels(&mut node_labels, node_id, self.current_epoch(), new_set);
         }
 
         drop(node_labels);
@@ -296,10 +287,7 @@ impl LpgStore {
             }
             let mut new_set = current;
             new_set.remove(&label_id);
-            node_labels
-                .entry(node_id)
-                .or_default()
-                .append(self.current_epoch(), new_set);
+            self.append_labels(&mut node_labels, node_id, self.current_epoch(), new_set);
         }
 
         drop(node_labels);
@@ -461,10 +449,7 @@ impl LpgStore {
         }
         let mut new_set = current;
         new_set.insert(label_id);
-        node_labels
-            .entry(node_id)
-            .or_default()
-            .append(EpochId::PENDING, new_set);
+        self.append_labels(&mut node_labels, node_id, EpochId::PENDING, new_set);
         drop(node_labels);
 
         // Update label_index
@@ -539,10 +524,7 @@ impl LpgStore {
         }
         let mut new_set = current;
         new_set.remove(&label_id);
-        node_labels
-            .entry(node_id)
-            .or_default()
-            .append(EpochId::PENDING, new_set);
+        self.append_labels(&mut node_labels, node_id, EpochId::PENDING, new_set);
         drop(node_labels);
 
         // Update label_index

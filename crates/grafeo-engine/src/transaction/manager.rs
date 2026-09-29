@@ -323,40 +323,40 @@ impl TransactionManager {
         let mut committed = self.committed_epochs.write();
 
         // First, validate the transaction exists and is active
-        let (our_isolation, our_start_epoch, our_write_set, our_read_set) = {
-            let info = txns.get(&transaction_id).ok_or_else(|| {
-                Error::Transaction(TransactionError::InvalidState(
-                    "Transaction not found".to_string(),
-                ))
-            })?;
+        let ours = txns.get(&transaction_id).ok_or_else(|| {
+            Error::Transaction(TransactionError::InvalidState(
+                "Transaction not found".to_string(),
+            ))
+        })?;
+        if ours.state != TransactionState::Active {
+            return Err(Error::Transaction(TransactionError::InvalidState(
+                "Transaction is not active".to_string(),
+            )));
+        }
+        let our_start_epoch = ours.start_epoch;
 
-            if info.state != TransactionState::Active {
-                return Err(Error::Transaction(TransactionError::InvalidState(
-                    "Transaction is not active".to_string(),
-                )));
-            }
-
-            (
-                info.isolation_level,
-                info.start_epoch,
-                info.write_set.clone(),
-                info.read_set.clone(),
-            )
-        };
+        // Only a transaction that committed after ours began can conflict
+        // with it, and each commit advances the epoch: if the epoch has not
+        // moved since, there is nothing to check. (Commits hold the
+        // `transactions` lock, so none can happen during the checks.)
+        let others_committed =
+            self.current_epoch.load(Ordering::Acquire) > our_start_epoch.as_u64();
 
         // Check for write-write conflicts with transactions that committed
         // after our snapshot (i.e., concurrent writers to the same entities).
         // Transactions committed before our start_epoch are part of our visible
         // snapshot, so overwriting their values is not a conflict.
-        for (other_tx, commit_epoch) in committed.iter() {
-            if *other_tx != transaction_id && commit_epoch.as_u64() > our_start_epoch.as_u64() {
-                // Check if that transaction wrote to any of our entities
-                if let Some(other_info) = txns.get(other_tx) {
-                    for entity in &our_write_set {
-                        if other_info.write_set.contains(entity) {
-                            return Err(Error::Transaction(TransactionError::WriteConflict(
-                                format!("Write-write conflict on entity {entity}"),
-                            )));
+        if others_committed && !ours.write_set.is_empty() {
+            for (other_tx, commit_epoch) in committed.iter() {
+                if *other_tx != transaction_id && commit_epoch.as_u64() > our_start_epoch.as_u64() {
+                    // Check if that transaction wrote to any of our entities
+                    if let Some(other_info) = txns.get(other_tx) {
+                        for entity in &ours.write_set {
+                            if other_info.write_set.contains(entity) {
+                                return Err(Error::Transaction(TransactionError::WriteConflict(
+                                    format!("Write-write conflict on entity {entity}"),
+                                )));
+                            }
                         }
                     }
                 }
@@ -372,12 +372,15 @@ impl TransactionManager {
         // no concurrent commit can insert into committed_epochs or change
         // transaction state during our validation window. A single pass over
         // committed_epochs is sufficient.
-        if our_isolation == IsolationLevel::Serializable && !our_read_set.is_empty() {
+        if others_committed
+            && ours.isolation_level == IsolationLevel::Serializable
+            && !ours.read_set.is_empty()
+        {
             for (other_tx, commit_epoch) in committed.iter() {
                 if *other_tx != transaction_id && commit_epoch.as_u64() > our_start_epoch.as_u64() {
                     // Check if that transaction wrote to any entity we read
                     if let Some(other_info) = txns.get(other_tx) {
-                        for entity in &our_read_set {
+                        for entity in &ours.read_set {
                             if other_info.write_set.contains(entity) {
                                 return Err(Error::Transaction(
                                     TransactionError::SerializationFailure(format!(

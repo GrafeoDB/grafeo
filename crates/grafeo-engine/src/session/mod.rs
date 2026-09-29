@@ -540,18 +540,23 @@ impl Session {
     /// in a [`WalGraphStore`] so mutations are WAL-logged with the correct
     /// graph context.
     fn active_store(&self) -> Arc<dyn GraphStoreSearch> {
-        let key = self.active_graph_storage_key();
+        self.store_for_key(self.active_graph_storage_key().as_deref())
+    }
+
+    /// The graph store for the graph with storage key `key` (see
+    /// [`active_store`](Self::active_store)).
+    fn store_for_key(&self, key: Option<&str>) -> Arc<dyn GraphStoreSearch> {
         match key {
             None => Arc::clone(&self.graph_store),
             #[cfg(feature = "lpg")]
-            Some(ref name) => match self.store.graph(name) {
+            Some(name) => match self.store.graph(name) {
                 Some(named_store) => {
                     #[cfg(feature = "wal")]
                     if let Some(wal) = &self.wal {
                         return Arc::new(crate::database::wal_store::WalGraphStore::new_for_graph(
                             named_store,
                             Arc::clone(wal),
-                            name.clone(),
+                            name.to_string(),
                         )) as Arc<dyn GraphStoreSearch>;
                     }
                     named_store as Arc<dyn GraphStoreSearch>
@@ -568,11 +573,16 @@ impl Session {
     /// Returns `None` for read-only databases. For named graphs, wraps
     /// the store with WAL logging when durability is enabled.
     fn active_write_store(&self) -> Option<Arc<dyn GraphStoreMut>> {
-        let key = self.active_graph_storage_key();
+        self.write_store_for_key(self.active_graph_storage_key().as_deref())
+    }
+
+    /// The writable store for the graph with storage key `key` (see
+    /// [`active_write_store`](Self::active_write_store)).
+    fn write_store_for_key(&self, key: Option<&str>) -> Option<Arc<dyn GraphStoreMut>> {
         match key {
             None => self.graph_store_mut.as_ref().map(Arc::clone),
             #[cfg(feature = "lpg")]
-            Some(ref name) => match self.store.graph(name) {
+            Some(name) => match self.store.graph(name) {
                 Some(named_store) => {
                     let mut store: Arc<dyn GraphStoreMut> = named_store;
 
@@ -584,7 +594,7 @@ impl Session {
                                 .graph(name)
                                 .unwrap_or_else(|| Arc::clone(&self.store)),
                             Arc::clone(wal),
-                            name.clone(),
+                            name.to_string(),
                         ));
                     }
 
@@ -650,11 +660,16 @@ impl Session {
     /// setters do not need to invoke this directly.
     fn track_graph_touch(&self) {
         if self.current_transaction.lock().is_some() {
-            let key = self.active_graph_storage_key();
-            let mut touched = self.touched_graphs.lock();
-            if !touched.contains(&key) {
-                touched.push(key);
-            }
+            self.touch_graph(self.active_graph_storage_key());
+        }
+    }
+
+    /// Records the graph with storage key `key` as touched by the open
+    /// transaction (see [`track_graph_touch`](Self::track_graph_touch)).
+    fn touch_graph(&self, key: Option<String>) {
+        let mut touched = self.touched_graphs.lock();
+        if !touched.contains(&key) {
+            touched.push(key);
         }
     }
 
@@ -4935,8 +4950,11 @@ impl Session {
         use grafeo_core::execution::operators::GraphWriter;
 
         self.with_auto_commit(true, || {
-            self.track_graph_touch();
-            let store = self.active_write_store().ok_or(
+            let key = self.active_graph_storage_key();
+            if self.current_transaction.lock().is_some() {
+                self.touch_graph(key.clone());
+            }
+            let store = self.write_store_for_key(key.as_deref()).ok_or(
                 grafeo_common::utils::error::Error::Transaction(
                     grafeo_common::utils::error::TransactionError::ReadOnly,
                 ),
@@ -4945,16 +4963,21 @@ impl Session {
             let mut writer = GraphWriter::new(store)
                 .with_transaction_context(epoch, transaction_id)
                 .with_validator(Arc::new(self.constraint_validator(
-                    self.active_store(),
+                    self.store_for_key(key.as_deref()),
                     epoch,
                     transaction_id,
                 )));
             if transaction_id.is_some() {
+                // The graph the writes land in: the active one, or the
+                // default graph when no graph of that name exists.
+                let graph = key
+                    .as_deref()
+                    .filter(|name| self.store.graph(name).is_some());
                 writer = writer.with_write_tracker(Arc::new(
                     crate::transaction::TransactionWriteTracker::new(Arc::clone(
                         &self.transaction_manager,
                     ))
-                    .in_graph(self.active_lpg_graph_key().as_deref()),
+                    .in_graph(graph),
                 ));
             }
             write(&writer).map_err(crate::query::executor::convert_operator_error)
@@ -5086,7 +5109,7 @@ impl Session {
         let properties = direct_properties(properties);
         self.write(|writer| {
             for endpoint in [src, dst] {
-                if writer.node(endpoint).is_none() {
+                if !writer.has_node(endpoint) {
                     return Err(missing_node(endpoint));
                 }
             }
@@ -5104,7 +5127,7 @@ impl Session {
     #[cfg(feature = "lpg")]
     pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
         self.write(|writer| {
-            if writer.node(id).is_none() {
+            if !writer.has_node(id) {
                 return Err(missing_node(id));
             }
             writer.set_node_properties(id, &[(key.to_string(), value)], false)
@@ -5120,7 +5143,7 @@ impl Session {
     #[cfg(feature = "lpg")]
     pub fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
         self.write(|writer| {
-            if writer.edge(id).is_none() {
+            if !writer.has_edge(id) {
                 return Err(grafeo_core::execution::operators::OperatorError::Execution(
                     format!("edge {} does not exist", id.as_u64()),
                 ));

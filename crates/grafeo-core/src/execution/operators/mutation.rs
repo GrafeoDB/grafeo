@@ -140,6 +140,23 @@ pub trait ConstraintValidator: Send + Sync {
         Ok(())
     }
 
+    /// Whether [`validate_edge_endpoints`](Self::validate_edge_endpoints)
+    /// checks anything for `edge_type`. A writer reads the endpoints' labels
+    /// only when it does.
+    fn constrains_edge_endpoints(&self, edge_type: &str) -> bool {
+        let _ = edge_type;
+        true
+    }
+
+    /// Whether checking `value` for property `key` of an existing node needs
+    /// the node's labels or its other properties. When no value a SET writes
+    /// does, a writer checks each value on its own (with no labels) and does
+    /// not read the node.
+    fn constrains_node_property(&self, key: &str, value: &Value) -> bool {
+        let _ = (key, value);
+        true
+    }
+
     /// Injects default values for properties that are defined in a type but
     /// not explicitly provided.
     fn inject_defaults(&self, labels: &[String], properties: &mut Vec<(String, Value)>) {

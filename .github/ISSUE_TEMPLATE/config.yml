@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or help
+    url: https://github.com/GrafeoDB/grafeo/discussions/categories/q-a
+    about: How to do something with Grafeo, or whether a behavior is expected.
+  - name: Idea
+    url: https://github.com/GrafeoDB/grafeo/discussions/categories/ideas
+    about: Explore an idea before it becomes a feature request.
+  - name: Security vulnerability
+    url: https://github.com/GrafeoDB/grafeo/security/policy
+    about: Report it privately as described in the security policy, never in a public issue.

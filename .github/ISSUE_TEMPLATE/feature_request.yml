@@ -1,21 +1,62 @@
-name: Feature Request
-description: Suggest a new feature for Grafeo
-title: "[Feature]: "
+name: Feature request
+description: A new capability, or a change to how Grafeo behaves today
 type: Feature
 body:
-  - type: textarea
-    id: description
+  - type: markdown
     attributes:
-      label: What would you like?
-      description: Describe the feature and the problem it solves.
-      placeholder: It would be useful to...
+      value: |
+        Want to talk an idea through first? Start in
+        [Ideas](https://github.com/GrafeoDB/grafeo/discussions/categories/ideas). A pull request
+        needs a planned issue: once the scope is agreed here, a maintainer adds a milestone or the
+        `help wanted` label. New dependencies, crates, feature flags and CI changes also need
+        agreement here before a pull request, see
+        [Pull Request Eligibility](https://github.com/GrafeoDB/grafeo/blob/main/CONTRIBUTING.md#pull-request-eligibility).
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: |
+        What you want and the problem it solves. Say how you use Grafeo: embedded in an
+        application, in the browser, or behind a server.
     validations:
       required: true
 
   - type: textarea
-    id: context
+    id: example
     attributes:
-      label: Additional context
-      description: Any extra details, examples, or alternatives you've considered.
+      label: Example
+      description: What using it would look like, as a query, an API call or a CLI command.
+      placeholder: |
+        ```gql
+        MATCH (p:Person {city: 'Amsterdam'}) RETURN p.name ORDER BY p.name
+        ```
     validations:
       required: false
+
+  - type: textarea
+    id: direction
+    attributes:
+      label: Direction
+      description: |
+        How you would approach it and the alternatives you considered, if you have an idea. Name
+        any new dependency, crate, feature flag or CI change it needs.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: profiles
+    attributes:
+      label: Affected profiles
+      description: Which feature profiles (and therefore which products) this touches. Leave empty if unsure.
+      options:
+        - label: embedded (facade, Python, Node.js, C and friends)
+        - label: edge (WASM, grafeo-web)
+        - label: server (grafeo-server)
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contributing
+      options:
+        - label: I would like to work on this myself.

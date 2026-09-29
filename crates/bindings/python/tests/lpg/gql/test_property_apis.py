@@ -515,15 +515,26 @@ class TestDatetimeConversion:
         dt = datetime(2024, 6, 15, 14, 30, 0, tzinfo=amsterdam_summer)
         assert self.roundtrip(db, dt) == datetime(2024, 6, 15, 12, 30, 0)
 
-    def test_aware_datetime_near_year_one(self, db):
-        # Converting to UTC first would fall before year 1 and raise.
-        dt = datetime(1, 1, 1, 0, 30, 0, tzinfo=timezone(timedelta(hours=1)))
-        node = db.create_node(["T"], {"val": dt})
-        result = db.execute(
-            f"MATCH (n) WHERE id(n) = {node.id} RETURN n.val < $t AS earlier",
-            {"t": datetime(1, 1, 1, 0, 0, 0)},
-        )
-        assert list(result)[0]["earlier"] is True
+    def test_aware_datetime_near_the_limits_roundtrips(self, db):
+        dt = datetime(1, 1, 1, 2, 30, 0, tzinfo=timezone(timedelta(hours=1)))
+        assert self.roundtrip(db, dt) == datetime(1, 1, 1, 1, 30, 0)
+        dt = datetime(9999, 12, 31, 21, 30, 0, tzinfo=timezone(timedelta(hours=-2)))
+        assert self.roundtrip(db, dt) == datetime(9999, 12, 31, 23, 30, 0)
+
+    @pytest.mark.parametrize(
+        "dt",
+        [
+            datetime(1, 1, 1, 0, 30, 0, tzinfo=timezone(timedelta(hours=1))),
+            datetime(9999, 12, 31, 23, 30, 0, tzinfo=timezone(timedelta(hours=-1))),
+        ],
+    )
+    def test_aware_datetime_outside_python_range_is_rejected(self, db, dt):
+        # Its UTC time falls in year 0 or 10000: it could never be read back.
+        with pytest.raises(ValueError, match="year 1 to 9999"):
+            db.create_node(["T"], {"val": dt})
+        with pytest.raises(ValueError, match="year 1 to 9999"):
+            db.execute("RETURN $t AS t", {"t": dt})
+        assert db.node_count == 0
 
     def test_microseconds_are_kept(self, db):
         dt = datetime(2024, 6, 15, 12, 30, 0, 123457)

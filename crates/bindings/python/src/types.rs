@@ -190,6 +190,13 @@ impl PyValue {
         if obj.is_instance_of::<PyDateTime>() {
             let micros = datetime_to_utc_micros(obj)
                 .map_err(|e| PyGrafeoError::Type(format!("Failed to convert datetime: {}", e)))?;
+            // An aware datetime can fall in year 0 or 10000 in UTC, which the
+            // naive UTC datetime it is returned as cannot hold.
+            if !(MIN_PYTHON_MICROS..=MAX_PYTHON_MICROS).contains(&micros) {
+                return Err(PyGrafeoError::Type(format!(
+                    "datetime {obj} is outside year 1 to 9999 in UTC, so it could not be read back"
+                )));
+            }
             return Ok(Value::Timestamp(Timestamp::from_micros(micros)));
         }
 
@@ -391,6 +398,11 @@ fn unix_epoch(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         .getattr("datetime")?
         .call1((1970, 1, 1))
 }
+
+/// Microseconds since the Unix epoch for `0001-01-01T00:00:00` and
+/// `9999-12-31T23:59:59.999999`, the range a Python datetime can hold.
+const MIN_PYTHON_MICROS: i64 = -62_135_596_800 * MICROS_PER_SECOND;
+const MAX_PYTHON_MICROS: i64 = 253_402_300_800 * MICROS_PER_SECOND - 1;
 
 /// Microseconds since the Unix epoch for a Python datetime. A naive datetime
 /// is read as UTC; an aware one has its UTC offset subtracted.

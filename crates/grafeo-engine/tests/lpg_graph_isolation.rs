@@ -316,7 +316,7 @@ fn session_create_node_respects_active_graph() {
     session.execute("USE GRAPH mydb").unwrap();
 
     // Direct CRUD via session
-    session.create_node(&["Widget"]);
+    session.create_node(&["Widget"]).unwrap();
 
     let result = session.execute("MATCH (n:Widget) RETURN n").unwrap();
     assert_eq!(

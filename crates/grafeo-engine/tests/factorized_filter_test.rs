@@ -22,14 +22,14 @@ fn test_filter_in_multihop_query() {
     // Create edges: node 0 -> nodes 1,2,3 (3 neighbors)
     // node 1 -> nodes 2,3,4 (3 neighbors)
     // node 2 -> nodes 3,4 (2 neighbors)
-    session.create_edge(nodes[0], nodes[1], "KNOWS");
-    session.create_edge(nodes[0], nodes[2], "KNOWS");
-    session.create_edge(nodes[0], nodes[3], "KNOWS");
-    session.create_edge(nodes[1], nodes[2], "KNOWS");
-    session.create_edge(nodes[1], nodes[3], "KNOWS");
-    session.create_edge(nodes[1], nodes[4], "KNOWS");
-    session.create_edge(nodes[2], nodes[3], "KNOWS");
-    session.create_edge(nodes[2], nodes[4], "KNOWS");
+    session.create_edge(nodes[0], nodes[1], "KNOWS").unwrap();
+    session.create_edge(nodes[0], nodes[2], "KNOWS").unwrap();
+    session.create_edge(nodes[0], nodes[3], "KNOWS").unwrap();
+    session.create_edge(nodes[1], nodes[2], "KNOWS").unwrap();
+    session.create_edge(nodes[1], nodes[3], "KNOWS").unwrap();
+    session.create_edge(nodes[1], nodes[4], "KNOWS").unwrap();
+    session.create_edge(nodes[2], nodes[3], "KNOWS").unwrap();
+    session.create_edge(nodes[2], nodes[4], "KNOWS").unwrap();
 
     println!("\n=== Testing 1-hop from node 0 ===");
     let result = session

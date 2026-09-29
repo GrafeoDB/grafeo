@@ -56,11 +56,11 @@ fn social_graph() -> GrafeoDB {
         .create_node_with_props(&["Company"], [("name", Value::String("TechCorp".into()))])
         .unwrap();
 
-    session.create_edge(alix, gus, "KNOWS");
-    session.create_edge(alix, harm, "KNOWS");
-    session.create_edge(gus, harm, "KNOWS");
-    session.create_edge(alix, techcorp, "WORKS_AT");
-    session.create_edge(gus, techcorp, "WORKS_AT");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
+    session.create_edge(alix, harm, "KNOWS").unwrap();
+    session.create_edge(gus, harm, "KNOWS").unwrap();
+    session.create_edge(alix, techcorp, "WORKS_AT").unwrap();
+    session.create_edge(gus, techcorp, "WORKS_AT").unwrap();
 
     // Verify setup: 3 Person + 1 Company = 4 nodes, 3 KNOWS + 2 WORKS_AT = 5 edges
     assert_eq!(db.node_count(), 4, "social_graph: expected 4 nodes");

@@ -97,11 +97,13 @@ mod tests {
 
     fn create_test_db(dir: &std::path::Path) {
         let db = grafeo_engine::GrafeoDB::open(dir).expect("create db");
-        let n1 = db.create_node(&["Person"]);
-        let n2 = db.create_node(&["Company"]);
-        db.set_node_property(n1, "name", grafeo_common::types::Value::from("Alix"));
-        db.set_node_property(n2, "name", grafeo_common::types::Value::from("Acme"));
-        db.create_edge(n1, n2, "WORKS_AT");
+        let n1 = db.create_node(&["Person"]).unwrap();
+        let n2 = db.create_node(&["Company"]).unwrap();
+        db.set_node_property(n1, "name", grafeo_common::types::Value::from("Alix"))
+            .unwrap();
+        db.set_node_property(n2, "name", grafeo_common::types::Value::from("Acme"))
+            .unwrap();
+        db.create_edge(n1, n2, "WORKS_AT").unwrap();
         db.close().expect("close db");
     }
 

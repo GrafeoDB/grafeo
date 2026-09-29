@@ -42,7 +42,9 @@ mod batch_create_with_props {
         p2.insert(PropertyKey::new("score"), Value::Float64(0.80));
         props_list.push(p2);
 
-        let ids = db.batch_create_nodes_with_props("Memory", props_list);
+        let ids = db
+            .batch_create_nodes_with_props("Memory", props_list)
+            .unwrap();
         assert_eq!(ids.len(), 2);
 
         // Verify properties
@@ -78,7 +80,9 @@ mod batch_create_with_props {
         );
         props_list.push(p2);
 
-        let ids = db.batch_create_nodes_with_props("Document", props_list);
+        let ids = db
+            .batch_create_nodes_with_props("Document", props_list)
+            .unwrap();
         assert_eq!(ids.len(), 2);
 
         // Verify vector property
@@ -92,7 +96,9 @@ mod batch_create_with_props {
     #[test]
     fn empty_list_returns_empty_ids() {
         let db = db();
-        let ids = db.batch_create_nodes_with_props("Memory", Vec::new());
+        let ids = db
+            .batch_create_nodes_with_props("Memory", Vec::new())
+            .unwrap();
         assert!(ids.is_empty());
     }
 
@@ -116,7 +122,9 @@ mod batch_create_with_props {
         p2.insert(PropertyKey::new("archived"), Value::Bool(false));
         props_list.push(p2);
 
-        let ids = db.batch_create_nodes_with_props("Item", props_list);
+        let ids = db
+            .batch_create_nodes_with_props("Item", props_list)
+            .unwrap();
         assert_eq!(ids.len(), 2);
 
         let n1 = db.get_node(ids[0]).unwrap();
@@ -149,7 +157,7 @@ mod batch_create_with_props {
         );
         props_list.push(p2);
 
-        let ids = db.batch_create_nodes_with_props("Doc", props_list);
+        let ids = db.batch_create_nodes_with_props("Doc", props_list).unwrap();
         assert_eq!(ids.len(), 2);
 
         // Search should find both
@@ -193,7 +201,8 @@ mod filter_optimization {
                 make_memory("new", "u1", 2000, vec![0.0, 1.0, 0.0]),
                 make_memory("newest", "u1", 3000, vec![0.0, 0.0, 1.0]),
             ],
-        );
+        )
+        .unwrap();
 
         // Filter: created_at >= 2000 should return 2 results
         let mut filters = HashMap::new();
@@ -252,7 +261,8 @@ mod filter_optimization {
             Value::Vector(vec![1.0, 1.0].into()),
         );
 
-        db.batch_create_nodes_with_props("Memory", vec![p1, p2, p3]);
+        db.batch_create_nodes_with_props("Memory", vec![p1, p2, p3])
+            .unwrap();
 
         // Filter: user_id = u1 AND created_at >= 2000
         let mut filters = HashMap::new();
@@ -305,7 +315,8 @@ mod filter_optimization {
                     p
                 },
             ],
-        );
+        )
+        .unwrap();
 
         let mut filters = HashMap::new();
         let mut lt_map = BTreeMap::new();

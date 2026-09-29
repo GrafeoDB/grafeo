@@ -111,9 +111,9 @@
 //! use grafeo_common::types::Value;
 //!
 //! let db = GrafeoDB::new_in_memory();
-//! let id = db.create_node(&["Person"]);
-//! db.set_node_property(id, "name", Value::from("Alix"));
-//! db.set_node_property(id, "name", Value::from("Gus"));
+//! let id = db.create_node(&["Person"])?;
+//! db.set_node_property(id, "name", Value::from("Alix"))?;
+//! db.set_node_property(id, "name", Value::from("Gus"))?;
 //!
 //! let history = db.history(id)?;
 //! assert_eq!(history.len(), 3); // create + 2 updates
@@ -724,6 +724,50 @@ fn triple_hash(subject: &str, predicate: &str, object: &str, graph: Option<&str>
     object.hash(&mut h);
     graph.hash(&mut h);
     h.finish()
+}
+
+/// Folds a transaction's property changes to the entities it created into
+/// their create events, so a create event carries the properties the
+/// transaction left the entity with.
+///
+/// Statements and the direct API both create an entity and then set its
+/// properties one by one; without this, a consumer saw a create event
+/// without properties followed by one update per property. Changes to
+/// entities that existed before the transaction stay as they are, and so do
+/// label changes: an added label's event lists the labels after the change,
+/// a removed label's the labels before it, so neither can be merged.
+pub(crate) fn fold_into_creates(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
+    let mut folded: Vec<ChangeEvent> = Vec::with_capacity(events.len());
+    let mut created: HashMap<EntityId, usize> = HashMap::new();
+    for event in events {
+        let Some(&at) = created.get(&event.entity_id) else {
+            if event.kind == ChangeKind::Create {
+                created.insert(event.entity_id, folded.len());
+            }
+            folded.push(event);
+            continue;
+        };
+        if event.kind != ChangeKind::Update || event.labels.is_some() {
+            folded.push(event);
+            continue;
+        }
+        let create = &mut folded[at];
+        match (event.before, event.after) {
+            (_, Some(after)) => create.after.get_or_insert_with(HashMap::new).extend(after),
+            (Some(removed), None) => {
+                if let Some(properties) = create.after.as_mut() {
+                    for key in removed.keys() {
+                        properties.remove(key);
+                    }
+                }
+            }
+            (None, None) => {}
+        }
+        if create.after.as_ref().is_some_and(HashMap::is_empty) {
+            create.after = None;
+        }
+    }
+    folded
 }
 
 #[cfg(test)]

@@ -817,7 +817,11 @@ impl PyGrafeoDB {
         self.execute_language_impl(language, query, params)
     }
 
-    /// Create a node.
+    /// Create a node in the selected graph.
+    ///
+    /// Checked like a query `INSERT`: raises if the node breaks a constraint
+    /// or node type of its labels (a duplicate `UNIQUE` value, a missing
+    /// `NOT NULL` property, a value of the wrong type).
     #[pyo3(signature = (labels, properties=None))]
     fn create_node(
         &self,
@@ -842,8 +846,9 @@ impl PyGrafeoDB {
                 props.push((grafeo_common::types::PropertyKey::new(key_str), val));
             }
             db.create_node_with_props(&label_refs, props)
+                .map_err(PyGrafeoError::from)?
         } else {
-            db.create_node(&label_refs)
+            db.create_node(&label_refs).map_err(PyGrafeoError::from)?
         };
 
         // Fetch the node back to get the full representation
@@ -860,6 +865,9 @@ impl PyGrafeoDB {
     }
 
     /// Create an edge between two nodes.
+    ///
+    /// Raises if either node does not exist or the edge breaks its edge
+    /// type.
     #[pyo3(signature = (source_id, target_id, edge_type, properties=None))]
     fn create_edge(
         &self,
@@ -885,8 +893,10 @@ impl PyGrafeoDB {
                 props.push((grafeo_common::types::PropertyKey::new(key_str), val));
             }
             db.create_edge_with_props(src, dst, &edge_type, props)
+                .map_err(PyGrafeoError::from)?
         } else {
             db.create_edge(src, dst, &edge_type)
+                .map_err(PyGrafeoError::from)?
         };
 
         // Fetch the edge back to get the full representation
@@ -1225,18 +1235,24 @@ impl PyGrafeoDB {
     }
 
     /// Delete a node by ID.
+    ///
+    /// Returns False if the node does not exist. Raises if the node still
+    /// has edges: delete them first, or use `DETACH DELETE` in a query.
     fn delete_node(&self, id: u64) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.delete_node(NodeId(id)))
+        Ok(db.delete_node(NodeId(id)).map_err(PyGrafeoError::from)?)
     }
 
     /// Delete an edge by ID.
     fn delete_edge(&self, id: u64) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.delete_edge(EdgeId(id)))
+        Ok(db.delete_edge(EdgeId(id)).map_err(PyGrafeoError::from)?)
     }
 
     /// Set a property on a node.
+    ///
+    /// Raises if the node does not exist or the value breaks a constraint or
+    /// node type of its labels.
     ///
     /// Example:
     /// ```python
@@ -1251,14 +1267,16 @@ impl PyGrafeoDB {
     ) -> PyResult<()> {
         let db = self.inner.read();
         let val = PyValue::from_py(value)?;
-        db.set_node_property(NodeId(node_id), key, val);
+        db.set_node_property(NodeId(node_id), key, val)
+            .map_err(PyGrafeoError::from)?;
         Ok(())
     }
 
     /// Add a label to an existing node.
     ///
     /// Returns True if the label was added, False if the node doesn't exist
-    /// or already has the label.
+    /// or already has the label. Raises if the node breaks a constraint or
+    /// node type of the new label.
     ///
     /// Example:
     /// ```python
@@ -1267,7 +1285,9 @@ impl PyGrafeoDB {
     /// ```
     fn add_node_label(&self, node_id: u64, label: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.add_node_label(NodeId(node_id), label))
+        Ok(db
+            .add_node_label(NodeId(node_id), label)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Remove a label from a node.
@@ -1281,7 +1301,9 @@ impl PyGrafeoDB {
     /// ```
     fn remove_node_label(&self, node_id: u64, label: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.remove_node_label(NodeId(node_id), label))
+        Ok(db
+            .remove_node_label(NodeId(node_id), label)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Get all labels for a node.
@@ -1301,6 +1323,8 @@ impl PyGrafeoDB {
 
     /// Set a property on an edge.
     ///
+    /// Raises if the edge does not exist or the value breaks its edge type.
+    ///
     /// Example:
     /// ```python
     /// db.set_edge_property(edge_id, "weight", 1.5)
@@ -1314,7 +1338,8 @@ impl PyGrafeoDB {
     ) -> PyResult<()> {
         let db = self.inner.read();
         let val = PyValue::from_py(value)?;
-        db.set_edge_property(EdgeId(edge_id), key, val);
+        db.set_edge_property(EdgeId(edge_id), key, val)
+            .map_err(PyGrafeoError::from)?;
         Ok(())
     }
 
@@ -1329,7 +1354,9 @@ impl PyGrafeoDB {
     /// ```
     fn remove_node_property(&self, node_id: u64, key: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.remove_node_property(NodeId(node_id), key))
+        Ok(db
+            .remove_node_property(NodeId(node_id), key)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Remove a property from an edge.
@@ -1343,7 +1370,9 @@ impl PyGrafeoDB {
     /// ```
     fn remove_edge_property(&self, edge_id: u64, key: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.remove_edge_property(EdgeId(edge_id), key))
+        Ok(db
+            .remove_edge_property(EdgeId(edge_id), key)
+            .map_err(PyGrafeoError::from)?)
     }
 
     // =========================================================================
@@ -1522,7 +1551,9 @@ impl PyGrafeoDB {
         vectors: Vec<Vec<f32>>,
     ) -> PyResult<Vec<u64>> {
         let db = self.inner.read();
-        let ids = db.batch_create_nodes(label, property, vectors);
+        let ids = db
+            .batch_create_nodes(label, property, vectors)
+            .map_err(PyGrafeoError::from)?;
         Ok(ids.into_iter().map(|id| id.as_u64()).collect())
     }
 
@@ -1530,7 +1561,8 @@ impl PyGrafeoDB {
     ///
     /// Each dict in `properties_list` is a complete set of properties for one
     /// node. Vector values (list of floats) are automatically inserted into
-    /// matching vector indexes.
+    /// matching vector indexes. The nodes are created in one transaction: if
+    /// one breaks a constraint, the call raises and creates none of them.
     ///
     /// Args:
     ///     label: Node label for all created nodes.
@@ -1562,7 +1594,9 @@ impl PyGrafeoDB {
             }
             props_vec.push(props);
         }
-        let ids = db.batch_create_nodes_with_props(label, props_vec);
+        let ids = db
+            .batch_create_nodes_with_props(label, props_vec)
+            .map_err(PyGrafeoError::from)?;
         Ok(ids.into_iter().map(|id| id.as_u64()).collect())
     }
 
@@ -3030,7 +3064,8 @@ impl PyGrafeoDB {
                         })
                         .collect();
 
-                    db.create_node_with_props(&label_refs, props);
+                    db.create_node_with_props(&label_refs, props)
+                        .map_err(PyGrafeoError::from)?;
                     count += 1;
                 }
             }
@@ -3074,7 +3109,8 @@ impl PyGrafeoDB {
                         })
                         .collect();
 
-                    db.create_edge_with_props(src_id, dst_id, edge_type_str, props);
+                    db.create_edge_with_props(src_id, dst_id, edge_type_str, props)
+                        .map_err(PyGrafeoError::from)?;
                     count += 1;
                 }
             }

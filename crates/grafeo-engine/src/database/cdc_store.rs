@@ -115,6 +115,19 @@ impl CdcGraphStore {
         Some(node.labels.iter().map(|l| l.to_string()).collect())
     }
 
+    /// Collects labels for a node as `transaction_id` sees it, so a node the
+    /// transaction created itself has its labels too.
+    fn collect_node_labels_versioned(
+        &self,
+        id: NodeId,
+        transaction_id: TransactionId,
+    ) -> Option<Vec<String>> {
+        let node = self
+            .inner
+            .get_node_versioned(id, self.inner.current_epoch(), transaction_id)?;
+        Some(node.labels.iter().map(|l| l.to_string()).collect())
+    }
+
     /// Returns the next HLC timestamp from the CDC log's clock.
     fn next_ts(&self) -> HlcTimestamp {
         self.cdc_log.next_timestamp()
@@ -430,12 +443,12 @@ impl GraphStoreSearch for CdcGraphStore {
     }
 
     #[cfg(feature = "vector-index")]
-    fn vector_index_metric(
+    fn vector_index_config(
         &self,
         label: &str,
         property: &str,
-    ) -> Option<grafeo_core::index::vector::DistanceMetric> {
-        self.inner.vector_index_metric(label, property)
+    ) -> Option<grafeo_core::index::vector::HnswConfig> {
+        self.inner.vector_index_config(label, property)
     }
 
     #[cfg(feature = "vector-index")]
@@ -910,7 +923,7 @@ impl GraphStoreMut for CdcGraphStore {
                 epoch,
                 self.next_ts(),
             );
-            event.labels = self.collect_node_labels(node_id);
+            event.labels = self.collect_node_labels_versioned(node_id, transaction_id);
             self.buffer_event(event);
         }
         added
@@ -922,7 +935,7 @@ impl GraphStoreMut for CdcGraphStore {
         label: &str,
         transaction_id: TransactionId,
     ) -> bool {
-        let old_labels = self.collect_node_labels(node_id);
+        let old_labels = self.collect_node_labels_versioned(node_id, transaction_id);
         let removed = self
             .inner
             .remove_label_versioned(node_id, label, transaction_id);

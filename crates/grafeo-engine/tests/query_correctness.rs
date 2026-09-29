@@ -78,14 +78,14 @@ fn create_social_network() -> GrafeoDB {
         .unwrap();
 
     // Create KNOWS relationships
-    session.create_edge(alix, gus, "KNOWS");
-    session.create_edge(alix, harm, "KNOWS");
-    session.create_edge(gus, harm, "KNOWS");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
+    session.create_edge(alix, harm, "KNOWS").unwrap();
+    session.create_edge(gus, harm, "KNOWS").unwrap();
 
     // Create WORKS_AT relationships
-    session.create_edge(alix, techcorp, "WORKS_AT");
-    session.create_edge(gus, techcorp, "WORKS_AT");
-    session.create_edge(harm, startup, "WORKS_AT");
+    session.create_edge(alix, techcorp, "WORKS_AT").unwrap();
+    session.create_edge(gus, techcorp, "WORKS_AT").unwrap();
+    session.create_edge(harm, startup, "WORKS_AT").unwrap();
 
     db
 }
@@ -108,9 +108,9 @@ fn create_chain() -> GrafeoDB {
         .create_node_with_props(&["Node"], [("id", Value::String("D".into()))])
         .unwrap();
 
-    session.create_edge(a, b, "NEXT");
-    session.create_edge(b, c, "NEXT");
-    session.create_edge(c, d, "NEXT");
+    session.create_edge(a, b, "NEXT").unwrap();
+    session.create_edge(b, c, "NEXT").unwrap();
+    session.create_edge(c, d, "NEXT").unwrap();
 
     db
 }
@@ -131,7 +131,7 @@ fn create_star() -> GrafeoDB {
                 [("id", Value::String(format!("spoke_{}", i).into()))],
             )
             .unwrap();
-        session.create_edge(center, spoke, "CONNECTS");
+        session.create_edge(center, spoke, "CONNECTS").unwrap();
     }
 
     db
@@ -218,10 +218,10 @@ fn create_tree() -> GrafeoDB {
         )
         .unwrap();
 
-    session.create_edge(root, child1, "HAS_CHILD");
-    session.create_edge(root, child2, "HAS_CHILD");
-    session.create_edge(child1, leaf1, "HAS_CHILD");
-    session.create_edge(child1, leaf2, "HAS_CHILD");
+    session.create_edge(root, child1, "HAS_CHILD").unwrap();
+    session.create_edge(root, child2, "HAS_CHILD").unwrap();
+    session.create_edge(child1, leaf1, "HAS_CHILD").unwrap();
+    session.create_edge(child1, leaf2, "HAS_CHILD").unwrap();
 
     db
 }
@@ -1145,9 +1145,9 @@ mod gql_direction_tests {
             .create_node_with_props(&["User"], [("name", Value::String("D".into()))])
             .unwrap();
 
-        session.create_edge(a, b, "FOLLOWS"); // A -> B
-        session.create_edge(b, c, "FOLLOWS"); // B -> C
-        session.create_edge(d, b, "FOLLOWS"); // D -> B
+        session.create_edge(a, b, "FOLLOWS").unwrap(); // A -> B
+        session.create_edge(b, c, "FOLLOWS").unwrap(); // B -> C
+        session.create_edge(d, b, "FOLLOWS").unwrap(); // D -> B
 
         db
     }

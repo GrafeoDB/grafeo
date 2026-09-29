@@ -15,6 +15,9 @@
 
 #![cfg(all(feature = "cdc", feature = "gql"))]
 
+use std::collections::HashMap;
+
+use grafeo_common::types::Value;
 use grafeo_engine::cdc::{ChangeKind, EntityId};
 use grafeo_engine::{Config, GrafeoDB};
 
@@ -488,12 +491,11 @@ fn detach_delete_through_session_generates_cdc() {
 #[test]
 fn multiple_property_updates_in_transaction_generate_cdc() {
     let db = db();
+    db.execute("INSERT (:Person {name: 'Alix', age: 30})")
+        .unwrap();
     let mut session = db.session();
 
     session.begin_transaction().unwrap();
-    session
-        .execute("INSERT (:Person {name: 'Alix', age: 30})")
-        .unwrap();
     session
         .execute("MATCH (n:Person {name: 'Alix'}) SET n.age = 31, n.city = 'Amsterdam'")
         .unwrap();
@@ -506,12 +508,64 @@ fn multiple_property_updates_in_transaction_generate_cdc() {
         )
         .unwrap();
 
-    let update_count = changes
+    let mut updates: Vec<_> = changes
         .iter()
         .filter(|e| e.kind == ChangeKind::Update)
-        .count();
-    assert!(
-        update_count >= 1,
-        "Should have Update events for property changes, got {update_count}"
+        .map(|e| (e.before.clone(), e.after.clone()))
+        .collect();
+    updates.sort_by_key(|(_, after)| format!("{after:?}"));
+    let single = |key: &str, value: Value| Some(HashMap::from([(key.to_string(), value)]));
+    assert_eq!(
+        updates,
+        [
+            (
+                single("age", Value::Int64(30)),
+                single("age", Value::Int64(31))
+            ),
+            (None, single("city", Value::from("Amsterdam"))),
+        ]
     );
+}
+
+/// A node created and then changed in one transaction gets one create event
+/// with the properties the transaction left it with; a label change stays an
+/// event of its own.
+#[test]
+fn updates_to_a_node_created_in_the_same_transaction_fold_into_its_create() {
+    let db = db();
+    let mut session = db.session();
+
+    session.begin_transaction().unwrap();
+    session
+        .execute("INSERT (:Person {name: 'Alix', age: 30})")
+        .unwrap();
+    session
+        .execute("MATCH (n:Person {name: 'Alix'}) SET n.age = 31, n.city = 'Amsterdam', n:Admin")
+        .unwrap();
+    session.commit().unwrap();
+
+    let changes = db
+        .changes_between(
+            grafeo_common::types::EpochId::new(0),
+            grafeo_common::types::EpochId::new(u64::MAX),
+        )
+        .unwrap();
+
+    assert_eq!(changes.len(), 2, "{changes:?}");
+    let create = &changes[0];
+    assert_eq!(create.kind, ChangeKind::Create);
+    assert_eq!(create.labels.as_deref(), Some(&["Person".to_string()][..]));
+    assert_eq!(
+        create.after,
+        Some(HashMap::from([
+            ("name".to_string(), Value::from("Alix")),
+            ("age".to_string(), Value::Int64(31)),
+            ("city".to_string(), Value::from("Amsterdam")),
+        ]))
+    );
+    let label_added = &changes[1];
+    assert_eq!(label_added.kind, ChangeKind::Update);
+    let mut labels = label_added.labels.clone().unwrap_or_default();
+    labels.sort();
+    assert_eq!(labels, ["Admin", "Person"]);
 }

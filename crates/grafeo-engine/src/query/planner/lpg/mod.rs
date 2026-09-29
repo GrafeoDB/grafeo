@@ -1004,7 +1004,8 @@ impl Planner {
         let index_metric = scan
             .label
             .as_ref()
-            .and_then(|label| self.store.vector_index_metric(label, &scan.property));
+            .and_then(|label| self.store.vector_index_config(label, &scan.property))
+            .map(|config| config.metric);
         let metric = requested_metric
             .or(index_metric)
             .unwrap_or(DistanceMetric::Cosine);

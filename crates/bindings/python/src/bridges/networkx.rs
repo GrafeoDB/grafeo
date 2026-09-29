@@ -281,16 +281,22 @@ impl PyNetworkXAdapter {
             };
 
             let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-            let grafeo_id = db_guard.create_node(&label_refs);
+            let grafeo_id = db_guard
+                .create_node(&label_refs)
+                .map_err(PyGrafeoError::from)?;
             nx_key_to_grafeo.insert(hash_key, grafeo_id);
 
             // Store the original NetworkX node ID as a property for round-tripping.
             if let Ok(nx_val) = crate::types::PyValue::from_py(&py_id_obj) {
-                db_guard.set_node_property(grafeo_id, "_networkx_id", nx_val);
+                db_guard
+                    .set_node_property(grafeo_id, "_networkx_id", nx_val)
+                    .map_err(PyGrafeoError::from)?;
             } else {
                 // Fallback: store as string representation.
                 let repr: String = py_id_obj.repr()?.extract()?;
-                db_guard.set_node_property(grafeo_id, "_networkx_id", Value::String(repr.into()));
+                db_guard
+                    .set_node_property(grafeo_id, "_networkx_id", Value::String(repr.into()))
+                    .map_err(PyGrafeoError::from)?;
             }
 
             // Record in the return mapping: grafeo_id (int) -> original NX id
@@ -307,7 +313,9 @@ impl PyNetworkXAdapter {
                         continue; // Skip labels, already handled
                     }
                     if let Ok(val) = crate::types::PyValue::from_py(&value) {
-                        db_guard.set_node_property(grafeo_id, &key_str, val);
+                        db_guard
+                            .set_node_property(grafeo_id, &key_str, val)
+                            .map_err(PyGrafeoError::from)?;
                     }
                 }
             }
@@ -338,7 +346,9 @@ impl PyNetworkXAdapter {
                     "EDGE".to_string()
                 };
 
-                let edge_id = db_guard.create_edge(src_id, dst_id, &edge_type);
+                let edge_id = db_guard
+                    .create_edge(src_id, dst_id, &edge_type)
+                    .map_err(PyGrafeoError::from)?;
 
                 // Import all properties except "type"
                 if let Ok(dict) = edge_data.cast::<pyo3::types::PyDict>() {
@@ -351,7 +361,9 @@ impl PyNetworkXAdapter {
                             continue; // Skip type, already handled
                         }
                         if let Ok(val) = crate::types::PyValue::from_py(&value) {
-                            db_guard.set_edge_property(edge_id, &key_str, val);
+                            db_guard
+                                .set_edge_property(edge_id, &key_str, val)
+                                .map_err(PyGrafeoError::from)?;
                         }
                     }
                 }

@@ -1002,7 +1002,10 @@ impl Database {
                         .collect()
                 })
                 .unwrap_or_default();
-            let id = self.inner.create_node_with_props(&labels, props);
+            let id = self
+                .inner
+                .create_node_with_props(&labels, props)
+                .map_err(|e| JsError::new(&e.to_string()))?;
             node_ids.push(id);
         }
 
@@ -1033,7 +1036,8 @@ impl Database {
                 })
                 .unwrap_or_default();
             self.inner
-                .create_edge_with_props(src, dst, &edge.edge_type, props);
+                .create_edge_with_props(src, dst, &edge.edge_type, props)
+                .map_err(|e| JsError::new(&e.to_string()))?;
             edge_count += 1;
         }
 
@@ -1238,7 +1242,9 @@ impl Database {
                         .filter(|(_, v)| !v.is_null())
                         .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                         .collect();
-                    self.inner.create_node_with_props(&label_refs, props);
+                    self.inner
+                        .create_node_with_props(&label_refs, props)
+                        .map_err(|e| JsError::new(&format!("rows[{count}]: {e}")))?;
                     count += 1;
                 }
             }
@@ -1270,7 +1276,8 @@ impl Database {
                         .collect();
 
                     self.inner
-                        .create_edge_with_props(src_id, dst_id, edge_type, props);
+                        .create_edge_with_props(src_id, dst_id, edge_type, props)
+                        .map_err(|e| JsError::new(&format!("rows[{i}]: {e}")))?;
                     count += 1;
                 }
             }
@@ -1693,11 +1700,14 @@ mod tests {
 
             let vecs: &[&[f32]] = &[&[1.0, 0.0, 0.0], &[0.0, 1.0, 0.0], &[0.0, 0.0, 1.0]];
             for (i, v) in vecs.iter().enumerate() {
-                let id = db.create_node_with_props(
-                    &["Doc"],
-                    vec![(PropertyKey::new("title"), Value::from(format!("doc_{i}")))],
-                );
-                db.set_node_property(id, "embedding", Value::Vector(v.to_vec().into()));
+                let id = db
+                    .create_node_with_props(
+                        &["Doc"],
+                        vec![(PropertyKey::new("title"), Value::from(format!("doc_{i}")))],
+                    )
+                    .unwrap();
+                db.set_node_property(id, "embedding", Value::Vector(v.to_vec().into()))
+                    .unwrap();
             }
 
             let results = db
@@ -1729,11 +1739,14 @@ mod tests {
             for i in 0..5 {
                 let x = if i < 3 { 1.0f32 } else { 0.0 };
                 let y = if i >= 3 { 1.0f32 } else { 0.0 };
-                let id = db.create_node_with_props(
-                    &["Doc"],
-                    vec![(PropertyKey::new("idx"), Value::Int64(i))],
-                );
-                db.set_node_property(id, "embedding", Value::Vector(vec![x, y, 0.0].into()));
+                let id = db
+                    .create_node_with_props(
+                        &["Doc"],
+                        vec![(PropertyKey::new("idx"), Value::Int64(i))],
+                    )
+                    .unwrap();
+                db.set_node_property(id, "embedding", Value::Vector(vec![x, y, 0.0].into()))
+                    .unwrap();
             }
 
             let results = db
@@ -1890,7 +1903,8 @@ mod tests {
                 (PropertyKey::new("name"), Value::from("Alix")),
                 (PropertyKey::new("age"), Value::Int64(30)),
             ],
-        );
+        )
+        .unwrap();
 
         let usage = db.memory_usage();
         assert!(usage.total_bytes > 0, "should report non-zero memory");
@@ -2008,7 +2022,7 @@ mod tests {
                 .filter(|(_, v)| !v.is_null())
                 .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                 .collect();
-            db.create_node_with_props(&label_refs, props);
+            db.create_node_with_props(&label_refs, props).unwrap();
         }
 
         assert_eq!(db.node_count(), 2);
@@ -2022,14 +2036,18 @@ mod tests {
     #[test]
     fn import_rows_edges_basic() {
         let db = GrafeoDB::new_in_memory();
-        let alix = db.create_node_with_props(
-            &["Person"],
-            vec![(PropertyKey::new("name"), Value::from("Alix"))],
-        );
-        let gus = db.create_node_with_props(
-            &["Person"],
-            vec![(PropertyKey::new("name"), Value::from("Gus"))],
-        );
+        let alix = db
+            .create_node_with_props(
+                &["Person"],
+                vec![(PropertyKey::new("name"), Value::from("Alix"))],
+            )
+            .unwrap();
+        let gus = db
+            .create_node_with_props(
+                &["Person"],
+                vec![(PropertyKey::new("name"), Value::from("Gus"))],
+            )
+            .unwrap();
 
         let rows: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_value(json!([
             { "source": alix.0, "target": gus.0, "since": 2020 }
@@ -2044,7 +2062,7 @@ mod tests {
                 .filter(|(k, v)| k.as_str() != "source" && k.as_str() != "target" && !v.is_null())
                 .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                 .collect();
-            db.create_edge_with_props(src, dst, "KNOWS", props);
+            db.create_edge_with_props(src, dst, "KNOWS", props).unwrap();
         }
 
         assert_eq!(db.edge_count(), 1);
@@ -2064,7 +2082,7 @@ mod tests {
                 .filter(|(_, v)| !v.is_null())
                 .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                 .collect();
-            db.create_node_with_props(&["Person"], props);
+            db.create_node_with_props(&["Person"], props).unwrap();
         }
 
         assert_eq!(db.node_count(), 1);
@@ -2091,7 +2109,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                 .collect();
-            db.create_node_with_props(&["Item"], props);
+            db.create_node_with_props(&["Item"], props).unwrap();
         }
 
         assert_eq!(db.node_count(), 500);
@@ -2127,7 +2145,7 @@ mod tests {
                         .collect()
                 })
                 .unwrap_or_default();
-            let id = db.create_node_with_props(&labels, props);
+            let id = db.create_node_with_props(&labels, props).unwrap();
             node_ids.push(id);
         }
 
@@ -2139,7 +2157,8 @@ mod tests {
                 dst,
                 &edge.edge_type,
                 std::iter::empty::<(PropertyKey, Value)>(),
-            );
+            )
+            .unwrap();
         }
 
         assert_eq!(db.node_count(), 3);
@@ -2167,15 +2186,15 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
         let node_spec: LpgNodeSpec = serde_json::from_value(json!({ "labels": ["Tag"] })).unwrap();
         let labels: Vec<&str> = node_spec.labels.iter().map(String::as_str).collect();
-        db.create_node(&labels);
+        db.create_node(&labels).unwrap();
         assert_eq!(db.node_count(), 1);
     }
 
     #[test]
     fn import_lpg_self_loop() {
         let db = GrafeoDB::new_in_memory();
-        let id = db.create_node(&["Node"]);
-        db.create_edge(id, id, "SELF_REF");
+        let id = db.create_node(&["Node"]).unwrap();
+        db.create_edge(id, id, "SELF_REF").unwrap();
         assert_eq!(db.edge_count(), 1);
 
         let session = db.session();
@@ -2188,17 +2207,21 @@ mod tests {
     #[test]
     fn import_lpg_multiple_edges_between_same_nodes() {
         let db = GrafeoDB::new_in_memory();
-        let alix = db.create_node_with_props(
-            &["Person"],
-            vec![(PropertyKey::new("name"), Value::from("Alix"))],
-        );
-        let gus = db.create_node_with_props(
-            &["Person"],
-            vec![(PropertyKey::new("name"), Value::from("Gus"))],
-        );
-        db.create_edge(alix, gus, "KNOWS");
-        db.create_edge(alix, gus, "WORKS_WITH");
-        db.create_edge(gus, alix, "KNOWS");
+        let alix = db
+            .create_node_with_props(
+                &["Person"],
+                vec![(PropertyKey::new("name"), Value::from("Alix"))],
+            )
+            .unwrap();
+        let gus = db
+            .create_node_with_props(
+                &["Person"],
+                vec![(PropertyKey::new("name"), Value::from("Gus"))],
+            )
+            .unwrap();
+        db.create_edge(alix, gus, "KNOWS").unwrap();
+        db.create_edge(alix, gus, "WORKS_WITH").unwrap();
+        db.create_edge(gus, alix, "KNOWS").unwrap();
 
         assert_eq!(db.edge_count(), 3);
     }
@@ -2226,7 +2249,7 @@ mod tests {
                         .collect()
                 })
                 .unwrap_or_default();
-            db.create_node_with_props(&labels, props);
+            db.create_node_with_props(&labels, props).unwrap();
         }
 
         assert_eq!(db.node_count(), 500);
@@ -2235,8 +2258,8 @@ mod tests {
     #[test]
     fn import_lpg_edge_with_properties() {
         let db = GrafeoDB::new_in_memory();
-        let a = db.create_node(&["A"]);
-        let b = db.create_node(&["B"]);
+        let a = db.create_node(&["A"]).unwrap();
+        let b = db.create_node(&["B"]).unwrap();
         db.create_edge_with_props(
             a,
             b,
@@ -2245,7 +2268,8 @@ mod tests {
                 (PropertyKey::new("weight"), Value::Float64(0.75)),
                 (PropertyKey::new("label"), Value::from("strong")),
             ],
-        );
+        )
+        .unwrap();
 
         let session = db.session();
         let result = session

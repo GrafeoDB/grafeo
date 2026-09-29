@@ -27,6 +27,9 @@ impl LpgStore {
         self.node_properties
             .set(id, prop_key, value, self.current_epoch());
 
+        #[cfg(feature = "vector-index")]
+        self.sync_vector_indexes_for_property(id, key);
+
         // Update props_count in record
         #[cfg(not(feature = "temporal"))]
         {
@@ -57,6 +60,9 @@ impl LpgStore {
         #[cfg(feature = "temporal")]
         self.node_properties
             .set(id, prop_key, value, self.current_epoch());
+
+        #[cfg(feature = "vector-index")]
+        self.sync_vector_indexes_for_property(id, key);
     }
 
     /// Sets a property on an edge.
@@ -139,6 +145,8 @@ impl LpgStore {
         let result = self
             .node_properties
             .remove(id, &prop_key, self.current_epoch());
+        #[cfg(feature = "vector-index")]
+        self.sync_vector_indexes_for_property(id, key);
 
         // Update props_count in record
         #[cfg(not(feature = "temporal"))]
@@ -168,14 +176,14 @@ impl LpgStore {
         self.update_text_index_on_remove(id, key);
 
         #[cfg(not(feature = "temporal"))]
-        {
-            self.node_properties.remove(id, &prop_key)
-        }
+        let result = self.node_properties.remove(id, &prop_key);
         #[cfg(feature = "temporal")]
-        {
-            self.node_properties
-                .remove(id, &prop_key, self.current_epoch())
-        }
+        let result = self
+            .node_properties
+            .remove(id, &prop_key, self.current_epoch());
+        #[cfg(feature = "vector-index")]
+        self.sync_vector_indexes_for_property(id, key);
+        result
     }
 
     /// Removes a property from an edge.
@@ -349,6 +357,8 @@ impl LpgStore {
             self.update_text_index_on_set(id, key, &value);
             self.node_properties
                 .set(id, prop_key2, value, grafeo_common::types::EpochId::PENDING);
+            #[cfg(feature = "vector-index")]
+            self.sync_vector_indexes_for_property(id, key);
         }
     }
 
@@ -410,12 +420,26 @@ impl LpgStore {
                 .or_default()
                 .push(PropertyUndoEntry::NodeProperty {
                     node_id: id,
-                    key: prop_key,
+                    key: prop_key.clone(),
                     old_value: old_value.clone(),
                 });
         }
 
-        // Delegate to the normal (unversioned) remove
+        // Temporal: the tombstone is this transaction's write, PENDING
+        // until it commits.
+        #[cfg(feature = "temporal")]
+        {
+            self.update_property_index_on_remove(id, &prop_key);
+            #[cfg(feature = "text-index")]
+            self.update_text_index_on_remove(id, key);
+            let removed =
+                self.node_properties
+                    .remove(id, &prop_key, grafeo_common::types::EpochId::PENDING);
+            #[cfg(feature = "vector-index")]
+            self.sync_vector_indexes_for_property(id, key);
+            removed
+        }
+        #[cfg(not(feature = "temporal"))]
         self.remove_node_property(id, key)
     }
 
@@ -440,12 +464,19 @@ impl LpgStore {
                 .or_default()
                 .push(PropertyUndoEntry::EdgeProperty {
                     edge_id: id,
-                    key: prop_key,
+                    key: prop_key.clone(),
                     old_value: old_value.clone(),
                 });
         }
 
-        // Delegate to the normal (unversioned) remove
+        // Temporal: the tombstone is this transaction's write, PENDING
+        // until it commits.
+        #[cfg(feature = "temporal")]
+        {
+            self.edge_properties
+                .remove(id, &prop_key, grafeo_common::types::EpochId::PENDING)
+        }
+        #[cfg(not(feature = "temporal"))]
         self.remove_edge_property(id, key)
     }
 

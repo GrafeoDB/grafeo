@@ -91,17 +91,18 @@ fn graph_spec_strategy() -> impl Strategy<Value = GraphSpec> {
 fn apply_spec(spec: &GraphSpec, db: &GrafeoDB) {
     let mut ids: Vec<NodeId> = Vec::with_capacity(spec.nodes.len());
     for n in &spec.nodes {
-        let id = db.create_node(&[n.label]);
+        let id = db.create_node(&[n.label]).unwrap();
         if let Some(num) = n.num {
-            db.set_node_property(id, "num", Value::Int64(num));
+            db.set_node_property(id, "num", Value::Int64(num)).unwrap();
         }
         if let Some(s) = &n.name {
-            db.set_node_property(id, "name", Value::String(s.clone().into()));
+            db.set_node_property(id, "name", Value::String(s.clone().into()))
+                .unwrap();
         }
         ids.push(id);
     }
     for e in &spec.edges {
-        let _ = db.create_edge(ids[e.src], ids[e.dst], e.kind);
+        let _ = db.create_edge(ids[e.src], ids[e.dst], e.kind).unwrap();
     }
 }
 
@@ -216,10 +217,10 @@ fn empty_graph_compact_is_noop() {
 #[test]
 fn single_node_no_properties() {
     let live = GrafeoDB::new_in_memory();
-    live.create_node(&["A"]);
+    live.create_node(&["A"]).unwrap();
 
     let mut compacted = GrafeoDB::new_in_memory();
-    compacted.create_node(&["A"]);
+    compacted.create_node(&["A"]).unwrap();
     compacted.compact().expect("compact");
 
     assert_equivalent(&live, &compacted);
@@ -228,12 +229,12 @@ fn single_node_no_properties() {
 #[test]
 fn self_loop_survives_compact() {
     let live = GrafeoDB::new_in_memory();
-    let n = live.create_node(&["A"]);
-    live.create_edge(n, n, "R1");
+    let n = live.create_node(&["A"]).unwrap();
+    live.create_edge(n, n, "R1").unwrap();
 
     let mut compacted = GrafeoDB::new_in_memory();
-    let m = compacted.create_node(&["A"]);
-    compacted.create_edge(m, m, "R1");
+    let m = compacted.create_node(&["A"]).unwrap();
+    compacted.create_edge(m, m, "R1").unwrap();
     compacted.compact().expect("compact");
 
     assert_equivalent(&live, &compacted);

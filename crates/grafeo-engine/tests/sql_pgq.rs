@@ -55,9 +55,9 @@ fn create_social_network() -> GrafeoDB {
         )
         .unwrap();
 
-    session.create_edge(alix, gus, "KNOWS");
-    session.create_edge(alix, harm, "KNOWS");
-    session.create_edge(gus, harm, "KNOWS");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
+    session.create_edge(alix, harm, "KNOWS").unwrap();
+    session.create_edge(gus, harm, "KNOWS").unwrap();
 
     db
 }
@@ -271,9 +271,9 @@ fn create_chain_network() -> GrafeoDB {
         .create_node_with_props(&["Person"], [("name", Value::String("D".into()))])
         .unwrap();
 
-    session.create_edge(a, b, "KNOWS");
-    session.create_edge(b, c, "KNOWS");
-    session.create_edge(c, d, "KNOWS");
+    session.create_edge(a, b, "KNOWS").unwrap();
+    session.create_edge(b, c, "KNOWS").unwrap();
+    session.create_edge(c, d, "KNOWS").unwrap();
 
     db
 }
@@ -552,7 +552,7 @@ fn create_partial_network() -> GrafeoDB {
         .unwrap();
 
     // Alix knows Gus, but Vincent knows nobody
-    session.create_edge(alix, gus, "KNOWS");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
 
     let _ = vincent; // Vincent has no outgoing KNOWS edges
     db

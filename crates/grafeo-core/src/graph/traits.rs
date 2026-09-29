@@ -354,7 +354,7 @@ pub trait GraphStore: Send + Sync {
 ///
 /// `text_search` and `vector_search` are peer operations returning owned
 /// `Vec<(NodeId, f64)>`. The planner decides strategy based on `has_*_index`
-/// and `vector_index_metric` introspection; the store executes the chosen
+/// and `vector_index_config` introspection; the store executes the chosen
 /// plan, falling back to brute-force internally when the request is valid
 /// but no matching index exists.
 pub trait GraphStoreSearch: GraphStore {
@@ -451,7 +451,11 @@ pub trait GraphStoreSearch: GraphStore {
     /// requested metric cannot serve the query directly, so the planner either
     /// routes to brute force or skips pushdown entirely.
     #[cfg(feature = "vector-index")]
-    fn vector_index_metric(&self, _label: &str, _property: &str) -> Option<DistanceMetric> {
+    fn vector_index_config(
+        &self,
+        _label: &str,
+        _property: &str,
+    ) -> Option<crate::index::vector::HnswConfig> {
         None
     }
 

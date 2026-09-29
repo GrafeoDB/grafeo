@@ -112,7 +112,8 @@ impl GraphWriter {
     }
 
     /// The node as this writer's transaction sees it, its own writes included.
-    fn node(&self, id: NodeId) -> Option<Node> {
+    #[must_use]
+    pub fn node(&self, id: NodeId) -> Option<Node> {
         match (self.viewing_epoch, self.transaction_id) {
             (Some(epoch), Some(transaction_id)) => {
                 self.store.get_node_versioned(id, epoch, transaction_id)
@@ -122,7 +123,8 @@ impl GraphWriter {
     }
 
     /// The edge as this writer's transaction sees it, its own writes included.
-    fn edge(&self, id: EdgeId) -> Option<Edge> {
+    #[must_use]
+    pub fn edge(&self, id: EdgeId) -> Option<Edge> {
         match (self.viewing_epoch, self.transaction_id) {
             (Some(epoch), Some(transaction_id)) => {
                 self.store.get_edge_versioned(id, epoch, transaction_id)
@@ -226,17 +228,46 @@ impl GraphWriter {
         Ok(())
     }
 
+    /// Removes a property from a node, checked like setting it to null.
+    /// Returns whether the node had it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict or the constraint the removal would violate
+    /// (`NOT NULL`, `NODE KEY`).
+    pub fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool, OperatorError> {
+        self.record(Entity::Node(id))?;
+        let Some(node) = self.node(id) else {
+            return Ok(false);
+        };
+        if node.get_property(key).is_none() {
+            return Ok(false);
+        }
+        if let Some(validator) = &self.validator {
+            self.check_node_set(
+                validator.as_ref(),
+                &node,
+                &[(key.to_string(), Value::Null)],
+                false,
+            )?;
+        }
+        self.remove_value(Entity::Node(id), key);
+        Ok(true)
+    }
+
     /// Adds labels to a node, after checking the node against the
-    /// constraints of the labels it gets. Returns how many were new.
+    /// constraints of the labels it gets. Returns how many were new (none for
+    /// a node that does not exist).
     ///
     /// # Errors
     ///
     /// Returns a write conflict or the first constraint violated.
     pub fn add_labels(&self, id: NodeId, labels: &[String]) -> Result<usize, OperatorError> {
         self.record(Entity::Node(id))?;
-        if let Some(validator) = &self.validator
-            && let Some(node) = self.node(id)
-        {
+        let Some(node) = self.node(id) else {
+            return Ok(0);
+        };
+        if let Some(validator) = &self.validator {
             let added: Vec<String> = labels
                 .iter()
                 .filter(|label| !node.has_label(label))
@@ -265,13 +296,17 @@ impl GraphWriter {
         Ok(added)
     }
 
-    /// Removes labels from a node. Returns how many it had.
+    /// Removes labels from a node. Returns how many it had (none for a node
+    /// that does not exist).
     ///
     /// # Errors
     ///
     /// Returns a write conflict.
     pub fn remove_labels(&self, id: NodeId, labels: &[String]) -> Result<usize, OperatorError> {
         self.record(Entity::Node(id))?;
+        if self.node(id).is_none() {
+            return Ok(0);
+        }
         let mut removed = 0;
         for label in labels {
             let had = match self.transaction_id {
@@ -397,6 +432,27 @@ impl GraphWriter {
         }
         self.apply_set(Entity::Edge(id), assignments, replace);
         Ok(())
+    }
+
+    /// Removes a property from an edge, checked like setting it to null.
+    /// Returns whether the edge had it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict or the constraint the removal would violate.
+    pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool, OperatorError> {
+        self.record(Entity::Edge(id))?;
+        let Some(edge) = self.edge(id) else {
+            return Ok(false);
+        };
+        if edge.get_property(key).is_none() {
+            return Ok(false);
+        }
+        if let Some(validator) = &self.validator {
+            validator.validate_edge_property(edge.edge_type.as_str(), key, &Value::Null)?;
+        }
+        self.remove_value(Entity::Edge(id), key);
+        Ok(true)
     }
 
     /// Deletes an edge.

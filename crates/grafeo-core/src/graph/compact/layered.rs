@@ -1096,8 +1096,12 @@ impl GraphStoreSearch for LayeredStore {
     }
 
     #[cfg(feature = "vector-index")]
-    fn vector_index_metric(&self, label: &str, property: &str) -> Option<DistanceMetric> {
-        self.overlay.load().vector_index_metric(label, property)
+    fn vector_index_config(
+        &self,
+        label: &str,
+        property: &str,
+    ) -> Option<crate::index::vector::HnswConfig> {
+        self.overlay.load().vector_index_config(label, property)
     }
 
     #[cfg(feature = "vector-index")]

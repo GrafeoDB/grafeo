@@ -1,0 +1,280 @@
+//! The direct write API (`create_node`, `set_node_property`, ...) writes
+//! through the same path as a query: each call is one transaction on the
+//! current graph, checked against the schema and constraints, versioned and
+//! reported to CDC, and it applies completely or fails with an error.
+
+use std::collections::HashMap;
+
+use grafeo_common::types::{PropertyKey, Value};
+use grafeo_engine::GrafeoDB;
+
+/// Sorted `n.id` of every node in the database's current graph.
+fn ids(db: &GrafeoDB) -> Vec<String> {
+    db.execute("MATCH (n) RETURN n.id ORDER BY n.id")
+        .unwrap()
+        .rows()
+        .iter()
+        .map(|row| match &row[0] {
+            Value::String(s) => s.to_string(),
+            other => panic!("unexpected id {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn writes_go_to_the_selected_graph() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("CREATE GRAPH model").unwrap();
+    db.set_current_graph(Some("model")).unwrap();
+
+    let component = db
+        .create_node_with_props(&["Component"], [("id", Value::from("c1"))])
+        .unwrap();
+    let data = db.create_node(&["Data"]).unwrap();
+    db.set_node_property(data, "id", Value::from("d1")).unwrap();
+    db.set_node_property(component, "name", Value::from("Billing"))
+        .unwrap();
+    assert!(db.add_node_label(component, "Service").unwrap());
+    let access = db
+        .create_edge_with_props(component, data, "ACCESS", [("id", Value::from("r1"))])
+        .unwrap();
+    db.set_edge_property(access, "weight", Value::from(2_i64))
+        .unwrap();
+
+    assert_eq!(ids(&db), ["c1", "d1"]);
+    let result = db
+        .execute("MATCH (a:Service)-[r:ACCESS]->(b) RETURN a.name, r.id, r.weight, b.id")
+        .unwrap();
+    assert_eq!(
+        result.rows(),
+        [vec![
+            Value::from("Billing"),
+            Value::from("r1"),
+            Value::from(2_i64),
+            Value::from("d1"),
+        ]]
+    );
+    assert!(db.get_node(component).is_some());
+    assert!(db.get_edge(access).is_some());
+
+    // The default graph got none of it.
+    db.set_current_graph(None).unwrap();
+    assert!(ids(&db).is_empty());
+    assert!(db.get_node(component).is_none());
+}
+
+#[test]
+fn property_index_calls_follow_the_selected_graph() {
+    let db = GrafeoDB::new_in_memory();
+    let in_default = db
+        .create_node_with_props(&["Doc"], [("id", Value::from("x"))])
+        .unwrap();
+    db.execute("CREATE GRAPH model").unwrap();
+    db.set_current_graph(Some("model")).unwrap();
+    let in_model = db
+        .create_node_with_props(&["Doc"], [("id", Value::from("x"))])
+        .unwrap();
+    db.create_property_index("id");
+    assert!(db.has_property_index("id"));
+    assert_eq!(
+        db.find_nodes_by_property("id", &Value::from("x")),
+        [in_model]
+    );
+
+    db.set_current_graph(None).unwrap();
+    assert!(!db.has_property_index("id"));
+    assert_eq!(
+        db.find_nodes_by_property("id", &Value::from("x")),
+        [in_default]
+    );
+}
+
+#[test]
+fn writes_are_checked_against_constraints() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("CREATE CONSTRAINT person_email FOR (n:Person) ON (n.email) UNIQUE")
+        .unwrap();
+    db.execute("CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) NOT NULL")
+        .unwrap();
+    let alix = db
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::from("Alix")),
+                ("email", Value::from("alix@example.org")),
+            ],
+        )
+        .unwrap();
+    let gus = db
+        .create_node_with_props(&["Person"], [("name", Value::from("Gus"))])
+        .unwrap();
+
+    let duplicate = db.create_node_with_props(
+        &["Person"],
+        [
+            ("name", Value::from("Vincent")),
+            ("email", Value::from("alix@example.org")),
+        ],
+    );
+    assert!(duplicate.is_err(), "a duplicate UNIQUE value is rejected");
+    assert!(
+        db.set_node_property(gus, "email", Value::from("alix@example.org"))
+            .is_err(),
+        "setting a duplicate UNIQUE value is rejected"
+    );
+    assert!(
+        db.remove_node_property(alix, "name").is_err(),
+        "removing a NOT NULL property is rejected"
+    );
+    assert!(
+        db.create_node(&["Person"]).is_err(),
+        "a node without its NOT NULL property is rejected"
+    );
+    let guest = db
+        .create_node_with_props(&["Guest"], [("email", Value::from("alix@example.org"))])
+        .unwrap();
+    assert!(
+        db.add_node_label(guest, "Person").is_err(),
+        "a label whose constraints the node breaks is rejected"
+    );
+
+    assert_eq!(
+        db.execute("MATCH (n:Person) RETURN count(n)")
+            .unwrap()
+            .rows()[0][0],
+        Value::Int64(2)
+    );
+}
+
+#[test]
+fn a_failing_batch_creates_nothing() {
+    // With a property index the UNIQUE check finds candidates through the
+    // index, without one through the label: both see the batch's own nodes.
+    for with_index in [false, true] {
+        let db = GrafeoDB::new_in_memory();
+        db.execute("CREATE CONSTRAINT doc_id FOR (n:Doc) ON (n.id) UNIQUE")
+            .unwrap();
+        if with_index {
+            db.create_property_index("id");
+        }
+        let row = |id: &str| HashMap::from([(PropertyKey::new("id"), Value::from(id))]);
+
+        let err = db
+            .batch_create_nodes_with_props("Doc", vec![row("a"), row("b"), row("a")])
+            .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("unique"), "{err}");
+        assert_eq!(db.node_count(), 0, "with_index: {with_index}");
+        assert!(
+            db.find_nodes_by_property("id", &Value::from("a"))
+                .is_empty()
+        );
+
+        let created = db
+            .batch_create_nodes_with_props("Doc", vec![row("a"), row("b")])
+            .unwrap();
+        assert_eq!(created.len(), 2);
+        assert!(
+            db.create_node_with_props(&["Doc"], [("id", Value::from("b"))])
+                .is_err(),
+            "with_index: {with_index}"
+        );
+    }
+}
+
+#[test]
+fn missing_entities_are_errors_or_false() {
+    let db = GrafeoDB::new_in_memory();
+    let alix = db.create_node(&["Person"]).unwrap();
+    let gus = db.create_node(&["Person"]).unwrap();
+    db.create_edge(alix, gus, "KNOWS").unwrap();
+
+    let missing = grafeo_common::types::NodeId::new(999);
+    assert!(db.create_edge(alix, missing, "KNOWS").is_err());
+    assert!(
+        db.set_node_property(missing, "x", Value::from(1_i64))
+            .is_err()
+    );
+    assert!(!db.delete_node(missing).unwrap());
+    assert!(!db.add_node_label(missing, "Person").unwrap());
+    // A node that still has edges is not deleted.
+    assert!(db.delete_node(alix).is_err());
+    assert!(db.get_node(alix).is_some());
+}
+
+#[test]
+fn every_write_advances_the_epoch() {
+    let db = GrafeoDB::new_in_memory();
+    let start = db.current_epoch();
+    let alix = db.create_node(&["Person"]).unwrap();
+    let after_create = db.current_epoch();
+    db.set_node_property(alix, "name", Value::from("Alix"))
+        .unwrap();
+    let after_set = db.current_epoch();
+    assert!(after_create > start, "{after_create:?} after {start:?}");
+    assert!(
+        after_set > after_create,
+        "{after_set:?} after {after_create:?}"
+    );
+}
+
+/// A reader pinned at `current_epoch()` does not see nodes and edges written
+/// or deleted after it: each direct write commits at a later epoch.
+#[test]
+fn a_pinned_epoch_does_not_see_later_writes() {
+    let db = GrafeoDB::new_in_memory();
+    let alix = db.create_node(&["Person"]).unwrap();
+    let gus = db.create_node(&["Person"]).unwrap();
+    let knows = db.create_edge(alix, gus, "KNOWS").unwrap();
+    let pinned = db.current_epoch();
+
+    let vincent = db.create_node(&["Person"]).unwrap();
+    let likes = db.create_edge(gus, vincent, "LIKES").unwrap();
+    assert!(db.delete_edge(knows).unwrap());
+
+    assert!(db.get_node_at_epoch(vincent, pinned).is_none());
+    assert!(db.get_edge_at_epoch(likes, pinned).is_none());
+    assert!(db.get_edge_at_epoch(knows, pinned).is_some());
+    assert!(db.get_node_at_epoch(alix, pinned).is_some());
+    assert!(db.get_edge(knows).is_none());
+}
+
+#[test]
+fn session_writes_roll_back_with_the_transaction() {
+    let db = GrafeoDB::new_in_memory();
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    let alix = session
+        .create_node_with_props(&["Person"], [("id", Value::from("alix"))])
+        .unwrap();
+    assert!(session.get_node(alix).is_some());
+    session.rollback().unwrap();
+    assert!(db.get_node(alix).is_none());
+    assert_eq!(db.node_count(), 0);
+}
+
+#[cfg(feature = "cdc")]
+#[test]
+fn a_create_event_carries_the_labels_and_properties() {
+    use grafeo_engine::cdc::ChangeKind;
+
+    let db = GrafeoDB::with_config(grafeo_engine::Config::in_memory().with_cdc()).unwrap();
+    let direct = db
+        .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
+        .unwrap();
+    db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+    let from_query = db.find_nodes_by_property("name", &Value::from("Gus"))[0];
+
+    for node in [direct, from_query] {
+        let history = db.history(node).unwrap();
+        assert_eq!(history.len(), 1, "one create event: {history:?}");
+        let create = &history[0];
+        assert_eq!(create.kind, ChangeKind::Create);
+        assert_eq!(create.labels.as_deref(), Some(&["Person".to_string()][..]));
+        assert!(
+            create
+                .after
+                .as_ref()
+                .is_some_and(|after| after.contains_key("name"))
+        );
+    }
+}

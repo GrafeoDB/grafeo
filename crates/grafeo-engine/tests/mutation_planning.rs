@@ -55,11 +55,11 @@ fn create_social_network() -> GrafeoDB {
         .create_node_with_props(&["Company"], [("name", Value::String("TechCorp".into()))])
         .unwrap();
 
-    session.create_edge(alix, gus, "KNOWS");
-    session.create_edge(alix, harm, "KNOWS");
-    session.create_edge(gus, harm, "KNOWS");
-    session.create_edge(alix, techcorp, "WORKS_AT");
-    session.create_edge(gus, techcorp, "WORKS_AT");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
+    session.create_edge(alix, harm, "KNOWS").unwrap();
+    session.create_edge(gus, harm, "KNOWS").unwrap();
+    session.create_edge(alix, techcorp, "WORKS_AT").unwrap();
+    session.create_edge(gus, techcorp, "WORKS_AT").unwrap();
 
     db
 }
@@ -414,7 +414,7 @@ fn test_create_path_with_new_nodes() {
     let france = session
         .create_node_with_props(&["Country"], [("name", Value::String("France".into()))])
         .unwrap();
-    session.create_edge(paris, france, "IN");
+    session.create_edge(paris, france, "IN").unwrap();
 
     assert_eq!(db.node_count(), 2);
     assert_eq!(db.edge_count(), 1);
@@ -1739,7 +1739,7 @@ fn test_traits_create_with_props_convenience() {
     let other = session
         .create_node_with_props(&["Box"], [("size", Value::Int64(10))])
         .unwrap();
-    session.create_edge(node, other, "FITS_IN");
+    session.create_edge(node, other, "FITS_IN").unwrap();
 
     let edge_result = session
         .execute("MATCH (w:Widget)-[:FITS_IN]->(b:Box) RETURN w.color, b.size")

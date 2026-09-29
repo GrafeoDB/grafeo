@@ -21,8 +21,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (title, embedding) in documents {
         // Create a document node using the programmatic API
-        let node_id = db.create_node(&["Document"]);
-        db.set_node_property(node_id, "title", Value::from(*title));
+        let node_id = db.create_node(&["Document"]).unwrap();
+        db.set_node_property(node_id, "title", Value::from(*title))
+            .unwrap();
 
         // Store the embedding as a Vector property.
         // Value::Vector wraps an Arc<[f32]>, created from a Vec.
@@ -30,7 +31,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             node_id,
             "embedding",
             Value::Vector(embedding.to_vec().into()),
-        );
+        )
+        .unwrap();
     }
 
     println!("Created {} documents with embeddings\n", documents.len());

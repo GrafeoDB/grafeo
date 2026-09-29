@@ -365,6 +365,7 @@ class TestEdgeCrud:
     def test_delete_node(self, populated_db):
         db = populated_db["db"]
         nid = populated_db["gus"].id
+        assert db.delete_edge(populated_db["edge"].id) is True
         deleted = db.delete_node(nid)
         assert deleted is True
         assert db.get_node(nid) is None
@@ -570,13 +571,27 @@ class TestErrorHandling:
         node = db.get_node(999999)
         assert node is None
 
-    def test_set_property_nonexistent_node_silent(self, db):
-        # Setting property on nonexistent node succeeds silently
-        db.set_node_property(999999, "key", "value")
+    def test_set_property_nonexistent_node_raises(self, db):
+        with pytest.raises(Exception, match="node 999999 does not exist"):
+            db.set_node_property(999999, "key", "value")
 
-    def test_set_property_nonexistent_edge_silent(self, db):
-        # Setting property on nonexistent edge succeeds silently
-        db.set_edge_property(999999, "key", "value")
+    def test_set_property_nonexistent_edge_raises(self, db):
+        with pytest.raises(Exception, match="edge 999999 does not exist"):
+            db.set_edge_property(999999, "key", "value")
+
+    def test_create_edge_to_a_nonexistent_node_raises(self, db):
+        alix = db.create_node(["Person"], {"name": "Alix"})
+        with pytest.raises(Exception, match="node 999999 does not exist"):
+            db.create_edge(alix.id, 999999, "KNOWS")
+        assert db.edge_count == 0
+
+    def test_delete_node_with_edges_raises(self, db):
+        alix = db.create_node(["Person"], {"name": "Alix"})
+        gus = db.create_node(["Person"], {"name": "Gus"})
+        db.create_edge(alix.id, gus.id, "KNOWS")
+        with pytest.raises(Exception, match="DETACH DELETE"):
+            db.delete_node(alix.id)
+        assert db.get_node(alix.id) is not None
 
     def test_double_close(self, db):
         db.close()

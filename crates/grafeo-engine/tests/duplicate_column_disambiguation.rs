@@ -33,7 +33,7 @@ fn one_edge() -> GrafeoDB {
             ],
         )
         .unwrap();
-    session.create_edge(s, t, "KNOWS");
+    session.create_edge(s, t, "KNOWS").unwrap();
     db
 }
 

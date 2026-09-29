@@ -67,6 +67,8 @@ impl LpgStore {
             index.resize(label_id as usize + 1, FxHashMap::default());
         }
         index[label_id as usize].insert(node_id, ());
+        drop(index);
+        self.index_node_under_label(node_id, label);
 
         // Update label count in node record
         #[cfg(not(feature = "temporal"))]
@@ -146,6 +148,8 @@ impl LpgStore {
             index.resize(label_id as usize + 1, FxHashMap::default());
         }
         index[label_id as usize].insert(node_id, ());
+        drop(index);
+        self.index_node_under_label(node_id, label);
 
         true
     }
@@ -217,6 +221,8 @@ impl LpgStore {
         if (label_id as usize) < index.len() {
             index[label_id as usize].remove(&node_id);
         }
+        drop(index);
+        self.unindex_node_under_label(node_id, label);
 
         // Update label count in node record
         #[cfg(not(feature = "temporal"))]
@@ -303,6 +309,8 @@ impl LpgStore {
         if (label_id as usize) < index.len() {
             index[label_id as usize].remove(&node_id);
         }
+        drop(index);
+        self.unindex_node_under_label(node_id, label);
 
         true
     }
@@ -465,6 +473,8 @@ impl LpgStore {
             index.resize(label_id as usize + 1, FxHashMap::default());
         }
         index[label_id as usize].insert(node_id, ());
+        drop(index);
+        self.index_node_under_label(node_id, label);
 
         // Record in undo log
         self.property_undo_log
@@ -540,6 +550,8 @@ impl LpgStore {
         if (label_id as usize) < index.len() {
             index[label_id as usize].remove(&node_id);
         }
+        drop(index);
+        self.unindex_node_under_label(node_id, label);
 
         // Record in undo log
         self.property_undo_log

@@ -227,35 +227,43 @@ mod tests {
             }
             // #395: a database-level write, then `wal_checkpoint()`, no close.
             "db_write_then_checkpoint" => {
-                db.create_node_with_props(&["Document"], [("title", Value::from("test"))]);
+                db.create_node_with_props(&["Document"], [("title", Value::from("test"))])
+                    .unwrap();
                 db.wal_checkpoint().unwrap();
             }
             // Every database-level write call, outside any transaction.
             "db_crud" => {
-                let alix = db.create_node(&["Person"]);
-                db.set_node_property(alix, "name", Value::from("Alix"));
-                let gus = db.create_node_with_props(
-                    &["Person"],
-                    [("name", Value::from("Gus")), ("age", Value::from(40_i64))],
-                );
-                db.add_node_label(alix, "Employee");
-                db.add_node_label(gus, "Temp");
-                db.remove_node_label(gus, "Temp");
-                db.remove_node_property(gus, "age");
-                let knows = db.create_edge(alix, gus, "KNOWS");
-                db.set_edge_property(knows, "since", Value::from(2020_i64));
-                let likes = db.create_edge_with_props(
-                    gus,
-                    alix,
-                    "LIKES",
-                    [("w", Value::from(1_i64)), ("x", Value::from(2_i64))],
-                );
-                db.remove_edge_property(likes, "x");
-                let vincent = db.create_node(&["Person"]);
-                db.delete_node(vincent);
-                let temp = db.create_edge(alix, gus, "TEMP");
-                db.delete_edge(temp);
-                db.batch_create_nodes("Vec", "v", vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+                let alix = db.create_node(&["Person"]).unwrap();
+                db.set_node_property(alix, "name", Value::from("Alix"))
+                    .unwrap();
+                let gus = db
+                    .create_node_with_props(
+                        &["Person"],
+                        [("name", Value::from("Gus")), ("age", Value::from(40_i64))],
+                    )
+                    .unwrap();
+                db.add_node_label(alix, "Employee").unwrap();
+                db.add_node_label(gus, "Temp").unwrap();
+                db.remove_node_label(gus, "Temp").unwrap();
+                db.remove_node_property(gus, "age").unwrap();
+                let knows = db.create_edge(alix, gus, "KNOWS").unwrap();
+                db.set_edge_property(knows, "since", Value::from(2020_i64))
+                    .unwrap();
+                let likes = db
+                    .create_edge_with_props(
+                        gus,
+                        alix,
+                        "LIKES",
+                        [("w", Value::from(1_i64)), ("x", Value::from(2_i64))],
+                    )
+                    .unwrap();
+                db.remove_edge_property(likes, "x").unwrap();
+                let vincent = db.create_node(&["Person"]).unwrap();
+                db.delete_node(vincent).unwrap();
+                let temp = db.create_edge(alix, gus, "TEMP").unwrap();
+                db.delete_edge(temp).unwrap();
+                db.batch_create_nodes("Vec", "v", vec![vec![1.0, 0.0], vec![0.0, 1.0]])
+                    .unwrap();
                 db.batch_create_nodes_with_props(
                     "Doc",
                     ["a", "b"]
@@ -264,14 +272,16 @@ mod tests {
                             std::iter::once(("title".into(), Value::from(*title))).collect()
                         })
                         .collect(),
-                );
+                )
+                .unwrap();
             }
             // A database-level write while a session transaction is open.
             "db_write_during_session_tx" => {
                 let mut a = db.session();
                 a.begin_transaction().unwrap();
                 insert(&a, "Mia");
-                db.create_node_with_props(&["Person"], [("name", Value::from("Django"))]);
+                db.create_node_with_props(&["Person"], [("name", Value::from("Django"))])
+                    .unwrap();
             }
             "seed_alix" => insert(&db.session(), "Alix"),
             "insert_gus" => insert(&db.session(), "Gus"),

@@ -87,16 +87,16 @@ fn social_graph() -> GrafeoDB {
         .unwrap();
 
     // KNOWS: Alix -> Gus, Alix -> Vincent, Gus -> Jules, Vincent -> Jules
-    session.create_edge(alix, gus, "KNOWS");
-    session.create_edge(alix, vincent, "KNOWS");
-    session.create_edge(gus, jules, "KNOWS");
-    session.create_edge(vincent, jules, "KNOWS");
+    session.create_edge(alix, gus, "KNOWS").unwrap();
+    session.create_edge(alix, vincent, "KNOWS").unwrap();
+    session.create_edge(gus, jules, "KNOWS").unwrap();
+    session.create_edge(vincent, jules, "KNOWS").unwrap();
 
     // WORKS_AT: Alix -> TechCorp, Gus -> TechCorp, Vincent -> Startup, Jules -> Startup
-    session.create_edge(alix, techcorp, "WORKS_AT");
-    session.create_edge(gus, techcorp, "WORKS_AT");
-    session.create_edge(vincent, startup, "WORKS_AT");
-    session.create_edge(jules, startup, "WORKS_AT");
+    session.create_edge(alix, techcorp, "WORKS_AT").unwrap();
+    session.create_edge(gus, techcorp, "WORKS_AT").unwrap();
+    session.create_edge(vincent, startup, "WORKS_AT").unwrap();
+    session.create_edge(jules, startup, "WORKS_AT").unwrap();
 
     db
 }

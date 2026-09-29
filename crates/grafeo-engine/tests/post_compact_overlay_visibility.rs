@@ -37,9 +37,9 @@ fn row_count(db: &GrafeoDB, q: &str) -> usize {
 #[test]
 fn node_created_after_compact_is_visible() {
     let mut db = GrafeoDB::new_in_memory();
-    db.create_node(&["X"]);
+    db.create_node(&["X"]).unwrap();
     db.compact().expect("compact");
-    db.create_node(&["Y"]);
+    db.create_node(&["Y"]).unwrap();
 
     assert_eq!(int_scalar(&db, "MATCH (n) RETURN count(n)"), 2);
     assert_eq!(row_count(&db, "MATCH (n:Y) RETURN n"), 1);
@@ -49,10 +49,10 @@ fn node_created_after_compact_is_visible() {
 #[test]
 fn multiple_post_compact_nodes_visible() {
     let mut db = GrafeoDB::new_in_memory();
-    db.create_node(&["Base"]);
+    db.create_node(&["Base"]).unwrap();
     db.compact().expect("compact");
     for _ in 0..5 {
-        db.create_node(&["Overlay"]);
+        db.create_node(&["Overlay"]).unwrap();
     }
 
     assert_eq!(int_scalar(&db, "MATCH (n) RETURN count(n)"), 6);
@@ -63,15 +63,15 @@ fn multiple_post_compact_nodes_visible() {
 #[test]
 fn post_compact_edge_visible() {
     let mut db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["A"]);
-    let b = db.create_node(&["B"]);
-    db.create_edge(a, b, "PRE");
+    let a = db.create_node(&["A"]).unwrap();
+    let b = db.create_node(&["B"]).unwrap();
+    db.create_edge(a, b, "PRE").unwrap();
     db.compact().expect("compact");
 
     // New nodes + edge entirely in the overlay.
-    let c = db.create_node(&["A"]);
-    let d = db.create_node(&["B"]);
-    db.create_edge(c, d, "POST");
+    let c = db.create_node(&["A"]).unwrap();
+    let d = db.create_node(&["B"]).unwrap();
+    db.create_edge(c, d, "POST").unwrap();
 
     assert_eq!(int_scalar(&db, "MATCH ()-[r]->() RETURN count(r)"), 2);
     assert_eq!(int_scalar(&db, "MATCH ()-[r:POST]->() RETURN count(r)"), 1);
@@ -81,10 +81,10 @@ fn post_compact_edge_visible() {
 #[test]
 fn post_compact_edge_between_base_and_overlay_nodes() {
     let mut db = GrafeoDB::new_in_memory();
-    let base_a = db.create_node(&["A"]);
+    let base_a = db.create_node(&["A"]).unwrap();
     db.compact().expect("compact");
-    let overlay_b = db.create_node(&["B"]);
-    db.create_edge(base_a, overlay_b, "CROSS");
+    let overlay_b = db.create_node(&["B"]).unwrap();
+    db.create_edge(base_a, overlay_b, "CROSS").unwrap();
 
     // The edge connects a base node to an overlay node — visibility has
     // to work on both sides.
@@ -101,11 +101,11 @@ fn post_compact_edge_between_base_and_overlay_nodes() {
 #[test]
 fn post_compact_property_anchored_edge_survives_unrelated_overlay_write() {
     let mut db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["A"]);
-    let b = db.create_node(&["B"]);
-    db.set_node_property(a, "id", Value::Int64(1));
-    db.set_node_property(b, "id", Value::Int64(2));
-    db.create_edge(a, b, "T");
+    let a = db.create_node(&["A"]).unwrap();
+    let b = db.create_node(&["B"]).unwrap();
+    db.set_node_property(a, "id", Value::Int64(1)).unwrap();
+    db.set_node_property(b, "id", Value::Int64(2)).unwrap();
+    db.create_edge(a, b, "T").unwrap();
     db.compact().expect("compact");
 
     // Both endpoints are in the snapshot tier.
@@ -118,9 +118,9 @@ fn post_compact_property_anchored_edge_survives_unrelated_overlay_write() {
     // Unrelated overlay write that promotes `a` (it becomes the endpoint of
     // a brand-new overlay edge). The original snapshot-tier `T` edge between
     // `a` and `b` is not touched in any way.
-    let c = db.create_node(&["C"]);
-    db.set_node_property(c, "id", Value::Int64(99));
-    db.create_edge(a, c, "UNRELATED");
+    let c = db.create_node(&["C"]).unwrap();
+    db.set_node_property(c, "id", Value::Int64(99)).unwrap();
+    db.create_edge(a, c, "UNRELATED").unwrap();
 
     assert_eq!(
         row_count(&db, "MATCH (a:A {id: 1})-[:T]->(b:B {id: 2}) RETURN true"),
@@ -131,16 +131,16 @@ fn post_compact_property_anchored_edge_survives_unrelated_overlay_write() {
 
     // Same when the destination endpoint is the one promoted.
     let mut db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["A"]);
-    let b = db.create_node(&["B"]);
-    db.set_node_property(a, "id", Value::Int64(1));
-    db.set_node_property(b, "id", Value::Int64(2));
-    db.create_edge(a, b, "T");
+    let a = db.create_node(&["A"]).unwrap();
+    let b = db.create_node(&["B"]).unwrap();
+    db.set_node_property(a, "id", Value::Int64(1)).unwrap();
+    db.set_node_property(b, "id", Value::Int64(2)).unwrap();
+    db.create_edge(a, b, "T").unwrap();
     db.compact().expect("compact");
 
-    let c = db.create_node(&["C"]);
-    db.set_node_property(c, "id", Value::Int64(99));
-    db.create_edge(c, b, "UNRELATED"); // promotes b
+    let c = db.create_node(&["C"]).unwrap();
+    db.set_node_property(c, "id", Value::Int64(99)).unwrap();
+    db.create_edge(c, b, "UNRELATED").unwrap(); // promotes b
 
     assert_eq!(
         row_count(&db, "MATCH (a:A {id: 1})-[:T]->(b:B {id: 2}) RETURN true"),
@@ -156,14 +156,14 @@ fn post_compact_property_anchored_edge_survives_unrelated_overlay_write() {
 #[test]
 fn post_compact_deleted_promoted_edge_stays_deleted() {
     let mut db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["A"]);
-    let b = db.create_node(&["B"]);
-    let c = db.create_node(&["C"]);
-    db.set_node_property(a, "id", Value::Int64(1));
-    db.set_node_property(b, "id", Value::Int64(2));
-    db.set_node_property(c, "id", Value::Int64(3));
-    db.create_edge(a, b, "T");
-    db.create_edge(c, b, "T");
+    let a = db.create_node(&["A"]).unwrap();
+    let b = db.create_node(&["B"]).unwrap();
+    let c = db.create_node(&["C"]).unwrap();
+    db.set_node_property(a, "id", Value::Int64(1)).unwrap();
+    db.set_node_property(b, "id", Value::Int64(2)).unwrap();
+    db.set_node_property(c, "id", Value::Int64(3)).unwrap();
+    db.create_edge(a, b, "T").unwrap();
+    db.create_edge(c, b, "T").unwrap();
     db.compact().expect("compact");
 
     let session = db.session();
@@ -197,10 +197,10 @@ fn post_compact_deleted_promoted_edge_stays_deleted() {
 #[test]
 fn post_compact_deleted_base_edge_hidden_while_endpoints_survive() {
     let mut db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["A"]);
-    let b = db.create_node(&["B"]);
-    db.set_node_property(a, "id", Value::Int64(1));
-    db.create_edge(a, b, "T");
+    let a = db.create_node(&["A"]).unwrap();
+    let b = db.create_node(&["B"]).unwrap();
+    db.set_node_property(a, "id", Value::Int64(1)).unwrap();
+    db.create_edge(a, b, "T").unwrap();
     db.compact().expect("compact");
 
     db.session()
@@ -215,10 +215,11 @@ fn post_compact_deleted_base_edge_hidden_while_endpoints_survive() {
 #[test]
 fn post_compact_node_property_survives_reread() {
     let mut db = GrafeoDB::new_in_memory();
-    db.create_node(&["X"]);
+    db.create_node(&["X"]).unwrap();
     db.compact().expect("compact");
-    let n = db.create_node(&["Y"]);
-    db.set_node_property(n, "label", Value::String("hello".into()));
+    let n = db.create_node(&["Y"]).unwrap();
+    db.set_node_property(n, "label", Value::String("hello".into()))
+        .unwrap();
 
     let s = db.session();
     let r = s.execute("MATCH (n:Y) RETURN n.label").unwrap();

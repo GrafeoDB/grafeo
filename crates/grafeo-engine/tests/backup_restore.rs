@@ -149,7 +149,7 @@ fn backup_manifest_tracks_segments() {
     let backup_dir = dir.path().join("backups");
 
     let db = GrafeoDB::open(&db_path).expect("open");
-    db.create_node(&["Test"]);
+    db.create_node(&["Test"]).unwrap();
 
     let segment = db.backup_full(&backup_dir).expect("full backup");
 
@@ -172,7 +172,7 @@ fn incremental_without_full_fails() {
     let backup_dir = dir.path().join("backups");
 
     let db = GrafeoDB::open(&db_path).expect("open");
-    db.create_node(&["Test"]);
+    db.create_node(&["Test"]).unwrap();
 
     let result = db.backup_incremental(&backup_dir);
     assert!(result.is_err(), "incremental without full should fail");

@@ -66,15 +66,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Snapshot round-trip ---\n");
 
     let db = GrafeoDB::new_in_memory();
-    let alix = db.create_node(&["Person"]);
-    db.set_node_property(alix, "name", Value::from("Alix"));
-    db.set_node_property(alix, "age", Value::from(30_i64));
+    let alix = db.create_node(&["Person"]).unwrap();
+    db.set_node_property(alix, "name", Value::from("Alix"))
+        .unwrap();
+    db.set_node_property(alix, "age", Value::from(30_i64))
+        .unwrap();
 
-    let gus = db.create_node(&["Person"]);
-    db.set_node_property(gus, "name", Value::from("Gus"));
-    db.set_node_property(gus, "age", Value::from(28_i64));
+    let gus = db.create_node(&["Person"]).unwrap();
+    db.set_node_property(gus, "name", Value::from("Gus"))
+        .unwrap();
+    db.set_node_property(gus, "age", Value::from(28_i64))
+        .unwrap();
 
-    db.create_edge(alix, gus, "KNOWS");
+    db.create_edge(alix, gus, "KNOWS").unwrap();
 
     println!(
         "Original: {} nodes, {} edges",

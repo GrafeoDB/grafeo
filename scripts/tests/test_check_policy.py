@@ -186,6 +186,17 @@ def test_d5_no_new_store_wrappers(repo: Path) -> None:
     ]
 
 
+def test_d5_matches_the_store_trait_not_a_mention(repo: Path) -> None:
+    write(
+        repo,
+        "crates/grafeo-core/src/writer.rs",
+        "impl From<Arc<dyn GraphStoreMut>> for GraphWriter {}\n"
+        "impl<S: GraphStore> crate::graph::GraphStore for Wrapper<S> {}\n",
+    )
+    result = policy(repo, "diff", "--base", "HEAD")
+    assert found(result) == ["D5 crates/grafeo-core/src/writer.rs:2"]
+
+
 def test_d5_can_be_allowed_as_a_warning(repo: Path) -> None:
     write(repo, "crates/grafeo-engine/src/x.rs", "impl GraphStore for X {}\n")
     result = policy(repo, "diff", "--base", "HEAD", "--allow", "D5")

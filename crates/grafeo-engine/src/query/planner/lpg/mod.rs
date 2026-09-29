@@ -317,6 +317,20 @@ impl Planner {
             ))
     }
 
+    /// A writer for this statement's mutations: the writable store with the
+    /// transaction context, the write tracker and the constraint validator.
+    fn graph_writer(&self) -> Result<grafeo_core::execution::operators::GraphWriter> {
+        let mut writer = grafeo_core::execution::operators::GraphWriter::new(self.write_store()?)
+            .with_transaction_context(self.viewing_epoch, self.transaction_id);
+        if let Some(ref tracker) = self.write_tracker {
+            writer = writer.with_write_tracker(Arc::clone(tracker));
+        }
+        if let Some(ref validator) = self.validator {
+            writer = writer.with_validator(Arc::clone(validator));
+        }
+        Ok(writer)
+    }
+
     /// Returns the viewing epoch for this planner.
     #[must_use]
     pub fn viewing_epoch(&self) -> EpochId {

@@ -55,6 +55,7 @@ mod unwind;
 pub mod value_utils;
 mod variable_length_expand;
 mod vector_join;
+mod writer;
 
 pub use accumulator::{AggregateExpr, AggregateFunction, HashableValue};
 pub use aggregate::{HashAggregateOperator, SimpleAggregateOperator};
@@ -114,6 +115,7 @@ pub use union::UnionOperator;
 pub use unwind::UnwindOperator;
 pub use variable_length_expand::{PathMode as ExecutionPathMode, VariableLengthExpandOperator};
 pub use vector_join::VectorJoinOperator;
+pub use writer::GraphWriter;
 
 use std::sync::Arc;
 

@@ -81,9 +81,10 @@ mod tests {
                     .execute("INSERT (:N {i: 5})-[:E]->(:N {i: 6})")
                     .unwrap();
             }
-            // Reopen (replaying the WAL) and crash again.
+            // Reopen (replaying the WAL), check the edges and crash again.
             "reopen" => {
-                session.execute("MATCH (n) RETURN count(n)").unwrap();
+                assert_eq!(edge_rows(&db), (Value::Int64(3), Value::Int64(3)));
+                assert_eq!(db.edge_count(), 3);
             }
             // Crash at injection point N inside the first checkpoint
             // (`first:N`) or inside a second one after more writes (`second:N`).
@@ -147,27 +148,24 @@ mod tests {
     }
 
     /// The server scenario from the issue: a full backup, more writes, then
-    /// repeated crash and reopen cycles.
+    /// repeated crash and reopen cycles. Each reopen replays the same WAL
+    /// over the backup's checkpoint and crashes before a clean close could
+    /// checkpoint again and drop the WAL.
     #[test]
     fn crash_after_full_backup_does_not_duplicate_edges() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db.grafeo");
         crash_after("backup_then_write", &path);
-
-        for cycle in 0..2 {
-            let db = open(&path);
-            assert_eq!(
-                edge_rows(&db),
-                (Value::Int64(3), Value::Int64(3)),
-                "cycle {cycle}"
-            );
-            assert_eq!(db.edge_count(), 3, "cycle {cycle}");
-            assert_eq!(db.node_count(), 6, "cycle {cycle}");
-            drop(db);
-            if cycle == 0 {
-                crash_after("reopen", &path);
-            }
+        for _ in 0..2 {
+            crash_after("reopen", &path);
         }
+        assert!(sidecar_wal(&path).exists(), "no WAL left to replay");
+
+        let db = open(&path);
+        assert_eq!(edge_rows(&db), (Value::Int64(3), Value::Int64(3)));
+        assert_eq!(db.edge_count(), 3);
+        assert_eq!(db.node_count(), 6);
+        drop(db);
 
         // The full backup restores to its two edges.
         let manifest = GrafeoDB::read_backup_manifest(&backup_dir(&path))

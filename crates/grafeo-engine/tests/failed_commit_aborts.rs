@@ -1,6 +1,7 @@
 //! A commit that fails with a write-write conflict aborts the transaction
-//! completely (#409): its entities are released, its versions discarded, an
-//! abort is logged to the WAL and the session is left without a transaction.
+//! completely (#409): its entities are released, its versions discarded, its
+//! buffered WAL records dropped (a transaction writes to the WAL only when it
+//! commits, #411) and the session is left without a transaction.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --features full --test failed_commit_aborts
@@ -144,8 +145,9 @@ mod persistent {
         configs
     }
 
-    /// Without an abort marker, WAL recovery carries the failed transaction's
-    /// records into the next commit and resurrects them on reopen.
+    /// The failed transaction's records never reach the WAL: if they did,
+    /// recovery would count them into the next commit and resurrect them on
+    /// reopen.
     #[test]
     fn failed_commit_is_not_recovered_from_wal() {
         let dir = tempfile::tempdir().unwrap();

@@ -264,6 +264,17 @@ impl CheckpointSources {
             .map_or(0, |t| t.0);
         #[cfg(feature = "lpg")]
         if let Some(store) = &self.store {
+            // After `compact()` the store is the overlay: count the base too.
+            #[cfg(feature = "compact-store")]
+            if let Some(layered) = &self.layered {
+                use grafeo_core::graph::GraphStore;
+                return FlushContext {
+                    epoch: store.current_epoch().0,
+                    transaction_id,
+                    node_count: layered.node_count() as u64,
+                    edge_count: layered.edge_count() as u64,
+                };
+            }
             return FlushContext {
                 epoch: store.current_epoch().0,
                 transaction_id,

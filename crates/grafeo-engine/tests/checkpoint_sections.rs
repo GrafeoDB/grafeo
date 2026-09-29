@@ -56,8 +56,8 @@ fn a_compacted_database_keeps_its_schema() {
     assert_eq!(types.rows().len(), 1, "the node type survives: {types:?}");
 }
 
-/// The file keeps the RDF section. (Querying the triples after `compact()`
-/// is a separate problem: they are hidden in memory already.)
+/// The file keeps the RDF section with its triples. (Querying the triples
+/// after `compact()` is a separate problem: they are hidden in memory already.)
 #[test]
 #[cfg(feature = "sparql")]
 fn a_compacted_database_keeps_its_rdf_section() {
@@ -83,6 +83,30 @@ fn a_compacted_database_keeps_its_rdf_section() {
         .unwrap()
         .unwrap();
     assert!(directory.find(SectionType::RdfStore).is_some());
+    // Read the store itself: SPARQL over a compacted database does not see
+    // RDF data yet, a separate problem.
+    assert_eq!(db.rdf_store().len(), 1, "the triple is in the section");
+}
+
+/// The header of a compacted database's checkpoint counts the compacted
+/// base as well as the overlay.
+#[test]
+fn a_compacted_checkpoint_counts_the_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.grafeo");
+    let mut db = GrafeoDB::with_config(config(&path)).unwrap();
+    db.session()
+        .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        .unwrap();
+    db.compact().unwrap();
+    db.session()
+        .execute("INSERT (:Person {name: 'Vincent'})")
+        .unwrap();
+    db.wal_checkpoint().unwrap();
+
+    let header = db.file_manager().unwrap().active_header();
+    assert_eq!((header.node_count, header.edge_count), (3, 1));
+    db.close().unwrap();
 }
 
 /// The timer captured the store when the database opened, so after

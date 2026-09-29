@@ -358,6 +358,49 @@ fn incremental_backup_works_without_manual_rotation() {
     db.close().expect("close");
 }
 
+/// An incremental backup with nothing new to back up fails without touching
+/// the WAL: polling for backups must not leave an empty log file each time.
+#[test]
+fn incremental_backup_without_new_records_leaves_the_wal_alone() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let db_path = dir.path().join("idle.grafeo");
+    let backup_dir = dir.path().join("backups");
+    let wal_dir = dir.path().join("idle.grafeo.wal");
+    let log_files = || {
+        std::fs::read_dir(&wal_dir)
+            .expect("read WAL directory")
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .is_ok_and(|entry| entry.path().extension().is_some_and(|ext| ext == "log"))
+            })
+            .count()
+    };
+
+    let db = GrafeoDB::open(&db_path).expect("open");
+    db.session()
+        .execute("INSERT (:Person {name: 'Alix'})")
+        .expect("insert");
+    db.backup_full(&backup_dir).expect("full backup");
+    let before = log_files();
+
+    for _ in 0..3 {
+        let err = db
+            .backup_incremental(&backup_dir)
+            .expect_err("nothing to back up");
+        assert!(err.to_string().contains("no new WAL records"), "{err}");
+    }
+    assert_eq!(log_files(), before);
+
+    // The next write is still backed up.
+    db.session()
+        .execute("INSERT (:Person {name: 'Gus'})")
+        .expect("insert");
+    db.backup_incremental(&backup_dir)
+        .expect("incremental after a write");
+    db.close().expect("close");
+}
+
 /// Regression for GrafeoDB/grafeo#267: two consecutive incremental backups
 /// with writes between them must both succeed.
 ///
@@ -418,7 +461,6 @@ fn multiple_incremental_backups_in_sequence() {
 #[test]
 fn backups_during_writes_lose_nothing() {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     const NODES: i64 = 3000;
 
@@ -432,10 +474,8 @@ fn backups_during_writes_lose_nothing() {
         .execute("INSERT (:N {i: -1})")
         .expect("seed insert");
 
-    let done = Arc::new(AtomicBool::new(false));
     let writer = {
         let db = Arc::clone(&db);
-        let done = Arc::clone(&done);
         std::thread::spawn(move || {
             let session = db.session();
             for i in 0..NODES {
@@ -443,12 +483,12 @@ fn backups_during_writes_lose_nothing() {
                     .execute(&format!("INSERT (:N {{i: {i}}})"))
                     .expect("insert");
             }
-            done.store(true, Ordering::Release);
         })
     };
 
     db.backup_full(&backup_dir).expect("full backup");
-    while !done.load(Ordering::Acquire) {
+    // Until the writer is done, or has panicked: `join()` below reports that.
+    while !writer.is_finished() {
         // "no new WAL records" is fine while the writer is between inserts
         let _ = db.backup_incremental(&backup_dir);
     }

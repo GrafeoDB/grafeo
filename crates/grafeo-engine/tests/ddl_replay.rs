@@ -46,9 +46,10 @@ mod tests {
     }
 
     /// Runs `statements` on a new WAL-directory database, then reopens it and
-    /// checks that replay rebuilt the same schema. Returns the reopened
-    /// database (declared first, so it closes before the directory goes).
-    fn replayed(statements: &[&str]) -> (GrafeoDB, tempfile::TempDir) {
+    /// checks that replay rebuilt the same schema. Returns the directory and
+    /// the reopened database: bind them as `(_dir, db)`, since bindings drop
+    /// in reverse order and the database must close before the directory goes.
+    fn replayed(statements: &[&str]) -> (tempfile::TempDir, GrafeoDB) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
         let before = {
@@ -63,7 +64,7 @@ mod tests {
         };
         let db = open_wal_dir(&path).unwrap();
         assert_eq!(schema(&db), before, "schema after replay");
-        (db, dir)
+        (dir, db)
     }
 
     fn graph_type(db: &GrafeoDB, name: &str) -> Vec<Value> {
@@ -72,7 +73,7 @@ mod tests {
 
     #[test]
     fn alter_graph_type_survives_replay() {
-        let (db, _dir) = replayed(&[
+        let (_dir, db) = replayed(&[
             "CREATE NODE TYPE Device (serial STRING)",
             "CREATE NODE TYPE Sensor (unit STRING)",
             "CREATE EDGE TYPE CONNECTS",
@@ -88,7 +89,7 @@ mod tests {
 
     #[test]
     fn alter_node_and_edge_types_survive_replay() {
-        let (db, _dir) = replayed(&[
+        let (_dir, db) = replayed(&[
             "CREATE NODE TYPE Sensor (unit STRING)",
             "ALTER NODE TYPE Sensor ADD PROPERTY location STRING",
             "ALTER NODE TYPE Sensor DROP PROPERTY unit",
@@ -104,7 +105,7 @@ mod tests {
 
     #[test]
     fn create_or_replace_types_survive_replay() {
-        let (db, _dir) = replayed(&[
+        let (_dir, db) = replayed(&[
             "CREATE NODE TYPE Widget (name STRING)",
             "CREATE OR REPLACE NODE TYPE Widget (name STRING, color STRING)",
             "CREATE EDGE TYPE HOLDS (since INTEGER)",
@@ -129,7 +130,7 @@ mod tests {
     #[test]
     #[cfg(feature = "algos")]
     fn create_or_replace_procedure_survives_replay() {
-        let (db, _dir) = replayed(&[
+        let (_dir, db) = replayed(&[
             "INSERT (:Person {name: 'Alix'})",
             "CREATE PROCEDURE people() RETURNS (n INTEGER) AS { MATCH (p:Person) RETURN count(p) AS n }",
             "CREATE OR REPLACE PROCEDURE people() RETURNS (n INTEGER) AS { MATCH (p:Person) RETURN count(p) + 10 AS n }",

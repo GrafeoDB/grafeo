@@ -2562,8 +2562,10 @@ impl GrafeoDB {
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     fn start_checkpoint_timer(&self) {
         self.stop_checkpoint_timer();
+        // `compact()` clears `read_only`, but a file opened read-only stays so.
         if let (Some(interval), Some(fm)) = (self.config.checkpoint_interval, &self.file_manager)
             && !self.read_only
+            && !fm.is_read_only()
         {
             *self.checkpoint_timer.lock() = Some(checkpoint_timer::CheckpointTimer::start(
                 interval,
@@ -3093,6 +3095,26 @@ impl FromValue for bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `compact()` makes a database opened read-only writable in memory, but
+    /// its file stays read-only: no checkpoint timer may run against it.
+    #[cfg(all(feature = "compact-store", feature = "grafeo-file", feature = "lpg"))]
+    #[test]
+    fn compacting_a_read_only_database_starts_no_checkpoint_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        {
+            let db = GrafeoDB::open(&path).unwrap();
+            db.create_node(&["Person"]);
+            db.close().unwrap();
+        }
+        let mut db = GrafeoDB::with_config(
+            Config::read_only(&path).with_checkpoint_interval(std::time::Duration::from_secs(60)),
+        )
+        .unwrap();
+        db.compact().unwrap();
+        assert!(db.checkpoint_timer.lock().is_none());
+    }
 
     #[test]
     fn test_create_in_memory_database() {

@@ -313,3 +313,19 @@ tests:
     query: "INSERT (n:E {id: 5}) INSERT (n:F)-[:T]->(:G {id: 6})"
     expect:
       error: "use SET"
+
+  - name: insert_cannot_relabel_a_merged_variable
+    setup:
+      - "INSERT (:A {id: 1})"
+    query: "MERGE (a:A {id: 1}) INSERT (a:X)-[:T]->(:B)"
+    expect:
+      error: "use SET"
+
+  - name: insert_after_merge_uses_the_merged_node
+    statements:
+      - "INSERT (:A {id: 1})"
+      - "MERGE (a:A {id: 1}) INSERT (a)-[:T]->(:B {id: 2})"
+      - "MATCH (n) OPTIONAL MATCH (n)-[:T]->(b) RETURN count(n), count(b)"
+    expect:
+      rows:
+        - [2, 1]

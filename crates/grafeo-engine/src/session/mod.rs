@@ -346,14 +346,16 @@ impl Session {
         self.wal = Some(buffer);
     }
 
-    /// Records a WAL record for the active graph. No-op for in-memory sessions.
+    /// Records a WAL record for the graph that direct writes go to (see
+    /// [`active_lpg_store`](Self::active_lpg_store)). No-op for in-memory
+    /// sessions.
     ///
     /// The record joins the current transaction's group. Callers outside a
     /// transaction finish with [`flush_wal_outside_transaction`](Self::flush_wal_outside_transaction).
     #[cfg(all(feature = "wal", feature = "lpg"))]
     pub(crate) fn log_wal_record(&self, record: grafeo_storage::wal::WalRecord) {
         if let Some(ref wal) = self.wal {
-            wal.push(self.active_graph_storage_key(), record);
+            wal.push(self.active_lpg_graph_key(), record);
         }
     }
 
@@ -626,14 +628,18 @@ impl Session {
     /// for versioned operations.
     #[cfg(feature = "lpg")]
     fn active_lpg_store(&self) -> Arc<LpgStore> {
-        let key = self.active_graph_storage_key();
-        match key {
-            None => Arc::clone(&self.store),
-            Some(ref name) => self
-                .store
-                .graph(name)
-                .unwrap_or_else(|| Arc::clone(&self.store)),
-        }
+        self.active_lpg_graph_key()
+            .and_then(|name| self.store.graph(&name))
+            .unwrap_or_else(|| Arc::clone(&self.store))
+    }
+
+    /// The storage key of the graph [`active_lpg_store`](Self::active_lpg_store)
+    /// writes to: the active graph, or `None` (the default graph) when no
+    /// graph of that name exists, which is where writes then go.
+    #[cfg(feature = "lpg")]
+    fn active_lpg_graph_key(&self) -> Option<String> {
+        self.active_graph_storage_key()
+            .filter(|name| self.store.graph(name).is_some())
     }
 
     /// Resolves a graph name to a concrete `LpgStore`.

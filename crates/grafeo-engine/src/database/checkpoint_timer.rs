@@ -237,13 +237,18 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let fm = Arc::new(GrafeoFileManager::create(dir.path().join("clean_test.grafeo")).unwrap());
 
+        let created = fm.active_header().iteration;
         let mut timer = start(Duration::from_millis(200), &fm, &store);
 
         std::thread::sleep(Duration::from_millis(500));
         timer.stop();
 
-        // Just verify no crash occurred
         let header = fm.active_header();
-        assert!(header.iteration <= 5);
+        assert!(
+            header.iteration > created,
+            "expected at least one checkpoint, got iteration={}",
+            header.iteration
+        );
+        assert_eq!(header.node_count, 0);
     }
 }

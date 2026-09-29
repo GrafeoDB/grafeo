@@ -288,6 +288,16 @@ pub(super) fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+/// The sequence number of a WAL log file (`wal_<sequence>.log`), 0 when the
+/// name has another form.
+fn wal_file_sequence(path: &Path) -> u64 {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix("wal_"))
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 // ── Backup operations (called from GrafeoDB) ───────────────────────
 
 use grafeo_storage::file::GrafeoFileManager;
@@ -399,6 +409,18 @@ pub(super) fn do_backup_incremental(
         Error::Internal("no backup cursor found; run a full backup first".to_string())
     })?;
 
+    // Nothing logged since the last backup: fail before sealing, or every
+    // such call (a poll for new data) would leave another empty log file.
+    let has_new_records = wal.log_files()?.iter().any(|path| {
+        wal_file_sequence(path) > cursor.log_sequence
+            && std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
+    });
+    if !has_new_records {
+        return Err(Error::Internal(
+            "no new WAL records since last backup".to_string(),
+        ));
+    }
+
     // Seal the active file first: every record logged so far is then in a
     // file up to `sealed`, and records logged from now on go to newer files,
     // which the next incremental backup reads. Reading the active file and
@@ -419,12 +441,7 @@ pub(super) fn do_backup_incremental(
     // cursor.backed_up_epoch used for start_epoch calculation below
 
     for file_path in &log_files {
-        let seq = file_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.strip_prefix("wal_"))
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+        let seq = wal_file_sequence(file_path);
 
         // Files up to the cursor are in earlier backups; files after
         // `sealed` were started after the rotation above and belong to the

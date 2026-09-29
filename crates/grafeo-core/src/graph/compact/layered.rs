@@ -3839,9 +3839,10 @@ mod tests {
         const READERS: usize = 4;
         let layered = Arc::new(build_test_layered());
         let stop = Arc::new(AtomicBool::new(false));
-        // The swapper starts only once every reader is running, so reads
-        // overlap the swaps. Without it a fast swapper could finish before a
-        // reader was scheduled, and that reader never read at all.
+        // Every reader reads once before the swapper starts and keeps reading
+        // until it is done, so each reader's reads span the swaps. Waiting on
+        // the barrier alone did not ensure that: a reader scheduled late could
+        // start after the last swap.
         let start = Arc::new(Barrier::new(READERS + 1));
 
         let mut readers = Vec::new();
@@ -3850,19 +3851,20 @@ mod tests {
             let s = Arc::clone(&stop);
             let b = Arc::clone(&start);
             readers.push(thread::spawn(move || {
-                b.wait();
-                let mut total = 0u64;
-                // Read at least once, then until the swapper is done.
-                loop {
+                let read = || {
                     let people = l.nodes_by_label("Person");
                     // Person count is base(2) + overlay(0..many); never less than base.
                     assert!(people.len() >= 2, "lost a base node mid-swap");
-                    total += people.len() as u64;
+                };
+                read();
+                b.wait();
+                // At least once more after the swapper started.
+                loop {
+                    read();
                     if s.load(Ordering::Relaxed) {
                         break;
                     }
                 }
-                total
             }));
         }
 
@@ -3880,10 +3882,8 @@ mod tests {
 
         swapper.join().unwrap();
         stop.store(true, Ordering::Relaxed);
-        let totals: Vec<u64> = readers.into_iter().map(|h| h.join().unwrap()).collect();
-        // Sanity: every reader observed at least one snapshot.
-        for t in totals {
-            assert!(t > 0, "reader saw zero snapshots");
+        for reader in readers {
+            reader.join().unwrap();
         }
     }
 

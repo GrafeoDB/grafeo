@@ -30,32 +30,43 @@ Persistent mode stores data durably on disk.
 
 ## File Structure
 
-```
+A path without the `.grafeo` extension is a directory database:
+
+```text
 my_graph.db/
-├── data/           # Main data files
-├── wal/            # Write-ahead log
-└── metadata        # Database metadata
+├── wal/            # Write-ahead log: the database's data
+└── LOCK            # Held while the database is open for writing
 ```
+
+A directory database keeps its data in the write-ahead log and replays it when it opens. A [single-file database](#single-file-format-grafeo) keeps its state in the `.grafeo` file and the changes since its last checkpoint in a `my_graph.grafeo.wal/` directory next to it.
 
 ## Durability Guarantees
 
-- **Write-Ahead Logging (WAL)** - All changes logged before applying
-- **Checkpointing** - Periodic consolidation of WAL into data files
-- **Crash Recovery** - Automatic recovery from WAL on startup
+- **Write-Ahead Logging (WAL)**: a transaction's changes are written to the WAL when it commits
+- **Checkpointing**: a `.grafeo` file is brought up to date periodically and on `close()`, after which the WAL keeps only newer changes
+- **Crash Recovery**: the WAL is replayed automatically when the database opens
 
-## Configuration
+## Sync Modes
 
-```python
-# Python constructor accepts path and cdc only.
-# Sync mode configuration is available via the Rust Config builder.
-db = grafeo.GrafeoDB(path="my_graph.db")
+The sync mode decides when the WAL is flushed to disk (`fsync`). Every mode hands each commit to the operating system right away, so a crash of the process loses no committed data; the modes differ in what a power loss or an operating system crash can lose.
+
+| Mode | When the WAL is synced | Lost on power loss |
+|------|------------------------|--------------------|
+| `DurabilityMode::Sync` | at every commit | nothing |
+| `DurabilityMode::Batch` (default: 100 ms, 1,000 records) | at a commit once the delay has passed or that many records were written | commits since the last sync |
+| `DurabilityMode::Adaptive` | by a background thread, at a steady interval | commits since the last sync |
+| `DurabilityMode::NoSync` | never; the operating system writes it back | commits not yet written back |
+
+`Batch` checks its limits when a commit is written. The last commit before an idle period is therefore synced by the next write or by `close()`, not when the delay passes.
+
+The sync mode is set through the Rust `Config` builder; the Python constructor uses the default.
+
+```rust
+use grafeo::{Config, DurabilityMode, GrafeoDB};
+
+let config = Config::persistent("my_graph.db").with_wal_durability(DurabilityMode::Sync);
+let db = GrafeoDB::with_config(config)?;
 ```
-
-| Sync Mode | Durability | Performance |
-|-----------|------------|-------------|
-| `full` | Highest | Slower |
-| `normal` | Good | Faster |
-| `off` | None | Fastest |
 
 ## Single-File Format (`.grafeo`)
 
@@ -100,7 +111,7 @@ Read-only mode uses a shared file lock instead of an exclusive lock, so multiple
 
 ## One Writer at a Time
 
-A persistent database can be open for writing by one `GrafeoDB` instance at a time, in one process. Opening it again, from the same process or another one, fails with a `database is locked by another process` error until the first instance calls `close()` or is dropped. This applies to both `.grafeo` files and directory databases.
+A persistent database can be open for writing by one `GrafeoDB` instance at a time, in one process. Opening it again, from the same process or another one, fails with a "locked by another process" error (`database file is locked by another process` for a `.grafeo` file, `database is locked by another process` for a directory) until the first instance calls `close()` or is dropped. A directory database is locked through its `LOCK` file, which it takes only when the WAL is enabled (the default).
 
 To share a database between processes, run it behind [Grafeo Server](https://github.com/GrafeoDB/grafeo-server), or open `.grafeo` files in [read-only mode](#read-only-mode) from the readers.
 

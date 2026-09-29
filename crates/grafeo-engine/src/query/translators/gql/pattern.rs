@@ -738,6 +738,14 @@ fn insert_input_variables(plan: &LogicalOperator) -> HashSet<String> {
                 }
                 collect(&create.input, vars);
             }
+            LogicalOperator::Merge(merge) => {
+                vars.insert(merge.variable.clone());
+                collect(&merge.input, vars);
+            }
+            LogicalOperator::MergeRelationship(merge) => {
+                vars.insert(merge.variable.clone());
+                collect(&merge.input, vars);
+            }
             other => crate::query::translators::common::collect_operator_variables(other, vars),
         }
     }

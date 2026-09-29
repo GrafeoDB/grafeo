@@ -133,15 +133,22 @@ mod tests {
             let first = open(&path, format).unwrap();
             insert(&first, "Alix");
 
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "tests::child_open_fails", "--nocapture"])
                 .env(CHILD_PATH_VAR, &path)
                 .env(CHILD_FORMAT_VAR, name)
-                .status()
+                .output()
                 .unwrap();
+            let stdout = String::from_utf8_lossy(&child.stdout);
             assert!(
-                status.success(),
-                "{name}: the other process could open the database"
+                child.status.success(),
+                "{name}: the other process could open the database\n{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            // A child that matched no test would also exit successfully.
+            assert!(
+                stdout.contains("1 passed"),
+                "{name}: the child ran no test:\n{stdout}"
             );
 
             insert(&first, "Gus");
@@ -160,10 +167,13 @@ mod tests {
     /// directly.
     #[test]
     fn child_open_fails() {
-        let Some(path) = std::env::var_os(CHILD_PATH_VAR) else {
+        let (Some(path), Ok(format)) = (
+            std::env::var_os(CHILD_PATH_VAR),
+            std::env::var(CHILD_FORMAT_VAR),
+        ) else {
             return;
         };
-        let format = format_from_name(&std::env::var(CHILD_FORMAT_VAR).unwrap());
+        let format = format_from_name(&format);
         match open(Path::new(&path), format) {
             Ok(db) => {
                 // Do not write anything on the way out.

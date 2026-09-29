@@ -136,27 +136,35 @@ mod vectors {
 
     #[test]
     fn rolled_back_delete_is_returned_by_vector_search_again() {
-        let (db, near, far) = vector_db(None);
-        let mut session = db.session();
-        session.begin_transaction().unwrap();
-        session
-            .execute_cypher("MATCH (n:Doc {id: 'near'}) DETACH DELETE n")
-            .unwrap();
-        session.rollback().unwrap();
-        assert_eq!(search(&db), vec![near, far]);
+        for quantization in [None, Some("scalar")] {
+            let (db, near, far) = vector_db(quantization);
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session
+                .execute_cypher("MATCH (n:Doc {id: 'near'}) DETACH DELETE n")
+                .unwrap();
+            session.rollback().unwrap();
+            assert_eq!(search(&db), vec![near, far], "{quantization:?}");
+        }
     }
 
     #[test]
     fn rolled_back_delete_restores_vector_entry_for_label_with_colon() {
         // Index keys are `label:property`; a ':' in the label used to break
         // the lookup, so the node was not re-inserted.
-        let (db, near, far) = vector_db_with_label("Doc:Draft", None);
-        let mut session = db.session();
-        session.begin_transaction().unwrap();
-        session
-            .execute_cypher("MATCH (n:`Doc:Draft` {id: 'near'}) DETACH DELETE n")
-            .unwrap();
-        session.rollback().unwrap();
-        assert_eq!(search_label(&db, "Doc:Draft"), vec![near, far]);
+        for quantization in [None, Some("scalar")] {
+            let (db, near, far) = vector_db_with_label("Doc:Draft", quantization);
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session
+                .execute_cypher("MATCH (n:`Doc:Draft` {id: 'near'}) DETACH DELETE n")
+                .unwrap();
+            session.rollback().unwrap();
+            assert_eq!(
+                search_label(&db, "Doc:Draft"),
+                vec![near, far],
+                "{quantization:?}"
+            );
+        }
     }
 }

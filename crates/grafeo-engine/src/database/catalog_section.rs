@@ -180,9 +180,13 @@ impl Section for CatalogSection {
     }
 
     fn serialize(&self) -> Result<Vec<u8>> {
+        // The names and the node types that enforce them, from one moment.
+        let (schema, constraints) = self
+            .catalog
+            .with_constraints(|constraints| (self.collect_schema(), constraints));
         let snapshot = CatalogSnapshot {
             version: CATALOG_SECTION_VERSION,
-            schema: self.collect_schema(),
+            schema,
             indexes: self.collect_indexes(),
             epoch: (self.epoch_fn)(),
         };
@@ -190,7 +194,6 @@ impl Section for CatalogSection {
         let config = bincode::config::standard();
         let mut bytes = bincode::serde::encode_to_vec(&snapshot, config)
             .map_err(|e| Error::Internal(format!("Catalog section serialization failed: {e}")))?;
-        let constraints = self.catalog.constraints();
         if !constraints.is_empty() {
             let names = bincode::serde::encode_to_vec(ConstraintNames { constraints }, config)
                 .map_err(|e| {
@@ -327,6 +330,56 @@ mod tests {
                 .constraints
                 .is_empty()
         );
+    }
+
+    /// A checkpoint sees the constraint names and the node types that enforce
+    /// them from one moment: with `CREATE CONSTRAINT` running at the same
+    /// time, a name saved without its type constraint would be unenforced
+    /// after a reopen, and one saved without its name could not be dropped.
+    #[test]
+    fn serialized_constraint_names_match_the_node_types() {
+        use crate::catalog::{ConstraintType, TypeConstraint};
+
+        let section = make_section();
+        let catalog = Arc::clone(&section.catalog);
+        let writer = std::thread::spawn(move || {
+            for _ in 0..3_000 {
+                catalog
+                    .create_constraint(ConstraintDefinition {
+                        name: "city_name".to_string(),
+                        label: "City".to_string(),
+                        properties: vec!["name".to_string()],
+                        kind: ConstraintType::Unique,
+                    })
+                    .unwrap();
+                catalog.drop_constraint("city_name").unwrap();
+            }
+        });
+
+        let config = bincode::config::standard();
+        let unique_name = TypeConstraint::Unique(vec!["name".to_string()]);
+        while !writer.is_finished() {
+            let bytes = section.serialize().unwrap();
+            let (snapshot, read): (CatalogSnapshot, _) =
+                bincode::serde::decode_from_slice(&bytes, config).unwrap();
+            let names = if read < bytes.len() {
+                let (names, _): (ConstraintNames, _) =
+                    bincode::serde::decode_from_slice(&bytes[read..], config).unwrap();
+                names.constraints.len()
+            } else {
+                0
+            };
+            let enforced = snapshot
+                .schema
+                .node_types
+                .iter()
+                .filter(|def| def.name == "City")
+                .flat_map(|def| &def.constraints)
+                .filter(|constraint| **constraint == unique_name)
+                .count();
+            assert_eq!(names, enforced, "names and type constraints differ");
+        }
+        writer.join().unwrap();
     }
 
     #[test]

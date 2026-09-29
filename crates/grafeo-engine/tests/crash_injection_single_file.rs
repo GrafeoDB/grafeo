@@ -422,7 +422,7 @@ fn wal_disabled_checkpoint_preserves_data() {
 /// image over the file (#418).
 #[test]
 fn wal_disabled_crash_during_checkpoint_recovers() {
-    let mut completed_runs = 0;
+    let (mut completed_runs, mut crashed_runs) = (0, 0);
     // More points than the close checkpoint has, so the last runs complete.
     for crash_point in 1..=16 {
         let dir = tempfile::TempDir::new().unwrap();
@@ -439,20 +439,14 @@ fn wal_disabled_crash_during_checkpoint_recovers() {
             db.close().unwrap();
         }
 
-        // Round 2: Reopen, add more data, crash during close checkpoint
-        let mut completed = false;
-        {
-            let db = GrafeoDB::with_config(wal_disabled_config(&path)).unwrap();
-            let session = db.session();
-            session.execute("INSERT (:Person {name: 'Mia'})").unwrap();
-
-            let db = AssertUnwindSafe(db);
-            let result = with_crash_at(crash_point, move || db.close());
-            if let CrashResult::Completed(closed) = result {
-                closed.unwrap();
-                completed = true;
-                completed_runs += 1;
-            }
+        // Round 2: Reopen, add more data, crash during close checkpoint. In a
+        // child process: caught in this one, the panic would drop the
+        // database, whose `Drop` closes it again and finishes the checkpoint.
+        let completed = close_in_child(crash_point, &path);
+        if completed {
+            completed_runs += 1;
+        } else {
+            crashed_runs += 1;
         }
 
         // Reopen: the .grafeo file should still have a valid snapshot
@@ -486,10 +480,59 @@ fn wal_disabled_crash_during_checkpoint_recovers() {
                 "crash_point={crash_point}: Mia missing after a completed close"
             );
         }
+        assert!(names.len() <= 3, "crash_point={crash_point}: {names:?}");
 
         db.close().unwrap();
     }
     assert!(completed_runs > 0, "no run got past the last crash point");
+    assert!(crashed_runs > 0, "no run crashed");
+}
+
+const CHILD_POINT_VAR: &str = "GRAFEO_CRASH_SINGLE_FILE_POINT";
+const CHILD_PATH_VAR: &str = "GRAFEO_CRASH_SINGLE_FILE_PATH";
+/// Exit code of a child whose `close()` crashed.
+const CRASHED: i32 = 3;
+
+/// Reopens the WAL-disabled database at `path` in a child process, adds a
+/// node and crashes at `crash_point` inside `close()`. Returns whether the
+/// close completed.
+fn close_in_child(crash_point: u64, path: &std::path::Path) -> bool {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "close_child", "--nocapture"])
+        .env(CHILD_POINT_VAR, crash_point.to_string())
+        .env(CHILD_PATH_VAR, path)
+        .status()
+        .unwrap();
+    match status.code() {
+        Some(0) => true,
+        Some(CRASHED) => false,
+        other => panic!("crash_point={crash_point}: child failed with {other:?}"),
+    }
+}
+
+/// Child-process entry for [`close_in_child`]; a no-op when run directly.
+#[test]
+fn close_child() {
+    let (Ok(point), Some(path)) = (
+        std::env::var(CHILD_POINT_VAR),
+        std::env::var_os(CHILD_PATH_VAR),
+    ) else {
+        return;
+    };
+    let db = GrafeoDB::with_config(wal_disabled_config(std::path::Path::new(&path))).unwrap();
+    db.session()
+        .execute("INSERT (:Person {name: 'Mia'})")
+        .unwrap();
+    let target = AssertUnwindSafe(&db);
+    let result = with_crash_at(point.parse().unwrap(), move || target.close());
+    // Exit without running destructors, like a crash.
+    match result {
+        CrashResult::Completed(closed) => {
+            closed.unwrap();
+            std::process::exit(0);
+        }
+        _ => std::process::exit(CRASHED),
+    }
 }
 
 /// With WAL disabled, uncommitted transaction data should not be persisted.

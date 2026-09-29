@@ -374,6 +374,7 @@ impl MergeOperator {
                 validator.check_unique_node_property(&self.config.labels, name, value)?;
             }
             validator.validate_node_complete(&self.config.labels, &all_props)?;
+            validator.check_unique_node(&self.config.labels, &all_props, None)?;
         }
 
         let prop_pairs: Vec<(PropertyKey, Value)> = all_props
@@ -427,9 +428,11 @@ impl MergeOperator {
     /// freshly created node, but before the values are written. The just
     /// created node holds only match properties at this point, so a
     /// uniqueness check on an ON CREATE property cannot conflict with the
-    /// node itself.
+    /// node itself; the check of constraints on several properties leaves
+    /// `node` out.
     fn validate_on_create_phase_two(
         &self,
+        node: NodeId,
         resolved_match_props: &[(String, Value)],
         resolved_create_props: &[(String, Value)],
     ) -> Result<(), super::OperatorError> {
@@ -442,6 +445,7 @@ impl MergeOperator {
         }
         let all_props = Self::merge_node_props(resolved_match_props, resolved_create_props);
         validator.validate_node_complete(&self.config.labels, &all_props)?;
+        validator.check_unique_node(&self.config.labels, &all_props, Some(node))?;
         Ok(())
     }
 
@@ -496,7 +500,7 @@ impl MergeOperator {
                 row,
                 new_id,
             )?;
-            self.validate_on_create_phase_two(&resolved_match, &resolved_on_create)?;
+            self.validate_on_create_phase_two(new_id, &resolved_match, &resolved_on_create)?;
             self.apply_on_match(new_id, &resolved_on_create)?;
             Ok(new_id)
         } else {

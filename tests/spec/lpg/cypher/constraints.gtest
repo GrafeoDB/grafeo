@@ -76,7 +76,6 @@ tests:
       error: "constraint"
 
   - name: not_null_constraint_violation_on_set
-    skip: "constraint check on REMOVE"
     setup:
       - "CREATE CONSTRAINT person_name_not_null FOR (p:Person) REQUIRE p.name IS NOT NULL"
       - "CREATE (:Person {name: 'Alix'})"
@@ -94,7 +93,6 @@ tests:
       count: 0
 
   - name: node_key_allows_different_combinations
-    skip: "NODE KEY constraint not implemented"
     setup:
       - "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE (p.name, p.city) IS NODE KEY"
       - "CREATE (:Person {name: 'Alix', city: 'Amsterdam'})"
@@ -113,12 +111,11 @@ tests:
       error: "constraint"
 
   - name: node_key_violation_missing_property
-    skip: "NODE KEY constraint not implemented"
     setup:
       - "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE (p.name, p.city) IS NODE KEY"
     query: "CREATE (:Person {name: 'Alix'})"
     expect:
-      error: "constraint"
+      error: "missing primary key property"
 
   # ---------------------------------------------------------------------------
   # DROP CONSTRAINT

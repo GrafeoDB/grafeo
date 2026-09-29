@@ -156,6 +156,8 @@ pub enum ConfigError {
     ZeroThreads,
     /// WAL flush interval must be greater than zero.
     ZeroWalFlushInterval,
+    /// `DurabilityMode::Adaptive` needs an interval greater than zero.
+    ZeroAdaptiveFlushInterval,
     /// RDF graph model requires the `rdf` feature flag.
     RdfFeatureRequired,
 }
@@ -168,6 +170,10 @@ impl fmt::Display for ConfigError {
             Self::ZeroWalFlushInterval => {
                 write!(f, "wal_flush_interval_ms must be greater than zero")
             }
+            Self::ZeroAdaptiveFlushInterval => write!(
+                f,
+                "the target_interval_ms of DurabilityMode::Adaptive must be greater than zero"
+            ),
             Self::RdfFeatureRequired => {
                 write!(
                     f,
@@ -711,6 +717,14 @@ impl Config {
             return Err(ConfigError::ZeroWalFlushInterval);
         }
 
+        if self.wal_durability
+            == (DurabilityMode::Adaptive {
+                target_interval_ms: 0,
+            })
+        {
+            return Err(ConfigError::ZeroAdaptiveFlushInterval);
+        }
+
         #[cfg(not(feature = "triple-store"))]
         if self.graph_model == GraphModel::Rdf {
             return Err(ConfigError::RdfFeatureRequired);
@@ -1036,6 +1050,18 @@ mod tests {
     fn test_validate_rejects_zero_threads() {
         let config = Config::in_memory().with_threads(0);
         assert_eq!(config.validate(), Err(ConfigError::ZeroThreads));
+    }
+
+    /// A zero interval made the adaptive WAL flusher sync in a busy loop.
+    #[test]
+    fn test_validate_rejects_zero_adaptive_interval() {
+        let config = Config::in_memory().with_wal_durability(DurabilityMode::Adaptive {
+            target_interval_ms: 0,
+        });
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::ZeroAdaptiveFlushInterval)
+        );
     }
 
     #[test]

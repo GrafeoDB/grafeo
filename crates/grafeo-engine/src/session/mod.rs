@@ -1534,14 +1534,35 @@ impl Session {
                     ConstraintKind::NotNull => ConstraintType::NotNull,
                     ConstraintKind::Exists => ConstraintType::Exists,
                 };
-                let name = stmt.name.clone().unwrap_or_else(|| {
-                    format!(
-                        "{}_{}_{}",
-                        stmt.label,
-                        stmt.properties.join("_"),
-                        kind.name_suffix()
-                    )
-                });
+                let name = match &stmt.name {
+                    Some(name) => name.clone(),
+                    None => {
+                        // The default name joins the properties with `_`, so a
+                        // property `a_b` and the pair `(a, b)` share it: a
+                        // different constraint that has it moves this one to
+                        // the next free suffix. The same constraint keeps it,
+                        // so creating it twice still fails.
+                        let base = format!(
+                            "{}_{}_{}",
+                            stmt.label,
+                            stmt.properties.join("_"),
+                            kind.name_suffix()
+                        );
+                        let mut name = base.clone();
+                        let mut suffix = 2;
+                        while let Some(other) = self.catalog.constraint(&name) {
+                            if other.label == stmt.label
+                                && other.properties == stmt.properties
+                                && other.kind == kind
+                            {
+                                break;
+                            }
+                            name = format!("{base}_{suffix}");
+                            suffix += 1;
+                        }
+                        name
+                    }
+                };
                 let def = ConstraintDefinition {
                     name: name.clone(),
                     label: stmt.label.clone(),

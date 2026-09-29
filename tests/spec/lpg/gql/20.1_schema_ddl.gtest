@@ -239,6 +239,111 @@ tests:
         - [Person_firstName_lastName_node_key, NODE KEY, Person, "firstName, lastName"]
         - [Person_name_not_null, NOT NULL, Person, name]
 
+  # Default names join the properties with `_`, so a property named `a_b` and
+  # the pair `(a, b)` would share one; the second gets a suffix.
+  - name: unnamed_constraints_with_colliding_default_names
+    statements:
+      - "CREATE CONSTRAINT FOR (n:Item) ON (n.a_b) UNIQUE"
+      - "CREATE CONSTRAINT FOR (n:Item) ON (n.a, n.b) UNIQUE"
+      - "SHOW CONSTRAINTS"
+    expect:
+      rows:
+        - [Item_a_b_unique, UNIQUE, Item, a_b]
+        - [Item_a_b_unique_2, UNIQUE, Item, "a, b"]
+
+  - name: unnamed_duplicate_constraint_fails
+    setup:
+      - "CREATE CONSTRAINT FOR (n:Item) ON (n.code) UNIQUE"
+    query: "CREATE CONSTRAINT FOR (n:Item) ON (n.code) UNIQUE"
+    expect:
+      error: "constraint 'Item_code_unique' already exists"
+
+  - name: unnamed_duplicate_constraint_if_not_exists_does_nothing
+    statements:
+      - "CREATE CONSTRAINT FOR (n:Item) ON (n.code) UNIQUE"
+      - "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Item) ON (n.code) UNIQUE"
+      - "SHOW CONSTRAINTS"
+    expect:
+      rows:
+        - [Item_code_unique, UNIQUE, Item, code]
+
+  # A constraint on several properties is unique on the combination: nodes may
+  # share any one of the values. It used to reject them per property.
+  - name: composite_unique_constraint_allows_a_shared_value
+    statements:
+      - "CREATE CONSTRAINT person_place FOR (n:Person) ON (n.name, n.city) UNIQUE"
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'})"
+      - "INSERT (:Person {name: 'Alix', city: 'Berlin'})"
+      - "INSERT (:Person {name: 'Gus', city: 'Amsterdam'})"
+      - "MATCH (n:Person) RETURN count(n)"
+    expect:
+      rows:
+        - [3]
+
+  - name: composite_unique_constraint_rejects_a_duplicate_combination
+    setup:
+      - "CREATE CONSTRAINT person_place FOR (n:Person) ON (n.name, n.city) UNIQUE"
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'})"
+    query: "INSERT (:Person {name: 'Alix', city: 'Amsterdam'})"
+    expect:
+      error: "constraint"
+
+  - name: composite_unique_constraint_checks_set
+    setup:
+      - "CREATE CONSTRAINT person_place FOR (n:Person) ON (n.name, n.city) UNIQUE"
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'})"
+      - "INSERT (:Person {name: 'Alix', city: 'Berlin'})"
+    query: "MATCH (n:Person {city: 'Berlin'}) SET n.city = 'Amsterdam'"
+    expect:
+      error: "constraint"
+
+  - name: composite_node_key_allows_a_shared_value
+    statements:
+      - "CREATE CONSTRAINT person_key FOR (n:Person) ON (n.name, n.city) NODE KEY"
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'})"
+      - "INSERT (:Person {name: 'Alix', city: 'Berlin'})"
+      - "MATCH (n:Person) RETURN count(n)"
+    expect:
+      rows:
+        - [2]
+
+  # SET and REMOVE are checked against the node's constraints; they were not
+  # (the node's labels never reached the check).
+  - name: set_null_violates_a_not_null_constraint
+    setup:
+      - "CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) NOT NULL"
+      - "INSERT (:Person {name: 'Alix'})"
+    query: "MATCH (n:Person) SET n.name = NULL"
+    expect:
+      error: "constraint"
+
+  - name: remove_violates_a_not_null_constraint
+    setup:
+      - "CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) NOT NULL"
+      - "INSERT (:Person {name: 'Alix'})"
+    query: "MATCH (n:Person) REMOVE n.name"
+    expect:
+      error: "constraint"
+
+  - name: set_violates_a_unique_constraint
+    setup:
+      - "CREATE CONSTRAINT person_email FOR (n:Person) ON (n.email) UNIQUE"
+      - "INSERT (:Person {name: 'Alix', email: 'alix@example.org'})"
+      - "INSERT (:Person {name: 'Gus', email: 'gus@example.org'})"
+    query: "MATCH (n:Person {name: 'Gus'}) SET n.email = 'alix@example.org'"
+    expect:
+      error: "constraint"
+
+  - name: set_keeps_a_node_own_unique_value
+    statements:
+      - "CREATE CONSTRAINT person_email FOR (n:Person) ON (n.email) UNIQUE"
+      - "INSERT (:Person {name: 'Alix', email: 'alix@example.org'})"
+      - "MATCH (n:Person) SET n.email = 'alix@example.org', n.name = 'Alix B'"
+      - "MATCH (n:Person) RETURN n.name, n.email"
+    expect:
+      rows:
+        - [Alix B, alix@example.org]
+
   - name: drop_constraint_removes_it
     statements:
       - "CREATE CONSTRAINT person_name FOR (n:Person) ON (n.name) UNIQUE"

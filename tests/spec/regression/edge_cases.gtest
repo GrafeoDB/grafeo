@@ -1380,23 +1380,45 @@ tests:
       rows:
         - [a]
 
-  # Must hold for every hop: a -[w:7]-> b -[w:50]-> c -[w:50]-> d
+  # Must hold for every hop: a -[w:50]-> b -[w:7]-> c -[w:50]-> d. The failing
+  # middle hop tells every-hop checking apart from checking only the first
+  # hop (it would add a-c and a-d) or only the last (a-d, b-d).
   - name: gql_anonymous_variable_length_edge_property_map_filters
     setup:
-      - "INSERT (:N {id: 'a'})-[:T {w: 7}]->(:N {id: 'b'})-[:T {w: 50}]->(:N {id: 'c'})-[:T {w: 50}]->(:N {id: 'd'})"
+      - "INSERT (:N {id: 'a'})-[:T {w: 50}]->(:N {id: 'b'})-[:T {w: 7}]->(:N {id: 'c'})-[:T {w: 50}]->(:N {id: 'd'})"
     query: "MATCH (x)-[{w: 50}]->{1,3}(y) RETURN x.id, y.id"
     expect:
       rows:
-        - [b, c]
-        - [b, d]
+        - [a, b]
         - [c, d]
 
   - name: gql_named_variable_length_edge_property_map_checks_every_hop
     setup:
-      - "INSERT (:N {id: 'a'})-[:T {w: 7}]->(:N {id: 'b'})-[:T {w: 50}]->(:N {id: 'c'})"
-    query: "MATCH (x {id: 'a'})-[r {w: 50}]->{1,2}(y) RETURN y.id"
+      - "INSERT (:N {id: 'a'})-[:T {w: 50}]->(:N {id: 'b'})-[:T {w: 7}]->(:N {id: 'c'})-[:T {w: 50}]->(:N {id: 'd'})"
+    query: "MATCH (x {id: 'a'})-[r {w: 50}]->{1,3}(y) RETURN y.id"
     expect:
-      empty: true
+      rows:
+        - [b]
+
+  # Variables of the row can be used per hop; `x.lim` used to be NULL
+  # inside the check, so no path matched.
+  - name: gql_variable_length_edge_property_map_uses_row_variables
+    setup:
+      - "INSERT (:N {id: 'a', lim: 50})-[:T {w: 50}]->(:N {id: 'b'})-[:T {w: 50}]->(:N {id: 'c'})-[:T {w: 7}]->(:N {id: 'd'})"
+    query: "MATCH (x {id: 'a'})-[{w: x.lim}]->{1,3}(y) RETURN y.id"
+    expect:
+      rows:
+        - [b]
+        - [c]
+
+  - name: gql_all_over_path_edges_uses_row_variables
+    setup:
+      - "INSERT (:N {id: 'a', lim: 50})-[:T {w: 50}]->(:N {id: 'b'})-[:T {w: 50}]->(:N {id: 'c'})-[:T {w: 7}]->(:N {id: 'd'})"
+    query: "MATCH p = (x {id: 'a'})-[]->{1,3}(y) WHERE all(e IN edges(p) WHERE e.w = x.lim) RETURN y.id"
+    expect:
+      rows:
+        - [b]
+        - [c]
 
   - name: gql_all_over_path_edges
     setup:

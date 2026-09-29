@@ -253,6 +253,23 @@ impl Planner {
         }
     }
 
+    /// Records the plan's writes, for conflict detection, as writes to the
+    /// graph with storage key `graph` (`None`: the default graph). Named
+    /// graphs number their entities on their own, so without this node 0 of
+    /// one graph would conflict with node 0 of another.
+    #[must_use]
+    pub fn with_write_graph(mut self, graph: Option<&str>) -> Self {
+        if self.write_tracker.is_some()
+            && let Some(manager) = &self.transaction_manager
+        {
+            self.write_tracker = Some(Arc::new(
+                crate::transaction::TransactionWriteTracker::new(Arc::clone(manager))
+                    .in_graph(graph),
+            ));
+        }
+        self
+    }
+
     /// Creates a new planner with transaction context for MVCC-aware planning.
     #[must_use]
     pub fn with_context(

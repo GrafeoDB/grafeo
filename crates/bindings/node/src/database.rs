@@ -1608,5 +1608,10 @@ fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::
         "timestamp": event.timestamp,
         "before": before,
         "after": after,
+        "labels": event.labels,
+        "before_labels": event.before_labels,
+        "edge_type": event.edge_type,
+        "src_id": event.src_id,
+        "dst_id": event.dst_id,
     })
 }

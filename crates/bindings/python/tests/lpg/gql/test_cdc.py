@@ -72,3 +72,55 @@ class TestCDC:
         node_id = rows[0]["n"]["_id"]
         history = db.node_history(node_id)
         assert len(history) == 0
+
+
+class TestCDCEventContext:
+    """Events say what was created, changed or deleted."""
+
+    def test_events_describe_nodes_and_edges(self, db):
+        alix = db.create_node(["Graph", "File"], {"id": "a"})
+        gus = db.create_node(["Graph", "Concept"], {"id": "b"})
+        edge = db.create_edge(alix.id, gus.id, "REFERENCES", {"id": "e1"})
+        db.remove_node_label(alix.id, "File")
+        db.delete_edge(edge.id)
+        db.delete_node(gus.id)
+
+        events = db.changes_between(0, db.current_epoch() + 1)
+
+        def find(entity_type, kind, entity_id):
+            return next(
+                e
+                for e in events
+                if e["entity_type"] == entity_type
+                and e["kind"] == kind
+                and e["entity_id"] == entity_id
+            )
+
+        endpoints = ("REFERENCES", alix.id, gus.id)
+        created = find("node", "create", gus.id)
+        assert sorted(created["labels"]) == ["Concept", "Graph"]
+        assert created["edge_type"] is None and created["src_id"] is None
+
+        edge_created = find("edge", "create", edge.id)
+        assert (
+            edge_created["edge_type"],
+            edge_created["src_id"],
+            edge_created["dst_id"],
+        ) == endpoints
+        assert edge_created["labels"] is None
+
+        relabeled = find("node", "update", alix.id)
+        assert sorted(relabeled["before_labels"]) == ["File", "Graph"]
+        assert relabeled["labels"] == ["Graph"]
+
+        edge_deleted = find("edge", "delete", edge.id)
+        assert (
+            edge_deleted["edge_type"],
+            edge_deleted["src_id"],
+            edge_deleted["dst_id"],
+        ) == endpoints
+        assert edge_deleted["before"] == {"id": "e1"}
+
+        deleted = find("node", "delete", gus.id)
+        assert sorted(deleted["labels"]) == ["Concept", "Graph"]
+        assert deleted["before"] == {"id": "b"}

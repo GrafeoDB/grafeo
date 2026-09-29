@@ -17,6 +17,7 @@ from grafeo.grafeo import (
     Edge,
     GrafeoDB,
     GrafeoError,
+    GraphHandle,
     Node,
     QueryResult,
     ResultStream,
@@ -31,6 +32,7 @@ from grafeo.grafeo import (
 __all__ = [
     "GrafeoDB",
     "GrafeoError",
+    "GraphHandle",
     "Node",
     "Edge",
     "QueryResult",

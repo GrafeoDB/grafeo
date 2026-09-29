@@ -1,6 +1,7 @@
 //! Transaction manager.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use grafeo_common::types::{EdgeId, EpochId, NodeId, TransactionId};
@@ -85,6 +86,58 @@ impl From<EdgeId> for EntityId {
     }
 }
 
+/// A node or edge of one graph: the unit of conflict detection.
+///
+/// Named graphs number their nodes and edges on their own, so the same ID
+/// in two graphs is two entities, and writes to them never conflict.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GraphEntity {
+    /// The graph's storage key; `None` for the default graph.
+    pub graph: Option<Arc<str>>,
+    /// The node or edge.
+    pub entity: EntityId,
+}
+
+impl GraphEntity {
+    /// An entity of the graph with storage key `graph` (`None`: the
+    /// default graph).
+    #[must_use]
+    pub fn new(graph: Option<Arc<str>>, entity: impl Into<EntityId>) -> Self {
+        Self {
+            graph,
+            entity: entity.into(),
+        }
+    }
+}
+
+impl From<EntityId> for GraphEntity {
+    fn from(entity: EntityId) -> Self {
+        Self::new(None, entity)
+    }
+}
+
+impl From<NodeId> for GraphEntity {
+    fn from(id: NodeId) -> Self {
+        Self::new(None, id)
+    }
+}
+
+impl From<EdgeId> for GraphEntity {
+    fn from(id: EdgeId) -> Self {
+        Self::new(None, id)
+    }
+}
+
+impl std::fmt::Display for GraphEntity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.entity)?;
+        if let Some(graph) = &self.graph {
+            write!(f, " in graph '{graph}'")?;
+        }
+        Ok(())
+    }
+}
+
 /// Information about an active transaction.
 pub struct TransactionInfo {
     /// Transaction state.
@@ -94,9 +147,9 @@ pub struct TransactionInfo {
     /// Start epoch (snapshot epoch for reads).
     pub start_epoch: EpochId,
     /// Set of entities written by this transaction.
-    pub write_set: HashSet<EntityId>,
+    pub write_set: HashSet<GraphEntity>,
     /// Set of entities read by this transaction (for serializable isolation).
-    pub read_set: HashSet<EntityId>,
+    pub read_set: HashSet<GraphEntity>,
 }
 
 impl TransactionInfo {
@@ -180,7 +233,7 @@ impl TransactionManager {
     pub fn record_write(
         &self,
         transaction_id: TransactionId,
-        entity: impl Into<EntityId>,
+        entity: impl Into<GraphEntity>,
     ) -> Result<()> {
         let entity = entity.into();
         let mut txns = self.transactions.write();
@@ -194,7 +247,7 @@ impl TransactionManager {
                     && other_info.write_set.contains(&entity)
                 {
                     return Err(Error::Transaction(TransactionError::WriteConflict(
-                        format!("Write-write conflict on entity {entity:?}"),
+                        format!("Write-write conflict on entity {entity}"),
                     )));
                 }
             }
@@ -225,7 +278,7 @@ impl TransactionManager {
     pub fn record_read(
         &self,
         transaction_id: TransactionId,
-        entity: impl Into<EntityId>,
+        entity: impl Into<GraphEntity>,
     ) -> Result<()> {
         let mut txns = self.transactions.write();
         let info = txns.get_mut(&transaction_id).ok_or_else(|| {
@@ -302,7 +355,7 @@ impl TransactionManager {
                     for entity in &our_write_set {
                         if other_info.write_set.contains(entity) {
                             return Err(Error::Transaction(TransactionError::WriteConflict(
-                                format!("Write-write conflict on entity {:?}", entity),
+                                format!("Write-write conflict on entity {entity}"),
                             )));
                         }
                     }
@@ -328,9 +381,8 @@ impl TransactionManager {
                             if other_info.write_set.contains(entity) {
                                 return Err(Error::Transaction(
                                     TransactionError::SerializationFailure(format!(
-                                        "Read-write conflict on entity {:?}: \
-                                         another transaction modified data we read",
-                                        entity
+                                        "Read-write conflict on entity {entity}: \
+                                         another transaction modified data we read"
                                     )),
                                 ));
                             }
@@ -387,7 +439,7 @@ impl TransactionManager {
     /// # Errors
     ///
     /// Returns a `TransactionError::InvalidState` if the transaction is not found.
-    pub fn get_write_set(&self, transaction_id: TransactionId) -> Result<HashSet<EntityId>> {
+    pub fn get_write_set(&self, transaction_id: TransactionId) -> Result<HashSet<GraphEntity>> {
         let txns = self.transactions.read();
         let info = txns.get(&transaction_id).ok_or_else(|| {
             Error::Transaction(TransactionError::InvalidState(
@@ -405,7 +457,7 @@ impl TransactionManager {
     pub fn reset_write_set(
         &self,
         transaction_id: TransactionId,
-        write_set: HashSet<EntityId>,
+        write_set: HashSet<GraphEntity>,
     ) -> Result<()> {
         let mut txns = self.transactions.write();
         let info = txns.get_mut(&transaction_id).ok_or_else(|| {

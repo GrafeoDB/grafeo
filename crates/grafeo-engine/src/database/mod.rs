@@ -36,6 +36,10 @@ mod embed;
 #[cfg(feature = "grafeo-file")]
 pub(crate) mod flush;
 #[cfg(feature = "lpg")]
+mod graph_handle;
+#[cfg(feature = "lpg")]
+pub use graph_handle::GraphHandle;
+#[cfg(feature = "lpg")]
 mod import;
 #[cfg(feature = "lpg")]
 mod index;

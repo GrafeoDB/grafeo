@@ -1311,6 +1311,32 @@ describe('CDC operations', () => {
     expect(history.length).toBe(0)
     db.close()
   })
+
+  it('should describe the deleted node and edge', async () => {
+    const db = GrafeoDB.create()
+    db.enableCdc()
+    const alix = db.createNode(['Person'], { name: 'Alix' })
+    const gus = db.createNode(['Person'], { name: 'Gus' })
+    const edge = db.createEdge(alix.id, gus.id, 'KNOWS', { since: 2020 })
+    db.deleteEdge(edge.id)
+    db.deleteNode(gus.id)
+
+    const changes = await db.changesBetween(0, 1000)
+    const find = (type, kind, id) =>
+      changes.find((c) => c.entity_type === type && c.kind === kind && c.entity_id === id)
+    const edgeDeleted = find('edge', 'delete', edge.id)
+    expect([edgeDeleted.edge_type, edgeDeleted.src_id, edgeDeleted.dst_id]).toEqual([
+      'KNOWS',
+      alix.id,
+      gus.id,
+    ])
+    expect(edgeDeleted.before).toEqual({ since: 2020 })
+    const nodeDeleted = find('node', 'delete', gus.id)
+    expect(nodeDeleted.labels).toEqual(['Person'])
+    expect(nodeDeleted.before).toEqual({ name: 'Gus' })
+    expect(nodeDeleted.edge_type).toBeNull()
+    db.close()
+  })
 })
 
 // ── Label management ────────────────────────────────────────────────

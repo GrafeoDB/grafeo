@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use arcstr::ArcStr;
 use grafeo_common::types::{
-    EdgeId, EpochId, HlcTimestamp, NodeId, PropertyKey, TransactionId, Value,
+    EdgeId, EpochId, HlcTimestamp, NodeId, PropertyKey, PropertyMap, TransactionId, Value,
 };
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::lpg::{CompareOp, Edge, Node};
@@ -87,45 +87,35 @@ impl CdcGraphStore {
         self.cdc_log.record(event);
     }
 
-    /// Collects all properties of a node as a `HashMap` for before/after snapshots.
-    fn collect_node_properties(&self, id: NodeId) -> Option<HashMap<String, Value>> {
-        let node = self.inner.get_node(id)?;
-        let map: HashMap<String, Value> = node
-            .properties
-            .iter()
-            .map(|(k, v)| (k.as_str().to_string(), v.clone()))
-            .collect();
-        if map.is_empty() { None } else { Some(map) }
+    /// The node as a change sees it: through `transaction_id` for a
+    /// transactional change, so a node the transaction wrote itself is seen
+    /// as it left it, and as committed otherwise.
+    fn node_as_seen(&self, id: NodeId, transaction_id: Option<TransactionId>) -> Option<Node> {
+        match transaction_id {
+            Some(transaction_id) => {
+                self.inner
+                    .get_node_versioned(id, self.inner.current_epoch(), transaction_id)
+            }
+            None => self.inner.get_node(id),
+        }
     }
 
-    /// Collects all properties of an edge as a `HashMap` for before/after snapshots.
-    fn collect_edge_properties(&self, id: EdgeId) -> Option<HashMap<String, Value>> {
-        let edge = self.inner.get_edge(id)?;
-        let map: HashMap<String, Value> = edge
-            .properties
-            .iter()
-            .map(|(k, v)| (k.as_str().to_string(), v.clone()))
-            .collect();
-        if map.is_empty() { None } else { Some(map) }
+    /// The edge as a change sees it, like [`node_as_seen`](Self::node_as_seen).
+    fn edge_as_seen(&self, id: EdgeId, transaction_id: Option<TransactionId>) -> Option<Edge> {
+        match transaction_id {
+            Some(transaction_id) => {
+                self.inner
+                    .get_edge_versioned(id, self.inner.current_epoch(), transaction_id)
+            }
+            None => self.inner.get_edge(id),
+        }
     }
 
-    /// Collects labels for a node.
-    fn collect_node_labels(&self, id: NodeId) -> Option<Vec<String>> {
-        let node = self.inner.get_node(id)?;
-        Some(node.labels.iter().map(|l| l.to_string()).collect())
-    }
-
-    /// Collects labels for a node as `transaction_id` sees it, so a node the
-    /// transaction created itself has its labels too.
-    fn collect_node_labels_versioned(
-        &self,
-        id: NodeId,
-        transaction_id: TransactionId,
-    ) -> Option<Vec<String>> {
-        let node = self
-            .inner
-            .get_node_versioned(id, self.inner.current_epoch(), transaction_id)?;
-        Some(node.labels.iter().map(|l| l.to_string()).collect())
+    /// The labels of a node as a change sees it; none for a missing node.
+    fn labels_as_seen(&self, id: NodeId, transaction_id: Option<TransactionId>) -> Vec<String> {
+        self.node_as_seen(id, transaction_id)
+            .map(|node| label_names(&node))
+            .unwrap_or_default()
     }
 
     /// Returns the next HLC timestamp from the CDC log's clock.
@@ -148,6 +138,7 @@ fn make_event(
         before: None,
         after: None,
         labels: None,
+        before_labels: None,
         edge_type: None,
         src_id: None,
         dst_id: None,
@@ -156,6 +147,58 @@ fn make_event(
         triple_object: None,
         triple_graph: None,
     }
+}
+
+/// An entity's properties as an event snapshot; `None` when it has none.
+fn property_snapshot(properties: &PropertyMap) -> Option<HashMap<String, Value>> {
+    if properties.is_empty() {
+        return None;
+    }
+    Some(
+        properties
+            .iter()
+            .map(|(key, value)| (key.as_str().to_string(), value.clone()))
+            .collect(),
+    )
+}
+
+fn label_names(node: &Node) -> Vec<String> {
+    node.labels.iter().map(ToString::to_string).collect()
+}
+
+/// Describes a deleted node: the labels and properties it had.
+fn describe_deleted_node(event: &mut ChangeEvent, node: &Node) {
+    event.labels = Some(label_names(node));
+    event.before = property_snapshot(&node.properties);
+}
+
+/// Describes an edge: its type and endpoints.
+fn describe_edge(event: &mut ChangeEvent, edge_type: &str, src: NodeId, dst: NodeId) {
+    event.edge_type = Some(edge_type.to_string());
+    event.src_id = Some(src.as_u64());
+    event.dst_id = Some(dst.as_u64());
+}
+
+/// Describes a deleted edge: its type, endpoints and last properties.
+fn describe_deleted_edge(event: &mut ChangeEvent, edge: &Edge) {
+    describe_edge(event, &edge.edge_type, edge.src, edge.dst);
+    event.before = property_snapshot(&edge.properties);
+}
+
+/// Describes a label change: the labels before and after it.
+fn describe_label_change(event: &mut ChangeEvent, before: Vec<String>, after: Vec<String>) {
+    event.before_labels = Some(before);
+    event.labels = Some(after);
+}
+
+fn with_label(labels: &[String], label: &str) -> Vec<String> {
+    let mut labels = labels.to_vec();
+    labels.push(label.to_string());
+    labels
+}
+
+fn without_label(labels: &[String], label: &str) -> Vec<String> {
+    labels.iter().filter(|l| *l != label).cloned().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -530,9 +573,7 @@ impl GraphStoreMut for CdcGraphStore {
             epoch,
             self.next_ts(),
         );
-        event.edge_type = Some(edge_type.to_string());
-        event.src_id = Some(src.as_u64());
-        event.dst_id = Some(dst.as_u64());
+        describe_edge(&mut event, edge_type, src, dst);
         self.record_directly(event);
         id
     }
@@ -554,9 +595,7 @@ impl GraphStoreMut for CdcGraphStore {
             epoch,
             self.next_ts(),
         );
-        event.edge_type = Some(edge_type.to_string());
-        event.src_id = Some(src.as_u64());
-        event.dst_id = Some(dst.as_u64());
+        describe_edge(&mut event, edge_type, src, dst);
         self.buffer_event(event);
         id
     }
@@ -571,9 +610,7 @@ impl GraphStoreMut for CdcGraphStore {
                 epoch,
                 self.next_ts(),
             );
-            event.edge_type = Some((*edge_type).to_string());
-            event.src_id = Some(src.as_u64());
-            event.dst_id = Some(dst.as_u64());
+            describe_edge(&mut event, edge_type, *src, *dst);
             self.record_directly(event);
         }
         ids
@@ -582,7 +619,7 @@ impl GraphStoreMut for CdcGraphStore {
     // --- Deletion ---
 
     fn delete_node(&self, id: NodeId) -> bool {
-        let before_props = self.collect_node_properties(id);
+        let node = self.node_as_seen(id, None);
         let deleted = self.inner.delete_node(id);
         if deleted {
             let epoch = self.inner.current_epoch();
@@ -592,7 +629,9 @@ impl GraphStoreMut for CdcGraphStore {
                 epoch,
                 self.next_ts(),
             );
-            event.before = before_props;
+            if let Some(node) = &node {
+                describe_deleted_node(&mut event, node);
+            }
             self.record_directly(event);
         }
         deleted
@@ -604,8 +643,7 @@ impl GraphStoreMut for CdcGraphStore {
         epoch: EpochId,
         transaction_id: TransactionId,
     ) -> bool {
-        let before_props = self.collect_node_properties(id);
-        let labels = self.collect_node_labels(id);
+        let node = self.node_as_seen(id, Some(transaction_id));
         let deleted = self.inner.delete_node_versioned(id, epoch, transaction_id);
         if deleted {
             let mut event = make_event(
@@ -614,41 +652,44 @@ impl GraphStoreMut for CdcGraphStore {
                 epoch,
                 self.next_ts(),
             );
-            event.before = before_props;
-            event.labels = labels;
+            if let Some(node) = &node {
+                describe_deleted_node(&mut event, node);
+            }
             self.buffer_event(event);
         }
         deleted
     }
 
     fn delete_node_edges(&self, node_id: NodeId) {
-        // Collect edge info before deletion
-        let outgoing: Vec<(NodeId, EdgeId)> = self.inner.edges_from(node_id, Direction::Outgoing);
-        let incoming: Vec<(NodeId, EdgeId)> = self.inner.edges_from(node_id, Direction::Incoming);
-
-        let edge_infos: Vec<(EdgeId, Option<HashMap<String, Value>>)> = outgoing
-            .iter()
-            .chain(incoming.iter())
-            .map(|(_, eid)| (*eid, self.collect_edge_properties(*eid)))
+        // Read the edges before they go; a self-loop is both outgoing and
+        // incoming but deleted once.
+        let mut edges: Vec<Edge> = self
+            .inner
+            .edges_from(node_id, Direction::Outgoing)
+            .into_iter()
+            .chain(self.inner.edges_from(node_id, Direction::Incoming))
+            .filter_map(|(_, edge)| self.edge_as_seen(edge, None))
             .collect();
+        edges.sort_unstable_by_key(|edge| edge.id);
+        edges.dedup_by_key(|edge| edge.id);
 
         self.inner.delete_node_edges(node_id);
 
         let epoch = self.inner.current_epoch();
-        for (eid, props) in edge_infos {
+        for edge in edges {
             let mut event = make_event(
-                EntityId::Edge(eid),
+                EntityId::Edge(edge.id),
                 ChangeKind::Delete,
                 epoch,
                 self.next_ts(),
             );
-            event.before = props;
+            describe_deleted_edge(&mut event, &edge);
             self.record_directly(event);
         }
     }
 
     fn delete_edge(&self, id: EdgeId) -> bool {
-        let before_props = self.collect_edge_properties(id);
+        let edge = self.edge_as_seen(id, None);
         let deleted = self.inner.delete_edge(id);
         if deleted {
             let epoch = self.inner.current_epoch();
@@ -658,7 +699,9 @@ impl GraphStoreMut for CdcGraphStore {
                 epoch,
                 self.next_ts(),
             );
-            event.before = before_props;
+            if let Some(edge) = &edge {
+                describe_deleted_edge(&mut event, edge);
+            }
             self.record_directly(event);
         }
         deleted
@@ -670,7 +713,7 @@ impl GraphStoreMut for CdcGraphStore {
         epoch: EpochId,
         transaction_id: TransactionId,
     ) -> bool {
-        let before_props = self.collect_edge_properties(id);
+        let edge = self.edge_as_seen(id, Some(transaction_id));
         let deleted = self.inner.delete_edge_versioned(id, epoch, transaction_id);
         if deleted {
             let mut event = make_event(
@@ -679,7 +722,9 @@ impl GraphStoreMut for CdcGraphStore {
                 epoch,
                 self.next_ts(),
             );
-            event.before = before_props;
+            if let Some(edge) = &edge {
+                describe_deleted_edge(&mut event, edge);
+            }
             self.buffer_event(event);
         }
         deleted
@@ -874,6 +919,7 @@ impl GraphStoreMut for CdcGraphStore {
     // --- Label mutation ---
 
     fn add_label(&self, node_id: NodeId, label: &str) -> bool {
+        let before = self.labels_as_seen(node_id, None);
         let added = self.inner.add_label(node_id, label);
         if added {
             let epoch = self.inner.current_epoch();
@@ -883,14 +929,15 @@ impl GraphStoreMut for CdcGraphStore {
                 epoch,
                 self.next_ts(),
             );
-            event.labels = self.collect_node_labels(node_id);
+            let after = with_label(&before, label);
+            describe_label_change(&mut event, before, after);
             self.record_directly(event);
         }
         added
     }
 
     fn remove_label(&self, node_id: NodeId, label: &str) -> bool {
-        let old_labels = self.collect_node_labels(node_id);
+        let before = self.labels_as_seen(node_id, None);
         let removed = self.inner.remove_label(node_id, label);
         if removed {
             let epoch = self.inner.current_epoch();
@@ -900,7 +947,8 @@ impl GraphStoreMut for CdcGraphStore {
                 epoch,
                 self.next_ts(),
             );
-            event.labels = old_labels;
+            let after = without_label(&before, label);
+            describe_label_change(&mut event, before, after);
             self.record_directly(event);
         }
         removed
@@ -912,6 +960,7 @@ impl GraphStoreMut for CdcGraphStore {
         label: &str,
         transaction_id: TransactionId,
     ) -> bool {
+        let before = self.labels_as_seen(node_id, Some(transaction_id));
         let added = self
             .inner
             .add_label_versioned(node_id, label, transaction_id);
@@ -923,7 +972,8 @@ impl GraphStoreMut for CdcGraphStore {
                 epoch,
                 self.next_ts(),
             );
-            event.labels = self.collect_node_labels_versioned(node_id, transaction_id);
+            let after = with_label(&before, label);
+            describe_label_change(&mut event, before, after);
             self.buffer_event(event);
         }
         added
@@ -935,7 +985,7 @@ impl GraphStoreMut for CdcGraphStore {
         label: &str,
         transaction_id: TransactionId,
     ) -> bool {
-        let old_labels = self.collect_node_labels_versioned(node_id, transaction_id);
+        let before = self.labels_as_seen(node_id, Some(transaction_id));
         let removed = self
             .inner
             .remove_label_versioned(node_id, label, transaction_id);
@@ -947,7 +997,8 @@ impl GraphStoreMut for CdcGraphStore {
                 epoch,
                 self.next_ts(),
             );
-            event.labels = old_labels;
+            let after = without_label(&before, label);
+            describe_label_change(&mut event, before, after);
             self.buffer_event(event);
         }
         removed
@@ -960,6 +1011,12 @@ mod tests {
     use grafeo_core::graph::lpg::LpgStore;
 
     /// Creates a `CdcGraphStore` wrapping a fresh `LpgStore`.
+    fn sorted(labels: Option<&Vec<String>>) -> Vec<String> {
+        let mut labels = labels.cloned().unwrap_or_default();
+        labels.sort();
+        labels
+    }
+
     fn setup() -> (CdcGraphStore, Arc<CdcLog>) {
         let store = Arc::new(LpgStore::new().unwrap());
         let log = Arc::new(CdcLog::new());
@@ -1285,6 +1342,7 @@ mod tests {
             .unwrap();
         let before = del_event.before.as_ref().unwrap();
         assert_eq!(before.get("name"), Some(&Value::from("Alix")));
+        assert_eq!(sorted(del_event.labels.as_ref()), ["P"]);
     }
 
     #[test]
@@ -1312,6 +1370,9 @@ mod tests {
             .unwrap();
         let before = del_event.before.as_ref().unwrap();
         assert_eq!(before.get("weight"), Some(&Value::Float64(1.5)));
+        assert_eq!(del_event.edge_type.as_deref(), Some("E"));
+        assert_eq!(del_event.src_id, Some(a.as_u64()));
+        assert_eq!(del_event.dst_id, Some(b.as_u64()));
     }
 
     #[test]
@@ -1334,17 +1395,47 @@ mod tests {
 
         cdc.delete_node_edges(a);
 
-        // Both edges should have Delete events
-        let e1_del = log
-            .history(EntityId::Edge(e1))
+        // Each edge's delete event says what the edge was.
+        let deleted = |edge| {
+            log.history(EntityId::Edge(edge))
+                .into_iter()
+                .find(|e| e.kind == ChangeKind::Delete)
+                .map(|e| (e.edge_type, e.src_id, e.dst_id, e.before))
+        };
+        assert_eq!(
+            deleted(e1),
+            Some((
+                Some("X".to_string()),
+                Some(a.as_u64()),
+                Some(b.as_u64()),
+                Some(HashMap::from([("p".to_string(), Value::Int64(1))])),
+            ))
+        );
+        assert_eq!(
+            deleted(e2),
+            Some((
+                Some("Y".to_string()),
+                Some(c.as_u64()),
+                Some(a.as_u64()),
+                None
+            ))
+        );
+    }
+
+    #[test]
+    fn delete_node_edges_reports_a_self_loop_once() {
+        let (cdc, log) = setup();
+        let a = cdc.create_node(&[]);
+        let own = cdc.create_edge(a, a, "SELF");
+
+        cdc.delete_node_edges(a);
+
+        let deletes = log
+            .history(EntityId::Edge(own))
             .into_iter()
-            .any(|e| e.kind == ChangeKind::Delete);
-        let e2_del = log
-            .history(EntityId::Edge(e2))
-            .into_iter()
-            .any(|e| e.kind == ChangeKind::Delete);
-        assert!(e1_del, "Outgoing edge should have Delete event");
-        assert!(e2_del, "Incoming edge should have Delete event");
+            .filter(|e| e.kind == ChangeKind::Delete)
+            .count();
+        assert_eq!(deletes, 1);
     }
 
     #[test]
@@ -1476,9 +1567,8 @@ mod tests {
             .iter()
             .find(|e| e.kind == ChangeKind::Update)
             .unwrap();
-        let labels = update.labels.as_ref().unwrap();
-        assert!(labels.contains(&"Person".to_string()));
-        assert!(labels.contains(&"Employee".to_string()));
+        assert_eq!(sorted(update.labels.as_ref()), ["Employee", "Person"]);
+        assert_eq!(sorted(update.before_labels.as_ref()), ["Person"]);
     }
 
     #[test]
@@ -1492,7 +1582,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_label_records_old_labels() {
+    fn remove_label_records_labels_before_and_after() {
         let (cdc, log) = setup();
         let id = cdc.create_node(&["Person", "Employee"]);
         let removed = cdc.remove_label(id, "Employee");
@@ -1503,10 +1593,11 @@ mod tests {
             .iter()
             .find(|e| e.kind == ChangeKind::Update)
             .unwrap();
-        // labels field captures the labels BEFORE removal
-        let labels = update.labels.as_ref().unwrap();
-        assert!(labels.contains(&"Person".to_string()));
-        assert!(labels.contains(&"Employee".to_string()));
+        assert_eq!(sorted(update.labels.as_ref()), ["Person"]);
+        assert_eq!(
+            sorted(update.before_labels.as_ref()),
+            ["Employee", "Person"]
+        );
     }
 
     #[test]
@@ -1612,6 +1703,11 @@ mod tests {
         assert_eq!(
             del.before.as_ref().unwrap().get("w"),
             Some(&Value::Int64(5))
+        );
+        assert_eq!(del.edge_type.as_deref(), Some("E"));
+        assert_eq!(
+            (del.src_id, del.dst_id),
+            (Some(a.as_u64()), Some(b.as_u64()))
         );
     }
 
@@ -1750,9 +1846,8 @@ mod tests {
         let pending = cdc.pending_events().lock().clone();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].kind, ChangeKind::Update);
-        let labels = pending[0].labels.as_ref().unwrap();
-        assert!(labels.contains(&"Person".to_string()));
-        assert!(labels.contains(&"Employee".to_string()));
+        assert_eq!(sorted(pending[0].labels.as_ref()), ["Employee", "Person"]);
+        assert_eq!(sorted(pending[0].before_labels.as_ref()), ["Person"]);
     }
 
     #[test]
@@ -1766,7 +1861,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_label_versioned_buffers_event_with_old_labels() {
+    fn remove_label_versioned_buffers_labels_before_and_after() {
         let (cdc, _log) = setup();
         let id = cdc.create_node(&["Person", "Employee"]);
         let tx = TransactionId::new(1);
@@ -1775,10 +1870,11 @@ mod tests {
 
         let pending = cdc.pending_events().lock().clone();
         assert_eq!(pending.len(), 1);
-        let labels = pending[0].labels.as_ref().unwrap();
-        // Captures labels BEFORE removal
-        assert!(labels.contains(&"Person".to_string()));
-        assert!(labels.contains(&"Employee".to_string()));
+        assert_eq!(sorted(pending[0].labels.as_ref()), ["Person"]);
+        assert_eq!(
+            sorted(pending[0].before_labels.as_ref()),
+            ["Employee", "Person"]
+        );
     }
 
     #[test]
@@ -1792,66 +1888,60 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Helper methods
+    // What events describe
     // ---------------------------------------------------------------
 
     #[test]
-    fn collect_node_properties_returns_none_for_empty() {
-        let (cdc, _log) = setup();
+    fn a_deleted_node_without_properties_has_labels_and_no_before() {
+        let (cdc, log) = setup();
         let id = cdc.create_node(&["N"]);
-        assert!(cdc.collect_node_properties(id).is_none());
+        assert!(cdc.delete_node(id));
+        let delete = log
+            .history(EntityId::Node(id))
+            .into_iter()
+            .find(|e| e.kind == ChangeKind::Delete)
+            .unwrap();
+        assert_eq!(delete.before, None);
+        assert_eq!(sorted(delete.labels.as_ref()), ["N"]);
     }
 
     #[test]
-    fn collect_node_properties_returns_map() {
+    fn a_delete_in_the_creating_transaction_describes_the_node() {
         let (cdc, _log) = setup();
-        let id = cdc.create_node(&["N"]);
-        cdc.set_node_property(id, "a", Value::Int64(1));
-        cdc.set_node_property(id, "b", Value::from("hello"));
-        let map = cdc.collect_node_properties(id).unwrap();
-        assert_eq!(map.get("a"), Some(&Value::Int64(1)));
-        assert_eq!(map.get("b"), Some(&Value::from("hello")));
+        // Not `new(1)`: that is `TransactionId::SYSTEM`.
+        let tx = TransactionId::new(7);
+        let epoch = cdc.current_epoch();
+        let id = cdc.create_node_versioned(&["Person"], epoch, tx);
+        cdc.set_node_property_versioned(id, "name", Value::from("Alix"), tx);
+        assert!(cdc.delete_node_versioned(id, epoch, tx));
+
+        let pending = cdc.pending_events().lock().clone();
+        let delete = pending
+            .iter()
+            .find(|e| e.kind == ChangeKind::Delete)
+            .unwrap();
+        assert_eq!(sorted(delete.labels.as_ref()), ["Person"]);
+        assert_eq!(
+            delete.before,
+            Some(HashMap::from([("name".to_string(), Value::from("Alix"))]))
+        );
     }
 
     #[test]
-    fn collect_node_properties_returns_none_for_nonexistent() {
+    fn a_label_change_in_the_creating_transaction_lists_the_labels() {
         let (cdc, _log) = setup();
-        assert!(cdc.collect_node_properties(NodeId::new(999)).is_none());
-    }
+        // Not `new(1)`: that is `TransactionId::SYSTEM`.
+        let tx = TransactionId::new(7);
+        let id = cdc.create_node_versioned(&["Person"], cdc.current_epoch(), tx);
+        assert!(cdc.add_label_versioned(id, "Admin", tx));
 
-    #[test]
-    fn collect_edge_properties_returns_none_for_empty() {
-        let (cdc, _log) = setup();
-        let a = cdc.create_node(&[]);
-        let b = cdc.create_node(&[]);
-        let eid = cdc.create_edge(a, b, "E");
-        assert!(cdc.collect_edge_properties(eid).is_none());
-    }
-
-    #[test]
-    fn collect_edge_properties_returns_map() {
-        let (cdc, _log) = setup();
-        let a = cdc.create_node(&[]);
-        let b = cdc.create_node(&[]);
-        let eid = cdc.create_edge(a, b, "E");
-        cdc.set_edge_property(eid, "w", Value::Float64(2.5));
-        let map = cdc.collect_edge_properties(eid).unwrap();
-        assert_eq!(map.get("w"), Some(&Value::Float64(2.5)));
-    }
-
-    #[test]
-    fn collect_node_labels_returns_labels() {
-        let (cdc, _log) = setup();
-        let id = cdc.create_node(&["Person", "Employee"]);
-        let labels = cdc.collect_node_labels(id).unwrap();
-        assert!(labels.contains(&"Person".to_string()));
-        assert!(labels.contains(&"Employee".to_string()));
-    }
-
-    #[test]
-    fn collect_node_labels_returns_none_for_nonexistent() {
-        let (cdc, _log) = setup();
-        assert!(cdc.collect_node_labels(NodeId::new(999)).is_none());
+        let pending = cdc.pending_events().lock().clone();
+        let change = pending
+            .iter()
+            .find(|e| e.kind == ChangeKind::Update)
+            .unwrap();
+        assert_eq!(sorted(change.before_labels.as_ref()), ["Person"]);
+        assert_eq!(sorted(change.labels.as_ref()), ["Admin", "Person"]);
     }
 
     #[test]

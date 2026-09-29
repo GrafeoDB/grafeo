@@ -209,17 +209,21 @@ pub struct ChangeEvent {
     pub before: Option<HashMap<String, Value>>,
     /// Properties after the change (None for Delete and for triple events).
     pub after: Option<HashMap<String, Value>>,
-    /// Node labels. Present only on node Create events.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Node labels: on a Create event the node's labels, on a Delete event
+    /// the labels it had, on a label change the labels after the change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
-    /// Edge relationship type. Present only on edge Create events.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Node labels before a label change. Present only on label changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_labels: Option<Vec<String>>,
+    /// Edge relationship type. Present on edge Create and Delete events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge_type: Option<String>,
-    /// Edge source node ID. Present only on edge Create events.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Edge source node ID. Present on edge Create and Delete events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub src_id: Option<u64>,
-    /// Edge destination node ID. Present only on edge Create events.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Edge destination node ID. Present on edge Create and Delete events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dst_id: Option<u64>,
     /// RDF triple subject (N-Triples encoded). Present only on triple events.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -343,6 +347,7 @@ impl CdcLog {
             before: None,
             after: props,
             labels,
+            before_labels: None,
             edge_type: None,
             src_id: None,
             dst_id: None,
@@ -371,6 +376,7 @@ impl CdcLog {
             before: None,
             after: props,
             labels: None,
+            before_labels: None,
             edge_type: Some(edge_type),
             src_id: Some(src_id),
             dst_id: Some(dst_id),
@@ -402,6 +408,7 @@ impl CdcLog {
             before: None,
             after: None,
             labels: None,
+            before_labels: None,
             edge_type: None,
             src_id: None,
             dst_id: None,
@@ -432,6 +439,7 @@ impl CdcLog {
             before: None,
             after: None,
             labels: None,
+            before_labels: None,
             edge_type: None,
             src_id: None,
             dst_id: None,
@@ -467,6 +475,7 @@ impl CdcLog {
             before,
             after: Some(after_map),
             labels: None,
+            before_labels: None,
             edge_type: None,
             src_id: None,
             dst_id: None,
@@ -492,6 +501,7 @@ impl CdcLog {
             before: props,
             after: None,
             labels: None,
+            before_labels: None,
             edge_type: None,
             src_id: None,
             dst_id: None,
@@ -726,16 +736,14 @@ fn triple_hash(subject: &str, predicate: &str, object: &str, graph: Option<&str>
     h.finish()
 }
 
-/// Folds a transaction's property changes to the entities it created into
-/// their create events, so a create event carries the properties the
-/// transaction left the entity with.
+/// Folds a transaction's changes to the entities it created into their
+/// create events, so a create event carries the entity as the transaction
+/// left it: its final labels and properties.
 ///
 /// Statements and the direct API both create an entity and then set its
-/// properties one by one; without this, a consumer saw a create event
-/// without properties followed by one update per property. Changes to
-/// entities that existed before the transaction stay as they are, and so do
-/// label changes: an added label's event lists the labels after the change,
-/// a removed label's the labels before it, so neither can be merged.
+/// properties and labels one by one; without this, a consumer saw a create
+/// event without properties followed by one update per property.
+/// Changes to entities that existed before the transaction stay as they are.
 pub(crate) fn fold_into_creates(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
     let mut folded: Vec<ChangeEvent> = Vec::with_capacity(events.len());
     let mut created: HashMap<EntityId, usize> = HashMap::new();
@@ -747,11 +755,15 @@ pub(crate) fn fold_into_creates(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
             folded.push(event);
             continue;
         };
-        if event.kind != ChangeKind::Update || event.labels.is_some() {
+        if event.kind != ChangeKind::Update {
             folded.push(event);
             continue;
         }
         let create = &mut folded[at];
+        // A label change lists the labels after it.
+        if let Some(labels) = event.labels {
+            create.labels = Some(labels);
+        }
         match (event.before, event.after) {
             (_, Some(after)) => create.after.get_or_insert_with(HashMap::new).extend(after),
             (Some(removed), None) => {

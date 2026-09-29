@@ -4874,6 +4874,11 @@ impl Session {
         .with_session_context(session_context)
         .with_read_only(read_only);
 
+        #[cfg(feature = "lpg")]
+        {
+            planner = planner.with_write_graph(self.active_lpg_graph_key().as_deref());
+        }
+
         // Attach the LPG store so CALL grafeo.search.* procedures can reach
         // HNSW / BM25 indexes. Skip when the session is backed by an external
         // store — `self.store` is an empty placeholder in that case and would
@@ -4948,7 +4953,8 @@ impl Session {
                 writer = writer.with_write_tracker(Arc::new(
                     crate::transaction::TransactionWriteTracker::new(Arc::clone(
                         &self.transaction_manager,
-                    )),
+                    ))
+                    .in_graph(self.active_lpg_graph_key().as_deref()),
                 ));
             }
             write(&writer).map_err(crate::query::executor::convert_operator_error)
@@ -5187,6 +5193,95 @@ impl Session {
     #[cfg(feature = "lpg")]
     pub fn delete_edge(&self, id: EdgeId) -> Result<bool> {
         self.write(|writer| writer.delete_edge(id))
+    }
+
+    /// Creates one node per vector, each with `label` and the vector as
+    /// `property`, in one transaction. Returns the IDs in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first node's error (for example a vector of another size
+    /// than the property's vector index); nothing of the batch is created then.
+    #[cfg(feature = "lpg")]
+    pub fn batch_create_nodes(
+        &self,
+        label: &str,
+        property: &str,
+        vectors: Vec<Vec<f32>>,
+    ) -> Result<Vec<NodeId>> {
+        let labels = [label.to_string()];
+        self.write(|writer| {
+            vectors
+                .into_iter()
+                .map(|vector| {
+                    writer.create_node(
+                        &labels,
+                        vec![(property.to_string(), Value::Vector(vector.into()))],
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// Creates one node with `label` per property map, in one transaction.
+    /// Returns the IDs in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first node's error (for example a `UNIQUE` value that
+    /// another node, or an earlier node of the batch, already has); nothing of
+    /// the batch is created then.
+    #[cfg(feature = "lpg")]
+    pub fn batch_create_nodes_with_props(
+        &self,
+        label: &str,
+        properties_list: Vec<std::collections::HashMap<PropertyKey, Value>>,
+    ) -> Result<Vec<NodeId>> {
+        let labels = [label.to_string()];
+        self.write(|writer| {
+            properties_list
+                .into_iter()
+                .map(|properties| writer.create_node(&labels, direct_properties(properties)))
+                .collect()
+        })
+    }
+
+    /// Finds the nodes of the session's graph that have a property value.
+    ///
+    /// With a property index on `property` this is a lookup, otherwise a scan
+    /// of the committed nodes. Returns the nodes the session sees: in a
+    /// transaction, its own writes found through the index included.
+    #[cfg(feature = "lpg")]
+    #[must_use]
+    pub fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
+        let store = self.active_lpg_store();
+        let candidates = store.find_nodes_by_property(property, value);
+        match self.get_transaction_context() {
+            (epoch, Some(transaction_id)) => {
+                store.filter_visible_node_ids_versioned(&candidates, epoch, transaction_id)
+            }
+            (epoch, None) => store.filter_visible_node_ids(&candidates, epoch),
+        }
+    }
+
+    /// Creates an index on a node property of the session's graph.
+    #[cfg(feature = "lpg")]
+    pub fn create_property_index(&self, property: &str) {
+        self.active_lpg_store().create_property_index(property);
+    }
+
+    /// Drops the index on a node property of the session's graph. Returns
+    /// whether there was one.
+    #[cfg(feature = "lpg")]
+    pub fn drop_property_index(&self, property: &str) -> bool {
+        self.active_lpg_store().drop_property_index(property)
+    }
+
+    /// Returns whether a node property of the session's graph has an index.
+    #[cfg(feature = "lpg")]
+    #[must_use]
+    pub fn has_property_index(&self, property: &str) -> bool {
+        self.active_lpg_store().has_property_index(property)
     }
 
     // =========================================================================

@@ -12,18 +12,9 @@ use std::sync::Arc;
 
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
-use grafeo_core::execution::operators::{GraphWriter, OperatorError};
 use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
 
 impl super::GrafeoDB {
-    /// Runs `write` as one implicit transaction on the current graph.
-    fn write<T>(
-        &self,
-        write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
-    ) -> Result<T> {
-        self.session().write(write)
-    }
-
     /// The store of the current graph: the one `set_current_graph` and
     /// `set_current_schema` select, or the default graph when they select
     /// none (or one that no longer exists).
@@ -383,18 +374,7 @@ impl super::GrafeoDB {
         property: &str,
         vectors: Vec<Vec<f32>>,
     ) -> Result<Vec<NodeId>> {
-        let labels = [label.to_string()];
-        self.write(|writer| {
-            vectors
-                .into_iter()
-                .map(|vector| {
-                    writer.create_node(
-                        &labels,
-                        vec![(property.to_string(), Value::Vector(vector.into()))],
-                    )
-                })
-                .collect()
-        })
+        self.session().batch_create_nodes(label, property, vectors)
     }
 
     /// Batch-creates nodes with full property maps.
@@ -422,14 +402,7 @@ impl super::GrafeoDB {
         label: &str,
         properties_list: Vec<HashMap<PropertyKey, Value>>,
     ) -> Result<Vec<NodeId>> {
-        let labels = [label.to_string()];
-        self.write(|writer| {
-            properties_list
-                .into_iter()
-                .map(|properties| {
-                    writer.create_node(&labels, crate::session::direct_properties(properties))
-                })
-                .collect()
-        })
+        self.session()
+            .batch_create_nodes_with_props(label, properties_list)
     }
 }

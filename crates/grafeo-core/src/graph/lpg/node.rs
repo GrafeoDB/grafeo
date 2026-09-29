@@ -124,7 +124,8 @@ pub struct NodeRecord {
     pub label_count: u16,
     /// Reserved for future use / alignment.
     pub(crate) _reserved: u16,
-    /// Number of properties.
+    /// Not maintained (always 0): the node's properties live in the property
+    /// store, so count those instead. Kept for the record's layout.
     pub props_count: u16,
     /// Flags (deleted, has_version, etc.).
     pub flags: NodeFlags,

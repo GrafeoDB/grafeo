@@ -268,14 +268,6 @@ impl LpgStore {
             self.node_properties.set(id, prop_key, prop_value, epoch);
         }
 
-        // Update props_count in record
-        let count = u16::try_from(self.node_properties.get_all(id).len()).unwrap_or(u16::MAX);
-        if let Some(chain) = self.nodes.write().get_mut(&id)
-            && let Some(record) = chain.latest_mut()
-        {
-            record.props_count = count;
-        }
-
         id
     }
 
@@ -301,9 +293,6 @@ impl LpgStore {
             #[cfg(feature = "temporal")]
             self.node_properties.set(id, prop_key, prop_value, epoch);
         }
-
-        // Note: props_count in record is not updated for tiered storage.
-        // The record is immutable once allocated in the arena.
 
         id
     }

@@ -29,17 +29,6 @@ impl LpgStore {
 
         #[cfg(feature = "vector-index")]
         self.sync_vector_indexes_for_property(id, key);
-
-        // Update props_count in record
-        #[cfg(not(feature = "temporal"))]
-        {
-            let count = u16::try_from(self.node_properties.get_all(id).len()).unwrap_or(u16::MAX);
-            if let Some(chain) = self.nodes.write().get_mut(&id)
-                && let Some(record) = chain.latest_mut()
-            {
-                record.props_count = count;
-            }
-        }
     }
 
     /// Sets a property on a node.
@@ -147,17 +136,6 @@ impl LpgStore {
             .remove(id, &prop_key, self.current_epoch());
         #[cfg(feature = "vector-index")]
         self.sync_vector_indexes_for_property(id, key);
-
-        // Update props_count in record
-        #[cfg(not(feature = "temporal"))]
-        {
-            let count = u16::try_from(self.node_properties.get_all(id).len()).unwrap_or(u16::MAX);
-            if let Some(chain) = self.nodes.write().get_mut(&id)
-                && let Some(record) = chain.latest_mut()
-            {
-                record.props_count = count;
-            }
-        }
 
         result
     }

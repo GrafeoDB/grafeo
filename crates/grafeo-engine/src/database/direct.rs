@@ -354,6 +354,14 @@ impl GrafeoDB {
                 )))
             }))
         });
+        // The buffers hold only this call's records and events: clear what a
+        // call that failed without cleaning up may have left.
+        #[cfg(feature = "wal")]
+        if let Some(buffer) = &wal {
+            buffer.clear();
+        }
+        #[cfg(feature = "cdc")]
+        self.implicit_writes.cdc_events.lock().clear();
         #[cfg(feature = "wal")]
         if let Some(buffer) = &wal {
             use super::wal_store::WalGraphStore;
@@ -384,8 +392,21 @@ impl GrafeoDB {
         let writer = GraphWriter::new(target)
             .with_transaction_context(view, transaction)
             .with_validator(Arc::new(validator));
-        let result = write(&writer).map_err(crate::query::executor::convert_operator_error);
+        // A panic in the call is handled like an error, then raised again:
+        // left alone, its records and events would stay in the buffers for
+        // the next call to commit.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&writer)));
         drop(writer);
+        let (result, panic) = match outcome {
+            Ok(result) => (
+                result.map_err(crate::query::executor::convert_operator_error),
+                None,
+            ),
+            Err(panic) => (
+                Err(Error::Internal("the direct call panicked".to_string())),
+                Some(panic),
+            ),
+        };
 
         match (&result, transaction) {
             (Err(_), Some(transaction)) => {
@@ -396,6 +417,9 @@ impl GrafeoDB {
                 }
                 #[cfg(feature = "cdc")]
                 self.implicit_writes.cdc_events.lock().clear();
+                if let Some(panic) = panic {
+                    std::panic::resume_unwind(panic);
+                }
                 return result;
             }
             (Ok(_), Some(transaction)) => {
@@ -449,6 +473,9 @@ impl GrafeoDB {
                 }
                 self.transaction_manager.gc();
             }
+        }
+        if let Some(panic) = panic {
+            std::panic::resume_unwind(panic);
         }
         result
     }
@@ -746,4 +773,76 @@ pub(crate) fn missing_graph(name: &str) -> Error {
         QueryErrorKind::Semantic,
         format!("Graph '{name}' does not exist"),
     ))
+}
+
+#[cfg(all(test, feature = "wal", feature = "cdc", feature = "gql"))]
+mod tests {
+    use grafeo_common::types::EpochId;
+
+    use super::*;
+    use crate::cdc::EntityId;
+    use crate::config::{Config, StorageFormat};
+
+    /// Runs a direct call on `db` that creates a `label` node and panics.
+    fn panicking_call(db: &GrafeoDB, batch: bool, label: &str) -> NodeId {
+        let created = parking_lot::Mutex::new(None);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            db.write_direct(
+                DirectTarget::Current,
+                batch,
+                |writer| {
+                    *created.lock() = Some(writer.create_node(&[label.to_string()], Vec::new())?);
+                    panic!("the call fails halfway");
+                },
+                |(): &()| Vec::new(),
+            )
+        }));
+        assert!(outcome.is_err(), "the panic comes through");
+        created.into_inner().unwrap()
+    }
+
+    /// A batch that panics leaves nothing: its versions are gone, and the
+    /// next call writes none of its WAL records or change events. A single
+    /// call writes in place, so what it wrote before the panic is committed,
+    /// as after an error: the WAL matches memory.
+    #[test]
+    fn a_panicking_call_leaves_nothing_for_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = || {
+            Config::persistent(dir.path().join("db"))
+                .with_storage_format(StorageFormat::WalDirectory)
+                .with_cdc()
+        };
+        let db = GrafeoDB::with_config(config()).unwrap();
+        let batch = panicking_call(&db, true, "Batch");
+        let single = panicking_call(&db, false, "Single");
+        let alix = db
+            .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
+            .unwrap();
+
+        assert!(
+            db.get_node(batch).is_none(),
+            "the batch's node is discarded"
+        );
+        assert!(db.get_node(single).is_some());
+        let events: Vec<EntityId> = db
+            .changes_between(EpochId::new(0), db.current_epoch())
+            .unwrap()
+            .into_iter()
+            .map(|event| event.entity_id)
+            .collect();
+        assert_eq!(events, [EntityId::Node(single), EntityId::Node(alix)]);
+        db.close().unwrap();
+        drop(db);
+
+        let db = GrafeoDB::with_config(config()).unwrap();
+        let labels = db
+            .execute("MATCH (n) RETURN labels(n)[0] AS label ORDER BY label")
+            .unwrap();
+        assert_eq!(
+            labels.rows(),
+            [[Value::from("Person")], [Value::from("Single")]]
+        );
+        db.close().unwrap();
+    }
 }

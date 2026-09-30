@@ -1587,23 +1587,18 @@ impl GrafeoDB {
             projections: Arc::clone(&self.projections),
         };
 
-        // Layered store: use the overlay LpgStore as the session's internal store
-        // so MVCC operations (begin_tx, commit, visibility) work correctly.
+        // After `compact()` the session keeps the overlay as its internal
+        // store, so MVCC operations (begin, commit, visibility) work, and
+        // reads and writes the layered store (base and overlay) below. It is
+        // wired like any other session: WAL, CDC, RDF store, graph, schema.
         #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        if let Some(ref layered) = self.layered_store {
-            let overlay = layered.overlay_store();
-            let layered_arc = Arc::clone(layered);
-            let mut session = Session::with_adaptive(overlay, session_cfg());
-            // Override graph_store/graph_store_mut to use the LayeredStore
-            // (which merges base + overlay), not just the overlay alone.
-            session.override_stores(
-                Arc::clone(&layered_arc) as Arc<dyn GraphStoreSearch>,
-                Some(layered_arc as Arc<dyn GraphStoreMut>),
-            );
-            return session;
-        }
+        let layered = self.layered_store.clone();
+        #[cfg(not(all(feature = "compact-store", feature = "lpg")))]
+        let layered: Option<()> = None;
 
-        if let Some(ref ext_read) = self.external_read_store {
+        if layered.is_none()
+            && let Some(ref ext_read) = self.external_read_store
+        {
             return Session::with_external_store(
                 Arc::clone(ext_read),
                 self.external_write_store.as_ref().map(Arc::clone),
@@ -1612,21 +1607,40 @@ impl GrafeoDB {
             .expect("arena allocation for external store session");
         }
 
+        #[cfg(feature = "lpg")]
+        let internal_store = match &layered {
+            #[cfg(feature = "compact-store")]
+            Some(layered) => layered.overlay_store(),
+            _ => Arc::clone(self.lpg_store()),
+        };
         #[cfg(all(feature = "lpg", feature = "triple-store"))]
         let mut session = Session::with_rdf_store_and_adaptive(
-            Arc::clone(self.lpg_store()),
+            internal_store,
             Arc::clone(&self.rdf_store),
             session_cfg(),
         );
         #[cfg(all(feature = "lpg", not(feature = "triple-store")))]
-        let mut session = Session::with_adaptive(Arc::clone(self.lpg_store()), session_cfg());
+        let mut session = Session::with_adaptive(internal_store, session_cfg());
+        #[cfg(all(feature = "compact-store", feature = "lpg"))]
+        if let Some(layered) = &layered {
+            session.override_stores(
+                Arc::clone(layered) as Arc<dyn GraphStoreSearch>,
+                Some(Arc::clone(layered) as Arc<dyn GraphStoreMut>),
+            );
+        }
         #[cfg(not(feature = "lpg"))]
         let mut session =
             Session::with_external_store(self.graph_store(), self.graph_store_mut(), session_cfg())
                 .expect("session creation for non-lpg build");
 
         #[cfg(all(feature = "wal", feature = "lpg"))]
-        if let Some(ref wal) = self.wal {
+        // The WAL wrapper records writes to the session's own store only: a
+        // compacted database's sessions write the layered store, so queries
+        // there are not logged (direct calls log their own records) until the
+        // WAL comes from the transaction's change set (#448).
+        if let Some(ref wal) = self.wal
+            && layered.is_none()
+        {
             session.set_wal(Arc::clone(wal));
         }
 

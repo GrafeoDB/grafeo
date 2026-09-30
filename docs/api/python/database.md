@@ -1059,9 +1059,9 @@ test_db = file_db.to_memory()  # safe copy for experiments, indexes included
 
 ### compact()
 
-Converts the database to a read-only [CompactStore](../../user-guide/compact-store.md) for faster queries. Takes a snapshot of all nodes and edges, builds a columnar store with CSR adjacency, and switches to read-only mode. The original store is dropped to free memory.
+Converts the database to a layered [CompactStore](../../user-guide/compact-store.md) for faster queries: a columnar base with CSR adjacency, built from a snapshot of all nodes and edges, plus a mutable overlay. The original store is dropped to free memory.
 
-After calling this, write queries will raise an error. Gives ~60x memory reduction and 100x+ traversal speedup for read-only workloads.
+The database stays writable: new writes land in the overlay, and `recompact()` merges the overlay into a fresh base. Gives ~60x memory reduction and 100x+ traversal speedup for read-mostly workloads.
 
 ```python
 def compact(self) -> None
@@ -1072,10 +1072,10 @@ db = grafeo.GrafeoDB()
 db.execute("INSERT (:Person {name: 'Alix', age: 30})")
 db.execute("INSERT (:Person {name: 'Gus', age: 25})")
 
-db.compact()  # switch to read-only columnar mode
+db.compact()  # switch to the columnar base
 
 result = db.execute("MATCH (p:Person) RETURN p.name")  # fast
-db.execute("INSERT (:Person {name: 'Vincent'})")        # raises error
+db.execute("INSERT (:Person {name: 'Vincent'})")        # lands in the overlay
 ```
 
 !!! note

@@ -1,0 +1,209 @@
+//! After `compact()`, sessions use the database's CDC, RDF store and
+//! selected graph, and direct calls are written to the WAL.
+//!
+//! Queries after `compact()` are not written to the WAL yet: the session's
+//! WAL records writes to a plain store, and a compacted database writes the
+//! layered store (#448 takes the WAL from the transaction's change set).
+//! After a crash, replay brings back what direct calls created after
+//! `compact()`, but not their updates and deletes of data from before it
+//! (#432 replaces the overlay).
+//!
+//! ```bash
+//! cargo test -p grafeo-engine --all-features --test compact_sessions
+//! ```
+
+#![cfg(all(feature = "compact-store", feature = "lpg", feature = "gql"))]
+
+use grafeo_common::types::Value;
+use grafeo_engine::{Config, GrafeoDB};
+
+/// The `name`s of the `Person` nodes, sorted.
+fn names(db: &GrafeoDB) -> Vec<Value> {
+    let result = db
+        .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
+        .unwrap();
+    result.rows().iter().map(|row| row[0].clone()).collect()
+}
+
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+mod crash {
+    use std::path::Path;
+
+    use grafeo_common::testing::child_process;
+    use grafeo_engine::config::{DurabilityMode, StorageFormat};
+
+    use super::*;
+
+    const PATH_VAR: &str = "GRAFEO_COMPACT_SESSIONS_CRASH_PATH";
+
+    fn open(path: &Path) -> GrafeoDB {
+        GrafeoDB::with_config(
+            Config::persistent(path)
+                .with_storage_format(StorageFormat::SingleFile)
+                .with_wal_durability(DurabilityMode::Sync),
+        )
+        .unwrap()
+    }
+
+    /// Child-process entry for [`writes_after_compact_survive_a_crash`]; a
+    /// no-op when run directly.
+    #[test]
+    fn crash_child() {
+        let Some(path) = std::env::var_os(PATH_VAR) else {
+            return;
+        };
+        let mut db = open(Path::new(&path));
+        db.create_graph("model").unwrap();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.compact().unwrap();
+        // The file itself is compacted from here on: it reopens layered.
+        db.wal_checkpoint().unwrap();
+        let person = |name: &str| {
+            db.create_node_with_props(&["Person"], [("name", Value::from(name))])
+                .unwrap()
+        };
+        let gus = person("Gus");
+        let jules = person("Jules");
+        db.set_node_property(jules, "city", Value::from("Paris"))
+            .unwrap();
+        db.create_edge(gus, jules, "KNOWS").unwrap();
+        db.graph("model")
+            .unwrap()
+            .create_node_with_props(&["Component"], [("id", Value::from("c0"))])
+            .unwrap();
+        // Crash: no close(), no checkpoint, no destructors.
+        std::process::exit(0);
+    }
+
+    /// Direct calls after `compact()` are in the WAL, so a crash loses none
+    /// of them, in the default graph and in a named graph.
+    #[test]
+    fn writes_after_compact_survive_a_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        let status = child_process::run(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "crash::crash_child", "--nocapture"])
+                .env(PATH_VAR, &path),
+        )
+        .unwrap();
+        assert!(status.success());
+
+        let db = open(&path);
+        assert_eq!(
+            names(&db),
+            [
+                Value::from("Alix"),
+                Value::from("Gus"),
+                Value::from("Jules")
+            ]
+        );
+        let city = db
+            .execute("MATCH (p:Person {name: 'Jules'}) RETURN p.city")
+            .unwrap();
+        assert_eq!(city.rows(), [[Value::from("Paris")]]);
+        let knows = db
+            .execute("MATCH (:Person {name: 'Gus'})-[:KNOWS]->(p) RETURN p.name")
+            .unwrap();
+        assert_eq!(knows.rows(), [[Value::from("Jules")]]);
+        let model = db
+            .graph("model")
+            .unwrap()
+            .execute("MATCH (c:Component) RETURN c.id")
+            .unwrap();
+        assert_eq!(model.rows(), [[Value::from("c0")]]);
+    }
+}
+
+/// A WAL-directory database keeps only its WAL, so direct calls after
+/// `compact()` must be in it to survive a clean close; replay rebuilds a
+/// plain store, so updates of data from before `compact()` come back too.
+#[cfg(feature = "wal")]
+#[test]
+fn a_wal_directory_keeps_writes_after_compact() {
+    use grafeo_engine::config::StorageFormat;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = || {
+        Config::persistent(dir.path().join("db")).with_storage_format(StorageFormat::WalDirectory)
+    };
+    {
+        let mut db = GrafeoDB::with_config(config()).unwrap();
+        let alix = db
+            .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
+            .unwrap();
+        db.compact().unwrap();
+        db.create_node_with_props(&["Person"], [("name", Value::from("Gus"))])
+            .unwrap();
+        db.set_node_property(alix, "city", Value::from("Amsterdam"))
+            .unwrap();
+        db.close().unwrap();
+    }
+    let db = GrafeoDB::with_config(config()).unwrap();
+    assert_eq!(names(&db), [Value::from("Alix"), Value::from("Gus")]);
+    let city = db
+        .execute("MATCH (p:Person {name: 'Alix'}) RETURN p.city")
+        .unwrap();
+    assert_eq!(city.rows(), [[Value::from("Amsterdam")]]);
+    db.close().unwrap();
+}
+
+/// Direct calls and queries after `compact()` produce change events.
+#[cfg(feature = "cdc")]
+#[test]
+fn writes_after_compact_reach_cdc() {
+    let mut db = GrafeoDB::with_config(Config::in_memory().with_cdc()).unwrap();
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    db.compact().unwrap();
+
+    let gus = db
+        .create_node_with_props(&["Person"], [("name", Value::from("Gus"))])
+        .unwrap();
+    db.set_node_property(gus, "city", Value::from("Berlin"))
+        .unwrap();
+    assert_eq!(db.history(gus).unwrap().len(), 2, "create and update");
+
+    let after_gus = grafeo_common::types::EpochId::new(db.current_epoch().as_u64() + 1);
+    db.execute("INSERT (:Person {name: 'Jules'})").unwrap();
+    let events = db.changes_between(after_gus, db.current_epoch()).unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+}
+
+/// SPARQL through a session reads and writes the database's RDF store after
+/// `compact()`, not a store of its own.
+#[cfg(feature = "sparql")]
+#[test]
+fn sparql_after_compact_uses_the_database_rdf_store() {
+    let mut db = GrafeoDB::new_in_memory();
+    db.execute_sparql("INSERT DATA { <http://ex/alix> <http://ex/knows> <http://ex/gus> }")
+        .unwrap();
+    db.compact().unwrap();
+    db.session()
+        .execute_sparql("INSERT DATA { <http://ex/gus> <http://ex/knows> <http://ex/vincent> }")
+        .unwrap();
+    let known = db
+        .session()
+        .execute_sparql("SELECT ?s WHERE { ?s <http://ex/knows> ?o }")
+        .unwrap();
+    assert_eq!(known.rows().len(), 2);
+}
+
+/// The graph `set_current_graph` selects holds after `compact()`, for
+/// queries and direct calls.
+#[test]
+fn the_selected_graph_holds_after_compact() {
+    let mut db = GrafeoDB::new_in_memory();
+    db.create_graph("model").unwrap();
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    db.compact().unwrap();
+
+    db.set_current_graph(Some("model")).unwrap();
+    db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+    db.create_node_with_props(&["Person"], [("name", Value::from("Jules"))])
+        .unwrap();
+    assert_eq!(db.current_graph().as_deref(), Some("model"));
+    assert_eq!(names(&db), [Value::from("Gus"), Value::from("Jules")]);
+
+    db.set_current_graph(None).unwrap();
+    assert_eq!(names(&db), [Value::from("Alix")]);
+}

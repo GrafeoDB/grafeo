@@ -21,7 +21,7 @@ use grafeo_common::utils::error::Result;
 use grafeo_storage::file::GrafeoFileManager;
 
 #[cfg(feature = "grafeo-file")]
-use super::flush::CheckpointSources;
+use super::sections::CheckpointSources;
 
 /// How often the timer thread checks the shutdown flag.
 #[cfg(feature = "grafeo-file")]

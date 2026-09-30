@@ -59,6 +59,7 @@ mod schema_replay;
 #[cfg(feature = "lpg")]
 mod search;
 pub(crate) mod section_consumer;
+mod sections;
 #[cfg(all(feature = "lpg", feature = "gql"))]
 mod upsert;
 #[cfg(all(feature = "wal", feature = "lpg"))]
@@ -400,23 +401,10 @@ impl GrafeoDB {
 
         let is_read_only = config.access_mode == crate::config::AccessMode::ReadOnly;
 
-        // Phase 5e: capture the deserialized CompactStore base when we
-        // reload a v2 section file that was written by a previously
-        // compacted database. The post-construction wiring uses this to
-        // rebuild the LayeredStore + tier wrapper + overlay consumer.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "compact-store"))]
-        let mut loaded_compact_base: Option<
-            Arc<grafeo_core::graph::compact::CompactStore>,
-        > = None;
-
-        // Phase 5e: snapshot of the OverlayDeletions section (if present),
-        // applied after the LayeredStore is wired so that previously-deleted
-        // base nodes/edges remain deleted across reload.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "compact-store"))]
-        let mut loaded_overlay_deletions: Option<(
-            Vec<grafeo_common::types::NodeId>,
-            Vec<grafeo_common::types::EdgeId>,
-        )> = None;
+        // What loading a v2 section file leaves for the built database: a
+        // compacted base to wire under its overlay, and indexes to build.
+        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        let mut loaded_sections = sections::LoadedSections::default();
 
         // What WAL recovery found at the end of the log, applied once the WAL
         // is open (#411): a torn tail must be sealed before anything new is
@@ -436,19 +424,19 @@ impl GrafeoDB {
                     let fm = GrafeoFileManager::open_read_only(db_path)?;
                     // Try v2 section-based format first
                     #[cfg(feature = "lpg")]
-                    if fm.read_section_directory()?.is_some() {
-                        Self::load_from_sections(
-                            &fm,
+                    if let Some(directory) = fm.read_section_directory()? {
+                        loaded_sections = sections::load_sections(
+                            &mut |section_type| {
+                                directory
+                                    .find(section_type)
+                                    .map(|entry| fm.read_section_data(entry))
+                                    .transpose()
+                            },
                             &store,
                             &catalog,
                             #[cfg(feature = "triple-store")]
                             &rdf_store,
                         )?;
-                        #[cfg(feature = "compact-store")]
-                        {
-                            loaded_compact_base = Self::extract_compact_base(&fm)?;
-                            loaded_overlay_deletions = Self::extract_overlay_deletions(&fm)?;
-                        }
                     } else {
                         // Fall back to v1 blob format
                         let snapshot_data = fm.read_snapshot()?;
@@ -494,19 +482,19 @@ impl GrafeoDB {
 
                 // Load data: try v2 section-based format, fall back to v1 blob
                 #[cfg(feature = "lpg")]
-                if fm.read_section_directory()?.is_some() {
-                    Self::load_from_sections(
-                        &fm,
+                if let Some(directory) = fm.read_section_directory()? {
+                    loaded_sections = sections::load_sections(
+                        &mut |section_type| {
+                            directory
+                                .find(section_type)
+                                .map(|entry| fm.read_section_data(entry))
+                                .transpose()
+                        },
                         &store,
                         &catalog,
                         #[cfg(feature = "triple-store")]
                         &rdf_store,
                     )?;
-                    #[cfg(feature = "compact-store")]
-                    {
-                        loaded_compact_base = Self::extract_compact_base(&fm)?;
-                        loaded_overlay_deletions = Self::extract_overlay_deletions(&fm)?;
-                    }
                 } else {
                     let snapshot_data = fm.read_snapshot()?;
                     if !snapshot_data.is_empty() {
@@ -723,15 +711,11 @@ impl GrafeoDB {
         // Register storage sections as memory consumers for pressure tracking
         db.register_section_consumers();
 
-        // Phase 5e: if the loaded file has a CompactStore section, the
-        // database was previously compacted. Reconstruct the LayeredStore
-        // wiring (base + overlay + tier wrapper + consumers) so the
-        // engine sees the full picture and the read/write paths route
-        // through the layered store.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "compact-store"))]
-        if let Some(compact_base) = loaded_compact_base {
-            db.wire_layered_after_load(compact_base, loaded_overlay_deletions)?;
-        }
+        // A previously compacted file gets its layered store back, and the
+        // indexes its sections did not hold are built from all the data,
+        // now that WAL recovery is done.
+        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        db.finish_load(loaded_sections)?;
 
         // Start periodic checkpoint timer if configured (after the layered
         // store is wired, so its checkpoints include the compacted base)
@@ -1383,19 +1367,18 @@ impl GrafeoDB {
         )
     }
 
-    /// Phase 5e: post-load LayeredStore wiring.
+    /// Post-load LayeredStore wiring.
     ///
-    /// After `load_from_sections` has populated `self.store` (the LpgStore,
-    /// which now holds the overlay data) and `extract_compact_base` has
-    /// produced the base, this rebuilds the same engine state that
-    /// `compact()` establishes:
+    /// After `sections::load_sections` has populated `self.store` (the
+    /// LpgStore, which now holds the overlay data) and produced the base,
+    /// this rebuilds the same engine state that `compact()` establishes:
     ///
     /// - `self.layered_store = Some(LayeredStore { base, overlay = self.store })`
     /// - `self.external_read_store / external_write_store = Arc::clone(layered)`
     /// - `self.store` swapped to the overlay (which is the same `Arc<LpgStore>`)
     /// - Tier wrapper installed and `CompactStoreConsumer` + `OverlayConsumer`
     ///   registered with the BufferManager
-    #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "compact-store"))]
+    #[cfg(all(feature = "lpg", feature = "compact-store"))]
     fn wire_layered_after_load(
         &mut self,
         compact_base: Arc<grafeo_core::graph::compact::CompactStore>,
@@ -1450,135 +1433,6 @@ impl GrafeoDB {
         self.buffer_manager.register_consumer(overlay_consumer);
 
         self.layered_store = Some(layered);
-
-        Ok(())
-    }
-
-    /// Phase 5e: extracts the deserialized CompactStore base from a v2
-    /// section file, if present. Used by the open path to reconstruct
-    /// the LayeredStore wiring after a previously-compacted database
-    /// reopens.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "compact-store"))]
-    fn extract_compact_base(
-        fm: &GrafeoFileManager,
-    ) -> Result<Option<Arc<grafeo_core::graph::compact::CompactStore>>> {
-        use grafeo_common::storage::{Section, SectionType};
-        let Some(dir) = fm.read_section_directory()? else {
-            return Ok(None);
-        };
-        let Some(entry) = dir.find(SectionType::CompactStore) else {
-            return Ok(None);
-        };
-        let data = fm.read_section_data(entry)?;
-        let mut section = grafeo_core::graph::compact::section::CompactStoreSection::empty();
-        section.deserialize(&data)?;
-        Ok(section.store())
-    }
-
-    /// Reads the persisted overlay deletion log from the container, if
-    /// the file carries one. Returns `(deleted_nodes, deleted_edges)` so
-    /// the caller can seed `LayeredStore::seed_deleted_from_base` after
-    /// the layered store is constructed. Returns `None` when no
-    /// deletions were recorded (the section is omitted in that case).
-    #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "compact-store"))]
-    fn extract_overlay_deletions(
-        fm: &GrafeoFileManager,
-    ) -> Result<
-        Option<(
-            Vec<grafeo_common::types::NodeId>,
-            Vec<grafeo_common::types::EdgeId>,
-        )>,
-    > {
-        use grafeo_common::storage::{Section, SectionType};
-        let Some(dir) = fm.read_section_directory()? else {
-            return Ok(None);
-        };
-        let Some(entry) = dir.find(SectionType::OverlayDeletions) else {
-            return Ok(None);
-        };
-        let data = fm.read_section_data(entry)?;
-        let mut section =
-            grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection::empty();
-        section.deserialize(&data)?;
-        Ok(Some(section.take()))
-    }
-
-    /// Loads from a section-based `.grafeo` file (v2 format).
-    ///
-    /// Reads the section directory, then deserializes each section independently.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-    fn load_from_sections(
-        fm: &GrafeoFileManager,
-        store: &Arc<LpgStore>,
-        catalog: &Arc<crate::catalog::Catalog>,
-        #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
-    ) -> Result<()> {
-        use grafeo_common::storage::{Section, SectionType};
-
-        let dir = fm.read_section_directory()?.ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
-                "expected v2 section directory but found none".to_string(),
-            )
-        })?;
-
-        // Load catalog section first (schema defs needed before data)
-        if let Some(entry) = dir.find(SectionType::Catalog) {
-            let data = fm.read_section_data(entry)?;
-            let tm = Arc::new(crate::transaction::TransactionManager::new());
-            let mut section = catalog_section::CatalogSection::new(
-                Arc::clone(catalog),
-                Arc::clone(store),
-                move || tm.current_epoch().as_u64(),
-            );
-            section.deserialize(&data)?;
-        }
-
-        // Load LPG store (Phase 5e: when the file has a CompactStore section,
-        // this LpgStore data IS the overlay; the caller then wires it into
-        // a LayeredStore via `extract_compact_base`).
-        if let Some(entry) = dir.find(SectionType::LpgStore) {
-            let data = fm.read_section_data(entry)?;
-            let mut section = grafeo_core::graph::lpg::LpgStoreSection::new(Arc::clone(store));
-            section.deserialize(&data)?;
-        }
-
-        // Load RDF store
-        #[cfg(feature = "triple-store")]
-        if let Some(entry) = dir.find(SectionType::RdfStore) {
-            let data = fm.read_section_data(entry)?;
-            let mut section = grafeo_core::graph::rdf::RdfStoreSection::new(Arc::clone(rdf_store));
-            section.deserialize(&data)?;
-        }
-
-        // Restore Ring Index (if persisted)
-        #[cfg(feature = "ring-index")]
-        if let Some(entry) = dir.find(SectionType::RdfRing) {
-            let data = fm.read_section_data(entry)?;
-            let mut section = grafeo_core::index::ring::RdfRingSection::new(Arc::clone(rdf_store));
-            section.deserialize(&data)?;
-        }
-
-        // Restore HNSW topology (if vector indexes exist in both catalog and section)
-        #[cfg(feature = "vector-index")]
-        if let Some(entry) = dir.find(SectionType::VectorStore) {
-            let data = fm.read_section_data(entry)?;
-            let indexes = store.vector_index_entries();
-            if !indexes.is_empty() {
-                let mut section = grafeo_core::index::vector::VectorStoreSection::new(indexes);
-                section.deserialize(&data)?;
-            }
-        }
-
-        // Restore BM25 postings (if text indexes exist in both catalog and section)
-        #[cfg(feature = "text-index")]
-        if let Some(entry) = dir.find(SectionType::TextIndex) {
-            let data = fm.read_section_data(entry)?;
-            let indexes = store.text_index_entries();
-            if !indexes.is_empty() {
-                let mut section = grafeo_core::index::text::TextIndexSection::new(indexes);
-                section.deserialize(&data)?;
-            }
-        }
 
         Ok(())
     }
@@ -2574,10 +2428,9 @@ impl GrafeoDB {
     }
 
     /// What a checkpoint writes: the complete current state (see
-    /// [`flush::CheckpointSources`]).
-    #[cfg(feature = "grafeo-file")]
-    fn checkpoint_sources(&self) -> flush::CheckpointSources {
-        flush::CheckpointSources {
+    /// [`sections::CheckpointSources`]).
+    fn checkpoint_sources(&self) -> sections::CheckpointSources {
+        sections::CheckpointSources {
             #[cfg(feature = "lpg")]
             store: self.store.clone(),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]

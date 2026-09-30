@@ -38,10 +38,12 @@ fn force_disk_spills_and_search_works() {
     let dim = 8;
     let mut node_ids = Vec::new();
     for i in 1..=10 {
-        let id = db.create_node(&["Item"]);
+        let id = db.create_node(&["Item"]).unwrap();
         let embedding = make_embedding(i, dim);
-        db.set_node_property(id, "name", Value::from(format!("item_{i}")));
-        db.set_node_property(id, "embedding", Value::Vector(embedding.into()));
+        db.set_node_property(id, "name", Value::from(format!("item_{i}")))
+            .unwrap();
+        db.set_node_property(id, "embedding", Value::Vector(embedding.into()))
+            .unwrap();
         node_ids.push(id);
     }
 
@@ -115,13 +117,15 @@ fn checkpoint_after_spill_preserves_non_vector_data() {
         let config = Config::persistent(&db_path);
         let db = GrafeoDB::with_config(config).unwrap();
 
-        let id = db.create_node(&["Item"]);
-        db.set_node_property(id, "name", Value::from("test"));
+        let id = db.create_node(&["Item"]).unwrap();
+        db.set_node_property(id, "name", Value::from("test"))
+            .unwrap();
         db.set_node_property(
             id,
             "embedding",
             Value::Vector(vec![1.0, 2.0, 3.0, 4.0].into()),
-        );
+        )
+        .unwrap();
         db.create_vector_index("Item", "embedding", Some(4), None, None, None, None)
             .unwrap();
 

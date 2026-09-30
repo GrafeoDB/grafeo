@@ -384,6 +384,56 @@ fn populate_store_from_snapshot_ref(
     Ok(())
 }
 
+/// Copies the nodes and edges of `source` into `target` with their IDs, and
+/// those of each named graph, as the LPG section would load them: with
+/// `temporal`, every property keeps its history and the stores their epoch.
+fn copy_graph_data(
+    source: &grafeo_core::graph::lpg::LpgStore,
+    target: &grafeo_core::graph::lpg::LpgStore,
+) -> Result<()> {
+    for node in source.all_nodes() {
+        let labels: Vec<&str> = node.labels.iter().map(|label| &**label).collect();
+        target.create_node_with_id(node.id, &labels)?;
+        #[cfg(feature = "temporal")]
+        for (key, history) in source.node_property_history(node.id) {
+            for (epoch, value) in history {
+                target.set_node_property_at_epoch(node.id, key.as_str(), value, epoch);
+            }
+        }
+        #[cfg(not(feature = "temporal"))]
+        for (key, value) in node.properties {
+            target.set_node_property(node.id, key.as_str(), value);
+        }
+    }
+    for edge in source.all_edges() {
+        target.create_edge_with_id(edge.id, edge.src, edge.dst, &edge.edge_type)?;
+        #[cfg(feature = "temporal")]
+        for (key, history) in source.edge_property_history(edge.id) {
+            for (epoch, value) in history {
+                target.set_edge_property_at_epoch(edge.id, key.as_str(), value, epoch);
+            }
+        }
+        #[cfg(not(feature = "temporal"))]
+        for (key, value) in edge.properties {
+            target.set_edge_property(edge.id, key.as_str(), value);
+        }
+    }
+    #[cfg(feature = "temporal")]
+    target.sync_epoch(source.current_epoch());
+
+    for name in source.graph_names() {
+        if let Some(source_graph) = source.graph(&name) {
+            target
+                .create_graph(&name)
+                .map_err(|e| Error::Internal(e.to_string()))?;
+            if let Some(target_graph) = target.graph(&name) {
+                copy_graph_data(&source_graph, &target_graph)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Restores schema definitions from a snapshot into the catalog.
 ///
 /// Also ensures each schema has its `__default__` graph partition, which
@@ -701,11 +751,6 @@ impl super::GrafeoDB {
         Ok(())
     }
 
-    /// Creates an in-memory copy of this database.
-    ///
-    /// Returns a new database that is completely independent, including
-    /// all named graph data.
-    /// Useful for:
     /// Saves the database to a single `.grafeo` file.
     #[cfg(feature = "grafeo-file")]
     fn save_as_grafeo_file(&self, path: &Path) -> Result<()> {
@@ -731,6 +776,16 @@ impl super::GrafeoDB {
         Ok(())
     }
 
+    /// Creates an in-memory copy of this database.
+    ///
+    /// The copy is independent of this database and holds what reopening
+    /// it from a checkpoint would: every graph with its data, the schema and
+    /// constraints, and the property, vector and text indexes. It is built
+    /// from the checkpoint sections and loaded as a `.grafeo` file is, except
+    /// that nodes and edges are copied from store to store, which is much
+    /// faster than encoding them.
+    ///
+    /// Useful for:
     /// - Testing modifications without affecting the original
     /// - Faster operations when persistence isn't needed
     ///
@@ -738,80 +793,37 @@ impl super::GrafeoDB {
     ///
     /// Returns an error if the copy operation fails.
     pub fn to_memory(&self) -> Result<Self> {
-        let config = Config::in_memory();
-        let target = Self::with_config(config)?;
+        use grafeo_common::storage::SectionType;
 
-        // Copy default graph nodes
-        for node in self.lpg_store().all_nodes() {
-            let label_refs: Vec<&str> = node.labels.iter().map(|s| &**s).collect();
-            target
-                .lpg_store()
-                .create_node_with_id(node.id, &label_refs)?;
-            for (key, value) in node.properties {
-                target
-                    .lpg_store()
-                    .set_node_property(node.id, key.as_str(), value);
+        let mut target = Self::with_config(Config::in_memory())?;
+        let mut sections: Vec<(SectionType, Option<Vec<u8>>)> = Vec::new();
+        for section in self.checkpoint_sources().sections() {
+            // The LPG section holds the store's nodes and edges (the overlay's,
+            // after `compact()`): copy them instead, in the section's place.
+            if section.section_type() == SectionType::LpgStore {
+                copy_graph_data(self.lpg_store(), target.lpg_store())?;
+            } else {
+                sections.push((section.section_type(), Some(section.serialize()?)));
             }
         }
 
-        // Copy default graph edges
-        for edge in self.lpg_store().all_edges() {
-            target
-                .lpg_store()
-                .create_edge_with_id(edge.id, edge.src, edge.dst, &edge.edge_type)?;
-            for (key, value) in edge.properties {
-                target
-                    .lpg_store()
-                    .set_edge_property(edge.id, key.as_str(), value);
-            }
-        }
-
-        // Copy named graphs
-        for graph_name in self.lpg_store().graph_names() {
-            if let Some(src_graph) = self.lpg_store().graph(&graph_name) {
-                target
-                    .lpg_store()
-                    .create_graph(&graph_name)
-                    .map_err(|e| Error::Internal(e.to_string()))?;
-                if let Some(dst_graph) = target.lpg_store().graph(&graph_name) {
-                    for node in src_graph.all_nodes() {
-                        let label_refs: Vec<&str> = node.labels.iter().map(|s| &**s).collect();
-                        dst_graph.create_node_with_id(node.id, &label_refs)?;
-                        for (key, value) in node.properties {
-                            dst_graph.set_node_property(node.id, key.as_str(), value);
-                        }
-                    }
-                    for edge in src_graph.all_edges() {
-                        dst_graph.create_edge_with_id(
-                            edge.id,
-                            edge.src,
-                            edge.dst,
-                            &edge.edge_type,
-                        )?;
-                        for (key, value) in edge.properties {
-                            dst_graph.set_edge_property(edge.id, key.as_str(), value);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Copy RDF data
-        #[cfg(feature = "triple-store")]
-        {
-            for triple in self.rdf_store.triples() {
-                target.rdf_store.insert((*triple).clone());
-            }
-            for name in self.rdf_store.graph_names() {
-                if let Some(src_graph) = self.rdf_store.graph(&name) {
-                    let dst_graph = target.rdf_store.graph_or_create(&name);
-                    for triple in src_graph.triples() {
-                        dst_graph.insert((*triple).clone());
-                    }
-                }
-            }
-        }
-
+        let loaded = super::sections::load_sections(
+            &mut |section_type| {
+                Ok(sections
+                    .iter_mut()
+                    .find(|(stored, _)| *stored == section_type)
+                    .and_then(|(_, data)| data.take()))
+            },
+            target.lpg_store(),
+            &target.catalog,
+            #[cfg(feature = "triple-store")]
+            &target.rdf_store,
+        )?;
+        #[cfg(feature = "temporal")]
+        target
+            .transaction_manager
+            .sync_epoch(target.lpg_store().current_epoch());
+        target.finish_load(loaded)?;
         Ok(target)
     }
 

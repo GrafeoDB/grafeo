@@ -1044,15 +1044,15 @@ db.save("./mydb")  # persist to disk
 
 ### to_memory()
 
-Create an independent in-memory copy of this database. Changes to the copy do not affect the original.
+Create an independent in-memory copy of this database. Changes to the copy do not affect the original. The copy has every graph with its data, the schema and constraints, and the property, vector and text indexes: what reopening the database from a checkpoint would give.
 
 ```python
 def to_memory(self) -> GrafeoDB
 ```
 
 ```python
-file_db = GrafeoDB("./production.db")
-test_db = file_db.to_memory()  # safe copy for experiments
+file_db = GrafeoDB("./production.grafeo")
+test_db = file_db.to_memory()  # safe copy for experiments, indexes included
 ```
 
 ### compact()

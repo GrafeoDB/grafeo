@@ -210,7 +210,7 @@ grafeo.GrafeoDB.restore_to_epoch("/backups/full", epoch=100, output_path="./rest
 # Save database to disk
 db.save("backup.db")
 
-# Create an in-memory copy
+# Create an in-memory copy (with its indexes and constraints)
 memory_db = db.to_memory()
 
 # Load database as in-memory

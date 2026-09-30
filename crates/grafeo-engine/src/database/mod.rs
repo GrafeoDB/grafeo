@@ -1847,7 +1847,14 @@ impl GrafeoDB {
                 ),
             ));
         };
-        Ok(store.create_graph(name)?)
+        let created = store.create_graph(name)?;
+        #[cfg(feature = "wal")]
+        if created {
+            self.log_graph_change(WalRecord::CreateNamedGraph {
+                name: name.to_string(),
+            });
+        }
+        Ok(created)
     }
 
     /// Drops a named graph. Returns `true` if dropped, `false` if it did not exist.
@@ -1861,6 +1868,10 @@ impl GrafeoDB {
         };
         let dropped = store.drop_graph(name);
         if dropped {
+            #[cfg(feature = "wal")]
+            self.log_graph_change(WalRecord::DropNamedGraph {
+                name: name.to_string(),
+            });
             let mut current = self.current_graph.write();
             if current
                 .as_deref()
@@ -2173,6 +2184,22 @@ impl GrafeoDB {
     #[must_use]
     pub fn wal(&self) -> Option<&Arc<LpgWal>> {
         self.wal.as_ref()
+    }
+
+    /// Logs a change to the set of named graphs as a committed group of its
+    /// own, as `CREATE GRAPH` and `DROP GRAPH` do.
+    #[cfg(all(feature = "wal", feature = "lpg"))]
+    fn log_graph_change(&self, record: WalRecord) {
+        if let Some(wal) = &self.wal
+            && let Err(e) = wal.log_batch(&[
+                record,
+                WalRecord::TransactionCommit {
+                    transaction_id: grafeo_common::types::TransactionId::SYSTEM,
+                },
+            ])
+        {
+            grafeo_warn!("Failed to log a graph change to the WAL: {}", e);
+        }
     }
 
     /// Logs a WAL record if WAL is enabled.

@@ -247,3 +247,48 @@ tests:
       rows:
         - [1]
         - [2]
+
+  # Every set operation checks its branch columns like UNION (#481).
+
+  - name: except_mismatched_names_rejected
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    query: MATCH (a:Person) RETURN a.name AS x EXCEPT MATCH (b:Person) RETURN b.age AS y
+    expect:
+      error: "same columns"
+
+  - name: except_different_width_rejected
+    query: RETURN 1 AS a, 2 AS b EXCEPT RETURN 1 AS a
+    expect:
+      error: "same columns"
+
+  - name: intersect_mismatched_names_rejected
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    query: MATCH (a:Person) RETURN a.name AS x INTERSECT MATCH (b:Person) RETURN b.name AS y
+    expect:
+      error: "same columns"
+
+  - name: otherwise_different_width_rejected
+    query: MATCH (a:Nobody) RETURN a.name AS x OTHERWISE RETURN 1 AS x, 2 AS y
+    expect:
+      error: "same columns"
+
+  - name: except_chain_third_branch_rejected
+    query: RETURN 1 AS a EXCEPT RETURN 2 AS a EXCEPT RETURN 3 AS b
+    expect:
+      error: "same columns"
+
+  - name: except_matching_columns_runs
+    query: RETURN 1 AS a EXCEPT RETURN 2 AS a
+    expect:
+      columns: [a]
+      rows:
+        - [1]
+
+  - name: intersect_matching_columns_runs
+    query: RETURN 1 AS a INTERSECT RETURN 1 AS a
+    expect:
+      columns: [a]
+      rows:
+        - [1]

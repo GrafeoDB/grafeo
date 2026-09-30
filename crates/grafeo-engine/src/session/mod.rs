@@ -4445,6 +4445,17 @@ impl Session {
             )
         })?;
 
+        self.savepoints
+            .lock()
+            .push(self.capture_savepoint(tx_id, name));
+        Ok(())
+    }
+
+    /// The state a savepoint named `name` restores: how far the change log
+    /// of transaction `tx_id` reaches in every graph it touched, and the
+    /// lengths of the CDC and WAL buffers.
+    #[cfg(feature = "lpg")]
+    fn capture_savepoint(&self, tx_id: TransactionId, name: &str) -> SavepointState {
         // Capture state for every graph touched so far.
         let touched = self.touched_graphs.lock().clone();
         let graph_snapshots: Vec<GraphSavepoint> = touched
@@ -4458,7 +4469,7 @@ impl Session {
             })
             .collect();
 
-        self.savepoints.lock().push(SavepointState {
+        SavepointState {
             name: name.to_string(),
             graph_snapshots,
             active_graph: self.current_graph.lock().clone(),
@@ -4469,8 +4480,7 @@ impl Session {
                 .map_or(0, |p| p.lock().len()),
             #[cfg(feature = "wal")]
             wal_position: self.wal.as_ref().map_or(0, |w| w.len()),
-        });
-        Ok(())
+        }
     }
 
     /// Rolls back to a named savepoint, undoing all writes made after it.
@@ -4510,6 +4520,15 @@ impl Session {
         savepoints.truncate(pos);
         drop(savepoints);
 
+        self.restore_savepoint(transaction_id, &sp_state);
+        Ok(())
+    }
+
+    /// Undoes what transaction `transaction_id` did after `sp_state` was
+    /// captured: its changes in every graph, its CDC events and its
+    /// buffered WAL records.
+    #[cfg(feature = "lpg")]
+    fn restore_savepoint(&self, transaction_id: TransactionId, sp_state: &SavepointState) {
         // Roll back each graph that was captured in the savepoint.
         for gs in &sp_state.graph_snapshots {
             let store = self.resolve_store(&gs.graph_name);
@@ -4553,8 +4572,6 @@ impl Session {
                 touched.push(gs.graph_name.clone());
             }
         }
-
-        Ok(())
     }
 
     /// Releases (removes) a named savepoint without rolling back.
@@ -4688,7 +4705,18 @@ impl Session {
                 }
             }
         } else {
+            // Inside an open transaction a failed statement undoes its own
+            // writes, and the transaction goes on.
+            let transaction = *self.current_transaction.lock();
+            let start = transaction
+                .filter(|_| has_mutations)
+                .map(|tx| (tx, self.capture_savepoint(tx, "statement")));
             let result = body();
+            if result.is_err()
+                && let Some((tx, start)) = &start
+            {
+                self.restore_savepoint(*tx, start);
+            }
             #[cfg(feature = "wal")]
             self.flush_wal_outside_transaction();
             result

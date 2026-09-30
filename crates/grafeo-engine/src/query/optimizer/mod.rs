@@ -986,6 +986,25 @@ impl Optimizer {
         predicate: LogicalExpression,
         op: LogicalOperator,
     ) -> LogicalOperator {
+        // Subquery and volatile conjuncts stay above `op`, where they were
+        // written; only the others move down.
+        let (pinned, movable): (Vec<_>, Vec<_>) =
+            conjuncts(predicate).into_iter().partition(stays_in_place);
+        let predicate = match (conjunction(pinned), conjunction(movable)) {
+            (Some(pinned), movable) => {
+                let input = match movable {
+                    Some(movable) => self.try_push_filter_into(movable, op),
+                    None => op,
+                };
+                return LogicalOperator::Filter(FilterOp {
+                    predicate: pinned,
+                    pushdown_hint: None,
+                    input: Box::new(input),
+                });
+            }
+            (None, Some(movable)) => movable,
+            (None, None) => return op,
+        };
         match op {
             // Can push through Project if predicate doesn't depend on computed columns
             LogicalOperator::Project(mut proj) => {
@@ -1445,6 +1464,74 @@ impl Optimizer {
 impl Default for Optimizer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Whether a conjunct must stay where it is written: it holds a subquery,
+/// whose outer references [`Optimizer::collect_variables`] does not see, or a
+/// volatile function, which would run a different number of times lower down.
+fn stays_in_place(expr: &LogicalExpression) -> bool {
+    let any = |items: &[LogicalExpression]| items.iter().any(stays_in_place);
+    let maybe = |expr: &Option<Box<LogicalExpression>>| expr.as_deref().is_some_and(stays_in_place);
+    match expr {
+        LogicalExpression::ExistsSubquery(_)
+        | LogicalExpression::CountSubquery(_)
+        | LogicalExpression::ValueSubquery(_)
+        | LogicalExpression::PatternComprehension { .. } => true,
+        LogicalExpression::FunctionCall { name, args, .. } => {
+            name.eq_ignore_ascii_case("rand") || name.eq_ignore_ascii_case("random") || any(args)
+        }
+        LogicalExpression::Binary { left, right, .. } => {
+            stays_in_place(left) || stays_in_place(right)
+        }
+        LogicalExpression::Unary { operand, .. } => stays_in_place(operand),
+        LogicalExpression::List(items) => any(items),
+        LogicalExpression::Map(pairs) => pairs.iter().any(|(_, value)| stays_in_place(value)),
+        LogicalExpression::IndexAccess { base, index } => {
+            stays_in_place(base) || stays_in_place(index)
+        }
+        LogicalExpression::MapAccess { base, .. } => stays_in_place(base),
+        LogicalExpression::SliceAccess { base, start, end } => {
+            stays_in_place(base) || maybe(start) || maybe(end)
+        }
+        LogicalExpression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            maybe(operand)
+                || when_clauses
+                    .iter()
+                    .any(|(condition, result)| stays_in_place(condition) || stays_in_place(result))
+                || maybe(else_clause)
+        }
+        LogicalExpression::ListComprehension {
+            list_expr,
+            filter_expr,
+            map_expr,
+            ..
+        } => stays_in_place(list_expr) || maybe(filter_expr) || stays_in_place(map_expr),
+        LogicalExpression::ListPredicate {
+            list_expr,
+            predicate,
+            ..
+        } => stays_in_place(list_expr) || stays_in_place(predicate),
+        LogicalExpression::MapProjection { entries, .. } => entries.iter().any(|entry| {
+            matches!(entry, crate::query::plan::MapProjectionEntry::LiteralEntry(_, value) if stays_in_place(value))
+        }),
+        LogicalExpression::Reduce {
+            initial,
+            list,
+            expression,
+            ..
+        } => stays_in_place(initial) || stays_in_place(list) || stays_in_place(expression),
+        LogicalExpression::Variable(_)
+        | LogicalExpression::Property { .. }
+        | LogicalExpression::Literal(_)
+        | LogicalExpression::Parameter(_)
+        | LogicalExpression::Labels(_)
+        | LogicalExpression::Type(_)
+        | LogicalExpression::Id(_) => false,
     }
 }
 

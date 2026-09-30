@@ -18,6 +18,93 @@ fn make_embedding(seed: u64, dim: usize) -> Vec<f32> {
         .collect()
 }
 
+/// A persistent database whose vector section is forced to disk.
+fn force_disk_db(path: &std::path::Path) -> GrafeoDB {
+    GrafeoDB::with_config(Config::persistent(path).with_section_config(
+        SectionType::VectorStore,
+        SectionMemoryConfig {
+            max_ram: None,
+            tier: TierOverride::ForceDisk,
+        },
+    ))
+    .unwrap()
+}
+
+/// Three indexed `:Item` nodes with embeddings close to the x axis.
+fn indexed_items(db: &GrafeoDB) -> Vec<grafeo_common::types::NodeId> {
+    let ids = (0..3u8)
+        .map(|i| {
+            let embedding = vec![1.0, f32::from(i) / 10.0, 0.0, 0.0];
+            db.create_node_with_props(&["Item"], [("embedding", Value::Vector(embedding.into()))])
+                .unwrap()
+        })
+        .collect();
+    db.create_vector_index("Item", "embedding", Some(4), None, None, None, None)
+        .unwrap();
+    ids
+}
+
+fn embedding(db: &GrafeoDB, id: grafeo_common::types::NodeId) -> Option<Vec<f32>> {
+    match db.get_node(id)?.get_property("embedding")? {
+        Value::Vector(v) => Some(v.to_vec()),
+        _ => None,
+    }
+}
+
+/// An embedding changed while its column is spilled wins over the spilled
+/// one when the column is reloaded.
+#[test]
+#[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
+fn an_embedding_updated_while_spilled_wins() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = force_disk_db(&dir.path().join("updated.grafeo"));
+    let ids = indexed_items(&db);
+    db.buffer_manager().spill_all();
+
+    let moved = vec![0.0, 0.0, 0.0, 1.0];
+    db.set_node_property(ids[0], "embedding", Value::Vector(moved.clone().into()))
+        .unwrap();
+
+    assert!(db.reload_eligible(1.0) > 0);
+    assert_eq!(embedding(&db, ids[0]), Some(moved));
+    assert_eq!(embedding(&db, ids[1]), Some(vec![1.0, 0.1, 0.0, 0.0]));
+}
+
+/// Closed while spilled: the embeddings stay in the spill file, which the
+/// next open finds again, and one changed while spilled still wins at reload.
+#[test]
+#[cfg(all(
+    feature = "vector-index",
+    feature = "mmap",
+    feature = "grafeo-file",
+    not(feature = "temporal")
+))]
+fn an_embedding_updated_while_spilled_wins_after_a_reopen() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("closed.grafeo");
+    let moved = vec![0.0, 0.0, 0.0, 1.0];
+    let ids = {
+        let db = force_disk_db(&path);
+        let ids = indexed_items(&db);
+        db.buffer_manager().spill_all();
+        db.set_node_property(ids[0], "embedding", Value::Vector(moved.clone().into()))
+            .unwrap();
+        db.close().unwrap();
+        ids
+    };
+
+    let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+    // The spilled embeddings are found again through the spill file.
+    let nearest = db
+        .vector_search("Item", "embedding", &[1.0, 0.2, 0.0, 0.0], 1, None, None)
+        .unwrap();
+    assert_eq!(nearest[0].0, ids[2], "{nearest:?}");
+
+    assert!(db.reload_eligible(1.0) > 0);
+    assert_eq!(embedding(&db, ids[0]), Some(moved));
+    assert_eq!(embedding(&db, ids[2]), Some(vec![1.0, 0.2, 0.0, 0.0]));
+}
+
 #[test]
 #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
 fn force_disk_spills_and_search_works() {

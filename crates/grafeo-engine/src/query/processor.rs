@@ -718,6 +718,7 @@ pub(crate) fn explain_result(plan: &LogicalPlan) -> QueryResult {
         rows_scanned: None,
         status_message: None,
         gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+        counters: Default::default(),
     }
 }
 
@@ -741,6 +742,7 @@ pub(crate) fn physical_explain_result(
         rows_scanned: None,
         status_message: None,
         gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+        counters: Default::default(),
     }
 }
 

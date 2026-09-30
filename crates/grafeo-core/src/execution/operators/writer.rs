@@ -7,6 +7,7 @@
 //! transaction's versioning, so the rules for a valid write live in one place.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use grafeo_common::types::{
     EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, TransactionId, Value,
@@ -27,6 +28,64 @@ enum Entity {
     Edge(EdgeId),
 }
 
+/// What the writes of one statement changed, as counts: the summary a query
+/// result reports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteCounters {
+    /// Nodes created, by `INSERT`, `CREATE` or `MERGE`.
+    pub nodes_created: u64,
+    /// Nodes deleted.
+    pub nodes_deleted: u64,
+    /// Edges created.
+    pub edges_created: u64,
+    /// Edges deleted, also those `DETACH DELETE` removes.
+    pub edges_deleted: u64,
+    /// Property values written or removed, also those of created entities.
+    pub properties_set: u64,
+    /// Labels added, also those of created nodes.
+    pub labels_added: u64,
+    /// Labels removed.
+    pub labels_removed: u64,
+}
+
+impl WriteCounters {
+    /// Whether the writes changed anything.
+    #[must_use]
+    pub fn contains_updates(&self) -> bool {
+        *self != Self::default()
+    }
+}
+
+/// Counts writes as they happen, shared by every writer of one statement;
+/// [`counters`](Self::counters) reads the totals.
+#[derive(Debug, Default)]
+pub struct WriteCounter {
+    nodes_created: AtomicU64,
+    nodes_deleted: AtomicU64,
+    edges_created: AtomicU64,
+    edges_deleted: AtomicU64,
+    properties_set: AtomicU64,
+    labels_added: AtomicU64,
+    labels_removed: AtomicU64,
+}
+
+impl WriteCounter {
+    /// The counts so far.
+    #[must_use]
+    pub fn counters(&self) -> WriteCounters {
+        let read = |count: &AtomicU64| count.load(Ordering::Relaxed);
+        WriteCounters {
+            nodes_created: read(&self.nodes_created),
+            nodes_deleted: read(&self.nodes_deleted),
+            edges_created: read(&self.edges_created),
+            edges_deleted: read(&self.edges_deleted),
+            properties_set: read(&self.properties_set),
+            labels_added: read(&self.labels_added),
+            labels_removed: read(&self.labels_removed),
+        }
+    }
+}
+
 /// Writes to a graph store for one statement or direct call: validated,
 /// tracked for write conflicts and versioned by the transaction.
 #[derive(Clone)]
@@ -36,6 +95,7 @@ pub struct GraphWriter {
     transaction_id: Option<TransactionId>,
     validator: Option<Arc<dyn ConstraintValidator>>,
     write_tracker: Option<SharedWriteTracker>,
+    counter: Option<Arc<WriteCounter>>,
 }
 
 impl From<Arc<dyn GraphStoreMut>> for GraphWriter {
@@ -54,6 +114,7 @@ impl GraphWriter {
             transaction_id: None,
             validator: None,
             write_tracker: None,
+            counter: None,
         }
     }
 
@@ -82,6 +143,22 @@ impl GraphWriter {
     pub fn with_write_tracker(mut self, tracker: SharedWriteTracker) -> Self {
         self.write_tracker = Some(tracker);
         self
+    }
+
+    /// Counts every write in `counter`.
+    #[must_use]
+    pub fn with_counter(mut self, counter: Arc<WriteCounter>) -> Self {
+        self.counter = Some(counter);
+        self
+    }
+
+    /// Adds `n` to the count `field` selects, if this writer counts.
+    fn count(&self, field: impl Fn(&WriteCounter) -> &AtomicU64, n: usize) {
+        if n > 0
+            && let Some(counter) = &self.counter
+        {
+            field(counter).fetch_add(n as u64, Ordering::Relaxed);
+        }
     }
 
     /// The store written to.
@@ -330,6 +407,7 @@ impl GraphWriter {
             };
             added += usize::from(new);
         }
+        self.count(|c| &c.labels_added, added);
         Ok(added)
     }
 
@@ -354,6 +432,7 @@ impl GraphWriter {
             };
             removed += usize::from(had);
         }
+        self.count(|c| &c.labels_removed, removed);
         Ok(removed)
     }
 
@@ -379,9 +458,11 @@ impl GraphWriter {
                 )));
             }
         }
-        Ok(self
+        let deleted = self
             .store
-            .delete_node_versioned(id, self.epoch(), self.transaction()))
+            .delete_node_versioned(id, self.epoch(), self.transaction());
+        self.count(|c| &c.nodes_deleted, usize::from(deleted));
+        Ok(deleted)
     }
 
     // === Edges ===
@@ -499,9 +580,11 @@ impl GraphWriter {
     /// Returns a write conflict.
     pub fn delete_edge(&self, id: EdgeId) -> Result<bool, OperatorError> {
         self.record(Entity::Edge(id))?;
-        Ok(self
+        let deleted = self
             .store
-            .delete_edge_versioned(id, self.epoch(), self.transaction()))
+            .delete_edge_versioned(id, self.epoch(), self.transaction());
+        self.count(|c| &c.edges_deleted, usize::from(deleted));
+        Ok(deleted)
     }
 
     // === Checks ===
@@ -575,6 +658,8 @@ impl GraphWriter {
             .store
             .create_node_versioned(&label_refs, self.epoch(), self.transaction());
         self.record(Entity::Node(id))?;
+        self.count(|c| &c.nodes_created, 1);
+        self.count(|c| &c.labels_added, labels.len());
         Ok(id)
     }
 
@@ -588,6 +673,7 @@ impl GraphWriter {
             self.store
                 .create_edge_versioned(src, dst, edge_type, self.epoch(), self.transaction());
         self.record(Entity::Edge(id))?;
+        self.count(|c| &c.edges_created, 1);
         Ok(id)
     }
 
@@ -597,7 +683,14 @@ impl GraphWriter {
         }
     }
 
+    /// Writes a property value; a null removes the property, since a property
+    /// with a null value does not exist.
     fn write_value(&self, entity: Entity, key: &str, value: Value) {
+        if value.is_null() {
+            self.remove_value(entity, key);
+            return;
+        }
+        self.count(|c| &c.properties_set, 1);
         match (entity, self.transaction_id) {
             (Entity::Node(id), Some(transaction_id)) => {
                 self.store
@@ -613,22 +706,18 @@ impl GraphWriter {
     }
 
     fn remove_value(&self, entity: Entity, key: &str) {
-        match (entity, self.transaction_id) {
-            (Entity::Node(id), Some(transaction_id)) => {
-                self.store
-                    .remove_node_property_versioned(id, key, transaction_id);
-            }
-            (Entity::Node(id), None) => {
-                self.store.remove_node_property(id, key);
-            }
-            (Entity::Edge(id), Some(transaction_id)) => {
-                self.store
-                    .remove_edge_property_versioned(id, key, transaction_id);
-            }
-            (Entity::Edge(id), None) => {
-                self.store.remove_edge_property(id, key);
-            }
-        }
+        let removed =
+            match (entity, self.transaction_id) {
+                (Entity::Node(id), Some(transaction_id)) => self
+                    .store
+                    .remove_node_property_versioned(id, key, transaction_id),
+                (Entity::Node(id), None) => self.store.remove_node_property(id, key),
+                (Entity::Edge(id), Some(transaction_id)) => self
+                    .store
+                    .remove_edge_property_versioned(id, key, transaction_id),
+                (Entity::Edge(id), None) => self.store.remove_edge_property(id, key),
+            };
+        self.count(|c| &c.properties_set, usize::from(removed.is_some()));
     }
 
     fn existing_keys(&self, entity: Entity) -> Vec<String> {

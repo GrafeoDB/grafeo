@@ -135,6 +135,7 @@ impl JsGrafeoDB {
         let columns = std::mem::take(&mut result.columns);
         let exec_time = result.execution_time_ms;
         let scanned = result.rows_scanned;
+        let counters = result.counters;
 
         Ok(QueryResult::with_metrics(
             columns,
@@ -143,7 +144,8 @@ impl JsGrafeoDB {
             edges,
             exec_time,
             scanned,
-        ))
+        )
+        .with_counters(counters))
     }
 
     /// Execute a GQL query. Returns a Promise<QueryResult>.
@@ -1265,6 +1267,7 @@ impl JsGrafeoDB {
         let columns = std::mem::take(&mut result.columns);
         let exec_time = result.execution_time_ms;
         let scanned = result.rows_scanned;
+        let counters = result.counters;
 
         Ok(QueryResult::with_metrics(
             columns,
@@ -1273,7 +1276,8 @@ impl JsGrafeoDB {
             edges,
             exec_time,
             scanned,
-        ))
+        )
+        .with_counters(counters))
     }
 }
 

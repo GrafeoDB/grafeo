@@ -70,14 +70,17 @@ pub(crate) fn query_result(mut result: QueryResult) -> PyQueryResult {
     let columns = std::mem::take(&mut result.columns);
     let execution_time = result.execution_time_ms;
     let rows_scanned = result.rows_scanned;
-    PyQueryResult::with_metrics(
+    let counters = result.counters;
+    let mut query_result = PyQueryResult::with_metrics(
         columns,
         result.into_rows(),
         nodes,
         edges,
         execution_time,
         rows_scanned,
-    )
+    );
+    query_result.counters = counters;
+    query_result
 }
 
 /// Runs a query in `language` in the session.

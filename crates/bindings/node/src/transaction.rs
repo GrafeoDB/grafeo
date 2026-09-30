@@ -145,6 +145,7 @@ impl Transaction {
         let columns = std::mem::take(&mut result.columns);
         let exec_time = result.execution_time_ms;
         let scanned = result.rows_scanned;
+        let counters = result.counters;
 
         Ok(QueryResult::with_metrics(
             columns,
@@ -153,7 +154,8 @@ impl Transaction {
             edges,
             exec_time,
             scanned,
-        ))
+        )
+        .with_counters(counters))
     }
 
     pub(crate) fn new(db: Arc<RwLock<GrafeoDB>>, isolation_level: Option<&str>) -> Result<Self> {

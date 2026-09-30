@@ -297,6 +297,11 @@ export declare class QueryResult {
   get executionTimeMs(): number | null
   /** Number of rows scanned during execution (if available). */
   get rowsScanned(): number | null
+  /**
+   * What the query's writes changed: nodes and edges created and deleted,
+   * properties set, labels added and removed.
+   */
+  get counters(): WriteCounters
   /** Get a single row by index as a plain object. */
   get(index: number): object
   /** Get all rows as an array of objects. */
@@ -419,3 +424,21 @@ export declare function simdSupport(): string
 
 /** Returns the Grafeo version. */
 export declare function version(): string
+
+/** What a query's writes changed. */
+export interface WriteCounters {
+  /** Nodes created, by `INSERT`, `CREATE` or `MERGE`. */
+  nodesCreated: number
+  /** Nodes deleted. */
+  nodesDeleted: number
+  /** Edges created. */
+  edgesCreated: number
+  /** Edges deleted, also those `DETACH DELETE` removes. */
+  edgesDeleted: number
+  /** Property values written or removed, also those of created entities. */
+  propertiesSet: number
+  /** Labels added, also those of created nodes. */
+  labelsAdded: number
+  /** Labels removed. */
+  labelsRemoved: number
+}

@@ -9,6 +9,25 @@ use grafeo_common::types::Value;
 use crate::graph::{JsEdge, JsNode};
 use crate::types;
 
+/// What a query's writes changed.
+#[napi(object)]
+pub struct WriteCounters {
+    /// Nodes created, by `INSERT`, `CREATE` or `MERGE`.
+    pub nodes_created: i64,
+    /// Nodes deleted.
+    pub nodes_deleted: i64,
+    /// Edges created.
+    pub edges_created: i64,
+    /// Edges deleted, also those `DETACH DELETE` removes.
+    pub edges_deleted: i64,
+    /// Property values written or removed, also those of created entities.
+    pub properties_set: i64,
+    /// Labels added, also those of created nodes.
+    pub labels_added: i64,
+    /// Labels removed.
+    pub labels_removed: i64,
+}
+
 /// Results from a query - access rows, nodes, and edges.
 #[napi]
 pub struct QueryResult {
@@ -18,6 +37,7 @@ pub struct QueryResult {
     pub(crate) edges: Vec<JsEdge>,
     pub(crate) execution_time_ms: Option<f64>,
     pub(crate) rows_scanned: Option<u64>,
+    pub(crate) counters: grafeo_engine::database::WriteCounters,
 }
 
 #[napi]
@@ -47,6 +67,23 @@ impl QueryResult {
     #[napi(getter, js_name = "rowsScanned")]
     pub fn rows_scanned(&self) -> Option<f64> {
         self.rows_scanned.map(|r| r as f64)
+    }
+
+    /// What the query's writes changed: nodes and edges created and deleted,
+    /// properties set, labels added and removed.
+    #[napi(getter)]
+    pub fn counters(&self) -> WriteCounters {
+        let c = &self.counters;
+        let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+        WriteCounters {
+            nodes_created: count(c.nodes_created),
+            nodes_deleted: count(c.nodes_deleted),
+            edges_created: count(c.edges_created),
+            edges_deleted: count(c.edges_deleted),
+            properties_set: count(c.properties_set),
+            labels_added: count(c.labels_added),
+            labels_removed: count(c.labels_removed),
+        }
     }
 
     /// Get a single row by index as a plain object.
@@ -208,6 +245,7 @@ impl QueryResult {
             edges,
             execution_time_ms: None,
             rows_scanned: None,
+            counters: grafeo_engine::database::WriteCounters::default(),
         }
     }
 
@@ -226,7 +264,18 @@ impl QueryResult {
             edges,
             execution_time_ms,
             rows_scanned,
+            counters: grafeo_engine::database::WriteCounters::default(),
         }
+    }
+
+    /// Sets the counters of the query's writes.
+    #[must_use]
+    pub(crate) fn with_counters(
+        mut self,
+        counters: grafeo_engine::database::WriteCounters,
+    ) -> Self {
+        self.counters = counters;
+        self
     }
 
     pub fn empty() -> Self {
@@ -237,6 +286,7 @@ impl QueryResult {
             edges: Vec::new(),
             execution_time_ms: None,
             rows_scanned: None,
+            counters: grafeo_engine::database::WriteCounters::default(),
         }
     }
 }

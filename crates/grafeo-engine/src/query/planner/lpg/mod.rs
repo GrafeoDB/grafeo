@@ -202,6 +202,8 @@ pub struct Planner {
     profile_entries: std::cell::RefCell<Vec<crate::query::profile::ProfileEntry>>,
     /// Optional write tracker for recording writes during mutations.
     write_tracker: Option<grafeo_core::execution::operators::SharedWriteTracker>,
+    /// Counts the writes of the plan's writers.
+    write_counter: Arc<grafeo_core::execution::operators::WriteCounter>,
     /// Session context for introspection functions (info, schema, current_schema, etc.).
     pub(super) session_context: grafeo_core::execution::operators::SessionContext,
     /// When true, expand operators use epoch-only visibility (no MVCC version
@@ -248,6 +250,7 @@ impl Planner {
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
             write_tracker: None,
+            write_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
@@ -311,6 +314,7 @@ impl Planner {
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
             write_tracker,
+            write_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
@@ -346,7 +350,14 @@ impl Planner {
         if let Some(ref validator) = self.validator {
             writer = writer.with_validator(Arc::clone(validator));
         }
-        Ok(writer)
+        Ok(writer.with_counter(Arc::clone(&self.write_counter)))
+    }
+
+    /// Counts the writes of the plan's writers: nodes and edges created and
+    /// deleted, properties set, labels added and removed.
+    #[must_use]
+    pub fn write_counter(&self) -> Arc<grafeo_core::execution::operators::WriteCounter> {
+        Arc::clone(&self.write_counter)
     }
 
     /// Returns the viewing epoch for this planner.

@@ -241,7 +241,8 @@ describe('properties', () => {
     expect(node.get('int')).toBe(42)
     expect(node.get('float')).toBeCloseTo(3.14)
     expect(node.get('bool')).toBe(true)
-    expect(node.get('nil')).toBeNull()
+    // A null value is not stored: a property with a null value does not exist.
+    expect(node.get('nil')).toBeUndefined()
   })
 
   it('should return undefined for missing property', () => {
@@ -503,6 +504,28 @@ describe('QueryResult metadata', () => {
     const result = await db.execute('MATCH (p:Person) RETURN p.name')
     expect(result.nodes().length).toBe(0)
     expect(result.edges().length).toBe(0)
+    db.close()
+  })
+  it('should report what the writes changed in counters', async () => {
+    const db = GrafeoDB.create()
+    const insert = await db.execute(
+      "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})"
+    )
+    expect(insert.counters).toEqual({
+      nodesCreated: 2,
+      nodesDeleted: 0,
+      edgesCreated: 1,
+      edgesDeleted: 0,
+      propertiesSet: 2,
+      labelsAdded: 2,
+      labelsRemoved: 0,
+    })
+    const merge = await db.execute(
+      "UNWIND ['Alix', 'Vincent'] AS name MERGE (:Person {name: name})"
+    )
+    expect(merge.counters.nodesCreated).toBe(1)
+    const read = await db.execute('MATCH (p:Person) RETURN p.name')
+    expect(read.counters.propertiesSet).toBe(0)
     db.close()
   })
 })

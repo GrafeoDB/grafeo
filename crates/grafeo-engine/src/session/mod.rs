@@ -2922,7 +2922,9 @@ impl Session {
                 );
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
-                let executor = self.make_executor(physical_plan.columns.clone());
+                let executor = self
+                    .make_executor(physical_plan.columns.clone())
+                    .with_write_counter(planner.write_counter());
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
 
                 let total_time_ms;
@@ -2967,7 +2969,9 @@ impl Session {
             let physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan via push-based pipeline when possible
-            let executor = self.make_executor(physical_plan.columns.clone());
+            let executor = self
+                .make_executor(physical_plan.columns.clone())
+                .with_write_counter(planner.write_counter());
             let (mut source, push_ops) = {
                 #[cfg(feature = "spill")]
                 {
@@ -3424,7 +3428,9 @@ impl Session {
                 );
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
-                let executor = self.make_executor(physical_plan.columns.clone());
+                let executor = self
+                    .make_executor(physical_plan.columns.clone())
+                    .with_write_counter(planner.write_counter());
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
 
                 let total_time_ms;
@@ -3460,7 +3466,9 @@ impl Session {
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan
-            let executor = self.make_executor(physical_plan.columns.clone());
+            let executor = self
+                .make_executor(physical_plan.columns.clone())
+                .with_write_counter(planner.write_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3533,7 +3541,9 @@ impl Session {
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan
-            let executor = self.make_executor(physical_plan.columns.clone());
+            let executor = self
+                .make_executor(physical_plan.columns.clone())
+                .with_write_counter(planner.write_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3593,7 +3603,9 @@ impl Session {
             let planner =
                 self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = self.make_executor(physical_plan.columns.clone());
+            let executor = self
+                .make_executor(physical_plan.columns.clone())
+                .with_write_counter(planner.write_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3666,7 +3678,9 @@ impl Session {
             let planner =
                 self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = self.make_executor(physical_plan.columns.clone());
+            let executor = self
+                .make_executor(physical_plan.columns.clone())
+                .with_write_counter(planner.write_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3732,7 +3746,9 @@ impl Session {
             let planner =
                 self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = self.make_executor(physical_plan.columns.clone());
+            let executor = self
+                .make_executor(physical_plan.columns.clone())
+                .with_write_counter(planner.write_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3818,6 +3834,7 @@ impl Session {
                         rows_scanned: None,
                         status_message: None,
                         gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+                        counters: Default::default(),
                     });
                 }
                 if params.is_some() {
@@ -3853,7 +3870,9 @@ impl Session {
             let planner =
                 self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = self.make_executor(physical_plan.columns.clone());
+            let executor = self
+                .make_executor(physical_plan.columns.clone())
+                .with_write_counter(planner.write_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 

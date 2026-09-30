@@ -117,7 +117,7 @@ pub use union::UnionOperator;
 pub use unwind::UnwindOperator;
 pub use variable_length_expand::{PathMode as ExecutionPathMode, VariableLengthExpandOperator};
 pub use vector_join::VectorJoinOperator;
-pub use writer::GraphWriter;
+pub use writer::{GraphWriter, WriteCounter, WriteCounters};
 
 use std::sync::Arc;
 

@@ -2775,6 +2775,8 @@ impl crate::admin::AdminService for GrafeoDB {
 // Query Result Types
 // =========================================================================
 
+pub use grafeo_core::execution::operators::WriteCounters;
+
 /// The result of running a query.
 ///
 /// Contains rows and columns, like a table. Use [`iter()`](Self::iter) to
@@ -2819,6 +2821,9 @@ pub struct QueryResult {
     pub status_message: Option<String>,
     /// GQLSTATUS code per ISO/IEC 39075:2024, sec 23.
     pub gql_status: grafeo_common::utils::GqlStatus,
+    /// What the statement's writes changed: nodes and edges created and
+    /// deleted, properties set, labels added and removed.
+    pub counters: WriteCounters,
 }
 
 impl QueryResult {
@@ -2858,6 +2863,7 @@ impl QueryResult {
             rows_scanned: None,
             status_message: None,
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            counters: Default::default(),
         }
     }
 
@@ -2872,6 +2878,7 @@ impl QueryResult {
             rows_scanned: None,
             status_message: Some(msg.into()),
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            counters: Default::default(),
         }
     }
 
@@ -2891,6 +2898,7 @@ impl QueryResult {
             rows_scanned: None,
             status_message: None,
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            counters: Default::default(),
         })
     }
 
@@ -2912,6 +2920,7 @@ impl QueryResult {
             rows_scanned: None,
             status_message: None,
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            counters: Default::default(),
         })
     }
 
@@ -2934,6 +2943,7 @@ impl QueryResult {
             rows_scanned: None,
             status_message: None,
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            counters: Default::default(),
         })
     }
 

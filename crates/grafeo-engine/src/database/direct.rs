@@ -33,7 +33,8 @@ use crate::session::graph_storage_key;
 #[derive(Clone, Copy)]
 pub(crate) enum DirectTarget<'a> {
     /// The graph `set_current_graph` and `set_current_schema` select, or the
-    /// default graph when they select none or one that no longer exists.
+    /// default graph when they select none. A selected graph that no longer
+    /// exists is an error.
     Current,
     /// A named graph of `schema`, which must exist (a graph handle).
     Named {
@@ -256,6 +257,21 @@ impl GrafeoDB {
                 .unwrap_or_else(|| "default".to_string()),
         };
         Err(missing_graph(&name))
+    }
+
+    /// The store the direct API reads the graph `target` names from: its own
+    /// store for a named graph; for the default graph the store queries read,
+    /// which is the layered store after `compact()` and the external store of
+    /// a database built with `with_store` or `with_read_store`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `target` names a graph that does not exist.
+    pub(crate) fn read_store(&self, target: DirectTarget<'_>) -> Result<Arc<dyn GraphStoreSearch>> {
+        Ok(match self.direct_store(target)? {
+            Some((store, Some(_))) => store,
+            _ => self.graph_store(),
+        })
     }
 
     /// Runs one direct call on `target`: without a session while no
@@ -501,12 +517,9 @@ impl DirectCalls<'_> {
         self.db.write_direct(self.target, true, write, touched)
     }
 
-    /// The store of the graph, for reads.
-    fn store(&self) -> Result<Arc<LpgStore>> {
-        Ok(match self.db.direct_store(self.target)? {
-            Some((store, _)) => store,
-            None => self.db.current_lpg_store(),
-        })
+    /// The store of the graph, for reads (see [`GrafeoDB::read_store`]).
+    fn store(&self) -> Result<Arc<dyn GraphStoreSearch>> {
+        self.db.read_store(self.target)
     }
 
     pub(crate) fn create_node_with_props(

@@ -6,7 +6,9 @@
 //! commits at an epoch of its own: it is checked against the schema and
 //! constraints, logged to the WAL and reported to CDC like the same write in a
 //! query, and it either applies completely or fails with an error (see
-//! [`direct`](super::direct) for how). Reads see the current graph.
+//! [`direct`](super::direct) for how). Reads see the current graph as queries
+//! do (after `compact()` and on an external store too), and nothing when the
+//! selected graph no longer exists.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -74,7 +76,7 @@ impl super::GrafeoDB {
     /// Gets a node by ID.
     #[must_use]
     pub fn get_node(&self, id: NodeId) -> Option<Node> {
-        self.current_lpg_store().get_node(id)
+        self.read_store(DirectTarget::Current).ok()?.get_node(id)
     }
 
     /// Gets a node as it existed at a specific epoch.
@@ -84,7 +86,9 @@ impl super::GrafeoDB {
     /// deleted at or before `epoch`.
     #[must_use]
     pub fn get_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> Option<Node> {
-        self.current_lpg_store().get_node_at_epoch(id, epoch)
+        self.read_store(DirectTarget::Current)
+            .ok()?
+            .get_node_at_epoch(id, epoch)
     }
 
     /// Gets an edge as it existed at a specific epoch.
@@ -92,7 +96,9 @@ impl super::GrafeoDB {
     /// Uses pure epoch-based visibility (not transaction-aware).
     #[must_use]
     pub fn get_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> Option<Edge> {
-        self.current_lpg_store().get_edge_at_epoch(id, epoch)
+        self.read_store(DirectTarget::Current)
+            .ok()?
+            .get_edge_at_epoch(id, epoch)
     }
 
     /// Returns all versions of a node with their creation/deletion epochs.
@@ -100,7 +106,8 @@ impl super::GrafeoDB {
     /// Properties and labels reflect the current state (not versioned per-epoch).
     #[must_use]
     pub fn get_node_history(&self, id: NodeId) -> Vec<(EpochId, Option<EpochId>, Node)> {
-        self.current_lpg_store().get_node_history(id)
+        self.read_store(DirectTarget::Current)
+            .map_or_else(|_| Vec::new(), |store| store.get_node_history(id))
     }
 
     /// Returns all versions of an edge with their creation/deletion epochs.
@@ -108,7 +115,8 @@ impl super::GrafeoDB {
     /// Properties reflect the current state (not versioned per-epoch).
     #[must_use]
     pub fn get_edge_history(&self, id: EdgeId) -> Vec<(EpochId, Option<EpochId>, Edge)> {
-        self.current_lpg_store().get_edge_history(id)
+        self.read_store(DirectTarget::Current)
+            .map_or_else(|_| Vec::new(), |store| store.get_edge_history(id))
     }
 
     /// Returns a property value as it existed at a specific epoch.
@@ -155,7 +163,11 @@ impl super::GrafeoDB {
     /// Every committed write advances it, from a query or from the direct API.
     #[must_use]
     pub fn current_epoch(&self) -> EpochId {
-        self.lpg_store().current_epoch()
+        match &self.store {
+            Some(store) => store.current_epoch(),
+            // An external store: the epochs the database's commits publish.
+            None => self.transaction_manager.current_epoch(),
+        }
     }
 
     /// Deletes a node and returns whether it existed.
@@ -251,8 +263,7 @@ impl super::GrafeoDB {
     /// ```
     #[must_use]
     pub fn get_node_labels(&self, id: NodeId) -> Option<Vec<String>> {
-        self.current_lpg_store()
-            .get_node(id)
+        self.get_node(id)
             .map(|node| node.labels.iter().map(|s| s.to_string()).collect())
     }
 
@@ -310,7 +321,7 @@ impl super::GrafeoDB {
     /// Gets an edge by ID.
     #[must_use]
     pub fn get_edge(&self, id: EdgeId) -> Option<Edge> {
-        self.current_lpg_store().get_edge(id)
+        self.read_store(DirectTarget::Current).ok()?.get_edge(id)
     }
 
     /// Deletes an edge and returns whether it existed.

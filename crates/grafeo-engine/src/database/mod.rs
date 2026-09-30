@@ -1834,10 +1834,20 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if arena allocation fails.
+    /// Returns an error if arena allocation fails, or if the database uses an
+    /// external store ([`with_store`](Self::with_store),
+    /// [`with_read_store`](Self::with_read_store)), which has no named graphs.
     #[cfg(feature = "lpg")]
     pub fn create_graph(&self, name: &str) -> Result<bool> {
-        Ok(self.lpg_store().create_graph(name)?)
+        let Some(store) = &self.store else {
+            return Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::new(
+                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    "Named graphs need the built-in store; this database uses an external store",
+                ),
+            ));
+        };
+        Ok(store.create_graph(name)?)
     }
 
     /// Drops a named graph. Returns `true` if dropped, `false` if it did not exist.
@@ -1862,11 +1872,14 @@ impl GrafeoDB {
         dropped
     }
 
-    /// Returns all named graph names.
+    /// Returns all named graph names (none on an external store).
     #[cfg(feature = "lpg")]
     #[must_use]
     pub fn list_graphs(&self) -> Vec<String> {
-        self.lpg_store().graph_names()
+        self.store
+            .as_ref()
+            .map(|store| store.graph_names())
+            .unwrap_or_default()
     }
 
     // === Graph Projections ===

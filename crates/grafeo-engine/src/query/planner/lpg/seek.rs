@@ -155,9 +155,28 @@ fn collect_value_variables(expr: &LogicalExpression, out: &mut HashSet<String>) 
             .iter()
             .all(|(_, value)| collect_value_variables(value, out)),
         LogicalExpression::FunctionCall { name, args, .. } => {
+            // Values that differ between two calls: the seek and the filter
+            // above it would each read their own.
             const CHANGING: [&str; 5] = ["rand", "random", "randomuuid", "uuid", "timestamp"];
-            !CHANGING.iter().any(|f| name.eq_ignore_ascii_case(f))
-                && args.iter().all(|arg| collect_value_variables(arg, out))
+            // Without arguments, these read the clock.
+            const CLOCK: [&str; 13] = [
+                "now",
+                "current_timestamp",
+                "currenttimestamp",
+                "current_date",
+                "currentdate",
+                "current_time",
+                "currenttime",
+                "date",
+                "time",
+                "local_time",
+                "datetime",
+                "localdatetime",
+                "local_datetime",
+            ];
+            let changing = CHANGING.iter().any(|f| name.eq_ignore_ascii_case(f))
+                || (args.is_empty() && CLOCK.iter().any(|f| name.eq_ignore_ascii_case(f)));
+            !changing && args.iter().all(|arg| collect_value_variables(arg, out))
         }
         _ => false,
     }

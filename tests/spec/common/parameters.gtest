@@ -204,6 +204,40 @@ tests:
         - [Alix, 30]
 
   # ---------------------------------------------------------------------------
+  # Parameterized writes are checked like literal ones, and PROFILE works
+  # ---------------------------------------------------------------------------
+
+  - name: gql_param_unique_violation
+    setup:
+      - "CREATE CONSTRAINT person_email FOR (n:Person) ON (n.email) UNIQUE"
+      - "INSERT (:Person {email: 'alix@example.org'})"
+    query: "INSERT (:Person {email: $email})"
+    params:
+      email: "alix@example.org"
+    expect:
+      error: "constraint"
+
+  - name: cypher_param_unique_violation
+    language: cypher
+    setup:
+      - "CREATE CONSTRAINT person_email FOR (n:Person) ON (n.email) UNIQUE"
+      - "INSERT (:Person {email: 'alix@example.org'})"
+    query: "CREATE (:Person {email: $email})"
+    params:
+      email: "alix@example.org"
+    expect:
+      error: "constraint"
+
+  - name: gql_profile_with_params
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    query: "PROFILE MATCH (p:Person) WHERE p.name = $name RETURN p.name"
+    params:
+      name: "Alix"
+    expect:
+      columns: [profile]
+
+  # ---------------------------------------------------------------------------
   # Gremlin parameter support
   # ---------------------------------------------------------------------------
 

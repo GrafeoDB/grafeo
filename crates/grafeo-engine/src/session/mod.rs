@@ -2794,6 +2794,18 @@ impl Session {
     /// ```
     #[cfg(feature = "gql")]
     pub fn execute(&self, query: &str) -> Result<QueryResult> {
+        self.execute_gql(query, None)
+    }
+
+    /// Executes a GQL statement, with `params` filled in when given: a
+    /// parameterized statement is checked, tracked and planned exactly like
+    /// the same statement with literal values.
+    #[cfg(feature = "gql")]
+    fn execute_gql(
+        &self,
+        query: &str,
+        params: Option<&std::collections::HashMap<String, Value>>,
+    ) -> Result<QueryResult> {
         self.require_lpg("GQL")?;
 
         #[cfg(feature = "testing-statement-injection")]
@@ -2815,54 +2827,61 @@ impl Session {
         #[cfg(not(target_arch = "wasm32"))]
         let start_time = std::time::Instant::now();
 
-        // Parse and translate, checking for session/schema commands first
-        let translation = gql::translate_full(query)?;
-        let logical_plan = match translation {
-            gql::GqlTranslationResult::SessionCommand(cmd) => {
-                return self.execute_session_command(cmd);
-            }
-            #[cfg(feature = "lpg")]
-            gql::GqlTranslationResult::SchemaCommand(cmd) => {
-                // All DDL requires Admin role
-                self.require_permission(crate::auth::StatementKind::Admin)?;
-                if *self.read_only_tx.lock() {
-                    return Err(grafeo_common::utils::error::Error::Transaction(
-                        grafeo_common::utils::error::TransactionError::ReadOnly,
+        // A parameterized statement reuses its parsed plan: the parameters
+        // are filled into a copy on every call, before optimizing, so the
+        // optimizer and planner see the values and no cached plan keeps them.
+        let cache_key = CacheKey::with_graph(query, QueryLanguage::Gql, self.current_graph());
+        let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
+        let logical_plan = match parsed {
+            Some(plan) => plan,
+            None => match gql::translate_full(query)? {
+                gql::GqlTranslationResult::SessionCommand(cmd) => {
+                    return self.execute_session_command(cmd);
+                }
+                #[cfg(feature = "lpg")]
+                gql::GqlTranslationResult::SchemaCommand(cmd) => {
+                    // All DDL requires Admin role
+                    self.require_permission(crate::auth::StatementKind::Admin)?;
+                    if *self.read_only_tx.lock() {
+                        return Err(grafeo_common::utils::error::Error::Transaction(
+                            grafeo_common::utils::error::TransactionError::ReadOnly,
+                        ));
+                    }
+                    return self.execute_schema_command(cmd);
+                }
+                #[cfg(not(feature = "lpg"))]
+                gql::GqlTranslationResult::SchemaCommand(_) => {
+                    return Err(grafeo_common::utils::error::Error::Internal(
+                        "Schema commands require the `lpg` feature".to_string(),
                     ));
                 }
-                return self.execute_schema_command(cmd);
-            }
-            gql::GqlTranslationResult::Plan(plan) => {
-                // Only walk the operator tree when it matters: non-admin
-                // identities need permission checks, read-only transactions
-                // need mutation blocking. Admin sessions in auto-commit mode
-                // skip the tree walk entirely.
-                let read_only = *self.read_only_tx.lock();
-                let need_check = read_only || !self.identity.can_admin();
-                let is_mutation = need_check && plan.root.has_mutations();
-                if is_mutation {
-                    self.require_permission(crate::auth::StatementKind::Write)?;
+                gql::GqlTranslationResult::Plan(plan) => {
+                    if params.is_some() {
+                        self.query_cache.put_parsed(cache_key.clone(), plan.clone());
+                    }
+                    plan
                 }
-                if read_only && is_mutation {
-                    return Err(grafeo_common::utils::error::Error::Transaction(
-                        grafeo_common::utils::error::TransactionError::ReadOnly,
-                    ));
-                }
-                plan
-            }
-            #[cfg(not(feature = "lpg"))]
-            gql::GqlTranslationResult::SchemaCommand(_) => {
-                return Err(grafeo_common::utils::error::Error::Internal(
-                    "Schema commands require the `lpg` feature".to_string(),
-                ));
-            }
+            },
         };
 
-        // Create cache key for this query
-        let cache_key = CacheKey::with_graph(query, QueryLanguage::Gql, self.current_graph());
+        // Only walk the operator tree when it matters: non-admin identities
+        // need permission checks, read-only transactions need mutation
+        // blocking. Admin sessions in auto-commit mode skip the tree walk.
+        let read_only = *self.read_only_tx.lock();
+        let need_check = read_only || !self.identity.can_admin();
+        let is_mutation = need_check && logical_plan.root.has_mutations();
+        if is_mutation {
+            self.require_permission(crate::auth::StatementKind::Write)?;
+        }
+        if read_only && is_mutation {
+            return Err(grafeo_common::utils::error::Error::Transaction(
+                grafeo_common::utils::error::TransactionError::ReadOnly,
+            ));
+        }
 
-        // Try to get cached optimized plan, or use the plan we just translated
-        let optimized_plan = if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
+        let optimized_plan = if let Some(params) = params {
+            self.optimize_with_params(logical_plan, params)?
+        } else if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
             cached_plan
         } else {
             // Semantic validation
@@ -3213,51 +3232,35 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        self.require_lpg("GQL")?;
+        self.execute_gql(query, Some(&params))
+    }
 
-        use crate::query::processor::{QueryLanguage, QueryProcessor};
+    /// Fills `params` (over the plan's own defaults) into a parsed plan, then
+    /// binds and optimizes it, so the optimizer sees the values as it does in
+    /// a statement with literals.
+    #[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+    fn optimize_with_params(
+        &self,
+        mut plan: crate::query::plan::LogicalPlan,
+        params: &std::collections::HashMap<String, Value>,
+    ) -> Result<crate::query::plan::LogicalPlan> {
+        use crate::query::{binder::Binder, optimizer::Optimizer, processor::substitute_params};
 
-        // Reject writes if the identity lacks permission. Parse the query
-        // to determine mutation status reliably (the text heuristic has false
-        // negatives that could bypass authorization).
-        let has_mutations = if self.identity.can_write() {
-            // Fast path: identity can write, use heuristic for auto-commit only
-            Self::query_looks_like_mutation(query)
+        if plan.default_params.is_empty() {
+            substitute_params(&mut plan, params)?;
         } else {
-            // Restricted identity: parse to check mutations reliably
-            use crate::query::translators::gql;
-            match gql::translate(query) {
-                Ok(plan) if plan.root.has_mutations() => {
-                    self.require_permission(crate::auth::StatementKind::Write)?;
-                    true
-                }
-                Ok(_) => false,
-                // Parse error: let the processor handle it below
-                Err(_) => Self::query_looks_like_mutation(query),
-            }
-        };
+            let mut merged = plan.default_params.clone();
+            merged.extend(
+                params
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
+            substitute_params(&mut plan, &merged)?;
+        }
+        let mut binder = Binder::new();
+        let _binding_context = binder.bind(&plan)?;
         let active = self.active_store();
-
-        self.with_auto_commit(has_mutations, || {
-            // Get transaction context for MVCC visibility
-            let (viewing_epoch, transaction_id) = self.get_transaction_context();
-
-            // Create processor with transaction context
-            let processor = QueryProcessor::for_stores_with_transaction(
-                Arc::clone(&active),
-                self.active_write_store(),
-                Arc::clone(&self.transaction_manager),
-            )?;
-
-            // Apply transaction context if in a transaction
-            let processor = if let Some(transaction_id) = transaction_id {
-                processor.with_transaction_context(viewing_epoch, transaction_id)
-            } else {
-                processor
-            };
-
-            processor.process(query, QueryLanguage::Gql, Some(&params))
-        })
+        Optimizer::from_graph_store(&*active).optimize(plan)
     }
 
     /// Executes a GQL query with parameters.
@@ -3295,61 +3298,89 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "cypher")]
     pub fn execute_cypher(&self, query: &str) -> Result<QueryResult> {
+        self.execute_cypher_inner(query, None)
+    }
+
+    /// Executes a Cypher query with parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    #[cfg(feature = "cypher")]
+    pub fn execute_cypher_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.execute_cypher_inner(query, Some(&params))
+    }
+
+    /// Executes a Cypher statement, with `params` filled in when given (see
+    /// [`execute_gql`](Self::execute_gql)).
+    #[cfg(feature = "cypher")]
+    fn execute_cypher_inner(
+        &self,
+        query: &str,
+        params: Option<&std::collections::HashMap<String, Value>>,
+    ) -> Result<QueryResult> {
         use crate::query::{
             binder::Binder, cache::CacheKey, optimizer::Optimizer, processor::QueryLanguage,
             translators::cypher,
         };
 
-        // Handle schema DDL and SHOW commands before the normal query path
-        let translation = cypher::translate_full(query)?;
-        match translation {
-            #[cfg(feature = "lpg")]
-            cypher::CypherTranslationResult::SchemaCommand(cmd) => {
-                use grafeo_common::utils::error::{
-                    Error as GrafeoError, QueryError, QueryErrorKind,
-                };
-                self.require_permission(crate::auth::StatementKind::Admin)?;
-                if *self.read_only_tx.lock() {
-                    return Err(GrafeoError::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        "Cannot execute schema DDL in a read-only transaction",
-                    )));
-                }
-                return self.execute_schema_command(cmd);
-            }
-            #[cfg(not(feature = "lpg"))]
-            cypher::CypherTranslationResult::SchemaCommand(_) => {
-                return Err(grafeo_common::utils::error::Error::Internal(
-                    "Schema DDL requires the `lpg` feature".to_string(),
-                ));
-            }
-            cypher::CypherTranslationResult::ShowIndexes => {
-                return self.execute_show_indexes();
-            }
-            cypher::CypherTranslationResult::ShowConstraints => {
-                return self.execute_show_constraints();
-            }
-            cypher::CypherTranslationResult::ShowCurrentGraphType => {
-                return self.execute_show_current_graph_type();
-            }
-            cypher::CypherTranslationResult::Plan(_) => {
-                // Fall through to normal execution below
-            }
-        }
-
         #[cfg(not(target_arch = "wasm32"))]
         let start_time = std::time::Instant::now();
 
-        // Create cache key for this query
+        // A parameterized statement reuses its parsed plan (see execute_gql).
         let cache_key = CacheKey::with_graph(query, QueryLanguage::Cypher, self.current_graph());
+        let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
+        let logical_plan = match parsed {
+            Some(plan) => plan,
+            // Schema DDL and SHOW commands run before the normal query path.
+            None => match cypher::translate_full(query)? {
+                #[cfg(feature = "lpg")]
+                cypher::CypherTranslationResult::SchemaCommand(cmd) => {
+                    use grafeo_common::utils::error::{
+                        Error as GrafeoError, QueryError, QueryErrorKind,
+                    };
+                    self.require_permission(crate::auth::StatementKind::Admin)?;
+                    if *self.read_only_tx.lock() {
+                        return Err(GrafeoError::Query(QueryError::new(
+                            QueryErrorKind::Semantic,
+                            "Cannot execute schema DDL in a read-only transaction",
+                        )));
+                    }
+                    return self.execute_schema_command(cmd);
+                }
+                #[cfg(not(feature = "lpg"))]
+                cypher::CypherTranslationResult::SchemaCommand(_) => {
+                    return Err(grafeo_common::utils::error::Error::Internal(
+                        "Schema DDL requires the `lpg` feature".to_string(),
+                    ));
+                }
+                cypher::CypherTranslationResult::ShowIndexes => {
+                    return self.execute_show_indexes();
+                }
+                cypher::CypherTranslationResult::ShowConstraints => {
+                    return self.execute_show_constraints();
+                }
+                cypher::CypherTranslationResult::ShowCurrentGraphType => {
+                    return self.execute_show_current_graph_type();
+                }
+                cypher::CypherTranslationResult::Plan(plan) => {
+                    if params.is_some() {
+                        self.query_cache.put_parsed(cache_key.clone(), plan.clone());
+                    }
+                    plan
+                }
+            },
+        };
 
-        // Try to get cached optimized plan
-        let optimized_plan = if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
+        let optimized_plan = if let Some(params) = params {
+            self.optimize_with_params(logical_plan, params)?
+        } else if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
             cached_plan
         } else {
-            // Parse and translate the query to a logical plan
-            let logical_plan = cypher::translate(query)?;
-
             // Semantic validation
             let mut binder = Binder::new();
             let _binding_context = binder.bind(&logical_plan)?;
@@ -3743,6 +3774,17 @@ impl Session {
     /// ```
     #[cfg(feature = "sql-pgq")]
     pub fn execute_sql(&self, query: &str) -> Result<QueryResult> {
+        self.execute_sql_inner(query, None)
+    }
+
+    /// Executes a SQL/PGQ statement, with `params` filled in when given (see
+    /// [`execute_gql`](Self::execute_gql)).
+    #[cfg(feature = "sql-pgq")]
+    fn execute_sql_inner(
+        &self,
+        query: &str,
+        params: Option<&std::collections::HashMap<String, Value>>,
+    ) -> Result<QueryResult> {
         use crate::query::{
             binder::Binder, cache::CacheKey, optimizer::Optimizer, plan::LogicalOperator,
             processor::QueryLanguage, translators::sql_pgq,
@@ -3751,31 +3793,44 @@ impl Session {
         #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         let start_time = Instant::now();
 
-        // Parse and translate (always needed to check for DDL)
-        let logical_plan = sql_pgq::translate(query)?;
-
-        // Handle DDL statements directly (they don't go through the query pipeline)
-        if let LogicalOperator::CreatePropertyGraph(ref cpg) = logical_plan.root {
-            self.require_permission(crate::auth::StatementKind::Admin)?;
-            return Ok(QueryResult {
-                columns: vec!["status".into()],
-                column_types: vec![grafeo_common::types::LogicalType::String],
-                rows: vec![vec![Value::from(format!(
-                    "Property graph '{}' created ({} node tables, {} edge tables)",
-                    cpg.name,
-                    cpg.node_tables.len(),
-                    cpg.edge_tables.len()
-                ))]],
-                execution_time_ms: None,
-                rows_scanned: None,
-                status_message: None,
-                gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
-            });
-        }
-
+        // A parameterized statement reuses its parsed plan (see execute_gql).
         let cache_key = CacheKey::with_graph(query, QueryLanguage::SqlPgq, self.current_graph());
+        let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
+        let logical_plan = match parsed {
+            Some(plan) => plan,
+            None => {
+                // Parse and translate (always needed to check for DDL)
+                let logical_plan = sql_pgq::translate(query)?;
 
-        let optimized_plan = if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
+                // Handle DDL statements directly (they don't go through the query pipeline)
+                if let LogicalOperator::CreatePropertyGraph(ref cpg) = logical_plan.root {
+                    self.require_permission(crate::auth::StatementKind::Admin)?;
+                    return Ok(QueryResult {
+                        columns: vec!["status".into()],
+                        column_types: vec![grafeo_common::types::LogicalType::String],
+                        rows: vec![vec![Value::from(format!(
+                            "Property graph '{}' created ({} node tables, {} edge tables)",
+                            cpg.name,
+                            cpg.node_tables.len(),
+                            cpg.edge_tables.len()
+                        ))]],
+                        execution_time_ms: None,
+                        rows_scanned: None,
+                        status_message: None,
+                        gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+                    });
+                }
+                if params.is_some() {
+                    self.query_cache
+                        .put_parsed(cache_key.clone(), logical_plan.clone());
+                }
+                logical_plan
+            }
+        };
+
+        let optimized_plan = if let Some(params) = params {
+            self.optimize_with_params(logical_plan, params)?
+        } else if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
             cached_plan
         } else {
             let mut binder = Binder::new();
@@ -3825,54 +3880,7 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        use crate::query::processor::{QueryLanguage, QueryProcessor};
-
-        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-        let start_time = Instant::now();
-
-        let has_mutations = if self.identity.can_write() {
-            Self::query_looks_like_mutation(query)
-        } else {
-            use crate::query::translators::sql_pgq;
-            match sql_pgq::translate(query) {
-                Ok(plan) if plan.root.has_mutations() => {
-                    self.require_permission(crate::auth::StatementKind::Write)?;
-                    true
-                }
-                Ok(_) => false,
-                Err(_) => Self::query_looks_like_mutation(query),
-            }
-        };
-        if has_mutations {
-            self.require_permission(crate::auth::StatementKind::Write)?;
-        }
-        let active = self.active_store();
-
-        let result = self.with_auto_commit(has_mutations, || {
-            let (viewing_epoch, transaction_id) = self.get_transaction_context();
-            let processor = QueryProcessor::for_stores_with_transaction(
-                Arc::clone(&active),
-                self.active_write_store(),
-                Arc::clone(&self.transaction_manager),
-            )?;
-            let processor = if let Some(transaction_id) = transaction_id {
-                processor.with_transaction_context(viewing_epoch, transaction_id)
-            } else {
-                processor
-            };
-            processor.process(query, QueryLanguage::SqlPgq, Some(&params))
-        });
-
-        #[cfg(feature = "metrics")]
-        {
-            #[cfg(not(target_arch = "wasm32"))]
-            let elapsed_ms = Some(start_time.elapsed().as_secs_f64() * 1000.0);
-            #[cfg(target_arch = "wasm32")]
-            let elapsed_ms = None;
-            self.record_query_metrics("sql", elapsed_ms, &result);
-        }
-
-        result
+        self.execute_sql_inner(query, Some(&params))
     }
 
     /// Executes a query in the specified language by name.
@@ -3905,50 +3913,7 @@ impl Session {
             #[cfg(feature = "cypher")]
             "cypher" => {
                 if let Some(p) = params {
-                    use crate::query::processor::{QueryLanguage, QueryProcessor};
-
-                    #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-                    let start_time = Instant::now();
-
-                    let has_mutations = if self.identity.can_write() {
-                        Self::query_looks_like_mutation(query)
-                    } else {
-                        use crate::query::translators::cypher;
-                        match cypher::translate(query) {
-                            Ok(plan) if plan.root.has_mutations() => {
-                                self.require_permission(crate::auth::StatementKind::Write)?;
-                                true
-                            }
-                            Ok(_) => false,
-                            Err(_) => Self::query_looks_like_mutation(query),
-                        }
-                    };
-                    let active = self.active_store();
-                    let result = self.with_auto_commit(has_mutations, || {
-                        let processor = QueryProcessor::for_stores_with_transaction(
-                            Arc::clone(&active),
-                            self.active_write_store(),
-                            Arc::clone(&self.transaction_manager),
-                        )?;
-                        let (viewing_epoch, transaction_id) = self.get_transaction_context();
-                        let processor = if let Some(transaction_id) = transaction_id {
-                            processor.with_transaction_context(viewing_epoch, transaction_id)
-                        } else {
-                            processor
-                        };
-                        processor.process(query, QueryLanguage::Cypher, Some(&p))
-                    });
-
-                    #[cfg(feature = "metrics")]
-                    {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        let elapsed_ms = Some(start_time.elapsed().as_secs_f64() * 1000.0);
-                        #[cfg(target_arch = "wasm32")]
-                        let elapsed_ms = None;
-                        self.record_query_metrics("cypher", elapsed_ms, &result);
-                    }
-
-                    result
+                    self.execute_cypher_with_params(query, p)
                 } else {
                     self.execute_cypher(query)
                 }
@@ -4688,23 +4653,6 @@ impl Session {
         #[cfg(feature = "wal")]
         self.flush_wal_outside_transaction();
         result
-    }
-
-    /// Quick heuristic: returns `true` when the query text looks like it
-    /// performs a mutation. Used by `_with_params` paths that go through the
-    /// `QueryProcessor` (where the logical plan isn't available before
-    /// execution). False negatives are harmless: the data just won't be
-    /// auto-committed, which matches the prior behaviour.
-    fn query_looks_like_mutation(query: &str) -> bool {
-        let upper = query.to_ascii_uppercase();
-        upper.contains("INSERT")
-            || upper.contains("CREATE")
-            || upper.contains("DELETE")
-            || upper.contains("MERGE")
-            || upper.contains("SET")
-            || upper.contains("REMOVE")
-            || upper.contains("DROP")
-            || upper.contains("ALTER")
     }
 
     /// Returns `Err(Transaction(InvalidState))` if any `ResultStream` is

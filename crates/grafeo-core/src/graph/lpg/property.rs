@@ -1102,14 +1102,15 @@ impl<Id: EntityId> PropertyColumn<Id> {
     /// Restores values into this column after a reload from disk.
     ///
     /// Clears the `spilled` flag. Callers are responsible for providing
-    /// the correct values (from `MmapStorage::export_all()` or similar).
+    /// the correct values (from `MmapStorage::export_all()` or similar). A
+    /// value written while the column was spilled is newer and stays.
     pub fn restore_values(&mut self, values: impl Iterator<Item = (Id, Value)>) {
         self.spilled = false;
         // Insert directly into the map without calling set(), which would
         // re-increment zone map counters (row_count, null_count) on top of
         // the already-preserved zone map from before eviction.
         for (id, value) in values {
-            self.values.insert(id, value);
+            self.values.entry(id).or_insert(value);
         }
     }
 
@@ -2040,6 +2041,26 @@ mod tests {
             Some(Value::String("Gus".into()))
         );
         assert!(storage.get(node2, &age_key).is_none());
+    }
+
+    /// A reload brings the spilled values back, but a value written while the
+    /// column was spilled is newer and stays.
+    #[test]
+    fn a_reload_keeps_values_written_while_spilled() {
+        let storage = PropertyStorage::new();
+        let (alix, gus) = (NodeId::new(1), NodeId::new(2));
+        let key = PropertyKey::new("city");
+        storage.set(alix, key.clone(), "Amsterdam".into());
+        storage.set(gus, key.clone(), "Berlin".into());
+
+        let spilled = storage.drain_column(&key);
+        assert!(storage.is_column_spilled(&key));
+        storage.set(alix, key.clone(), "Paris".into());
+        storage.restore_column(&key, spilled.into_iter());
+
+        assert!(!storage.is_column_spilled(&key));
+        assert_eq!(storage.get(alix, &key), Some(Value::from("Paris")));
+        assert_eq!(storage.get(gus, &key), Some(Value::from("Berlin")));
     }
 
     #[test]

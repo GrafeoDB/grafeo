@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use grafeo_common::types::Value;
 
@@ -29,6 +30,8 @@ pub struct PyQueryResult {
     pub(crate) execution_time_ms: Option<f64>,
     /// Number of rows scanned during execution.
     pub(crate) rows_scanned: Option<u64>,
+    /// What the query's writes changed.
+    pub(crate) counters: grafeo_engine::database::WriteCounters,
 }
 
 #[pymethods]
@@ -160,6 +163,33 @@ impl PyQueryResult {
     /// if result.rows_scanned:
     ///     print(f"Scanned {result.rows_scanned} rows")
     /// ```
+    /// What the query's writes changed, as a dict: `nodes_created`,
+    /// `nodes_deleted`, `edges_created`, `edges_deleted`, `properties_set`,
+    /// `labels_added` and `labels_removed`.
+    ///
+    /// Example:
+    ///     ```python
+    ///     result = db.execute("INSERT (:Person {name: 'Alix'})")
+    ///     result.counters["nodes_created"]  # 1
+    ///     ```
+    #[getter]
+    fn counters<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let c = &self.counters;
+        let dict = PyDict::new(py);
+        for (name, count) in [
+            ("nodes_created", c.nodes_created),
+            ("nodes_deleted", c.nodes_deleted),
+            ("edges_created", c.edges_created),
+            ("edges_deleted", c.edges_deleted),
+            ("properties_set", c.properties_set),
+            ("labels_added", c.labels_added),
+            ("labels_removed", c.labels_removed),
+        ] {
+            dict.set_item(name, count)?;
+        }
+        Ok(dict)
+    }
+
     #[getter]
     fn rows_scanned(&self) -> Option<u64> {
         self.rows_scanned
@@ -406,6 +436,7 @@ impl PyQueryResult {
             current_row: 0,
             execution_time_ms: None,
             rows_scanned: None,
+            counters: grafeo_engine::database::WriteCounters::default(),
         }
     }
 
@@ -426,6 +457,7 @@ impl PyQueryResult {
             current_row: 0,
             execution_time_ms,
             rows_scanned,
+            counters: grafeo_engine::database::WriteCounters::default(),
         }
     }
 
@@ -456,6 +488,7 @@ impl PyQueryResult {
             current_row: 0,
             execution_time_ms: None,
             rows_scanned: None,
+            counters: grafeo_engine::database::WriteCounters::default(),
         }
     }
 

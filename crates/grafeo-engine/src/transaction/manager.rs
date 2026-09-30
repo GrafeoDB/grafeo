@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use grafeo_common::types::{EdgeId, EpochId, NodeId, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_common::utils::hash::FxHashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, MutexGuard, RwLock};
 
 /// State of a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +178,10 @@ pub struct TransactionManager {
     /// Committed transaction epochs (for conflict detection).
     /// Maps TransactionId -> commit epoch.
     committed_epochs: RwLock<FxHashMap<TransactionId, EpochId>>,
+    /// Held by a write outside any transaction (see [`idle_gate`](Self::idle_gate))
+    /// and briefly by every [`begin`](Self::begin), so no transaction starts
+    /// while such a write runs.
+    idle_gate: Mutex<()>,
 }
 
 impl TransactionManager {
@@ -192,6 +196,7 @@ impl TransactionManager {
             active_count: AtomicU64::new(0),
             transactions: RwLock::new(FxHashMap::default()),
             committed_epochs: RwLock::new(FxHashMap::default()),
+            idle_gate: Mutex::new(()),
         }
     }
 
@@ -202,6 +207,8 @@ impl TransactionManager {
 
     /// Begins a new transaction with the specified isolation level.
     pub fn begin_with_isolation(&self, isolation_level: IsolationLevel) -> TransactionId {
+        // Wait for a write outside any transaction to finish.
+        let _gate = self.idle_gate.lock();
         let transaction_id =
             TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed));
         let epoch = EpochId::new(self.current_epoch.load(Ordering::Acquire));
@@ -210,6 +217,22 @@ impl TransactionManager {
         self.transactions.write().insert(transaction_id, info);
         self.active_count.fetch_add(1, Ordering::Relaxed);
         transaction_id
+    }
+
+    /// Exclusive access for a write outside any transaction: `Some` while no
+    /// transaction is open. No transaction can begin until the guard is
+    /// dropped, so such a write cannot conflict with one and needs no
+    /// conflict tracking.
+    pub(crate) fn idle_gate(&self) -> Option<MutexGuard<'_, ()>> {
+        let gate = self.idle_gate.lock();
+        (self.active_count.load(Ordering::Acquire) == 0).then_some(gate)
+    }
+
+    /// A transaction id that no transaction uses, for a write outside any
+    /// transaction that versions its changes so it can undo them (a batch
+    /// holding [`idle_gate`](Self::idle_gate)).
+    pub(crate) fn reserve_transaction_id(&self) -> TransactionId {
+        TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed))
     }
 
     /// Returns the isolation level of a transaction.

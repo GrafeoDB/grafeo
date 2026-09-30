@@ -271,3 +271,158 @@ fn the_same_node_in_one_graph_still_conflicts() {
         .unwrap_err();
     assert!(err.to_string().contains("in graph 'model'"), "{err}");
 }
+
+/// A handle's direct calls work in its graph, and once the graph is dropped
+/// they fail without writing anywhere else.
+#[test]
+fn direct_calls_on_a_handle_stay_in_its_graph() {
+    let db = db_with_graphs();
+    let model = db.graph("model").unwrap();
+    let billing = model
+        .create_node_with_props(&["Component"], [("id", Value::from("ac::billing"))])
+        .unwrap();
+    let ledger = model.create_node(&["Component"]).unwrap();
+    model
+        .set_node_property(ledger, "id", Value::from("ac::ledger"))
+        .unwrap();
+    let uses = model.create_edge(billing, ledger, "USES").unwrap();
+    model
+        .set_edge_property(uses, "weight", Value::from(2_i64))
+        .unwrap();
+    assert!(model.add_node_label(ledger, "Store").unwrap());
+    let ids_created = model
+        .batch_create_nodes_with_props(
+            "Component",
+            vec![
+                [("id".into(), Value::from("ac::audit"))]
+                    .into_iter()
+                    .collect(),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        ids(model.execute(ALL_IDS).unwrap()),
+        ["ac::audit", "ac::billing", "ac::ledger"]
+    );
+    assert_eq!(
+        model
+            .execute("MATCH (:Component)-[r:USES]->(:Store) RETURN r.weight")
+            .unwrap()
+            .rows(),
+        [vec![Value::from(2_i64)]]
+    );
+    assert_eq!(
+        model
+            .get_node(ids_created[0])
+            .unwrap()
+            .unwrap()
+            .get_property("id"),
+        Some(&Value::from("ac::audit"))
+    );
+    assert!(model.get_edge(uses).unwrap().is_some());
+    assert!(ids(db.execute(ALL_IDS).unwrap()).is_empty());
+    assert!(
+        db.get_node(billing).is_none(),
+        "the default graph got nothing"
+    );
+
+    db.execute("DROP GRAPH model").unwrap();
+    let err = model.create_node(&["Component"]).unwrap_err();
+    assert!(err.to_string().contains("does not exist"), "{err}");
+    assert!(model.get_node(billing).is_err());
+    assert!(ids(db.execute(ALL_IDS).unwrap()).is_empty());
+}
+
+#[test]
+fn a_handle_batch_of_edges_stays_in_its_graph() {
+    use grafeo_engine::database::BatchEdge;
+
+    let db = db_with_graphs();
+    let model = db.graph("model").unwrap();
+    let ids = model
+        .batch_create_nodes_with_labels(
+            &["Graph", "Component"],
+            vec![
+                [("id".into(), Value::from("ac::a"))].into_iter().collect(),
+                [("id".into(), Value::from("ac::b"))].into_iter().collect(),
+            ],
+        )
+        .unwrap();
+    model
+        .batch_create_edges(vec![BatchEdge::new(ids[0], ids[1], "USES")])
+        .unwrap();
+    assert_eq!(
+        model
+            .execute("MATCH (:Graph:Component)-[r:USES]->() RETURN count(r)")
+            .unwrap()
+            .rows()[0][0],
+        Value::Int64(1)
+    );
+    assert_eq!(
+        db.execute("MATCH ()-[r]->() RETURN count(r)")
+            .unwrap()
+            .rows()[0][0],
+        Value::Int64(0)
+    );
+}
+
+/// The number of nodes in the default graph.
+fn default_graph_nodes(db: &GrafeoDB) -> Value {
+    db.execute("MATCH (n) RETURN count(n)").unwrap().rows()[0][0].clone()
+}
+
+fn assert_missing<T: std::fmt::Debug>(result: grafeo_common::utils::error::Result<T>) {
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("does not exist"), "{err}");
+}
+
+/// A schema's default graph exists only while the schema does: a handle on
+/// it neither opens nor writes once the schema is gone.
+#[test]
+fn a_schema_default_graph_needs_its_schema() {
+    let db = GrafeoDB::new_in_memory();
+    assert_missing(db.graph_in(Some("missing"), "default"));
+
+    db.execute("CREATE SCHEMA staging").unwrap();
+    let staging = db.graph_in(Some("staging"), "default").unwrap();
+    staging.execute("INSERT (:File {id: 'f0'})").unwrap();
+    db.execute("DROP SCHEMA staging").unwrap();
+
+    assert_missing(staging.execute("INSERT (:File {id: 'f1'})"));
+    assert_missing(staging.create_node(&["File"]));
+    assert_eq!(default_graph_nodes(&db), Value::Int64(0));
+}
+
+/// A session keeps its graph's name: after another session drops the graph,
+/// its statements and direct calls fail instead of using the default graph.
+#[test]
+fn a_session_on_a_dropped_graph_writes_nowhere() {
+    let db = db_with_graphs();
+    let session = db.graph("model").unwrap().session().unwrap();
+    session.execute("INSERT (:Component {id: 'c0'})").unwrap();
+    db.execute("DROP GRAPH model").unwrap();
+
+    assert_missing(session.execute("INSERT (:Component {id: 'c1'})"));
+    assert_missing(session.execute("MATCH (n) RETURN n.id"));
+    assert_missing(session.create_node(&["Component"]));
+    assert_eq!(default_graph_nodes(&db), Value::Int64(0));
+
+    // The session can still switch to a graph that exists.
+    session.execute("USE GRAPH extraction").unwrap();
+    session.execute("INSERT (:File {id: 'f0'})").unwrap();
+}
+
+/// The graph `set_current_graph` selects, dropped through another session:
+/// the database's own calls fail instead of using the default graph.
+#[test]
+fn the_selected_graph_dropped_elsewhere() {
+    let db = db_with_graphs();
+    db.set_current_graph(Some("model")).unwrap();
+    db.session().execute("DROP GRAPH model").unwrap();
+
+    assert_missing(db.execute("INSERT (:Component {id: 'c0'})"));
+    assert_missing(db.create_node(&["Component"]));
+    db.set_current_graph(None).unwrap();
+    assert_eq!(default_graph_nodes(&db), Value::Int64(0));
+}

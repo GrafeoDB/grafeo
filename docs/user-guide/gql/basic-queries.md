@@ -65,6 +65,8 @@ RETURN friend.name
 
 ## Ordering Results
 
+Without `ORDER BY`, rows come in no particular order. The order can change between runs, builds and versions (parallel execution, compaction and planner changes all affect it), and so can which rows `LIMIT` keeps. When the order matters, say so with `ORDER BY`. To find code that relies on the order anyway, open the database with the `shuffle_unordered` option in tests (Python: `GrafeoDB(shuffle_unordered=True)`, Node.js: `GrafeoDB.create(path, { shuffleUnordered: true })`, Rust: `Config::with_shuffle_unordered(true)`): every result without `ORDER BY` then comes back in random order.
+
 ```sql
 -- Order by property
 MATCH (p:Person)

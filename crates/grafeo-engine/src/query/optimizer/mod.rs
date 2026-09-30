@@ -62,6 +62,18 @@ pub struct Optimizer {
     cost_model: CostModel,
     /// Cardinality estimator.
     card_estimator: CardinalityEstimator,
+    /// How cyclic joins of three or more relations are planned.
+    cyclic_joins: CyclicJoins,
+}
+
+/// How the optimizer plans a cyclic join of three or more relations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CyclicJoins {
+    /// Binary joins in cost-based order. LPG plans: the LPG leapfrog join
+    /// returned wrong rows.
+    Binary,
+    /// One leapfrog `MultiWayJoin`, which the RDF planner executes.
+    MultiWay,
 }
 
 impl Optimizer {
@@ -74,6 +86,7 @@ impl Optimizer {
             enable_projection_pushdown: true,
             cost_model: CostModel::new(),
             card_estimator: CardinalityEstimator::new(),
+            cyclic_joins: CyclicJoins::Binary,
         }
     }
 
@@ -117,6 +130,7 @@ impl Optimizer {
             enable_projection_pushdown: true,
             cost_model: CostModel::new().with_graph_totals(total, total),
             card_estimator: estimator,
+            cyclic_joins: CyclicJoins::MultiWay,
         }
     }
 
@@ -156,6 +170,7 @@ impl Optimizer {
                 .with_label_cardinalities(label_cardinalities)
                 .with_graph_totals(stats.total_nodes, stats.total_edges),
             card_estimator: estimator,
+            cyclic_joins: CyclicJoins::Binary,
         }
     }
 
@@ -396,6 +411,9 @@ impl Optimizer {
             LogicalExpression::IndexAccess { base, index } => {
                 Self::collect_from_expression(base, required);
                 Self::collect_from_expression(index, required);
+            }
+            LogicalExpression::MapAccess { base, .. } => {
+                Self::collect_from_expression(base, required);
             }
             LogicalExpression::SliceAccess { base, start, end } => {
                 Self::collect_from_expression(base, required);
@@ -711,7 +729,8 @@ impl Optimizer {
     }
 
     /// Optimizes the join order using DPccp, or produces a multi-way
-    /// leapfrog join for cyclic patterns when the cost model prefers it.
+    /// leapfrog join for cyclic patterns where the planner supports one (see
+    /// [`CyclicJoins`]).
     fn optimize_join_order(
         &self,
         relations: &[(String, LogicalOperator)],
@@ -737,11 +756,13 @@ impl Optimizer {
 
         let graph = builder.build();
 
-        // For cyclic graphs with 3+ relations, use leapfrog (WCOJ) join.
-        // Cyclic joins (e.g. triangle patterns) benefit from worst-case optimal
-        // multi-way intersection rather than binary hash join cascades that can
-        // produce intermediate blowup.
-        if graph.is_cyclic() && relations.len() >= 3 {
+        // For cyclic graphs with 3+ relations, use leapfrog (WCOJ) join where
+        // the planner has a correct one (RDF). The LPG leapfrog join
+        // intersected only the first shared variable, dropped pushed-down
+        // filters and ordered its variables nondeterministically, so it
+        // returned wrong rows; LPG plans keep binary joins until it holds
+        // every join condition.
+        if self.cyclic_joins == CyclicJoins::MultiWay && graph.is_cyclic() && relations.len() >= 3 {
             // Collect shared variables (variables appearing in 2+ conditions)
             let mut var_counts: std::collections::HashMap<&str, usize> =
                 std::collections::HashMap::new();
@@ -983,6 +1004,25 @@ impl Optimizer {
         predicate: LogicalExpression,
         op: LogicalOperator,
     ) -> LogicalOperator {
+        // Subquery and volatile conjuncts stay above `op`, where they were
+        // written; only the others move down.
+        let (pinned, movable): (Vec<_>, Vec<_>) =
+            conjuncts(predicate).into_iter().partition(stays_in_place);
+        let predicate = match (conjunction(pinned), conjunction(movable)) {
+            (Some(pinned), movable) => {
+                let input = match movable {
+                    Some(movable) => self.try_push_filter_into(movable, op),
+                    None => op,
+                };
+                return LogicalOperator::Filter(FilterOp {
+                    predicate: pinned,
+                    pushdown_hint: None,
+                    input: Box::new(input),
+                });
+            }
+            (None, Some(movable)) => movable,
+            (None, None) => return op,
+        };
         match op {
             // Can push through Project if predicate doesn't depend on computed columns
             LogicalOperator::Project(mut proj) => {
@@ -1349,6 +1389,7 @@ impl Optimizer {
                 Self::collect_variables(base, vars);
                 Self::collect_variables(index, vars);
             }
+            LogicalExpression::MapAccess { base, .. } => Self::collect_variables(base, vars),
             LogicalExpression::SliceAccess { base, start, end } => {
                 Self::collect_variables(base, vars);
                 if let Some(s) = start {
@@ -1441,6 +1482,74 @@ impl Optimizer {
 impl Default for Optimizer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Whether a conjunct must stay where it is written: it holds a subquery,
+/// whose outer references [`Optimizer::collect_variables`] does not see, or a
+/// volatile function, which would run a different number of times lower down.
+fn stays_in_place(expr: &LogicalExpression) -> bool {
+    let any = |items: &[LogicalExpression]| items.iter().any(stays_in_place);
+    let maybe = |expr: &Option<Box<LogicalExpression>>| expr.as_deref().is_some_and(stays_in_place);
+    match expr {
+        LogicalExpression::ExistsSubquery(_)
+        | LogicalExpression::CountSubquery(_)
+        | LogicalExpression::ValueSubquery(_)
+        | LogicalExpression::PatternComprehension { .. } => true,
+        LogicalExpression::FunctionCall { name, args, .. } => {
+            name.eq_ignore_ascii_case("rand") || name.eq_ignore_ascii_case("random") || any(args)
+        }
+        LogicalExpression::Binary { left, right, .. } => {
+            stays_in_place(left) || stays_in_place(right)
+        }
+        LogicalExpression::Unary { operand, .. } => stays_in_place(operand),
+        LogicalExpression::List(items) => any(items),
+        LogicalExpression::Map(pairs) => pairs.iter().any(|(_, value)| stays_in_place(value)),
+        LogicalExpression::IndexAccess { base, index } => {
+            stays_in_place(base) || stays_in_place(index)
+        }
+        LogicalExpression::MapAccess { base, .. } => stays_in_place(base),
+        LogicalExpression::SliceAccess { base, start, end } => {
+            stays_in_place(base) || maybe(start) || maybe(end)
+        }
+        LogicalExpression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            maybe(operand)
+                || when_clauses
+                    .iter()
+                    .any(|(condition, result)| stays_in_place(condition) || stays_in_place(result))
+                || maybe(else_clause)
+        }
+        LogicalExpression::ListComprehension {
+            list_expr,
+            filter_expr,
+            map_expr,
+            ..
+        } => stays_in_place(list_expr) || maybe(filter_expr) || stays_in_place(map_expr),
+        LogicalExpression::ListPredicate {
+            list_expr,
+            predicate,
+            ..
+        } => stays_in_place(list_expr) || stays_in_place(predicate),
+        LogicalExpression::MapProjection { entries, .. } => entries.iter().any(|entry| {
+            matches!(entry, crate::query::plan::MapProjectionEntry::LiteralEntry(_, value) if stays_in_place(value))
+        }),
+        LogicalExpression::Reduce {
+            initial,
+            list,
+            expression,
+            ..
+        } => stays_in_place(initial) || stays_in_place(list) || stays_in_place(expression),
+        LogicalExpression::Variable(_)
+        | LogicalExpression::Property { .. }
+        | LogicalExpression::Literal(_)
+        | LogicalExpression::Parameter(_)
+        | LogicalExpression::Labels(_)
+        | LogicalExpression::Type(_)
+        | LogicalExpression::Id(_) => false,
     }
 }
 
@@ -2348,8 +2457,9 @@ mod tests {
         assert!(matches!(&optimized.root, LogicalOperator::Return(_)));
     }
 
-    #[test]
-    fn test_cyclic_join_produces_multi_way_join() {
+    /// `a JOIN b JOIN c` with the conditions a = b, b = c and c = a: a cyclic
+    /// join graph of three relations.
+    fn triangle_join_plan() -> LogicalPlan {
         use crate::query::plan::JoinCondition;
 
         // Triangle pattern: a ⋈ b ⋈ c ⋈ a (cyclic)
@@ -2396,37 +2506,46 @@ mod tests {
             ],
         });
 
-        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+        LogicalPlan::new(LogicalOperator::Return(ReturnOp {
             items: vec![ReturnItem {
                 expression: LogicalExpression::Variable("a".to_string()),
                 alias: None,
             }],
             distinct: false,
             input: Box::new(join_abc),
-        }));
+        }))
+    }
 
+    fn has_multi_way_join(op: &LogicalOperator) -> bool {
+        match op {
+            LogicalOperator::MultiWayJoin(_) => true,
+            LogicalOperator::Return(ret) => has_multi_way_join(&ret.input),
+            LogicalOperator::Filter(f) => has_multi_way_join(&f.input),
+            LogicalOperator::Project(p) => has_multi_way_join(&p.input),
+            _ => false,
+        }
+    }
+
+    /// The LPG leapfrog join returned wrong rows (it intersected only the
+    /// first shared variable), so LPG plans keep binary joins.
+    #[test]
+    fn test_cyclic_join_uses_binary_joins() {
         let mut optimizer = Optimizer::new();
         optimizer
             .card_estimator
             .add_table_stats("Person", cardinality::TableStats::new(1000));
+        let optimized = optimizer.optimize(triangle_join_plan()).unwrap();
+        assert!(!has_multi_way_join(&optimized.root));
+    }
 
-        let optimized = optimizer.optimize(plan).unwrap();
-
-        // Walk the tree to find a MultiWayJoin
-        fn has_multi_way_join(op: &LogicalOperator) -> bool {
-            match op {
-                LogicalOperator::MultiWayJoin(_) => true,
-                LogicalOperator::Return(ret) => has_multi_way_join(&ret.input),
-                LogicalOperator::Filter(f) => has_multi_way_join(&f.input),
-                LogicalOperator::Project(p) => has_multi_way_join(&p.input),
-                _ => false,
-            }
-        }
-
-        assert!(
-            has_multi_way_join(&optimized.root),
-            "Expected MultiWayJoin for cyclic triangle pattern"
-        );
+    /// The RDF planner's leapfrog join still gets cyclic joins.
+    #[cfg(feature = "triple-store")]
+    #[test]
+    fn test_rdf_cyclic_join_produces_multi_way_join() {
+        let optimizer =
+            Optimizer::from_rdf_statistics(grafeo_core::statistics::RdfStatistics::default());
+        let optimized = optimizer.optimize(triangle_join_plan()).unwrap();
+        assert!(has_multi_way_join(&optimized.root));
     }
 
     #[test]

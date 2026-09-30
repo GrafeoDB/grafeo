@@ -1,0 +1,116 @@
+# Cypher predicates: regular expressions and patterns in WHERE
+#
+# `s =~ pattern` is true when the pattern matches the whole string (inline
+# flags such as `(?i)` still apply). A pattern with a relationship in WHERE,
+# `(d)-[:T]->()`, is true when it has a match, like EXISTS { MATCH ... };
+# `NOT (d)-[:T]->()` keeps the rows without one.
+
+meta:
+  language: cypher
+  model: lpg
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # =~ matches the whole string
+  # ---------------------------------------------------------------------------
+
+  - name: regex_suffix_pattern_matches_the_whole_string
+    setup:
+      - "CREATE (:T {name: 'AlphaServiceImpl'}), (:T {name: 'AlphaService'})"
+    query: "MATCH (n:T) WHERE n.name =~ '.*Service' RETURN n.name"
+    expect:
+      rows:
+        - [AlphaService]
+
+  - name: regex_prefix_alone_does_not_match
+    setup:
+      - "CREATE (:T {name: 'AlphaServiceImpl'}), (:T {name: 'AlphaService'})"
+    query: "MATCH (n:T) WHERE n.name =~ 'Alpha' RETURN n.name"
+    expect:
+      empty: true
+
+  - name: regex_inline_flag_matches_the_whole_string
+    setup:
+      - "CREATE (:T {name: 'AlphaServiceImpl'}), (:T {name: 'AlphaService'})"
+    query: "MATCH (n:T) WHERE n.name =~ '(?i)alphaservice' RETURN n.name"
+    expect:
+      rows:
+        - [AlphaService]
+
+  - name: regex_anchors_still_work
+    setup:
+      - "CREATE (:T {name: 'AlphaServiceImpl'}), (:T {name: 'AlphaService'})"
+    query: "MATCH (n:T) WHERE n.name =~ '^.*Service$' RETURN n.name"
+    expect:
+      rows:
+        - [AlphaService]
+
+  - name: regex_alternation_covers_the_whole_string
+    setup:
+      - "CREATE (:T {name: 'route'}), (:T {name: 'api'}), (:T {name: 'router'})"
+    query: "MATCH (n:T) WHERE n.name =~ 'route|api' RETURN n.name ORDER BY n.name"
+    expect:
+      rows:
+        - [api]
+        - [route]
+
+  # ---------------------------------------------------------------------------
+  # Pattern predicates
+  # ---------------------------------------------------------------------------
+
+  - name: pattern_predicate_keeps_rows_with_a_match
+    setup:
+      - "CREATE (:Dir {id: 'a'})-[:CONTAINS]->(:File {id: 'f'})"
+      - "CREATE (:Dir {id: 'empty'})"
+    query: "MATCH (d:Dir) WHERE (d)-[:CONTAINS]->() RETURN d.id"
+    expect:
+      rows:
+        - [a]
+
+  - name: negated_pattern_predicate_keeps_rows_without_a_match
+    setup:
+      - "CREATE (:Dir {id: 'a'})-[:CONTAINS]->(:File {id: 'f'})"
+      - "CREATE (:Dir {id: 'empty'})"
+    query: "MATCH (d:Dir) WHERE NOT (d)-[:CONTAINS]->() RETURN d.id"
+    expect:
+      rows:
+        - [empty]
+
+  - name: untyped_pattern_predicate
+    setup:
+      - "CREATE (:Dir {id: 'a'})-[:CONTAINS]->(:File {id: 'f'})"
+      - "CREATE (:Dir {id: 'empty'})"
+    query: "MATCH (d:Dir) WHERE (d)-->() RETURN d.id"
+    expect:
+      rows:
+        - [a]
+
+  - name: pattern_predicate_with_a_backquoted_type
+    setup:
+      - "CREATE (:Graph:Dir {id: 'a'})-[:`Graph:CONTAINS`]->(:Graph:File {id: 'f'})"
+      - "CREATE (:Graph:Dir {id: 'empty'})"
+    query: "MATCH (d:Graph:Dir) WHERE (d)-[:`Graph:CONTAINS`]->() RETURN d.id"
+    expect:
+      rows:
+        - [a]
+
+  - name: pattern_predicate_combined_with_other_conditions
+    setup:
+      - "CREATE (:Dir {id: 'a'})-[:CONTAINS]->(:File {id: 'f'})"
+      - "CREATE (:Dir {id: 'b'})-[:CONTAINS]->(:File {id: 'g'})"
+      - "CREATE (:Dir {id: 'empty'})"
+    query: "MATCH (d:Dir) WHERE d.id <> 'b' AND (d)-[:CONTAINS]->(:File) RETURN d.id"
+    expect:
+      rows:
+        - [a]
+
+  - name: parenthesized_expressions_still_parse
+    setup:
+      - "CREATE (:Dir {id: 'a', n: 2})"
+    query: "MATCH (d:Dir) WHERE (d.n + 1) * 2 = 6 AND (d.id = 'a') RETURN (d.n)"
+    expect:
+      rows:
+        - [2]

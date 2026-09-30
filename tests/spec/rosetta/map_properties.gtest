@@ -83,3 +83,48 @@ tests:
         - [b]
         - [c]
         - [a]
+
+  # A column without an alias is named as written: `n.meta.score`, while the
+  # subscript form keeps its brackets.
+  - name: nested_map_property_dot_access_names_its_column
+    setup:
+      - "INSERT (:A {id: 'a', meta: {score: 0.5, a: {b: 'deep'}}})"
+    variants:
+      gql: "MATCH (n:A) RETURN n.meta.score, n.meta.a.b, n.meta['score']"
+      cypher: "MATCH (n:A) RETURN n.meta.score, n.meta.a.b, n.meta['score']"
+    expect:
+      columns: [n.meta.score, n.meta.a.b, "n.meta['score']"]
+      rows:
+        - [0.5, deep, 0.5]
+
+  # Map-shaped bases: a map literal, a map bound to a variable, properties()
+  # and an element of a list of maps.
+  - name: nested_map_property_dot_access_on_map_values
+    setup:
+      - "INSERT (:A {id: 'a', items: [{k: 'first'}, {k: 'second'}]})"
+    variants:
+      gql: "MATCH (n:A) WITH n, {route: {to: 'x'}} AS m RETURN m.route.to, properties(n).id, n.items[1].k, [{k: 'y'}][0].k"
+      cypher: "MATCH (n:A) WITH n, {route: {to: 'x'}} AS m RETURN m.route.to, properties(n).id, n.items[1].k, [{k: 'y'}][0].k"
+    expect:
+      rows:
+        - [x, a, second, y]
+
+  # Dotted access reads a key of a map. On a node or edge that an expression
+  # returns it is an error, never a silent null: match the node as a variable.
+  - name: dot_access_on_an_endpoint_function_is_an_error
+    setup:
+      - "INSERT (:A {id: 'a'})-[:R]->(:A {id: 'b'})"
+    variants:
+      gql: "MATCH (:A)-[r:R]->(:A) RETURN startNode(r).id"
+      cypher: "MATCH (:A)-[r:R]->(:A) RETURN endNode(r).id"
+    expect:
+      error: "not a map"
+
+  - name: dot_access_on_a_collected_node_is_an_error
+    setup:
+      - "INSERT (:A {id: 'a'})"
+    variants:
+      gql: "MATCH (n:A) RETURN head(collect(n)).id"
+      cypher: "MATCH (n:A) RETURN collect(n)[0].id"
+    expect:
+      error: "not a map"

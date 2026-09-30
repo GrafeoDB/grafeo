@@ -718,6 +718,7 @@ pub(crate) fn explain_result(plan: &LogicalPlan) -> QueryResult {
         rows_scanned: None,
         status_message: None,
         gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+        counters: Default::default(),
     }
 }
 
@@ -741,6 +742,7 @@ pub(crate) fn physical_explain_result(
         rows_scanned: None,
         status_message: None,
         gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+        counters: Default::default(),
     }
 }
 
@@ -1080,6 +1082,7 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &QueryParams) 
             substitute_in_expression(base, params)?;
             substitute_in_expression(index, params)?;
         }
+        LogicalExpression::MapAccess { base, .. } => substitute_in_expression(base, params)?,
         LogicalExpression::SliceAccess { base, start, end } => {
             substitute_in_expression(base, params)?;
             if let Some(s) = start {

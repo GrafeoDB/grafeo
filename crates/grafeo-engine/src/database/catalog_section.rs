@@ -12,10 +12,12 @@ use serde::{Deserialize, Serialize};
 
 use grafeo_common::storage::section::{Section, SectionType};
 use grafeo_common::utils::error::{Error, Result};
+use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::index::vector::{DistanceMetric, QuantizationType};
 
 use crate::catalog::{
-    Catalog, ConstraintDefinition, EdgeTypeDefinition, GraphTypeDefinition, NodeTypeDefinition,
-    ProcedureDefinition,
+    Catalog, ConstraintDefinition, EdgeTypeDefinition, GraphTypeDefinition, IndexType,
+    NodeTypeDefinition, ProcedureDefinition,
 };
 
 /// Current catalog section format version.
@@ -51,6 +53,109 @@ struct ConstraintNames {
     constraints: Vec<ConstraintDefinition>,
 }
 
+/// The indexes of every graph and the index names, appended after the
+/// constraint names when there are any (0.5.44). The version 1 snapshot
+/// holds only the default graph's definitions, without quantization; readers
+/// before 0.5.44 ignore both, and did not rebuild indexes from it either.
+#[derive(Serialize, Deserialize)]
+struct IndexExtension {
+    graphs: Vec<GraphIndexes>,
+    names: Vec<IndexName>,
+}
+
+/// The indexes of one graph, as a checkpoint saves them: definitions only.
+/// Loading builds the indexes from the data, or restores the default graph's
+/// vector and text indexes from their own sections.
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+pub(crate) struct GraphIndexes {
+    /// The graph's storage key; `None` for the default graph.
+    pub graph: Option<String>,
+    /// Indexed node properties.
+    pub property: Vec<String>,
+    /// Vector indexes.
+    pub vector: Vec<VectorIndexDefinition>,
+    /// Text indexes, as `(label, property)`.
+    pub text: Vec<(String, String)>,
+}
+
+impl GraphIndexes {
+    /// The indexes of `store`, the graph `graph`.
+    fn of(store: &LpgStore, graph: Option<String>) -> Self {
+        let mut property = store.property_index_keys();
+        property.sort();
+
+        #[cfg(feature = "vector-index")]
+        let mut vector: Vec<VectorIndexDefinition> = store
+            .vector_index_entries()
+            .into_iter()
+            .filter_map(|(key, index)| {
+                let (label, property) = key.split_once(':')?;
+                let config = index.config();
+                Some(VectorIndexDefinition {
+                    label: label.to_string(),
+                    property: property.to_string(),
+                    dimensions: config.dimensions,
+                    metric: config.metric,
+                    m: config.m,
+                    ef_construction: config.ef_construction,
+                    quantization: index.quantization_type(),
+                })
+            })
+            .collect();
+        #[cfg(not(feature = "vector-index"))]
+        let mut vector: Vec<VectorIndexDefinition> = Vec::new();
+        vector.sort_by(|a, b| (&a.label, &a.property).cmp(&(&b.label, &b.property)));
+
+        #[cfg(feature = "text-index")]
+        let mut text: Vec<(String, String)> = store
+            .text_index_entries()
+            .into_iter()
+            .filter_map(|(key, _)| {
+                let (label, property) = key.split_once(':')?;
+                Some((label.to_string(), property.to_string()))
+            })
+            .collect();
+        #[cfg(not(feature = "text-index"))]
+        let mut text: Vec<(String, String)> = Vec::new();
+        text.sort();
+
+        Self {
+            graph,
+            property,
+            vector,
+            text,
+        }
+    }
+
+    /// Whether the graph has no index.
+    pub fn is_empty(&self) -> bool {
+        self.property.is_empty() && self.vector.is_empty() && self.text.is_empty()
+    }
+}
+
+/// A vector index's definition.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub(crate) struct VectorIndexDefinition {
+    pub label: String,
+    pub property: String,
+    pub dimensions: usize,
+    pub metric: DistanceMetric,
+    pub m: usize,
+    pub ef_construction: usize,
+    /// `None` for a plain HNSW index.
+    pub quantization: Option<QuantizationType>,
+}
+
+/// The name `CREATE INDEX` gave an index, for `SHOW INDEXES` and
+/// `DROP INDEX`.
+#[derive(Serialize, Deserialize)]
+struct IndexName {
+    name: String,
+    label: String,
+    property: String,
+    index_type: IndexType,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct SnapshotIndexes {
     property_indexes: Vec<String>,
@@ -58,12 +163,68 @@ struct SnapshotIndexes {
     text_indexes: Vec<SnapshotTextIndex>,
 }
 
+impl SnapshotIndexes {
+    /// The version 1 layout of the default graph's indexes.
+    fn from_graph(indexes: &GraphIndexes) -> Self {
+        Self {
+            property_indexes: indexes.property.clone(),
+            vector_indexes: indexes
+                .vector
+                .iter()
+                .map(|def| SnapshotVectorIndex {
+                    label: def.label.clone(),
+                    property: def.property.clone(),
+                    dimensions: def.dimensions,
+                    metric: def.metric,
+                    m: def.m,
+                    ef_construction: def.ef_construction,
+                })
+                .collect(),
+            text_indexes: indexes
+                .text
+                .iter()
+                .map(|(label, property)| SnapshotTextIndex {
+                    label: label.clone(),
+                    property: property.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// The default graph's indexes from the version 1 layout: files written
+    /// before 0.5.44, which have no [`IndexExtension`].
+    fn into_graph(self) -> GraphIndexes {
+        GraphIndexes {
+            graph: None,
+            property: self.property_indexes,
+            vector: self
+                .vector_indexes
+                .into_iter()
+                .map(|def| VectorIndexDefinition {
+                    label: def.label,
+                    property: def.property,
+                    dimensions: def.dimensions,
+                    metric: def.metric,
+                    m: def.m,
+                    ef_construction: def.ef_construction,
+                    quantization: None,
+                })
+                .collect(),
+            text: self
+                .text_indexes
+                .into_iter()
+                .map(|def| (def.label, def.property))
+                .collect(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct SnapshotVectorIndex {
     label: String,
     property: String,
     dimensions: usize,
-    metric: grafeo_core::index::vector::DistanceMetric,
+    metric: DistanceMetric,
     m: usize,
     ef_construction: usize,
 }
@@ -82,9 +243,11 @@ struct SnapshotTextIndex {
 /// small (typically < 10 KB) and always kept in RAM.
 pub struct CatalogSection {
     catalog: Arc<Catalog>,
-    store: Arc<grafeo_core::graph::lpg::LpgStore>,
+    store: Arc<LpgStore>,
     epoch_fn: Box<dyn Fn() -> u64 + Send + Sync>,
     dirty: AtomicBool,
+    /// The index definitions the last `deserialize` read.
+    loaded_indexes: Vec<GraphIndexes>,
 }
 
 impl CatalogSection {
@@ -94,7 +257,7 @@ impl CatalogSection {
     /// dependency on `TransactionManager` which lives in the engine layer.
     pub fn new(
         catalog: Arc<Catalog>,
-        store: Arc<grafeo_core::graph::lpg::LpgStore>,
+        store: Arc<LpgStore>,
         epoch_fn: impl Fn() -> u64 + Send + Sync + 'static,
     ) -> Self {
         Self {
@@ -102,7 +265,15 @@ impl CatalogSection {
             store,
             epoch_fn: Box::new(epoch_fn),
             dirty: AtomicBool::new(false),
+            loaded_indexes: Vec::new(),
         }
+    }
+
+    /// The index definitions of every graph that `deserialize` read, for the
+    /// loader to build once the data is in (the catalog holds only their
+    /// names).
+    pub(crate) fn take_loaded_indexes(&mut self) -> Vec<GraphIndexes> {
+        std::mem::take(&mut self.loaded_indexes)
     }
 
     /// Mark this section as dirty.
@@ -122,50 +293,54 @@ impl CatalogSection {
         }
     }
 
-    fn collect_indexes(&self) -> SnapshotIndexes {
-        let property_indexes = self.store.property_index_keys();
+    /// The indexes of the default graph and of each named graph that has any.
+    fn collect_graph_indexes(&self) -> Vec<GraphIndexes> {
+        let mut graphs = vec![GraphIndexes::of(&self.store, None)];
+        let mut names = self.store.graph_names();
+        names.sort();
+        for name in names {
+            if let Some(graph) = self.store.graph(&name) {
+                let indexes = GraphIndexes::of(&graph, Some(name));
+                if !indexes.is_empty() {
+                    graphs.push(indexes);
+                }
+            }
+        }
+        graphs
+    }
 
-        #[cfg(feature = "vector-index")]
-        let vector_indexes: Vec<SnapshotVectorIndex> = self
-            .store
-            .vector_index_entries()
+    /// The names `CREATE INDEX` gave indexes.
+    fn collect_index_names(&self) -> Vec<IndexName> {
+        let mut names: Vec<IndexName> = self
+            .catalog
+            .all_indexes()
             .into_iter()
-            .filter_map(|(key, index)| {
-                let (label, property) = key.split_once(':')?;
-                let config = index.config();
-                Some(SnapshotVectorIndex {
-                    label: label.to_string(),
-                    property: property.to_string(),
-                    dimensions: config.dimensions,
-                    metric: config.metric,
-                    m: config.m,
-                    ef_construction: config.ef_construction,
+            .filter_map(|def| {
+                Some(IndexName {
+                    label: self.catalog.get_label_name(def.label)?.to_string(),
+                    property: self
+                        .catalog
+                        .get_property_key_name(def.property_key)?
+                        .to_string(),
+                    name: def.name,
+                    index_type: def.index_type,
                 })
             })
             .collect();
-        #[cfg(not(feature = "vector-index"))]
-        let vector_indexes = Vec::new();
+        names.sort_by(|a, b| a.name.cmp(&b.name));
+        names
+    }
 
-        #[cfg(feature = "text-index")]
-        let text_indexes: Vec<SnapshotTextIndex> = self
-            .store
-            .text_index_entries()
-            .into_iter()
-            .filter_map(|(key, _)| {
-                let (label, property) = key.split_once(':')?;
-                Some(SnapshotTextIndex {
-                    label: label.to_string(),
-                    property: property.to_string(),
-                })
-            })
-            .collect();
-        #[cfg(not(feature = "text-index"))]
-        let text_indexes = Vec::new();
-
-        SnapshotIndexes {
-            property_indexes,
-            vector_indexes,
-            text_indexes,
+    /// Registers the index names in the catalog again.
+    fn restore_index_names(&self, names: Vec<IndexName>) {
+        for index in names {
+            if self.catalog.find_index_by_name(&index.name).is_some() {
+                continue;
+            }
+            let label = self.catalog.get_or_create_label(&index.label);
+            let property = self.catalog.get_or_create_property_key(&index.property);
+            self.catalog
+                .create_index(&index.name, label, property, index.index_type);
         }
     }
 }
@@ -184,22 +359,37 @@ impl Section for CatalogSection {
         let (schema, constraints) = self
             .catalog
             .with_constraints(|constraints| (self.collect_schema(), constraints));
+        let mut graphs = self.collect_graph_indexes();
         let snapshot = CatalogSnapshot {
             version: CATALOG_SECTION_VERSION,
             schema,
-            indexes: self.collect_indexes(),
+            indexes: SnapshotIndexes::from_graph(&graphs[0]),
             epoch: (self.epoch_fn)(),
         };
 
         let config = bincode::config::standard();
         let mut bytes = bincode::serde::encode_to_vec(&snapshot, config)
             .map_err(|e| Error::Internal(format!("Catalog section serialization failed: {e}")))?;
-        if !constraints.is_empty() {
+
+        graphs.retain(|graph| !graph.is_empty());
+        let extension = IndexExtension {
+            graphs,
+            names: self.collect_index_names(),
+        };
+        let has_extension = !extension.graphs.is_empty() || !extension.names.is_empty();
+        // The extension follows the constraint names, so they come first even
+        // when there are none.
+        if !constraints.is_empty() || has_extension {
             let names = bincode::serde::encode_to_vec(ConstraintNames { constraints }, config)
                 .map_err(|e| {
                     Error::Internal(format!("Constraint name serialization failed: {e}"))
                 })?;
             bytes.extend_from_slice(&names);
+        }
+        if has_extension {
+            let indexes = bincode::serde::encode_to_vec(&extension, config)
+                .map_err(|e| Error::Internal(format!("Index serialization failed: {e}")))?;
+            bytes.extend_from_slice(&indexes);
         }
         Ok(bytes)
     }
@@ -233,17 +423,32 @@ impl Section for CatalogSection {
             let _ = self.catalog.bind_graph_type(graph_name, type_name.clone());
         }
         // The node types restored above already hold the constraints.
-        if read < data.len() {
-            let (names, _): (ConstraintNames, _) =
-                bincode::serde::decode_from_slice(&data[read..], config).map_err(|e| {
+        let mut rest = &data[read..];
+        if !rest.is_empty() {
+            let (names, read): (ConstraintNames, _) =
+                bincode::serde::decode_from_slice(rest, config).map_err(|e| {
                     Error::Serialization(format!("Constraint names deserialization failed: {e}"))
                 })?;
             self.catalog.restore_constraint_names(names.constraints);
+            rest = &rest[read..];
         }
 
-        // Index metadata is stored for reference. Actual index rebuilding
-        // happens in the engine after all data sections are loaded.
-        // The engine reads the catalog's index defs and calls create_*_index.
+        // The indexes are built by the loader once the data is in.
+        self.loaded_indexes = if rest.is_empty() {
+            let root = snapshot.indexes.into_graph();
+            if root.is_empty() {
+                Vec::new()
+            } else {
+                vec![root]
+            }
+        } else {
+            let (extension, _): (IndexExtension, _) =
+                bincode::serde::decode_from_slice(rest, config).map_err(|e| {
+                    Error::Serialization(format!("Index deserialization failed: {e}"))
+                })?;
+            self.restore_index_names(extension.names);
+            extension.graphs
+        };
 
         Ok(())
     }
@@ -467,5 +672,81 @@ mod tests {
         let mut section = make_section();
         let result = section.deserialize(&[0xFF, 0xFE, 0xFD, 0x00]);
         assert!(result.is_err(), "corrupt data should fail deserialization");
+    }
+
+    /// The indexes of every graph and the index names round trip: loading
+    /// hands the definitions to the loader and registers the names.
+    #[test]
+    fn indexes_of_every_graph_round_trip() {
+        let section = make_section();
+        section.store.create_property_index("id");
+        section.store.create_graph("model").unwrap();
+        section
+            .store
+            .graph("model")
+            .unwrap()
+            .create_property_index("key");
+        let label = section.catalog.get_or_create_label("File");
+        let size = section.catalog.get_or_create_property_key("size");
+        section
+            .catalog
+            .create_index("file_size", label, size, IndexType::BTree);
+        let bytes = section.serialize().unwrap();
+
+        let catalog = Arc::new(Catalog::new());
+        let store = Arc::new(LpgStore::new().unwrap());
+        let mut loaded = CatalogSection::new(Arc::clone(&catalog), store, || 0);
+        loaded.deserialize(&bytes).unwrap();
+        assert_eq!(
+            loaded.take_loaded_indexes(),
+            [
+                GraphIndexes {
+                    graph: None,
+                    property: vec!["id".to_string()],
+                    ..GraphIndexes::default()
+                },
+                GraphIndexes {
+                    graph: Some("model".to_string()),
+                    property: vec!["key".to_string()],
+                    ..GraphIndexes::default()
+                },
+            ]
+        );
+        let index = catalog
+            .get_index(catalog.find_index_by_name("file_size").unwrap())
+            .unwrap();
+        assert_eq!(index.index_type, IndexType::BTree);
+        assert_eq!(catalog.get_label_name(index.label).as_deref(), Some("File"));
+        assert_eq!(
+            catalog.get_property_key_name(index.property_key).as_deref(),
+            Some("size")
+        );
+    }
+
+    /// A catalog written before 0.5.44 names the default graph's indexes in
+    /// the version 1 snapshot only.
+    #[test]
+    fn a_version_1_catalog_names_the_default_graph_indexes() {
+        let snapshot = CatalogSnapshot {
+            version: 1,
+            schema: SnapshotSchema::default(),
+            indexes: SnapshotIndexes {
+                property_indexes: vec!["id".to_string()],
+                ..SnapshotIndexes::default()
+            },
+            epoch: 7,
+        };
+        let bytes = bincode::serde::encode_to_vec(&snapshot, bincode::config::standard()).unwrap();
+
+        let mut section = make_section();
+        section.deserialize(&bytes).unwrap();
+        assert_eq!(
+            section.take_loaded_indexes(),
+            [GraphIndexes {
+                graph: None,
+                property: vec!["id".to_string()],
+                ..GraphIndexes::default()
+            }]
+        );
     }
 }

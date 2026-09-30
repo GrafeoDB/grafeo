@@ -9,6 +9,7 @@ pub mod stream;
 #[cfg(all(feature = "algos", feature = "gql"))]
 pub mod user_procedure;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::AdaptiveConfig;
@@ -16,7 +17,7 @@ use crate::database::QueryResult;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, QueryError, Result};
-use grafeo_core::execution::operators::{Operator, OperatorError};
+use grafeo_core::execution::operators::{Operator, OperatorError, WriteCounter};
 use grafeo_core::execution::{
     AdaptiveContext, AdaptiveSummary, CardinalityTrackingWrapper, DataChunk, Pipeline,
     SharedAdaptiveContext,
@@ -32,6 +33,8 @@ pub struct Executor {
     deadline: Option<Instant>,
     /// The configured timeout duration (for error messages).
     query_timeout: Option<Duration>,
+    /// Counts the statement's writes, for the result's counters.
+    write_counter: Option<Arc<WriteCounter>>,
 }
 
 impl Executor {
@@ -43,6 +46,7 @@ impl Executor {
             column_types: Vec::new(),
             deadline: None,
             query_timeout: None,
+            write_counter: None,
         }
     }
 
@@ -55,6 +59,7 @@ impl Executor {
             column_types: vec![LogicalType::Any; len],
             deadline: None,
             query_timeout: None,
+            write_counter: None,
         }
     }
 
@@ -66,6 +71,7 @@ impl Executor {
             column_types,
             deadline: None,
             query_timeout: None,
+            write_counter: None,
         }
     }
 
@@ -84,6 +90,21 @@ impl Executor {
     }
 
     /// Checks whether the deadline has been exceeded.
+    /// Reports the writes `counter` counts in the result's counters.
+    #[must_use]
+    pub fn with_write_counter(mut self, counter: Arc<WriteCounter>) -> Self {
+        self.write_counter = Some(counter);
+        self
+    }
+
+    /// The result, with the counters of the writes it made.
+    fn with_counters(&self, mut result: QueryResult) -> QueryResult {
+        if let Some(counter) = &self.write_counter {
+            result.counters = counter.counters();
+        }
+        result
+    }
+
     fn check_deadline(&self) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(deadline) = self.deadline
@@ -124,7 +145,7 @@ impl Executor {
             }
         }
 
-        Ok(result)
+        Ok(self.with_counters(result))
     }
 
     /// Executes a push-based pipeline.
@@ -180,7 +201,7 @@ impl Executor {
             self.collect_chunk(chunk, &mut result)?;
         }
 
-        Ok(result)
+        Ok(self.with_counters(result))
     }
 
     /// Executes and returns at most `limit` rows.
@@ -219,7 +240,7 @@ impl Executor {
             }
         }
 
-        Ok(result)
+        Ok(self.with_counters(result))
     }
 
     /// Captures column types from a DataChunk.
@@ -379,7 +400,7 @@ impl Executor {
         // Get final summary
         let summary = shared_ctx.snapshot().map(|ctx| ctx.summary());
 
-        Ok((result, summary))
+        Ok((self.with_counters(result), summary))
     }
 }
 

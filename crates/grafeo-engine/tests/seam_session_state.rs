@@ -742,16 +742,45 @@ mod introspection {
     fn current_schema_and_graph_in_same_query() {
         let db = db();
         let session = db.session();
-        // Set graph before schema since graphs resolve relative to schema
-        session.execute("CREATE GRAPH mydb").unwrap();
-        session.execute("SESSION SET GRAPH mydb").unwrap();
+        // Graphs resolve relative to the schema: create mydb inside analytics.
         session.execute("CREATE SCHEMA analytics").unwrap();
         session.execute("SESSION SET SCHEMA analytics").unwrap();
+        session.execute("CREATE GRAPH mydb").unwrap();
+        session.execute("SESSION SET GRAPH mydb").unwrap();
 
         let result = session
             .execute("RETURN CURRENT_SCHEMA AS s, CURRENT_GRAPH AS g")
             .unwrap();
         assert_eq!(result.rows()[0][0], Value::String("analytics".into()));
         assert_eq!(result.rows()[0][1], Value::String("mydb".into()));
+    }
+
+    /// Switching the schema away from the selected graph leaves a selection
+    /// that names no graph: statements fail until another graph is selected,
+    /// instead of running on the default graph.
+    #[test]
+    fn a_schema_switch_away_from_the_graph_fails_statements() {
+        let db = db();
+        let session = db.session();
+        session.execute("CREATE GRAPH mydb").unwrap();
+        session.execute("SESSION SET GRAPH mydb").unwrap();
+        session.execute("CREATE SCHEMA analytics").unwrap();
+        session.execute("SESSION SET SCHEMA analytics").unwrap();
+
+        let error = session
+            .execute("RETURN CURRENT_GRAPH AS g")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not exist"), "{error}");
+        let error = session.execute("INSERT (:Person)").unwrap_err().to_string();
+        assert!(error.contains("does not exist"), "{error}");
+
+        session.execute("SESSION RESET SCHEMA").unwrap();
+        let result = session.execute("RETURN CURRENT_GRAPH AS g").unwrap();
+        assert_eq!(result.rows()[0][0], Value::String("mydb".into()));
+        // A fresh session reads the default graph on purpose: the failed
+        // INSERT must not have run there instead.
+        let nodes = db.session().execute("MATCH (n) RETURN count(n)").unwrap();
+        assert_eq!(nodes.rows()[0][0], Value::Int64(0));
     }
 }

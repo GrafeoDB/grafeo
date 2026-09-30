@@ -163,6 +163,39 @@ fn id_lookups_do_not_scan() {
     assert!(rows(&db, single, &[("id", Value::Null)]).is_empty());
 }
 
+/// A key that reads the clock is not looked up: the lookup and the filter
+/// above it would each read the clock, and could see different days.
+#[test]
+fn a_clock_key_is_not_looked_up() {
+    let db = docs(true);
+    let lookup = |key: &str| {
+        plan(
+            &db,
+            &format!("UNWIND ['d'] AS p MATCH (n:Doc {{id: {key}}}) RETURN n"),
+        )
+    };
+    // Keys that read the clock or randomness, in any spelling or arity.
+    for changing in [
+        "p + toString(date())",
+        "p + toString(zoneddatetime())",
+        "p + toString(current_date())",
+        "p + toString(timestamp())",
+        "p + toString(randomUUID())",
+    ] {
+        let plan = lookup(changing);
+        assert!(!plan.contains("[index"), "{changing}: {plan}");
+    }
+    // Keys built from their arguments alone.
+    for fixed in [
+        "p + toString(date('2026-09-30'))",
+        "toLower(p)",
+        "coalesce(p, 'x')",
+    ] {
+        let plan = lookup(fixed);
+        assert!(plan.contains("[index: id]"), "{fixed}: {plan}");
+    }
+}
+
 #[test]
 fn a_seek_sees_what_the_transaction_sees() {
     let db = docs(true);

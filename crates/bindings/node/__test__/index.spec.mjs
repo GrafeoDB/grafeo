@@ -241,7 +241,8 @@ describe('properties', () => {
     expect(node.get('int')).toBe(42)
     expect(node.get('float')).toBeCloseTo(3.14)
     expect(node.get('bool')).toBe(true)
-    expect(node.get('nil')).toBeNull()
+    // A null value is not stored: a property with a null value does not exist.
+    expect(node.get('nil')).toBeUndefined()
   })
 
   it('should return undefined for missing property', () => {
@@ -503,6 +504,28 @@ describe('QueryResult metadata', () => {
     const result = await db.execute('MATCH (p:Person) RETURN p.name')
     expect(result.nodes().length).toBe(0)
     expect(result.edges().length).toBe(0)
+    db.close()
+  })
+  it('should report what the writes changed in counters', async () => {
+    const db = GrafeoDB.create()
+    const insert = await db.execute(
+      "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})"
+    )
+    expect(insert.counters).toEqual({
+      nodesCreated: 2,
+      nodesDeleted: 0,
+      edgesCreated: 1,
+      edgesDeleted: 0,
+      propertiesSet: 2,
+      labelsAdded: 2,
+      labelsRemoved: 0,
+    })
+    const merge = await db.execute(
+      "UNWIND ['Alix', 'Vincent'] AS name MERGE (:Person {name: name})"
+    )
+    expect(merge.counters.nodesCreated).toBe(1)
+    const read = await db.execute('MATCH (p:Person) RETURN p.name')
+    expect(read.counters.propertiesSet).toBe(0)
     db.close()
   })
 })
@@ -1570,5 +1593,112 @@ describe('concurrent instances', () => {
     expect(r2.scalar()).toBe(2)
     db1.close()
     db2.close()
+  })
+})
+
+// -- Upserts -----------------------------------------------------------
+
+describe('upserts', () => {
+  it('should create then update nodes and edges by key', async () => {
+    const db = GrafeoDB.create()
+    const nodes = await db.upsertNodes(
+      ['Graph', 'File'],
+      [{ id: 'f1', size: 3 }, { size: 4 }, { id: 'f2' }, { id: 'f1', lang: 'rs' }]
+    )
+    expect(nodes).toEqual({ created: 2, updated: 1, skipped: 1, skippedRows: [1] })
+
+    const edges = await db.upsertEdges('Graph:USES', [
+      { src: 'f1', dst: 'f2', id: 'u1', w: 1 },
+      { src: 'f1', dst: 'missing', id: 'u2' },
+      { src: 'f1', dst: 'f2', id: 'u1', w: 5 },
+    ])
+    expect(edges).toEqual({ created: 1, updated: 1, skipped: 1, skippedRows: [1] })
+    const rows = (await db.execute('MATCH ()-[r]->() RETURN r.id, r.w')).toArray()
+    expect(rows).toEqual([{ 'r.id': 'u1', 'r.w': 5 }])
+
+    await db.upsertNodes(['Graph', 'File'], [{ id: 'f1', size: 9 }], { replace: true })
+    const file = (await db.execute("MATCH (n:File {id: 'f1'}) RETURN n.size, n.lang")).toArray()
+    expect(file).toEqual([{ 'n.size': 9, 'n.lang': null }])
+    db.close()
+  })
+
+  it('should take edge options', async () => {
+    const db = GrafeoDB.create()
+    await db.upsertNodes(['File'], [{ id: 'f1' }, { id: 'f2' }])
+    const result = await db.upsertEdges('CALLS', [{ from: 'f1', to: 'f2', rid: 'c1' }], {
+      key: 'rid',
+      endpointLabels: ['File'],
+      srcField: 'from',
+      dstField: 'to',
+    })
+    expect(result.created).toBe(1)
+    db.close()
+  })
+})
+
+// -- Batch writes --------------------------------------------------------
+
+describe('batch writes', () => {
+  it('should create nodes with several labels and edges with their own types', async () => {
+    const db = GrafeoDB.create()
+    const [alix, gus, vincent] = await db.batchCreateNodesWithProps(
+      ['Graph', 'Person'],
+      [{ name: 'Alix' }, { name: 'Gus' }, { name: 'Vincent' }]
+    )
+    const ids = await db.batchCreateEdges([
+      { src: alix, dst: gus, type: 'KNOWS', properties: { since: 2020 } },
+      { src: gus, dst: vincent, type: 'LIKES' },
+    ])
+    expect(ids.length).toBe(2)
+    const rows = (
+      await db.execute(
+        'MATCH (a:Graph:Person)-[r]->(b) RETURN a.name, type(r), r.since ORDER BY a.name'
+      )
+    ).toArray()
+    expect(rows).toEqual([
+      { 'a.name': 'Alix', 'type(r)': 'KNOWS', 'r.since': 2020 },
+      { 'a.name': 'Gus', 'type(r)': 'LIKES', 'r.since': null },
+    ])
+    db.close()
+  })
+
+  it('should create no edge of a failing batch', async () => {
+    const db = GrafeoDB.create()
+    const [alix, gus] = await db.batchCreateNodesWithProps('Person', [{}, {}])
+    await expect(
+      db.batchCreateEdges([
+        { src: alix, dst: gus, type: 'KNOWS' },
+        { src: alix, dst: 999, type: 'KNOWS' },
+      ])
+    ).rejects.toThrow(/does not exist/)
+    expect(db.edgeCount()).toBe(0)
+    db.close()
+  })
+})
+
+describe('row order', () => {
+  const orders = async (db, query) => {
+    const seen = new Set()
+    for (let i = 0; i < 5; i++) {
+      const result = await db.execute(query)
+      seen.add(JSON.stringify(result.toArray().map((row) => row.v)))
+    }
+    return seen
+  }
+
+  it('should shuffle results without ORDER BY when asked', async () => {
+    const db = GrafeoDB.create(undefined, { shuffleUnordered: true })
+    await db.execute('UNWIND range(0, 49) AS v INSERT (:A {v: v})')
+    expect((await orders(db, 'MATCH (n:A) RETURN n.v AS v')).size).toBeGreaterThan(1)
+    const ordered = await orders(db, 'MATCH (n:A) RETURN n.v AS v ORDER BY v')
+    expect([...ordered]).toEqual([JSON.stringify([...Array(50).keys()])])
+    db.close()
+  })
+
+  it('should not shuffle by default', async () => {
+    const db = GrafeoDB.create()
+    await db.execute('UNWIND range(0, 49) AS v INSERT (:A {v: v})')
+    expect((await orders(db, 'MATCH (n:A) RETURN n.v AS v')).size).toBe(1)
+    db.close()
   })
 })

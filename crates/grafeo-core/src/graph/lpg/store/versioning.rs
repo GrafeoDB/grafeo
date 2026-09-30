@@ -566,9 +566,12 @@ impl LpgStore {
         #[cfg(feature = "temporal")]
         self.register_node_labels(id, labels, epoch);
 
-        // Allocate record in arena and get offset (create epoch if needed)
-        let arena = self.arena_allocator.arena_or_create(epoch)?;
-        let (offset, _stored) = arena.alloc_value_with_offset(record)?;
+        // Allocate the record in the epoch's arena (created if needed),
+        // releasing the arena's lock before the version lock below.
+        let (offset, _stored) = self
+            .arena_allocator
+            .arena_or_create(epoch)?
+            .alloc_value_with_offset(record)?;
 
         // Create HotVersionRef (using SYSTEM tx for recovery)
         let hot_ref = HotVersionRef::new(epoch, epoch, offset, TransactionId::SYSTEM);
@@ -658,9 +661,12 @@ impl LpgStore {
 
         let record = EdgeRecord::new(id, src, dst, type_id, epoch);
 
-        // Allocate record in arena and get offset (create epoch if needed)
-        let arena = self.arena_allocator.arena_or_create(epoch)?;
-        let (offset, _stored) = arena.alloc_value_with_offset(record)?;
+        // Allocate the record in the epoch's arena (created if needed),
+        // releasing the arena's lock before the version lock below.
+        let (offset, _stored) = self
+            .arena_allocator
+            .arena_or_create(epoch)?
+            .alloc_value_with_offset(record)?;
 
         // Create HotVersionRef (using SYSTEM tx for recovery)
         let hot_ref = HotVersionRef::new(epoch, epoch, offset, TransactionId::SYSTEM);

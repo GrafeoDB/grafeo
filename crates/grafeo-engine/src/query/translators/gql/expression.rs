@@ -155,6 +155,9 @@ impl GqlTranslator {
                     index: Box::new(index_expr),
                 })
             }
+            ast::Expression::MapAccess { base, key } => {
+                crate::query::translators::common::map_access(self.translate_expression(base)?, key)
+            }
             ast::Expression::SliceAccess { base, start, end } => {
                 let base_expr = self.translate_expression(base)?;
                 let start_expr = start

@@ -1,0 +1,155 @@
+# Rosetta: the items of list comprehensions and list predicates
+#
+# Every expression that works in RETURN works on the loop variable of a list
+# comprehension or list predicate: function calls, index access, nested
+# comprehensions (a reused name shadows the outer one). The items of an edge
+# list (`relationships(p)`, the variable of a variable-length edge pattern)
+# are edges, also through `reverse`, `tail` and slices, and the items of
+# `nodes(p)` are nodes.
+#
+# Setup (GQL): Dir a -[CONTAINS {w: 1}]-> Dir b -[CONTAINS {w: 2}]-> File f.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: List comprehension and list predicate items
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Any expression on the loop variable
+  # ---------------------------------------------------------------------------
+
+  - name: map_calls_a_string_function
+    variants:
+      gql: "RETURN [x IN ['a', 'b'] | toUpper(x)] AS r"
+      cypher: "RETURN [x IN ['a', 'b'] | toUpper(x)] AS r"
+    expect:
+      rows:
+        - ["[A, B]"]
+
+  - name: map_calls_a_numeric_function
+    variants:
+      gql: "RETURN [x IN [-1, 2] | abs(x)] AS r"
+      cypher: "RETURN [x IN [-1, 2] | abs(x)] AS r"
+    expect:
+      rows:
+        - ["[1, 2]"]
+
+  - name: map_calls_size
+    variants:
+      gql: "RETURN [x IN ['ab', 'c'] | size(x)] AS r"
+      cypher: "RETURN [x IN ['ab', 'c'] | size(x)] AS r"
+    expect:
+      rows:
+        - ["[2, 1]"]
+
+  - name: map_indexes_the_item
+    variants:
+      gql: "RETURN [x IN [[1, 2], [3]] | x[0]] AS r"
+      cypher: "RETURN [x IN [[1, 2], [3]] | x[0]] AS r"
+    expect:
+      rows:
+        - ["[1, 3]"]
+
+  - name: nested_comprehension_shadows_the_name
+    variants:
+      gql: "RETURN [x IN [1, 2] | [x IN [3, 4] | x]] AS r"
+      cypher: "RETURN [x IN [1, 2] | [x IN [3, 4] | x]] AS r"
+    expect:
+      rows:
+        - ["[[3, 4], [3, 4]]"]
+
+  - name: nested_comprehension_reads_the_outer_item
+    variants:
+      gql: "RETURN [x IN [1, 2] | [y IN [10, 20] | x + y]] AS r"
+      cypher: "RETURN [x IN [1, 2] | [y IN [10, 20] | x + y]] AS r"
+    expect:
+      rows:
+        - ["[[11, 21], [12, 22]]"]
+
+  - name: filter_calls_a_function
+    variants:
+      gql: "RETURN [x IN ['a', 'B'] WHERE toUpper(x) = x | x] AS r"
+      cypher: "RETURN [x IN ['a', 'B'] WHERE toUpper(x) = x | x] AS r"
+    expect:
+      rows:
+        - ["[B]"]
+
+  - name: list_predicates_call_functions
+    variants:
+      gql: "RETURN all(x IN ['a'] WHERE toUpper(x) = 'A') AS a, any(x IN ['a', 'b'] WHERE toUpper(x) = 'B') AS b, none(x IN ['a'] WHERE toUpper(x) = 'A') AS c, single(x IN ['a', 'b'] WHERE size(x) = 1) AS d"
+      cypher: "RETURN all(x IN ['a'] WHERE toUpper(x) = 'A') AS a, any(x IN ['a', 'b'] WHERE toUpper(x) = 'B') AS b, none(x IN ['a'] WHERE toUpper(x) = 'A') AS c, single(x IN ['a', 'b'] WHERE size(x) = 1) AS d"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  # ---------------------------------------------------------------------------
+  # Edges and nodes of a path
+  # ---------------------------------------------------------------------------
+
+  - name: relationship_types_of_a_path
+    setup:
+      - "INSERT (:Dir {name: 'a'})-[:CONTAINS {w: 1}]->(:Dir {name: 'b'})-[:CONTAINS {w: 2}]->(:File {name: 'f'})"
+    variants:
+      gql: "MATCH p = (d:Dir {name: 'a'})-[:CONTAINS]->{1,3}(x:File) RETURN [e IN relationships(p) | type(e)] AS types"
+      cypher: "MATCH p = (d:Dir {name: 'a'})-[:CONTAINS*1..3]->(x:File) RETURN [e IN relationships(p) | type(e)] AS types"
+    expect:
+      rows:
+        - ["[CONTAINS, CONTAINS]"]
+
+  - name: edge_items_through_list_functions
+    setup:
+      - "INSERT (:Dir {name: 'a'})-[:CONTAINS {w: 1}]->(:Dir {name: 'b'})-[:CONTAINS {w: 2}]->(:File {name: 'f'})"
+    variants:
+      gql: "MATCH p = (d:Dir {name: 'a'})-[:CONTAINS]->{1,3}(x:File) RETURN [e IN reverse(relationships(p)) | e.w] AS r, [e IN tail(relationships(p)) | e.w] AS t, [e IN relationships(p)[1..] | e.w] AS s"
+      cypher: "MATCH p = (d:Dir {name: 'a'})-[:CONTAINS*1..3]->(x:File) RETURN [e IN reverse(relationships(p)) | e.w] AS r, [e IN tail(relationships(p)) | e.w] AS t, [e IN relationships(p)[1..] | e.w] AS s"
+    expect:
+      rows:
+        - ["[2, 1]", "[2]", "[2]"]
+
+  - name: node_items_of_a_path
+    setup:
+      - "INSERT (:Dir {name: 'a'})-[:CONTAINS {w: 1}]->(:Dir {name: 'b'})-[:CONTAINS {w: 2}]->(:File {name: 'f'})"
+    variants:
+      gql: "MATCH p = (d:Dir {name: 'a'})-[:CONTAINS]->{1,3}(x:File) RETURN [n IN nodes(p) | n.name] AS names, [n IN nodes(p) WHERE 'File' IN labels(n) | n.name] AS files"
+      cypher: "MATCH p = (d:Dir {name: 'a'})-[:CONTAINS*1..3]->(x:File) RETURN [n IN nodes(p) | n.name] AS names, [n IN nodes(p) WHERE 'File' IN labels(n) | n.name] AS files"
+    expect:
+      rows:
+        - ["[a, b, f]", "[f]"]
+
+  # ---------------------------------------------------------------------------
+  # The variable of a variable-length edge pattern is a list of edges
+  # ---------------------------------------------------------------------------
+
+  - name: variable_length_edge_variable_is_a_list
+    setup:
+      - "INSERT (:Dir {name: 'a'})-[:CONTAINS {w: 1}]->(:Dir {name: 'b'})-[:CONTAINS {w: 2}]->(:File {name: 'f'})"
+    variants:
+      gql: "MATCH (d:Dir {name: 'a'})-[r]->{1,3}(x:File) RETURN size(r) AS n, [e IN r | e.w] AS ws, [e IN r | type(e)] AS types"
+      cypher: "MATCH (d:Dir {name: 'a'})-[r*1..3]->(x:File) RETURN size(r) AS n, [e IN r | e.w] AS ws, [e IN r | type(e)] AS types"
+    expect:
+      rows:
+        - [2, "[1, 2]", "[CONTAINS, CONTAINS]"]
+
+  - name: typed_variable_length_edge_variable_is_a_list
+    setup:
+      - "INSERT (:Dir {name: 'a'})-[:CONTAINS {w: 1}]->(:Dir {name: 'b'})-[:CONTAINS {w: 2}]->(:File {name: 'f'})"
+    variants:
+      gql: "MATCH (d:Dir {name: 'a'})-[r:CONTAINS]->{1,3}(x:File) RETURN size(r) AS n, [e IN tail(r) | e.w] AS rest"
+      cypher: "MATCH (d:Dir {name: 'a'})-[r:CONTAINS*1..3]->(x:File) RETURN size(r) AS n, [e IN tail(r) | e.w] AS rest"
+    expect:
+      rows:
+        - [2, "[2]"]
+
+  - name: list_predicate_over_a_variable_length_edge_variable
+    setup:
+      - "INSERT (:Dir {name: 'a'})-[:CONTAINS {w: 1}]->(:Dir {name: 'b'})-[:CONTAINS {w: 2}]->(:File {name: 'f'})"
+    variants:
+      gql: "MATCH (d:Dir {name: 'a'})-[r]->{1,3}(x:File) WHERE all(e IN r WHERE type(e) = 'CONTAINS') RETURN count(*) AS n"
+      cypher: "MATCH (d:Dir {name: 'a'})-[r*1..3]->(x:File) WHERE all(e IN r WHERE type(e) = 'CONTAINS') RETURN count(*) AS n"
+    expect:
+      rows:
+        - [1]

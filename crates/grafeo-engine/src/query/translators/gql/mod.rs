@@ -9,7 +9,7 @@ mod pattern;
 use std::collections::{HashMap, HashSet};
 
 use super::common::{
-    build_left_join_with_predicates, check_union_columns, combine_with_and, flatten_and_conjuncts,
+    build_left_join_with_predicates, check_branch_columns, combine_with_and, flatten_and_conjuncts,
     has_all_labels, is_aggregate_function, is_binary_set_function, join_and_conjuncts,
     references_any, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
     wrap_skip, wrap_sort,
@@ -146,7 +146,7 @@ impl GqlTranslator {
         match op {
             ast::CompositeOp::Union | ast::CompositeOp::UnionAll => {
                 let inputs = vec![left_plan.root, right_plan.root];
-                check_union_columns(&inputs)?;
+                check_branch_columns("UNION", &inputs)?;
                 let union_op = LogicalOperator::Union(UnionOp { inputs });
                 let root = if op == ast::CompositeOp::UnionAll {
                     union_op
@@ -156,25 +156,34 @@ impl GqlTranslator {
                 Ok(LogicalPlan::new(root))
             }
             ast::CompositeOp::Except | ast::CompositeOp::ExceptAll => {
+                let branches = [left_plan.root, right_plan.root];
+                check_branch_columns("EXCEPT", &branches)?;
+                let [left, right] = branches;
                 let root = LogicalOperator::Except(ExceptOp {
-                    left: Box::new(left_plan.root),
-                    right: Box::new(right_plan.root),
+                    left: Box::new(left),
+                    right: Box::new(right),
                     all: matches!(op, ast::CompositeOp::ExceptAll),
                 });
                 Ok(LogicalPlan::new(root))
             }
             ast::CompositeOp::Intersect | ast::CompositeOp::IntersectAll => {
+                let branches = [left_plan.root, right_plan.root];
+                check_branch_columns("INTERSECT", &branches)?;
+                let [left, right] = branches;
                 let root = LogicalOperator::Intersect(IntersectOp {
-                    left: Box::new(left_plan.root),
-                    right: Box::new(right_plan.root),
+                    left: Box::new(left),
+                    right: Box::new(right),
                     all: matches!(op, ast::CompositeOp::IntersectAll),
                 });
                 Ok(LogicalPlan::new(root))
             }
             ast::CompositeOp::Otherwise => {
+                let branches = [left_plan.root, right_plan.root];
+                check_branch_columns("OTHERWISE", &branches)?;
+                let [left, right] = branches;
                 let root = LogicalOperator::Otherwise(OtherwiseOp {
-                    left: Box::new(left_plan.root),
-                    right: Box::new(right_plan.root),
+                    left: Box::new(left),
+                    right: Box::new(right),
                 });
                 Ok(LogicalPlan::new(root))
             }
@@ -2914,7 +2923,7 @@ mod tests {
 
     #[test]
     fn test_translate_except() {
-        let query = "MATCH (a:Person) RETURN a EXCEPT MATCH (b:Employee) RETURN b";
+        let query = "MATCH (n:Person) RETURN n EXCEPT MATCH (n:Employee) RETURN n";
         let result = translate(query);
         assert!(
             result.is_ok(),
@@ -2932,7 +2941,7 @@ mod tests {
 
     #[test]
     fn test_translate_intersect() {
-        let query = "MATCH (a:Person) RETURN a INTERSECT MATCH (b:Employee) RETURN b";
+        let query = "MATCH (n:Person) RETURN n INTERSECT MATCH (n:Employee) RETURN n";
         let result = translate(query);
         assert!(
             result.is_ok(),
@@ -2950,7 +2959,7 @@ mod tests {
 
     #[test]
     fn test_translate_otherwise() {
-        let query = "MATCH (a:Person) RETURN a OTHERWISE MATCH (b:Employee) RETURN b";
+        let query = "MATCH (n:Person) RETURN n OTHERWISE MATCH (n:Employee) RETURN n";
         let result = translate(query);
         assert!(
             result.is_ok(),

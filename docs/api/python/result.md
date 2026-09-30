@@ -17,6 +17,7 @@ Query result iterator.
 | `columns` | `List[str]` | Column names |
 | `execution_time_ms` | `float` | Query execution time in milliseconds |
 | `rows_scanned` | `int` | Number of rows scanned during query execution |
+| `counters` | `dict` | What the query's writes changed: `nodes_created`, `nodes_deleted`, `edges_created`, `edges_deleted`, `properties_set`, `labels_added`, `labels_removed` |
 
 ## Methods
 

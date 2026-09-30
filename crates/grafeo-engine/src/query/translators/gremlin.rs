@@ -2108,7 +2108,7 @@ impl GremlinTranslator {
                 left: Box::new(expr),
                 op: BinaryOp::Regex,
                 right: Box::new(LogicalExpression::Literal(Value::String(
-                    pattern.clone().into(),
+                    anywhere(pattern).into(),
                 ))),
             }),
             ast::Predicate::NotRegex(pattern) => Ok(LogicalExpression::Unary {
@@ -2117,7 +2117,7 @@ impl GremlinTranslator {
                     left: Box::new(expr),
                     op: BinaryOp::Regex,
                     right: Box::new(LogicalExpression::Literal(Value::String(
-                        pattern.clone().into(),
+                        anywhere(pattern).into(),
                     ))),
                 }),
             }),
@@ -2360,6 +2360,13 @@ impl GremlinTranslator {
             _ => None,
         }
     }
+}
+
+/// A pattern that matches a whole string exactly when `pattern` matches
+/// somewhere in it: Gremlin's `regex()` finds (TinkerPop `TextP.regex`),
+/// while the `=~` operator it translates to matches the whole string.
+fn anywhere(pattern: &str) -> String {
+    format!("(?s).*(?:{pattern}).*")
 }
 
 #[cfg(test)]

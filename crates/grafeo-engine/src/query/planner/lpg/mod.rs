@@ -174,12 +174,20 @@ pub struct Planner {
     pub(super) anon_edge_counter: std::cell::Cell<u32>,
     /// Whether to use factorized execution for multi-hop queries.
     pub(super) factorized_execution: bool,
+    /// Whether a plan without `ORDER BY` returns its rows in random order.
+    pub(super) shuffle_unordered: bool,
     /// Variables that hold scalar values (from UNWIND/FOR), not node/edge IDs.
     /// Used by plan_return to assign `LogicalType::Any` instead of `Node`.
     pub(super) scalar_columns: std::cell::RefCell<std::collections::HashSet<String>>,
     /// Variables that hold edge IDs (from MATCH edge patterns).
     /// Used by plan_return to emit `EdgeResolve` instead of `NodeResolve`.
     pub(super) edge_columns: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// Columns that hold a list of node or edge ids: the variable of a
+    /// variable-length edge pattern, and WITH aliases of such lists. RETURN
+    /// returns their items as node and edge maps.
+    pub(super) entity_list_columns: std::cell::RefCell<
+        std::collections::HashMap<String, grafeo_core::execution::operators::EntityValue>,
+    >,
     /// Optional constraint validator for schema enforcement during mutations.
     pub(super) validator: Option<Arc<dyn ConstraintValidator>>,
     /// Catalog for user-defined procedure lookup.
@@ -202,6 +210,8 @@ pub struct Planner {
     profile_entries: std::cell::RefCell<Vec<crate::query::profile::ProfileEntry>>,
     /// Optional write tracker for recording writes during mutations.
     write_tracker: Option<grafeo_core::execution::operators::SharedWriteTracker>,
+    /// Counts the writes of the plan's writers.
+    write_counter: Arc<grafeo_core::execution::operators::WriteCounter>,
     /// Session context for introspection functions (info, schema, current_schema, etc.).
     pub(super) session_context: grafeo_core::execution::operators::SessionContext,
     /// When true, expand operators use epoch-only visibility (no MVCC version
@@ -237,8 +247,10 @@ impl Planner {
             viewing_epoch: epoch,
             anon_edge_counter: std::cell::Cell::new(0),
             factorized_execution: true,
+            shuffle_unordered: false,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
+            entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
             validator: None,
             catalog: None,
             #[cfg(feature = "lpg")]
@@ -248,6 +260,7 @@ impl Planner {
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
             write_tracker: None,
+            write_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
@@ -300,8 +313,10 @@ impl Planner {
             viewing_epoch,
             anon_edge_counter: std::cell::Cell::new(0),
             factorized_execution: true,
+            shuffle_unordered: false,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
+            entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
             validator: None,
             catalog: None,
             #[cfg(feature = "lpg")]
@@ -311,6 +326,7 @@ impl Planner {
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
             write_tracker,
+            write_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
@@ -346,7 +362,14 @@ impl Planner {
         if let Some(ref validator) = self.validator {
             writer = writer.with_validator(Arc::clone(validator));
         }
-        Ok(writer)
+        Ok(writer.with_counter(Arc::clone(&self.write_counter)))
+    }
+
+    /// Counts the writes of the plan's writers: nodes and edges created and
+    /// deleted, properties set, labels added and removed.
+    #[must_use]
+    pub fn write_counter(&self) -> Arc<grafeo_core::execution::operators::WriteCounter> {
+        Arc::clone(&self.write_counter)
     }
 
     /// Returns the viewing epoch for this planner.
@@ -372,6 +395,32 @@ impl Planner {
     pub fn with_factorized_execution(mut self, enabled: bool) -> Self {
         self.factorized_execution = enabled;
         self
+    }
+
+    /// Returns the rows of plans without `ORDER BY` in random order (the
+    /// `shuffle_unordered` test option).
+    #[must_use]
+    pub fn with_shuffle_unordered(mut self, shuffle: bool) -> Self {
+        self.shuffle_unordered = shuffle;
+        self
+    }
+
+    /// The root operator, behind a shuffle when the option is on and the
+    /// plan does not order its rows.
+    fn shuffled_root(
+        &self,
+        logical_plan: &LogicalPlan,
+        operator: Box<dyn Operator>,
+        columns: &[String],
+    ) -> Box<dyn Operator> {
+        if self.shuffle_unordered && !super::common::orders_rows(&logical_plan.root) {
+            let schema = self.derive_schema_from_columns(columns);
+            Box::new(grafeo_core::execution::operators::ShuffleOperator::new(
+                operator, schema,
+            ))
+        } else {
+            operator
+        }
     }
 
     /// Sets the constraint validator for schema enforcement during mutations.
@@ -470,6 +519,7 @@ impl Planner {
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
+        let operator = self.shuffled_root(logical_plan, operator, &columns);
         Ok(PhysicalPlan {
             operator,
             columns,
@@ -518,6 +568,7 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan_adaptive(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
+        let operator = self.shuffled_root(logical_plan, operator, &columns);
 
         let mut adaptive_context = AdaptiveContext::new();
         self.collect_cardinality_estimates(&logical_plan.root, &mut adaptive_context, 0);

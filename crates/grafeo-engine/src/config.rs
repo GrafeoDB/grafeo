@@ -228,6 +228,14 @@ pub struct Config {
     /// Enabled by default.
     pub factorized_execution: bool,
 
+    /// Whether every query without `ORDER BY` returns its rows in random
+    /// order.
+    ///
+    /// Without `ORDER BY` the row order is unspecified: it can change between
+    /// runs, builds and versions. This test option makes that visible, so
+    /// tests find code that relies on an order anyway. Default: `false`.
+    pub shuffle_unordered: bool,
+
     /// WAL durability mode. Only used when `wal_enabled` is true.
     pub wal_durability: DurabilityMode,
 
@@ -407,6 +415,7 @@ impl Default for Config {
             query_logging: false,
             adaptive: AdaptiveConfig::default(),
             factorized_execution: true,
+            shuffle_unordered: false,
             wal_durability: DurabilityMode::default(),
             storage_format: StorageFormat::default(),
             schema_constraints: false,
@@ -515,6 +524,15 @@ impl Config {
     #[must_use]
     pub fn without_factorized_execution(mut self) -> Self {
         self.factorized_execution = false;
+        self
+    }
+
+    /// Returns the rows of every query without `ORDER BY` in random order,
+    /// a test option that finds code relying on a row order that is
+    /// unspecified (see [`Config::shuffle_unordered`]).
+    #[must_use]
+    pub fn with_shuffle_unordered(mut self, shuffle: bool) -> Self {
+        self.shuffle_unordered = shuffle;
         self
     }
 

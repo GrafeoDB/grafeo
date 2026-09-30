@@ -5,7 +5,9 @@ use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::graph::GraphStoreSearch;
 use crate::graph::lpg::{Edge, Node};
-use grafeo_common::types::{EpochId, LogicalType, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{
+    EdgeId, EpochId, LogicalType, NodeId, PropertyKey, TransactionId, Value,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -45,6 +47,19 @@ pub enum ProjectExpr {
         /// The column containing the edge ID.
         column: usize,
     },
+    /// Evaluates an expression whose value is a node, an edge or a list of
+    /// them (as ids, like `relationships(p)` and the variable of a
+    /// variable-length edge pattern) and returns node and edge maps, as
+    /// [`NodeResolve`](Self::NodeResolve) and [`EdgeResolve`](Self::EdgeResolve)
+    /// do for a column.
+    Entities {
+        /// The expression to evaluate.
+        expr: FilterExpression,
+        /// Variable name to column index mapping.
+        variable_columns: HashMap<String, usize>,
+        /// What the value holds.
+        kind: EntityValue,
+    },
     /// Returns the first non-null value from two columns (used for RIGHT/FULL join dedup).
     Coalesce {
         /// Primary column index.
@@ -52,6 +67,20 @@ pub enum ProjectExpr {
         /// Fallback column index.
         second: usize,
     },
+}
+
+/// What a [`ProjectExpr::Entities`] value holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EntityValue {
+    /// One node id.
+    Node,
+    /// One edge id.
+    Edge,
+    /// A list of node ids.
+    Nodes,
+    /// A list of edge ids.
+    Edges,
 }
 
 /// A project operator that selects and transforms columns.
@@ -380,6 +409,36 @@ impl Operator for ProjectOperator {
                         output_col.push_value(value);
                     }
                 }
+                ProjectExpr::Entities {
+                    expr,
+                    variable_columns,
+                    kind,
+                } => {
+                    let output_col = output
+                        .column_mut(i)
+                        .expect("column exists: index matches projection schema");
+
+                    let store = self.store.as_ref().ok_or_else(|| {
+                        OperatorError::Execution(
+                            "Store required for expression evaluation".to_string(),
+                        )
+                    })?;
+
+                    let mut evaluator = ExpressionPredicate::new(
+                        expr.clone(),
+                        variable_columns.clone(),
+                        Arc::clone(store),
+                    )
+                    .with_session_context(self.session_context.clone());
+                    if let (Some(ep), tx_id) = (self.viewing_epoch, self.transaction_id) {
+                        evaluator = evaluator.with_transaction_context(ep, tx_id);
+                    }
+
+                    for row in input.selected_indices() {
+                        let value = evaluator.eval_at(&input, row).unwrap_or(Value::Null);
+                        output_col.push_value(self.resolve_entities(store.as_ref(), value, *kind));
+                    }
+                }
                 ProjectExpr::Coalesce { first, second } => {
                     let first_col = input
                         .column(*first)
@@ -419,6 +478,62 @@ impl Operator for ProjectOperator {
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
+    }
+}
+
+impl ProjectOperator {
+    /// Replaces the entity ids in `value` with node or edge maps. Ids of
+    /// entities this read cannot see become null; values that are already
+    /// maps (or null) are kept.
+    fn resolve_entities(
+        &self,
+        store: &dyn GraphStoreSearch,
+        value: Value,
+        kind: EntityValue,
+    ) -> Value {
+        let node = |value: &Value| match value {
+            Value::Int64(id) => u64::try_from(*id).ok().map_or(Value::Null, |id| {
+                self.visible_node(store, NodeId::new(id))
+                    .map_or(Value::Null, |n| node_to_map(&n))
+            }),
+            other => other.clone(),
+        };
+        let edge = |value: &Value| match value {
+            Value::Int64(id) => u64::try_from(*id).ok().map_or(Value::Null, |id| {
+                self.visible_edge(store, EdgeId::new(id))
+                    .map_or(Value::Null, |e| edge_to_map(&e))
+            }),
+            other => other.clone(),
+        };
+        match (kind, &value) {
+            (EntityValue::Node, _) => node(&value),
+            (EntityValue::Edge, _) => edge(&value),
+            (EntityValue::Nodes, Value::List(items)) => {
+                Value::List(items.iter().map(node).collect::<Vec<_>>().into())
+            }
+            (EntityValue::Edges, Value::List(items)) => {
+                Value::List(items.iter().map(edge).collect::<Vec<_>>().into())
+            }
+            _ => value,
+        }
+    }
+
+    /// The node `id` as this operator's reads see it.
+    fn visible_node(&self, store: &dyn GraphStoreSearch, id: NodeId) -> Option<Node> {
+        match (self.viewing_epoch, self.transaction_id) {
+            (Some(epoch), Some(tx)) => store.get_node_versioned(id, epoch, tx),
+            (Some(epoch), None) => store.get_node_at_epoch(id, epoch),
+            _ => store.get_node(id),
+        }
+    }
+
+    /// The edge `id` as this operator's reads see it.
+    fn visible_edge(&self, store: &dyn GraphStoreSearch, id: EdgeId) -> Option<Edge> {
+        match (self.viewing_epoch, self.transaction_id) {
+            (Some(epoch), Some(tx)) => store.get_edge_versioned(id, epoch, tx),
+            (Some(epoch), None) => store.get_edge_at_epoch(id, epoch),
+            _ => store.get_edge(id),
+        }
     }
 }
 

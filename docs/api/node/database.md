@@ -21,13 +21,16 @@ const db = GrafeoDB.create('./my_graph.db');
 
 // Open existing database
 const db = GrafeoDB.open('./my_graph.db');
+
+// For tests: rows of queries without ORDER BY in random order
+const db = GrafeoDB.create(undefined, { shuffleUnordered: true });
 ```
 
 ### Parameters
 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
-| `create(path?)` | `path: string \| undefined` | Create a database (in-memory if no path) |
+| `create(path?, options?)` | `path: string \| undefined`, `options: { shuffleUnordered?: boolean }` | Create a database (in-memory if no path). `shuffleUnordered` returns the rows of every query without `ORDER BY` in random order, to find code that relies on an order that is unspecified |
 | `open(path)` | `path: string` | Open an existing database |
 
 ## Query Methods
@@ -314,6 +317,49 @@ async batchCreateNodes(
   property: string,
   vectors: number[][]
 ): Promise<number[]>
+```
+
+### batchCreateNodesWithProps()
+
+Create one node per properties object, each with `labels` (a label or a list of labels), in one
+transaction. Returns an array of node IDs, in input order.
+
+```typescript
+async batchCreateNodesWithProps(
+  labels: string | string[],
+  propertiesList: Record<string, any>[]
+): Promise<number[]>
+```
+
+### batchCreateEdges()
+
+Create edges, each with its own type and properties, in one transaction: if an edge names a node that
+does not exist or breaks the schema, none is created. Returns an array of edge IDs, in input order.
+
+```typescript
+async batchCreateEdges(
+  edges: { src: number; dst: number; type: string; properties?: Record<string, any> }[]
+): Promise<number[]>
+```
+
+```javascript
+const [alix, gus] = await db.batchCreateNodesWithProps('Person', [{ name: 'Alix' }, { name: 'Gus' }]);
+await db.batchCreateEdges([
+  { src: alix, dst: gus, type: 'KNOWS', properties: { since: 2020 } },
+  { src: gus, dst: alix, type: 'KNOWS' },
+]);
+```
+
+### upsertNodes() / upsertEdges()
+
+Create or update nodes and edges by a key property, many rows in one statement. See the Python
+`upsert_nodes()` and `upsert_edges()` for the rules; the options object takes the same settings in
+camelCase (`key`, `replace`, `endpointKey`, `endpointLabels`, `srcField`, `dstField`).
+
+```typescript
+async upsertNodes(labels: string[], rows: Record<string, any>[], options?: { key?: string; replace?: boolean }): Promise<UpsertSummary>
+async upsertEdges(edgeType: string, rows: Record<string, any>[], options?: UpsertEdgesOptions): Promise<UpsertSummary>
+// UpsertSummary: { created: number; updated: number; skipped: number; skippedRows: number[] }
 ```
 
 ### batchVectorSearch()

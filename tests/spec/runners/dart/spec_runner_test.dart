@@ -954,7 +954,8 @@ void _runTestCase(GrafeoDB db, _TestCase tc, String language,
 
   // Error case
   if (exp.error != null) {
-    _runErrorTest(db, language, queries, exp.error!);
+    _runErrorTest(db, language, queries, exp.error!,
+        params: tc.params.isNotEmpty ? tc.params : null);
     return;
   }
 
@@ -1009,16 +1010,17 @@ void _runErrorTest(
   GrafeoDB db,
   String language,
   List<String> queries,
-  String expectedSubstring,
-) {
+  String expectedSubstring, {
+  Map<String, String>? params,
+}) {
   // Execute all-but-last normally
   for (var i = 0; i < queries.length - 1; i++) {
-    _executeQuery(db, language, queries[i]);
+    _executeQuery(db, language, queries[i], params: params);
   }
 
   // Last query should fail
   try {
-    _executeQuery(db, language, queries.last);
+    _executeQuery(db, language, queries.last, params: params);
     fail("Expected error containing '$expectedSubstring' but query succeeded");
   } on GrafeoException catch (e) {
     expect(e.message, contains(expectedSubstring),

@@ -1,15 +1,15 @@
-//! Queries and direct writes through a session, shared by `GrafeoDB` (a
-//! session in its current graph) and `GraphHandle` (a session in its graph).
+//! Queries and direct writes shared by `GrafeoDB` (its current graph),
+//! `GraphHandle` (its graph) and `Transaction` (its session).
 
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use grafeo_common::types::{NodeId, PropertyKey, Value};
+use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_core::graph::lpg::{Edge, Node};
-use grafeo_engine::Session;
-use grafeo_engine::database::QueryResult;
+use grafeo_engine::database::{BatchEdge, EdgeUpsertOptions, QueryResult, UpsertSummary};
+use grafeo_engine::{GrafeoDB, GraphHandle, Session};
 
 use crate::error::PyGrafeoError;
 use crate::graph::{PyEdge, PyNode};
@@ -70,14 +70,17 @@ pub(crate) fn query_result(mut result: QueryResult) -> PyQueryResult {
     let columns = std::mem::take(&mut result.columns);
     let execution_time = result.execution_time_ms;
     let rows_scanned = result.rows_scanned;
-    PyQueryResult::with_metrics(
+    let counters = result.counters;
+    let mut query_result = PyQueryResult::with_metrics(
         columns,
         result.into_rows(),
         nodes,
         edges,
         execution_time,
         rows_scanned,
-    )
+    );
+    query_result.counters = counters;
+    query_result
 }
 
 /// Runs a query in `language` in the session.
@@ -108,35 +111,290 @@ pub(crate) fn edge(edge: Edge) -> PyEdge {
     )
 }
 
-/// Creates a node and returns it as the session now sees it.
+/// Where a direct write goes: a session (inside its transaction), the
+/// database (its current graph) or a graph handle (its graph). The database
+/// and handles commit each call on its own, without a session.
+pub(crate) trait DirectTarget {
+    fn create_node_with_props(
+        &self,
+        labels: &[&str],
+        properties: Vec<(PropertyKey, Value)>,
+    ) -> grafeo_common::utils::error::Result<NodeId>;
+
+    fn create_edge_with_props(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        edge_type: &str,
+        properties: Vec<(PropertyKey, Value)>,
+    ) -> grafeo_common::utils::error::Result<EdgeId>;
+
+    fn node(&self, id: NodeId) -> Option<Node>;
+
+    fn edge(&self, id: EdgeId) -> Option<Edge>;
+
+    fn upsert_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        replace: bool,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary>;
+
+    fn upsert_edges(
+        &self,
+        edge_type: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        options: &EdgeUpsertOptions,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary>;
+}
+
+impl DirectTarget for Session {
+    fn create_node_with_props(
+        &self,
+        labels: &[&str],
+        properties: Vec<(PropertyKey, Value)>,
+    ) -> grafeo_common::utils::error::Result<NodeId> {
+        Session::create_node_with_props(self, labels, properties)
+    }
+
+    fn create_edge_with_props(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        edge_type: &str,
+        properties: Vec<(PropertyKey, Value)>,
+    ) -> grafeo_common::utils::error::Result<EdgeId> {
+        Session::create_edge_with_props(self, source, target, edge_type, properties)
+    }
+
+    fn node(&self, id: NodeId) -> Option<Node> {
+        self.get_node(id)
+    }
+
+    fn edge(&self, id: EdgeId) -> Option<Edge> {
+        self.get_edge(id)
+    }
+
+    fn upsert_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        replace: bool,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        Session::upsert_nodes(self, labels, key, rows, replace)
+    }
+
+    fn upsert_edges(
+        &self,
+        edge_type: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        options: &EdgeUpsertOptions,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        Session::upsert_edges(self, edge_type, rows, options)
+    }
+}
+
+impl DirectTarget for GrafeoDB {
+    fn create_node_with_props(
+        &self,
+        labels: &[&str],
+        properties: Vec<(PropertyKey, Value)>,
+    ) -> grafeo_common::utils::error::Result<NodeId> {
+        GrafeoDB::create_node_with_props(self, labels, properties)
+    }
+
+    fn create_edge_with_props(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        edge_type: &str,
+        properties: Vec<(PropertyKey, Value)>,
+    ) -> grafeo_common::utils::error::Result<EdgeId> {
+        GrafeoDB::create_edge_with_props(self, source, target, edge_type, properties)
+    }
+
+    fn node(&self, id: NodeId) -> Option<Node> {
+        self.get_node(id)
+    }
+
+    fn edge(&self, id: EdgeId) -> Option<Edge> {
+        self.get_edge(id)
+    }
+
+    fn upsert_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        replace: bool,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        GrafeoDB::upsert_nodes(self, labels, key, rows, replace)
+    }
+
+    fn upsert_edges(
+        &self,
+        edge_type: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        options: &EdgeUpsertOptions,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        GrafeoDB::upsert_edges(self, edge_type, rows, options)
+    }
+}
+
+impl DirectTarget for GraphHandle<'_> {
+    fn create_node_with_props(
+        &self,
+        labels: &[&str],
+        properties: Vec<(PropertyKey, Value)>,
+    ) -> grafeo_common::utils::error::Result<NodeId> {
+        GraphHandle::create_node_with_props(self, labels, properties)
+    }
+
+    fn create_edge_with_props(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        edge_type: &str,
+        properties: Vec<(PropertyKey, Value)>,
+    ) -> grafeo_common::utils::error::Result<EdgeId> {
+        GraphHandle::create_edge_with_props(self, source, target, edge_type, properties)
+    }
+
+    fn node(&self, id: NodeId) -> Option<Node> {
+        self.get_node(id).ok().flatten()
+    }
+
+    fn edge(&self, id: EdgeId) -> Option<Edge> {
+        self.get_edge(id).ok().flatten()
+    }
+
+    fn upsert_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        replace: bool,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        GraphHandle::upsert_nodes(self, labels, key, rows, replace)
+    }
+
+    fn upsert_edges(
+        &self,
+        edge_type: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        options: &EdgeUpsertOptions,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        GraphHandle::upsert_edges(self, edge_type, rows, options)
+    }
+}
+
+/// Upserts rows as nodes and returns the summary as a dict.
+pub(crate) fn upsert_nodes<'py>(
+    py: Python<'py>,
+    target: &impl DirectTarget,
+    labels: &[String],
+    rows: &Bound<'_, PyList>,
+    key: &str,
+    replace: bool,
+) -> PyResult<Bound<'py, PyDict>> {
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let summary = target
+        .upsert_nodes(&labels, key, properties_list(rows)?, replace)
+        .map_err(PyGrafeoError::from)?;
+    upsert_summary(py, &summary)
+}
+
+/// Upserts rows as edges and returns the summary as a dict.
+pub(crate) fn upsert_edges<'py>(
+    py: Python<'py>,
+    target: &impl DirectTarget,
+    edge_type: &str,
+    rows: &Bound<'_, PyList>,
+    options: &EdgeUpsertOptions,
+) -> PyResult<Bound<'py, PyDict>> {
+    let summary = target
+        .upsert_edges(edge_type, properties_list(rows)?, options)
+        .map_err(PyGrafeoError::from)?;
+    upsert_summary(py, &summary)
+}
+
+/// An upsert summary as a dict: `created`, `updated`, `skipped` and
+/// `skipped_rows`.
+fn upsert_summary<'py>(py: Python<'py>, summary: &UpsertSummary) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("created", summary.created)?;
+    dict.set_item("updated", summary.updated)?;
+    dict.set_item("skipped", summary.skipped)?;
+    dict.set_item("skipped_rows", summary.skipped_rows.clone())?;
+    Ok(dict)
+}
+
+/// Node labels from a string (one label) or a list of strings.
+pub(crate) fn labels(value: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if let Ok(label) = value.extract::<String>() {
+        return Ok(vec![label]);
+    }
+    value.extract::<Vec<String>>().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err("labels must be a string or a list of strings")
+    })
+}
+
+/// Edges for a batch from `(src, dst, type)` or `(src, dst, type, properties)`
+/// tuples.
+pub(crate) fn batch_edges(edges: &Bound<'_, PyList>) -> PyResult<Vec<BatchEdge>> {
+    edges
+        .iter()
+        .map(|edge| {
+            let (src, dst, edge_type, props): (u64, u64, String, Option<Bound<'_, PyDict>>) =
+                if let Ok((src, dst, edge_type)) = edge.extract::<(u64, u64, String)>() {
+                    (src, dst, edge_type, None)
+                } else {
+                    edge.extract().map_err(|_| {
+                        pyo3::exceptions::PyTypeError::new_err(
+                            "each edge must be a (src, dst, type) or (src, dst, type, properties) tuple",
+                        )
+                    })?
+                };
+            let mut batch_edge = BatchEdge::new(NodeId(src), NodeId(dst), edge_type);
+            if let Some(props) = props {
+                batch_edge = batch_edge.with_properties(properties(Some(&props))?);
+            }
+            Ok(batch_edge)
+        })
+        .collect()
+}
+
+/// Creates a node and returns it as the target now sees it.
 pub(crate) fn create_node(
-    session: &Session,
+    target: &impl DirectTarget,
     labels: &[String],
     node_properties: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyNode> {
     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let id = session
+    let id = target
         .create_node_with_props(&labels, properties(node_properties)?)
         .map_err(PyGrafeoError::from)?;
-    session
-        .get_node(id)
+    target
+        .node(id)
         .map(node)
         .ok_or_else(|| PyGrafeoError::database("Failed to create node").into())
 }
 
-/// Creates an edge and returns it as the session now sees it.
+/// Creates an edge and returns it as the target now sees it.
 pub(crate) fn create_edge(
-    session: &Session,
+    target: &impl DirectTarget,
     source: NodeId,
-    target: NodeId,
+    target_node: NodeId,
     edge_type: &str,
     edge_properties: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyEdge> {
-    let id = session
-        .create_edge_with_props(source, target, edge_type, properties(edge_properties)?)
+    let id = target
+        .create_edge_with_props(source, target_node, edge_type, properties(edge_properties)?)
         .map_err(PyGrafeoError::from)?;
-    session
-        .get_edge(id)
+    target
+        .edge(id)
         .map(edge)
         .ok_or_else(|| PyGrafeoError::database("Failed to create edge").into())
 }

@@ -6,13 +6,13 @@
 //! would drop it from the file. Writing only what changed needs a container
 //! that keeps the other sections (incremental checkpoints, #430).
 
-use std::sync::Arc;
-
 use grafeo_common::storage::{Section, SectionType};
 use grafeo_common::utils::error::Result;
 
 #[cfg(feature = "grafeo-file")]
 use grafeo_storage::file::GrafeoFileManager;
+
+use super::sections::CheckpointSources;
 
 /// Context needed by each section during serialization.
 pub(super) struct FlushContext {
@@ -140,122 +140,7 @@ pub(super) fn flush(
     Ok(FlushResult { sections_written })
 }
 
-/// Everything a checkpoint writes: the database's complete state.
-///
-/// A checkpoint's container holds only the sections built here, so every
-/// checkpoint path (`close()`, `wal_checkpoint()`, backups, the async
-/// snapshot and the periodic timer) builds them from these sources.
-#[derive(Clone)]
-pub(super) struct CheckpointSources {
-    /// The LPG store; the overlay after `compact()`.
-    #[cfg(feature = "lpg")]
-    pub store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
-    /// The compacted base and overlay, after `compact()`.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    pub layered: Option<Arc<grafeo_core::graph::compact::layered::LayeredStore>>,
-    #[cfg(feature = "lpg")]
-    pub catalog: Arc<crate::catalog::Catalog>,
-    pub transaction_manager: Arc<crate::transaction::TransactionManager>,
-    #[cfg(feature = "triple-store")]
-    pub rdf_store: Arc<grafeo_core::graph::rdf::RdfStore>,
-}
-
 impl CheckpointSources {
-    /// Builds every section of the database.
-    pub fn sections(&self) -> Vec<Box<dyn Section>> {
-        #[cfg_attr(
-            not(any(feature = "lpg", feature = "triple-store")),
-            expect(
-                unused_mut,
-                reason = "only the lpg and triple-store features add sections"
-            )
-        )]
-        let mut sections: Vec<Box<dyn Section>> = Vec::new();
-
-        #[cfg(feature = "lpg")]
-        if let Some(store) = &self.store {
-            let transaction_manager = Arc::clone(&self.transaction_manager);
-            sections.push(Box::new(super::catalog_section::CatalogSection::new(
-                Arc::clone(&self.catalog),
-                Arc::clone(store),
-                move || transaction_manager.current_epoch().as_u64(),
-            )));
-
-            #[cfg(feature = "compact-store")]
-            let layered = self.push_layered(&mut sections);
-            #[cfg(not(feature = "compact-store"))]
-            let layered = false;
-            if !layered {
-                sections.push(Box::new(grafeo_core::graph::lpg::LpgStoreSection::new(
-                    Arc::clone(store),
-                )));
-            }
-
-            // Vector indexes: persist HNSW topology to avoid rebuild on load
-            #[cfg(feature = "vector-index")]
-            {
-                let indexes = store.vector_index_entries();
-                if !indexes.is_empty() {
-                    sections.push(Box::new(
-                        grafeo_core::index::vector::VectorStoreSection::new(indexes),
-                    ));
-                }
-            }
-
-            // Text indexes: persist BM25 postings to avoid rebuild on load
-            #[cfg(feature = "text-index")]
-            {
-                let indexes = store.text_index_entries();
-                if !indexes.is_empty() {
-                    sections.push(Box::new(grafeo_core::index::text::TextIndexSection::new(
-                        indexes,
-                    )));
-                }
-            }
-        }
-
-        #[cfg(feature = "triple-store")]
-        if !self.rdf_store.is_empty() || self.rdf_store.graph_count() > 0 {
-            sections.push(Box::new(grafeo_core::graph::rdf::RdfStoreSection::new(
-                Arc::clone(&self.rdf_store),
-            )));
-        }
-
-        #[cfg(feature = "ring-index")]
-        if self.rdf_store.ring().is_some() {
-            sections.push(Box::new(grafeo_core::index::ring::RdfRingSection::new(
-                Arc::clone(&self.rdf_store),
-            )));
-        }
-
-        sections
-    }
-
-    /// Adds the compacted base, the overlay and the overlay's deletions, or
-    /// returns `false` when the database is not compacted.
-    #[cfg(all(feature = "lpg", feature = "compact-store"))]
-    fn push_layered(&self, sections: &mut Vec<Box<dyn Section>>) -> bool {
-        use grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection;
-        use grafeo_core::graph::compact::section::CompactStoreSection;
-
-        let Some(layered) = &self.layered else {
-            return false;
-        };
-        sections.push(Box::new(CompactStoreSection::new(layered.base_store_arc())));
-        sections.push(Box::new(grafeo_core::graph::lpg::LpgStoreSection::new(
-            layered.overlay_store(),
-        )));
-        // Tombstones for base nodes and edges not yet merged into the base:
-        // without them a reopen would bring deleted entities back.
-        let deletions = OverlayDeletionsSection::from_layered(Arc::clone(layered));
-        if deletions.is_empty() {
-            layered.mark_deletions_clean();
-        } else {
-            sections.push(Box::new(deletions));
-        }
-        true
-    }
-
     /// The header values of the checkpoint.
     pub fn context(&self) -> FlushContext {
         let transaction_id = self

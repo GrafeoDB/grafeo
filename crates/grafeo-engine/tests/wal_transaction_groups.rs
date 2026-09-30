@@ -188,8 +188,12 @@ mod tests {
             "direct_write_to_unknown_graph" => {
                 let session = db.session();
                 session.use_graph("missing");
-                session
-                    .create_node_with_props(&["Person"], [("name", Value::from("Butch"))])
+                let error = session
+                    .create_node_with_props(&["Person"], [("name", Value::from("Vincent"))])
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("does not exist"), "{error}");
+                db.create_node_with_props(&["Person"], [("name", Value::from("Butch"))])
                     .unwrap();
                 assert_eq!(names(db), strings(&["Butch"]));
             }
@@ -282,6 +286,16 @@ mod tests {
                 insert(&a, "Mia");
                 db.create_node_with_props(&["Person"], [("name", Value::from("Django"))])
                     .unwrap();
+            }
+            // Graphs created and dropped through the API, not by a query.
+            "api_graphs" => {
+                db.create_graph("empty").unwrap();
+                db.execute("CREATE GRAPH doomed").unwrap();
+                let session = db.session();
+                session.use_graph("doomed");
+                insert(&session, "Hans");
+                assert!(db.drop_graph("doomed"));
+                assert_eq!(db.list_graphs(), strings(&["empty"]));
             }
             "seed_alix" => insert(&db.session(), "Alix"),
             "insert_gus" => insert(&db.session(), "Gus"),
@@ -385,17 +399,33 @@ mod tests {
         }
     }
 
-    /// The WAL records the graph a direct write went to, not the name the
-    /// session asked for: replay must not create that graph and move the
-    /// node there.
+    /// A direct write to a graph that does not exist fails and logs nothing:
+    /// replay must not create that graph, and only the later write to the
+    /// default graph comes back.
     #[test]
-    fn direct_write_to_an_unknown_graph_replays_where_it_went() {
+    fn direct_write_to_an_unknown_graph_leaves_no_trace() {
         let dir = tempfile::tempdir().unwrap();
         for (format, path) in formats(dir.path()) {
             crash_after("direct_write_to_unknown_graph", &path, format);
             let db = open(&path, format);
             assert_eq!(names(&db), strings(&["Butch"]), "{format}: default graph");
             assert_eq!(db.list_graphs(), Vec::<String>::new(), "{format}");
+        }
+    }
+
+    /// `create_graph` and `drop_graph` are logged like `CREATE GRAPH` and
+    /// `DROP GRAPH`: replay neither loses an empty graph created through the
+    /// API nor brings back one dropped through it (its writes switched to it).
+    #[test]
+    fn graphs_created_and_dropped_through_the_api_are_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        for (format, path) in formats(dir.path()) {
+            crash_after("api_graphs", &path, format);
+            assert_eq!(
+                open(&path, format).list_graphs(),
+                strings(&["empty"]),
+                "{format}"
+            );
         }
     }
 

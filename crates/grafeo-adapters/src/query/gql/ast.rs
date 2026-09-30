@@ -796,6 +796,14 @@ pub enum Expression {
         /// The index expression.
         index: Box<Expression>,
     },
+    /// Dotted key access into a map value: `expr.key`, as in `n.meta.route`
+    /// (`n.meta` itself is a property access).
+    MapAccess {
+        /// The base expression.
+        base: Box<Expression>,
+        /// The key.
+        key: String,
+    },
     /// Slice access: `expr[start..end]`, `expr[..end]`, `expr[start..]`.
     SliceAccess {
         /// The base expression.

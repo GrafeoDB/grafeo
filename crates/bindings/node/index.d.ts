@@ -2,8 +2,14 @@
 /* eslint-disable */
 /** Your connection to a Grafeo database. */
 export declare class GrafeoDB {
-  /** Create a database. Pass a path for persistence, or omit for in-memory. */
-  static create(path?: string | undefined | null): GrafeoDB
+  /**
+   * Create a database. Pass a path for persistence, or omit for in-memory.
+   *
+   * `options.shuffleUnordered` returns the rows of every query without
+   * ORDER BY in random order: for tests, to find code that relies on a row
+   * order that is unspecified.
+   */
+  static create(path?: string | undefined | null, options?: CreateOptions | undefined | null): GrafeoDB
   /** Open an existing database at the given path. */
   static open(path: string): GrafeoDB
   /**
@@ -250,6 +256,41 @@ export declare class GrafeoDB {
    * Returns the number of nodes created.
    */
   importJsonl(path: string, options?: JsonlImportOptions | undefined | null): Promise<number>
+  /**
+   * Creates one node per properties object, each with `labels` (a label
+   * or a list of labels), in one transaction: if one breaks a constraint,
+   * none is created. Returns a Promise of the node IDs, in input order.
+   */
+  batchCreateNodesWithProps(labels: string | Array<string>, propertiesList: Array<any>): Promise<Array<number>>
+  /**
+   * Creates the edges, each with its own `type` and `properties`, in one
+   * transaction: if one names a node that does not exist or breaks the
+   * schema, none is created. Returns a Promise of the edge IDs, in input
+   * order.
+   */
+  batchCreateEdges(edges: Array<BatchEdgeInput>): Promise<Array<number>>
+  /**
+   * Creates or updates one node per row, matched by `key` and all of
+   * `labels`, in one statement. Returns a Promise.
+   *
+   * Each row is an object of properties holding the key; a row without it
+   * is skipped. By default a row's properties are merged into the node's;
+   * with `replace: true` they become exactly the row's. Labels are never
+   * removed. A key repeated within one call creates one node, which the
+   * later rows update. The call is checked like a query and writes all
+   * rows or none.
+   */
+  upsertNodes(labels: Array<string>, rows: Array<any>, options?: UpsertNodesOptions | undefined | null): Promise<UpsertSummary>
+  /**
+   * Creates or updates one edge of `edgeType` per row between existing
+   * nodes, in one statement. Returns a Promise.
+   *
+   * Each row names its endpoints in the source and target fields (`src`
+   * and `dst` by default) and holds the edge key; every other field is an
+   * edge property. A row whose endpoint does not exist, or without the
+   * key, is skipped, never created.
+   */
+  upsertEdges(edgeType: string, rows: Array<any>, options?: UpsertEdgesOptions | undefined | null): Promise<UpsertSummary>
 }
 export type JsGrafeoDB = GrafeoDB
 
@@ -297,6 +338,11 @@ export declare class QueryResult {
   get executionTimeMs(): number | null
   /** Number of rows scanned during execution (if available). */
   get rowsScanned(): number | null
+  /**
+   * What the query's writes changed: nodes and edges created and deleted,
+   * properties set, labels added and removed.
+   */
+  get counters(): WriteCounters
   /** Get a single row by index as a plain object. */
   get(index: number): object
   /** Get all rows as an array of objects. */
@@ -400,6 +446,28 @@ export declare class Transaction {
   executeSparql(query: string, params?: any | undefined | null): Promise<QueryResult>
 }
 
+/** An edge for `batchCreateEdges`. */
+export interface BatchEdgeInput {
+  /** The source node's ID. */
+  src: number
+  /** The target node's ID. */
+  dst: number
+  /** The edge type. */
+  type: string
+  /** The edge's properties. */
+  properties?: any
+}
+
+/** Options for `GrafeoDB.create`. */
+export interface CreateOptions {
+  /**
+   * Return the rows of every query without ORDER BY in random order
+   * (default `false`): a test option that finds code relying on a row
+   * order that is unspecified.
+   */
+  shuffleUnordered?: boolean
+}
+
 /** Options for CSV import. */
 export interface CsvImportOptions {
   /** Label to assign to created nodes (default: "Row") */
@@ -417,5 +485,71 @@ export interface JsonlImportOptions {
 /** Returns the active SIMD instruction set for vector operations. */
 export declare function simdSupport(): string
 
+/** Options for `upsertEdges`. */
+export interface UpsertEdgesOptions {
+  /** The property that identifies an edge between two nodes (default `id`). */
+  key?: string
+  /**
+   * The node property the endpoint fields hold (default `id`). A property
+   * index on it makes the lookups fast.
+   */
+  endpointKey?: string
+  /** Labels an endpoint must have (default none: the key alone). */
+  endpointLabels?: Array<string>
+  /** The row field with the source node's key (default `src`). */
+  srcField?: string
+  /** The row field with the target node's key (default `dst`). */
+  dstField?: string
+  /**
+   * Whether an edge's properties become exactly the row's (default
+   * `false`: the row's properties are merged in).
+   */
+  replace?: boolean
+}
+
+/** Options for `upsertNodes`. */
+export interface UpsertNodesOptions {
+  /** The property that identifies a node (default `id`). */
+  key?: string
+  /**
+   * Whether a node's properties become exactly the row's (default
+   * `false`: the row's properties are merged in and none is removed).
+   */
+  replace?: boolean
+}
+
+/** What an upsert did with its rows. */
+export interface UpsertSummary {
+  /** Rows that created a node or edge. */
+  created: number
+  /** Rows that updated an existing node or edge. */
+  updated: number
+  /**
+   * Rows that were not written: without their key, or an edge row whose
+   * endpoint does not exist.
+   */
+  skipped: number
+  /** The indices of the skipped rows, in order (at most 1,000). */
+  skippedRows: Array<number>
+}
+
 /** Returns the Grafeo version. */
 export declare function version(): string
+
+/** What a query's writes changed. */
+export interface WriteCounters {
+  /** Nodes created, by `INSERT`, `CREATE` or `MERGE`. */
+  nodesCreated: number
+  /** Nodes deleted. */
+  nodesDeleted: number
+  /** Edges created. */
+  edgesCreated: number
+  /** Edges deleted, also those `DETACH DELETE` removes. */
+  edgesDeleted: number
+  /** Property values written or removed, also those of created entities. */
+  propertiesSet: number
+  /** Labels added, also those of created nodes. */
+  labelsAdded: number
+  /** Labels removed. */
+  labelsRemoved: number
+}

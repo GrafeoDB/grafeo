@@ -51,7 +51,8 @@ impl GrafeoDB {
 
         // EXPLAIN: return the physical plan tree without executing
         if optimized_plan.explain {
-            let planner = RdfPlanner::new(Arc::clone(&self.rdf_store));
+            let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
+                .with_shuffle_unordered(self.config.shuffle_unordered);
             let (_, entries) = planner.plan_profiled(&optimized_plan)?;
             use crate::query::processor::physical_explain_result;
             return Ok(physical_explain_result(&optimized_plan, entries));
@@ -76,7 +77,8 @@ impl GrafeoDB {
 
         // EXPLAIN ANALYZE: execute with profiling, report actual stats
         if optimized_plan.profile {
-            let planner = RdfPlanner::new(Arc::clone(&self.rdf_store));
+            let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
+                .with_shuffle_unordered(self.config.shuffle_unordered);
             #[cfg(feature = "wal")]
             let planner = planner.with_wal(wal_buffer.clone());
             let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
@@ -97,7 +99,8 @@ impl GrafeoDB {
         }
 
         // Convert to physical plan using RDF planner
-        let planner = RdfPlanner::new(Arc::clone(&self.rdf_store));
+        let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
+            .with_shuffle_unordered(self.config.shuffle_unordered);
         #[cfg(feature = "wal")]
         let planner = planner.with_wal(wal_buffer.clone());
         let mut physical_plan = planner.plan(&optimized_plan)?;

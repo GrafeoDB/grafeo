@@ -111,6 +111,10 @@ impl super::Planner {
                     index: Box::new(index_expr),
                 })
             }
+            LogicalExpression::MapAccess { base, key } => Ok(FilterExpression::IndexAccess {
+                base: Box::new(self.convert_expression(base)?),
+                index: Box::new(FilterExpression::Literal(Value::from(key.as_str()))),
+            }),
             LogicalExpression::SliceAccess { base, start, end } => {
                 let base_expr = self.convert_expression(base)?;
                 let start_expr = start

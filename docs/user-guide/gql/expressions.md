@@ -264,8 +264,21 @@ RETURN person.name, person.age
 
 -- Maps in mutations
 MATCH (p:Person {name: 'Alix'})
-SET p += {city: 'NYC', role: 'engineer'}
+SET p += {city: 'Amsterdam', role: 'engineer'}
 ```
+
+A property can hold a map. Dotted access reads its keys, also nested, the same as a subscript; a missing key, or a value that is not a map, gives null. A column without an alias is named as written:
+
+```sql
+INSERT (:Doc {id: 'd1', meta: {route: 'directory', score: 0.5, source: {kind: 'file'}}})
+
+MATCH (d:Doc)
+WHERE d.meta.route = 'directory'
+RETURN d.meta.score, d.meta.source.kind, d.meta['route']
+-- columns: d.meta.score, d.meta.source.kind, d.meta['route']
+```
+
+Dotted access needs a map value: a property, a variable, a parameter, a map literal or `properties(n)`. On a node or edge that an expression returns, such as `startNode(r).name`, it is an error; match the node with a variable and read its property instead.
 
 ## SESSION_USER
 

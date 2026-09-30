@@ -105,6 +105,7 @@ pub fn profile_result(root: &ProfileNode, total_time_ms: f64) -> QueryResult {
         rows_scanned: None,
         status_message: None,
         gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+        counters: Default::default(),
     }
 }
 

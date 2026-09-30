@@ -143,6 +143,21 @@ tests:
       rows:
         - [2]
 
+  # TinkerPop's regex() finds the pattern anywhere in the string (Cypher's
+  # =~ matches the whole string instead).
+  - name: regex_finds_a_part_of_the_string
+    query: "g.V().hasLabel('Person').has('name', regex('lix')).values('name')"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: not_regex_finds_a_part_of_the_string
+    query: "g.V().hasLabel('Person').has('name', notRegex('lix')).values('name')"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
   # ---------------------------------------------------------------------------
   # notRegex() predicate
   # ---------------------------------------------------------------------------

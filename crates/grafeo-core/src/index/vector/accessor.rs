@@ -65,12 +65,13 @@ impl VectorAccessor for PropertyVectorAccessor<'_> {
     }
 }
 
-/// Reads vectors from a spill-backed store first, falling back to
-/// property storage for vectors that haven't been spilled (e.g., new inserts).
+/// Reads vectors written after a spill from property storage, and every
+/// other vector from the spill-backed store.
 ///
 /// Created by the engine when a vector index has been spilled to disk.
-/// The mmap-backed store serves the bulk of reads (zero-copy from page cache),
-/// while the property store catches any vectors inserted after the spill.
+/// The mmap-backed store serves the bulk of reads (zero-copy from page cache);
+/// the property store holds what was inserted or changed after the spill,
+/// which must win over the spilled value.
 pub struct SpillableVectorAccessor<'a> {
     store: &'a dyn GraphStore,
     property: PropertyKey,
@@ -78,8 +79,8 @@ pub struct SpillableVectorAccessor<'a> {
 }
 
 impl<'a> SpillableVectorAccessor<'a> {
-    /// Creates a new accessor that checks `spill_storage` first, then falls
-    /// back to the property store.
+    /// Creates a new accessor that checks the property store first (writes
+    /// after the spill), then `spill_storage`.
     #[must_use]
     pub fn new(
         store: &'a dyn GraphStore,
@@ -96,15 +97,11 @@ impl<'a> SpillableVectorAccessor<'a> {
 
 impl VectorAccessor for SpillableVectorAccessor<'_> {
     fn get_vector(&self, id: NodeId) -> Option<Arc<[f32]>> {
-        // Try spill storage first (mmap-backed, serves most reads)
-        if let Some(v) = self.spill_storage.get(id) {
+        // A vector written after the spill wins over the spilled one.
+        if let Some(Value::Vector(v)) = self.store.get_node_property(id, &self.property) {
             return Some(v);
         }
-        // Fall back to property store (new inserts after spill)
-        match self.store.get_node_property(id, &self.property) {
-            Some(Value::Vector(v)) => Some(v),
-            _ => None,
-        }
+        self.spill_storage.get(id)
     }
 }
 
@@ -117,7 +114,8 @@ impl VectorAccessor for SpillableVectorAccessor<'_> {
 pub enum VectorAccessorKind<'a> {
     /// Direct property store lookup (default, no spill).
     Property(PropertyVectorAccessor<'a>),
-    /// Spill-backed: checks MmapStorage first, falls back to property store.
+    /// Spill-backed: checks the property store first (writes after the
+    /// spill), then the MmapStorage.
     Spilled(SpillableVectorAccessor<'a>),
 }
 
@@ -217,12 +215,14 @@ mod spill_tests {
         assert_eq!(result.unwrap().as_ref(), prop_vec.as_ref());
     }
 
+    /// A vector in the property store was written after the spill, so it
+    /// wins over the spilled one.
     #[test]
-    fn spill_accessor_prefers_spill_over_property_store() {
+    fn spill_accessor_prefers_a_write_after_the_spill() {
         let store = LpgStore::new().unwrap();
         let vincent_id = store.create_node(&["Person"]);
         let prop_vec: Arc<[f32]> = vec![1.0, 0.0, 0.0].into();
-        store.set_node_property(vincent_id, "embedding", Value::Vector(prop_vec));
+        store.set_node_property(vincent_id, "embedding", Value::Vector(prop_vec.clone()));
 
         let spill_vec: Vec<f32> = vec![0.0, 1.0, 0.0];
         let spill = Arc::new(RamStorage::new(3));
@@ -230,7 +230,7 @@ mod spill_tests {
 
         let accessor = SpillableVectorAccessor::new(&store as &dyn GraphStore, "embedding", spill);
         let result = accessor.get_vector(vincent_id).unwrap();
-        assert_eq!(result.as_ref(), spill_vec.as_slice());
+        assert_eq!(result.as_ref(), prop_vec.as_ref());
     }
 
     #[test]

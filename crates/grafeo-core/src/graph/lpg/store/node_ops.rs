@@ -201,12 +201,13 @@ impl LpgStore {
         #[cfg(feature = "temporal")]
         self.register_node_labels(id, labels, version_epoch);
 
-        // Allocate record in arena and get offset (create epoch if needed)
-        let arena = self
+        // Allocate the record in the epoch's arena (created if needed). The
+        // arena's lock is released at the end of this statement, before the
+        // version lock below: see the lock order on `arena_allocator`.
+        let (offset, _stored) = self
             .arena_allocator
             .arena_or_create(epoch)
-            .expect("failed to create arena for epoch");
-        let (offset, _stored) = arena
+            .expect("failed to create arena for epoch")
             .alloc_value_with_offset(record)
             .expect("arena allocation failed for node record");
 
@@ -267,14 +268,6 @@ impl LpgStore {
             self.node_properties.set(id, prop_key, prop_value, epoch);
         }
 
-        // Update props_count in record
-        let count = u16::try_from(self.node_properties.get_all(id).len()).unwrap_or(u16::MAX);
-        if let Some(chain) = self.nodes.write().get_mut(&id)
-            && let Some(record) = chain.latest_mut()
-        {
-            record.props_count = count;
-        }
-
         id
     }
 
@@ -300,9 +293,6 @@ impl LpgStore {
             #[cfg(feature = "temporal")]
             self.node_properties.set(id, prop_key, prop_value, epoch);
         }
-
-        // Note: props_count in record is not updated for tiered storage.
-        // The record is immutable once allocated in the arena.
 
         id
     }

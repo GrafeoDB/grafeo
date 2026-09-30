@@ -49,7 +49,10 @@ impl Session {
             identity: cfg.identity,
             auto_commit: true,
             adaptive_config: cfg.adaptive_config,
-            factorized_execution: cfg.factorized_execution,
+            plan_options: super::PlanOptions {
+                factorized_execution: cfg.factorized_execution,
+                shuffle_unordered: cfg.shuffle_unordered,
+            },
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
@@ -98,11 +101,16 @@ impl Session {
         let optimizer = Optimizer::from_graph_store(&*active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
-        if !self.identity.can_admin() && optimized_plan.root.has_mutations() {
-            self.require_permission(crate::auth::StatementKind::Write)?;
+        // A write needs a writable session: a writing role, and no read-only
+        // transaction or database (skip the tree walk when neither can fail).
+        if (!self.identity.can_admin() || *self.read_only_tx.lock())
+            && optimized_plan.root.has_mutations()
+        {
+            self.check_writable()?;
         }
 
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
+            .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
         let planner = planner.with_wal(self.wal.clone());
@@ -159,9 +167,12 @@ impl Session {
         let optimizer = Optimizer::from_rdf_statistics((*rdf_stats).clone());
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
-        // Check role-based permission for mutations
-        if !self.identity.can_admin() && optimized_plan.root.has_mutations() {
-            self.require_permission(crate::auth::StatementKind::Write)?;
+        // A write needs a writable session: a writing role, and no read-only
+        // transaction or database (skip the tree walk when neither can fail).
+        if (!self.identity.can_admin() || *self.read_only_tx.lock())
+            && optimized_plan.root.has_mutations()
+        {
+            self.check_writable()?;
         }
 
         // EXPLAIN: return the logical plan tree without executing
@@ -171,6 +182,7 @@ impl Session {
         }
 
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
+            .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
         let planner = planner.with_wal(self.wal.clone());
@@ -218,9 +230,12 @@ impl Session {
         let optimizer = Optimizer::from_rdf_statistics((*rdf_stats).clone());
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
-        // Check role-based permission for mutations (skip tree walk for admin)
-        if !self.identity.can_admin() && optimized_plan.root.has_mutations() {
-            self.require_permission(crate::auth::StatementKind::Write)?;
+        // A write needs a writable session: a writing role, and no read-only
+        // transaction or database (skip the tree walk when neither can fail).
+        if (!self.identity.can_admin() || *self.read_only_tx.lock())
+            && optimized_plan.root.has_mutations()
+        {
+            self.check_writable()?;
         }
 
         // EXPLAIN: return the logical plan tree without executing
@@ -230,6 +245,7 @@ impl Session {
         }
 
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
+            .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
         let planner = planner.with_wal(self.wal.clone());
@@ -282,9 +298,12 @@ impl Session {
         let optimizer = Optimizer::from_rdf_statistics((*rdf_stats).clone());
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
-        // Check role-based permission for mutations (skip tree walk for admin)
-        if !self.identity.can_admin() && optimized_plan.root.has_mutations() {
-            self.require_permission(crate::auth::StatementKind::Write)?;
+        // A write needs a writable session: a writing role, and no read-only
+        // transaction or database (skip the tree walk when neither can fail).
+        if (!self.identity.can_admin() || *self.read_only_tx.lock())
+            && optimized_plan.root.has_mutations()
+        {
+            self.check_writable()?;
         }
 
         // EXPLAIN: return the logical plan tree without executing
@@ -294,6 +313,7 @@ impl Session {
         }
 
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
+            .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
         let planner = planner.with_wal(self.wal.clone());

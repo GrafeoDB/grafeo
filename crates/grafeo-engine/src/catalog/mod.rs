@@ -1046,7 +1046,7 @@ impl EdgeTypeCatalog {
 // === Index Catalog ===
 
 /// Type of index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum IndexType {
     /// Hash index for equality lookups.

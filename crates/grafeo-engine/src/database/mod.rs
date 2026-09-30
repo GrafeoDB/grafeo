@@ -31,6 +31,8 @@ mod checkpoint_timer;
 pub mod compact_tiered;
 #[cfg(feature = "lpg")]
 mod crud;
+#[cfg(feature = "lpg")]
+pub(crate) mod direct;
 #[cfg(feature = "embed")]
 mod embed;
 #[cfg(feature = "grafeo-file")]
@@ -38,7 +40,11 @@ pub(crate) mod flush;
 #[cfg(feature = "lpg")]
 mod graph_handle;
 #[cfg(feature = "lpg")]
+pub use direct::BatchEdge;
+#[cfg(feature = "lpg")]
 pub use graph_handle::GraphHandle;
+#[cfg(all(feature = "lpg", feature = "gql"))]
+pub use upsert::{EdgeUpsertOptions, UpsertSummary};
 #[cfg(feature = "lpg")]
 mod import;
 #[cfg(feature = "lpg")]
@@ -53,6 +59,9 @@ mod schema_replay;
 #[cfg(feature = "lpg")]
 mod search;
 pub(crate) mod section_consumer;
+mod sections;
+#[cfg(all(feature = "lpg", feature = "gql"))]
+mod upsert;
 #[cfg(all(feature = "wal", feature = "lpg"))]
 pub(crate) mod wal_store;
 
@@ -186,6 +195,9 @@ pub struct GrafeoDB {
     /// Whether this database is open in read-only mode.
     /// When true, sessions automatically enforce read-only transactions.
     read_only: bool,
+    /// Buffers of the direct calls made outside a transaction.
+    #[cfg(feature = "lpg")]
+    implicit_writes: direct::ImplicitWrites,
     /// Named graph projections (virtual subgraphs), shared with sessions.
     projections:
         Arc<RwLock<std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>>>,
@@ -389,23 +401,10 @@ impl GrafeoDB {
 
         let is_read_only = config.access_mode == crate::config::AccessMode::ReadOnly;
 
-        // Phase 5e: capture the deserialized CompactStore base when we
-        // reload a v2 section file that was written by a previously
-        // compacted database. The post-construction wiring uses this to
-        // rebuild the LayeredStore + tier wrapper + overlay consumer.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "compact-store"))]
-        let mut loaded_compact_base: Option<
-            Arc<grafeo_core::graph::compact::CompactStore>,
-        > = None;
-
-        // Phase 5e: snapshot of the OverlayDeletions section (if present),
-        // applied after the LayeredStore is wired so that previously-deleted
-        // base nodes/edges remain deleted across reload.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "compact-store"))]
-        let mut loaded_overlay_deletions: Option<(
-            Vec<grafeo_common::types::NodeId>,
-            Vec<grafeo_common::types::EdgeId>,
-        )> = None;
+        // What loading a v2 section file leaves for the built database: a
+        // compacted base to wire under its overlay, and indexes to build.
+        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        let mut loaded_sections = sections::LoadedSections::default();
 
         // What WAL recovery found at the end of the log, applied once the WAL
         // is open (#411): a torn tail must be sealed before anything new is
@@ -425,19 +424,19 @@ impl GrafeoDB {
                     let fm = GrafeoFileManager::open_read_only(db_path)?;
                     // Try v2 section-based format first
                     #[cfg(feature = "lpg")]
-                    if fm.read_section_directory()?.is_some() {
-                        Self::load_from_sections(
-                            &fm,
+                    if let Some(directory) = fm.read_section_directory()? {
+                        loaded_sections = sections::load_sections(
+                            &mut |section_type| {
+                                directory
+                                    .find(section_type)
+                                    .map(|entry| fm.read_section_data(entry))
+                                    .transpose()
+                            },
                             &store,
                             &catalog,
                             #[cfg(feature = "triple-store")]
                             &rdf_store,
                         )?;
-                        #[cfg(feature = "compact-store")]
-                        {
-                            loaded_compact_base = Self::extract_compact_base(&fm)?;
-                            loaded_overlay_deletions = Self::extract_overlay_deletions(&fm)?;
-                        }
                     } else {
                         // Fall back to v1 blob format
                         let snapshot_data = fm.read_snapshot()?;
@@ -483,19 +482,19 @@ impl GrafeoDB {
 
                 // Load data: try v2 section-based format, fall back to v1 blob
                 #[cfg(feature = "lpg")]
-                if fm.read_section_directory()?.is_some() {
-                    Self::load_from_sections(
-                        &fm,
+                if let Some(directory) = fm.read_section_directory()? {
+                    loaded_sections = sections::load_sections(
+                        &mut |section_type| {
+                            directory
+                                .find(section_type)
+                                .map(|entry| fm.read_section_data(entry))
+                                .transpose()
+                        },
                         &store,
                         &catalog,
                         #[cfg(feature = "triple-store")]
                         &rdf_store,
                     )?;
-                    #[cfg(feature = "compact-store")]
-                    {
-                        loaded_compact_base = Self::extract_compact_base(&fm)?;
-                        loaded_overlay_deletions = Self::extract_overlay_deletions(&fm)?;
-                    }
                 } else {
                     let snapshot_data = fm.read_snapshot()?;
                     if !snapshot_data.is_empty() {
@@ -700,6 +699,8 @@ impl GrafeoDB {
             current_graph: RwLock::new(None),
             current_schema: RwLock::new(None),
             read_only: is_read_only,
+            #[cfg(feature = "lpg")]
+            implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
             layered_store: None,
@@ -710,15 +711,11 @@ impl GrafeoDB {
         // Register storage sections as memory consumers for pressure tracking
         db.register_section_consumers();
 
-        // Phase 5e: if the loaded file has a CompactStore section, the
-        // database was previously compacted. Reconstruct the LayeredStore
-        // wiring (base + overlay + tier wrapper + consumers) so the
-        // engine sees the full picture and the read/write paths route
-        // through the layered store.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "compact-store"))]
-        if let Some(compact_base) = loaded_compact_base {
-            db.wire_layered_after_load(compact_base, loaded_overlay_deletions)?;
-        }
+        // A previously compacted file gets its layered store back, and the
+        // indexes its sections did not hold are built from all the data,
+        // now that WAL recovery is done.
+        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        db.finish_load(loaded_sections)?;
 
         // Start periodic checkpoint timer if configured (after the layered
         // store is wired, so its checkpoints include the compacted base)
@@ -779,7 +776,9 @@ impl GrafeoDB {
             .validate()
             .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
 
+        // Commits continue from the epoch the store is at.
         let transaction_manager = Arc::new(TransactionManager::new());
+        transaction_manager.sync_epoch(store.current_epoch());
 
         let buffer_config = BufferManagerConfig {
             budget: config.memory_limit.unwrap_or_else(|| {
@@ -835,6 +834,8 @@ impl GrafeoDB {
             current_graph: RwLock::new(None),
             current_schema: RwLock::new(None),
             read_only: false,
+            #[cfg(feature = "lpg")]
+            implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
             layered_store: None,
@@ -872,7 +873,9 @@ impl GrafeoDB {
             .validate()
             .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
 
+        // Commits continue from the epoch the store is at.
         let transaction_manager = Arc::new(TransactionManager::new());
+        transaction_manager.sync_epoch(store.current_epoch());
 
         let buffer_config = BufferManagerConfig {
             budget: config.memory_limit.unwrap_or_else(|| {
@@ -928,6 +931,8 @@ impl GrafeoDB {
             current_graph: RwLock::new(None),
             current_schema: RwLock::new(None),
             read_only: true,
+            #[cfg(feature = "lpg")]
+            implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
             layered_store: None,
@@ -946,6 +951,10 @@ impl GrafeoDB {
     /// Unlike the pre-0.5.39 behavior, the database remains writable after
     /// compaction: new writes go to the overlay. Call [`recompact()`](Self::recompact)
     /// to merge the overlay back into the columnar base periodically.
+    ///
+    /// Compaction keeps no version history: point-in-time reads
+    /// ([`get_node_at_epoch`](Self::get_node_at_epoch), `execute_at_epoch`) see
+    /// the compacted nodes and edges at every epoch.
     ///
     /// # Errors
     ///
@@ -1366,19 +1375,18 @@ impl GrafeoDB {
         )
     }
 
-    /// Phase 5e: post-load LayeredStore wiring.
+    /// Post-load LayeredStore wiring.
     ///
-    /// After `load_from_sections` has populated `self.store` (the LpgStore,
-    /// which now holds the overlay data) and `extract_compact_base` has
-    /// produced the base, this rebuilds the same engine state that
-    /// `compact()` establishes:
+    /// After `sections::load_sections` has populated `self.store` (the
+    /// LpgStore, which now holds the overlay data) and produced the base,
+    /// this rebuilds the same engine state that `compact()` establishes:
     ///
     /// - `self.layered_store = Some(LayeredStore { base, overlay = self.store })`
     /// - `self.external_read_store / external_write_store = Arc::clone(layered)`
     /// - `self.store` swapped to the overlay (which is the same `Arc<LpgStore>`)
     /// - Tier wrapper installed and `CompactStoreConsumer` + `OverlayConsumer`
     ///   registered with the BufferManager
-    #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "compact-store"))]
+    #[cfg(all(feature = "lpg", feature = "compact-store"))]
     fn wire_layered_after_load(
         &mut self,
         compact_base: Arc<grafeo_core::graph::compact::CompactStore>,
@@ -1433,135 +1441,6 @@ impl GrafeoDB {
         self.buffer_manager.register_consumer(overlay_consumer);
 
         self.layered_store = Some(layered);
-
-        Ok(())
-    }
-
-    /// Phase 5e: extracts the deserialized CompactStore base from a v2
-    /// section file, if present. Used by the open path to reconstruct
-    /// the LayeredStore wiring after a previously-compacted database
-    /// reopens.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "compact-store"))]
-    fn extract_compact_base(
-        fm: &GrafeoFileManager,
-    ) -> Result<Option<Arc<grafeo_core::graph::compact::CompactStore>>> {
-        use grafeo_common::storage::{Section, SectionType};
-        let Some(dir) = fm.read_section_directory()? else {
-            return Ok(None);
-        };
-        let Some(entry) = dir.find(SectionType::CompactStore) else {
-            return Ok(None);
-        };
-        let data = fm.read_section_data(entry)?;
-        let mut section = grafeo_core::graph::compact::section::CompactStoreSection::empty();
-        section.deserialize(&data)?;
-        Ok(section.store())
-    }
-
-    /// Reads the persisted overlay deletion log from the container, if
-    /// the file carries one. Returns `(deleted_nodes, deleted_edges)` so
-    /// the caller can seed `LayeredStore::seed_deleted_from_base` after
-    /// the layered store is constructed. Returns `None` when no
-    /// deletions were recorded (the section is omitted in that case).
-    #[cfg(all(feature = "grafeo-file", feature = "lpg", feature = "compact-store"))]
-    fn extract_overlay_deletions(
-        fm: &GrafeoFileManager,
-    ) -> Result<
-        Option<(
-            Vec<grafeo_common::types::NodeId>,
-            Vec<grafeo_common::types::EdgeId>,
-        )>,
-    > {
-        use grafeo_common::storage::{Section, SectionType};
-        let Some(dir) = fm.read_section_directory()? else {
-            return Ok(None);
-        };
-        let Some(entry) = dir.find(SectionType::OverlayDeletions) else {
-            return Ok(None);
-        };
-        let data = fm.read_section_data(entry)?;
-        let mut section =
-            grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection::empty();
-        section.deserialize(&data)?;
-        Ok(Some(section.take()))
-    }
-
-    /// Loads from a section-based `.grafeo` file (v2 format).
-    ///
-    /// Reads the section directory, then deserializes each section independently.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-    fn load_from_sections(
-        fm: &GrafeoFileManager,
-        store: &Arc<LpgStore>,
-        catalog: &Arc<crate::catalog::Catalog>,
-        #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
-    ) -> Result<()> {
-        use grafeo_common::storage::{Section, SectionType};
-
-        let dir = fm.read_section_directory()?.ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
-                "expected v2 section directory but found none".to_string(),
-            )
-        })?;
-
-        // Load catalog section first (schema defs needed before data)
-        if let Some(entry) = dir.find(SectionType::Catalog) {
-            let data = fm.read_section_data(entry)?;
-            let tm = Arc::new(crate::transaction::TransactionManager::new());
-            let mut section = catalog_section::CatalogSection::new(
-                Arc::clone(catalog),
-                Arc::clone(store),
-                move || tm.current_epoch().as_u64(),
-            );
-            section.deserialize(&data)?;
-        }
-
-        // Load LPG store (Phase 5e: when the file has a CompactStore section,
-        // this LpgStore data IS the overlay; the caller then wires it into
-        // a LayeredStore via `extract_compact_base`).
-        if let Some(entry) = dir.find(SectionType::LpgStore) {
-            let data = fm.read_section_data(entry)?;
-            let mut section = grafeo_core::graph::lpg::LpgStoreSection::new(Arc::clone(store));
-            section.deserialize(&data)?;
-        }
-
-        // Load RDF store
-        #[cfg(feature = "triple-store")]
-        if let Some(entry) = dir.find(SectionType::RdfStore) {
-            let data = fm.read_section_data(entry)?;
-            let mut section = grafeo_core::graph::rdf::RdfStoreSection::new(Arc::clone(rdf_store));
-            section.deserialize(&data)?;
-        }
-
-        // Restore Ring Index (if persisted)
-        #[cfg(feature = "ring-index")]
-        if let Some(entry) = dir.find(SectionType::RdfRing) {
-            let data = fm.read_section_data(entry)?;
-            let mut section = grafeo_core::index::ring::RdfRingSection::new(Arc::clone(rdf_store));
-            section.deserialize(&data)?;
-        }
-
-        // Restore HNSW topology (if vector indexes exist in both catalog and section)
-        #[cfg(feature = "vector-index")]
-        if let Some(entry) = dir.find(SectionType::VectorStore) {
-            let data = fm.read_section_data(entry)?;
-            let indexes = store.vector_index_entries();
-            if !indexes.is_empty() {
-                let mut section = grafeo_core::index::vector::VectorStoreSection::new(indexes);
-                section.deserialize(&data)?;
-            }
-        }
-
-        // Restore BM25 postings (if text indexes exist in both catalog and section)
-        #[cfg(feature = "text-index")]
-        if let Some(entry) = dir.find(SectionType::TextIndex) {
-            let data = fm.read_section_data(entry)?;
-            let indexes = store.text_index_entries();
-            if !indexes.is_empty() {
-                let mut section = grafeo_core::index::text::TextIndexSection::new(indexes);
-                section.deserialize(&data)?;
-            }
-        }
 
         Ok(())
     }
@@ -1703,6 +1582,7 @@ impl GrafeoDB {
             catalog: Arc::clone(&self.catalog),
             adaptive_config: self.config.adaptive.clone(),
             factorized_execution: self.config.factorized_execution,
+            shuffle_unordered: self.config.shuffle_unordered,
             graph_model: self.config.graph_model,
             query_timeout: self.config.query_timeout,
             max_property_size: self.config.max_property_size,
@@ -1715,23 +1595,18 @@ impl GrafeoDB {
             projections: Arc::clone(&self.projections),
         };
 
-        // Layered store: use the overlay LpgStore as the session's internal store
-        // so MVCC operations (begin_tx, commit, visibility) work correctly.
+        // After `compact()` the session keeps the overlay as its internal
+        // store, so MVCC operations (begin, commit, visibility) work, and
+        // reads and writes the layered store (base and overlay) below. It is
+        // wired like any other session: WAL, CDC, RDF store, graph, schema.
         #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        if let Some(ref layered) = self.layered_store {
-            let overlay = layered.overlay_store();
-            let layered_arc = Arc::clone(layered);
-            let mut session = Session::with_adaptive(overlay, session_cfg());
-            // Override graph_store/graph_store_mut to use the LayeredStore
-            // (which merges base + overlay), not just the overlay alone.
-            session.override_stores(
-                Arc::clone(&layered_arc) as Arc<dyn GraphStoreSearch>,
-                Some(layered_arc as Arc<dyn GraphStoreMut>),
-            );
-            return session;
-        }
+        let layered = self.layered_store.clone();
+        #[cfg(not(all(feature = "compact-store", feature = "lpg")))]
+        let layered: Option<()> = None;
 
-        if let Some(ref ext_read) = self.external_read_store {
+        if layered.is_none()
+            && let Some(ref ext_read) = self.external_read_store
+        {
             return Session::with_external_store(
                 Arc::clone(ext_read),
                 self.external_write_store.as_ref().map(Arc::clone),
@@ -1740,21 +1615,40 @@ impl GrafeoDB {
             .expect("arena allocation for external store session");
         }
 
+        #[cfg(feature = "lpg")]
+        let internal_store = match &layered {
+            #[cfg(feature = "compact-store")]
+            Some(layered) => layered.overlay_store(),
+            _ => Arc::clone(self.lpg_store()),
+        };
         #[cfg(all(feature = "lpg", feature = "triple-store"))]
         let mut session = Session::with_rdf_store_and_adaptive(
-            Arc::clone(self.lpg_store()),
+            internal_store,
             Arc::clone(&self.rdf_store),
             session_cfg(),
         );
         #[cfg(all(feature = "lpg", not(feature = "triple-store")))]
-        let mut session = Session::with_adaptive(Arc::clone(self.lpg_store()), session_cfg());
+        let mut session = Session::with_adaptive(internal_store, session_cfg());
+        #[cfg(all(feature = "compact-store", feature = "lpg"))]
+        if let Some(layered) = &layered {
+            session.override_stores(
+                Arc::clone(layered) as Arc<dyn GraphStoreSearch>,
+                Some(Arc::clone(layered) as Arc<dyn GraphStoreMut>),
+            );
+        }
         #[cfg(not(feature = "lpg"))]
         let mut session =
             Session::with_external_store(self.graph_store(), self.graph_store_mut(), session_cfg())
                 .expect("session creation for non-lpg build");
 
         #[cfg(all(feature = "wal", feature = "lpg"))]
-        if let Some(ref wal) = self.wal {
+        // The WAL wrapper records writes to the session's own store only: a
+        // compacted database's sessions write the layered store, so queries
+        // there are not logged (direct calls log their own records) until the
+        // WAL comes from the transaction's change set (#448).
+        if let Some(ref wal) = self.wal
+            && layered.is_none()
+        {
             session.set_wal(Arc::clone(wal));
         }
 
@@ -1948,10 +1842,27 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if arena allocation fails.
+    /// Returns an error if arena allocation fails, or if the database uses an
+    /// external store ([`with_store`](Self::with_store),
+    /// [`with_read_store`](Self::with_read_store)), which has no named graphs.
     #[cfg(feature = "lpg")]
     pub fn create_graph(&self, name: &str) -> Result<bool> {
-        Ok(self.lpg_store().create_graph(name)?)
+        let Some(store) = &self.store else {
+            return Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::new(
+                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    "Named graphs need the built-in store; this database uses an external store",
+                ),
+            ));
+        };
+        let created = store.create_graph(name)?;
+        #[cfg(feature = "wal")]
+        if created {
+            self.log_graph_change(WalRecord::CreateNamedGraph {
+                name: name.to_string(),
+            });
+        }
+        Ok(created)
     }
 
     /// Drops a named graph. Returns `true` if dropped, `false` if it did not exist.
@@ -1965,6 +1876,10 @@ impl GrafeoDB {
         };
         let dropped = store.drop_graph(name);
         if dropped {
+            #[cfg(feature = "wal")]
+            self.log_graph_change(WalRecord::DropNamedGraph {
+                name: name.to_string(),
+            });
             let mut current = self.current_graph.write();
             if current
                 .as_deref()
@@ -1976,11 +1891,14 @@ impl GrafeoDB {
         dropped
     }
 
-    /// Returns all named graph names.
+    /// Returns all named graph names (none on an external store).
     #[cfg(feature = "lpg")]
     #[must_use]
     pub fn list_graphs(&self) -> Vec<String> {
-        self.lpg_store().graph_names()
+        self.store
+            .as_ref()
+            .map(|store| store.graph_names())
+            .unwrap_or_default()
     }
 
     // === Graph Projections ===
@@ -2276,6 +2194,22 @@ impl GrafeoDB {
         self.wal.as_ref()
     }
 
+    /// Logs a change to the set of named graphs as a committed group of its
+    /// own, as `CREATE GRAPH` and `DROP GRAPH` do.
+    #[cfg(all(feature = "wal", feature = "lpg"))]
+    fn log_graph_change(&self, record: WalRecord) {
+        if let Some(wal) = &self.wal
+            && let Err(e) = wal.log_batch(&[
+                record,
+                WalRecord::TransactionCommit {
+                    transaction_id: grafeo_common::types::TransactionId::SYSTEM,
+                },
+            ])
+        {
+            grafeo_warn!("Failed to log a graph change to the WAL: {}", e);
+        }
+    }
+
     /// Logs a WAL record if WAL is enabled.
     #[cfg(feature = "wal")]
     pub(super) fn log_wal(&self, record: &WalRecord) -> Result<()> {
@@ -2557,10 +2491,9 @@ impl GrafeoDB {
     }
 
     /// What a checkpoint writes: the complete current state (see
-    /// [`flush::CheckpointSources`]).
-    #[cfg(feature = "grafeo-file")]
-    fn checkpoint_sources(&self) -> flush::CheckpointSources {
-        flush::CheckpointSources {
+    /// [`sections::CheckpointSources`]).
+    fn checkpoint_sources(&self) -> sections::CheckpointSources {
+        sections::CheckpointSources {
             #[cfg(feature = "lpg")]
             store: self.store.clone(),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
@@ -2764,6 +2697,8 @@ impl crate::admin::AdminService for GrafeoDB {
 // Query Result Types
 // =========================================================================
 
+pub use grafeo_core::execution::operators::WriteCounters;
+
 /// The result of running a query.
 ///
 /// Contains rows and columns, like a table. Use [`iter()`](Self::iter) to
@@ -2808,6 +2743,9 @@ pub struct QueryResult {
     pub status_message: Option<String>,
     /// GQLSTATUS code per ISO/IEC 39075:2024, sec 23.
     pub gql_status: grafeo_common::utils::GqlStatus,
+    /// What the statement's writes changed: nodes and edges created and
+    /// deleted, properties set, labels added and removed.
+    pub counters: WriteCounters,
 }
 
 impl QueryResult {
@@ -2847,6 +2785,7 @@ impl QueryResult {
             rows_scanned: None,
             status_message: None,
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            counters: Default::default(),
         }
     }
 
@@ -2861,6 +2800,7 @@ impl QueryResult {
             rows_scanned: None,
             status_message: Some(msg.into()),
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            counters: Default::default(),
         }
     }
 
@@ -2880,6 +2820,7 @@ impl QueryResult {
             rows_scanned: None,
             status_message: None,
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            counters: Default::default(),
         })
     }
 
@@ -2901,6 +2842,7 @@ impl QueryResult {
             rows_scanned: None,
             status_message: None,
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            counters: Default::default(),
         })
     }
 
@@ -2923,6 +2865,7 @@ impl QueryResult {
             rows_scanned: None,
             status_message: None,
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            counters: Default::default(),
         })
     }
 

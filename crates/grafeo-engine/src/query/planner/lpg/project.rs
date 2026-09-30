@@ -1,6 +1,7 @@
 //! Projection, RETURN, sort, limit, and skip planning.
 
 use grafeo_common::collections::GrafeoSet;
+use grafeo_core::execution::operators::EntityValue;
 
 use super::{
     Arc, Error, FilterExpression, GraphStoreSearch, HashMap, LimitOp, LogicalExpression,
@@ -100,7 +101,14 @@ impl super::Planner {
                             Error::Internal(format!("Variable '{}' not found in input", name))
                         })?;
                         // Path detail variables and UNWIND/FOR scalar variables pass through as-is
-                        if name.starts_with("_path_nodes_")
+                        if let Some(kind) = self.entity_list_columns.borrow().get(name).copied() {
+                            projections.push(ProjectExpr::Entities {
+                                expr: FilterExpression::Variable(name.clone()),
+                                variable_columns: variable_columns.clone(),
+                                kind,
+                            });
+                            output_types.push(LogicalType::Any);
+                        } else if name.starts_with("_path_nodes_")
                             || name.starts_with("_path_edges_")
                             || name.starts_with("_path_length_")
                             || self.scalar_columns.borrow().contains(name)
@@ -200,22 +208,33 @@ impl super::Planner {
                                     )));
                                 }
                                 if let LogicalExpression::Variable(var_name) = &args[0] {
-                                    // Map to internal column name
-                                    let suffix = if func_name == "nodes" {
-                                        "nodes"
+                                    // Read the path's internal column, and return
+                                    // its items as node or edge maps.
+                                    let (suffix, kind) = if func_name == "nodes" {
+                                        ("nodes", EntityValue::Nodes)
                                     } else {
-                                        "edges"
+                                        ("edges", EntityValue::Edges)
                                     };
                                     let path_col = format!("_path_{suffix}_{var_name}");
-                                    let col_idx = variable_columns
-                                        .get(&path_col)
-                                        .or_else(|| variable_columns.get(var_name))
-                                        .ok_or_else(|| {
-                                            Error::Internal(format!(
-                                                "Variable '{var_name}' not found in input",
-                                            ))
-                                        })?;
-                                    projections.push(ProjectExpr::Column(*col_idx));
+                                    let column = if variable_columns.contains_key(&path_col) {
+                                        path_col
+                                    } else if variable_columns.contains_key(var_name) {
+                                        var_name.clone()
+                                    } else {
+                                        return Err(Error::Internal(format!(
+                                            "Variable '{var_name}' not found in input",
+                                        )));
+                                    };
+                                    let expr = if column == *var_name {
+                                        self.convert_expression(&item.expression)?
+                                    } else {
+                                        FilterExpression::Variable(column)
+                                    };
+                                    projections.push(ProjectExpr::Entities {
+                                        expr,
+                                        variable_columns: variable_columns.clone(),
+                                        kind,
+                                    });
                                     output_types.push(LogicalType::Any);
                                 } else {
                                     return Err(Error::Internal(format!(
@@ -242,11 +261,10 @@ impl super::Planner {
                                     projections.push(ProjectExpr::Column(col_idx));
                                     output_types.push(LogicalType::Any);
                                 } else {
-                                    let filter_expr = self.convert_expression(&item.expression)?;
-                                    projections.push(ProjectExpr::Expression {
-                                        expr: filter_expr,
-                                        variable_columns: variable_columns.clone(),
-                                    });
+                                    projections.push(self.expression_projection(
+                                        &item.expression,
+                                        &variable_columns,
+                                    )?);
                                     output_types.push(LogicalType::Any);
                                 }
                             }
@@ -267,6 +285,7 @@ impl super::Planner {
                     | LogicalExpression::List(_)
                     | LogicalExpression::Map(_)
                     | LogicalExpression::IndexAccess { .. }
+                    | LogicalExpression::MapAccess { .. }
                     | LogicalExpression::SliceAccess { .. }
                     | LogicalExpression::CountSubquery(_)
                     | LogicalExpression::ValueSubquery(_)
@@ -277,11 +296,8 @@ impl super::Planner {
                     | LogicalExpression::ListPredicate { .. }
                     | LogicalExpression::ExistsSubquery(_) => {
                         // Convert complex expressions to FilterExpression for evaluation
-                        let filter_expr = self.convert_expression(&item.expression)?;
-                        projections.push(ProjectExpr::Expression {
-                            expr: filter_expr,
-                            variable_columns: variable_columns.clone(),
-                        });
+                        projections
+                            .push(self.expression_projection(&item.expression, &variable_columns)?);
                         output_types.push(LogicalType::Any);
                     }
                     _ => {
@@ -323,7 +339,14 @@ impl super::Planner {
                     let col_idx = *variable_columns.get(name).ok_or_else(|| {
                         Error::Internal(format!("Variable '{}' not found in input", name))
                     })?;
-                    if self.scalar_columns.borrow().contains(name) {
+                    if let Some(kind) = self.entity_list_columns.borrow().get(name).copied() {
+                        projections.push(ProjectExpr::Entities {
+                            expr: FilterExpression::Variable(name.clone()),
+                            variable_columns: variable_columns.clone(),
+                            kind,
+                        });
+                        output_types.push(LogicalType::Any);
+                    } else if self.scalar_columns.borrow().contains(name) {
                         projections.push(ProjectExpr::Column(col_idx));
                         output_types.push(LogicalType::Any);
                     } else if self.edge_columns.borrow().contains(name) {
@@ -424,7 +447,13 @@ impl super::Planner {
                     projections.push(ProjectExpr::Column(col_idx));
                     // Use Any for scalar variables so string/numeric values
                     // are not coerced to NodeId by the typed vector push.
-                    if self.scalar_columns.borrow().contains(name) {
+                    let list_kind = self.entity_list_columns.borrow().get(name).copied();
+                    if let Some(kind) = list_kind {
+                        output_types.push(entity_list_type(kind));
+                        self.entity_list_columns
+                            .borrow_mut()
+                            .insert(col_name.clone(), kind);
+                    } else if self.scalar_columns.borrow().contains(name) {
                         output_types.push(LogicalType::Any);
                         self.scalar_columns.borrow_mut().insert(col_name.clone());
                     } else if self.edge_columns.borrow().contains(name) {
@@ -459,9 +488,21 @@ impl super::Planner {
                         expr: filter_expr,
                         variable_columns: variable_columns.clone(),
                     });
-                    output_types.push(LogicalType::Any);
-                    // Expression results are scalar values
-                    self.scalar_columns.borrow_mut().insert(col_name.clone());
+                    match self.entity_value(&projection.expression) {
+                        // A node or edge list stays one, so a later list
+                        // comprehension sees nodes or edges and RETURN maps.
+                        Some(kind @ (EntityValue::Nodes | EntityValue::Edges)) => {
+                            output_types.push(entity_list_type(kind));
+                            self.entity_list_columns
+                                .borrow_mut()
+                                .insert(col_name.clone(), kind);
+                        }
+                        _ => {
+                            output_types.push(LogicalType::Any);
+                            // Expression results are scalar values
+                            self.scalar_columns.borrow_mut().insert(col_name.clone());
+                        }
+                    }
                 }
             }
 
@@ -480,6 +521,62 @@ impl super::Planner {
         );
 
         Ok((operator, output_columns))
+    }
+
+    /// The projection of a RETURN expression: node and edge maps when it
+    /// yields nodes or edges (see [`entity_value`](Self::entity_value)),
+    /// otherwise the plain value.
+    fn expression_projection(
+        &self,
+        expression: &LogicalExpression,
+        variable_columns: &HashMap<String, usize>,
+    ) -> Result<ProjectExpr> {
+        let expr = self.convert_expression(expression)?;
+        let variable_columns = variable_columns.clone();
+        Ok(match self.entity_value(expression) {
+            Some(kind) => ProjectExpr::Entities {
+                expr,
+                variable_columns,
+                kind,
+            },
+            None => ProjectExpr::Expression {
+                expr,
+                variable_columns,
+            },
+        })
+    }
+
+    /// What `expression` yields when that is a node, an edge or a list of
+    /// them (as ids): `relationships(p)`, `nodes(p)` and list columns (the
+    /// variable of a variable-length edge pattern), also through `reverse`,
+    /// `tail` and slices, and one item of such a list (`head`, `last`, `[i]`).
+    fn entity_value(&self, expression: &LogicalExpression) -> Option<EntityValue> {
+        let item = |kind: EntityValue| match kind {
+            EntityValue::Nodes => Some(EntityValue::Node),
+            EntityValue::Edges => Some(EntityValue::Edge),
+            _ => None,
+        };
+        let list = |kind: EntityValue| match kind {
+            EntityValue::Nodes | EntityValue::Edges => Some(kind),
+            _ => None,
+        };
+        match expression {
+            LogicalExpression::Variable(name) => {
+                self.entity_list_columns.borrow().get(name).copied()
+            }
+            LogicalExpression::FunctionCall { name, args, .. } => {
+                match (name.to_lowercase().as_str(), args.as_slice()) {
+                    ("relationships" | "edges", [_]) => Some(EntityValue::Edges),
+                    ("nodes", [_]) => Some(EntityValue::Nodes),
+                    ("reverse" | "tail", [inner]) => self.entity_value(inner).and_then(list),
+                    ("head" | "last", [inner]) => self.entity_value(inner).and_then(item),
+                    _ => None,
+                }
+            }
+            LogicalExpression::IndexAccess { base, .. } => self.entity_value(base).and_then(item),
+            LogicalExpression::SliceAccess { base, .. } => self.entity_value(base).and_then(list),
+            _ => None,
+        }
     }
 
     /// Plans a LIMIT operator.
@@ -1413,6 +1510,7 @@ fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
             collect_vars(base, out);
             collect_vars(index, out);
         }
+        LogicalExpression::MapAccess { base, .. } => collect_vars(base, out),
         LogicalExpression::SliceAccess { base, start, end } => {
             collect_vars(base, out);
             for bound in [start, end].into_iter().flatten() {
@@ -1609,4 +1707,13 @@ pub(super) fn text_score_column_name(
         variable,
         score_query_hash(query)
     )
+}
+
+/// The column type of a node or edge list (`List(Node)` or `List(Edge)`), which
+/// tells the expression evaluator what the items are.
+fn entity_list_type(kind: EntityValue) -> LogicalType {
+    LogicalType::List(Box::new(match kind {
+        EntityValue::Nodes | EntityValue::Node => LogicalType::Node,
+        _ => LogicalType::Edge,
+    }))
 }

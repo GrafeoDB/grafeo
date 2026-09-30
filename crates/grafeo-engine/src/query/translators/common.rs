@@ -263,6 +263,50 @@ pub(crate) fn every_edge_matches(
 }
 
 /// Collects all variable names referenced by a logical expression.
+/// Dotted access `base.key` into a map value (`n.meta.route`), for the GQL and
+/// Cypher translators.
+///
+/// # Errors
+///
+/// Returns an error when `base` cannot be a map. A node or edge that a
+/// function returns (`startNode(r)`, `head(collect(n))`) is an entity ID at
+/// runtime, so reading a key from it would give null without saying why.
+pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalExpression> {
+    if !can_be_map(&base) {
+        let base = crate::query::planner::common::expression_to_string(&base);
+        return Err(Error::Query(QueryError::new(
+            QueryErrorKind::Semantic,
+            format!(
+                "{base} is not a map value, so .{key} cannot read from it: match a node or edge \
+                 with a variable and read its property, or bind a value with WITH ... AS m and \
+                 use m.{key}"
+            ),
+        )));
+    }
+    Ok(LogicalExpression::MapAccess {
+        base: Box::new(base),
+        key: key.to_string(),
+    })
+}
+
+/// Whether an expression can evaluate to a map: a variable, a parameter, a
+/// property, a map literal, `properties(...)`, or a key or element of one of
+/// those (or of a list literal).
+fn can_be_map(expr: &LogicalExpression) -> bool {
+    match expr {
+        LogicalExpression::Variable(_)
+        | LogicalExpression::Parameter(_)
+        | LogicalExpression::Property { .. }
+        | LogicalExpression::Map(_)
+        | LogicalExpression::MapAccess { .. } => true,
+        LogicalExpression::IndexAccess { base, .. } => {
+            matches!(**base, LogicalExpression::List(_)) || can_be_map(base)
+        }
+        LogicalExpression::FunctionCall { name, .. } => name.eq_ignore_ascii_case("properties"),
+        _ => false,
+    }
+}
+
 pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut HashSet<String>) {
     match expr {
         LogicalExpression::Variable(name) => {
@@ -300,6 +344,7 @@ pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut 
             collect_expression_variables(base, vars);
             collect_expression_variables(index, vars);
         }
+        LogicalExpression::MapAccess { base, .. } => collect_expression_variables(base, vars),
         LogicalExpression::SliceAccess { base, start, end } => {
             collect_expression_variables(base, vars);
             if let Some(s) = start {
@@ -778,6 +823,17 @@ fn branch_output_columns(op: &LogicalOperator) -> Option<Vec<Option<String>>> {
             }
             merged
         }
+        // A nested EXCEPT, INTERSECT or OTHERWISE was checked when it was
+        // built; it outputs its branches' columns.
+        LogicalOperator::Except(op) => {
+            branch_output_columns(&op.left).or_else(|| branch_output_columns(&op.right))
+        }
+        LogicalOperator::Intersect(op) => {
+            branch_output_columns(&op.left).or_else(|| branch_output_columns(&op.right))
+        }
+        LogicalOperator::Otherwise(op) => {
+            branch_output_columns(&op.left).or_else(|| branch_output_columns(&op.right))
+        }
         LogicalOperator::Sort(sort) => branch_output_columns(&sort.input),
         LogicalOperator::Limit(limit) => branch_output_columns(&limit.input),
         LogicalOperator::Skip(skip) => branch_output_columns(&skip.input),
@@ -787,10 +843,11 @@ fn branch_output_columns(op: &LogicalOperator) -> Option<Vec<Option<String>>> {
     }
 }
 
-/// Checks that the branches of a user-written `UNION` are compatible, as GQL
-/// (ISO/IEC 39075 14.2) and Cypher require: every branch returns the same number
-/// of columns, and where both branches name a column explicitly (alias or bare
-/// variable) the names match position by position.
+/// Checks that the branches of a user-written set operation (`UNION`,
+/// `EXCEPT`, `INTERSECT`, `OTHERWISE`, named by `operation`) are compatible, as
+/// GQL (ISO/IEC 39075 14.2) and Cypher require: every branch returns the same
+/// number of columns, and where both branches name a column explicitly (alias
+/// or bare variable) the names match position by position.
 ///
 /// Branches whose columns cannot be determined here (for example `RETURN *`)
 /// are not checked.
@@ -798,7 +855,7 @@ fn branch_output_columns(op: &LogicalOperator) -> Option<Vec<Option<String>>> {
 /// # Errors
 ///
 /// Returns a semantic error naming both column lists on the first mismatch.
-pub(crate) fn check_union_columns(branches: &[LogicalOperator]) -> Result<()> {
+pub(crate) fn check_branch_columns(operation: &str, branches: &[LogicalOperator]) -> Result<()> {
     let render = |columns: &[Option<String>]| -> String {
         columns
             .iter()
@@ -823,7 +880,7 @@ pub(crate) fn check_union_columns(branches: &[LogicalOperator]) -> Result<()> {
             return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
-                    "All UNION branches must return the same columns in the same order: \
+                    "All {operation} branches must return the same columns in the same order: \
                      [{}] vs [{}]",
                     render(first),
                     render(&columns)
@@ -876,6 +933,7 @@ pub(crate) fn references_any(expr: &LogicalExpression, names: &[String]) -> bool
         LogicalExpression::IndexAccess { base, index } => {
             references_any(base, names) || references_any(index, names)
         }
+        LogicalExpression::MapAccess { base, .. } => references_any(base, names),
         LogicalExpression::SliceAccess { base, start, end } => {
             references_any(base, names)
                 || start.as_ref().is_some_and(|s| references_any(s, names))

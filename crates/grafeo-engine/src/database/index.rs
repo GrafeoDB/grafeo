@@ -1,13 +1,29 @@
 //! Index management for GrafeoDB (property, vector, and text indexes).
 
 use grafeo_common::grafeo_info;
-#[cfg(any(feature = "vector-index", feature = "text-index"))]
 use std::sync::Arc;
 
 #[cfg(feature = "text-index")]
 use parking_lot::RwLock;
 
 use grafeo_common::utils::error::Result;
+use grafeo_core::graph::GraphStoreSearch;
+use grafeo_core::graph::lpg::LpgStore;
+
+/// The name [`create_vector_index`](super::GrafeoDB::create_vector_index)
+/// takes for a quantization.
+#[cfg(feature = "vector-index")]
+pub(super) fn quantization_name(
+    quantization: grafeo_core::index::vector::QuantizationType,
+) -> Option<&'static str> {
+    use grafeo_core::index::vector::QuantizationType;
+    match quantization {
+        QuantizationType::Scalar => Some("scalar"),
+        QuantizationType::Binary => Some("binary"),
+        QuantizationType::Product { .. } => Some("product"),
+        _ => None,
+    }
+}
 
 impl super::GrafeoDB {
     // =========================================================================
@@ -75,7 +91,9 @@ impl super::GrafeoDB {
     ) -> Vec<grafeo_common::types::NodeId> {
         // The index also holds nodes created by transactions that have not
         // committed yet; return only what a reader at the current epoch sees.
-        let store = self.current_lpg_store();
+        let Ok(store) = self.read_store(super::direct::DirectTarget::Current) else {
+            return Vec::new();
+        };
         let candidates = store.find_nodes_by_property(property, value);
         store.filter_visible_node_ids(&candidates, store.current_epoch())
     }
@@ -116,6 +134,53 @@ impl super::GrafeoDB {
         ef_construction: Option<usize>,
         quantization: Option<&str>,
     ) -> Result<()> {
+        self.create_vector_index_in(
+            None,
+            label,
+            property,
+            dimensions,
+            metric,
+            m,
+            ef_construction,
+            quantization,
+        )
+    }
+
+    /// The graph an index reads and the store that holds it, for the graph
+    /// with storage key `graph` (`None` for the default graph).
+    fn index_target(
+        &self,
+        graph: Option<&str>,
+    ) -> Result<(Arc<dyn GraphStoreSearch>, Arc<LpgStore>)> {
+        match graph {
+            None => Ok((self.graph_store(), Arc::clone(self.lpg_store()))),
+            Some(key) => {
+                let store = self
+                    .lpg_store()
+                    .graph(key)
+                    .ok_or_else(|| super::direct::missing_graph(key))?;
+                Ok((Arc::clone(&store) as Arc<dyn GraphStoreSearch>, store))
+            }
+        }
+    }
+
+    /// [`create_vector_index`](Self::create_vector_index) in the graph with
+    /// storage key `graph` (`None` for the default graph).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the arguments of create_vector_index and the graph"
+    )]
+    pub(super) fn create_vector_index_in(
+        &self,
+        graph: Option<&str>,
+        label: &str,
+        property: &str,
+        dimensions: Option<usize>,
+        metric: Option<&str>,
+        m: Option<usize>,
+        ef_construction: Option<usize>,
+        quantization: Option<&str>,
+    ) -> Result<()> {
         use grafeo_common::types::{PropertyKey, Value};
         use grafeo_core::index::vector::DistanceMetric;
 
@@ -142,7 +207,7 @@ impl super::GrafeoDB {
         #[cfg(feature = "vector-index")]
         let mut vectors: Vec<(grafeo_common::types::NodeId, Vec<f32>)> = Vec::new();
 
-        let graph = self.graph_store();
+        let (graph, target) = self.index_target(graph)?;
         for node_id in graph.nodes_by_label(label) {
             if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key) {
                 if let Some(expected) = found_dims {
@@ -177,11 +242,10 @@ impl super::GrafeoDB {
                         quantization_type,
                         0,
                     );
-                    self.lpg_store()
-                        .add_vector_index(label, property, Arc::new(index));
+                    target.add_vector_index(label, property, Arc::new(index));
                 }
 
-                let _ = (m, ef_construction);
+                let _ = (m, ef_construction, &target);
                 grafeo_info!(
                     "Empty vector index created: :{label}({property}) - 0 vectors, {d} dimensions, metric={metric_name}",
                     metric_name = metric.name()
@@ -210,7 +274,6 @@ impl super::GrafeoDB {
 
             match &index {
                 VectorIndexKind::Hnsw(_) => {
-                    let graph = self.graph_store();
                     let accessor =
                         grafeo_core::index::vector::PropertyVectorAccessor::new(&*graph, property);
                     for (node_id, vec) in &vectors {
@@ -224,12 +287,11 @@ impl super::GrafeoDB {
                 }
             }
 
-            self.lpg_store()
-                .add_vector_index(label, property, Arc::new(index));
+            target.add_vector_index(label, property, Arc::new(index));
         }
 
         // Suppress unused variable warnings when vector-index is off
-        let _ = (m, ef_construction);
+        let _ = (m, ef_construction, &target);
 
         grafeo_info!(
             "Vector index created: :{label}({property}) - {vector_count} vectors, {dims} dimensions, metric={metric_name}",
@@ -258,7 +320,7 @@ impl super::GrafeoDB {
 
     /// Builds a [`VectorIndexKind`] from the given parameters.
     #[cfg(feature = "vector-index")]
-    fn build_vector_index(
+    pub(super) fn build_vector_index(
         dims: usize,
         metric: grafeo_core::index::vector::DistanceMetric,
         m: Option<usize>,
@@ -332,14 +394,7 @@ impl super::GrafeoDB {
         let existing = self.lpg_store().get_vector_index(label, property);
 
         let (config, quantization_name) = if let Some(ref idx) = existing {
-            let qt = match idx.quantization_type() {
-                Some(grafeo_core::index::vector::QuantizationType::Scalar) => Some("scalar"),
-                Some(grafeo_core::index::vector::QuantizationType::Binary) => Some("binary"),
-                Some(grafeo_core::index::vector::QuantizationType::Product { .. }) => {
-                    Some("product")
-                }
-                _ => None,
-            };
+            let qt = idx.quantization_type().and_then(quantization_name);
             (Some(idx.config().clone()), qt)
         } else {
             (None, None)
@@ -379,6 +434,18 @@ impl super::GrafeoDB {
     /// Returns an error if the label has no nodes or the property contains no text values.
     #[cfg(feature = "text-index")]
     pub fn create_text_index(&self, label: &str, property: &str) -> Result<()> {
+        self.create_text_index_in(None, label, property)
+    }
+
+    /// [`create_text_index`](Self::create_text_index) in the graph with
+    /// storage key `graph` (`None` for the default graph).
+    #[cfg(feature = "text-index")]
+    pub(super) fn create_text_index_in(
+        &self,
+        graph: Option<&str>,
+        label: &str,
+        property: &str,
+    ) -> Result<()> {
         use grafeo_common::types::{PropertyKey, Value};
         use grafeo_core::index::text::{BM25Config, InvertedIndex};
 
@@ -386,7 +453,7 @@ impl super::GrafeoDB {
         let prop_key = PropertyKey::new(property);
 
         // Index all existing nodes with this label + property
-        let graph = self.graph_store();
+        let (graph, target) = self.index_target(graph)?;
         let nodes = graph.nodes_by_label(label);
         for node_id in nodes {
             if let Some(Value::String(text)) = graph.get_node_property(node_id, &prop_key) {
@@ -394,8 +461,7 @@ impl super::GrafeoDB {
             }
         }
 
-        self.lpg_store()
-            .add_text_index(label, property, Arc::new(RwLock::new(index)));
+        target.add_text_index(label, property, Arc::new(RwLock::new(index)));
         Ok(())
     }
 

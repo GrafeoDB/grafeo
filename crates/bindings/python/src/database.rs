@@ -322,12 +322,17 @@ impl PyGrafeoDB {
     /// section_tiers keys: "Catalog", "LpgStore", "RdfStore", "CompactStore",
     /// "VectorStore", "TextIndex", "RdfRing", "PropertyIndex".
     /// Values: "auto" (default), "force_ram", "force_disk".
+    ///
+    /// shuffle_unordered=True returns the rows of every query without ORDER BY
+    /// in random order: for tests, to find code that relies on a row order
+    /// that is unspecified.
     #[new]
-    #[pyo3(signature = (path=None, *, cdc=false, section_tiers=None))]
+    #[pyo3(signature = (path=None, *, cdc=false, section_tiers=None, shuffle_unordered=false))]
     fn new(
         path: Option<String>,
         cdc: bool,
         section_tiers: Option<HashMap<String, String>>,
+        shuffle_unordered: bool,
     ) -> PyResult<Self> {
         let mut config = if let Some(p) = path {
             Config::persistent(p)
@@ -337,6 +342,7 @@ impl PyGrafeoDB {
         if cdc {
             config = config.with_cdc();
         }
+        config = config.with_shuffle_unordered(shuffle_unordered);
         if let Some(tiers) = section_tiers {
             for (section_name, tier_name) in tiers {
                 let section_type = parse_section_type(&section_name)?;
@@ -785,7 +791,7 @@ impl PyGrafeoDB {
         properties: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyNode> {
         let db = self.inner.read();
-        crate::direct::create_node(&db.session(), &labels, properties)
+        crate::direct::create_node(&*db, &labels, properties)
     }
 
     /// Create an edge between two nodes.
@@ -802,7 +808,7 @@ impl PyGrafeoDB {
     ) -> PyResult<PyEdge> {
         let db = self.inner.read();
         crate::direct::create_edge(
-            &db.session(),
+            &*db,
             NodeId(source_id),
             NodeId(target_id),
             &edge_type,
@@ -1423,6 +1429,90 @@ impl PyGrafeoDB {
         Ok(ids.into_iter().map(|id| id.as_u64()).collect())
     }
 
+    /// Creates or updates one node per row, matched by `key` and all of
+    /// `labels`, in one statement.
+    ///
+    /// Each row is a dict of properties holding `key`; a row without it is
+    /// skipped. By default a row's properties are merged into the node's and
+    /// none is removed; with `replace=True` the node's properties become
+    /// exactly the row's. Labels are never removed. A key repeated within one
+    /// call creates one node, which the later rows update. The call is
+    /// checked like a query and writes all rows or none.
+    ///
+    /// Returns:
+    ///     dict with `created`, `updated`, `skipped` and `skipped_rows` (the
+    ///     indices of the skipped rows, at most 1,000).
+    ///
+    /// Example:
+    ///     db.upsert_nodes(["Graph", "File"], [{"id": "f1", "size": 3}])
+    #[pyo3(signature = (labels, rows, key="id", replace=false))]
+    fn upsert_nodes<'py>(
+        &self,
+        py: Python<'py>,
+        labels: Vec<String>,
+        rows: &Bound<'_, pyo3::types::PyList>,
+        key: &str,
+        replace: bool,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let db = self.inner.read();
+        crate::direct::upsert_nodes(py, &*db, &labels, rows, key, replace)
+    }
+
+    /// Creates or updates one edge of `edge_type` per row between existing
+    /// nodes, in one statement.
+    ///
+    /// Each row names its endpoints in `src_field` and `dst_field` (the
+    /// nodes whose `endpoint_key` has that value, with all of
+    /// `endpoint_labels` when given) and holds the edge's `key`; every other
+    /// field is an edge property. A row whose endpoint does not exist, or
+    /// without the key, is skipped, never created. An edge is identified by
+    /// its endpoints, type and key. By default a row's properties are merged
+    /// into the edge's; with `replace=True` they become exactly the row's.
+    /// A property index on `endpoint_key` makes the endpoint lookups fast.
+    ///
+    /// Returns:
+    ///     dict with `created`, `updated`, `skipped` and `skipped_rows`.
+    ///
+    /// Example:
+    ///     db.upsert_edges("USES", [{"src": "f1", "dst": "f2", "id": "u1", "w": 1}])
+    #[pyo3(signature = (
+        edge_type,
+        rows,
+        key="id",
+        endpoint_key="id",
+        endpoint_labels=None,
+        src_field="src",
+        dst_field="dst",
+        replace=false
+    ))]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each Python keyword argument is a parameter"
+    )]
+    fn upsert_edges<'py>(
+        &self,
+        py: Python<'py>,
+        edge_type: &str,
+        rows: &Bound<'_, pyo3::types::PyList>,
+        key: &str,
+        endpoint_key: &str,
+        endpoint_labels: Option<Vec<String>>,
+        src_field: &str,
+        dst_field: &str,
+        replace: bool,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let options = grafeo_engine::database::EdgeUpsertOptions {
+            key: key.to_string(),
+            endpoint_key: endpoint_key.to_string(),
+            endpoint_labels: endpoint_labels.unwrap_or_default(),
+            src_field: src_field.to_string(),
+            dst_field: dst_field.to_string(),
+            replace,
+        };
+        let db = self.inner.read();
+        crate::direct::upsert_edges(py, &*db, edge_type, rows, &options)
+    }
+
     /// Batch-create nodes with full property maps.
     ///
     /// Each dict in `properties_list` is a complete set of properties for one
@@ -1431,7 +1521,8 @@ impl PyGrafeoDB {
     /// one breaks a constraint, the call raises and creates none of them.
     ///
     /// Args:
-    ///     label: Node label for all created nodes.
+    ///     label: Label for all created nodes, or a list of labels they all
+    ///         get (for example a namespace label and a type label).
     ///     properties_list: List of property dicts, one per node.
     ///
     /// Returns:
@@ -1442,16 +1533,47 @@ impl PyGrafeoDB {
     ///         {"text": "hello", "user_id": "u1", "embedding": [0.1, 0.2]},
     ///         {"text": "world", "user_id": "u1", "embedding": [0.3, 0.4]},
     ///     ])
+    ///     db.batch_create_nodes_with_props(["Graph", "File"], [{"id": "f1"}])
     #[pyo3(signature = (label, properties_list))]
     fn batch_create_nodes_with_props(
         &self,
-        label: &str,
+        label: &Bound<'_, PyAny>,
         properties_list: &Bound<'_, pyo3::types::PyList>,
     ) -> PyResult<Vec<u64>> {
+        let labels = crate::direct::labels(label)?;
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
         let db = self.inner.read();
         let ids = db
-            .batch_create_nodes_with_props(label, crate::direct::properties_list(properties_list)?)
+            .batch_create_nodes_with_labels(
+                &labels,
+                crate::direct::properties_list(properties_list)?,
+            )
             .map_err(PyGrafeoError::from)?;
+        Ok(ids.into_iter().map(|id| id.as_u64()).collect())
+    }
+
+    /// Batch-create edges, each with its own type and properties.
+    ///
+    /// The edges are created in one transaction: if one breaks the schema or
+    /// names a node that does not exist, the call raises and creates none of
+    /// them.
+    ///
+    /// Args:
+    ///     edges: List of `(src, dst, type)` or `(src, dst, type, properties)`
+    ///         tuples.
+    ///
+    /// Returns:
+    ///     List of created edge IDs, in input order.
+    ///
+    /// Example:
+    ///     ids = db.batch_create_edges([
+    ///         (alix.id, gus.id, "KNOWS", {"since": 2020}),
+    ///         (gus.id, alix.id, "KNOWS"),
+    ///     ])
+    fn batch_create_edges(&self, edges: &Bound<'_, pyo3::types::PyList>) -> PyResult<Vec<u64>> {
+        let edges = crate::direct::batch_edges(edges)?;
+        let db = self.inner.read();
+        let ids = db.batch_create_edges(edges).map_err(PyGrafeoError::from)?;
         Ok(ids.into_iter().map(|id| id.as_u64()).collect())
     }
 

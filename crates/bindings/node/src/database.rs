@@ -77,15 +77,32 @@ pub struct JsGrafeoDB {
     inner: Arc<RwLock<GrafeoDB>>,
 }
 
+/// Options for `GrafeoDB.create`.
+#[napi(object)]
+pub struct CreateOptions {
+    /// Return the rows of every query without ORDER BY in random order
+    /// (default `false`): a test option that finds code relying on a row
+    /// order that is unspecified.
+    pub shuffle_unordered: Option<bool>,
+}
+
 #[napi]
 impl JsGrafeoDB {
     /// Create a database. Pass a path for persistence, or omit for in-memory.
+    ///
+    /// `options.shuffleUnordered` returns the rows of every query without
+    /// ORDER BY in random order: for tests, to find code that relies on a row
+    /// order that is unspecified.
     #[napi(factory)]
-    pub fn create(path: Option<String>) -> Result<Self> {
+    pub fn create(path: Option<String>, options: Option<CreateOptions>) -> Result<Self> {
         let config = match path {
             Some(p) => Config::persistent(p),
             None => Config::in_memory(),
         };
+        let shuffle_unordered = options
+            .and_then(|options| options.shuffle_unordered)
+            .unwrap_or(false);
+        let config = config.with_shuffle_unordered(shuffle_unordered);
         let db = GrafeoDB::with_config(config).map_err(NodeGrafeoError::from)?;
         Ok(Self {
             inner: Arc::new(RwLock::new(db)),
@@ -135,6 +152,7 @@ impl JsGrafeoDB {
         let columns = std::mem::take(&mut result.columns);
         let exec_time = result.execution_time_ms;
         let scanned = result.rows_scanned;
+        let counters = result.counters;
 
         Ok(QueryResult::with_metrics(
             columns,
@@ -143,7 +161,8 @@ impl JsGrafeoDB {
             edges,
             exec_time,
             scanned,
-        ))
+        )
+        .with_counters(counters))
     }
 
     /// Execute a GQL query. Returns a Promise<QueryResult>.
@@ -1265,6 +1284,7 @@ impl JsGrafeoDB {
         let columns = std::mem::take(&mut result.columns);
         let exec_time = result.execution_time_ms;
         let scanned = result.rows_scanned;
+        let counters = result.counters;
 
         Ok(QueryResult::with_metrics(
             columns,
@@ -1273,7 +1293,8 @@ impl JsGrafeoDB {
             edges,
             exec_time,
             scanned,
-        ))
+        )
+        .with_counters(counters))
     }
 }
 
@@ -1615,3 +1636,8 @@ fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::
         "dst_id": event.dst_id,
     })
 }
+
+// After `JsGrafeoDB`: napi takes the class's JS name from the struct, so the
+// `impl` blocks of these modules must come after it.
+mod batch;
+mod upsert;

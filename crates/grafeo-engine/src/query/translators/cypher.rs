@@ -4,7 +4,7 @@
 //! that can be optimized and executed.
 
 use super::common::{
-    build_left_join_with_predicates, check_union_columns, combine_with_and, has_all_labels,
+    build_left_join_with_predicates, check_branch_columns, combine_with_and, has_all_labels,
     is_aggregate_function, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit,
     wrap_return, wrap_skip, wrap_sort,
 };
@@ -130,7 +130,7 @@ impl CypherTranslator {
                         Ok(plan.root)
                     })
                     .collect::<Result<Vec<_>>>()?;
-                check_union_columns(&inputs)?;
+                check_branch_columns("UNION", &inputs)?;
 
                 let union_op = LogicalOperator::Union(UnionOp { inputs });
 
@@ -2059,11 +2059,9 @@ impl CypherTranslator {
                         property: property.clone(),
                     })
                 } else {
-                    // Key access into a map value: `n.meta.route` is `n.meta['route']`.
-                    Ok(LogicalExpression::IndexAccess {
-                        base: Box::new(self.translate_expression(base)?),
-                        index: Box::new(LogicalExpression::Literal(Value::from(property.as_str()))),
-                    })
+                    // Key access into a map value: `n.meta.route` reads like
+                    // `n.meta['route']`.
+                    super::common::map_access(self.translate_expression(base)?, property)
                 }
             }
             ast::Expression::IndexAccess { base, index } => {
@@ -2623,7 +2621,7 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_dotted_map_key_access_is_subscript() {
+    fn test_translate_dotted_map_key_access() {
         let return_expression = |query: &str| {
             let plan = translate(query).unwrap();
             let LogicalOperator::Return(ret) = &plan.root else {
@@ -2631,15 +2629,26 @@ mod tests {
             };
             format!("{:?}", ret.items[0].expression)
         };
+        let meta = LogicalExpression::Property {
+            variable: "n".to_string(),
+            property: "meta".to_string(),
+        };
+        let key = |base: LogicalExpression, key: &str| LogicalExpression::MapAccess {
+            base: Box::new(base),
+            key: key.to_string(),
+        };
         // `n.meta.route` reads key `route` of the map in `n.meta`, and chains.
         assert_eq!(
             return_expression("MATCH (n) RETURN n.meta.route"),
-            return_expression("MATCH (n) RETURN n.meta['route']")
+            format!("{:?}", key(meta.clone(), "route"))
         );
         assert_eq!(
             return_expression("MATCH (n) RETURN n.meta.a.b"),
-            return_expression("MATCH (n) RETURN n.meta['a']['b']")
+            format!("{:?}", key(key(meta, "a"), "b"))
         );
+        // A node that a function returns is not a map.
+        let err = translate("MATCH ()-[r]->() RETURN startNode(r).name").unwrap_err();
+        assert!(err.to_string().contains("not a map value"), "{err}");
     }
 
     #[test]

@@ -48,6 +48,7 @@ mod scan_text;
 mod scan_vector;
 mod set_ops;
 mod shortest_path;
+mod shuffle;
 pub mod single_row;
 mod sort;
 pub mod top_k;
@@ -94,7 +95,7 @@ pub use mutation::{
 };
 pub use node_seek::{NodeSeekOperator, SeekKey};
 pub use parameter_scan::{ParameterScanOperator, ParameterState};
-pub use project::{ProjectExpr, ProjectOperator};
+pub use project::{EntityValue, ProjectExpr, ProjectOperator};
 pub use push::{
     AggregatePushOperator, DistinctMaterializingOperator, DistinctPushOperator, FilterPushOperator,
     LimitPushOperator, ProjectPushOperator, SkipLimitPushOperator, SkipPushOperator,
@@ -110,6 +111,7 @@ pub use scan_text::TextScanOperator;
 pub use scan_vector::VectorScanOperator;
 pub use set_ops::{ExceptOperator, IntersectOperator, OtherwiseOperator};
 pub use shortest_path::ShortestPathOperator;
+pub use shuffle::ShuffleOperator;
 pub use single_row::{EmptyOperator, NodeListOperator, SingleRowOperator};
 pub use sort::{NullOrder, SortDirection, SortKey, SortOperator};
 pub use top_k::TopKOperator;
@@ -117,7 +119,7 @@ pub use union::UnionOperator;
 pub use unwind::UnwindOperator;
 pub use variable_length_expand::{PathMode as ExecutionPathMode, VariableLengthExpandOperator};
 pub use vector_join::VectorJoinOperator;
-pub use writer::GraphWriter;
+pub use writer::{GraphWriter, WriteCounter, WriteCounters};
 
 use std::sync::Arc;
 

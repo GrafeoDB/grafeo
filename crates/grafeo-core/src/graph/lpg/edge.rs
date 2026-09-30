@@ -109,7 +109,8 @@ pub struct EdgeRecord {
     pub type_id: u32,
     /// Offset into the property arena.
     pub props_offset: u32,
-    /// Number of properties.
+    /// Not maintained (always 0): the edge's properties live in the property
+    /// store, so count those instead. Kept for the record's layout.
     pub props_count: u16,
     /// Flags (deleted, has_version, etc.).
     pub flags: EdgeFlags,

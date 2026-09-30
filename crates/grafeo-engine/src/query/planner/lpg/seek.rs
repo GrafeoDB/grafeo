@@ -129,6 +129,74 @@ fn value_variables(expr: &LogicalExpression) -> Option<HashSet<String>> {
     collect_value_variables(expr, &mut variables).then_some(variables)
 }
 
+/// Whether the function `name` called with `arity` arguments returns the same
+/// value for the same arguments, so a seek can evaluate a key once and probe
+/// the index with it while the filter above it reads the same value.
+///
+/// An allowlist on purpose: a function not listed (every clock and random
+/// function among them) keeps the scan and its filter, so a missing name costs
+/// speed, never rows. The evaluator dispatches functions by name, so this list
+/// cannot come from it yet (#540).
+fn deterministic(name: &str, arity: usize) -> bool {
+    const PURE: [&str; 39] = [
+        "tostring",
+        "tostringornull",
+        "tointeger",
+        "toint",
+        "tointegerornull",
+        "tofloat",
+        "tofloatornull",
+        "toboolean",
+        "tobooleanornull",
+        "tolower",
+        "toupper",
+        "lower",
+        "upper",
+        "trim",
+        "ltrim",
+        "rtrim",
+        "btrim",
+        "substring",
+        "left",
+        "right",
+        "replace",
+        "split",
+        "reverse",
+        "size",
+        "length",
+        "char_length",
+        "character_length",
+        "abs",
+        "ceil",
+        "floor",
+        "round",
+        "sign",
+        "sqrt",
+        "coalesce",
+        "head",
+        "last",
+        "tail",
+        "keys",
+        "properties",
+    ];
+    // Temporal constructors: from their arguments (`date('2026-09-30')`), or
+    // from the clock without any.
+    const FROM_ARGUMENTS: [&str; 10] = [
+        "date",
+        "time",
+        "datetime",
+        "localdatetime",
+        "local_datetime",
+        "localtime",
+        "local_time",
+        "zoneddatetime",
+        "zoned_datetime",
+        "duration",
+    ];
+    PURE.iter().any(|f| name.eq_ignore_ascii_case(f))
+        || (arity > 0 && FROM_ARGUMENTS.iter().any(|f| name.eq_ignore_ascii_case(f)))
+}
+
 fn collect_value_variables(expr: &LogicalExpression, out: &mut HashSet<String>) -> bool {
     match expr {
         LogicalExpression::Literal(_) | LogicalExpression::Parameter(_) => true,
@@ -147,6 +215,7 @@ fn collect_value_variables(expr: &LogicalExpression, out: &mut HashSet<String>) 
         LogicalExpression::IndexAccess { base, index } => {
             collect_value_variables(base, out) && collect_value_variables(index, out)
         }
+        LogicalExpression::MapAccess { base, .. } => collect_value_variables(base, out),
         LogicalExpression::List(items) => {
             items.iter().all(|item| collect_value_variables(item, out))
         }
@@ -154,8 +223,7 @@ fn collect_value_variables(expr: &LogicalExpression, out: &mut HashSet<String>) 
             .iter()
             .all(|(_, value)| collect_value_variables(value, out)),
         LogicalExpression::FunctionCall { name, args, .. } => {
-            const CHANGING: [&str; 5] = ["rand", "random", "randomuuid", "uuid", "timestamp"];
-            !CHANGING.iter().any(|f| name.eq_ignore_ascii_case(f))
+            deterministic(name, args.len())
                 && args.iter().all(|arg| collect_value_variables(arg, out))
         }
         _ => false,

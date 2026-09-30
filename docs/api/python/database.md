@@ -16,7 +16,8 @@ The main database class.
 GrafeoDB(
     path: Optional[str] = None,
     *,
-    cdc: bool = False
+    cdc: bool = False,
+    shuffle_unordered: bool = False
 )
 ```
 
@@ -26,6 +27,7 @@ GrafeoDB(
 | --------- | ---- | ------- | ----------- |
 | `path` | `str` | `None` | Database file path (None for in-memory) |
 | `cdc` | `bool` | `False` | Enable change data capture (keyword-only). When `True`, mutations are tracked and queryable via `node_history()` / `edge_history()`. |
+| `shuffle_unordered` | `bool` | `False` | Return the rows of every query without `ORDER BY` in random order (keyword-only). For tests: without `ORDER BY` the row order is unspecified, and this finds code that relies on it. |
 
 ### Examples
 
@@ -331,6 +333,56 @@ Remove a property from an edge. Returns `True` if the property existed and was r
 def remove_edge_property(self, edge_id: int, key: str) -> bool
 ```
 
+## Upserts
+
+Create or update nodes and edges by a key property, many rows in one statement. The rows are checked like
+a query (constraints, schema), and a call writes all of its rows or none. Rows apply in order: a key
+repeated within one call creates one node or edge, which the later rows update. Both return a dict with
+`created`, `updated`, `skipped` and `skipped_rows` (the indices of the skipped rows, at most 1,000). Graph
+handles (`db.graph(name)`) have the same methods.
+
+### upsert_nodes()
+
+One node per row, matched by `key` and all of `labels`. A row without the key is skipped. By default a
+row's properties are merged into the node's and none is removed; with `replace=True` they become exactly
+the row's. Labels are never removed.
+
+```python
+def upsert_nodes(self, labels: list[str], rows: list[dict], key: str = "id", replace: bool = False) -> dict
+```
+
+```python
+db.upsert_nodes(["Graph", "File"], [{"id": "f1", "size": 3}, {"id": "f2", "size": 5}])
+# {'created': 2, 'updated': 0, 'skipped': 0, 'skipped_rows': []}
+```
+
+### upsert_edges()
+
+One edge of `edge_type` per row, between the nodes whose `endpoint_key` is the row's `src_field` and
+`dst_field` value (restricted to `endpoint_labels` when given). The edge is identified by its endpoints,
+type and `key`; every other field of the row is an edge property. A row whose endpoint does not exist, or
+without the key, is skipped, never created. A property index on `endpoint_key` makes the lookups fast.
+
+```python
+def upsert_edges(
+    self,
+    edge_type: str,
+    rows: list[dict],
+    key: str = "id",
+    endpoint_key: str = "id",
+    endpoint_labels: list[str] | None = None,
+    src_field: str = "src",
+    dst_field: str = "dst",
+    replace: bool = False,
+) -> dict
+```
+
+```python
+db.create_property_index("id")
+db.upsert_edges("USES", [{"src": "f1", "dst": "f2", "id": "u1", "weight": 1}])
+# {'created': 1, 'updated': 0, 'skipped': 0, 'skipped_rows': []}
+```
+
 ## DataFrame Integration
 
 These methods convert between Grafeo and pandas/polars DataFrames. Requires `pandas` or `polars` to be installed (`uv add pandas` or `uv add polars`).
@@ -507,20 +559,42 @@ set of properties for one node. Vector values are auto-inserted into matching
 vector indexes.
 
 ```python
-def batch_create_nodes_with_props(self, label: str, properties_list: List[Dict[str, Any]]) -> List[int]
+def batch_create_nodes_with_props(self, label: str | list[str], properties_list: List[Dict[str, Any]]) -> List[int]
 ```
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `label` | `str` | Label for all created nodes |
+| `label` | `str` or `list[str]` | Label for all created nodes, or labels they all get |
 | `properties_list` | `list[dict]` | One property dict per node |
 
-Returns a list of created node IDs.
+Returns a list of created node IDs. The batch is one transaction: if a node breaks a constraint, none is
+created.
 
 ```python
 ids = db.batch_create_nodes_with_props("Person", [
     {"name": "Alix", "age": 30},
     {"name": "Gus", "age": 25},
+])
+db.batch_create_nodes_with_props(["Graph", "File"], [{"id": "f1"}, {"id": "f2"}])
+```
+
+### batch_create_edges()
+
+Batch-create edges, each with its own type and properties, from `(src, dst, type)` or
+`(src, dst, type, properties)` tuples. The batch is one transaction: if an edge names a node that does not
+exist or breaks the schema, none is created.
+
+```python
+def batch_create_edges(self, edges: List[tuple]) -> List[int]
+```
+
+Returns a list of created edge IDs, in input order.
+
+```python
+alix, gus = db.batch_create_nodes_with_props("Person", [{"name": "Alix"}, {"name": "Gus"}])
+ids = db.batch_create_edges([
+    (alix, gus, "KNOWS", {"since": 2020}),
+    (gus, alix, "KNOWS"),
 ])
 ```
 
@@ -972,22 +1046,22 @@ db.save("./mydb")  # persist to disk
 
 ### to_memory()
 
-Create an independent in-memory copy of this database. Changes to the copy do not affect the original.
+Create an independent in-memory copy of this database. Changes to the copy do not affect the original. The copy has every graph with its data, the schema and constraints, and the property, vector and text indexes: what reopening the database from a checkpoint would give.
 
 ```python
 def to_memory(self) -> GrafeoDB
 ```
 
 ```python
-file_db = GrafeoDB("./production.db")
-test_db = file_db.to_memory()  # safe copy for experiments
+file_db = GrafeoDB("./production.grafeo")
+test_db = file_db.to_memory()  # safe copy for experiments, indexes included
 ```
 
 ### compact()
 
-Converts the database to a read-only [CompactStore](../../user-guide/compact-store.md) for faster queries. Takes a snapshot of all nodes and edges, builds a columnar store with CSR adjacency, and switches to read-only mode. The original store is dropped to free memory.
+Converts the database to a layered [CompactStore](../../user-guide/compact-store.md) for faster queries: a columnar base with CSR adjacency, built from a snapshot of all nodes and edges, plus a mutable overlay. The original store is dropped to free memory.
 
-After calling this, write queries will raise an error. Gives ~60x memory reduction and 100x+ traversal speedup for read-only workloads.
+The database stays writable: new writes land in the overlay, and `recompact()` merges the overlay into a fresh base. Gives ~60x memory reduction and 100x+ traversal speedup for read-mostly workloads.
 
 ```python
 def compact(self) -> None
@@ -998,10 +1072,10 @@ db = grafeo.GrafeoDB()
 db.execute("INSERT (:Person {name: 'Alix', age: 30})")
 db.execute("INSERT (:Person {name: 'Gus', age: 25})")
 
-db.compact()  # switch to read-only columnar mode
+db.compact()  # switch to the columnar base
 
 result = db.execute("MATCH (p:Person) RETURN p.name")  # fast
-db.execute("INSERT (:Person {name: 'Vincent'})")        # raises error
+db.execute("INSERT (:Person {name: 'Vincent'})")        # lands in the overlay
 ```
 
 !!! note

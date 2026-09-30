@@ -1,38 +1,108 @@
-name: Bug Report
-description: Report a bug in Grafeo
-title: "[Bug]: "
+name: Bug report
+description: Wrong results, errors, crashes or data loss in Grafeo
 type: Bug
 body:
-  - type: textarea
-    id: description
+  - type: markdown
     attributes:
-      label: What happened?
-      description: Describe the bug and what you expected instead.
-      placeholder: |
-        When I do X, Y happens instead of Z.
+      value: |
+        Please search the existing issues first. Security vulnerabilities go by email as described
+        in the [security policy](https://github.com/GrafeoDB/grafeo/security/policy), never in a
+        public issue. Problems in grafeo-server, grafeo-web or another companion project belong in
+        that project's repository.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What goes wrong, in one or two sentences.
     validations:
       required: true
 
   - type: textarea
-    id: reproduction
+    id: reproduce
     attributes:
-      label: How to reproduce
+      label: Reproduce
       description: |
-        Minimal code or steps to reproduce the issue.
-        You can also submit a `.gtest` test case (see [tests/spec/README.md](https://github.com/GrafeoDB/grafeo/blob/main/tests/spec/README.md)):
-        ```yaml
-        - name: my_bug
-          skip: "describe the wrong behavior"
-          query: "MATCH (n:A:B) RETURN n"
-          expect:
-            rows:
-              - [expected_value]
-        ```
+        The smallest program or list of queries that shows the problem, starting from an empty
+        database where you can. If it only happens after closing and reopening the database,
+        include that step. A `.gtest` case is the quickest to act on, see
+        [tests/spec/README.md](https://github.com/GrafeoDB/grafeo/blob/main/tests/spec/README.md#reporting-a-bug-as-a-gtest).
       placeholder: |
-        ```rust
-        let db = GrafeoDB::open("test")?;
-        // ...
+        ```python
+        db = grafeo.GrafeoDB()
+        db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        db.execute("MATCH (a:Person)-[:KNOWS]->(b) RETURN b.name")  # 0 rows
         ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: |
+        What should happen instead. If the right answer is not obvious, say where it comes from:
+        the GQL, Cypher or SPARQL specification, or what another database returns.
+      placeholder: One row, `Gus`.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      options:
+        - Data loss or corruption
+        - Crash, panic or hang
+        - Wrong query results
+        - Error where a result was expected
+        - Performance
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where does it happen?
+      multiple: true
+      options:
+        - Rust crate
+        - Python
+        - Node.js / TypeScript
+        - WASM / browser
+        - C or Go
+        - C#
+        - Dart
+        - CLI
+    validations:
+      required: true
+
+  - type: dropdown
+    id: language
+    attributes:
+      label: Query language
+      multiple: true
+      options:
+        - GQL
+        - Cypher
+        - SPARQL
+        - Gremlin
+        - GraphQL
+        - SQL/PGQ
+        - None (direct API calls)
+    validations:
+      required: false
+
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Storage
+      options:
+        - In memory
+        - On disk (opened with a path)
+        - Both
+        - Not sure
     validations:
       required: false
 
@@ -40,7 +110,17 @@ body:
     id: version
     attributes:
       label: Version
-      description: Grafeo version and language (Rust/Python/Node.js)
-      placeholder: "0.4.0, Python"
+      description: Grafeo version, where you installed it from, and your platform.
+      placeholder: "0.5.43, Python from PyPI, Linux x86_64"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: |
+        A backtrace (run with `RUST_BACKTRACE=1`), log output, the Cargo features you enabled if
+        you build from source, or the last version where it worked.
     validations:
       required: false

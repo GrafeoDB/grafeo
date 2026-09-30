@@ -745,6 +745,25 @@ fn import_v1_snapshot_is_rejected() {
     );
 }
 
+/// With `temporal`, the copy has each property's history at the same epochs,
+/// and continues from the source's epoch.
+#[cfg(feature = "temporal")]
+#[test]
+fn to_memory_keeps_property_history() {
+    let db = GrafeoDB::new_in_memory();
+    let alix = db
+        .create_node_with_props(&["Person"], [("city", Value::from("Amsterdam"))])
+        .unwrap();
+    db.set_node_property(alix, "city", Value::from("Berlin"))
+        .unwrap();
+
+    let copy = db.to_memory().unwrap();
+    let history = copy.get_node_property_history(alix, "city");
+    assert_eq!(history, db.get_node_property_history(alix, "city"));
+    assert_eq!(history.len(), 2, "{history:?}");
+    assert_eq!(copy.current_epoch(), db.current_epoch());
+}
+
 #[test]
 fn to_memory_copies_named_graphs() {
     let db = GrafeoDB::new_in_memory();

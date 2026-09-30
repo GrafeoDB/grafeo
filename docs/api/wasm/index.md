@@ -142,13 +142,13 @@ Objects can be a plain string (treated as IRI), or a structured literal with `va
 
 ## Compact Store
 
-Convert to a read-only columnar store for faster queries. See the [CompactStore guide](../../user-guide/compact-store.md).
+Convert to a layered columnar store for faster queries. See the [CompactStore guide](../../user-guide/compact-store.md).
 
 ```javascript
-db.compact();  // switches to read-only columnar mode
+db.compact();  // switches to a columnar base with a mutable overlay
 ```
 
-After this call, write operations will throw. Queries continue to work with ~60x lower memory and 100x+ faster traversal. Particularly useful for WASM deployments where memory is constrained.
+After this call, queries run with ~60x lower memory and 100x+ faster traversal, and writes land in the overlay. Particularly useful for WASM deployments where memory is constrained.
 
 ## Snapshots (Persistence)
 

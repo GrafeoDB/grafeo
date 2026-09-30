@@ -812,6 +812,18 @@ impl Session {
         })
     }
 
+    /// Fails when this session may not write: its role is read-only, or a
+    /// read-only transaction or a read-only database is open.
+    fn check_writable(&self) -> Result<()> {
+        self.require_permission(crate::auth::StatementKind::Write)?;
+        if *self.read_only_tx.lock() {
+            return Err(grafeo_common::utils::error::Error::Transaction(
+                grafeo_common::utils::error::TransactionError::ReadOnly,
+            ));
+        }
+        Ok(())
+    }
+
     /// Executes a session or transaction command, returning an empty result.
     #[cfg(feature = "gql")]
     fn execute_session_command(
@@ -4651,12 +4663,18 @@ impl Session {
 
     /// Wraps `body` in an automatic begin/commit when [`needs_auto_commit`]
     /// returns `true`. On error the transaction is rolled back.
+    ///
+    /// Every statement and direct write passes here: a write fails first
+    /// when the session may not write (see `check_writable`).
     #[cfg(feature = "lpg")]
     fn with_auto_commit<T, F>(&self, has_mutations: bool, body: F) -> Result<T>
     where
         F: FnOnce() -> Result<T>,
     {
         self.check_active_graph()?;
+        if has_mutations {
+            self.check_writable()?;
+        }
         if self.needs_auto_commit(has_mutations) {
             self.begin_transaction_inner(false, None)?;
             match body() {
@@ -4702,10 +4720,13 @@ impl Session {
 
     /// Non-LPG stub: no auto-commit wrapping (SPARQL UPDATE is atomic).
     #[cfg(not(feature = "lpg"))]
-    fn with_auto_commit<T, F>(&self, _has_mutations: bool, body: F) -> Result<T>
+    fn with_auto_commit<T, F>(&self, has_mutations: bool, body: F) -> Result<T>
     where
         F: FnOnce() -> Result<T>,
     {
+        if has_mutations {
+            self.check_writable()?;
+        }
         let result = body();
         #[cfg(feature = "wal")]
         self.flush_wal_outside_transaction();

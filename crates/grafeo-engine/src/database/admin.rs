@@ -66,8 +66,8 @@ impl super::GrafeoDB {
     pub fn info(&self) -> crate::admin::DatabaseInfo {
         crate::admin::DatabaseInfo {
             mode: crate::admin::DatabaseMode::Lpg,
-            node_count: self.lpg_store().node_count(),
-            edge_count: self.lpg_store().edge_count(),
+            node_count: self.graph_store().node_count(),
+            edge_count: self.graph_store().edge_count(),
             is_persistent: self.is_persistent(),
             path: self.config.path.clone(),
             wal_enabled: self.config.wal_enabled,
@@ -207,8 +207,8 @@ impl super::GrafeoDB {
         let disk_bytes: Option<usize> = None;
 
         crate::admin::DatabaseStats {
-            node_count: self.lpg_store().node_count(),
-            edge_count: self.lpg_store().edge_count(),
+            node_count: self.graph_store().node_count(),
+            edge_count: self.graph_store().edge_count(),
             label_count: self.lpg_store().label_count(),
             edge_type_count: self.lpg_store().edge_type_count(),
             property_key_count: self.lpg_store().property_key_count(),
@@ -311,10 +311,13 @@ impl super::GrafeoDB {
     #[must_use]
     pub fn validate(&self) -> crate::admin::ValidationResult {
         let mut result = crate::admin::ValidationResult::default();
+        // Nodes as queries see them: after `compact()` an edge of the overlay
+        // can end at a node of the compacted base.
+        let store = self.graph_store();
 
         // Check for dangling edge references
         for edge in self.lpg_store().all_edges() {
-            if self.lpg_store().get_node(edge.src).is_none() {
+            if store.get_node(edge.src).is_none() {
                 result.errors.push(crate::admin::ValidationError {
                     code: "DANGLING_SRC".to_string(),
                     message: format!(
@@ -324,7 +327,7 @@ impl super::GrafeoDB {
                     context: Some(format!("edge:{}", edge.id.0)),
                 });
             }
-            if self.lpg_store().get_node(edge.dst).is_none() {
+            if store.get_node(edge.dst).is_none() {
                 result.errors.push(crate::admin::ValidationError {
                     code: "DANGLING_DST".to_string(),
                     message: format!(
@@ -337,7 +340,7 @@ impl super::GrafeoDB {
         }
 
         // Add warnings for potential issues
-        if self.lpg_store().node_count() > 0 && self.lpg_store().edge_count() == 0 {
+        if store.node_count() > 0 && store.edge_count() == 0 {
             result.warnings.push(crate::admin::ValidationWarning {
                 code: "NO_EDGES".to_string(),
                 message: "Database has nodes but no edges".to_string(),

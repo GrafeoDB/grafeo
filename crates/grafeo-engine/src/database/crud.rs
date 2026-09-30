@@ -165,7 +165,8 @@ impl super::GrafeoDB {
     pub fn current_epoch(&self) -> EpochId {
         match &self.store {
             Some(store) => store.current_epoch(),
-            // An external store: the epochs the database's commits publish.
+            // An external store: the epochs the database's commits publish,
+            // which start from the store's own when it is opened.
             None => self.transaction_manager.current_epoch(),
         }
     }

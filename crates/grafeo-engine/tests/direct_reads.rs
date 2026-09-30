@@ -55,6 +55,15 @@ fn direct_reads_see_the_compacted_data() {
         handle.get_edge(knows).unwrap().map(|edge| edge.id),
         Some(knows)
     );
+
+    // The admin views count the same, and an edge from a compacted node to a
+    // new one is not dangling.
+    db.create_edge(alix, vincent, "KNOWS").unwrap();
+    assert_eq!((db.info().node_count, db.info().edge_count), (3, 2));
+    let stats = db.detailed_stats();
+    assert_eq!((stats.node_count, stats.edge_count), (3, 2));
+    let validation = db.validate();
+    assert!(validation.errors.is_empty(), "{:?}", validation.errors);
 }
 
 #[test]
@@ -64,6 +73,9 @@ fn direct_reads_on_an_external_store() {
     store.set_node_property(alix, "name", Value::from("Alix"));
     let gus = store.create_node(&["Person"]);
     let knows = store.create_edge(alix, gus, "KNOWS");
+    for _ in 0..3 {
+        store.new_epoch();
+    }
     let db = GrafeoDB::with_store(
         Arc::clone(&store) as Arc<dyn GraphStoreMut>,
         Config::default(),
@@ -81,7 +93,9 @@ fn direct_reads_on_an_external_store() {
             .map(|node| node.id),
         Some(alix)
     );
+    // The store's epoch, not a fresh count from zero.
     let before = db.current_epoch();
+    assert_eq!(before, store.current_epoch());
     db.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
     assert!(db.current_epoch() > before);
 

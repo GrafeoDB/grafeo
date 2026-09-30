@@ -4689,6 +4689,7 @@ impl Session {
         F: FnOnce() -> Result<T>,
     {
         self.check_active_graph()?;
+        self.check_graph_grant(has_mutations)?;
         if has_mutations {
             self.check_writable()?;
         }
@@ -4721,6 +4722,41 @@ impl Session {
             self.flush_wal_outside_transaction();
             result
         }
+    }
+
+    /// Fails when this identity has per-graph grants and none covers the
+    /// selected graph at the level the statement needs: any grant to read, a
+    /// read-write one to write. `use_graph` selects a graph without the check
+    /// `USE GRAPH` makes, so every statement and direct call checks here. The
+    /// default graph needs no grant, as for `USE GRAPH`.
+    #[cfg(feature = "lpg")]
+    fn check_graph_grant(&self, writes: bool) -> Result<()> {
+        if !self.identity.has_grants() {
+            return Ok(());
+        }
+        let Some(graph) = self.current_graph.lock().clone() else {
+            return Ok(());
+        };
+        if graph.eq_ignore_ascii_case("default") {
+            return Ok(());
+        }
+        let (role, access) = if writes {
+            (crate::auth::Role::ReadWrite, "write")
+        } else {
+            (crate::auth::Role::ReadOnly, "read")
+        };
+        if self.identity.can_access_graph(&graph, role) {
+            return Ok(());
+        }
+        Err(grafeo_common::utils::error::Error::Query(
+            grafeo_common::utils::error::QueryError::new(
+                grafeo_common::utils::error::QueryErrorKind::Semantic,
+                format!(
+                    "permission denied: no {access} grant for graph '{graph}' (user: {})",
+                    self.identity.user_id()
+                ),
+            ),
+        ))
     }
 
     /// Fails when the selected graph no longer exists, because another session

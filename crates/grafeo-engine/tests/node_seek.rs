@@ -174,10 +174,26 @@ fn a_clock_key_is_not_looked_up() {
             &format!("UNWIND ['d'] AS p MATCH (n:Doc {{id: {key}}}) RETURN n"),
         )
     };
-    let today = lookup("p + toString(date())");
-    assert!(!today.contains("[index"), "{today}");
-    let fixed = lookup("p + toString(date('2026-09-30'))");
-    assert!(fixed.contains("[index: id]"), "{fixed}");
+    // Keys that read the clock or randomness, in any spelling or arity.
+    for changing in [
+        "p + toString(date())",
+        "p + toString(zoneddatetime())",
+        "p + toString(current_date())",
+        "p + toString(timestamp())",
+        "p + toString(randomUUID())",
+    ] {
+        let plan = lookup(changing);
+        assert!(!plan.contains("[index"), "{changing}: {plan}");
+    }
+    // Keys built from their arguments alone.
+    for fixed in [
+        "p + toString(date('2026-09-30'))",
+        "toLower(p)",
+        "coalesce(p, 'x')",
+    ] {
+        let plan = lookup(fixed);
+        assert!(plan.contains("[index: id]"), "{fixed}: {plan}");
+    }
 }
 
 #[test]

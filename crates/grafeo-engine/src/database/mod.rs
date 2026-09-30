@@ -776,7 +776,9 @@ impl GrafeoDB {
             .validate()
             .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
 
+        // Commits continue from the epoch the store is at.
         let transaction_manager = Arc::new(TransactionManager::new());
+        transaction_manager.sync_epoch(store.current_epoch());
 
         let buffer_config = BufferManagerConfig {
             budget: config.memory_limit.unwrap_or_else(|| {
@@ -871,7 +873,9 @@ impl GrafeoDB {
             .validate()
             .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
 
+        // Commits continue from the epoch the store is at.
         let transaction_manager = Arc::new(TransactionManager::new());
+        transaction_manager.sync_epoch(store.current_epoch());
 
         let buffer_config = BufferManagerConfig {
             budget: config.memory_limit.unwrap_or_else(|| {
@@ -947,6 +951,10 @@ impl GrafeoDB {
     /// Unlike the pre-0.5.39 behavior, the database remains writable after
     /// compaction: new writes go to the overlay. Call [`recompact()`](Self::recompact)
     /// to merge the overlay back into the columnar base periodically.
+    ///
+    /// Compaction keeps no version history: point-in-time reads
+    /// ([`get_node_at_epoch`](Self::get_node_at_epoch), `execute_at_epoch`) see
+    /// the compacted nodes and edges at every epoch.
     ///
     /// # Errors
     ///

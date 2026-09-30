@@ -778,6 +778,8 @@ mod introspection {
         session.execute("SESSION RESET SCHEMA").unwrap();
         let result = session.execute("RETURN CURRENT_GRAPH AS g").unwrap();
         assert_eq!(result.rows()[0][0], Value::String("mydb".into()));
+        // A fresh session reads the default graph on purpose: the failed
+        // INSERT must not have run there instead.
         let nodes = db.session().execute("MATCH (n) RETURN count(n)").unwrap();
         assert_eq!(nodes.rows()[0][0], Value::Int64(0));
     }

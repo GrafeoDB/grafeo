@@ -5,8 +5,8 @@
 //! translation follows the GQL translator pattern.
 
 use super::common::{
-    combine_with_and, has_all_labels, is_aggregate_function, to_aggregate_function, wrap_filter,
-    wrap_limit, wrap_return, wrap_skip, wrap_sort,
+    check_branch_columns, combine_with_and, has_all_labels, is_aggregate_function,
+    to_aggregate_function, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CallProcedureOp,
@@ -79,6 +79,12 @@ impl SqlPgqTranslator {
     fn translate_set_operation(&self, set_op: &ast::SetOperationStatement) -> Result<LogicalPlan> {
         let left_plan = self.translate_select(&set_op.left)?;
         let right_plan = self.translate_select(&set_op.right)?;
+        let name = match set_op.operation {
+            ast::SetOperationKind::Union => "UNION",
+            ast::SetOperationKind::Intersect => "INTERSECT",
+            ast::SetOperationKind::Except => "EXCEPT",
+        };
+        check_branch_columns(name, &[left_plan.root.clone(), right_plan.root.clone()])?;
 
         let root = match set_op.operation {
             ast::SetOperationKind::Union => {

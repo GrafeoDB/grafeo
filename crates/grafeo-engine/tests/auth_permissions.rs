@@ -398,3 +398,54 @@ fn cypher_execute_language_write_with_readonly_fails() {
         "Error should mention permission denial, got: {err_msg}"
     );
 }
+
+// ── Per-graph grants through the Rust API ──────────────────────
+
+/// `use_graph` selects a graph without the grant check `USE GRAPH` makes:
+/// statements and direct writes check the grant themselves, reads needing
+/// any grant for the graph and writes a read-write one.
+#[test]
+fn per_graph_grants_hold_after_use_graph() {
+    use grafeo_engine::auth::Grant;
+
+    let db = GrafeoDB::new_in_memory();
+    for graph in ["open", "readonly", "closed"] {
+        db.create_graph(graph).unwrap();
+    }
+    let identity = Identity::new("gus", [Role::ReadWrite]).with_grants([
+        Grant::new("open", Role::ReadWrite),
+        Grant::new("readonly", Role::ReadOnly),
+    ]);
+    let session = db.session_with_identity(identity);
+    let denied = |result: String| assert!(result.contains("permission denied"), "{result}");
+
+    session.use_graph("closed");
+    denied(
+        session
+            .execute("MATCH (n) RETURN n")
+            .unwrap_err()
+            .to_string(),
+    );
+    denied(session.execute("INSERT (:X)").unwrap_err().to_string());
+    denied(session.create_node(&["X"]).unwrap_err().to_string());
+
+    session.use_graph("readonly");
+    session.execute("MATCH (n) RETURN count(n)").unwrap();
+    denied(session.execute("INSERT (:X)").unwrap_err().to_string());
+    denied(session.create_node(&["X"]).unwrap_err().to_string());
+
+    session.use_graph("open");
+    session.execute("INSERT (:X)").unwrap();
+    session.create_node(&["X"]).unwrap();
+
+    let admin = db.session();
+    for (graph, expected) in [("open", 2), ("readonly", 0), ("closed", 0)] {
+        admin.use_graph(graph);
+        let count = admin.execute("MATCH (n) RETURN count(n)").unwrap();
+        assert_eq!(
+            count.rows()[0][0],
+            grafeo_common::types::Value::Int64(expected),
+            "{graph}"
+        );
+    }
+}

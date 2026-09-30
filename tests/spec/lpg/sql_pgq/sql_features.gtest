@@ -178,6 +178,34 @@ tests:
   # Set operations: UNION, INTERSECT, EXCEPT
   # ---------------------------------------------------------------------------
 
+  - name: except_with_different_columns_rejected
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person)
+        COLUMNS (n.name AS name)
+      )
+      EXCEPT
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person)
+        COLUMNS (n.age AS age)
+      )
+    expect:
+      error: "same columns"
+
+  - name: union_with_a_different_width_rejected
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person)
+        COLUMNS (n.name AS name, n.age AS age)
+      )
+      UNION ALL
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person)
+        COLUMNS (n.name AS name)
+      )
+    expect:
+      error: "same columns"
+
   - name: union_two_graph_table_queries
     query: |
       SELECT * FROM GRAPH_TABLE (

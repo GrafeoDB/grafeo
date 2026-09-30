@@ -603,15 +603,12 @@ impl Session {
             #[cfg(feature = "lpg")]
             Some(name) => match self.store.graph(name) {
                 Some(named_store) => {
-                    let mut store: Arc<dyn GraphStoreMut> = named_store;
+                    let mut store: Arc<dyn GraphStoreMut> = Arc::clone(&named_store) as _;
 
                     #[cfg(feature = "wal")]
                     if let Some(wal) = &self.wal {
                         store = Arc::new(crate::database::wal_store::WalGraphStore::new_for_graph(
-                            // WAL needs Arc<LpgStore>, get it fresh
-                            self.store
-                                .graph(name)
-                                .unwrap_or_else(|| Arc::clone(&self.store)),
+                            named_store,
                             Arc::clone(wal),
                             name.to_string(),
                         ));
@@ -4659,6 +4656,7 @@ impl Session {
     where
         F: FnOnce() -> Result<T>,
     {
+        self.check_active_graph()?;
         if self.needs_auto_commit(has_mutations) {
             self.begin_transaction_inner(false, None)?;
             match body() {
@@ -4676,6 +4674,29 @@ impl Session {
             #[cfg(feature = "wal")]
             self.flush_wal_outside_transaction();
             result
+        }
+    }
+
+    /// Fails when the selected graph no longer exists, because another session
+    /// dropped it or its schema: the statement would otherwise read and write
+    /// the default graph.
+    #[cfg(feature = "lpg")]
+    fn check_active_graph(&self) -> Result<()> {
+        match self.active_graph_storage_key() {
+            Some(key) if self.store.graph(&key).is_none() => {
+                let name = self
+                    .current_graph
+                    .lock()
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string());
+                Err(grafeo_common::utils::error::Error::Query(
+                    grafeo_common::utils::error::QueryError::new(
+                        grafeo_common::utils::error::QueryErrorKind::Semantic,
+                        format!("Graph '{name}' does not exist"),
+                    ),
+                ))
+            }
+            _ => Ok(()),
         }
     }
 

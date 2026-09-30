@@ -188,8 +188,12 @@ mod tests {
             "direct_write_to_unknown_graph" => {
                 let session = db.session();
                 session.use_graph("missing");
-                session
-                    .create_node_with_props(&["Person"], [("name", Value::from("Butch"))])
+                let error = session
+                    .create_node_with_props(&["Person"], [("name", Value::from("Vincent"))])
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("does not exist"), "{error}");
+                db.create_node_with_props(&["Person"], [("name", Value::from("Butch"))])
                     .unwrap();
                 assert_eq!(names(db), strings(&["Butch"]));
             }
@@ -385,11 +389,11 @@ mod tests {
         }
     }
 
-    /// The WAL records the graph a direct write went to, not the name the
-    /// session asked for: replay must not create that graph and move the
-    /// node there.
+    /// A direct write to a graph that does not exist fails and logs nothing:
+    /// replay must not create that graph, and only the later write to the
+    /// default graph comes back.
     #[test]
-    fn direct_write_to_an_unknown_graph_replays_where_it_went() {
+    fn direct_write_to_an_unknown_graph_leaves_no_trace() {
         let dir = tempfile::tempdir().unwrap();
         for (format, path) in formats(dir.path()) {
             crash_after("direct_write_to_unknown_graph", &path, format);

@@ -151,9 +151,9 @@ impl GraphHandle<'_> {
 
     fn check_exists(&self) -> Result<()> {
         let exists = match graph_storage_key(self.schema.as_deref(), Some(&self.name)) {
-            // The default graph always exists.
+            // The database's default graph always exists; a schema's default
+            // graph only while the schema does.
             None => true,
-            Some(_) if self.name.eq_ignore_ascii_case("default") => true,
             Some(key) => self
                 .db
                 .store

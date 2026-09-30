@@ -246,13 +246,16 @@ impl GrafeoDB {
         if let Some(store) = root.graph(&key) {
             return Ok(Some((store, Some(key))));
         }
-        match target {
-            DirectTarget::Named { name, .. } if !name.eq_ignore_ascii_case("default") => {
-                Err(missing_graph(name))
-            }
-            // Where a session writes when its graph does not exist.
-            _ => Ok(Some((Arc::clone(root), None))),
-        }
+        // The graph was dropped, or its schema: never fall back to another.
+        let name = match target {
+            DirectTarget::Named { name, .. } => name.to_string(),
+            DirectTarget::Current => self
+                .current_graph
+                .read()
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+        };
+        Err(missing_graph(&name))
     }
 
     /// Runs one direct call on `target`: without a session while no

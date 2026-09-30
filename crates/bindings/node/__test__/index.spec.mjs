@@ -1675,3 +1675,30 @@ describe('batch writes', () => {
     db.close()
   })
 })
+
+describe('row order', () => {
+  const orders = async (db, query) => {
+    const seen = new Set()
+    for (let i = 0; i < 5; i++) {
+      const result = await db.execute(query)
+      seen.add(JSON.stringify(result.toArray().map((row) => row.v)))
+    }
+    return seen
+  }
+
+  it('should shuffle results without ORDER BY when asked', async () => {
+    const db = GrafeoDB.create(undefined, { shuffleUnordered: true })
+    await db.execute('UNWIND range(0, 49) AS v INSERT (:A {v: v})')
+    expect((await orders(db, 'MATCH (n:A) RETURN n.v AS v')).size).toBeGreaterThan(1)
+    const ordered = await orders(db, 'MATCH (n:A) RETURN n.v AS v ORDER BY v')
+    expect([...ordered]).toEqual([JSON.stringify([...Array(50).keys()])])
+    db.close()
+  })
+
+  it('should not shuffle by default', async () => {
+    const db = GrafeoDB.create()
+    await db.execute('UNWIND range(0, 49) AS v INSERT (:A {v: v})')
+    expect((await orders(db, 'MATCH (n:A) RETURN n.v AS v')).size).toBe(1)
+    db.close()
+  })
+})

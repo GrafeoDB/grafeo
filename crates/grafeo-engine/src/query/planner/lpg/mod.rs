@@ -174,6 +174,8 @@ pub struct Planner {
     pub(super) anon_edge_counter: std::cell::Cell<u32>,
     /// Whether to use factorized execution for multi-hop queries.
     pub(super) factorized_execution: bool,
+    /// Whether a plan without `ORDER BY` returns its rows in random order.
+    pub(super) shuffle_unordered: bool,
     /// Variables that hold scalar values (from UNWIND/FOR), not node/edge IDs.
     /// Used by plan_return to assign `LogicalType::Any` instead of `Node`.
     pub(super) scalar_columns: std::cell::RefCell<std::collections::HashSet<String>>,
@@ -239,6 +241,7 @@ impl Planner {
             viewing_epoch: epoch,
             anon_edge_counter: std::cell::Cell::new(0),
             factorized_execution: true,
+            shuffle_unordered: false,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             validator: None,
@@ -303,6 +306,7 @@ impl Planner {
             viewing_epoch,
             anon_edge_counter: std::cell::Cell::new(0),
             factorized_execution: true,
+            shuffle_unordered: false,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             validator: None,
@@ -383,6 +387,32 @@ impl Planner {
     pub fn with_factorized_execution(mut self, enabled: bool) -> Self {
         self.factorized_execution = enabled;
         self
+    }
+
+    /// Returns the rows of plans without `ORDER BY` in random order (the
+    /// `shuffle_unordered` test option).
+    #[must_use]
+    pub fn with_shuffle_unordered(mut self, shuffle: bool) -> Self {
+        self.shuffle_unordered = shuffle;
+        self
+    }
+
+    /// The root operator, behind a shuffle when the option is on and the
+    /// plan does not order its rows.
+    fn shuffled_root(
+        &self,
+        logical_plan: &LogicalPlan,
+        operator: Box<dyn Operator>,
+        columns: &[String],
+    ) -> Box<dyn Operator> {
+        if self.shuffle_unordered && !super::common::orders_rows(&logical_plan.root) {
+            let schema = self.derive_schema_from_columns(columns);
+            Box::new(grafeo_core::execution::operators::ShuffleOperator::new(
+                operator, schema,
+            ))
+        } else {
+            operator
+        }
     }
 
     /// Sets the constraint validator for schema enforcement during mutations.
@@ -481,6 +511,7 @@ impl Planner {
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
+        let operator = self.shuffled_root(logical_plan, operator, &columns);
         Ok(PhysicalPlan {
             operator,
             columns,
@@ -529,6 +560,7 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan_adaptive(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
+        let operator = self.shuffled_root(logical_plan, operator, &columns);
 
         let mut adaptive_context = AdaptiveContext::new();
         self.collect_cardinality_estimates(&logical_plan.root, &mut adaptive_context, 0);

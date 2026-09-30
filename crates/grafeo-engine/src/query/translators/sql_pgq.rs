@@ -1058,6 +1058,9 @@ impl SqlPgqTranslator {
                     index: Box::new(index_expr),
                 })
             }
+            ast::Expression::MapAccess { base, key } => {
+                super::common::map_access(self.translate_expression(base, table_alias)?, key)
+            }
             ast::Expression::SliceAccess { base, start, end } => {
                 let base_expr = self.translate_expression(base, table_alias)?;
                 let start_expr = start

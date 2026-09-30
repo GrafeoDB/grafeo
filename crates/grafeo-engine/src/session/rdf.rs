@@ -49,7 +49,10 @@ impl Session {
             identity: cfg.identity,
             auto_commit: true,
             adaptive_config: cfg.adaptive_config,
-            factorized_execution: cfg.factorized_execution,
+            plan_options: super::PlanOptions {
+                factorized_execution: cfg.factorized_execution,
+                shuffle_unordered: cfg.shuffle_unordered,
+            },
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
@@ -103,6 +106,7 @@ impl Session {
         }
 
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
+            .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
         let planner = planner.with_wal(self.wal.clone());
@@ -171,6 +175,7 @@ impl Session {
         }
 
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
+            .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
         let planner = planner.with_wal(self.wal.clone());
@@ -230,6 +235,7 @@ impl Session {
         }
 
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
+            .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
         let planner = planner.with_wal(self.wal.clone());
@@ -294,6 +300,7 @@ impl Session {
         }
 
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
+            .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
         let planner = planner.with_wal(self.wal.clone());

@@ -182,3 +182,52 @@ fn explain_and_profile_take_parameters() {
         assert_eq!(profile.columns, ["profile"]);
     }
 }
+
+/// Dotted access reads keys of a map parameter, in GQL and Cypher.
+#[test]
+fn dotted_access_reads_a_map_parameter() {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use grafeo_common::types::PropertyKey;
+
+    let db = GrafeoDB::new_in_memory();
+    let route = Value::Map(Arc::new(BTreeMap::from([(
+        PropertyKey::new("to"),
+        Value::from("Prague"),
+    )])));
+    let meta = Value::Map(Arc::new(BTreeMap::from([(
+        PropertyKey::new("route"),
+        route,
+    )])));
+    let result = db
+        .execute_with_params(
+            "RETURN $meta.route.to AS to",
+            params(&[("meta", meta.clone())]),
+        )
+        .unwrap();
+    assert_eq!(result.rows(), [[Value::from("Prague")]]);
+    #[cfg(feature = "cypher")]
+    {
+        let result = db
+            .session()
+            .execute_cypher_with_params("RETURN $meta.route.to AS to", params(&[("meta", meta)]))
+            .unwrap();
+        assert_eq!(result.rows(), [[Value::from("Prague")]]);
+    }
+}
+
+/// Dotted access on a node that a function returns is an error that says
+/// what to do, never a silent null.
+#[test]
+fn dotted_access_on_a_node_expression_explains_itself() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:City {name: 'Amsterdam'})-[:ROAD]->(:City {name: 'Berlin'})")
+        .unwrap();
+    let err = db
+        .execute("MATCH (:City)-[r:ROAD]->(:City) RETURN startNode(r).name")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("startNode(r) is not a map value"), "{err}");
+    assert!(err.contains("read its property"), "{err}");
+}

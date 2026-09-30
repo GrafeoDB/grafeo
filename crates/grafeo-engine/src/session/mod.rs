@@ -89,6 +89,16 @@ fn parse_default_literal(text: &str) -> Value {
     Value::String(text.into())
 }
 
+/// How a session's queries are planned, from the database's configuration.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PlanOptions {
+    /// Whether to use factorized execution for multi-hop queries.
+    pub factorized_execution: bool,
+    /// Whether queries without `ORDER BY` return their rows in random order
+    /// (the `shuffle_unordered` test option).
+    pub shuffle_unordered: bool,
+}
+
 /// Runtime configuration for creating a new session.
 ///
 /// Groups the shared parameters passed to all session constructors, keeping
@@ -99,6 +109,7 @@ pub(crate) struct SessionConfig {
     pub catalog: Arc<Catalog>,
     pub adaptive_config: AdaptiveConfig,
     pub factorized_execution: bool,
+    pub shuffle_unordered: bool,
     pub graph_model: GraphModel,
     pub query_timeout: Option<Duration>,
     pub max_property_size: Option<usize>,
@@ -163,8 +174,8 @@ pub struct Session {
     /// Adaptive execution configuration.
     #[allow(dead_code)] // Stored for future adaptive re-optimization during execution
     adaptive_config: AdaptiveConfig,
-    /// Whether to use factorized execution for multi-hop queries.
-    factorized_execution: bool,
+    /// How the session's queries are planned.
+    plan_options: PlanOptions,
     /// The graph data model this session operates on.
     graph_model: GraphModel,
     /// Maximum time a query may run before being cancelled.
@@ -293,7 +304,10 @@ impl Session {
             identity: cfg.identity,
             auto_commit: true,
             adaptive_config: cfg.adaptive_config,
-            factorized_execution: cfg.factorized_execution,
+            plan_options: PlanOptions {
+                factorized_execution: cfg.factorized_execution,
+                shuffle_unordered: cfg.shuffle_unordered,
+            },
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
@@ -429,7 +443,10 @@ impl Session {
             identity: cfg.identity,
             auto_commit: true,
             adaptive_config: cfg.adaptive_config,
-            factorized_execution: cfg.factorized_execution,
+            plan_options: PlanOptions {
+                factorized_execution: cfg.factorized_execution,
+                shuffle_unordered: cfg.shuffle_unordered,
+            },
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
@@ -4853,7 +4870,8 @@ impl Session {
             transaction_id,
             viewing_epoch,
         )
-        .with_factorized_execution(self.factorized_execution)
+        .with_factorized_execution(self.plan_options.factorized_execution)
+        .with_shuffle_unordered(self.plan_options.shuffle_unordered)
         .with_catalog(Arc::clone(&self.catalog))
         .with_session_context(session_context)
         .with_read_only(read_only);

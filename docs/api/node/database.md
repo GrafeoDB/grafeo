@@ -21,13 +21,16 @@ const db = GrafeoDB.create('./my_graph.db');
 
 // Open existing database
 const db = GrafeoDB.open('./my_graph.db');
+
+// For tests: rows of queries without ORDER BY in random order
+const db = GrafeoDB.create(undefined, { shuffleUnordered: true });
 ```
 
 ### Parameters
 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
-| `create(path?)` | `path: string \| undefined` | Create a database (in-memory if no path) |
+| `create(path?, options?)` | `path: string \| undefined`, `options: { shuffleUnordered?: boolean }` | Create a database (in-memory if no path). `shuffleUnordered` returns the rows of every query without `ORDER BY` in random order, to find code that relies on an order that is unspecified |
 | `open(path)` | `path: string` | Open an existing database |
 
 ## Query Methods

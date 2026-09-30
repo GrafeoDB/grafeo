@@ -267,6 +267,7 @@ impl super::Planner {
                     | LogicalExpression::List(_)
                     | LogicalExpression::Map(_)
                     | LogicalExpression::IndexAccess { .. }
+                    | LogicalExpression::MapAccess { .. }
                     | LogicalExpression::SliceAccess { .. }
                     | LogicalExpression::CountSubquery(_)
                     | LogicalExpression::ValueSubquery(_)
@@ -1413,6 +1414,7 @@ fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
             collect_vars(base, out);
             collect_vars(index, out);
         }
+        LogicalExpression::MapAccess { base, .. } => collect_vars(base, out),
         LogicalExpression::SliceAccess { base, start, end } => {
             collect_vars(base, out);
             for bound in [start, end].into_iter().flatten() {

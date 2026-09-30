@@ -3627,8 +3627,9 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                // Key access into a map value: `n.meta.route` is `n.meta['route']`
-                // (the primary expression already consumed `n.meta`).
+                // Key access into a map value: `n.meta.route` reads like
+                // `n.meta['route']` (the primary expression already consumed
+                // `n.meta`).
                 TokenKind::Dot => {
                     self.advance();
                     if !self.is_label_or_type_name() {
@@ -3636,9 +3637,9 @@ impl<'a> Parser<'a> {
                     }
                     let key = self.get_identifier_name();
                     self.advance();
-                    expr = Expression::IndexAccess {
+                    expr = Expression::MapAccess {
                         base: Box::new(expr),
-                        index: Box::new(Expression::Literal(Literal::String(key))),
+                        key,
                     };
                 }
                 // n:Label label-check syntax (compact form of IS LABELED).
@@ -8055,26 +8056,34 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_dotted_map_key_access_is_subscript() {
+    fn test_parse_dotted_map_key_access() {
         let return_expression = |query: &str| {
             let Statement::Query(q) = Parser::new(query).parse().unwrap() else {
                 panic!("Expected Query statement");
             };
             format!("{:?}", q.return_clause.items[0].expression)
         };
+        let meta = Expression::PropertyAccess {
+            variable: "n".to_string(),
+            property: "meta".to_string(),
+        };
+        let key = |base: Expression, key: &str| Expression::MapAccess {
+            base: Box::new(base),
+            key: key.to_string(),
+        };
         // `n.meta.route` reads key `route` of the map in `n.meta`, and chains.
         assert_eq!(
             return_expression("MATCH (n) RETURN n.meta.route"),
-            return_expression("MATCH (n) RETURN n.meta['route']")
+            format!("{:?}", key(meta.clone(), "route"))
         );
         assert_eq!(
             return_expression("MATCH (n) RETURN n.meta.a.b"),
-            return_expression("MATCH (n) RETURN n.meta['a']['b']")
+            format!("{:?}", key(key(meta.clone(), "a"), "b"))
         );
         // Keywords are valid keys, as they are valid property names.
         assert_eq!(
             return_expression("MATCH (n) RETURN n.meta.type"),
-            return_expression("MATCH (n) RETURN n.meta['type']")
+            format!("{:?}", key(meta, "type"))
         );
         let err = Parser::new("MATCH (n) RETURN n.meta.")
             .parse()

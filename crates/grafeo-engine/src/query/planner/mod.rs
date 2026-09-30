@@ -250,6 +250,12 @@ pub fn convert_filter_expression(expr: &LogicalExpression) -> Result<FilterExpre
                 index: Box::new(index_expr),
             })
         }
+        LogicalExpression::MapAccess { base, key } => Ok(FilterExpression::IndexAccess {
+            base: Box::new(convert_filter_expression(base)?),
+            index: Box::new(FilterExpression::Literal(
+                grafeo_common::types::Value::from(key.as_str()),
+            )),
+        }),
         LogicalExpression::SliceAccess { base, start, end } => {
             let base_expr = convert_filter_expression(base)?;
             let start_expr = start

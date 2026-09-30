@@ -1574,6 +1574,7 @@ impl GrafeoDB {
             catalog: Arc::clone(&self.catalog),
             adaptive_config: self.config.adaptive.clone(),
             factorized_execution: self.config.factorized_execution,
+            shuffle_unordered: self.config.shuffle_unordered,
             graph_model: self.config.graph_model,
             query_timeout: self.config.query_timeout,
             max_property_size: self.config.max_property_size,

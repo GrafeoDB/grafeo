@@ -397,6 +397,9 @@ impl Optimizer {
                 Self::collect_from_expression(base, required);
                 Self::collect_from_expression(index, required);
             }
+            LogicalExpression::MapAccess { base, .. } => {
+                Self::collect_from_expression(base, required);
+            }
             LogicalExpression::SliceAccess { base, start, end } => {
                 Self::collect_from_expression(base, required);
                 if let Some(s) = start {
@@ -1349,6 +1352,7 @@ impl Optimizer {
                 Self::collect_variables(base, vars);
                 Self::collect_variables(index, vars);
             }
+            LogicalExpression::MapAccess { base, .. } => Self::collect_variables(base, vars),
             LogicalExpression::SliceAccess { base, start, end } => {
                 Self::collect_variables(base, vars);
                 if let Some(s) = start {

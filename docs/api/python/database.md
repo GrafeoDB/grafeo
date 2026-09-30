@@ -16,7 +16,8 @@ The main database class.
 GrafeoDB(
     path: Optional[str] = None,
     *,
-    cdc: bool = False
+    cdc: bool = False,
+    shuffle_unordered: bool = False
 )
 ```
 
@@ -26,6 +27,7 @@ GrafeoDB(
 | --------- | ---- | ------- | ----------- |
 | `path` | `str` | `None` | Database file path (None for in-memory) |
 | `cdc` | `bool` | `False` | Enable change data capture (keyword-only). When `True`, mutations are tracked and queryable via `node_history()` / `edge_history()`. |
+| `shuffle_unordered` | `bool` | `False` | Return the rows of every query without `ORDER BY` in random order (keyword-only). For tests: without `ORDER BY` the row order is unspecified, and this finds code that relies on it. |
 
 ### Examples
 

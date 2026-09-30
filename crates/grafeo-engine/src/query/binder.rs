@@ -1099,6 +1099,7 @@ impl Binder {
                 self.validate_expression(base)?;
                 self.validate_expression(index)
             }
+            LogicalExpression::MapAccess { base, .. } => self.validate_expression(base),
             LogicalExpression::SliceAccess { base, start, end } => {
                 self.validate_expression(base)?;
                 if let Some(s) = start {

@@ -1082,6 +1082,7 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &QueryParams) 
             substitute_in_expression(base, params)?;
             substitute_in_expression(index, params)?;
         }
+        LogicalExpression::MapAccess { base, .. } => substitute_in_expression(base, params)?,
         LogicalExpression::SliceAccess { base, start, end } => {
             substitute_in_expression(base, params)?;
             if let Some(s) = start {

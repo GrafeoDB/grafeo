@@ -208,6 +208,8 @@ pub struct RdfPlanner {
     /// Column names that carry dictionary-encoded Int64 term IDs.
     /// Populated by `plan_triple_scan()`, consumed by `plan()` for resolution.
     encoded_columns: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// Whether a plan without `ORDER BY` returns its rows in random order.
+    shuffle_unordered: bool,
 }
 
 impl RdfPlanner {
@@ -223,6 +225,7 @@ impl RdfPlanner {
             needs_companion_columns: std::cell::Cell::new(false),
             dictionary: None,
             encoded_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
+            shuffle_unordered: false,
             #[cfg(feature = "wal")]
             wal: None,
             #[cfg(feature = "cdc")]
@@ -236,6 +239,14 @@ impl RdfPlanner {
     #[must_use]
     pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
         self.chunk_size = chunk_size;
+        self
+    }
+
+    /// Returns the rows of plans without `ORDER BY` in random order (the
+    /// `shuffle_unordered` test option).
+    #[must_use]
+    pub fn with_shuffle_unordered(mut self, shuffle: bool) -> Self {
+        self.shuffle_unordered = shuffle;
         self
     }
 
@@ -303,6 +314,15 @@ impl RdfPlanner {
         // from the output. They are used by LANG()/LANGMATCHES()/DATATYPE()
         // during evaluation but should never appear in query results.
         let (operator, columns) = strip_internal_columns(operator, columns);
+        let operator: Box<dyn Operator> =
+            if self.shuffle_unordered && !super::common::orders_rows(&logical_plan.root) {
+                Box::new(grafeo_core::execution::operators::ShuffleOperator::new(
+                    operator,
+                    vec![LogicalType::Any; columns.len()],
+                ))
+            } else {
+                operator
+            };
         Ok(PhysicalPlan {
             operator,
             columns,

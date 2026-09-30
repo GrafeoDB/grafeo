@@ -2394,6 +2394,17 @@ pub enum LogicalExpression {
         index: Box<LogicalExpression>,
     },
 
+    /// Dotted key access into a map value (e.g., `n.meta.route`): evaluates
+    /// like `n.meta['route']`, and names its column as written. Translators
+    /// build it only on a base that can be a map (see
+    /// `translators::common::map_access`).
+    MapAccess {
+        /// The map-valued base expression.
+        base: Box<LogicalExpression>,
+        /// The key.
+        key: String,
+    },
+
     /// Slice access (e.g., list[1..3]).
     SliceAccess {
         /// The base expression (typically a list or string).

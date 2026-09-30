@@ -6,7 +6,7 @@
 //! plus a schema derivation function to handle LPG vs RDF type differences.
 
 use crate::query::plan::{
-    BinaryOp, ListPredicateKind, LogicalExpression, MapProjectionEntry, UnaryOp,
+    BinaryOp, ListPredicateKind, LogicalExpression, LogicalOperator, MapProjectionEntry, UnaryOp,
 };
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
@@ -425,6 +425,21 @@ pub(crate) fn resolve_expression_to_column(
         })
 }
 
+/// Whether a plan's rows come out in an order it defines: an `ORDER BY` at
+/// the top, possibly under a projection, `RETURN`, `DISTINCT`, `SKIP` or
+/// `LIMIT`.
+pub(crate) fn orders_rows(op: &LogicalOperator) -> bool {
+    match op {
+        LogicalOperator::Sort(_) => true,
+        LogicalOperator::Return(ret) => orders_rows(&ret.input),
+        LogicalOperator::Project(project) => orders_rows(&project.input),
+        LogicalOperator::Distinct(distinct) => orders_rows(&distinct.input),
+        LogicalOperator::Skip(skip) => orders_rows(&skip.input),
+        LogicalOperator::Limit(limit) => orders_rows(&limit.input),
+        _ => false,
+    }
+}
+
 /// Converts a logical expression to a human-readable string for column naming.
 ///
 /// Used when a `RETURN` item has no alias. The text follows the source syntax
@@ -459,6 +474,9 @@ pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
                 expression_to_string(base),
                 expression_to_string(index)
             )
+        }
+        LogicalExpression::MapAccess { base, key } => {
+            format!("{}.{key}", expression_to_string(base))
         }
         LogicalExpression::SliceAccess { base, start, end } => {
             let start = start

@@ -322,12 +322,17 @@ impl PyGrafeoDB {
     /// section_tiers keys: "Catalog", "LpgStore", "RdfStore", "CompactStore",
     /// "VectorStore", "TextIndex", "RdfRing", "PropertyIndex".
     /// Values: "auto" (default), "force_ram", "force_disk".
+    ///
+    /// shuffle_unordered=True returns the rows of every query without ORDER BY
+    /// in random order: for tests, to find code that relies on a row order
+    /// that is unspecified.
     #[new]
-    #[pyo3(signature = (path=None, *, cdc=false, section_tiers=None))]
+    #[pyo3(signature = (path=None, *, cdc=false, section_tiers=None, shuffle_unordered=false))]
     fn new(
         path: Option<String>,
         cdc: bool,
         section_tiers: Option<HashMap<String, String>>,
+        shuffle_unordered: bool,
     ) -> PyResult<Self> {
         let mut config = if let Some(p) = path {
             Config::persistent(p)
@@ -337,6 +342,7 @@ impl PyGrafeoDB {
         if cdc {
             config = config.with_cdc();
         }
+        config = config.with_shuffle_unordered(shuffle_unordered);
         if let Some(tiers) = section_tiers {
             for (section_name, tier_name) in tiers {
                 let section_type = parse_section_type(&section_name)?;

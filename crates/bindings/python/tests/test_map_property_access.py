@@ -1,4 +1,4 @@
-"""Dotted access into map-valued properties: `n.meta.route` is `n.meta['route']`."""
+"""Dotted access into map-valued properties: `n.meta.route` reads like `n.meta['route']`."""
 
 import grafeo
 import pytest
@@ -53,3 +53,16 @@ def test_dotted_access_on_a_non_map_is_null_like_subscript(db, cypher):
         "MATCH (n:A) WHERE n.id = 'c' RETURN n.meta.route AS dotted, n.meta['route'] AS subscript"
     )
     assert rows(db, query, cypher) == [{"dotted": None, "subscript": None}]
+
+
+@pytest.mark.parametrize("cypher", LANGUAGES)
+def test_a_column_without_alias_is_named_as_written(db, cypher):
+    query = "MATCH (n:A) WHERE n.id = 'a' RETURN n.meta.score, n.meta.nested.level"
+    assert rows(db, query, cypher) == [{"n.meta.score": 0.5, "n.meta.nested.level": 2}]
+
+
+@pytest.mark.parametrize("cypher", LANGUAGES)
+def test_dotted_access_on_a_node_expression_is_an_error(db, cypher):
+    db.execute("MATCH (a:A {id: 'a'}), (b:A {id: 'b'}) INSERT (a)-[:R]->(b)")
+    with pytest.raises(Exception, match="not a map value"):
+        rows(db, "MATCH (:A)-[r:R]->(:A) RETURN startNode(r).id", cypher)

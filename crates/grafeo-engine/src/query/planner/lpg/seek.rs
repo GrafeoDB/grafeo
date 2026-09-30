@@ -147,6 +147,7 @@ fn collect_value_variables(expr: &LogicalExpression, out: &mut HashSet<String>) 
         LogicalExpression::IndexAccess { base, index } => {
             collect_value_variables(base, out) && collect_value_variables(index, out)
         }
+        LogicalExpression::MapAccess { base, .. } => collect_value_variables(base, out),
         LogicalExpression::List(items) => {
             items.iter().all(|item| collect_value_variables(item, out))
         }

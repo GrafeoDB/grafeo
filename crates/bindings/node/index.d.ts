@@ -2,8 +2,14 @@
 /* eslint-disable */
 /** Your connection to a Grafeo database. */
 export declare class GrafeoDB {
-  /** Create a database. Pass a path for persistence, or omit for in-memory. */
-  static create(path?: string | undefined | null): GrafeoDB
+  /**
+   * Create a database. Pass a path for persistence, or omit for in-memory.
+   *
+   * `options.shuffleUnordered` returns the rows of every query without
+   * ORDER BY in random order: for tests, to find code that relies on a row
+   * order that is unspecified.
+   */
+  static create(path?: string | undefined | null, options?: CreateOptions | undefined | null): GrafeoDB
   /** Open an existing database at the given path. */
   static open(path: string): GrafeoDB
   /**
@@ -450,6 +456,16 @@ export interface BatchEdgeInput {
   type: string
   /** The edge's properties. */
   properties?: any
+}
+
+/** Options for `GrafeoDB.create`. */
+export interface CreateOptions {
+  /**
+   * Return the rows of every query without ORDER BY in random order
+   * (default `false`): a test option that finds code relying on a row
+   * order that is unspecified.
+   */
+  shuffleUnordered?: boolean
 }
 
 /** Options for CSV import. */

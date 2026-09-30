@@ -1740,6 +1740,26 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::LParen => {
+                // A pattern with a relationship, `(d)-[:T]->()`, is a pattern
+                // predicate: true when it has a match, like
+                // EXISTS { MATCH (d)-[:T]->() }. Anything else in parentheses,
+                // including a lone `(n)`, is a parenthesized expression.
+                let saved = (
+                    self.lexer.clone(),
+                    self.current.clone(),
+                    self.previous.clone(),
+                );
+                if let Ok(pattern @ Pattern::Path(_)) = self.parse_pattern() {
+                    return Ok(Expression::Exists(Box::new(Query {
+                        clauses: vec![Clause::Match(MatchClause {
+                            patterns: vec![pattern],
+                            span: None,
+                        })],
+                        span: None,
+                    })));
+                }
+                (self.lexer, self.current, self.previous) = saved;
+
                 self.enter_nesting()?;
                 self.advance();
                 let expr = self.parse_expression()?;

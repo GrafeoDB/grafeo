@@ -229,6 +229,38 @@ pub struct ExpressionPredicate {
     viewing_epoch: Option<EpochId>,
     /// Session context for introspection functions (info, schema, current_schema, etc.).
     session_context: SessionContext,
+    /// Compiled patterns of `=~` and `LIKE` (see [`PatternCache`]).
+    patterns: Arc<PatternCache>,
+}
+
+/// Compiled patterns of `=~` and `LIKE`, by their final regex text, shared by
+/// an evaluator and the list scopes it creates, so a pattern compiles once
+/// instead of once per row. `None` marks a pattern that does not compile.
+/// Empty in builds without a regex feature.
+#[derive(Default)]
+struct PatternCache(
+    #[cfg(any(feature = "regex", feature = "regex-lite"))]
+    parking_lot::Mutex<HashMap<String, Option<Regex>>>,
+);
+
+#[cfg(any(feature = "regex", feature = "regex-lite"))]
+impl PatternCache {
+    /// Patterns kept at most; a query with more distinct ones (patterns
+    /// taken from rows) starts over.
+    const CAPACITY: usize = 256;
+
+    /// Whether `text` matches `regex`, or `None` when `regex` does not compile.
+    fn is_match(&self, regex: String, text: &str) -> Option<bool> {
+        let mut patterns = self.0.lock();
+        if patterns.len() >= Self::CAPACITY && !patterns.contains_key(&regex) {
+            patterns.clear();
+        }
+        patterns
+            .entry(regex)
+            .or_insert_with_key(|regex| Regex::new(regex).ok())
+            .as_ref()
+            .map(|re| re.is_match(text))
+    }
 }
 
 /// A lazily-computed, cloneable value.
@@ -516,6 +548,7 @@ impl ExpressionPredicate {
             transaction_id: None,
             viewing_epoch: None,
             session_context: SessionContext::default(),
+            patterns: Arc::default(),
         }
     }
 
@@ -1187,14 +1220,16 @@ impl ExpressionPredicate {
             }
             // IN is handled separately
             BinaryFilterOp::In => None,
-            // Regex match (=~)
+            // Regex match (=~): the pattern must match the whole string, as in
+            // openCypher (Gremlin's partial `regex()` is widened by its
+            // translator).
             BinaryFilterOp::Regex => {
                 #[cfg(any(feature = "regex", feature = "regex-lite"))]
                 match (left, right) {
-                    (Value::String(s), Value::String(pattern)) => match Regex::new(pattern) {
-                        Ok(re) => Some(Value::Bool(re.is_match(s))),
-                        Err(_) => None,
-                    },
+                    (Value::String(s), Value::String(pattern)) => self
+                        .patterns
+                        .is_match(format!("^(?:{pattern})$"), s)
+                        .map(Value::Bool),
                     _ => None,
                 }
                 #[cfg(not(any(feature = "regex", feature = "regex-lite")))]
@@ -1242,10 +1277,7 @@ impl ExpressionPredicate {
                             }
                         }
                         regex_pattern.push('$');
-                        match Regex::new(&regex_pattern) {
-                            Ok(re) => Some(Value::Bool(re.is_match(s))),
-                            Err(_) => None,
-                        }
+                        self.patterns.is_match(regex_pattern, s).map(Value::Bool)
                     }
                     (Value::Null, _) | (_, Value::Null) => Some(Value::Null),
                     _ => None,
@@ -3592,6 +3624,7 @@ impl ItemScope {
                 transaction_id: outer.transaction_id,
                 viewing_epoch: outer.viewing_epoch,
                 session_context: outer.session_context.clone(),
+                patterns: Arc::clone(&outer.patterns),
             },
             chunk: DataChunk::new(columns),
             first,

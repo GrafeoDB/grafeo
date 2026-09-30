@@ -1,12 +1,12 @@
 //! Filter operator for applying predicates.
 
 use super::{Operator, OperatorResult};
-use crate::execution::{ChunkZoneHints, DataChunk, SelectionVector};
+use crate::execution::{ChunkZoneHints, DataChunk, SelectionVector, ValueVector};
 use crate::graph::Direction;
 use crate::graph::GraphStoreSearch;
 use crate::graph::lpg::{Edge, Node};
 use grafeo_common::types::{
-    EdgeId, EpochId, HashableValue, NodeId, PropertyKey, TransactionId, Value,
+    EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyKey, TransactionId, Value,
 };
 #[cfg(feature = "regex")]
 use regex::Regex;
@@ -422,75 +422,6 @@ pub enum FilterExpression {
         /// Body expression (references both accumulator and variable).
         expression: Box<FilterExpression>,
     },
-}
-
-impl FilterExpression {
-    /// Whether the expression uses the variable `name` anywhere, also inside
-    /// nested list expressions that bind their own variable (so a shadowed
-    /// name counts as used).
-    fn mentions(&self, name: &str) -> bool {
-        fn any<'a>(mut exprs: impl Iterator<Item = &'a FilterExpression>, name: &str) -> bool {
-            exprs.any(|expr| expr.mentions(name))
-        }
-        match self {
-            Self::Literal(_) => false,
-            Self::Variable(variable)
-            | Self::Property { variable, .. }
-            | Self::Id(variable)
-            | Self::Labels(variable)
-            | Self::Type(variable)
-            | Self::ExistsSubquery {
-                start_var: variable,
-                ..
-            }
-            | Self::CountSubquery {
-                start_var: variable,
-                ..
-            } => variable == name,
-            Self::Binary { left, right, .. } => left.mentions(name) || right.mentions(name),
-            Self::Unary { operand, .. } => operand.mentions(name),
-            Self::FunctionCall { args, .. } | Self::List(args) => any(args.iter(), name),
-            Self::Map(entries) => any(entries.iter().map(|(_, value)| value), name),
-            Self::IndexAccess { base, index } => base.mentions(name) || index.mentions(name),
-            Self::SliceAccess { base, start, end } => {
-                base.mentions(name) || any(start.iter().chain(end).map(AsRef::as_ref), name)
-            }
-            Self::Case {
-                operand,
-                when_clauses,
-                else_clause,
-            } => {
-                any(operand.iter().chain(else_clause).map(AsRef::as_ref), name)
-                    || any(
-                        when_clauses.iter().flat_map(|(when, then)| [when, then]),
-                        name,
-                    )
-            }
-            Self::ListComprehension {
-                list_expr,
-                filter_expr,
-                map_expr,
-                ..
-            } => {
-                list_expr.mentions(name)
-                    || map_expr.mentions(name)
-                    || filter_expr
-                        .as_ref()
-                        .is_some_and(|filter| filter.mentions(name))
-            }
-            Self::ListPredicate {
-                list_expr,
-                predicate,
-                ..
-            } => list_expr.mentions(name) || predicate.mentions(name),
-            Self::Reduce {
-                initial,
-                list,
-                expression,
-                ..
-            } => initial.mentions(name) || list.mentions(name) || expression.mentions(name),
-        }
-    }
 }
 
 /// The kind of list predicate function.
@@ -945,64 +876,19 @@ impl ExpressionPredicate {
                 filter_expr,
                 map_expr,
             } => {
-                // Evaluate the source list (accept both List and Vector)
-                let kind = ItemKind::of(list_expr);
-                let list_val = self.eval_expr(list_expr, chunk, row)?;
-                let owned_items: Vec<Value>;
-                let items: &[Value] = match &list_val {
-                    Value::List(list) => list,
-                    Value::Vector(vec) => {
-                        owned_items = vec.iter().map(|&f| Value::Float64(f64::from(f))).collect();
-                        &owned_items
-                    }
-                    _ => return None,
-                };
-
-                // Build the result list by iterating over source items
-                let mut result = Vec::new();
-                for item in items {
-                    // Create a temporary context with the iteration variable bound
-                    // For now, we'll do a simplified version that works for literals
-                    // A full implementation would need to create a sub-evaluator
-
-                    // Check filter predicate if present
-                    let passes_filter = if let Some(filter) = filter_expr {
-                        // Simplified: evaluate filter with item as context
-                        // This works for simple cases like x > 5
-                        matches!(
-                            self.eval_comprehension_expr(
-                                filter,
-                                ComprehensionScope {
-                                    item,
-                                    variable,
-                                    kind,
-                                    chunk,
-                                    row
-                                }
-                            ),
-                            Some(Value::Bool(true))
-                        )
-                    } else {
-                        true
-                    };
-
-                    if passes_filter {
-                        // Apply the mapping expression
-                        if let Some(mapped) = self.eval_comprehension_expr(
-                            map_expr,
-                            ComprehensionScope {
-                                item,
-                                variable,
-                                kind,
-                                chunk,
-                                row,
-                            },
-                        ) {
-                            result.push(mapped);
-                        }
+                let kind = self.item_kind(list_expr, chunk);
+                let items = Self::list_items(self.eval_expr(list_expr, chunk, row)?)?;
+                let mut scope = ItemScope::new(self, &[variable], chunk, row);
+                let mut result = Vec::with_capacity(items.len());
+                for item in &items {
+                    scope.bind(0, item, kind);
+                    let passes = filter_expr
+                        .as_ref()
+                        .is_none_or(|filter| matches!(scope.eval(filter), Some(Value::Bool(true))));
+                    if passes {
+                        result.push(scope.eval(map_expr).unwrap_or(Value::Null));
                     }
                 }
-
                 Some(Value::List(result.into()))
             }
             FilterExpression::ListPredicate {
@@ -1011,45 +897,22 @@ impl ExpressionPredicate {
                 list_expr,
                 predicate,
             } => {
-                let item_kind = ItemKind::of(list_expr);
-                let list_val = self.eval_expr(list_expr, chunk, row)?;
-                // Accept both List and Vector as iterable sequences
-                let vec_items: Vec<Value>;
-                let items: Vec<&Value> = match &list_val {
-                    Value::List(list) => list.iter().collect(),
-                    Value::Vector(vec) => {
-                        vec_items = vec.iter().map(|&f| Value::Float64(f64::from(f))).collect();
-                        vec_items.iter().collect()
-                    }
-                    _ => return None,
-                };
-
-                let mut match_count: u32 = 0;
+                let item_kind = self.item_kind(list_expr, chunk);
+                let items = Self::list_items(self.eval_expr(list_expr, chunk, row)?)?;
+                let mut scope = ItemScope::new(self, &[variable], chunk, row);
+                let mut match_count = 0usize;
                 for item in &items {
-                    let result = self.eval_comprehension_expr(
-                        predicate,
-                        ComprehensionScope {
-                            item,
-                            variable,
-                            kind: item_kind,
-                            chunk,
-                            row,
-                        },
-                    );
-                    if matches!(result, Some(Value::Bool(true))) {
+                    scope.bind(0, item, item_kind);
+                    if matches!(scope.eval(predicate), Some(Value::Bool(true))) {
                         match_count += 1;
                     }
                 }
-
                 let result = match kind {
-                    // reason: list length is bounded by practical sizes, fits u32
-                    #[allow(clippy::cast_possible_truncation)]
-                    ListPredicateKind::All => match_count == items.len() as u32,
+                    ListPredicateKind::All => match_count == items.len(),
                     ListPredicateKind::Any => match_count > 0,
                     ListPredicateKind::None => match_count == 0,
                     ListPredicateKind::Single => match_count == 1,
                 };
-
                 Some(Value::Bool(result))
             }
             FilterExpression::ExistsSubquery {
@@ -1107,321 +970,62 @@ impl ExpressionPredicate {
                 list,
                 expression,
             } => {
-                let init_val = self.eval_expr(initial, chunk, row)?;
-                let list_val = self.eval_expr(list, chunk, row)?;
-                let owned_items: Vec<Value>;
-                let items: &[Value] = match &list_val {
-                    Value::List(list) => list,
-                    Value::Vector(vec) => {
-                        owned_items = vec.iter().map(|&f| Value::Float64(f64::from(f))).collect();
-                        &owned_items
-                    }
-                    _ => return None,
-                };
-                let mut acc = init_val;
-                for item in items {
-                    acc = self.eval_reduce_expr(
-                        expression,
-                        &acc,
-                        accumulator,
-                        item,
-                        variable,
-                        (chunk, row),
-                    )?;
+                let kind = self.item_kind(list, chunk);
+                let mut acc = self.eval_expr(initial, chunk, row)?;
+                let items = Self::list_items(self.eval_expr(list, chunk, row)?)?;
+                let mut scope = ItemScope::new(self, &[accumulator, variable], chunk, row);
+                for item in &items {
+                    scope.bind(0, &acc, ItemKind::Value);
+                    scope.bind(1, item, kind);
+                    acc = scope.eval(expression)?;
                 }
                 Some(acc)
             }
         }
     }
 
-    /// Evaluates an expression in the context of a reduce() call.
-    ///
-    /// Both the accumulator variable and the iteration variable are bound.
-    /// The `ctx` parameter provides chunk context `(chunk, row)` for resolving
-    /// outer-scope variables (variables not bound by reduce).
-    fn eval_reduce_expr(
-        &self,
-        expr: &FilterExpression,
-        acc_val: &Value,
-        acc_name: &str,
-        item_val: &Value,
-        item_name: &str,
-        ctx: (&DataChunk, usize),
-    ) -> Option<Value> {
-        // Closure for recursive calls with all bindings
-        let recurse = |e| self.eval_reduce_expr(e, acc_val, acc_name, item_val, item_name, ctx);
-        match expr {
-            FilterExpression::Variable(name) if name == acc_name => Some(acc_val.clone()),
-            FilterExpression::Variable(name) if name == item_name => Some(item_val.clone()),
-            FilterExpression::Literal(v) => Some(v.clone()),
-            FilterExpression::Binary { left, op, right } => {
-                // IN operator needs special handling: right side is a list
-                if *op == BinaryFilterOp::In {
-                    let l = recurse(left)?;
-                    let r = recurse(right)?;
-                    return match r {
-                        Value::List(items) => {
-                            if l.is_null() {
-                                return Some(Value::Null);
-                            }
-                            let mut has_null = false;
-                            for v in items.iter() {
-                                if v.is_null() {
-                                    has_null = true;
-                                } else if Self::values_equal(&l, v) {
-                                    return Some(Value::Bool(true));
-                                }
-                            }
-                            if has_null {
-                                Some(Value::Null)
-                            } else {
-                                Some(Value::Bool(false))
-                            }
-                        }
-                        _ => None,
-                    };
-                }
-                let l = recurse(left)?;
-                let r = recurse(right)?;
-                self.eval_binary_op(&l, *op, &r)
-            }
-            FilterExpression::Unary { op, operand } => {
-                let val = recurse(operand);
-                self.eval_unary_op(*op, val)
-            }
-            FilterExpression::Property {
-                variable: var,
-                property,
-            } if var == item_name => {
-                if let Value::Map(map) = item_val {
-                    Some(
-                        map.iter()
-                            .find(|(k, _)| k.as_str() == property)
-                            .map_or(Value::Null, |(_, v)| v.clone()),
-                    )
-                } else {
-                    None
-                }
-            }
-            FilterExpression::Property {
-                variable: var,
-                property,
-            } if var == acc_name => {
-                if let Value::Map(map) = acc_val {
-                    Some(
-                        map.iter()
-                            .find(|(k, _)| k.as_str() == property)
-                            .map_or(Value::Null, |(_, v)| v.clone()),
-                    )
-                } else {
-                    None
-                }
-            }
-            FilterExpression::List(items) => {
-                let values: Vec<Value> = items.iter().filter_map(&recurse).collect();
-                Some(Value::List(values.into()))
-            }
-            FilterExpression::Case {
-                operand,
-                when_clauses,
-                else_clause,
-            } => {
-                if let Some(test_expr) = operand.as_deref() {
-                    let test_val = recurse(test_expr)?;
-                    for (when_expr, then_expr) in when_clauses {
-                        let when_val = recurse(when_expr)?;
-                        if Self::values_equal(&test_val, &when_val) {
-                            return recurse(then_expr);
-                        }
-                    }
-                } else {
-                    for (when_expr, then_expr) in when_clauses {
-                        let when_val = recurse(when_expr)?;
-                        if when_val.as_bool() == Some(true) {
-                            return recurse(then_expr);
-                        }
-                    }
-                }
-                if let Some(else_expr) = else_clause.as_deref() {
-                    recurse(else_expr)
-                } else {
-                    Some(Value::Null)
-                }
-            }
-            FilterExpression::IndexAccess { base, index } => {
-                let base_val = recurse(base)?;
-                let index_val = recurse(index)?;
-                match (&base_val, &index_val) {
-                    (Value::List(items), Value::Int64(i)) => {
-                        // reason: list/string lengths fit i64; index values are user-provided
-                        #[allow(
-                            clippy::cast_possible_truncation,
-                            clippy::cast_possible_wrap,
-                            clippy::cast_sign_loss
-                        )]
-                        let idx = if *i < 0 {
-                            let len = items.len() as i64;
-                            (len + i) as usize
-                        } else {
-                            *i as usize
-                        };
-                        items.get(idx).cloned()
-                    }
-                    (Value::String(s), Value::Int64(i)) => {
-                        // reason: list/string lengths fit i64; index values are user-provided
-                        #[allow(
-                            clippy::cast_possible_truncation,
-                            clippy::cast_possible_wrap,
-                            clippy::cast_sign_loss
-                        )]
-                        let idx = if *i < 0 {
-                            let len = s.len() as i64;
-                            (len + i) as usize
-                        } else {
-                            *i as usize
-                        };
-                        s.chars()
-                            .nth(idx)
-                            .map(|c| Value::String(c.to_string().into()))
-                    }
-                    (Value::Map(m), Value::String(key)) => {
-                        let prop_key = PropertyKey::new(key.as_str());
-                        m.get(&prop_key).cloned()
-                    }
-                    _ => None,
-                }
-            }
-            // For expressions not referencing the local variables, resolve
-            // from the outer scope (chunk/row)
-            _ => self.eval_expr(expr, ctx.0, ctx.1),
-        }
-    }
-
-    /// Evaluates an expression for one element of a list comprehension or
-    /// list predicate (see [`ComprehensionScope`]).
-    fn eval_comprehension_expr(
-        &self,
-        expr: &FilterExpression,
-        scope: ComprehensionScope<'_>,
-    ) -> Option<Value> {
-        match expr {
-            FilterExpression::Variable(name) if name == scope.variable => Some(scope.item.clone()),
-            FilterExpression::Literal(v) => Some(v.clone()),
-            FilterExpression::Binary { left, op, right } => {
-                // IN operator needs special handling: right side is a list
-                if *op == BinaryFilterOp::In {
-                    let left_val = self.eval_comprehension_expr(left, scope)?;
-                    let right_val = self.eval_comprehension_expr(right, scope)?;
-                    return match right_val {
-                        Value::List(items) => {
-                            if left_val.is_null() {
-                                return Some(Value::Null);
-                            }
-                            let mut has_null = false;
-                            for v in items.iter() {
-                                if v.is_null() {
-                                    has_null = true;
-                                } else if Self::values_equal(&left_val, v) {
-                                    return Some(Value::Bool(true));
-                                }
-                            }
-                            if has_null {
-                                Some(Value::Null)
-                            } else {
-                                Some(Value::Bool(false))
-                            }
-                        }
-                        _ => None,
-                    };
-                }
-                let left_val = self.eval_comprehension_expr(left, scope)?;
-                let right_val = self.eval_comprehension_expr(right, scope)?;
-                self.eval_binary_op(&left_val, *op, &right_val)
-            }
-            FilterExpression::Unary { op, operand } => {
-                let val = self.eval_comprehension_expr(operand, scope);
-                self.eval_unary_op(*op, val)
-            }
-            FilterExpression::Property {
-                variable: var,
-                property,
-            } if var == scope.variable => {
-                // Property access on the iteration variable
-                match (scope.item, scope.kind) {
-                    (Value::Map(m), _) => {
-                        let key = PropertyKey::new(property.as_str());
-                        m.get(&key).cloned()
-                    }
-                    // `all(e IN edges(p) WHERE e.w = 1)`: path functions yield ids
-                    (Value::Int64(id), ItemKind::Edge) => {
-                        let edge = self.resolve_edge(EdgeId::new(u64::try_from(*id).ok()?))?;
-                        edge.get_property(property).cloned()
-                    }
-                    _ => None,
-                }
-            }
-            FilterExpression::List(items) => {
-                let values: Vec<Value> = items
+    /// The items of a list a comprehension, list predicate or `reduce`
+    /// iterates over (a vector counts as a list of floats), or `None` for any
+    /// other value.
+    fn list_items(value: Value) -> Option<Vec<Value>> {
+        match value {
+            Value::List(items) => Some(items.to_vec()),
+            Value::Vector(vector) => Some(
+                vector
                     .iter()
-                    .filter_map(|i| self.eval_comprehension_expr(i, scope))
-                    .collect();
-                Some(Value::List(values.into()))
-            }
-            FilterExpression::Case {
-                operand,
-                when_clauses,
-                else_clause,
-            } => self.eval_case_in_comprehension(
-                operand.as_deref(),
-                when_clauses,
-                else_clause.as_deref(),
-                scope,
+                    .map(|&f| Value::Float64(f64::from(f)))
+                    .collect(),
             ),
-            // Anything that does not use the iteration variable belongs to the
-            // row: `all(e IN edges(p) WHERE e.w = n.limit)`. An
-            // expression that does use it is not supported here.
-            other if !other.mentions(scope.variable) => {
-                self.eval_expr(other, scope.chunk, scope.row)
-            }
             _ => None,
         }
     }
 
-    /// Evaluates a CASE expression inside a list comprehension or predicate context.
-    fn eval_case_in_comprehension(
-        &self,
-        operand: Option<&FilterExpression>,
-        when_clauses: &[(FilterExpression, FilterExpression)],
-        else_clause: Option<&FilterExpression>,
-        scope: ComprehensionScope<'_>,
-    ) -> Option<Value> {
-        if let Some(test_expr) = operand {
-            let test_val = self
-                .eval_comprehension_expr(test_expr, scope)
-                .unwrap_or(Value::Null);
-            for (when_expr, then_expr) in when_clauses {
-                let when_val = self
-                    .eval_comprehension_expr(when_expr, scope)
-                    .unwrap_or(Value::Null);
-                if !test_val.is_null()
-                    && !when_val.is_null()
-                    && Self::values_equal(&test_val, &when_val)
-                {
-                    return self.eval_comprehension_expr(then_expr, scope);
+    /// What the items of `list_expr` refer to: edges for `edges(p)`,
+    /// `relationships(p)` and the variable of a variable-length edge pattern,
+    /// nodes for `nodes(p)`, also after `reverse`, `tail` or a slice.
+    fn item_kind(&self, list_expr: &FilterExpression, chunk: &DataChunk) -> ItemKind {
+        match list_expr {
+            FilterExpression::FunctionCall { name, args, .. } => {
+                match name.to_lowercase().as_str() {
+                    "edges" | "relationships" => ItemKind::Edge,
+                    "nodes" => ItemKind::Node,
+                    "reverse" | "tail" => args
+                        .first()
+                        .map_or(ItemKind::Value, |list| self.item_kind(list, chunk)),
+                    _ => ItemKind::Value,
                 }
             }
-        } else {
-            for (when_expr, then_expr) in when_clauses {
-                let when_val = self.eval_comprehension_expr(when_expr, scope)?;
-                if when_val.as_bool() == Some(true) {
-                    return self.eval_comprehension_expr(then_expr, scope);
-                }
-            }
-        }
-        if let Some(else_expr) = else_clause {
-            self.eval_comprehension_expr(else_expr, scope)
-        } else {
-            Some(Value::Null)
+            FilterExpression::SliceAccess { base, .. } => self.item_kind(base, chunk),
+            FilterExpression::Variable(name) => self
+                .variable_columns
+                .get(name)
+                .and_then(|&index| chunk.column(index))
+                .map_or(ItemKind::Value, |column| match column.data_type() {
+                    LogicalType::List(item) if **item == LogicalType::Edge => ItemKind::Edge,
+                    LogicalType::List(item) if **item == LogicalType::Node => ItemKind::Node,
+                    _ => ItemKind::Value,
+                }),
+            _ => ItemKind::Value,
         }
     }
 
@@ -3932,39 +3536,102 @@ impl ExpressionPredicate {
     }
 }
 
-/// What the items of a list comprehension or list predicate refer to.
-///
-/// `edges(p)` / `relationships(p)` return edge ids, so `e.w` in
-/// `all(e IN edges(p) WHERE e.w = 1)` must look the property up on the edge.
-/// It used to evaluate to NULL, so such predicates silently matched nothing.
-/// One element of a list comprehension or list predicate being evaluated: the
-/// element bound to the iteration variable, the kind of items the list holds,
-/// and the row the whole expression is evaluated for (other variables come
-/// from there).
-#[derive(Clone, Copy)]
-struct ComprehensionScope<'a> {
-    item: &'a Value,
-    variable: &'a str,
-    kind: ItemKind,
-    chunk: &'a DataChunk,
-    row: usize,
-}
-
+/// What the items of a list a comprehension, list predicate or `reduce`
+/// iterates over refer to. `edges(p)`, `relationships(p)` and `nodes(p)`
+/// hold entity ids; an item bound as an edge or a node is read like an edge
+/// or node variable of the row.
 #[derive(Clone, Copy)]
 enum ItemKind {
     Value,
     Edge,
+    Node,
 }
 
-impl ItemKind {
-    fn of(list_expr: &FilterExpression) -> Self {
-        match list_expr {
-            FilterExpression::FunctionCall { name, .. } => match name.to_lowercase().as_str() {
-                "edges" | "relationships" => Self::Edge,
-                _ => Self::Value,
-            },
-            _ => Self::Value,
+/// The row a list comprehension, list predicate or `reduce` is evaluated for,
+/// with a column of its own for each variable it binds, read by the normal
+/// evaluator: every expression that works in RETURN works on the items, an
+/// edge or node item sits in an edge or node column (so `type(e)`, `id(n)`
+/// and `labels(n)` work on it), and an inner expression that binds a name
+/// again gets its own column, which shadows the outer one.
+struct ItemScope {
+    evaluator: ExpressionPredicate,
+    chunk: DataChunk,
+    /// The column of the first bound variable; the others follow it.
+    first: usize,
+}
+
+impl ItemScope {
+    fn new(
+        outer: &ExpressionPredicate,
+        variables: &[&String],
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Self {
+        let mut columns: Vec<ValueVector> = chunk
+            .columns()
+            .iter()
+            .map(|column| {
+                let mut copy = ValueVector::with_capacity(column.logical_type(), 1);
+                column.copy_row_to(row, &mut copy);
+                copy
+            })
+            .collect();
+        let first = columns.len();
+        let mut variable_columns = outer.variable_columns.clone();
+        for (offset, variable) in variables.iter().enumerate() {
+            variable_columns.insert((*variable).clone(), first + offset);
+            let mut column = ValueVector::with_capacity(LogicalType::Any, 1);
+            column.push_value(Value::Null);
+            columns.push(column);
         }
+        Self {
+            evaluator: ExpressionPredicate {
+                expression: FilterExpression::Literal(Value::Null),
+                variable_columns,
+                store: Arc::clone(&outer.store),
+                transaction_id: outer.transaction_id,
+                viewing_epoch: outer.viewing_epoch,
+                session_context: outer.session_context.clone(),
+            },
+            chunk: DataChunk::new(columns),
+            first,
+        }
+    }
+
+    /// Binds the `index`-th variable given to [`new`](Self::new) to `value`.
+    fn bind(&mut self, index: usize, value: &Value, kind: ItemKind) {
+        let entity = match value {
+            Value::Int64(id) => u64::try_from(*id).ok(),
+            Value::Map(map) => match map.get(&PropertyKey::new("_id")) {
+                Some(Value::Int64(id)) => u64::try_from(*id).ok(),
+                _ => None,
+            },
+            _ => None,
+        };
+        let column = match (kind, entity) {
+            (ItemKind::Edge, Some(id)) => {
+                let mut column = ValueVector::with_capacity(LogicalType::Edge, 1);
+                column.push_edge_id(EdgeId::new(id));
+                column
+            }
+            (ItemKind::Node, Some(id)) => {
+                let mut column = ValueVector::with_capacity(LogicalType::Node, 1);
+                column.push_node_id(NodeId::new(id));
+                column
+            }
+            _ => {
+                let mut column = ValueVector::with_capacity(LogicalType::Any, 1);
+                column.push_value(value.clone());
+                column
+            }
+        };
+        if let Some(slot) = self.chunk.column_mut(self.first + index) {
+            *slot = column;
+        }
+    }
+
+    fn eval(&self, expr: &FilterExpression) -> Option<Value> {
+        self.evaluator.eval_expr(expr, &self.chunk, 0)
     }
 }
 

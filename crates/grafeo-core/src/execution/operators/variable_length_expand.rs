@@ -64,6 +64,9 @@ pub struct VariableLengthExpandOperator {
     output_path_length: bool,
     /// Whether to output full path detail (node list and edge list).
     output_path_detail: bool,
+    /// Whether the edge column holds the path's edges as a list instead of
+    /// its last edge (the variable of a variable-length edge pattern).
+    output_edge_list: bool,
     /// Path traversal mode (WALK, TRAIL, SIMPLE, ACYCLIC).
     path_mode: PathMode,
 }
@@ -198,6 +201,7 @@ impl VariableLengthExpandOperator {
             exhausted: false,
             output_path_length: false,
             output_path_detail: false,
+            output_edge_list: false,
             path_mode: PathMode::Walk,
         }
     }
@@ -217,6 +221,14 @@ impl VariableLengthExpandOperator {
     /// Enables full path detail output (node list and edge list columns).
     pub fn with_path_detail_output(mut self) -> Self {
         self.output_path_detail = true;
+        self
+    }
+
+    /// Makes the edge column hold every edge of the path, in order, as a
+    /// list of edge ids (typed `List(Edge)`), which is what the variable of a
+    /// variable-length edge pattern binds to.
+    pub fn with_edge_list_output(mut self) -> Self {
+        self.output_edge_list = true;
         self
     }
 
@@ -363,7 +375,8 @@ impl VariableLengthExpandOperator {
     /// Process one input row, generating all reachable outputs.
     fn process_input_row(&self, input_idx: usize, source_node: NodeId) -> Vec<OutputRow> {
         let mut results = Vec::new();
-        let needs_tracking = self.output_path_detail || self.path_mode != PathMode::Walk;
+        let needs_edges = self.output_path_detail || self.output_edge_list;
+        let needs_tracking = needs_edges || self.path_mode != PathMode::Walk;
 
         // Zero-length path: when min_hops is 0 the source node matches itself
         // with no edges traversed. Emit it before starting the BFS.
@@ -378,11 +391,7 @@ impl VariableLengthExpandOperator {
                 } else {
                     None
                 },
-                path_edges: if self.output_path_detail {
-                    Some(Vec::new())
-                } else {
-                    None
-                },
+                path_edges: if needs_edges { Some(Vec::new()) } else { None },
             });
         }
 
@@ -421,7 +430,7 @@ impl VariableLengthExpandOperator {
                         } else {
                             None
                         },
-                        path_edges: if self.output_path_detail {
+                        path_edges: if needs_edges {
                             Some(segment.collect_edges(depth))
                         } else {
                             None
@@ -534,14 +543,18 @@ impl Operator for VariableLengthExpandOperator {
                 schema.push(ty);
             }
         }
-        schema.push(LogicalType::Edge);
+        schema.push(if self.output_edge_list {
+            LogicalType::List(Box::new(LogicalType::Edge))
+        } else {
+            LogicalType::Edge
+        });
         schema.push(LogicalType::Node);
         if self.output_path_length {
             schema.push(LogicalType::Int64);
         }
         if self.output_path_detail {
-            schema.push(LogicalType::Any); // path_nodes as Value::List
-            schema.push(LogicalType::Any); // path_edges as Value::List
+            schema.push(LogicalType::List(Box::new(LogicalType::Node))); // path nodes (ids)
+            schema.push(LogicalType::List(Box::new(LogicalType::Edge))); // path edges (ids)
             schema.push(LogicalType::Any); // Value::Path (first-class path)
         }
 
@@ -565,9 +578,13 @@ impl Operator for VariableLengthExpandOperator {
                 }
             }
 
-            // Add edge column (Null for zero-length paths)
+            // Add edge column: the path's edges (an empty list for a
+            // zero-length path), or its last edge (Null for zero length)
             if let Some(col) = chunk.column_mut(num_input_cols) {
-                if let Some(edge_id) = out_row.edge_id {
+                if self.output_edge_list {
+                    let edges = edge_id_list(out_row.path_edges.as_deref().unwrap_or(&[]))?;
+                    col.push_value(grafeo_common::types::Value::List(edges.into()));
+                } else if let Some(edge_id) = out_row.edge_id {
                     col.push_edge_id(edge_id);
                 } else {
                     col.push_value(grafeo_common::types::Value::Null);
@@ -614,21 +631,7 @@ impl Operator for VariableLengthExpandOperator {
 
                 // Path edges column
                 if let Some(col) = chunk.column_mut(base + 1) {
-                    let edges_list: Vec<grafeo_common::types::Value> = out_row
-                        .path_edges
-                        .as_deref()
-                        .unwrap_or(&[])
-                        .iter()
-                        .map(|id| {
-                            let signed = i64::try_from(id.0).map_err(|_| {
-                                OperatorError::Execution(format!(
-                                    "EdgeId {} exceeds i64 range",
-                                    id.0
-                                ))
-                            })?;
-                            Ok(grafeo_common::types::Value::Int64(signed))
-                        })
-                        .collect::<Result<Vec<_>, OperatorError>>()?;
+                    let edges_list = edge_id_list(out_row.path_edges.as_deref().unwrap_or(&[]))?;
                     col.push_value(grafeo_common::types::Value::List(edges_list.into()));
                 }
 
@@ -691,6 +694,18 @@ impl Operator for VariableLengthExpandOperator {
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
     }
+}
+
+/// Edge ids as the `Value::Int64` items of an edge list.
+fn edge_id_list(edges: &[EdgeId]) -> Result<Vec<grafeo_common::types::Value>, OperatorError> {
+    edges
+        .iter()
+        .map(|id| {
+            i64::try_from(id.0)
+                .map(grafeo_common::types::Value::Int64)
+                .map_err(|_| OperatorError::Execution(format!("EdgeId {} exceeds i64 range", id.0)))
+        })
+        .collect()
 }
 
 #[cfg(all(test, feature = "lpg"))]

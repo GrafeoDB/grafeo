@@ -95,7 +95,7 @@ pub use mutation::{
 };
 pub use node_seek::{NodeSeekOperator, SeekKey};
 pub use parameter_scan::{ParameterScanOperator, ParameterState};
-pub use project::{ProjectExpr, ProjectOperator};
+pub use project::{EntityValue, ProjectExpr, ProjectOperator};
 pub use push::{
     AggregatePushOperator, DistinctMaterializingOperator, DistinctPushOperator, FilterPushOperator,
     LimitPushOperator, ProjectPushOperator, SkipLimitPushOperator, SkipPushOperator,

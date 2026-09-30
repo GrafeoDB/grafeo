@@ -182,6 +182,12 @@ pub struct Planner {
     /// Variables that hold edge IDs (from MATCH edge patterns).
     /// Used by plan_return to emit `EdgeResolve` instead of `NodeResolve`.
     pub(super) edge_columns: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// Columns that hold a list of node or edge ids: the variable of a
+    /// variable-length edge pattern, and WITH aliases of such lists. RETURN
+    /// returns their items as node and edge maps.
+    pub(super) entity_list_columns: std::cell::RefCell<
+        std::collections::HashMap<String, grafeo_core::execution::operators::EntityValue>,
+    >,
     /// Optional constraint validator for schema enforcement during mutations.
     pub(super) validator: Option<Arc<dyn ConstraintValidator>>,
     /// Catalog for user-defined procedure lookup.
@@ -244,6 +250,7 @@ impl Planner {
             shuffle_unordered: false,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
+            entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
             validator: None,
             catalog: None,
             #[cfg(feature = "lpg")]
@@ -309,6 +316,7 @@ impl Planner {
             shuffle_unordered: false,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
+            entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
             validator: None,
             catalog: None,
             #[cfg(feature = "lpg")]

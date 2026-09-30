@@ -2923,7 +2923,7 @@ mod tests {
 
     #[test]
     fn test_translate_except() {
-        let query = "MATCH (a:Person) RETURN a EXCEPT MATCH (b:Employee) RETURN b";
+        let query = "MATCH (n:Person) RETURN n EXCEPT MATCH (n:Employee) RETURN n";
         let result = translate(query);
         assert!(
             result.is_ok(),
@@ -2941,7 +2941,7 @@ mod tests {
 
     #[test]
     fn test_translate_intersect() {
-        let query = "MATCH (a:Person) RETURN a INTERSECT MATCH (b:Employee) RETURN b";
+        let query = "MATCH (n:Person) RETURN n INTERSECT MATCH (n:Employee) RETURN n";
         let result = translate(query);
         assert!(
             result.is_ok(),
@@ -2959,7 +2959,7 @@ mod tests {
 
     #[test]
     fn test_translate_otherwise() {
-        let query = "MATCH (a:Person) RETURN a OTHERWISE MATCH (b:Employee) RETURN b";
+        let query = "MATCH (n:Person) RETURN n OTHERWISE MATCH (n:Employee) RETURN n";
         let result = translate(query);
         assert!(
             result.is_ok(),

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use grafeo_common::types::{NodeId, Value};
 use grafeo_core::graph::lpg::LpgStore;
 use grafeo_core::graph::traits::GraphStoreMut;
-use grafeo_engine::{Config, GrafeoDB};
+use grafeo_engine::{Config, GrafeoDB, SchemaInfo};
 
 fn name(db: &GrafeoDB, id: NodeId) -> Option<Value> {
     db.get_node(id)
@@ -66,6 +66,63 @@ fn direct_reads_see_the_compacted_data() {
     assert!(validation.errors.is_empty(), "{:?}", validation.errors);
 }
 
+/// The schema views count the labels, edge types and property keys of the
+/// compacted data next to those written since.
+#[cfg(feature = "compact-store")]
+#[test]
+fn schema_views_see_the_compacted_data() {
+    let mut db = GrafeoDB::new_in_memory();
+    let alix = person(&db, "Alix");
+    let amsterdam = db
+        .create_node_with_props(&["City"], [("population", Value::Int64(921_000))])
+        .unwrap();
+    db.create_edge(alix, amsterdam, "LIVES_IN").unwrap();
+    db.compact().unwrap();
+    let gus = person(&db, "Gus");
+    db.create_edge_with_props(alix, gus, "KNOWS", [("since", Value::Int64(2020))])
+        .unwrap();
+
+    // Person and City, LIVES_IN and KNOWS, name, population and since.
+    assert_eq!(
+        (
+            db.label_count(),
+            db.edge_type_count(),
+            db.property_key_count()
+        ),
+        (2, 2, 3)
+    );
+    let stats = db.detailed_stats();
+    assert_eq!(
+        (
+            stats.label_count,
+            stats.edge_type_count,
+            stats.property_key_count
+        ),
+        (2, 2, 3)
+    );
+
+    let SchemaInfo::Lpg(schema) = db.schema() else {
+        panic!("expected an LPG schema");
+    };
+    let mut labels: Vec<_> = schema
+        .labels
+        .iter()
+        .map(|label| (label.name.as_str(), label.count))
+        .collect();
+    labels.sort_unstable();
+    assert_eq!(labels, [("City", 1), ("Person", 2)]);
+    let mut edge_types: Vec<_> = schema
+        .edge_types
+        .iter()
+        .map(|edge_type| (edge_type.name.as_str(), edge_type.count))
+        .collect();
+    edge_types.sort_unstable();
+    assert_eq!(edge_types, [("KNOWS", 1), ("LIVES_IN", 1)]);
+    let mut keys = schema.property_keys;
+    keys.sort_unstable();
+    assert_eq!(keys, ["name", "population", "since"]);
+}
+
 #[test]
 fn direct_reads_on_an_external_store() {
     let store = Arc::new(LpgStore::new().unwrap());
@@ -85,6 +142,14 @@ fn direct_reads_on_an_external_store() {
     assert_eq!(name(&db, alix), Some(Value::from("Alix")));
     assert_eq!(db.get_edge(knows).map(|edge| edge.dst), Some(gus));
     assert_eq!(db.get_node_labels(alix), Some(vec!["Person".to_string()]));
+    assert_eq!(
+        (
+            db.label_count(),
+            db.edge_type_count(),
+            db.property_key_count()
+        ),
+        (1, 1, 1)
+    );
     assert_eq!(
         db.graph("default")
             .unwrap()

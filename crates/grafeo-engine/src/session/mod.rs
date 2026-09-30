@@ -2931,6 +2931,8 @@ impl Session {
         // EXPLAIN: annotate pushdown hints and return the plan tree
         if optimized_plan.explain {
             use crate::query::processor::{annotate_pushdown_hints, explain_result};
+            #[cfg(feature = "lpg")]
+            self.check_graph_access(optimized_plan.root.has_mutations())?;
             let mut plan = optimized_plan;
             annotate_pushdown_hints(&mut plan.root, active.as_ref());
             return Ok(explain_result(&plan));
@@ -3437,6 +3439,8 @@ impl Session {
         // EXPLAIN
         if optimized_plan.explain {
             use crate::query::processor::{annotate_pushdown_hints, explain_result};
+            #[cfg(feature = "lpg")]
+            self.check_graph_access(optimized_plan.root.has_mutations())?;
             let mut plan = optimized_plan;
             annotate_pushdown_hints(&mut plan.root, active.as_ref());
             return Ok(explain_result(&plan));
@@ -4688,8 +4692,7 @@ impl Session {
     where
         F: FnOnce() -> Result<T>,
     {
-        self.check_active_graph()?;
-        self.check_graph_grant(has_mutations)?;
+        self.check_graph_access(has_mutations)?;
         if has_mutations {
             self.check_writable()?;
         }
@@ -4722,6 +4725,16 @@ impl Session {
             self.flush_wal_outside_transaction();
             result
         }
+    }
+
+    /// Fails when the selected graph is gone or this identity has no grant
+    /// for it (see `check_active_graph` and `check_graph_grant`). Every
+    /// statement checks this, also `EXPLAIN`, which shows a plan without
+    /// running it.
+    #[cfg(feature = "lpg")]
+    fn check_graph_access(&self, writes: bool) -> Result<()> {
+        self.check_active_graph()?;
+        self.check_graph_grant(writes)
     }
 
     /// Fails when this identity has per-graph grants and none covers the

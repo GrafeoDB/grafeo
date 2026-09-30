@@ -774,6 +774,11 @@ mod introspection {
         assert!(error.contains("does not exist"), "{error}");
         let error = session.execute("INSERT (:Person)").unwrap_err().to_string();
         assert!(error.contains("does not exist"), "{error}");
+        let error = session
+            .execute("EXPLAIN MATCH (n) RETURN n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not exist"), "{error}");
 
         session.execute("SESSION RESET SCHEMA").unwrap();
         let result = session.execute("RETURN CURRENT_GRAPH AS g").unwrap();

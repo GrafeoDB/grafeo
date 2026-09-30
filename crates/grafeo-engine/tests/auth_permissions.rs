@@ -403,7 +403,8 @@ fn cypher_execute_language_write_with_readonly_fails() {
 
 /// `use_graph` selects a graph without the grant check `USE GRAPH` makes:
 /// statements and direct writes check the grant themselves, reads needing
-/// any grant for the graph and writes a read-write one.
+/// any grant for the graph and writes a read-write one. `EXPLAIN` needs what
+/// the statement it shows would need.
 #[test]
 fn per_graph_grants_hold_after_use_graph() {
     use grafeo_engine::auth::Grant;
@@ -428,15 +429,36 @@ fn per_graph_grants_hold_after_use_graph() {
     );
     denied(session.execute("INSERT (:X)").unwrap_err().to_string());
     denied(session.create_node(&["X"]).unwrap_err().to_string());
+    denied(
+        session
+            .execute("EXPLAIN MATCH (n) RETURN n")
+            .unwrap_err()
+            .to_string(),
+    );
+    #[cfg(feature = "cypher")]
+    denied(
+        session
+            .execute_cypher("EXPLAIN MATCH (n) RETURN n")
+            .unwrap_err()
+            .to_string(),
+    );
 
     session.use_graph("readonly");
     session.execute("MATCH (n) RETURN count(n)").unwrap();
     denied(session.execute("INSERT (:X)").unwrap_err().to_string());
     denied(session.create_node(&["X"]).unwrap_err().to_string());
+    session.execute("EXPLAIN MATCH (n) RETURN n").unwrap();
+    denied(
+        session
+            .execute("EXPLAIN INSERT (:X)")
+            .unwrap_err()
+            .to_string(),
+    );
 
     session.use_graph("open");
     session.execute("INSERT (:X)").unwrap();
     session.create_node(&["X"]).unwrap();
+    session.execute("EXPLAIN INSERT (:X)").unwrap();
 
     let admin = db.session();
     for (graph, expected) in [("open", 2), ("readonly", 0), ("closed", 0)] {

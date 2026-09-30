@@ -214,7 +214,7 @@ DROP INDEX index_name
 DROP INDEX IF EXISTS index_name
 ```
 
-When the key comes from the rows of the query (`UNWIND`, an earlier `MATCH`), an index lookup can miss values that `=` treats as equal without one: a number stored as a string in another spelling (`'42.0'` or `'042'` for `42`), and floats that differ only in the last digit (`0.1 + 0.2` for `0.3`). On properties that mix strings and numbers, or that hold computed floats, such a query can return fewer rows once an index exists. Keys written in the query itself or passed as parameters compare exactly either way. Keep a property's values of one type to get the same rows either way.
+When the pattern follows an earlier clause (`UNWIND`, another `MATCH`), an index lookup can miss values that `=` treats as equal without one: a number stored as a string in another spelling (`'42.0'` or `'042'` for `42`), and floats that differ only in the last digit (`0.1 + 0.2` for `0.3`). This holds whether the key comes from the rows, is written in the query or is passed as a parameter. On properties that mix strings and numbers, or that hold computed floats, such a query can return fewer rows once an index exists. Keep a property's values of one type to get the same rows either way.
 
 ### Text Indexes
 

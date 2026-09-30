@@ -6,7 +6,7 @@ use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::lpg::{Edge, Node};
 
-use super::direct::{DirectCalls, DirectTarget, missing_graph};
+use super::direct::{BatchEdge, DirectCalls, DirectTarget, missing_graph};
 use super::{GrafeoDB, QueryResult};
 use crate::session::{Session, graph_storage_key};
 
@@ -340,8 +340,33 @@ impl GraphHandle<'_> {
         label: &str,
         properties_list: Vec<HashMap<PropertyKey, Value>>,
     ) -> Result<Vec<NodeId>> {
+        self.batch_create_nodes_with_labels(&[label], properties_list)
+    }
+
+    /// Creates one node with all of `labels` per property map, all or none,
+    /// like [`GrafeoDB::batch_create_nodes_with_labels`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the graph no longer exists, or the first node's
+    /// error; nothing of the batch is created then.
+    pub fn batch_create_nodes_with_labels(
+        &self,
+        labels: &[&str],
+        properties_list: Vec<HashMap<PropertyKey, Value>>,
+    ) -> Result<Vec<NodeId>> {
         self.direct()
-            .batch_create_nodes_with_props(label, properties_list)
+            .batch_create_nodes_with_labels(labels, properties_list)
+    }
+
+    /// Creates the edges, all or none, like [`GrafeoDB::batch_create_edges`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the graph no longer exists, or the first edge's
+    /// error; nothing of the batch is created then.
+    pub fn batch_create_edges(&self, edges: Vec<BatchEdge>) -> Result<Vec<EdgeId>> {
+        self.direct().batch_create_edges(edges)
     }
 
     /// Gets a node of this graph.

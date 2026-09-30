@@ -8,7 +8,7 @@ use pyo3::types::{PyDict, PyList};
 
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_core::graph::lpg::{Edge, Node};
-use grafeo_engine::database::{EdgeUpsertOptions, QueryResult, UpsertSummary};
+use grafeo_engine::database::{BatchEdge, EdgeUpsertOptions, QueryResult, UpsertSummary};
 use grafeo_engine::{GrafeoDB, GraphHandle, Session};
 
 use crate::error::PyGrafeoError;
@@ -329,6 +329,41 @@ fn upsert_summary<'py>(py: Python<'py>, summary: &UpsertSummary) -> PyResult<Bou
     dict.set_item("skipped", summary.skipped)?;
     dict.set_item("skipped_rows", summary.skipped_rows.clone())?;
     Ok(dict)
+}
+
+/// Node labels from a string (one label) or a list of strings.
+pub(crate) fn labels(value: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if let Ok(label) = value.extract::<String>() {
+        return Ok(vec![label]);
+    }
+    value.extract::<Vec<String>>().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err("labels must be a string or a list of strings")
+    })
+}
+
+/// Edges for a batch from `(src, dst, type)` or `(src, dst, type, properties)`
+/// tuples.
+pub(crate) fn batch_edges(edges: &Bound<'_, PyList>) -> PyResult<Vec<BatchEdge>> {
+    edges
+        .iter()
+        .map(|edge| {
+            let (src, dst, edge_type, props): (u64, u64, String, Option<Bound<'_, PyDict>>) =
+                if let Ok((src, dst, edge_type)) = edge.extract::<(u64, u64, String)>() {
+                    (src, dst, edge_type, None)
+                } else {
+                    edge.extract().map_err(|_| {
+                        pyo3::exceptions::PyTypeError::new_err(
+                            "each edge must be a (src, dst, type) or (src, dst, type, properties) tuple",
+                        )
+                    })?
+                };
+            let mut batch_edge = BatchEdge::new(NodeId(src), NodeId(dst), edge_type);
+            if let Some(props) = props {
+                batch_edge = batch_edge.with_properties(properties(Some(&props))?);
+            }
+            Ok(batch_edge)
+        })
+        .collect()
 }
 
 /// Creates a node and returns it as the target now sees it.

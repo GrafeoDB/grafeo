@@ -1621,5 +1621,6 @@ fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::
 }
 
 // After `JsGrafeoDB`: napi takes the class's JS name from the struct, so the
-// upsert methods' `impl` block must come after it.
+// `impl` blocks of these modules must come after it.
+mod batch;
 mod upsert;

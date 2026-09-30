@@ -333,3 +333,36 @@ fn direct_calls_on_a_handle_stay_in_its_graph() {
     assert!(model.get_node(billing).is_err());
     assert!(ids(db.execute(ALL_IDS).unwrap()).is_empty());
 }
+
+#[test]
+fn a_handle_batch_of_edges_stays_in_its_graph() {
+    use grafeo_engine::database::BatchEdge;
+
+    let db = db_with_graphs();
+    let model = db.graph("model").unwrap();
+    let ids = model
+        .batch_create_nodes_with_labels(
+            &["Graph", "Component"],
+            vec![
+                [("id".into(), Value::from("ac::a"))].into_iter().collect(),
+                [("id".into(), Value::from("ac::b"))].into_iter().collect(),
+            ],
+        )
+        .unwrap();
+    model
+        .batch_create_edges(vec![BatchEdge::new(ids[0], ids[1], "USES")])
+        .unwrap();
+    assert_eq!(
+        model
+            .execute("MATCH (:Graph:Component)-[r:USES]->() RETURN count(r)")
+            .unwrap()
+            .rows()[0][0],
+        Value::Int64(1)
+    );
+    assert_eq!(
+        db.execute("MATCH ()-[r]->() RETURN count(r)")
+            .unwrap()
+            .rows()[0][0],
+        Value::Int64(0)
+    );
+}

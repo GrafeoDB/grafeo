@@ -15,7 +15,7 @@ use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
 
-use super::direct::DirectTarget;
+use super::direct::{BatchEdge, DirectTarget};
 
 impl super::GrafeoDB {
     /// The store of the current graph: the one `set_current_graph` and
@@ -412,7 +412,53 @@ impl super::GrafeoDB {
         label: &str,
         properties_list: Vec<HashMap<PropertyKey, Value>>,
     ) -> Result<Vec<NodeId>> {
+        self.batch_create_nodes_with_labels(&[label], properties_list)
+    }
+
+    /// Batch-creates nodes with full property maps, each with all of
+    /// `labels` (for example a namespace label and a type label).
+    ///
+    /// The batch is one transaction: it is created and recovered completely
+    /// or not at all, and other readers see all of it or none of it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first node's error; nothing of the batch is created then.
+    pub fn batch_create_nodes_with_labels(
+        &self,
+        labels: &[&str],
+        properties_list: Vec<HashMap<PropertyKey, Value>>,
+    ) -> Result<Vec<NodeId>> {
         self.direct(DirectTarget::Current)
-            .batch_create_nodes_with_props(label, properties_list)
+            .batch_create_nodes_with_labels(labels, properties_list)
+    }
+
+    /// Batch-creates edges, each with its own endpoints, type and
+    /// properties, in one transaction: created and recovered completely or
+    /// not at all. Returns the IDs in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first edge's error (an endpoint that does not exist, or a
+    /// schema violation); nothing of the batch is created then.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    /// use grafeo_engine::database::BatchEdge;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let alix = db.create_node(&["Person"])?;
+    /// let gus = db.create_node(&["Person"])?;
+    /// let ids = db.batch_create_edges(vec![
+    ///     BatchEdge::new(alix, gus, "KNOWS").with_properties([("since", 2020_i64)]),
+    ///     BatchEdge::new(gus, alix, "KNOWS"),
+    /// ])?;
+    /// assert_eq!(ids.len(), 2);
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    pub fn batch_create_edges(&self, edges: Vec<BatchEdge>) -> Result<Vec<EdgeId>> {
+        self.direct(DirectTarget::Current).batch_create_edges(edges)
     }
 }

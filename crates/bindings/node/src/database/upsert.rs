@@ -66,8 +66,8 @@ impl From<EngineUpsertSummary> for UpsertSummary {
     }
 }
 
-/// Upsert rows from JSON objects.
-fn rows(rows: &[serde_json::Value]) -> Result<Vec<HashMap<PropertyKey, Value>>> {
+/// Rows of properties from JSON objects.
+pub(super) fn rows(rows: &[serde_json::Value]) -> Result<Vec<HashMap<PropertyKey, Value>>> {
     rows.iter()
         .map(|row| {
             let serde_json::Value::Object(fields) = row else {

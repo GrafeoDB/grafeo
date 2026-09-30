@@ -557,20 +557,42 @@ set of properties for one node. Vector values are auto-inserted into matching
 vector indexes.
 
 ```python
-def batch_create_nodes_with_props(self, label: str, properties_list: List[Dict[str, Any]]) -> List[int]
+def batch_create_nodes_with_props(self, label: str | list[str], properties_list: List[Dict[str, Any]]) -> List[int]
 ```
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `label` | `str` | Label for all created nodes |
+| `label` | `str` or `list[str]` | Label for all created nodes, or labels they all get |
 | `properties_list` | `list[dict]` | One property dict per node |
 
-Returns a list of created node IDs.
+Returns a list of created node IDs. The batch is one transaction: if a node breaks a constraint, none is
+created.
 
 ```python
 ids = db.batch_create_nodes_with_props("Person", [
     {"name": "Alix", "age": 30},
     {"name": "Gus", "age": 25},
+])
+db.batch_create_nodes_with_props(["Graph", "File"], [{"id": "f1"}, {"id": "f2"}])
+```
+
+### batch_create_edges()
+
+Batch-create edges, each with its own type and properties, from `(src, dst, type)` or
+`(src, dst, type, properties)` tuples. The batch is one transaction: if an edge names a node that does not
+exist or breaks the schema, none is created.
+
+```python
+def batch_create_edges(self, edges: List[tuple]) -> List[int]
+```
+
+Returns a list of created edge IDs, in input order.
+
+```python
+alix, gus = db.batch_create_nodes_with_props("Person", [{"name": "Alix"}, {"name": "Gus"}])
+ids = db.batch_create_edges([
+    (alix, gus, "KNOWS", {"since": 2020}),
+    (gus, alix, "KNOWS"),
 ])
 ```
 

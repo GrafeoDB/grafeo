@@ -156,16 +156,31 @@ impl PyGraphHandle {
         })
     }
 
-    /// Creates one node with `label` per property dict, all or none.
+    /// Creates one node per property dict, all or none, each with `label`
+    /// (a string or a list of labels).
     fn batch_create_nodes_with_props(
         &self,
-        label: &str,
+        label: &Bound<'_, PyAny>,
         properties_list: &Bound<'_, PyList>,
     ) -> PyResult<Vec<u64>> {
+        let labels = direct::labels(label)?;
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
         let properties = direct::properties_list(properties_list)?;
         self.with_graph(|graph| {
             let ids = graph
-                .batch_create_nodes_with_props(label, properties)
+                .batch_create_nodes_with_labels(&labels, properties)
+                .map_err(PyGrafeoError::from)?;
+            Ok(ids.into_iter().map(|id| id.as_u64()).collect())
+        })
+    }
+
+    /// Creates edges from `(src, dst, type)` or `(src, dst, type, properties)`
+    /// tuples, all or none.
+    fn batch_create_edges(&self, edges: &Bound<'_, PyList>) -> PyResult<Vec<u64>> {
+        let edges = direct::batch_edges(edges)?;
+        self.with_graph(|graph| {
+            let ids = graph
+                .batch_create_edges(edges)
                 .map_err(PyGrafeoError::from)?;
             Ok(ids.into_iter().map(|id| id.as_u64()).collect())
         })

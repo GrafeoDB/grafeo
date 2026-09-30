@@ -1635,3 +1635,43 @@ describe('upserts', () => {
     db.close()
   })
 })
+
+// -- Batch writes --------------------------------------------------------
+
+describe('batch writes', () => {
+  it('should create nodes with several labels and edges with their own types', async () => {
+    const db = GrafeoDB.create()
+    const [alix, gus, vincent] = await db.batchCreateNodesWithProps(
+      ['Graph', 'Person'],
+      [{ name: 'Alix' }, { name: 'Gus' }, { name: 'Vincent' }]
+    )
+    const ids = await db.batchCreateEdges([
+      { src: alix, dst: gus, type: 'KNOWS', properties: { since: 2020 } },
+      { src: gus, dst: vincent, type: 'LIKES' },
+    ])
+    expect(ids.length).toBe(2)
+    const rows = (
+      await db.execute(
+        'MATCH (a:Graph:Person)-[r]->(b) RETURN a.name, type(r), r.since ORDER BY a.name'
+      )
+    ).toArray()
+    expect(rows).toEqual([
+      { 'a.name': 'Alix', 'type(r)': 'KNOWS', 'r.since': 2020 },
+      { 'a.name': 'Gus', 'type(r)': 'LIKES', 'r.since': null },
+    ])
+    db.close()
+  })
+
+  it('should create no edge of a failing batch', async () => {
+    const db = GrafeoDB.create()
+    const [alix, gus] = await db.batchCreateNodesWithProps('Person', [{}, {}])
+    await expect(
+      db.batchCreateEdges([
+        { src: alix, dst: gus, type: 'KNOWS' },
+        { src: alix, dst: 999, type: 'KNOWS' },
+      ])
+    ).rejects.toThrow(/does not exist/)
+    expect(db.edgeCount()).toBe(0)
+    db.close()
+  })
+})

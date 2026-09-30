@@ -251,6 +251,19 @@ export declare class GrafeoDB {
    */
   importJsonl(path: string, options?: JsonlImportOptions | undefined | null): Promise<number>
   /**
+   * Creates one node per properties object, each with `labels` (a label
+   * or a list of labels), in one transaction: if one breaks a constraint,
+   * none is created. Returns a Promise of the node IDs, in input order.
+   */
+  batchCreateNodesWithProps(labels: string | Array<string>, propertiesList: Array<any>): Promise<Array<number>>
+  /**
+   * Creates the edges, each with its own `type` and `properties`, in one
+   * transaction: if one names a node that does not exist or breaks the
+   * schema, none is created. Returns a Promise of the edge IDs, in input
+   * order.
+   */
+  batchCreateEdges(edges: Array<BatchEdgeInput>): Promise<Array<number>>
+  /**
    * Creates or updates one node per row, matched by `key` and all of
    * `labels`, in one statement. Returns a Promise.
    *
@@ -425,6 +438,18 @@ export declare class Transaction {
   executeGraphql(query: string, params?: any | undefined | null): Promise<QueryResult>
   /** Execute a SPARQL query within this transaction. */
   executeSparql(query: string, params?: any | undefined | null): Promise<QueryResult>
+}
+
+/** An edge for `batchCreateEdges`. */
+export interface BatchEdgeInput {
+  /** The source node's ID. */
+  src: number
+  /** The target node's ID. */
+  dst: number
+  /** The edge type. */
+  type: string
+  /** The edge's properties. */
+  properties?: any
 }
 
 /** Options for CSV import. */

@@ -40,6 +40,8 @@ pub(crate) mod flush;
 #[cfg(feature = "lpg")]
 mod graph_handle;
 #[cfg(feature = "lpg")]
+pub use direct::BatchEdge;
+#[cfg(feature = "lpg")]
 pub use graph_handle::GraphHandle;
 #[cfg(all(feature = "lpg", feature = "gql"))]
 pub use upsert::{EdgeUpsertOptions, UpsertSummary};

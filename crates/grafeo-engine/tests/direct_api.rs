@@ -497,3 +497,60 @@ fn direct_writes_are_reported_at_their_own_epochs() {
         [(ChangeKind::Create, created), (ChangeKind::Update, updated)]
     );
 }
+
+/// A batch of edges is one transaction: each edge gets its own type and
+/// properties, and an edge to a missing node fails the whole batch.
+#[test]
+fn a_batch_of_edges_is_all_or_nothing() {
+    use grafeo_engine::database::BatchEdge;
+
+    let db = GrafeoDB::new_in_memory();
+    let alix = db.create_node(&["Person"]).unwrap();
+    let gus = db.create_node(&["Person"]).unwrap();
+    let vincent = db.create_node(&["Person"]).unwrap();
+    let ids = db
+        .batch_create_edges(vec![
+            BatchEdge::new(alix, gus, "KNOWS").with_properties([("since", 2020_i64)]),
+            BatchEdge::new(gus, vincent, "LIKES"),
+        ])
+        .unwrap();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(db.get_edge(ids[0]).unwrap().edge_type.as_str(), "KNOWS");
+    assert_eq!(
+        db.get_edge(ids[0]).unwrap().get_property("since"),
+        Some(&Value::from(2020_i64))
+    );
+    assert_eq!(db.get_edge(ids[1]).unwrap().edge_type.as_str(), "LIKES");
+
+    let missing = grafeo_common::types::NodeId::new(999);
+    let err = db
+        .batch_create_edges(vec![
+            BatchEdge::new(alix, vincent, "KNOWS"),
+            BatchEdge::new(alix, missing, "KNOWS"),
+        ])
+        .unwrap_err();
+    assert!(err.to_string().contains("does not exist"), "{err}");
+    assert_eq!(
+        db.execute("MATCH ()-[r]->() RETURN count(r)")
+            .unwrap()
+            .rows()[0][0],
+        Value::Int64(2),
+        "the first edge of the failed batch is gone too"
+    );
+}
+
+#[test]
+fn a_batch_of_nodes_gets_every_label() {
+    let db = GrafeoDB::new_in_memory();
+    let row = |id: &str| HashMap::from([(PropertyKey::new("id"), Value::from(id))]);
+    let ids = db
+        .batch_create_nodes_with_labels(&["Graph", "File"], vec![row("f1"), row("f2")])
+        .unwrap();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(
+        db.execute("MATCH (n:Graph:File) RETURN count(n)")
+            .unwrap()
+            .rows()[0][0],
+        Value::Int64(2)
+    );
+}

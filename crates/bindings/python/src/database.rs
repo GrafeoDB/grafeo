@@ -1515,7 +1515,8 @@ impl PyGrafeoDB {
     /// one breaks a constraint, the call raises and creates none of them.
     ///
     /// Args:
-    ///     label: Node label for all created nodes.
+    ///     label: Label for all created nodes, or a list of labels they all
+    ///         get (for example a namespace label and a type label).
     ///     properties_list: List of property dicts, one per node.
     ///
     /// Returns:
@@ -1526,16 +1527,47 @@ impl PyGrafeoDB {
     ///         {"text": "hello", "user_id": "u1", "embedding": [0.1, 0.2]},
     ///         {"text": "world", "user_id": "u1", "embedding": [0.3, 0.4]},
     ///     ])
+    ///     db.batch_create_nodes_with_props(["Graph", "File"], [{"id": "f1"}])
     #[pyo3(signature = (label, properties_list))]
     fn batch_create_nodes_with_props(
         &self,
-        label: &str,
+        label: &Bound<'_, PyAny>,
         properties_list: &Bound<'_, pyo3::types::PyList>,
     ) -> PyResult<Vec<u64>> {
+        let labels = crate::direct::labels(label)?;
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
         let db = self.inner.read();
         let ids = db
-            .batch_create_nodes_with_props(label, crate::direct::properties_list(properties_list)?)
+            .batch_create_nodes_with_labels(
+                &labels,
+                crate::direct::properties_list(properties_list)?,
+            )
             .map_err(PyGrafeoError::from)?;
+        Ok(ids.into_iter().map(|id| id.as_u64()).collect())
+    }
+
+    /// Batch-create edges, each with its own type and properties.
+    ///
+    /// The edges are created in one transaction: if one breaks the schema or
+    /// names a node that does not exist, the call raises and creates none of
+    /// them.
+    ///
+    /// Args:
+    ///     edges: List of `(src, dst, type)` or `(src, dst, type, properties)`
+    ///         tuples.
+    ///
+    /// Returns:
+    ///     List of created edge IDs, in input order.
+    ///
+    /// Example:
+    ///     ids = db.batch_create_edges([
+    ///         (alix.id, gus.id, "KNOWS", {"since": 2020}),
+    ///         (gus.id, alix.id, "KNOWS"),
+    ///     ])
+    fn batch_create_edges(&self, edges: &Bound<'_, pyo3::types::PyList>) -> PyResult<Vec<u64>> {
+        let edges = crate::direct::batch_edges(edges)?;
+        let db = self.inner.read();
+        let ids = db.batch_create_edges(edges).map_err(PyGrafeoError::from)?;
         Ok(ids.into_iter().map(|id| id.as_u64()).collect())
     }
 

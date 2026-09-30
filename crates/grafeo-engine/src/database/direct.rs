@@ -54,6 +54,46 @@ pub(crate) struct ImplicitWrites {
     cdc_events: Arc<parking_lot::Mutex<Vec<crate::cdc::ChangeEvent>>>,
 }
 
+/// An edge to create with [`GrafeoDB::batch_create_edges`]: its endpoints,
+/// type and properties.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchEdge {
+    /// The source node.
+    pub src: NodeId,
+    /// The target node.
+    pub dst: NodeId,
+    /// The edge type.
+    pub edge_type: String,
+    /// The edge's properties.
+    pub properties: HashMap<PropertyKey, Value>,
+}
+
+impl BatchEdge {
+    /// An edge without properties.
+    #[must_use]
+    pub fn new(src: NodeId, dst: NodeId, edge_type: impl Into<String>) -> Self {
+        Self {
+            src,
+            dst,
+            edge_type: edge_type.into(),
+            properties: HashMap::new(),
+        }
+    }
+
+    /// The edge with `properties`.
+    #[must_use]
+    pub fn with_properties(
+        mut self,
+        properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
+    ) -> Self {
+        self.properties = properties
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self
+    }
+}
+
 /// The direct API on one graph, shared by [`GrafeoDB`] (its current graph)
 /// and [`GraphHandle`](super::GraphHandle) (the handle's graph).
 pub(crate) struct DirectCalls<'a> {
@@ -352,12 +392,16 @@ impl DirectCalls<'_> {
         self.write_batch(|writer| create_vector_nodes(writer, label, property, vectors))
     }
 
-    pub(crate) fn batch_create_nodes_with_props(
+    pub(crate) fn batch_create_nodes_with_labels(
         &self,
-        label: &str,
+        labels: &[&str],
         properties_list: Vec<HashMap<PropertyKey, Value>>,
     ) -> Result<Vec<NodeId>> {
-        self.write_batch(|writer| create_nodes(writer, label, properties_list))
+        self.write_batch(|writer| create_nodes(writer, labels, properties_list))
+    }
+
+    pub(crate) fn batch_create_edges(&self, edges: Vec<BatchEdge>) -> Result<Vec<EdgeId>> {
+        self.write_batch(|writer| create_edges(writer, edges))
     }
 
     pub(crate) fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
@@ -453,16 +497,35 @@ pub(crate) fn create_vector_nodes(
         .collect()
 }
 
-/// Creates one node with `label` per property map.
+/// Creates one node with all of `labels` per property map.
 pub(crate) fn create_nodes(
     writer: &GraphWriter,
-    label: &str,
+    labels: &[&str],
     properties_list: Vec<HashMap<PropertyKey, Value>>,
 ) -> std::result::Result<Vec<NodeId>, OperatorError> {
-    let labels = [label.to_string()];
+    let labels: Vec<String> = labels.iter().map(|label| (*label).to_string()).collect();
     properties_list
         .into_iter()
         .map(|properties| writer.create_node(&labels, direct_properties(properties)))
+        .collect()
+}
+
+/// Creates the edges, each between two nodes the writer sees.
+pub(crate) fn create_edges(
+    writer: &GraphWriter,
+    edges: Vec<BatchEdge>,
+) -> std::result::Result<Vec<EdgeId>, OperatorError> {
+    edges
+        .into_iter()
+        .map(|edge| {
+            create_edge(
+                writer,
+                edge.src,
+                edge.dst,
+                &edge.edge_type,
+                direct_properties(edge.properties),
+            )
+        })
         .collect()
 }
 

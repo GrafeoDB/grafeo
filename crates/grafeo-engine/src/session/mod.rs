@@ -5200,7 +5200,34 @@ impl Session {
         label: &str,
         properties_list: Vec<std::collections::HashMap<PropertyKey, Value>>,
     ) -> Result<Vec<NodeId>> {
-        self.write(|writer| direct::create_nodes(writer, label, properties_list))
+        self.batch_create_nodes_with_labels(&[label], properties_list)
+    }
+
+    /// Creates one node with all of `labels` per property map, in one
+    /// transaction. Returns the IDs in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first node's error; nothing of the batch is created then.
+    #[cfg(feature = "lpg")]
+    pub fn batch_create_nodes_with_labels(
+        &self,
+        labels: &[&str],
+        properties_list: Vec<std::collections::HashMap<PropertyKey, Value>>,
+    ) -> Result<Vec<NodeId>> {
+        self.write(|writer| direct::create_nodes(writer, labels, properties_list))
+    }
+
+    /// Creates the edges, each with its own endpoints, type and properties,
+    /// in one transaction. Returns the IDs in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first edge's error (an endpoint that does not exist, or a
+    /// schema violation); nothing of the batch is created then.
+    #[cfg(feature = "lpg")]
+    pub fn batch_create_edges(&self, edges: Vec<direct::BatchEdge>) -> Result<Vec<EdgeId>> {
+        self.write(|writer| direct::create_edges(writer, edges))
     }
 
     /// Finds the nodes of the session's graph that have a property value.

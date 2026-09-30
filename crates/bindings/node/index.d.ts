@@ -250,6 +250,28 @@ export declare class GrafeoDB {
    * Returns the number of nodes created.
    */
   importJsonl(path: string, options?: JsonlImportOptions | undefined | null): Promise<number>
+  /**
+   * Creates or updates one node per row, matched by `key` and all of
+   * `labels`, in one statement. Returns a Promise.
+   *
+   * Each row is an object of properties holding the key; a row without it
+   * is skipped. By default a row's properties are merged into the node's;
+   * with `replace: true` they become exactly the row's. Labels are never
+   * removed. A key repeated within one call creates one node, which the
+   * later rows update. The call is checked like a query and writes all
+   * rows or none.
+   */
+  upsertNodes(labels: Array<string>, rows: Array<any>, options?: UpsertNodesOptions | undefined | null): Promise<UpsertSummary>
+  /**
+   * Creates or updates one edge of `edgeType` per row between existing
+   * nodes, in one statement. Returns a Promise.
+   *
+   * Each row names its endpoints in the source and target fields (`src`
+   * and `dst` by default) and holds the edge key; every other field is an
+   * edge property. A row whose endpoint does not exist, or without the
+   * key, is skipped, never created.
+   */
+  upsertEdges(edgeType: string, rows: Array<any>, options?: UpsertEdgesOptions | undefined | null): Promise<UpsertSummary>
 }
 export type JsGrafeoDB = GrafeoDB
 
@@ -421,6 +443,54 @@ export interface JsonlImportOptions {
 
 /** Returns the active SIMD instruction set for vector operations. */
 export declare function simdSupport(): string
+
+/** Options for `upsertEdges`. */
+export interface UpsertEdgesOptions {
+  /** The property that identifies an edge between two nodes (default `id`). */
+  key?: string
+  /**
+   * The node property the endpoint fields hold (default `id`). A property
+   * index on it makes the lookups fast.
+   */
+  endpointKey?: string
+  /** Labels an endpoint must have (default none: the key alone). */
+  endpointLabels?: Array<string>
+  /** The row field with the source node's key (default `src`). */
+  srcField?: string
+  /** The row field with the target node's key (default `dst`). */
+  dstField?: string
+  /**
+   * Whether an edge's properties become exactly the row's (default
+   * `false`: the row's properties are merged in).
+   */
+  replace?: boolean
+}
+
+/** Options for `upsertNodes`. */
+export interface UpsertNodesOptions {
+  /** The property that identifies a node (default `id`). */
+  key?: string
+  /**
+   * Whether a node's properties become exactly the row's (default
+   * `false`: the row's properties are merged in and none is removed).
+   */
+  replace?: boolean
+}
+
+/** What an upsert did with its rows. */
+export interface UpsertSummary {
+  /** Rows that created a node or edge. */
+  created: number
+  /** Rows that updated an existing node or edge. */
+  updated: number
+  /**
+   * Rows that were not written: without their key, or an edge row whose
+   * endpoint does not exist.
+   */
+  skipped: number
+  /** The indices of the skipped rows, in order (at most 1,000). */
+  skippedRows: Array<number>
+}
 
 /** Returns the Grafeo version. */
 export declare function version(): string

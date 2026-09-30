@@ -331,6 +331,56 @@ Remove a property from an edge. Returns `True` if the property existed and was r
 def remove_edge_property(self, edge_id: int, key: str) -> bool
 ```
 
+## Upserts
+
+Create or update nodes and edges by a key property, many rows in one statement. The rows are checked like
+a query (constraints, schema), and a call writes all of its rows or none. Rows apply in order: a key
+repeated within one call creates one node or edge, which the later rows update. Both return a dict with
+`created`, `updated`, `skipped` and `skipped_rows` (the indices of the skipped rows, at most 1,000). Graph
+handles (`db.graph(name)`) have the same methods.
+
+### upsert_nodes()
+
+One node per row, matched by `key` and all of `labels`. A row without the key is skipped. By default a
+row's properties are merged into the node's and none is removed; with `replace=True` they become exactly
+the row's. Labels are never removed.
+
+```python
+def upsert_nodes(self, labels: list[str], rows: list[dict], key: str = "id", replace: bool = False) -> dict
+```
+
+```python
+db.upsert_nodes(["Graph", "File"], [{"id": "f1", "size": 3}, {"id": "f2", "size": 5}])
+# {'created': 2, 'updated': 0, 'skipped': 0, 'skipped_rows': []}
+```
+
+### upsert_edges()
+
+One edge of `edge_type` per row, between the nodes whose `endpoint_key` is the row's `src_field` and
+`dst_field` value (restricted to `endpoint_labels` when given). The edge is identified by its endpoints,
+type and `key`; every other field of the row is an edge property. A row whose endpoint does not exist, or
+without the key, is skipped, never created. A property index on `endpoint_key` makes the lookups fast.
+
+```python
+def upsert_edges(
+    self,
+    edge_type: str,
+    rows: list[dict],
+    key: str = "id",
+    endpoint_key: str = "id",
+    endpoint_labels: list[str] | None = None,
+    src_field: str = "src",
+    dst_field: str = "dst",
+    replace: bool = False,
+) -> dict
+```
+
+```python
+db.create_property_index("id")
+db.upsert_edges("USES", [{"src": "f1", "dst": "f2", "id": "u1", "weight": 1}])
+# {'created': 1, 'updated': 0, 'skipped': 0, 'skipped_rows': []}
+```
+
 ## DataFrame Integration
 
 These methods convert between Grafeo and pandas/polars DataFrames. Requires `pandas` or `polars` to be installed (`uv add pandas` or `uv add polars`).

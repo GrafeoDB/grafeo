@@ -171,6 +171,88 @@ impl PyGraphHandle {
         })
     }
 
+    /// Creates or updates one node per row, matched by `key` and all of
+    /// `labels`, in one statement.
+    ///
+    /// Each row is a dict of properties holding `key`; a row without it is
+    /// skipped. By default a row's properties are merged into the node's and
+    /// none is removed; with `replace=True` the node's properties become
+    /// exactly the row's. Labels are never removed. A key repeated within one
+    /// call creates one node, which the later rows update. The call is
+    /// checked like a query and writes all rows or none.
+    ///
+    /// Returns:
+    ///     dict with `created`, `updated`, `skipped` and `skipped_rows` (the
+    ///     indices of the skipped rows, at most 1,000).
+    ///
+    /// Example:
+    ///     graph.upsert_nodes(["Graph", "File"], [{"id": "f1", "size": 3}])
+    #[pyo3(signature = (labels, rows, key="id", replace=false))]
+    fn upsert_nodes<'py>(
+        &self,
+        py: Python<'py>,
+        labels: Vec<String>,
+        rows: &Bound<'_, PyList>,
+        key: &str,
+        replace: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.with_graph(|graph| crate::direct::upsert_nodes(py, graph, &labels, rows, key, replace))
+    }
+
+    /// Creates or updates one edge of `edge_type` per row between existing
+    /// nodes, in one statement.
+    ///
+    /// Each row names its endpoints in `src_field` and `dst_field` (the
+    /// nodes whose `endpoint_key` has that value, with all of
+    /// `endpoint_labels` when given) and holds the edge's `key`; every other
+    /// field is an edge property. A row whose endpoint does not exist, or
+    /// without the key, is skipped, never created. An edge is identified by
+    /// its endpoints, type and key. By default a row's properties are merged
+    /// into the edge's; with `replace=True` they become exactly the row's.
+    /// A property index on `endpoint_key` makes the endpoint lookups fast.
+    ///
+    /// Returns:
+    ///     dict with `created`, `updated`, `skipped` and `skipped_rows`.
+    ///
+    /// Example:
+    ///     graph.upsert_edges("USES", [{"src": "f1", "dst": "f2", "id": "u1", "w": 1}])
+    #[pyo3(signature = (
+        edge_type,
+        rows,
+        key="id",
+        endpoint_key="id",
+        endpoint_labels=None,
+        src_field="src",
+        dst_field="dst",
+        replace=false
+    ))]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each Python keyword argument is a parameter"
+    )]
+    fn upsert_edges<'py>(
+        &self,
+        py: Python<'py>,
+        edge_type: &str,
+        rows: &Bound<'_, PyList>,
+        key: &str,
+        endpoint_key: &str,
+        endpoint_labels: Option<Vec<String>>,
+        src_field: &str,
+        dst_field: &str,
+        replace: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let options = grafeo_engine::database::EdgeUpsertOptions {
+            key: key.to_string(),
+            endpoint_key: endpoint_key.to_string(),
+            endpoint_labels: endpoint_labels.unwrap_or_default(),
+            src_field: src_field.to_string(),
+            dst_field: dst_field.to_string(),
+            replace,
+        };
+        self.with_graph(|graph| crate::direct::upsert_edges(py, graph, edge_type, rows, &options))
+    }
+
     /// Gets a node by ID, or None.
     fn get_node(&self, id: u64) -> PyResult<Option<PyNode>> {
         self.with_graph(|graph| {

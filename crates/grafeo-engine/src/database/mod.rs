@@ -41,6 +41,8 @@ pub(crate) mod flush;
 mod graph_handle;
 #[cfg(feature = "lpg")]
 pub use graph_handle::GraphHandle;
+#[cfg(all(feature = "lpg", feature = "gql"))]
+pub use upsert::{EdgeUpsertOptions, UpsertSummary};
 #[cfg(feature = "lpg")]
 mod import;
 #[cfg(feature = "lpg")]
@@ -55,6 +57,8 @@ mod schema_replay;
 #[cfg(feature = "lpg")]
 mod search;
 pub(crate) mod section_consumer;
+#[cfg(all(feature = "lpg", feature = "gql"))]
+mod upsert;
 #[cfg(all(feature = "wal", feature = "lpg"))]
 pub(crate) mod wal_store;
 

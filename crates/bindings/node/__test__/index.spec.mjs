@@ -1595,3 +1595,43 @@ describe('concurrent instances', () => {
     db2.close()
   })
 })
+
+// -- Upserts -----------------------------------------------------------
+
+describe('upserts', () => {
+  it('should create then update nodes and edges by key', async () => {
+    const db = GrafeoDB.create()
+    const nodes = await db.upsertNodes(
+      ['Graph', 'File'],
+      [{ id: 'f1', size: 3 }, { size: 4 }, { id: 'f2' }, { id: 'f1', lang: 'rs' }]
+    )
+    expect(nodes).toEqual({ created: 2, updated: 1, skipped: 1, skippedRows: [1] })
+
+    const edges = await db.upsertEdges('Graph:USES', [
+      { src: 'f1', dst: 'f2', id: 'u1', w: 1 },
+      { src: 'f1', dst: 'missing', id: 'u2' },
+      { src: 'f1', dst: 'f2', id: 'u1', w: 5 },
+    ])
+    expect(edges).toEqual({ created: 1, updated: 1, skipped: 1, skippedRows: [1] })
+    const rows = (await db.execute('MATCH ()-[r]->() RETURN r.id, r.w')).toArray()
+    expect(rows).toEqual([{ 'r.id': 'u1', 'r.w': 5 }])
+
+    await db.upsertNodes(['Graph', 'File'], [{ id: 'f1', size: 9 }], { replace: true })
+    const file = (await db.execute("MATCH (n:File {id: 'f1'}) RETURN n.size, n.lang")).toArray()
+    expect(file).toEqual([{ 'n.size': 9, 'n.lang': null }])
+    db.close()
+  })
+
+  it('should take edge options', async () => {
+    const db = GrafeoDB.create()
+    await db.upsertNodes(['File'], [{ id: 'f1' }, { id: 'f2' }])
+    const result = await db.upsertEdges('CALLS', [{ from: 'f1', to: 'f2', rid: 'c1' }], {
+      key: 'rid',
+      endpointLabels: ['File'],
+      srcField: 'from',
+      dstField: 'to',
+    })
+    expect(result.created).toBe(1)
+    db.close()
+  })
+})

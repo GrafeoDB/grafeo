@@ -8,7 +8,7 @@ use pyo3::types::{PyDict, PyList};
 
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_core::graph::lpg::{Edge, Node};
-use grafeo_engine::database::QueryResult;
+use grafeo_engine::database::{EdgeUpsertOptions, QueryResult, UpsertSummary};
 use grafeo_engine::{GrafeoDB, GraphHandle, Session};
 
 use crate::error::PyGrafeoError;
@@ -132,6 +132,21 @@ pub(crate) trait DirectTarget {
     fn node(&self, id: NodeId) -> Option<Node>;
 
     fn edge(&self, id: EdgeId) -> Option<Edge>;
+
+    fn upsert_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        replace: bool,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary>;
+
+    fn upsert_edges(
+        &self,
+        edge_type: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        options: &EdgeUpsertOptions,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary>;
 }
 
 impl DirectTarget for Session {
@@ -159,6 +174,25 @@ impl DirectTarget for Session {
 
     fn edge(&self, id: EdgeId) -> Option<Edge> {
         self.get_edge(id)
+    }
+
+    fn upsert_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        replace: bool,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        Session::upsert_nodes(self, labels, key, rows, replace)
+    }
+
+    fn upsert_edges(
+        &self,
+        edge_type: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        options: &EdgeUpsertOptions,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        Session::upsert_edges(self, edge_type, rows, options)
     }
 }
 
@@ -188,6 +222,25 @@ impl DirectTarget for GrafeoDB {
     fn edge(&self, id: EdgeId) -> Option<Edge> {
         self.get_edge(id)
     }
+
+    fn upsert_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        replace: bool,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        GrafeoDB::upsert_nodes(self, labels, key, rows, replace)
+    }
+
+    fn upsert_edges(
+        &self,
+        edge_type: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        options: &EdgeUpsertOptions,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        GrafeoDB::upsert_edges(self, edge_type, rows, options)
+    }
 }
 
 impl DirectTarget for GraphHandle<'_> {
@@ -216,6 +269,66 @@ impl DirectTarget for GraphHandle<'_> {
     fn edge(&self, id: EdgeId) -> Option<Edge> {
         self.get_edge(id).ok().flatten()
     }
+
+    fn upsert_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        replace: bool,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        GraphHandle::upsert_nodes(self, labels, key, rows, replace)
+    }
+
+    fn upsert_edges(
+        &self,
+        edge_type: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        options: &EdgeUpsertOptions,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        GraphHandle::upsert_edges(self, edge_type, rows, options)
+    }
+}
+
+/// Upserts rows as nodes and returns the summary as a dict.
+pub(crate) fn upsert_nodes<'py>(
+    py: Python<'py>,
+    target: &impl DirectTarget,
+    labels: &[String],
+    rows: &Bound<'_, PyList>,
+    key: &str,
+    replace: bool,
+) -> PyResult<Bound<'py, PyDict>> {
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let summary = target
+        .upsert_nodes(&labels, key, properties_list(rows)?, replace)
+        .map_err(PyGrafeoError::from)?;
+    upsert_summary(py, &summary)
+}
+
+/// Upserts rows as edges and returns the summary as a dict.
+pub(crate) fn upsert_edges<'py>(
+    py: Python<'py>,
+    target: &impl DirectTarget,
+    edge_type: &str,
+    rows: &Bound<'_, PyList>,
+    options: &EdgeUpsertOptions,
+) -> PyResult<Bound<'py, PyDict>> {
+    let summary = target
+        .upsert_edges(edge_type, properties_list(rows)?, options)
+        .map_err(PyGrafeoError::from)?;
+    upsert_summary(py, &summary)
+}
+
+/// An upsert summary as a dict: `created`, `updated`, `skipped` and
+/// `skipped_rows`.
+fn upsert_summary<'py>(py: Python<'py>, summary: &UpsertSummary) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("created", summary.created)?;
+    dict.set_item("updated", summary.updated)?;
+    dict.set_item("skipped", summary.skipped)?;
+    dict.set_item("skipped_rows", summary.skipped_rows.clone())?;
+    Ok(dict)
 }
 
 /// Creates a node and returns it as the target now sees it.

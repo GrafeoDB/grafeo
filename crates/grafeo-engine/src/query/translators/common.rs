@@ -823,6 +823,17 @@ fn branch_output_columns(op: &LogicalOperator) -> Option<Vec<Option<String>>> {
             }
             merged
         }
+        // A nested EXCEPT, INTERSECT or OTHERWISE was checked when it was
+        // built; it outputs its branches' columns.
+        LogicalOperator::Except(op) => {
+            branch_output_columns(&op.left).or_else(|| branch_output_columns(&op.right))
+        }
+        LogicalOperator::Intersect(op) => {
+            branch_output_columns(&op.left).or_else(|| branch_output_columns(&op.right))
+        }
+        LogicalOperator::Otherwise(op) => {
+            branch_output_columns(&op.left).or_else(|| branch_output_columns(&op.right))
+        }
         LogicalOperator::Sort(sort) => branch_output_columns(&sort.input),
         LogicalOperator::Limit(limit) => branch_output_columns(&limit.input),
         LogicalOperator::Skip(skip) => branch_output_columns(&skip.input),
@@ -832,10 +843,11 @@ fn branch_output_columns(op: &LogicalOperator) -> Option<Vec<Option<String>>> {
     }
 }
 
-/// Checks that the branches of a user-written `UNION` are compatible, as GQL
-/// (ISO/IEC 39075 14.2) and Cypher require: every branch returns the same number
-/// of columns, and where both branches name a column explicitly (alias or bare
-/// variable) the names match position by position.
+/// Checks that the branches of a user-written set operation (`UNION`,
+/// `EXCEPT`, `INTERSECT`, `OTHERWISE`, named by `operation`) are compatible, as
+/// GQL (ISO/IEC 39075 14.2) and Cypher require: every branch returns the same
+/// number of columns, and where both branches name a column explicitly (alias
+/// or bare variable) the names match position by position.
 ///
 /// Branches whose columns cannot be determined here (for example `RETURN *`)
 /// are not checked.
@@ -843,7 +855,7 @@ fn branch_output_columns(op: &LogicalOperator) -> Option<Vec<Option<String>>> {
 /// # Errors
 ///
 /// Returns a semantic error naming both column lists on the first mismatch.
-pub(crate) fn check_union_columns(branches: &[LogicalOperator]) -> Result<()> {
+pub(crate) fn check_branch_columns(operation: &str, branches: &[LogicalOperator]) -> Result<()> {
     let render = |columns: &[Option<String>]| -> String {
         columns
             .iter()
@@ -868,7 +880,7 @@ pub(crate) fn check_union_columns(branches: &[LogicalOperator]) -> Result<()> {
             return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
-                    "All UNION branches must return the same columns in the same order: \
+                    "All {operation} branches must return the same columns in the same order: \
                      [{}] vs [{}]",
                     render(first),
                     render(&columns)

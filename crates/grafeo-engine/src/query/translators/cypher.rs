@@ -4,7 +4,7 @@
 //! that can be optimized and executed.
 
 use super::common::{
-    build_left_join_with_predicates, check_union_columns, combine_with_and, has_all_labels,
+    build_left_join_with_predicates, check_branch_columns, combine_with_and, has_all_labels,
     is_aggregate_function, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit,
     wrap_return, wrap_skip, wrap_sort,
 };
@@ -130,7 +130,7 @@ impl CypherTranslator {
                         Ok(plan.root)
                     })
                     .collect::<Result<Vec<_>>>()?;
-                check_union_columns(&inputs)?;
+                check_branch_columns("UNION", &inputs)?;
 
                 let union_op = LogicalOperator::Union(UnionOp { inputs });
 

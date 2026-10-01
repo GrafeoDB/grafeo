@@ -54,6 +54,7 @@ Durability and consistency release. Crash-safe checkpoints and WAL recovery, ind
 - **Cypher and SQL/PGQ checked only the first label of some node patterns** ([#513](https://github.com/GrafeoDB/grafeo/issues/513)), e.g. `MATCH ()-[r]->(n:A:B)`.
 - **Shortest-path searches returned pairs without a path and ignored hop bounds** ([#514](https://github.com/GrafeoDB/grafeo/issues/514)). Unreachable pairs no longer get a row, `->+` finds the shortest cycle, and the path must fit the quantifier (an edge without one is a single hop, as in GQL).
 - **`EXISTS`, `NOT EXISTS` and `COUNT` subqueries in `WHERE` could run before their variables were bound** and return no rows.
+- **A path back to an earlier variable matched every path of its shape**: `MATCH (a)-->(b)-->(a)`, or a second `MATCH` from `b` back to `a`, returned all two-hop paths instead of the cycles, in GQL, Cypher and SQL/PGQ. The path now has to end at the node the variable holds.
 - **Variable-length edge patterns**: the edge variable held only the last edge (it is now the list of relationships), and a property map was checked only against the last hop.
 - **List comprehensions, list predicates and `reduce()` lost items** ([#538](https://github.com/GrafeoDB/grafeo/issues/538)) when the expression called a function, read a property of a `relationships(p)` item or used another row variable.
 - **`relationships(p)` and `nodes(p)` returned internal ids** instead of relationships and nodes.

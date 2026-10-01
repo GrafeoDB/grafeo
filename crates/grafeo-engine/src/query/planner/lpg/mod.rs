@@ -158,15 +158,13 @@ struct RangeBounds<'a> {
     max_inclusive: bool,
 }
 
-/// How a planned query without `ORDER BY` orders its rows.
+/// How the planned query's rows reach the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Shuffle {
-    /// In the order the operators produce them.
-    Off,
-    /// In random order, after reading the whole result.
-    Whole,
-    /// In random order within each chunk, for a stream.
-    PerChunk,
+enum Delivery {
+    /// As one result, read in full before it is returned.
+    Collected,
+    /// As a stream, chunk by chunk, with bounded memory.
+    Streamed,
 }
 
 /// Converts a logical plan to a physical operator tree for LPG stores.
@@ -185,9 +183,11 @@ pub struct Planner {
     pub(super) anon_edge_counter: std::cell::Cell<u32>,
     /// Whether to use factorized execution for multi-hop queries.
     pub(super) factorized_execution: bool,
-    /// How a plan without `ORDER BY` orders its rows (the `shuffle_unordered`
-    /// test option).
-    shuffle: Shuffle,
+    /// Whether a plan without `ORDER BY` returns its rows in random order.
+    shuffle_unordered: bool,
+    /// Whether the rows are collected or streamed (a stream is shuffled per
+    /// chunk).
+    delivery: Delivery,
     /// Variables that hold scalar values (from UNWIND/FOR), not node/edge IDs.
     /// Used by plan_return to assign `LogicalType::Any` instead of `Node`.
     pub(super) scalar_columns: std::cell::RefCell<std::collections::HashSet<String>>,
@@ -259,7 +259,8 @@ impl Planner {
             viewing_epoch: epoch,
             anon_edge_counter: std::cell::Cell::new(0),
             factorized_execution: true,
-            shuffle: Shuffle::Off,
+            shuffle_unordered: false,
+            delivery: Delivery::Collected,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -325,7 +326,8 @@ impl Planner {
             viewing_epoch,
             anon_edge_counter: std::cell::Cell::new(0),
             factorized_execution: true,
-            shuffle: Shuffle::Off,
+            shuffle_unordered: false,
+            delivery: Delivery::Collected,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -425,23 +427,16 @@ impl Planner {
     /// `shuffle_unordered` test option).
     #[must_use]
     pub fn with_shuffle_unordered(mut self, shuffle: bool) -> Self {
-        self.shuffle = if shuffle {
-            Shuffle::Whole
-        } else {
-            Shuffle::Off
-        };
+        self.shuffle_unordered = shuffle;
         self
     }
 
     /// Plans for a stream: with `shuffle_unordered`, the rows of each chunk
     /// are shuffled on their own instead of the whole result, which would
-    /// have to be read before the first row. Call it after
-    /// [`with_shuffle_unordered`](Self::with_shuffle_unordered).
+    /// have to be read before the first row.
     #[must_use]
     pub fn for_streaming(mut self) -> Self {
-        if self.shuffle == Shuffle::Whole {
-            self.shuffle = Shuffle::PerChunk;
-        }
+        self.delivery = Delivery::Streamed;
         self
     }
 
@@ -454,13 +449,13 @@ impl Planner {
         columns: &[String],
     ) -> Box<dyn Operator> {
         use grafeo_core::execution::operators::ShuffleOperator;
-        if self.shuffle == Shuffle::Off || super::common::orders_rows(&logical_plan.root) {
+        if !self.shuffle_unordered || super::common::orders_rows(&logical_plan.root) {
             return operator;
         }
         let schema = self.derive_schema_from_columns(columns);
-        Box::new(match self.shuffle {
-            Shuffle::PerChunk => ShuffleOperator::per_chunk(operator, schema),
-            _ => ShuffleOperator::new(operator, schema),
+        Box::new(match self.delivery {
+            Delivery::Streamed => ShuffleOperator::per_chunk(operator, schema),
+            Delivery::Collected => ShuffleOperator::new(operator, schema),
         })
     }
 

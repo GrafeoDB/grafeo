@@ -55,25 +55,52 @@ fn results_without_order_by_are_shuffled() {
 }
 
 /// A stream is shuffled one chunk at a time, so it keeps its bounded memory:
-/// every row comes back, in an order that changes.
+/// over several chunks, each chunk holds the same rows in every run (the rows
+/// the scan put there), in an order that changes, and every row comes back.
+/// A shuffle of the whole result would move rows between chunks.
 #[test]
-fn streamed_results_are_shuffled_too() {
-    let db = shuffled_database();
-    let stream = || {
-        db.execute_streaming("MATCH (n:A) RETURN n.v")
-            .unwrap()
-            .collect()
-            .unwrap()
-            .rows()
-            .to_vec()
+fn streamed_results_are_shuffled_per_chunk() {
+    let db = GrafeoDB::with_config(Config::in_memory().with_shuffle_unordered(true)).unwrap();
+    db.execute("UNWIND range(0, 4999) AS v INSERT (:A {v: v})")
+        .unwrap();
+    let chunks = || {
+        let mut stream = db.execute_streaming("MATCH (n:A) RETURN n.v").unwrap();
+        let mut chunks = Vec::new();
+        while let Some(chunk) = stream.next_chunk().unwrap() {
+            let column = chunk.column(0).unwrap();
+            let values: Vec<i64> = chunk
+                .selected_indices()
+                .map(|row| column.get_value(row).and_then(|v| v.as_int64()).unwrap())
+                .collect();
+            chunks.push(values);
+        }
+        chunks
     };
-    let unordered = orders(stream);
-    assert!(unordered.len() > 1, "five runs gave one order");
-    for order in &unordered {
-        let mut sorted = order.clone();
-        sorted.sort_by_key(|value| value.as_int64());
-        assert_eq!(sorted, ints(0..50), "every row once");
+    let sorted = |chunks: &[Vec<i64>]| -> Vec<Vec<i64>> {
+        chunks
+            .iter()
+            .map(|chunk| {
+                let mut chunk = chunk.clone();
+                chunk.sort_unstable();
+                chunk
+            })
+            .collect()
+    };
+
+    let first = chunks();
+    assert!(first.len() > 1, "{} chunks", first.len());
+    let mut all: Vec<i64> = first.iter().flatten().copied().collect();
+    all.sort_unstable();
+    assert_eq!(all, (0..5000).collect::<Vec<_>>(), "every row once");
+
+    let runs: Vec<Vec<Vec<i64>>> = (0..4).map(|_| chunks()).collect();
+    for run in &runs {
+        assert_eq!(sorted(run), sorted(&first), "each chunk keeps its rows");
     }
+    assert!(
+        runs.iter().any(|run| *run != first),
+        "five runs gave one order"
+    );
 }
 
 #[test]

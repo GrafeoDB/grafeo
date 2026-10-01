@@ -5,7 +5,7 @@
 //! translation follows the GQL translator pattern.
 
 use super::common::{
-    check_branch_columns, combine_with_and, has_all_labels, is_aggregate_function,
+    VarGen, check_branch_columns, combine_with_and, has_all_labels, is_aggregate_function,
     to_aggregate_function, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
@@ -60,11 +60,17 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 }
 
 /// SQL/PGQ AST to logical plan translator.
-struct SqlPgqTranslator;
+struct SqlPgqTranslator {
+    /// Names for anonymous nodes: each is a variable of its own, so two of
+    /// them in one pattern are not taken for the same node.
+    anonymous: VarGen,
+}
 
 impl SqlPgqTranslator {
     fn new() -> Self {
-        Self
+        Self {
+            anonymous: VarGen::new(),
+        }
     }
 
     fn translate_statement(&self, stmt: &ast::Statement) -> Result<LogicalPlan> {
@@ -575,7 +581,10 @@ impl SqlPgqTranslator {
         node: &ast::NodePattern,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
-        let variable = node.variable.clone().unwrap_or_else(|| "_anon".to_string());
+        let variable = node
+            .variable
+            .clone()
+            .unwrap_or_else(|| self.anonymous.next());
         let label = node.labels.first().cloned();
 
         let mut plan = LogicalOperator::NodeScan(NodeScanOp {
@@ -625,7 +634,7 @@ impl SqlPgqTranslator {
             .target
             .variable
             .clone()
-            .unwrap_or_else(|| "_anon".to_string());
+            .unwrap_or_else(|| self.anonymous.next());
 
         let direction = match edge.direction {
             ast::EdgeDirection::Outgoing => ExpandDirection::Outgoing,

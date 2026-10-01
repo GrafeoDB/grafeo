@@ -193,6 +193,7 @@ impl VarGen {
     }
 
     /// Returns the current counter value without incrementing.
+    #[cfg(any(feature = "gremlin", test))]
     pub fn current(&self) -> u32 {
         self.counter.load(Ordering::Relaxed)
     }

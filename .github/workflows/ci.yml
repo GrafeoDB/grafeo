@@ -386,6 +386,8 @@ jobs:
           - profile: rdf
             features: "--features gql,sparql,graphql,triple-store,spill,mmap,regex"
             engine_features: "--features gql,sparql,graphql,triple-store,shacl,wal,grafeo-file,spill,mmap,regex"
+            # The facade's `rdf` profile on its own keeps its data across a reopen (#544).
+            facade_test: "--features rdf --test rdf_profile"
           # Analytics persona: Data Scientist (algorithms + search + bulk import)
           - profile: analytics
             features: "--features algos,vector-index,text-index,hybrid-search,jsonl-import,parquet-import"
@@ -453,6 +455,17 @@ jobs:
           -p grafeo-engine
           -p grafeo
           --no-default-features ${{ matrix.engine_features || matrix.features }}
+        env:
+          RUSTC_WRAPPER: sccache
+
+      # A facade test built with only the profile's features, for profiles
+      # whose behavior depends on what the profile itself enables.
+      - name: Test facade profile (${{ matrix.profile }})
+        if: matrix.facade_test
+        run: >
+          cargo test
+          -p grafeo
+          --no-default-features ${{ matrix.facade_test }}
         env:
           RUSTC_WRAPPER: sccache
 

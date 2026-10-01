@@ -55,7 +55,7 @@ ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 storage = ["grafeo-engine/storage"]
 # Persona-based profiles
 lpg = ["grafeo-engine/lpg", "gql", "cypher", "gremlin", "sql-pgq", "storage", "grafeo-engine/regex"]
-rdf = ["triple-store", "gql", "sparql", "graphql", "storage", "grafeo-engine/regex", "shacl"]
+rdf = ["triple-store", "grafeo-engine/lpg", "gql", "sparql", "graphql", "storage", "grafeo-engine/regex", "shacl"]  # The LPG store is needed for persistence until #544
 analytics = ["algos", "vector-index", "text-index", "hybrid-search", "jsonl-import", "parquet-import"]
 edge = ["grafeo-engine/lpg", "gql", "grafeo-engine/regex-lite"]
 # Deployment-based profiles (deprecated)

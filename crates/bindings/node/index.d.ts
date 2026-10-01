@@ -357,6 +357,8 @@ export declare class QueryResult {
   edges(): Array<JsEdge>
   /** Returns the result formatted as a Unicode table. */
   toString(): string
+  /** Get all rows as an array of arrays (no column names). */
+  rows(): object
   /**
    * Returns the result as Arrow IPC stream bytes (Buffer).
    *
@@ -367,8 +369,6 @@ export declare class QueryResult {
    * ```
    */
   toArrowIPC(): Buffer
-  /** Get all rows as an array of arrays (no column names). */
-  rows(): object
 }
 
 /**

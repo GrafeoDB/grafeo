@@ -102,6 +102,28 @@ tests:
       rows:
         - [0]
 
+  # A target inside EXISTS needs all its labels too: t is a Tech, not a Concept.
+  - name: exists_subquery_target_keeps_all_labels
+    setup:
+      - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"
+      - "MATCH (d:Directory) INSERT (d)-[:REL]->(:Graph:Tech {id: 't'})"
+    variants:
+      gql: "MATCH (d:Graph:Directory) WHERE EXISTS { MATCH (d)-[:REL]->(n:Graph:Concept) WHERE n.id = 't' } RETURN d.id"
+      cypher: "MATCH (d:Graph:Directory) WHERE EXISTS { MATCH (d)-[:REL]->(n:Graph:Concept) WHERE n.id = 't' } RETURN d.id"
+    expect:
+      empty: true
+
+  - name: exists_subquery_finds_a_target_with_all_labels
+    setup:
+      - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"
+      - "MATCH (d:Directory) INSERT (d)-[:REL]->(:Graph:Tech {id: 't'})"
+    variants:
+      gql: "MATCH (d:Graph:Directory) WHERE EXISTS { MATCH (d)-[:REL]->(n:Graph:Concept) WHERE n.id = 'c' } RETURN d.id"
+      cypher: "MATCH (d:Graph:Directory) WHERE EXISTS { MATCH (d)-[:REL]->(n:Graph:Concept) WHERE n.id = 'c' } RETURN d.id"
+    expect:
+      rows:
+        - [d]
+
   - name: variable_length_target_keeps_all_labels
     setup:
       - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"

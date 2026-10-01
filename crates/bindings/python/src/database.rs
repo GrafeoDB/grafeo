@@ -1467,9 +1467,9 @@ impl PyGrafeoDB {
     /// field is an edge property. A row is skipped when it lacks the key,
     /// `src_field` or `dst_field`, or when no node or more than one node has
     /// its endpoint key; endpoints are never created. `key`, `src_field` and
-    /// `dst_field` must be different fields. An edge is identified by its endpoints, type and key. By
-    /// default a row's properties are merged into the edge's; with
-    /// `replace=True` they become exactly the row's.
+    /// `dst_field` must be different fields. An edge is identified by its
+    /// endpoints, type and key. By default a row's properties are merged
+    /// into the edge's; with `replace=True` they become exactly the row's.
     /// A property index on `endpoint_key` makes the endpoint lookups fast.
     ///
     /// Returns:

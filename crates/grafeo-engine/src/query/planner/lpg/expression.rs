@@ -17,8 +17,8 @@
 //! inline.
 
 use super::{
-    Direction, Error, ExpandDirection, ExpandOp, FilterExpression, LogicalExpression,
-    LogicalOperator, Result, Value, convert_binary_op, convert_unary_op,
+    Direction, Error, ExpandDirection, FilterExpression, LogicalExpression, LogicalOperator,
+    Result, Value, convert_binary_op, convert_unary_op,
 };
 
 impl super::Planner {
@@ -189,30 +189,30 @@ impl super::Planner {
                 })
             }
             LogicalExpression::ExistsSubquery(subplan) => {
-                // Extract the pattern from the subplan
-                // For EXISTS { MATCH (n)-[:TYPE]->() }, we extract start_var, direction, edge_type
-                let (start_var, direction, edge_types, end_labels) =
-                    self.extract_exists_pattern(subplan)?;
-
+                // For EXISTS { MATCH (n)-[:TYPE]->() }: a check on n's own edges.
+                let check = self.extract_exists_pattern(subplan)?;
                 Ok(FilterExpression::ExistsSubquery {
-                    start_var,
-                    direction,
-                    edge_types,
-                    end_labels,
+                    start_var: check.start_var,
+                    direction: check.direction,
+                    edge_types: check.edge_types,
+                    end_labels: check.end_labels,
                     min_hops: None,
                     max_hops: None,
                 })
             }
             LogicalExpression::CountSubquery(subplan) => {
-                // Reuse the same pattern extraction as EXISTS (fast path for simple edges)
-                let (start_var, direction, edge_types, end_labels) =
-                    self.extract_exists_pattern(subplan)?;
-
+                // The same edge check, counted; only a single edge counts the same.
+                let check = self.extract_exists_pattern(subplan)?;
+                if !check.one_edge {
+                    return Err(Error::Internal(
+                        "Unsupported COUNT subquery pattern".to_string(),
+                    ));
+                }
                 Ok(FilterExpression::CountSubquery {
-                    start_var,
-                    direction,
-                    edge_types,
-                    end_labels,
+                    start_var: check.start_var,
+                    direction: check.direction,
+                    edge_types: check.edge_types,
+                    end_labels: check.end_labels,
                 })
             }
             LogicalExpression::ValueSubquery(_) => {
@@ -281,31 +281,34 @@ impl super::Planner {
         }
     }
 
-    /// Extracts the pattern from an EXISTS subplan for the simple single-hop fast path.
+    /// Extracts the edge check that an `EXISTS` subplan reduces to, for the
+    /// fast path that looks only at the correlated node's own edges.
     ///
-    /// Returns `(start_variable, direction, edge_type, end_labels)` only for bare
-    /// single-hop patterns like `(n)-[:TYPE]->()` or `()-[:TYPE]->(n)`. Rejects
-    /// multi-hop patterns, inner WHERE filters, label constraints on target nodes,
-    /// and non-correlated patterns (both endpoints anonymous), all of which are
-    /// handled correctly by the semi-join rewrite in `plan_filter`.
+    /// Accepts a single edge from or to an outer variable, like
+    /// `(n)-[:TYPE]->()`, `(n)-[:TYPE]->(:Label)` or `()-[:TYPE]->(n)`, and a
+    /// path of at least one edge with no condition on its end, like
+    /// `(n)-[:TYPE*]->()`, which exists exactly when its first edge does.
+    /// Everything else goes to the semi-join rewrite in `plan_filter`: a path
+    /// with a minimum other than one hop or with a labeled end, a label on the
+    /// outer variable, an inner `WHERE` other than a label on the end, and
+    /// patterns with no outer variable.
     ///
-    /// When the correlated variable appears on the target side of the pattern
-    /// (e.g., `()-[:CALLS]->(m)` where `m` is from the outer scope), the direction
-    /// is flipped so the runtime can evaluate from the correlated node.
-    pub(super) fn extract_exists_pattern(
-        &self,
-        subplan: &LogicalOperator,
-    ) -> Result<(String, Direction, Vec<String>, Option<Vec<String>>)> {
+    /// When the outer variable is on the target side of the pattern (e.g.
+    /// `()-[:CALLS]->(m)`), the direction is flipped so the runtime can
+    /// evaluate from the outer node.
+    pub(super) fn extract_exists_pattern(&self, subplan: &LogicalOperator) -> Result<EdgeCheck> {
+        let unsupported = || Error::Internal("Unsupported EXISTS subquery pattern".to_string());
         match subplan {
             LogicalOperator::Expand(expand) => {
-                // Only accept single-hop: the Expand's input (source plan) must be
-                // a plain NodeScan. Another Expand means multi-hop; a Filter means
-                // inner WHERE or label constraint. Both require the semi-join path.
-                if !matches!(expand.input.as_ref(), LogicalOperator::NodeScan(_)) {
-                    return Err(Error::Internal(
-                        "Unsupported EXISTS subquery pattern".to_string(),
-                    ));
+                // The Expand's input must be the plain scan of its source: another
+                // Expand means more edges, a Filter an inner WHERE or a second label.
+                let LogicalOperator::NodeScan(source) = expand.input.as_ref() else {
+                    return Err(unsupported());
+                };
+                if expand.min_hops != 1 {
+                    return Err(unsupported());
                 }
+                let one_edge = expand.max_hops == Some(1);
 
                 let from_is_anon = expand.from_variable.starts_with("_anon_");
                 let to_is_anon = expand.to_variable.starts_with("_anon_");
@@ -319,38 +322,46 @@ impl super::Planner {
                 }
 
                 if from_is_anon {
-                    // Correlated variable is on the target side, e.g. ()-[:CALLS]->(m).
-                    // Flip direction: "does m have an incoming CALLS edge?"
+                    // Outer variable on the target side, e.g. ()-[:CALLS]->(m).
+                    // Flip direction: "does m have an incoming CALLS edge?" The
+                    // source's label becomes a label of the far end.
                     let direction = match expand.direction {
                         ExpandDirection::Outgoing => Direction::Incoming,
                         ExpandDirection::Incoming => Direction::Outgoing,
                         ExpandDirection::Both => Direction::Both,
                     };
-                    let end_labels = self.extract_source_labels_from_expand(expand);
-                    Ok((
-                        expand.to_variable.clone(),
+                    let end_labels = source.label.clone().map(|label| vec![label]);
+                    if end_labels.is_some() && !one_edge {
+                        return Err(unsupported());
+                    }
+                    Ok(EdgeCheck {
+                        start_var: expand.to_variable.clone(),
+                        end_var: expand.from_variable.clone(),
                         direction,
-                        expand.edge_types.clone(),
+                        edge_types: expand.edge_types.clone(),
                         end_labels,
-                    ))
+                        one_edge,
+                    })
                 } else {
-                    // Normal case: correlated variable on the source side, e.g. (m)-[:CALLS]->()
-                    //
-                    // No end_labels: the Expand's input is the source NodeScan, whose labels
-                    // belong to the correlated variable (already filtered by the outer scope).
-                    // Target labels would create a Filter wrapping the Expand, which is
-                    // rejected above and correctly routed to the semi-join path.
+                    // Outer variable on the source side, e.g. (m)-[:CALLS]->(). A
+                    // label on it here (`(m:Label)-[:CALLS]->()`) is a condition
+                    // the edge check cannot make.
+                    if source.label.is_some() {
+                        return Err(unsupported());
+                    }
                     let direction = match expand.direction {
                         ExpandDirection::Outgoing => Direction::Outgoing,
                         ExpandDirection::Incoming => Direction::Incoming,
                         ExpandDirection::Both => Direction::Both,
                     };
-                    Ok((
-                        expand.from_variable.clone(),
+                    Ok(EdgeCheck {
+                        start_var: expand.from_variable.clone(),
+                        end_var: expand.to_variable.clone(),
                         direction,
-                        expand.edge_types.clone(),
-                        None,
-                    ))
+                        edge_types: expand.edge_types.clone(),
+                        end_labels: None,
+                        one_edge,
+                    })
                 }
             }
             LogicalOperator::NodeScan(scan) => {
@@ -362,62 +373,56 @@ impl super::Planner {
                     ))
                 }
             }
-            // A Filter wrapping an Expand typically arises from a label constraint
-            // on the anonymous endpoint, e.g. EXISTS { (u)<-[:AUTH]-(:Identity) }.
-            // Extract the inner Expand pattern and fold the label filter into end_labels.
-            // Only pure hasLabel filters are supported; property filters (WHERE m.age > 30)
-            // must go through the semi-join path for correct evaluation.
+            // A label on the far end of a single edge, e.g.
+            // EXISTS { (u)<-[:AUTH]-(:Identity) }, joins the end labels. Any other
+            // filter (a property, a label on another variable, a label on the end
+            // of a longer path) goes to the semi-join path.
             LogicalOperator::Filter(filter_op) => {
-                let end_labels = self.extract_labels_from_filter_predicate(&filter_op.predicate);
-                match end_labels {
-                    Some(labels) => {
-                        let (start_var, direction, edge_types, _) =
-                            self.extract_exists_pattern(&filter_op.input)?;
-                        Ok((start_var, direction, edge_types, Some(labels)))
-                    }
-                    None => {
-                        // Non-label filter (property checks, etc.): reject so the
-                        // planner uses the semi-join rewrite instead.
-                        Err(Error::Internal(
-                            "Unsupported EXISTS subquery pattern".to_string(),
-                        ))
-                    }
+                let (variable, label) = self
+                    .label_condition(&filter_op.predicate)
+                    .ok_or_else(unsupported)?;
+                let mut check = self.extract_exists_pattern(&filter_op.input)?;
+                if variable != check.end_var || !check.one_edge {
+                    return Err(unsupported());
                 }
+                check.end_labels.get_or_insert_with(Vec::new).push(label);
+                Ok(check)
             }
-            _ => Err(Error::Internal(
-                "Unsupported EXISTS subquery pattern".to_string(),
-            )),
+            _ => Err(unsupported()),
         }
     }
 
-    /// Extracts label names from a hasLabel filter predicate.
-    ///
-    /// Given `FunctionCall { name: "hasLabel", args: [Variable(x), Literal("Label")] }`,
-    /// returns `Some(vec!["Label"])`.
-    fn extract_labels_from_filter_predicate(
-        &self,
-        predicate: &LogicalExpression,
-    ) -> Option<Vec<String>> {
+    /// The variable and label of a `hasLabel(variable, 'Label')` predicate.
+    fn label_condition<'a>(&self, predicate: &'a LogicalExpression) -> Option<(&'a str, String)> {
         match predicate {
             LogicalExpression::FunctionCall { name, args, .. } if name == "hasLabel" => {
-                if let Some(LogicalExpression::Literal(Value::String(label))) = args.get(1) {
-                    Some(vec![label.to_string()])
-                } else {
-                    None
+                match (args.first(), args.get(1)) {
+                    (
+                        Some(LogicalExpression::Variable(variable)),
+                        Some(LogicalExpression::Literal(Value::String(label))),
+                    ) => Some((variable, label.to_string())),
+                    _ => None,
                 }
             }
             _ => None,
         }
     }
+}
 
-    /// Extracts source (input) node labels from an Expand for the flipped EXISTS case.
-    ///
-    /// When the pattern is `(:Label)-[:TYPE]->(m)` and we flip to start from `m`,
-    /// the source node's labels become the "end" labels for the reversed traversal.
-    fn extract_source_labels_from_expand(&self, expand: &ExpandOp) -> Option<Vec<String>> {
-        match expand.input.as_ref() {
-            LogicalOperator::NodeScan(scan) => scan.label.clone().map(|l| vec![l]),
-            _ => None,
-        }
-    }
+/// The check on an outer node's own edges that an `EXISTS` or `COUNT`
+/// subquery reduces to (see `extract_exists_pattern`).
+pub(super) struct EdgeCheck {
+    /// The outer variable the check starts from.
+    pub start_var: String,
+    /// The pattern's other end.
+    pub end_var: String,
+    /// The direction of the edge, seen from the outer node.
+    pub direction: Direction,
+    /// The edge types to match (empty matches any).
+    pub edge_types: Vec<String>,
+    /// The labels the other end must all have.
+    pub end_labels: Option<Vec<String>>,
+    /// Whether the pattern is a single edge. A longer path is accepted only for
+    /// `EXISTS`: it exists when its first edge does, but counts differently.
+    pub one_edge: bool,
 }

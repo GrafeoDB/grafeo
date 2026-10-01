@@ -161,14 +161,15 @@ fn a_sql_pgq_path_back_to_an_earlier_variable_closes_the_cycle() {
 }
 
 /// After `WITH b` the earlier `a` is out of scope: the second `MATCH` binds a
-/// new `a`, so every edge out of `b` counts, cycle or not. (Cypher: GQL plans
-/// `MATCH ... WITH ... MATCH` wrongly, #480.)
+/// new `a`, so every edge out of `b` counts, cycle or not.
 #[cfg(feature = "cypher")]
 #[test]
 fn a_variable_out_of_scope_is_bound_again() {
     let db = cycles();
+    let query = "MATCH (a)-[:K]->(b) WITH b MATCH (b)-[:K]->(a) RETURN b.n, a.n";
+    assert_eq!(rows(db.execute(query)), rows(db.execute_cypher(query)));
     assert_eq!(
-        rows(db.execute_cypher("MATCH (a)-[:K]->(b) WITH b MATCH (b)-[:K]->(a) RETURN b.n, a.n")),
+        rows(db.execute(query)),
         vec![
             vec![1, 2],
             vec![1, 2],
@@ -180,5 +181,45 @@ fn a_variable_out_of_scope_is_bound_again() {
             vec![3, 4],
             vec![4, 2],
         ]
+    );
+}
+
+/// A user variable spelled like the name the rewrite gives the closing node
+/// still closes its cycle.
+#[test]
+fn a_cycle_on_a_variable_named_like_an_internal_one_closes() {
+    let db = cycles();
+    assert_eq!(
+        rows(db.execute(
+            "MATCH (_cycle_end_0)-[:K]->(b)-[:K]->(_cycle_end_0) RETURN _cycle_end_0.n, b.n"
+        )),
+        vec![vec![1, 2], vec![2, 1]]
+    );
+}
+
+/// The closing node's name is not one that a later clause binds: that clause
+/// scans its own nodes, so each 2-cycle row pairs with all four nodes.
+#[test]
+fn a_later_variable_named_like_an_internal_one_binds_on_its_own() {
+    let db = cycles();
+    assert_eq!(
+        rows(db.execute("MATCH (a)-[:K]->(b)-[:K]->(a) MATCH (_cycle_end_0:P) RETURN count(*)")),
+        vec![vec![8]]
+    );
+}
+
+/// An anonymous node is a node of its own, also next to a user variable
+/// spelled like the names anonymous nodes get: every edge out of `_v0` counts.
+#[cfg(feature = "sql-pgq")]
+#[test]
+fn a_sql_pgq_anonymous_node_is_not_a_user_variable() {
+    let db = cycles();
+    assert_eq!(
+        rows(
+            db.session().execute_sql(
+                "SELECT n FROM GRAPH_TABLE (MATCH (_v0)-[:K]->() COLUMNS (_v0.n AS n))"
+            )
+        ),
+        vec![vec![1], vec![2], vec![2], vec![3], vec![3], vec![4]]
     );
 }

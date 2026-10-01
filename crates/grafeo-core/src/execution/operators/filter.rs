@@ -953,8 +953,9 @@ impl ExpressionPredicate {
                 direction,
                 edge_types,
                 end_labels,
-                // min_hops/max_hops are always None from the fast path
-                // (extract_exists_pattern rejects multi-hop patterns).
+                // min_hops/max_hops are always None: the planner takes this
+                // path only when one edge from the start node decides the
+                // answer (see `extract_exists_pattern`).
                 ..
             } => {
                 // Get the start node ID from the current row

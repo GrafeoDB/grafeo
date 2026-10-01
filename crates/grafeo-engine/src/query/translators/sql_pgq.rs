@@ -4,6 +4,8 @@
 //! representation. The inner MATCH clause reuses GQL AST types, so pattern
 //! translation follows the GQL translator pattern.
 
+use std::collections::HashSet;
+
 use super::common::{
     VarGen, check_branch_columns, combine_with_and, has_all_labels, is_aggregate_function,
     to_aggregate_function, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
@@ -52,7 +54,7 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
     };
 
     let statement = sql_pgq::parse(actual_query)?;
-    let translator = SqlPgqTranslator::new();
+    let translator = SqlPgqTranslator::new(&statement);
     let mut plan = translator.translate_statement(&statement)?;
     plan.explain = explain;
     plan.profile = profile;
@@ -64,12 +66,34 @@ struct SqlPgqTranslator {
     /// Names for anonymous nodes: each is a variable of its own, so two of
     /// them in one pattern are not taken for the same node.
     anonymous: VarGen,
+    /// The names the statement itself uses, which no anonymous node gets.
+    named: HashSet<String>,
 }
 
 impl SqlPgqTranslator {
-    fn new() -> Self {
+    fn new(statement: &ast::Statement) -> Self {
+        let mut named = HashSet::new();
+        match statement {
+            ast::Statement::Select(select) => select_names(select, &mut named),
+            ast::Statement::SetOperation(set_op) => {
+                select_names(&set_op.left, &mut named);
+                select_names(&set_op.right, &mut named);
+            }
+            ast::Statement::CreatePropertyGraph(_) | ast::Statement::Call(_) => {}
+        }
         Self {
             anonymous: VarGen::new(),
+            named,
+        }
+    }
+
+    /// A name for an anonymous node that no variable of the statement has.
+    fn anonymous_variable(&self) -> String {
+        loop {
+            let name = self.anonymous.next();
+            if !self.named.contains(&name) {
+                return name;
+            }
         }
     }
 
@@ -584,7 +608,7 @@ impl SqlPgqTranslator {
         let variable = node
             .variable
             .clone()
-            .unwrap_or_else(|| self.anonymous.next());
+            .unwrap_or_else(|| self.anonymous_variable());
         let label = node.labels.first().cloned();
 
         let mut plan = LogicalOperator::NodeScan(NodeScanOp {
@@ -634,7 +658,7 @@ impl SqlPgqTranslator {
             .target
             .variable
             .clone()
-            .unwrap_or_else(|| self.anonymous.next());
+            .unwrap_or_else(|| self.anonymous_variable());
 
         let direction = match edge.direction {
             ast::EdgeDirection::Outgoing => ExpandDirection::Outgoing,
@@ -1291,6 +1315,47 @@ impl SqlPgqTranslator {
                 QueryErrorKind::Semantic,
                 "Cannot get variable from operator",
             ))),
+        }
+    }
+}
+
+/// Adds the names a SELECT gives its pattern variables, paths and columns.
+fn select_names(select: &ast::SelectStatement, names: &mut HashSet<String>) {
+    let graph_table = &select.graph_table;
+    for clause in std::iter::once(&graph_table.match_clause).chain(&graph_table.optional_matches) {
+        for aliased in &clause.patterns {
+            names.extend(aliased.alias.iter().cloned());
+            pattern_names(&aliased.pattern, names);
+        }
+    }
+    names.extend(
+        graph_table
+            .columns
+            .items
+            .iter()
+            .map(|item| item.alias.clone()),
+    );
+    if let ast::SelectList::Columns(items) = &select.select_list {
+        names.extend(items.iter().filter_map(|item| item.alias.clone()));
+    }
+}
+
+/// Adds the variables a pattern names.
+fn pattern_names(pattern: &ast::Pattern, names: &mut HashSet<String>) {
+    match pattern {
+        ast::Pattern::Node(node) => names.extend(node.variable.iter().cloned()),
+        ast::Pattern::Path(path) => {
+            names.extend(path.source.variable.iter().cloned());
+            for edge in &path.edges {
+                names.extend(edge.variable.iter().cloned());
+                names.extend(edge.target.variable.iter().cloned());
+            }
+        }
+        ast::Pattern::Quantified { pattern, .. } => pattern_names(pattern, names),
+        ast::Pattern::Union(patterns) | ast::Pattern::MultisetUnion(patterns) => {
+            for pattern in patterns {
+                pattern_names(pattern, names);
+            }
         }
     }
 }

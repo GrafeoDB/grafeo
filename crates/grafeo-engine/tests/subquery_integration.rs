@@ -237,3 +237,79 @@ mod cypher_subqueries {
         assert_eq!(harm_row[1], Value::Null);
     }
 }
+
+/// `EXISTS` and `COUNT` over a path: `top -> sub -> f` and `lone -> f`.
+#[cfg(feature = "cypher")]
+mod subqueries_over_paths {
+    use super::*;
+
+    fn tree() -> GrafeoDB {
+        let db = GrafeoDB::new_in_memory();
+        db.execute(
+            "INSERT (:Directory {id: 'top'})-[:CONTAINS]->(:Directory {id: 'sub'})\
+             -[:CONTAINS]->(:File {id: 'f'})",
+        )
+        .unwrap();
+        db.execute("MATCH (f:File) INSERT (:Directory {id: 'lone'})-[:CONTAINS]->(f)")
+            .unwrap();
+        db
+    }
+
+    /// One edge from the outer node still decides a path with no condition on
+    /// its end, also in `RETURN`.
+    #[test]
+    fn exists_over_a_path_with_no_end_condition_in_return() {
+        let db = tree();
+        let result = db
+            .execute_cypher(
+                "MATCH (n) RETURN n.id, EXISTS { MATCH (n)-[:CONTAINS*]->() } AS e ORDER BY n.id",
+            )
+            .unwrap();
+        let rows: Vec<(Value, Value)> = result
+            .rows()
+            .iter()
+            .map(|row| (row[0].clone(), row[1].clone()))
+            .collect();
+        assert_eq!(
+            rows,
+            [("f", false), ("lone", true), ("sub", true), ("top", true)]
+                .map(|(id, e)| (Value::from(id), Value::Bool(e)))
+        );
+    }
+
+    /// In `RETURN`, a subquery that one edge cannot decide fails rather than
+    /// answering for the first hop only (`top` reaches a file in two hops, and
+    /// counts two nodes below it). A correlated plan for these is #543.
+    #[test]
+    fn subqueries_one_edge_cannot_decide_fail_in_return() {
+        let db = tree();
+        for query in [
+            "MATCH (n:Directory) RETURN n.id, EXISTS { MATCH (n)-[:CONTAINS*]->(:File) } AS e",
+            "MATCH (n:Directory) RETURN n.id, COUNT { MATCH (n)-[:CONTAINS*]->() } AS c",
+            "MATCH (n:Directory) RETURN n.id, EXISTS { MATCH (n)-[:CONTAINS*2..]->() } AS e",
+        ] {
+            assert!(db.execute_cypher(query).is_err(), "{query}");
+        }
+    }
+
+    /// `COUNT` of single edges keeps the fast path: `f` has two incoming.
+    #[test]
+    fn count_of_single_edges_in_return() {
+        let db = tree();
+        let result = db
+            .execute_cypher(
+                "MATCH (n) RETURN n.id, COUNT { MATCH (n)<-[:CONTAINS]-() } AS c ORDER BY n.id",
+            )
+            .unwrap();
+        let rows: Vec<(Value, Value)> = result
+            .rows()
+            .iter()
+            .map(|row| (row[0].clone(), row[1].clone()))
+            .collect();
+        assert_eq!(
+            rows,
+            [("f", 2), ("lone", 0), ("sub", 1), ("top", 0)]
+                .map(|(id, c)| (Value::from(id), Value::Int64(c)))
+        );
+    }
+}

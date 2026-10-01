@@ -200,7 +200,7 @@ fn edges_are_created_then_updated_between_existing_nodes() {
     );
 }
 
-/// An endpoint key that more than one node holds names no single endpoint:
+/// An endpoint key that more than one node has names no single endpoint:
 /// the row is skipped and reported, and writes no edge at all.
 #[test]
 fn a_row_with_an_ambiguous_endpoint_is_skipped() {
@@ -255,6 +255,23 @@ fn a_row_with_an_ambiguous_endpoint_is_skipped() {
     );
     assert_eq!(
         rows(&db, "MATCH (s)-[r:CALLS]->(d) RETURN s.id, d.id"),
+        [vec![Value::from("f3"), Value::from("f1")]]
+    );
+
+    // Without auto-commit and outside a transaction the call is still one
+    // write: the undone attempt leaves nothing behind.
+    let mut manual = db.session();
+    manual.set_auto_commit(false);
+    let result = manual
+        .upsert_edges(
+            "LINKS",
+            vec![edge("f1", "f2", "l1"), edge("f3", "f1", "l2")],
+            &EdgeUpsertOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(result, summary(1, 0, &[0]));
+    assert_eq!(
+        rows(&db, "MATCH (s)-[r:LINKS]->(d) RETURN s.id, d.id"),
         [vec![Value::from("f3"), Value::from("f1")]]
     );
 }

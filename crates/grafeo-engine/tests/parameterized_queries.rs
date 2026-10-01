@@ -151,6 +151,39 @@ fn a_cached_plan_does_not_keep_the_values() {
     }
 }
 
+/// An empty map fills in nothing: a statement without parameters reuses its
+/// optimized plan like the same call without a map, and one that names a
+/// parameter still fails as missing it.
+#[test]
+fn an_empty_parameter_map_uses_the_cached_plan() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    let query = "MATCH (p:Person) RETURN p.name";
+    let hits = || db.query_cache().stats().optimized_hits;
+    let before = hits();
+    for _ in 0..3 {
+        let rows = db
+            .execute_with_params(query, HashMap::new())
+            .unwrap()
+            .rows()
+            .to_vec();
+        assert_eq!(rows, [vec![Value::from("Alix")]]);
+    }
+    assert_eq!(
+        hits() - before,
+        2,
+        "the second and third call reuse the plan"
+    );
+
+    let error = db
+        .execute_with_params(
+            "MATCH (p:Person) WHERE p.name = $name RETURN p.name",
+            HashMap::new(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("$name"), "{error}");
+}
+
 #[test]
 fn explain_and_profile_take_parameters() {
     let db = GrafeoDB::new_in_memory();
@@ -229,5 +262,5 @@ fn dotted_access_on_a_node_expression_explains_itself() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("startNode(r) is not a map value"), "{err}");
-    assert!(err.contains("read its property"), "{err}");
+    assert!(err.contains("bound to a variable in the pattern"), "{err}");
 }

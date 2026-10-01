@@ -36,11 +36,12 @@ const RETRY_WINDOW: Duration = Duration::from_millis(250);
 pub fn run(command: &mut Command) -> io::Result<ExitStatus> {
     let mut child = {
         let _starting = CHILD_START.write().unwrap_or_else(PoisonError::into_inner);
-        CHILDREN_STARTED.store(true, Ordering::Relaxed);
         // `spawn` reports a failed exec, so it returns only once the child
         // runs its own program, which closes the copies (Rust opens files
         // close-on-exec), give or take the moment `take_lock` allows for.
-        command.spawn()?
+        let child = command.spawn()?;
+        CHILDREN_STARTED.store(true, Ordering::Relaxed);
+        child
     };
     child.wait()
 }
@@ -54,12 +55,13 @@ pub fn run(command: &mut Command) -> io::Result<ExitStatus> {
 pub fn output(command: &mut Command) -> io::Result<Output> {
     let child = {
         let _starting = CHILD_START.write().unwrap_or_else(PoisonError::into_inner);
-        CHILDREN_STARTED.store(true, Ordering::Relaxed);
-        command
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?
+            .spawn()?;
+        CHILDREN_STARTED.store(true, Ordering::Relaxed);
+        child
     };
     child.wait_with_output()
 }
@@ -71,24 +73,27 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
 /// it closes the child's close-on-exec files, so for a moment after [`run`]
 /// or [`output`] started a child, that child can still hold the lock of a
 /// database a test has just closed. In a process that started children this
-/// way, a failed `try_lock` is therefore tried again for up to 250 ms before
-/// its error stands. Other processes get the first answer.
+/// way, a lock that `try_lock` finds held (an error `held` accepts) is
+/// therefore tried again for up to 250 ms before the error stands. Other
+/// errors, and every error in other processes, are returned at once.
 ///
 /// # Errors
 ///
 /// Returns the last error of `try_lock`.
-pub fn take_lock<T, E>(mut try_lock: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+pub fn take_lock<T, E>(
+    mut try_lock: impl FnMut() -> Result<T, E>,
+    held: impl Fn(&E) -> bool,
+) -> Result<T, E> {
     let _no_child_start = CHILD_START.read().unwrap_or_else(PoisonError::into_inner);
     let deadline = CHILDREN_STARTED
         .load(Ordering::Relaxed)
         .then(|| Instant::now() + RETRY_WINDOW);
     loop {
-        let result = try_lock();
-        match deadline {
-            Some(deadline) if result.is_err() && Instant::now() < deadline => {
+        match (try_lock(), deadline) {
+            (Err(error), Some(deadline)) if held(&error) && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(2));
             }
-            _ => return result,
+            (result, _) => return result,
         }
     }
 }
@@ -150,13 +155,23 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
             drop(held);
         });
+        let held =
+            |error: &std::fs::TryLockError| matches!(error, std::fs::TryLockError::WouldBlock);
         let ours = open();
-        assert!(take_lock(|| ours.try_lock()).is_ok());
+        assert!(take_lock(|| ours.try_lock(), held).is_ok());
         release.join().unwrap();
 
         let started = Instant::now();
-        assert!(take_lock(|| open().try_lock()).is_err());
+        assert!(take_lock(|| open().try_lock(), held).is_err());
         assert!(started.elapsed() >= RETRY_WINDOW);
+
+        // An error other than a held lock is returned at once.
+        let started = Instant::now();
+        assert_eq!(
+            take_lock(|| Err::<(), _>("broken"), |_| false),
+            Err("broken")
+        );
+        assert!(started.elapsed() < RETRY_WINDOW);
         drop(ours);
         std::fs::remove_file(&path).unwrap();
     }

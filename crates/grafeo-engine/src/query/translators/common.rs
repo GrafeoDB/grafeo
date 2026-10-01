@@ -277,9 +277,8 @@ pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalEx
         return Err(Error::Query(QueryError::new(
             QueryErrorKind::Semantic,
             format!(
-                "{base} is not a map value, so .{key} cannot read from it: match a node or edge \
-                 with a variable and read its property, or bind a value with WITH ... AS m and \
-                 use m.{key}"
+                "{base} is not a map value, so .{key} cannot read from it: read .{key} of a node \
+                 or edge bound to a variable in the pattern, or of a map value"
             ),
         )));
     }
@@ -290,14 +289,15 @@ pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalEx
 }
 
 /// Whether an expression can evaluate to a map: a variable, a parameter, a
-/// property, a map literal, `properties(...)`, or a key or element of one of
-/// those (or of a list literal).
+/// property, a map literal or projection, `properties(...)`, or a key or
+/// element of one of those (or of a list literal).
 fn can_be_map(expr: &LogicalExpression) -> bool {
     match expr {
         LogicalExpression::Variable(_)
         | LogicalExpression::Parameter(_)
         | LogicalExpression::Property { .. }
         | LogicalExpression::Map(_)
+        | LogicalExpression::MapProjection { .. }
         | LogicalExpression::MapAccess { .. } => true,
         LogicalExpression::IndexAccess { base, .. } => {
             matches!(**base, LogicalExpression::List(_)) || can_be_map(base)

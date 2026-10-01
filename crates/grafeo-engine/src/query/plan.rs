@@ -1199,6 +1199,7 @@ fn fmt_expr(expr: &LogicalExpression) -> String {
     match expr {
         LogicalExpression::Variable(name) => name.clone(),
         LogicalExpression::Property { variable, property } => format!("{variable}.{property}"),
+        LogicalExpression::MapAccess { base, key } => format!("{}.{key}", fmt_expr(base)),
         LogicalExpression::Literal(val) => format!("{val}"),
         LogicalExpression::Binary { left, op, right } => {
             format!("{} {op:?} {}", fmt_expr(left), fmt_expr(right))
@@ -4502,6 +4503,15 @@ mod tests {
             property: "age".into(),
         };
         assert_eq!(fmt_expr(&p), "n.age");
+
+        let route = LogicalExpression::MapAccess {
+            base: Box::new(LogicalExpression::Property {
+                variable: "n".into(),
+                property: "meta".into(),
+            }),
+            key: "route".into(),
+        };
+        assert_eq!(fmt_expr(&route), "n.meta.route");
 
         let lit = LogicalExpression::Literal(Value::Int64(42));
         assert_eq!(fmt_expr(&lit), "42");

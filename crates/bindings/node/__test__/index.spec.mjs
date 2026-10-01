@@ -1572,6 +1572,17 @@ describe('ID validation', () => {
   it('should reject negative edge ID', () => {
     expect(() => db.getEdge(-1)).toThrow(/Invalid edge ID/)
   })
+
+  it('should reject a fractional ID instead of truncating it', async () => {
+    expect(() => db.getNode(1.5)).toThrow(/Invalid node ID/)
+    expect(() => db.getEdge(0.5)).toThrow(/Invalid edge ID/)
+    const alix = db.createNode(['Person']).id
+    const gus = db.createNode(['Person']).id
+    await expect(
+      db.batchCreateEdges([{ src: alix + 0.9, dst: gus, type: 'KNOWS' }])
+    ).rejects.toThrow(/Invalid node ID/)
+    expect(db.edgeCount()).toBe(0)
+  })
 })
 
 // ── Concurrent database instances ───────────────────────────────────

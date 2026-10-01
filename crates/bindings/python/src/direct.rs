@@ -129,9 +129,12 @@ pub(crate) trait DirectTarget {
         properties: Vec<(PropertyKey, Value)>,
     ) -> grafeo_common::utils::error::Result<EdgeId>;
 
-    fn node(&self, id: NodeId) -> Option<Node>;
+    /// The node as the target now sees it; an error when the target itself
+    /// is gone (a dropped graph).
+    fn node(&self, id: NodeId) -> grafeo_common::utils::error::Result<Option<Node>>;
 
-    fn edge(&self, id: EdgeId) -> Option<Edge>;
+    /// The edge as the target now sees it (see [`node`](Self::node)).
+    fn edge(&self, id: EdgeId) -> grafeo_common::utils::error::Result<Option<Edge>>;
 
     fn upsert_nodes(
         &self,
@@ -168,12 +171,12 @@ impl DirectTarget for Session {
         Session::create_edge_with_props(self, source, target, edge_type, properties)
     }
 
-    fn node(&self, id: NodeId) -> Option<Node> {
-        self.get_node(id)
+    fn node(&self, id: NodeId) -> grafeo_common::utils::error::Result<Option<Node>> {
+        Ok(self.get_node(id))
     }
 
-    fn edge(&self, id: EdgeId) -> Option<Edge> {
-        self.get_edge(id)
+    fn edge(&self, id: EdgeId) -> grafeo_common::utils::error::Result<Option<Edge>> {
+        Ok(self.get_edge(id))
     }
 
     fn upsert_nodes(
@@ -215,12 +218,12 @@ impl DirectTarget for GrafeoDB {
         GrafeoDB::create_edge_with_props(self, source, target, edge_type, properties)
     }
 
-    fn node(&self, id: NodeId) -> Option<Node> {
-        self.get_node(id)
+    fn node(&self, id: NodeId) -> grafeo_common::utils::error::Result<Option<Node>> {
+        Ok(self.get_node(id))
     }
 
-    fn edge(&self, id: EdgeId) -> Option<Edge> {
-        self.get_edge(id)
+    fn edge(&self, id: EdgeId) -> grafeo_common::utils::error::Result<Option<Edge>> {
+        Ok(self.get_edge(id))
     }
 
     fn upsert_nodes(
@@ -262,12 +265,12 @@ impl DirectTarget for GraphHandle<'_> {
         GraphHandle::create_edge_with_props(self, source, target, edge_type, properties)
     }
 
-    fn node(&self, id: NodeId) -> Option<Node> {
-        self.get_node(id).ok().flatten()
+    fn node(&self, id: NodeId) -> grafeo_common::utils::error::Result<Option<Node>> {
+        self.get_node(id)
     }
 
-    fn edge(&self, id: EdgeId) -> Option<Edge> {
-        self.get_edge(id).ok().flatten()
+    fn edge(&self, id: EdgeId) -> grafeo_common::utils::error::Result<Option<Edge>> {
+        self.get_edge(id)
     }
 
     fn upsert_nodes(
@@ -378,6 +381,7 @@ pub(crate) fn create_node(
         .map_err(PyGrafeoError::from)?;
     target
         .node(id)
+        .map_err(PyGrafeoError::from)?
         .map(node)
         .ok_or_else(|| PyGrafeoError::database("Failed to create node").into())
 }
@@ -395,6 +399,7 @@ pub(crate) fn create_edge(
         .map_err(PyGrafeoError::from)?;
     target
         .edge(id)
+        .map_err(PyGrafeoError::from)?
         .map(edge)
         .ok_or_else(|| PyGrafeoError::database("Failed to create edge").into())
 }

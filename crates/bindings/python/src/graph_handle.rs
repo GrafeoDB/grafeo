@@ -220,11 +220,12 @@ impl PyGraphHandle {
     /// Each row names its endpoints in `src_field` and `dst_field` (the
     /// nodes whose `endpoint_key` has that value, with all of
     /// `endpoint_labels` when given) and holds the edge's `key`; every other
-    /// field is an edge property. A row whose endpoint key no node or more
-    /// than one node holds, or without the key, is skipped; endpoints are
+    /// field is an edge property. A row is skipped when no node or more than
+    /// one node has its endpoint key, or when it has no key; endpoints are
     /// never created. `key`, `src_field` and `dst_field` must be different
-    /// fields. An edge is identified by its endpoints, type and key. By default a row's properties are merged
-    /// into the edge's; with `replace=True` they become exactly the row's.
+    /// fields. An edge is identified by its endpoints, type and key. By
+    /// default a row's properties are merged into the edge's; with
+    /// `replace=True` they become exactly the row's.
     /// A property index on `endpoint_key` makes the endpoint lookups fast.
     ///
     /// Returns:

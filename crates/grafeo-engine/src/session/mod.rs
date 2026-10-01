@@ -2862,7 +2862,7 @@ impl Session {
         // optimizer and planner see the values and no cached plan keeps them.
         let cache_key = CacheKey::with_graph(query, QueryLanguage::Gql, self.current_graph());
         let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
-        let logical_plan = match parsed {
+        let mut logical_plan = match parsed {
             Some(plan) => plan,
             None => match gql::translate_full(query)? {
                 gql::GqlTranslationResult::SessionCommand(cmd) => {
@@ -2909,6 +2909,7 @@ impl Session {
             ));
         }
 
+        let params = params_to_fill(&mut logical_plan, params)?;
         let optimized_plan = if let Some(params) = params {
             self.optimize_with_params(logical_plan, params)?
         } else if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
@@ -3371,7 +3372,7 @@ impl Session {
         // A parameterized statement reuses its parsed plan (see execute_gql).
         let cache_key = CacheKey::with_graph(query, QueryLanguage::Cypher, self.current_graph());
         let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
-        let logical_plan = match parsed {
+        let mut logical_plan = match parsed {
             Some(plan) => plan,
             // Schema DDL and SHOW commands run before the normal query path.
             None => match cypher::translate_full(query)? {
@@ -3413,6 +3414,7 @@ impl Session {
             },
         };
 
+        let params = params_to_fill(&mut logical_plan, params)?;
         let optimized_plan = if let Some(params) = params {
             self.optimize_with_params(logical_plan, params)?
         } else if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
@@ -3847,7 +3849,7 @@ impl Session {
         // A parameterized statement reuses its parsed plan (see execute_gql).
         let cache_key = CacheKey::with_graph(query, QueryLanguage::SqlPgq, self.current_graph());
         let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
-        let logical_plan = match parsed {
+        let mut logical_plan = match parsed {
             Some(plan) => plan,
             None => {
                 // Parse and translate (always needed to check for DDL)
@@ -3880,6 +3882,7 @@ impl Session {
             }
         };
 
+        let params = params_to_fill(&mut logical_plan, params)?;
         let optimized_plan = if let Some(params) = params {
             self.optimize_with_params(logical_plan, params)?
         } else if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
@@ -4733,11 +4736,27 @@ impl Session {
     }
 
     /// Runs `body`, which may run several statements, as one write: in a
-    /// transaction of its own when none is open, otherwise inside the open
-    /// one. An error undoes everything `body` wrote; an open transaction goes
-    /// on.
+    /// transaction of its own when none is open (whatever the auto-commit
+    /// setting), otherwise inside the open one. An error undoes everything
+    /// `body` wrote; an open transaction goes on.
+    #[cfg(all(feature = "lpg", feature = "gql"))]
     pub(crate) fn as_one_write<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.with_auto_commit(true, body)
+        if self.current_transaction.lock().is_some() {
+            return self.with_auto_commit(true, body);
+        }
+        self.begin_transaction_inner(false, None)?;
+        match self.with_auto_commit(true, body) {
+            Ok(result) => {
+                self.commit_inner()?;
+                Ok(result)
+            }
+            Err(error) => {
+                // The body's error is the one to report, as in
+                // `with_auto_commit`.
+                let _ = self.rollback_inner();
+                Err(error)
+            }
+        }
     }
 
     /// Fails when the selected graph is gone or this identity has no grant
@@ -5696,6 +5715,24 @@ impl Drop for Session {
             reg.session_active
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+}
+
+/// The parameter values to fill into `plan`: `None` for an empty map when the
+/// plan has no defaults either, after checking that the plan names no
+/// parameter (it fails like any missing value). A statement without
+/// parameters then uses its cached plan, like the same call without a map.
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+fn params_to_fill<'a>(
+    plan: &mut crate::query::plan::LogicalPlan,
+    params: Option<&'a std::collections::HashMap<String, Value>>,
+) -> Result<Option<&'a std::collections::HashMap<String, Value>>> {
+    match params {
+        Some(values) if values.is_empty() && plan.default_params.is_empty() => {
+            crate::query::processor::substitute_params(plan, values)?;
+            Ok(None)
+        }
+        other => Ok(other),
     }
 }
 

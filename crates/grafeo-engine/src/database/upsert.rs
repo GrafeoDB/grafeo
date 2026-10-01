@@ -27,7 +27,7 @@ pub struct UpsertSummary {
     /// Rows that updated an existing node or edge.
     pub updated: usize,
     /// Rows that were not written: a row without its key, or an edge row
-    /// whose endpoint key no node or more than one node holds.
+    /// whose endpoint key matches no node or more than one node.
     pub skipped: usize,
     /// The indices of the skipped rows, in order (at most 1,000).
     pub skipped_rows: Vec<usize>,
@@ -104,8 +104,8 @@ fn upsert_nodes(
 /// Creates or updates one edge per row between the nodes whose
 /// `options.endpoint_key` is the row's source and target field, matched by
 /// its type and `options.key`. Every other field of a row is an edge
-/// property. A row whose endpoint does not exist, or whose endpoint key more
-/// than one node holds, is skipped; endpoints are never created.
+/// property. A row is skipped when no node or more than one node has its
+/// endpoint key; endpoints are never created.
 fn upsert_edges(
     session: &Session,
     edge_type: &str,
@@ -173,7 +173,7 @@ fn upsert_edges(
         key = quote(&options.key),
     );
 
-    // A row whose endpoint key more than one node holds matches one pair of
+    // A row whose endpoint key more than one node has matches one pair of
     // endpoints per node and comes back once per pair. Such an attempt is
     // undone and the call runs again without those rows, so they write
     // nothing; each attempt drops at least one row.
@@ -334,8 +334,8 @@ impl GrafeoDB {
     /// graph, between the nodes the row's source and target fields name, in
     /// one statement (see [`EdgeUpsertOptions`]).
     ///
-    /// A row whose endpoint key no node or more than one node holds, or
-    /// without the edge key, is skipped; endpoints are never created. Rows
+    /// A row is skipped when no node or more than one node has its endpoint
+    /// key, or when it has no edge key; endpoints are never created. Rows
     /// apply in order: a key repeated within one call creates one edge, which
     /// the later rows update.
     ///

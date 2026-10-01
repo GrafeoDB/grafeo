@@ -360,8 +360,8 @@ db.upsert_nodes(["Graph", "File"], [{"id": "f1", "size": 3}, {"id": "f2", "size"
 
 One edge of `edge_type` per row, between the nodes whose `endpoint_key` is the row's `src_field` and
 `dst_field` value (restricted to `endpoint_labels` when given). The edge is identified by its endpoints,
-type and `key`; every other field of the row is an edge property. A row whose endpoint key no node or more
-than one node holds, or without the key, is skipped; endpoints are never created. `key`, `src_field` and
+type and `key`; every other field of the row is an edge property. A row is skipped when no node or more than
+one node has its endpoint key, or when it has no key; endpoints are never created. `key`, `src_field` and
 `dst_field` must be different fields. A property index on `endpoint_key` makes the lookups fast.
 
 ```python

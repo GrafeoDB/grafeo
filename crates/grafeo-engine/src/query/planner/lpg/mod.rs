@@ -167,6 +167,26 @@ enum Delivery {
     Streamed,
 }
 
+/// What the planner knows about named columns: which hold scalar values or
+/// records, edge IDs, lists of nodes or edges, or group lists.
+#[derive(Clone, Default)]
+struct ColumnKinds {
+    scalar: std::collections::HashSet<String>,
+    edge: std::collections::HashSet<String>,
+    entity_list: std::collections::HashMap<String, grafeo_core::execution::operators::EntityValue>,
+    group_list: std::collections::HashSet<String>,
+}
+
+impl ColumnKinds {
+    /// Adds what `other` knows.
+    fn add(&mut self, other: Self) {
+        self.scalar.extend(other.scalar);
+        self.edge.extend(other.edge);
+        self.entity_list.extend(other.entity_list);
+        self.group_list.extend(other.group_list);
+    }
+}
+
 /// Converts a logical plan to a physical operator tree for LPG stores.
 pub struct Planner {
     /// The graph store (read-only operations).
@@ -446,16 +466,14 @@ impl Planner {
         &self,
         logical_plan: &LogicalPlan,
         operator: Box<dyn Operator>,
-        columns: &[String],
     ) -> Box<dyn Operator> {
         use grafeo_core::execution::operators::ShuffleOperator;
         if !self.shuffle_unordered || super::common::orders_rows(&logical_plan.root) {
             return operator;
         }
-        let schema = self.derive_schema_from_columns(columns);
         Box::new(match self.delivery {
-            Delivery::Streamed => ShuffleOperator::per_chunk(operator, schema),
-            Delivery::Collected => ShuffleOperator::new(operator, schema),
+            Delivery::Streamed => ShuffleOperator::per_chunk(operator),
+            Delivery::Collected => ShuffleOperator::new(operator),
         })
     }
 
@@ -490,6 +508,49 @@ impl Planner {
     ) -> Self {
         self.session_context = context;
         self
+    }
+
+    /// What the planner knows about named columns.
+    fn column_kinds(&self) -> ColumnKinds {
+        ColumnKinds {
+            scalar: self.scalar_columns.borrow().clone(),
+            edge: self.edge_columns.borrow().clone(),
+            entity_list: self.entity_list_columns.borrow().clone(),
+            group_list: self.group_list_variables.borrow().clone(),
+        }
+    }
+
+    /// Replaces what the planner knows about named columns.
+    fn set_column_kinds(&self, kinds: ColumnKinds) {
+        *self.scalar_columns.borrow_mut() = kinds.scalar;
+        *self.edge_columns.borrow_mut() = kinds.edge;
+        *self.entity_list_columns.borrow_mut() = kinds.entity_list;
+        *self.group_list_variables.borrow_mut() = kinds.group_list;
+    }
+
+    /// Plans the branches of a set operation (UNION, EXCEPT, INTERSECT,
+    /// OTHERWISE), each from what the planner knew before the first: a branch
+    /// is a query of its own, so what one binds or returns under a name says
+    /// nothing about that name in the next (an edge `x` in one branch and a
+    /// node `x` in the other, or a returned record and a bound ID). After the
+    /// last branch the planner knows what any branch added, as the operators
+    /// above the set operation read the columns of every branch.
+    pub(super) fn plan_branches<'a>(
+        &self,
+        branches: impl IntoIterator<Item = &'a LogicalOperator>,
+    ) -> Result<Vec<(Box<dyn Operator>, Vec<String>)>> {
+        let before = self.column_kinds();
+        let mut after = ColumnKinds::default();
+        let mut planned = Vec::new();
+        for (index, branch) in branches.into_iter().enumerate() {
+            if index > 0 {
+                self.set_column_kinds(before.clone());
+            }
+            planned.push(self.plan_operator(branch)?);
+            after.add(self.column_kinds());
+        }
+        self.set_column_kinds(after);
+        Ok(planned)
     }
 
     /// Generates an edge column name from an expand's edge variable (or an
@@ -555,7 +616,7 @@ impl Planner {
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
-        let operator = self.shuffled_root(logical_plan, operator, &columns);
+        let operator = self.shuffled_root(logical_plan, operator);
         Ok(PhysicalPlan {
             operator,
             columns,
@@ -604,7 +665,7 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan_adaptive(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
-        let operator = self.shuffled_root(logical_plan, operator, &columns);
+        let operator = self.shuffled_root(logical_plan, operator);
 
         let mut adaptive_context = AdaptiveContext::new();
         self.collect_cardinality_estimates(&logical_plan.root, &mut adaptive_context, 0);
@@ -1820,17 +1881,26 @@ mod tests {
         let physical = planner.plan(&logical).unwrap();
         let root = physical.into_operator();
 
-        // Walk down: Limit → Sort → RangeScan, asserting at each step.
+        // Walk down: Limit → Project → Sort → Project → RangeScan, asserting
+        // at each step.
         let limit_op = root
             .into_any()
             .downcast::<LimitOperator>()
             .expect("top operator is LimitOperator");
         let (after_limit, _cap) = limit_op.into_parts();
 
-        let sort_op = after_limit
+        // The Project above the Sort drops the sort-key column (`n_name`)
+        // the Sort needed: the Sort's rows have the columns of its input.
+        let strip_op = after_limit
+            .into_any()
+            .downcast::<ProjectOperator>()
+            .expect("operator under Limit must be the Project that drops the sort key");
+        let (after_strip, _projs, _types) = strip_op.into_parts();
+
+        let sort_op = after_strip
             .into_any()
             .downcast::<SortOperator>()
-            .expect("operator under Limit must be Sort (Sort blocks pushdown)");
+            .expect("operator under the Project must be Sort (Sort blocks pushdown)");
         let (after_sort, _keys) = sort_op.into_parts();
 
         // Sort wraps its input in a Project that materializes the sort

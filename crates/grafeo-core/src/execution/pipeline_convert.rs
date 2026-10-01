@@ -336,8 +336,7 @@ mod tests {
         let scan: Box<dyn Operator> = Box::new(TestScanOperator::new());
         let predicate: Box<dyn Predicate> = Box::new(AlwaysTruePredicate);
         let filter: Box<dyn Operator> = Box::new(FilterOperator::new(scan, predicate));
-        let limit: Box<dyn Operator> =
-            Box::new(LimitOperator::new(filter, 10, vec![LogicalType::Int64]));
+        let limit: Box<dyn Operator> = Box::new(LimitOperator::new(filter, 10));
 
         let (source, push_ops) = convert_to_pipeline(limit);
         assert_eq!(source.name(), "TestScan");
@@ -351,8 +350,7 @@ mod tests {
     fn convert_sort_scan_produces_one_push_op() {
         let scan: Box<dyn Operator> = Box::new(TestScanOperator::new());
         let keys = vec![SortKey::ascending(0)];
-        let sort: Box<dyn Operator> =
-            Box::new(SortOperator::new(scan, keys, vec![LogicalType::Int64]));
+        let sort: Box<dyn Operator> = Box::new(SortOperator::new(scan, keys));
 
         let (source, push_ops) = convert_to_pipeline(sort);
         assert_eq!(source.name(), "TestScan");
@@ -390,8 +388,7 @@ mod tests {
     #[test]
     fn convert_distinct_scan_produces_one_push_op() {
         let scan: Box<dyn Operator> = Box::new(TestScanOperator::new());
-        let distinct: Box<dyn Operator> =
-            Box::new(DistinctOperator::new(scan, vec![LogicalType::Int64]));
+        let distinct: Box<dyn Operator> = Box::new(DistinctOperator::new(scan));
 
         let (source, push_ops) = convert_to_pipeline(distinct);
         assert_eq!(source.name(), "TestScan");
@@ -402,11 +399,7 @@ mod tests {
     #[test]
     fn convert_distinct_on_columns_scan() {
         let scan: Box<dyn Operator> = Box::new(TestScanOperator::new());
-        let distinct: Box<dyn Operator> = Box::new(DistinctOperator::on_columns(
-            scan,
-            vec![0],
-            vec![LogicalType::Int64],
-        ));
+        let distinct: Box<dyn Operator> = Box::new(DistinctOperator::on_columns(scan, vec![0]));
 
         let (source, push_ops) = convert_to_pipeline(distinct);
         assert_eq!(source.name(), "TestScan");
@@ -420,10 +413,8 @@ mod tests {
         let predicate: Box<dyn Predicate> = Box::new(AlwaysTruePredicate);
         let filter: Box<dyn Operator> = Box::new(FilterOperator::new(scan, predicate));
         let keys = vec![SortKey::ascending(0)];
-        let sort: Box<dyn Operator> =
-            Box::new(SortOperator::new(filter, keys, vec![LogicalType::Int64]));
-        let limit: Box<dyn Operator> =
-            Box::new(LimitOperator::new(sort, 5, vec![LogicalType::Int64]));
+        let sort: Box<dyn Operator> = Box::new(SortOperator::new(filter, keys));
+        let limit: Box<dyn Operator> = Box::new(LimitOperator::new(sort, 5));
 
         let (source, push_ops) = convert_to_pipeline(limit);
         assert_eq!(source.name(), "TestScan");
@@ -445,8 +436,7 @@ mod tests {
         let predicate: Box<dyn Predicate> = Box::new(AlwaysTruePredicate);
         let filter: Box<dyn Operator> = Box::new(FilterOperator::new(scan, predicate));
         let keys = vec![SortKey::ascending(0)];
-        let sort: Box<dyn Operator> =
-            Box::new(SortOperator::new(filter, keys, vec![LogicalType::Int64]));
+        let sort: Box<dyn Operator> = Box::new(SortOperator::new(filter, keys));
 
         // Convert to pipeline
         let (source, push_ops) = convert_to_pipeline(sort);
@@ -509,11 +499,7 @@ mod tests {
 
         // Build: Scan -> Distinct(on column 0)
         let scan: Box<dyn Operator> = Box::new(TestScanOperator::new());
-        let distinct: Box<dyn Operator> = Box::new(DistinctOperator::on_columns(
-            scan,
-            vec![0],
-            vec![LogicalType::Int64],
-        ));
+        let distinct: Box<dyn Operator> = Box::new(DistinctOperator::on_columns(scan, vec![0]));
 
         let (source, push_ops) = convert_to_pipeline(distinct);
         assert_eq!(push_ops.len(), 1);

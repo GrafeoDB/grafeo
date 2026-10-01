@@ -141,6 +141,15 @@ impl DataChunk {
         &self.columns
     }
 
+    /// Returns the types of the columns.
+    #[must_use]
+    pub fn column_types(&self) -> Vec<LogicalType> {
+        self.columns
+            .iter()
+            .map(|column| column.data_type().clone())
+            .collect()
+    }
+
     /// Returns the total number of rows (ignoring selection).
     #[must_use]
     pub fn total_row_count(&self) -> usize {
@@ -419,7 +428,8 @@ impl DataChunk {
 
     /// Returns a slice of this chunk.
     ///
-    /// Returns a new DataChunk containing rows [offset, offset + count).
+    /// Returns a new DataChunk containing the selected rows [offset, offset +
+    /// count). Each column keeps its type, so every value is copied as it is.
     #[must_use]
     pub fn slice(&self, offset: usize, count: usize) -> DataChunk {
         if offset >= self.len() || count == 0 {
@@ -430,7 +440,7 @@ impl DataChunk {
         let mut result_columns = Vec::with_capacity(self.columns.len());
 
         for col in &self.columns {
-            let mut new_col = ValueVector::new();
+            let mut new_col = ValueVector::with_capacity(col.data_type().clone(), actual_count);
             for i in offset..(offset + actual_count) {
                 let actual_idx = if let Some(sel) = &self.selection {
                     sel.get(i).unwrap_or(i)
@@ -457,6 +467,38 @@ impl DataChunk {
     #[must_use]
     pub fn num_columns(&self) -> usize {
         self.columns.len()
+    }
+}
+
+/// The column types for rows taken from the chunks of one input.
+///
+/// A column keeps its type while every chunk has that type there and becomes
+/// [`LogicalType::Any`] where they differ. Rows copied into columns of these
+/// types keep every value: a typed column stores a value of another type as
+/// that type's default (see [`ValueVector::push_value`]), so an operator that
+/// only reorders, cuts or deduplicates rows must not copy them by a declared
+/// schema.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ColumnTypes(Option<Vec<LogicalType>>);
+
+impl ColumnTypes {
+    /// Takes the column types of `chunk` into account.
+    pub(crate) fn add(&mut self, chunk: &DataChunk) {
+        match &mut self.0 {
+            None => self.0 = Some(chunk.column_types()),
+            Some(types) => {
+                for (known, column) in types.iter_mut().zip(chunk.columns()) {
+                    if known != column.data_type() {
+                        *known = LogicalType::Any;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The column types of the chunks seen so far (none before the first).
+    pub(crate) fn types(&self) -> &[LogicalType] {
+        self.0.as_deref().unwrap_or(&[])
     }
 }
 

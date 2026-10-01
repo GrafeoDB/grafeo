@@ -5,12 +5,12 @@
 
 use std::cmp::Ordering;
 
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::Value;
 
 use super::value_utils::compare_values_with_nulls;
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
-use crate::execution::chunk::DataChunkBuilder;
+use crate::execution::chunk::{ColumnTypes, DataChunkBuilder};
 
 /// Sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,14 +80,15 @@ struct SortRow {
 
 /// Sort operator.
 ///
-/// Materializes all input and sorts by the specified keys.
+/// Materializes all input and sorts by the specified keys. The rows keep
+/// their columns' types and values.
 pub struct SortOperator {
     /// Child operator.
     child: Box<dyn Operator>,
     /// Sort keys.
     sort_keys: Vec<SortKey>,
-    /// Output schema.
-    output_schema: Vec<LogicalType>,
+    /// The column types of the materialized chunks.
+    column_types: ColumnTypes,
     /// Materialized chunks.
     chunks: Vec<DataChunk>,
     /// Sorted row references.
@@ -100,15 +101,11 @@ pub struct SortOperator {
 
 impl SortOperator {
     /// Creates a new sort operator.
-    pub fn new(
-        child: Box<dyn Operator>,
-        sort_keys: Vec<SortKey>,
-        output_schema: Vec<LogicalType>,
-    ) -> Self {
+    pub fn new(child: Box<dyn Operator>, sort_keys: Vec<SortKey>) -> Self {
         Self {
             child,
             sort_keys,
-            output_schema,
+            column_types: ColumnTypes::default(),
             chunks: Vec::new(),
             sorted_rows: Vec::new(),
             sort_complete: false,
@@ -132,6 +129,7 @@ impl SortOperator {
                     row_index: row_idx,
                 });
             }
+            self.column_types.add(&chunk);
             self.chunks.push(chunk);
         }
 
@@ -180,7 +178,7 @@ impl Operator for SortOperator {
             return Ok(None);
         }
 
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);
+        let mut builder = DataChunkBuilder::with_capacity(self.column_types.types(), 2048);
 
         while self.output_position < self.sorted_rows.len() && !builder.is_full() {
             let row_ref = &self.sorted_rows[self.output_position];
@@ -212,6 +210,7 @@ impl Operator for SortOperator {
 
     fn reset(&mut self) {
         self.child.reset();
+        self.column_types = ColumnTypes::default();
         self.chunks.clear();
         self.sorted_rows.clear();
         self.sort_complete = false;
@@ -231,6 +230,7 @@ impl Operator for SortOperator {
 mod tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
+    use grafeo_common::types::LogicalType;
 
     struct MockOperator {
         chunks: Vec<DataChunk>,
@@ -288,11 +288,7 @@ mod tests {
     fn test_sort_ascending() {
         let mock = MockOperator::new(vec![create_unsorted_chunk()]);
 
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64, LogicalType::String],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -323,11 +319,7 @@ mod tests {
     fn test_sort_descending() {
         let mock = MockOperator::new(vec![create_unsorted_chunk()]);
 
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::descending(0)],
-            vec![LogicalType::Int64, LogicalType::String],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::descending(0)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -344,11 +336,7 @@ mod tests {
     fn test_sort_by_string() {
         let mock = MockOperator::new(vec![create_unsorted_chunk()]);
 
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(1)], // Sort by string column
-            vec![LogicalType::Int64, LogicalType::String],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(1)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -378,11 +366,7 @@ mod tests {
     fn test_sort_empty_input() {
         let mock = MockOperator::new(vec![]);
 
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         assert!(sort.next().unwrap().is_none());
     }
@@ -397,11 +381,7 @@ mod tests {
         let chunk = builder.finish();
 
         let mock = MockOperator::new(vec![chunk]);
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -423,11 +403,7 @@ mod tests {
         let chunk = builder.finish();
 
         let mock = MockOperator::new(vec![chunk]);
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -454,7 +430,6 @@ mod tests {
         let mut sort = SortOperator::new(
             Box::new(mock),
             vec![SortKey::ascending(0), SortKey::ascending(1)],
-            vec![LogicalType::String, LogicalType::Int64],
         );
 
         let mut results = Vec::new();
@@ -500,11 +475,7 @@ mod tests {
         let chunk2 = b2.finish();
 
         let mock = MockOperator::new(vec![chunk1, chunk2]);
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -526,11 +497,7 @@ mod tests {
         let chunk = builder.finish();
 
         let mock = MockOperator::new(vec![chunk]);
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -550,11 +517,7 @@ mod tests {
         let chunk = builder.finish();
 
         let mock = MockOperator::new(vec![chunk]);
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         let mut count = 0;
         while let Some(chunk) = sort.next().unwrap() {
@@ -569,22 +532,14 @@ mod tests {
     #[test]
     fn test_sort_name() {
         let mock = MockOperator::new(vec![]);
-        let sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
         assert_eq!(sort.name(), "Sort");
     }
 
     #[test]
     fn test_sort_into_any() {
         let mock = MockOperator::new(vec![]);
-        let op = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let op = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
         let any = Box::new(op).into_any();
         assert!(any.downcast::<SortOperator>().is_ok());
     }
@@ -595,7 +550,6 @@ mod tests {
         let op = SortOperator::new(
             Box::new(mock),
             vec![SortKey::ascending(0), SortKey::descending(1)],
-            vec![LogicalType::Int64, LogicalType::String],
         );
         let (mut child, sort_keys) = op.into_parts();
         assert_eq!(sort_keys.len(), 2);

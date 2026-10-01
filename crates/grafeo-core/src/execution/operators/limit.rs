@@ -5,32 +5,27 @@
 //! - `SkipOperator`: Skips a number of input rows
 //! - `LimitSkipOperator`: Combined LIMIT and OFFSET/SKIP
 
-use grafeo_common::types::{LogicalType, Value};
-
 use super::{Operator, OperatorResult};
-use crate::execution::chunk::DataChunkBuilder;
 
 /// Limit operator.
 ///
-/// Returns at most `limit` rows from the input.
+/// Returns at most `limit` rows from the input. A chunk it cuts short keeps
+/// its columns and values as they are.
 pub struct LimitOperator {
     /// Child operator.
     child: Box<dyn Operator>,
     /// Maximum number of rows to return.
     limit: usize,
-    /// Output schema.
-    output_schema: Vec<LogicalType>,
     /// Number of rows returned so far.
     returned: usize,
 }
 
 impl LimitOperator {
     /// Creates a new limit operator.
-    pub fn new(child: Box<dyn Operator>, limit: usize, output_schema: Vec<LogicalType>) -> Self {
+    pub fn new(child: Box<dyn Operator>, limit: usize) -> Self {
         Self {
             child,
             limit,
-            output_schema,
             returned: 0,
         }
     }
@@ -65,32 +60,11 @@ impl Operator for LimitOperator {
                 return Ok(Some(chunk));
             }
 
-            // Return partial chunk
-            let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, remaining);
-
-            let mut count = 0;
-            for row in chunk.selected_indices() {
-                if count >= remaining {
-                    break;
-                }
-
-                for col_idx in 0..chunk.column_count() {
-                    if let (Some(src_col), Some(dst_col)) =
-                        (chunk.column(col_idx), builder.column_mut(col_idx))
-                    {
-                        if let Some(value) = src_col.get_value(row) {
-                            dst_col.push_value(value);
-                        } else {
-                            dst_col.push_value(Value::Null);
-                        }
-                    }
-                }
-                builder.advance_row();
-                count += 1;
-            }
-
-            self.returned += count;
-            return Ok(Some(builder.finish()));
+            // The first rows of the chunk, copied as they are (a column
+            // rebuilt by a declared type would turn values of another type
+            // into that type's default).
+            self.returned += remaining;
+            return Ok(Some(chunk.slice(0, remaining)));
         }
     }
 
@@ -110,25 +84,23 @@ impl Operator for LimitOperator {
 
 /// Skip operator.
 ///
-/// Skips the first `skip` rows from the input.
+/// Skips the first `skip` rows from the input. A chunk it cuts short keeps
+/// its columns and values as they are.
 pub struct SkipOperator {
     /// Child operator.
     child: Box<dyn Operator>,
     /// Number of rows to skip.
     skip: usize,
-    /// Output schema.
-    output_schema: Vec<LogicalType>,
     /// Number of rows skipped so far.
     skipped: usize,
 }
 
 impl SkipOperator {
     /// Creates a new skip operator.
-    pub fn new(child: Box<dyn Operator>, skip: usize, output_schema: Vec<LogicalType>) -> Self {
+    pub fn new(child: Box<dyn Operator>, skip: usize) -> Self {
         Self {
             child,
             skip,
-            output_schema,
             skipped: 0,
         }
     }
@@ -154,26 +126,7 @@ impl Operator for SkipOperator {
             // Skip partial chunk
             self.skipped = self.skip;
 
-            let mut builder =
-                DataChunkBuilder::with_capacity(&self.output_schema, row_count - to_skip);
-
-            let rows: Vec<usize> = chunk.selected_indices().collect();
-            for &row in rows.iter().skip(to_skip) {
-                for col_idx in 0..chunk.column_count() {
-                    if let (Some(src_col), Some(dst_col)) =
-                        (chunk.column(col_idx), builder.column_mut(col_idx))
-                    {
-                        if let Some(value) = src_col.get_value(row) {
-                            dst_col.push_value(value);
-                        } else {
-                            dst_col.push_value(Value::Null);
-                        }
-                    }
-                }
-                builder.advance_row();
-            }
-
-            return Ok(Some(builder.finish()));
+            return Ok(Some(chunk.slice(to_skip, row_count - to_skip)));
         }
 
         // After skipping, just pass through
@@ -196,7 +149,8 @@ impl Operator for SkipOperator {
 
 /// Combined Limit and Skip operator.
 ///
-/// Equivalent to OFFSET skip LIMIT limit.
+/// Equivalent to OFFSET skip LIMIT limit. A chunk it cuts short keeps its
+/// columns and values as they are.
 pub struct LimitSkipOperator {
     /// Child operator.
     child: Box<dyn Operator>,
@@ -204,8 +158,6 @@ pub struct LimitSkipOperator {
     skip: usize,
     /// Maximum number of rows to return.
     limit: usize,
-    /// Output schema.
-    output_schema: Vec<LogicalType>,
     /// Number of rows skipped so far.
     skipped: usize,
     /// Number of rows returned so far.
@@ -214,17 +166,11 @@ pub struct LimitSkipOperator {
 
 impl LimitSkipOperator {
     /// Creates a new limit/skip operator.
-    pub fn new(
-        child: Box<dyn Operator>,
-        skip: usize,
-        limit: usize,
-        output_schema: Vec<LogicalType>,
-    ) -> Self {
+    pub fn new(child: Box<dyn Operator>, skip: usize, limit: usize) -> Self {
         Self {
             child,
             skip,
             limit,
-            output_schema,
             skipped: 0,
             returned: 0,
         }
@@ -248,7 +194,6 @@ impl Operator for LimitSkipOperator {
                 continue;
             }
 
-            let rows: Vec<usize> = chunk.selected_indices().collect();
             let mut start_idx = 0;
 
             // Skip rows if needed
@@ -271,25 +216,11 @@ impl Operator for LimitSkipOperator {
                 return Ok(None);
             }
 
-            let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, to_return);
-
-            for &row in rows.iter().skip(start_idx).take(to_return) {
-                for col_idx in 0..chunk.column_count() {
-                    if let (Some(src_col), Some(dst_col)) =
-                        (chunk.column(col_idx), builder.column_mut(col_idx))
-                    {
-                        if let Some(value) = src_col.get_value(row) {
-                            dst_col.push_value(value);
-                        } else {
-                            dst_col.push_value(Value::Null);
-                        }
-                    }
-                }
-                builder.advance_row();
-            }
-
             self.returned += to_return;
-            return Ok(Some(builder.finish()));
+            if start_idx == 0 && to_return == row_count {
+                return Ok(Some(chunk));
+            }
+            return Ok(Some(chunk.slice(start_idx, to_return)));
         }
     }
 
@@ -313,6 +244,7 @@ mod tests {
     use super::*;
     use crate::execution::DataChunk;
     use crate::execution::chunk::DataChunkBuilder;
+    use grafeo_common::types::{LogicalType, Value};
 
     struct MockOperator {
         chunks: Vec<DataChunk>,
@@ -365,7 +297,7 @@ mod tests {
     fn test_limit() {
         let mock = MockOperator::new(vec![create_numbered_chunk(&[1, 2, 3, 4, 5])]);
 
-        let mut limit = LimitOperator::new(Box::new(mock), 3, vec![LogicalType::Int64]);
+        let mut limit = LimitOperator::new(Box::new(mock), 3);
 
         let mut results = Vec::new();
         while let Some(chunk) = limit.next().unwrap() {
@@ -382,7 +314,7 @@ mod tests {
     fn test_limit_larger_than_input() {
         let mock = MockOperator::new(vec![create_numbered_chunk(&[1, 2, 3])]);
 
-        let mut limit = LimitOperator::new(Box::new(mock), 10, vec![LogicalType::Int64]);
+        let mut limit = LimitOperator::new(Box::new(mock), 10);
 
         let mut results = Vec::new();
         while let Some(chunk) = limit.next().unwrap() {
@@ -399,7 +331,7 @@ mod tests {
     fn test_skip() {
         let mock = MockOperator::new(vec![create_numbered_chunk(&[1, 2, 3, 4, 5])]);
 
-        let mut skip = SkipOperator::new(Box::new(mock), 2, vec![LogicalType::Int64]);
+        let mut skip = SkipOperator::new(Box::new(mock), 2);
 
         let mut results = Vec::new();
         while let Some(chunk) = skip.next().unwrap() {
@@ -416,7 +348,7 @@ mod tests {
     fn test_skip_all() {
         let mock = MockOperator::new(vec![create_numbered_chunk(&[1, 2, 3])]);
 
-        let mut skip = SkipOperator::new(Box::new(mock), 5, vec![LogicalType::Int64]);
+        let mut skip = SkipOperator::new(Box::new(mock), 5);
 
         let result = skip.next().unwrap();
         assert!(result.is_none());
@@ -431,8 +363,7 @@ mod tests {
         let mut op = LimitSkipOperator::new(
             Box::new(mock),
             3, // Skip first 3
-            4, // Take next 4
-            vec![LogicalType::Int64],
+            4,
         );
 
         let mut results = Vec::new();
@@ -454,7 +385,7 @@ mod tests {
             create_numbered_chunk(&[5, 6]),
         ]);
 
-        let mut limit = LimitOperator::new(Box::new(mock), 5, vec![LogicalType::Int64]);
+        let mut limit = LimitOperator::new(Box::new(mock), 5);
 
         let mut results = Vec::new();
         while let Some(chunk) = limit.next().unwrap() {
@@ -475,7 +406,7 @@ mod tests {
             create_numbered_chunk(&[5, 6]),
         ]);
 
-        let mut skip = SkipOperator::new(Box::new(mock), 3, vec![LogicalType::Int64]);
+        let mut skip = SkipOperator::new(Box::new(mock), 3);
 
         let mut results = Vec::new();
         while let Some(chunk) = skip.next().unwrap() {
@@ -491,7 +422,7 @@ mod tests {
     #[test]
     fn test_limit_into_parts() {
         let child = Box::new(MockOperator::new(vec![]));
-        let limit = LimitOperator::new(child, 42, vec![LogicalType::Int64]);
+        let limit = LimitOperator::new(child, 42);
         let (_, limit_value) = limit.into_parts();
         assert_eq!(limit_value, 42);
     }
@@ -499,8 +430,84 @@ mod tests {
     #[test]
     fn test_limit_into_any() {
         let child = Box::new(MockOperator::new(vec![]));
-        let limit: Box<dyn Operator> = Box::new(LimitOperator::new(child, 10, vec![]));
+        let limit: Box<dyn Operator> = Box::new(LimitOperator::new(child, 10));
         let any = limit.into_any();
         assert!(any.downcast::<LimitOperator>().is_ok());
+    }
+
+    /// A chunk of `values` in an untyped column, with its first row filtered
+    /// out: the operators must also respect the selection.
+    fn mixed_chunk(values: &[Value]) -> DataChunk {
+        let mut chunk = DataChunk::new(vec![crate::execution::ValueVector::from_values(values)]);
+        chunk.set_selection(crate::execution::SelectionVector::from_predicate(
+            values.len(),
+            |row| row > 0,
+        ));
+        chunk
+    }
+
+    /// The values the operator returns, in order, and the type of the column
+    /// of each chunk it returns.
+    fn output_of(mut op: impl Operator) -> (Vec<Value>, Vec<LogicalType>) {
+        let (mut values, mut types) = (Vec::new(), Vec::new());
+        while let Some(chunk) = op.next().unwrap() {
+            let column = chunk.column(0).unwrap();
+            types.push(column.data_type().clone());
+            values.extend(
+                chunk
+                    .selected_indices()
+                    .map(|row| column.get_value(row).unwrap()),
+            );
+        }
+        (values, types)
+    }
+
+    /// #482: cutting a chunk short keeps its values as they are, a mix of
+    /// types and a null in an untyped column included. Before, the cut rows
+    /// were rebuilt in columns of a declared type, which turned every value
+    /// of another type into that type's default.
+    #[test]
+    fn a_partial_chunk_keeps_its_values() {
+        let values = [
+            Value::Int64(0),
+            Value::Int64(7),
+            Value::from("eight"),
+            Value::Null,
+            Value::Int64(9),
+        ];
+        let child = || Box::new(MockOperator::new(vec![mixed_chunk(&values)]));
+
+        assert_eq!(output_of(LimitOperator::new(child(), 3)).0, values[1..4]);
+        assert_eq!(output_of(SkipOperator::new(child(), 2)).0, values[3..]);
+        assert_eq!(
+            output_of(LimitSkipOperator::new(child(), 1, 2)).0,
+            values[2..4]
+        );
+    }
+
+    /// A cut chunk keeps its column's type: here node IDs stay node IDs.
+    #[test]
+    fn a_partial_chunk_keeps_its_column_type() {
+        let child = || {
+            let mut builder = DataChunkBuilder::new(&[LogicalType::Node]);
+            for id in 1..=4 {
+                builder
+                    .column_mut(0)
+                    .unwrap()
+                    .push_node_id(grafeo_common::types::NodeId::new(id));
+                builder.advance_row();
+            }
+            Box::new(MockOperator::new(vec![builder.finish()]))
+        };
+
+        let (values, types) = output_of(LimitOperator::new(child(), 2));
+        assert_eq!(values, [Value::Int64(1), Value::Int64(2)]);
+        assert_eq!(types, [LogicalType::Node]);
+        let (values, types) = output_of(SkipOperator::new(child(), 3));
+        assert_eq!(values, [Value::Int64(4)]);
+        assert_eq!(types, [LogicalType::Node]);
+        let (values, types) = output_of(LimitSkipOperator::new(child(), 1, 2));
+        assert_eq!(values, [Value::Int64(2), Value::Int64(3)]);
+        assert_eq!(types, [LogicalType::Node]);
     }
 }

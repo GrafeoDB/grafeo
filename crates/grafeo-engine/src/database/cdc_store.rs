@@ -347,6 +347,15 @@ impl GraphStore for CdcGraphStore {
         self.inner.edge_type(id)
     }
 
+    fn edge_type_versioned(
+        &self,
+        id: EdgeId,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> Option<ArcStr> {
+        self.inner.edge_type_versioned(id, epoch, transaction_id)
+    }
+
     fn has_property_index(&self, property: &str) -> bool {
         self.inner.has_property_index(property)
     }

@@ -210,10 +210,7 @@ impl super::Planner {
     /// same width. User-written Cypher/GQL UNIONNs are checked for matching
     /// columns in the translators, so padding only applies to internal unions.
     pub(super) fn plan_union(&self, union: &UnionOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let mut planned = Vec::with_capacity(union.inputs.len());
-        for input in &union.inputs {
-            planned.push(self.plan_operator(input)?);
-        }
+        let planned = self.plan_branches(&union.inputs)?;
 
         // Pad narrower branches with NULL up to the widest branch.
         let mut unified_columns: Vec<String> = Vec::new();
@@ -264,12 +261,10 @@ impl super::Planner {
         distinct: &DistinctOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let (input_op, columns) = self.plan_operator(&distinct.input)?;
-        let schema = self.derive_schema_from_columns(&columns);
         Ok(common::build_distinct(
             input_op,
             columns,
             distinct.columns.as_deref(),
-            schema,
         ))
     }
 
@@ -278,12 +273,10 @@ impl super::Planner {
         &self,
         except: &ExceptOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (left_op, columns) = self.plan_operator(&except.left)?;
-        let (right_op, _) = self.plan_operator(&except.right)?;
-        let schema = self.derive_schema_from_columns(&columns);
-        Ok(common::build_except(
-            left_op, right_op, columns, except.all, schema,
-        ))
+        let mut planned = self.plan_branches([except.left.as_ref(), except.right.as_ref()])?;
+        let (right_op, _) = planned.pop().expect("two branches planned");
+        let (left_op, columns) = planned.pop().expect("two branches planned");
+        Ok(common::build_except(left_op, right_op, columns, except.all))
     }
 
     /// Plans an INTERSECT operator.
@@ -291,15 +284,15 @@ impl super::Planner {
         &self,
         intersect: &IntersectOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (left_op, columns) = self.plan_operator(&intersect.left)?;
-        let (right_op, _) = self.plan_operator(&intersect.right)?;
-        let schema = self.derive_schema_from_columns(&columns);
+        let mut planned =
+            self.plan_branches([intersect.left.as_ref(), intersect.right.as_ref()])?;
+        let (right_op, _) = planned.pop().expect("two branches planned");
+        let (left_op, columns) = planned.pop().expect("two branches planned");
         Ok(common::build_intersect(
             left_op,
             right_op,
             columns,
             intersect.all,
-            schema,
         ))
     }
 
@@ -308,8 +301,10 @@ impl super::Planner {
         &self,
         otherwise: &OtherwiseOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (left_op, columns) = self.plan_operator(&otherwise.left)?;
-        let (right_op, _) = self.plan_operator(&otherwise.right)?;
+        let mut planned =
+            self.plan_branches([otherwise.left.as_ref(), otherwise.right.as_ref()])?;
+        let (right_op, _) = planned.pop().expect("two branches planned");
+        let (left_op, columns) = planned.pop().expect("two branches planned");
         Ok(common::build_otherwise(left_op, right_op, columns))
     }
 

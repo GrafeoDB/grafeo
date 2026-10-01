@@ -1,22 +1,21 @@
 //! Shuffle operator: returns its input's rows in random order.
 
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::Value;
 
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
-use crate::execution::chunk::DataChunkBuilder;
+use crate::execution::chunk::{ColumnTypes, DataChunkBuilder};
 
 /// Returns its input's rows in random order.
 ///
 /// Planned at the root of a query without `ORDER BY` when the database's
 /// `shuffle_unordered` test option is on, so that tests find code relying on
 /// a row order that is unspecified. A stream shuffles each chunk on its own
-/// (see [`per_chunk`](Self::per_chunk)).
+/// (see [`per_chunk`](Self::per_chunk)). The rows keep their columns' types
+/// and values.
 pub struct ShuffleOperator {
     /// Child operator.
     child: Box<dyn Operator>,
-    /// Output schema.
-    output_schema: Vec<LogicalType>,
     /// Whether each input chunk is shuffled on its own.
     per_chunk: bool,
     /// The state of the random stream, seeded differently per operator.
@@ -34,10 +33,9 @@ pub struct ShuffleOperator {
 impl ShuffleOperator {
     /// Creates a shuffle operator over `child` that returns all of its rows
     /// in random order, after reading the whole input.
-    pub fn new(child: Box<dyn Operator>, output_schema: Vec<LogicalType>) -> Self {
+    pub fn new(child: Box<dyn Operator>) -> Self {
         Self {
             child,
-            output_schema,
             per_chunk: false,
             state: random_seed(),
             chunks: Vec::new(),
@@ -50,10 +48,10 @@ impl ShuffleOperator {
     /// Creates a shuffle operator over `child` that reads one input chunk at
     /// a time and returns its rows in random order: memory stays at one
     /// chunk, as a stream needs, and rows stay within their chunk.
-    pub fn per_chunk(child: Box<dyn Operator>, output_schema: Vec<LogicalType>) -> Self {
+    pub fn per_chunk(child: Box<dyn Operator>) -> Self {
         Self {
             per_chunk: true,
-            ..Self::new(child, output_schema)
+            ..Self::new(child)
         }
     }
 
@@ -132,7 +130,11 @@ impl Operator for ShuffleOperator {
             return Ok(None);
         }
 
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);
+        let mut column_types = ColumnTypes::default();
+        for chunk in &self.chunks {
+            column_types.add(chunk);
+        }
+        let mut builder = DataChunkBuilder::with_capacity(column_types.types(), 2048);
         while self.position < self.rows.len() && !builder.is_full() {
             let (chunk_index, row) = self.rows[self.position];
             let source_chunk = &self.chunks[chunk_index];
@@ -173,6 +175,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use grafeo_common::types::LogicalType;
 
     /// Returns its chunks once, counting how many it handed out.
     struct Chunks(Vec<DataChunk>, Arc<AtomicUsize>);
@@ -228,7 +231,7 @@ mod tests {
 
     /// The values 0 to 99, in three chunks, returned by a shuffle.
     fn shuffled() -> Vec<i64> {
-        let mut shuffle = ShuffleOperator::new(Box::new(input().0), vec![LogicalType::Int64]);
+        let mut shuffle = ShuffleOperator::new(Box::new(input().0));
         let mut all = Vec::new();
         while let Some(chunk) = shuffle.next().unwrap() {
             all.extend(values(&chunk));
@@ -243,8 +246,7 @@ mod tests {
         let mut first_chunks = std::collections::HashSet::new();
         for _ in 0..5 {
             let (chunks, pulled) = input();
-            let mut shuffle =
-                ShuffleOperator::per_chunk(Box::new(chunks), vec![LogicalType::Int64]);
+            let mut shuffle = ShuffleOperator::per_chunk(Box::new(chunks));
             let mut outputs = Vec::new();
             while let Some(chunk) = shuffle.next().unwrap() {
                 outputs.push(values(&chunk));

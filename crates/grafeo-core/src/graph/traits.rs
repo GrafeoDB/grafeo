@@ -162,17 +162,22 @@ pub trait GraphStore: Send + Sync {
     /// Returns the type string of an edge.
     fn edge_type(&self, id: EdgeId) -> Option<ArcStr>;
 
-    /// Returns the type string of an edge visible to a specific transaction.
+    /// Returns the type string of an edge visible to a specific transaction,
+    /// including the edges it created and has not committed yet.
     ///
-    /// Falls back to epoch-based `edge_type` if not overridden.
+    /// The default reads the whole edge with
+    /// [`get_edge_versioned`](Self::get_edge_versioned); stores override it
+    /// with a cheaper lookup. It must not fall back to
+    /// [`edge_type`](Self::edge_type), which reads the committed state and
+    /// misses the transaction's own edges.
     fn edge_type_versioned(
         &self,
         id: EdgeId,
         epoch: EpochId,
         transaction_id: TransactionId,
     ) -> Option<ArcStr> {
-        let _ = (epoch, transaction_id);
-        self.edge_type(id)
+        self.get_edge_versioned(id, epoch, transaction_id)
+            .map(|edge| edge.edge_type)
     }
 
     // --- Index introspection ---

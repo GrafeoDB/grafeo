@@ -318,7 +318,6 @@ impl RdfPlanner {
             if self.shuffle_unordered && !super::common::orders_rows(&logical_plan.root) {
                 Box::new(grafeo_core::execution::operators::ShuffleOperator::new(
                     operator,
-                    vec![LogicalType::Any; columns.len()],
                 ))
             } else {
                 operator
@@ -633,12 +632,7 @@ impl RdfPlanner {
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::planner::common;
         let (input_op, columns, types) = self.plan_operator(&distinct.input)?;
-        let (op, cols) = common::build_distinct(
-            input_op,
-            columns,
-            distinct.columns.as_deref(),
-            types.clone(),
-        );
+        let (op, cols) = common::build_distinct(input_op, columns, distinct.columns.as_deref());
         Ok((op, cols, types))
     }
 
@@ -649,7 +643,7 @@ impl RdfPlanner {
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::planner::common;
         let (input_op, columns, types) = self.plan_operator(&limit.input)?;
-        let (op, cols) = common::build_limit(input_op, columns, limit.count.value(), types.clone());
+        let (op, cols) = common::build_limit(input_op, columns, limit.count.value());
         Ok((op, cols, types))
     }
 
@@ -660,7 +654,7 @@ impl RdfPlanner {
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::planner::common;
         let (input_op, columns, types) = self.plan_operator(&skip.input)?;
-        let (op, cols) = common::build_skip(input_op, columns, skip.count.value(), types.clone());
+        let (op, cols) = common::build_skip(input_op, columns, skip.count.value());
         Ok((op, cols, types))
     }
 
@@ -737,7 +731,7 @@ impl RdfPlanner {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let operator = Box::new(SortOperator::new(input_op, physical_keys, types.clone()));
+        let operator = Box::new(SortOperator::new(input_op, physical_keys));
         Ok((operator, columns, types))
     }
 

@@ -39,8 +39,7 @@ impl super::Planner {
 
         // Apply DISTINCT if requested
         if ret.distinct {
-            let schema = vec![LogicalType::Any; columns.len()];
-            Ok(common::build_distinct(operator, columns, None, schema))
+            Ok(common::build_distinct(operator, columns, None))
         } else {
             Ok((operator, columns))
         }
@@ -646,24 +645,20 @@ impl super::Planner {
         }
 
         let (input_op, columns) = plan_result?;
-        let schema = self.derive_schema_from_columns(&columns);
         Ok(crate::query::planner::common::build_limit(
             input_op,
             columns,
             limit.count.value(),
-            schema,
         ))
     }
 
     /// Plans a SKIP operator.
     pub(super) fn plan_skip(&self, skip: &SkipOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let (input_op, columns) = self.plan_operator(&skip.input)?;
-        let schema = self.derive_schema_from_columns(&columns);
         Ok(crate::query::planner::common::build_skip(
             input_op,
             columns,
             skip.count.value(),
-            schema,
         ))
     }
 
@@ -822,7 +817,6 @@ impl super::Planner {
         }
         let mut extra_projections: Vec<SortExtraProjection> = Vec::new();
         let mut next_col_idx = input_columns.len();
-        let mut expr_extra_count: usize = 0;
 
         for key in &sort.keys {
             match &key.expression {
@@ -863,11 +857,12 @@ impl super::Planner {
                         });
                         variable_columns.insert(col_name, next_col_idx);
                         next_col_idx += 1;
-                        expr_extra_count += 1;
                     }
                 }
             }
         }
+
+        let extra_projection_count = extra_projections.len();
 
         // Track output columns
         let mut output_columns = input_columns.clone();
@@ -956,14 +951,13 @@ impl super::Planner {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let output_schema = self.derive_schema_from_columns(&output_columns);
-        let mut operator: Box<dyn Operator> =
-            Box::new(SortOperator::new(input_op, physical_keys, output_schema));
+        let mut operator: Box<dyn Operator> = Box::new(SortOperator::new(input_op, physical_keys));
 
-        // Strip extra columns injected for ORDER BY resolution: both pre-Return
-        // property projections (sort_extra_count) and synthetic __expr_ columns
-        // for complex expressions like labels(n)[0] or type(r).
-        let total_extra = sort_extra_count + expr_extra_count;
+        // Strip the columns added for ORDER BY: the pre-Return projections
+        // (sort_extra_count) and every projection added after it (properties
+        // of a RETURN alias such as `e.w` in `RETURN r AS e ORDER BY e.w`,
+        // and complex expressions like labels(n)[0] or type(r)).
+        let total_extra = sort_extra_count + extra_projection_count;
         if total_extra > 0 {
             let keep_count = output_columns.len() - total_extra;
             let strip_projections: Vec<ProjectExpr> =
@@ -996,16 +990,21 @@ impl super::Planner {
     /// Derives a schema from column names using the planner's type tracking.
     ///
     /// Defaults to `Any` (safe for all value types: scalars, maps, property
-    /// projections, etc.). Columns explicitly tracked in `edge_columns` get
-    /// `Edge` for compact `Vec<EdgeId>` storage. Mutation operators that add
+    /// projections, etc.). Columns tracked in `edge_columns` get `Edge` for
+    /// compact `Vec<EdgeId>` storage while they hold edge IDs, not once a
+    /// RETURN has made them records (it marks them scalar): a record in an
+    /// `Edge` column would be stored as edge 0. Mutation operators that add
     /// new entity-ID columns (CREATE, MERGE) should append `Node`/`Edge`
     /// explicitly after calling this for pass-through columns.
     pub(super) fn derive_schema_from_columns(&self, columns: &[String]) -> Vec<LogicalType> {
         let edges = self.edge_columns.borrow();
+        let scalars = self.scalar_columns.borrow();
         columns
             .iter()
             .map(|name| {
-                if edges.contains(name) {
+                // A RETURN marks its outputs scalar: an edge it returns is a
+                // record from then on, not an edge ID.
+                if edges.contains(name) && !scalars.contains(name) {
                     LogicalType::Edge
                 } else {
                     LogicalType::Any
@@ -1385,12 +1384,10 @@ impl super::Planner {
             physical_keys = resolve_logical_to_physical_keys(&sort.keys, &actual_columns)?;
         }
 
-        let schema = self.derive_schema_from_columns(&columns);
         let op: Box<dyn Operator> = Box::new(grafeo_core::execution::operators::TopKOperator::new(
             input_op,
             physical_keys,
             k,
-            schema,
         ));
         Ok(Some((op, columns)))
     }

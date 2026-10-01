@@ -1,0 +1,88 @@
+# Rosetta: set operations and ORDER BY on returned nodes and edges
+#
+# Every branch of a set operation returns its nodes and edges the same way,
+# so the same entity from two branches is one row of a UNION, and EXCEPT and
+# INTERSECT compare entities. A column added to sort by a RETURN alias's
+# property is not part of the result.
+#
+# Setup (GQL): (:A {n: 1})-[:K {w: 1}]->(:B {n: 2}), the same with n 3, 4 and
+# w 2, and with n 5, 6 and w 3.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Set operations and ORDER BY on returned entities
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: union_of_one_edge_from_two_branches
+    setup:
+      - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
+      - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
+      - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
+    variants:
+      gql: "MATCH ()-[r]->() WHERE r.w = 1 RETURN r UNION MATCH ()-[r]->() WHERE r.w = 1 RETURN r"
+      cypher: "MATCH ()-[r]->() WHERE r.w = 1 RETURN r UNION MATCH ()-[r]->() WHERE r.w = 1 RETURN r"
+    expect:
+      count: 1
+
+  - name: union_of_one_node_from_two_branches
+    setup:
+      - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
+      - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
+      - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
+    variants:
+      gql: "MATCH (a:A) WHERE a.n = 3 RETURN a UNION MATCH (a:A) WHERE a.n = 3 RETURN a"
+      cypher: "MATCH (a:A) WHERE a.n = 3 RETURN a UNION MATCH (a:A) WHERE a.n = 3 RETURN a"
+    expect:
+      count: 1
+
+  - name: except_on_edges
+    setup:
+      - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
+      - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
+      - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
+    query: "MATCH ()-[r]->() RETURN r EXCEPT MATCH ()-[r]->() WHERE r.w = 2 RETURN r"
+    expect:
+      count: 2
+
+  - name: intersect_on_edges
+    setup:
+      - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
+      - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
+      - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
+    query: "MATCH ()-[r]->() RETURN r INTERSECT MATCH ()-[r]->() WHERE r.w = 2 RETURN r"
+    expect:
+      count: 1
+
+  - name: except_on_nodes
+    setup:
+      - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
+      - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
+      - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
+    query: "MATCH (a:A) RETURN a EXCEPT MATCH (a:A) WHERE a.n = 3 RETURN a"
+    expect:
+      count: 2
+
+  - name: intersect_on_nodes
+    setup:
+      - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
+      - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
+      - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
+    query: "MATCH (a:A) RETURN a INTERSECT MATCH (a:A) WHERE a.n = 3 RETURN a"
+    expect:
+      count: 1
+
+  - name: a_sort_key_on_an_alias_is_not_a_column
+    setup:
+      - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
+      - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
+      - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
+    variants:
+      gql: "MATCH ()-[r]->() RETURN r AS e ORDER BY e.w"
+      cypher: "MATCH ()-[r]->() RETURN r AS e ORDER BY e.w"
+    expect:
+      columns: [e]
+      count: 3

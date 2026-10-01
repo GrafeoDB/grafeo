@@ -350,7 +350,7 @@ impl super::Planner {
         let union_op = UnionOperator::new(vec![exists_op, other_op], schema.clone());
 
         // Deduplicate (OR semantics: each row appears at most once)
-        let distinct_op = DistinctOperator::new(Box::new(union_op), schema);
+        let distinct_op = DistinctOperator::new(Box::new(union_op));
 
         Ok((Box::new(distinct_op), exists_cols))
     }

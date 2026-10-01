@@ -494,6 +494,11 @@ impl GraphStore for RdfGraphStoreAdapter {
             .map(|(_, _, t)| t.clone())
     }
 
+    /// A read-only view without versions: every edge is the committed one.
+    fn edge_type_versioned(&self, id: EdgeId, _: EpochId, _: TransactionId) -> Option<ArcStr> {
+        self.edge_type(id)
+    }
+
     // --- Filtered search ---
 
     fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {

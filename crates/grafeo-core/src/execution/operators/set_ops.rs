@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use grafeo_common::types::{HashableValue, LogicalType, Value};
 
 use super::{DataChunk, Operator, OperatorError, OperatorResult};
-use crate::execution::chunk::DataChunkBuilder;
+use crate::execution::chunk::{ColumnTypes, DataChunkBuilder};
 
 /// A hashable row key: one `HashableValue` per column.
 type RowKey = Vec<HashableValue>;
@@ -31,18 +31,22 @@ fn row_values(key: &RowKey) -> Vec<Value> {
     key.iter().map(|hv| hv.0.clone()).collect()
 }
 
-/// Materializes all rows from an operator into a vector of row keys.
-fn materialize(op: &mut dyn Operator) -> Result<Vec<RowKey>, OperatorError> {
+/// Materializes all rows from an operator into a vector of row keys, with
+/// the column types of its chunks.
+fn materialize(op: &mut dyn Operator) -> Result<(Vec<RowKey>, Vec<LogicalType>), OperatorError> {
     let mut rows = Vec::new();
+    let mut column_types = ColumnTypes::default();
     while let Some(chunk) = op.next()? {
+        column_types.add(&chunk);
         for row in chunk.selected_indices() {
             rows.push(row_key(&chunk, row));
         }
     }
-    Ok(rows)
+    Ok((rows, column_types.types().to_vec()))
 }
 
-/// Rebuilds a `DataChunk` from a set of row keys.
+/// Rebuilds a `DataChunk` from a set of row keys, in columns of the types
+/// the rows came in.
 fn rows_to_chunk(rows: &[RowKey], schema: &[LogicalType]) -> DataChunk {
     if rows.is_empty() {
         return DataChunk::empty();
@@ -65,32 +69,29 @@ pub struct ExceptOperator {
     left: Box<dyn Operator>,
     right: Box<dyn Operator>,
     all: bool,
-    output_schema: Vec<LogicalType>,
+    /// The column types of the left input, which the result rows come from.
+    column_types: Vec<LogicalType>,
     result: Option<Vec<RowKey>>,
     position: usize,
 }
 
 impl ExceptOperator {
     /// Creates a new EXCEPT operator.
-    pub fn new(
-        left: Box<dyn Operator>,
-        right: Box<dyn Operator>,
-        all: bool,
-        output_schema: Vec<LogicalType>,
-    ) -> Self {
+    pub fn new(left: Box<dyn Operator>, right: Box<dyn Operator>, all: bool) -> Self {
         Self {
             left,
             right,
             all,
-            output_schema,
+            column_types: Vec::new(),
             result: None,
             position: 0,
         }
     }
 
     fn compute(&mut self) -> Result<(), OperatorError> {
-        let left_rows = materialize(self.left.as_mut())?;
-        let right_rows = materialize(self.right.as_mut())?;
+        let (left_rows, column_types) = materialize(self.left.as_mut())?;
+        let (right_rows, _) = materialize(self.right.as_mut())?;
+        self.column_types = column_types;
 
         if self.all {
             // EXCEPT ALL: for each right row, remove one matching left row
@@ -134,7 +135,7 @@ impl Operator for ExceptOperator {
         if batch.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(rows_to_chunk(batch, &self.output_schema)))
+            Ok(Some(rows_to_chunk(batch, &self.column_types)))
         }
     }
 
@@ -159,32 +160,29 @@ pub struct IntersectOperator {
     left: Box<dyn Operator>,
     right: Box<dyn Operator>,
     all: bool,
-    output_schema: Vec<LogicalType>,
+    /// The column types of the left input, which the result rows come from.
+    column_types: Vec<LogicalType>,
     result: Option<Vec<RowKey>>,
     position: usize,
 }
 
 impl IntersectOperator {
     /// Creates a new INTERSECT operator.
-    pub fn new(
-        left: Box<dyn Operator>,
-        right: Box<dyn Operator>,
-        all: bool,
-        output_schema: Vec<LogicalType>,
-    ) -> Self {
+    pub fn new(left: Box<dyn Operator>, right: Box<dyn Operator>, all: bool) -> Self {
         Self {
             left,
             right,
             all,
-            output_schema,
+            column_types: Vec::new(),
             result: None,
             position: 0,
         }
     }
 
     fn compute(&mut self) -> Result<(), OperatorError> {
-        let left_rows = materialize(self.left.as_mut())?;
-        let right_rows = materialize(self.right.as_mut())?;
+        let (left_rows, column_types) = materialize(self.left.as_mut())?;
+        let (right_rows, _) = materialize(self.right.as_mut())?;
+        self.column_types = column_types;
 
         if self.all {
             // INTERSECT ALL: each right row matches at most one left row
@@ -229,7 +227,7 @@ impl Operator for IntersectOperator {
         if batch.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(rows_to_chunk(batch, &self.output_schema)))
+            Ok(Some(rows_to_chunk(batch, &self.column_types)))
         }
     }
 
@@ -400,12 +398,7 @@ mod tests {
     fn test_except_distinct() {
         let left = MockOperator::new(vec![create_int_chunk(&[1, 2, 3, 2])]);
         let right = MockOperator::new(vec![create_int_chunk(&[2, 4])]);
-        let mut op = ExceptOperator::new(
-            Box::new(left),
-            Box::new(right),
-            false,
-            vec![LogicalType::Int64],
-        );
+        let mut op = ExceptOperator::new(Box::new(left), Box::new(right), false);
 
         let mut result = collect_ints(&mut op);
         result.sort_unstable();
@@ -416,12 +409,7 @@ mod tests {
     fn test_except_all() {
         let left = MockOperator::new(vec![create_int_chunk(&[1, 2, 2, 3])]);
         let right = MockOperator::new(vec![create_int_chunk(&[2])]);
-        let mut op = ExceptOperator::new(
-            Box::new(left),
-            Box::new(right),
-            true,
-            vec![LogicalType::Int64],
-        );
+        let mut op = ExceptOperator::new(Box::new(left), Box::new(right), true);
 
         let mut result = collect_ints(&mut op);
         result.sort_unstable();
@@ -433,12 +421,7 @@ mod tests {
     fn test_except_empty_right() {
         let left = MockOperator::new(vec![create_int_chunk(&[1, 2])]);
         let right = MockOperator::new(vec![]);
-        let mut op = ExceptOperator::new(
-            Box::new(left),
-            Box::new(right),
-            false,
-            vec![LogicalType::Int64],
-        );
+        let mut op = ExceptOperator::new(Box::new(left), Box::new(right), false);
 
         let mut result = collect_ints(&mut op);
         result.sort_unstable();
@@ -449,12 +432,7 @@ mod tests {
     fn test_intersect_distinct() {
         let left = MockOperator::new(vec![create_int_chunk(&[1, 2, 3, 2])]);
         let right = MockOperator::new(vec![create_int_chunk(&[2, 3, 4])]);
-        let mut op = IntersectOperator::new(
-            Box::new(left),
-            Box::new(right),
-            false,
-            vec![LogicalType::Int64],
-        );
+        let mut op = IntersectOperator::new(Box::new(left), Box::new(right), false);
 
         let mut result = collect_ints(&mut op);
         result.sort_unstable();
@@ -465,12 +443,7 @@ mod tests {
     fn test_intersect_all() {
         let left = MockOperator::new(vec![create_int_chunk(&[1, 2, 2, 3])]);
         let right = MockOperator::new(vec![create_int_chunk(&[2, 2, 4])]);
-        let mut op = IntersectOperator::new(
-            Box::new(left),
-            Box::new(right),
-            true,
-            vec![LogicalType::Int64],
-        );
+        let mut op = IntersectOperator::new(Box::new(left), Box::new(right), true);
 
         let mut result = collect_ints(&mut op);
         result.sort_unstable();
@@ -481,12 +454,7 @@ mod tests {
     fn test_intersect_no_overlap() {
         let left = MockOperator::new(vec![create_int_chunk(&[1, 2])]);
         let right = MockOperator::new(vec![create_int_chunk(&[3, 4])]);
-        let mut op = IntersectOperator::new(
-            Box::new(left),
-            Box::new(right),
-            false,
-            vec![LogicalType::Int64],
-        );
+        let mut op = IntersectOperator::new(Box::new(left), Box::new(right), false);
 
         let result = collect_ints(&mut op);
         assert!(result.is_empty());
@@ -526,10 +494,10 @@ mod tests {
     fn test_operator_names() {
         let empty = || MockOperator::new(vec![]);
 
-        let op = ExceptOperator::new(Box::new(empty()), Box::new(empty()), false, vec![]);
+        let op = ExceptOperator::new(Box::new(empty()), Box::new(empty()), false);
         assert_eq!(op.name(), "Except");
 
-        let op = IntersectOperator::new(Box::new(empty()), Box::new(empty()), false, vec![]);
+        let op = IntersectOperator::new(Box::new(empty()), Box::new(empty()), false);
         assert_eq!(op.name(), "Intersect");
 
         let op = OtherwiseOperator::new(Box::new(empty()), Box::new(empty()));
@@ -544,7 +512,6 @@ mod tests {
             Box::new(empty()),
             Box::new(empty()),
             false,
-            vec![],
         ));
         assert!(op.into_any().downcast::<ExceptOperator>().is_ok());
 
@@ -552,7 +519,6 @@ mod tests {
             Box::new(empty()),
             Box::new(empty()),
             false,
-            vec![],
         ));
         assert!(op.into_any().downcast::<IntersectOperator>().is_ok());
 

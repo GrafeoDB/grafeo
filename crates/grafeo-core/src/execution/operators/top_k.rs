@@ -22,13 +22,13 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::Value;
 
 use super::sort::SortKey;
 use super::value_utils::compare_values_with_nulls;
 use super::{Operator, OperatorResult};
 use crate::execution::DataChunk;
-use crate::execution::chunk::DataChunkBuilder;
+use crate::execution::chunk::{ColumnTypes, DataChunkBuilder};
 
 /// Streaming bounded top-K operator.
 pub struct TopKOperator {
@@ -39,7 +39,8 @@ pub struct TopKOperator {
     /// marginal cost is negligible at k=50, N=1M.
     sort_keys: Arc<Vec<SortKey>>,
     limit: usize,
-    output_schema: Vec<LogicalType>,
+    /// The column types of the input chunks: the output keeps them.
+    column_types: ColumnTypes,
     state: TopKState,
     #[cfg(test)]
     materialized_rows: std::sync::atomic::AtomicUsize,
@@ -71,11 +72,8 @@ impl TopKOperator {
     /// regardless of `child`'s cardinality.
     ///
     /// Equivalent in output to `LimitOperator(SortOperator(child, sort_keys), limit)`,
-    /// including stability on ties.
-    ///
-    /// `output_schema` must have the same width as `child`'s output; the
-    /// operator asserts this on first pull (`debug_assert`) to catch planner
-    /// bugs that would silently truncate or null-pad rows.
+    /// including stability on ties. The rows keep their columns' types and
+    /// values.
     ///
     /// # Example
     ///
@@ -103,9 +101,7 @@ impl TopKOperator {
     /// let mut top_k = TopKOperator::new(
     ///     Box::new(source),
     ///     vec![SortKey::descending(0)],
-    ///     3,
-    ///     vec![LogicalType::Int64],
-    /// );
+    ///     3);
     ///
     /// let chunk = top_k.next().unwrap().unwrap();
     /// let mut out = vec![];
@@ -115,17 +111,12 @@ impl TopKOperator {
     /// assert_eq!(out, vec![319, 88, 33]);
     /// ```
     #[must_use]
-    pub fn new(
-        child: Box<dyn Operator>,
-        sort_keys: Vec<SortKey>,
-        limit: usize,
-        output_schema: Vec<LogicalType>,
-    ) -> Self {
+    pub fn new(child: Box<dyn Operator>, sort_keys: Vec<SortKey>, limit: usize) -> Self {
         Self {
             child,
             sort_keys: Arc::new(sort_keys),
             limit,
-            output_schema,
+            column_types: ColumnTypes::default(),
             state: TopKState::Building {
                 heap: BinaryHeap::new(),
                 next_insertion_id: 0,
@@ -161,16 +152,9 @@ impl Operator for TopKOperator {
                 unreachable!("matches! guard above")
             };
 
-            let mut schema_checked = false;
             while let Some(chunk) = self.child.next()? {
-                if !schema_checked {
-                    debug_assert_eq!(
-                        chunk.column_count(),
-                        self.output_schema.len(),
-                        "TopKOperator output_schema width must match child schema width",
-                    );
-                    schema_checked = true;
-                }
+                self.column_types.add(&chunk);
+                let width = self.column_types.types().len();
 
                 for row_idx in chunk.selected_indices() {
                     let new_sort_values =
@@ -189,7 +173,7 @@ impl Operator for TopKOperator {
                         continue;
                     }
 
-                    let row_values = extract_row_values(&chunk, row_idx, self.output_schema.len());
+                    let row_values = extract_row_values(&chunk, row_idx, width);
                     #[cfg(test)]
                     self.materialized_rows
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -218,10 +202,11 @@ impl Operator for TopKOperator {
 
         if let TopKState::Draining { rows, position } = &mut self.state {
             if *position < rows.len() {
-                let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);
+                let types = self.column_types.types();
+                let mut builder = DataChunkBuilder::with_capacity(types, 2048);
                 while *position < rows.len() && !builder.is_full() {
                     let entry = &rows[*position];
-                    for col_idx in 0..self.output_schema.len() {
+                    for col_idx in 0..types.len() {
                         if let Some(dst_col) = builder.column_mut(col_idx) {
                             let val = entry.row_values[col_idx].clone().unwrap_or(Value::Null);
                             dst_col.push_value(val);
@@ -242,6 +227,7 @@ impl Operator for TopKOperator {
 
     fn reset(&mut self) {
         self.child.reset();
+        self.column_types = ColumnTypes::default();
         self.state = TopKState::Building {
             heap: BinaryHeap::new(),
             next_insertion_id: 0,
@@ -359,6 +345,7 @@ mod tests {
     use super::*;
     use crate::execution::DataChunk;
     use crate::execution::chunk::DataChunkBuilder;
+    use grafeo_common::types::LogicalType;
 
     struct MockOperator {
         chunks: Vec<DataChunk>,
@@ -420,12 +407,7 @@ mod tests {
     #[test]
     fn top_k_returns_top_k_descending() {
         let mock = MockOperator::new(vec![chunk_int64(&[19, 88, 33, 8, 319])]);
-        let mut top_k = TopKOperator::new(
-            Box::new(mock),
-            vec![SortKey::descending(0)],
-            3,
-            vec![LogicalType::Int64],
-        );
+        let mut top_k = TopKOperator::new(Box::new(mock), vec![SortKey::descending(0)], 3);
         let out = collect_int64_col(&mut top_k);
         assert_eq!(out, vec![319, 88, 33]);
     }
@@ -466,12 +448,7 @@ mod tests {
             (3, "Mia"),
             (88, "Butch"),
         ])]);
-        let mut top_k = TopKOperator::new(
-            Box::new(mock),
-            vec![SortKey::descending(0)],
-            2,
-            vec![LogicalType::Int64, LogicalType::String],
-        );
+        let mut top_k = TopKOperator::new(Box::new(mock), vec![SortKey::descending(0)], 2);
         let out = collect_int_str(&mut top_k);
         assert_eq!(out, vec![(88, "Jules".into()), (88, "Butch".into())]);
     }
@@ -484,12 +461,7 @@ mod tests {
             (88, "Mia"),
             (3, "Butch"),
         ])]);
-        let mut top_k = TopKOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            2,
-            vec![LogicalType::Int64, LogicalType::String],
-        );
+        let mut top_k = TopKOperator::new(Box::new(mock), vec![SortKey::ascending(0)], 2);
         let out = collect_int_str(&mut top_k);
         assert_eq!(out, vec![(3, "Jules".into()), (3, "Butch".into())]);
     }
@@ -504,12 +476,7 @@ mod tests {
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let values: Vec<i64> = (0..1000_i64).map(|i| (i * 31 + 7) % 1000).collect();
         let mock = MockOperator::new(vec![chunk_int64(&values)]);
-        let mut top_k = TopKOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            5,
-            vec![LogicalType::Int64],
-        );
+        let mut top_k = TopKOperator::new(Box::new(mock), vec![SortKey::ascending(0)], 5);
 
         let out = collect_int64_col(&mut top_k);
         assert_eq!(out.len(), 5);
@@ -541,7 +508,6 @@ mod tests {
             Box::new(mock),
             vec![SortKey::descending(0), SortKey::ascending(1)],
             2,
-            vec![LogicalType::Int64, LogicalType::String],
         );
         let out = collect_int_str(&mut top_k);
         assert_eq!(out, vec![(88, "3".into()), (88, "5".into())]);
@@ -565,7 +531,6 @@ mod tests {
             Box::new(mock),
             vec![SortKey::ascending(0).with_null_order(NullOrder::NullsFirst)],
             3,
-            vec![LogicalType::Int64],
         );
 
         // ORDER BY x ASC NULLS FIRST gives [Null, Null, 3, 19, 88]; LIMIT 3 = [Null, Null, 3].
@@ -599,7 +564,6 @@ mod tests {
             Box::new(mock),
             vec![SortKey::ascending(0).with_null_order(NullOrder::NullsLast)],
             3,
-            vec![LogicalType::Int64],
         );
 
         // ORDER BY x ASC NULLS LAST gives [3, 19, 88, Null, Null]; LIMIT 3 = [3, 19, 88].
@@ -622,48 +586,28 @@ mod tests {
     #[test]
     fn top_k_empty_input() {
         let mock = MockOperator::new(vec![]);
-        let mut top_k = TopKOperator::new(
-            Box::new(mock),
-            vec![SortKey::descending(0)],
-            5,
-            vec![LogicalType::Int64],
-        );
+        let mut top_k = TopKOperator::new(Box::new(mock), vec![SortKey::descending(0)], 5);
         assert_eq!(collect_int64_col(&mut top_k), Vec::<i64>::new());
     }
 
     #[test]
     fn top_k_k_zero_returns_no_rows() {
         let mock = MockOperator::new(vec![chunk_int64(&[3, 19, 88])]);
-        let mut top_k = TopKOperator::new(
-            Box::new(mock),
-            vec![SortKey::descending(0)],
-            0,
-            vec![LogicalType::Int64],
-        );
+        let mut top_k = TopKOperator::new(Box::new(mock), vec![SortKey::descending(0)], 0);
         assert_eq!(collect_int64_col(&mut top_k), Vec::<i64>::new());
     }
 
     #[test]
     fn top_k_k_greater_than_n() {
         let mock = MockOperator::new(vec![chunk_int64(&[19, 88, 3])]);
-        let mut top_k = TopKOperator::new(
-            Box::new(mock),
-            vec![SortKey::descending(0)],
-            10,
-            vec![LogicalType::Int64],
-        );
+        let mut top_k = TopKOperator::new(Box::new(mock), vec![SortKey::descending(0)], 10);
         assert_eq!(collect_int64_col(&mut top_k), vec![88, 19, 3]);
     }
 
     #[test]
     fn top_k_returns_top_k_ascending() {
         let mock = MockOperator::new(vec![chunk_int64(&[19, 88, 33, 8, 319])]);
-        let mut top_k = TopKOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            3,
-            vec![LogicalType::Int64],
-        );
+        let mut top_k = TopKOperator::new(Box::new(mock), vec![SortKey::ascending(0)], 3);
         assert_eq!(collect_int64_col(&mut top_k), vec![8, 19, 33]);
     }
 
@@ -674,24 +618,14 @@ mod tests {
             chunk_int64(&[33, 8]),
             chunk_int64(&[40, 319]),
         ]);
-        let mut top_k = TopKOperator::new(
-            Box::new(mock),
-            vec![SortKey::descending(0)],
-            3,
-            vec![LogicalType::Int64],
-        );
+        let mut top_k = TopKOperator::new(Box::new(mock), vec![SortKey::descending(0)], 3);
         assert_eq!(collect_int64_col(&mut top_k), vec![319, 88, 40]);
     }
 
     #[test]
     fn top_k_into_parts_round_trip() {
         let mock = MockOperator::new(vec![chunk_int64(&[3, 19, 88])]);
-        let top_k = TopKOperator::new(
-            Box::new(mock),
-            vec![SortKey::descending(0)],
-            5,
-            vec![LogicalType::Int64],
-        );
+        let top_k = TopKOperator::new(Box::new(mock), vec![SortKey::descending(0)], 5);
         let (mut child, sort_keys, limit) = top_k.into_parts();
         assert_eq!(sort_keys.len(), 1);
         assert_eq!(limit, 5);
@@ -702,12 +636,7 @@ mod tests {
     #[test]
     fn top_k_name() {
         let mock = MockOperator::new(vec![]);
-        let top_k = TopKOperator::new(
-            Box::new(mock),
-            vec![SortKey::descending(0)],
-            5,
-            vec![LogicalType::Int64],
-        );
+        let top_k = TopKOperator::new(Box::new(mock), vec![SortKey::descending(0)], 5);
         assert_eq!(top_k.name(), "TopK");
     }
 
@@ -718,7 +647,6 @@ mod tests {
             Box::new(mock),
             vec![SortKey::descending(0)],
             5,
-            vec![LogicalType::Int64],
         ));
         let any = op.into_any();
         assert!(any.downcast::<TopKOperator>().is_ok());

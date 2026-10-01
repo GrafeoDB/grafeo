@@ -5,7 +5,7 @@
 //! - `NestedLoopJoinOperator`: General-purpose join for any condition
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use arcstr::ArcStr;
 use grafeo_common::types::{LogicalType, Value};
@@ -662,6 +662,10 @@ pub struct NestedLoopJoinOperator {
     right_chunks: Vec<DataChunk>,
     /// Whether the right side is materialized.
     right_materialized: bool,
+    /// Whether the whole left side is read before the right side.
+    left_first: bool,
+    /// The left side's chunks, when it is read first.
+    left_chunks: Option<VecDeque<DataChunk>>,
     /// Current left chunk.
     current_left_chunk: Option<DataChunk>,
     /// Current row in the left chunk.
@@ -743,11 +747,30 @@ impl NestedLoopJoinOperator {
             output_schema,
             right_chunks: Vec::new(),
             right_materialized: false,
+            left_first: false,
+            left_chunks: None,
             current_left_chunk: None,
             current_left_row: 0,
             current_right_chunk: 0,
             current_right_row: 0,
             current_left_matched: false,
+        }
+    }
+
+    /// Reads the whole left side before the right side, so that the right
+    /// side sees what the left side wrote: in `INSERT (:N) WITH 1 AS x
+    /// MATCH (n:N)` the scan of `n` runs after the insert.
+    #[must_use]
+    pub fn with_left_first(mut self) -> Self {
+        self.left_first = true;
+        self
+    }
+
+    /// The next left chunk, from the buffer when the left side was read first.
+    fn next_left(&mut self) -> OperatorResult {
+        match &mut self.left_chunks {
+            Some(chunks) => Ok(chunks.pop_front()),
+            None => self.left.next(),
         }
     }
 
@@ -835,6 +858,14 @@ impl NestedLoopJoinOperator {
 
 impl Operator for NestedLoopJoinOperator {
     fn next(&mut self) -> OperatorResult {
+        if self.left_first && self.left_chunks.is_none() {
+            let mut chunks = VecDeque::new();
+            while let Some(chunk) = self.left.next()? {
+                chunks.push_back(chunk);
+            }
+            self.left_chunks = Some(chunks);
+        }
+
         // Materialize right side
         if !self.right_materialized {
             self.materialize_right()?;
@@ -850,7 +881,7 @@ impl Operator for NestedLoopJoinOperator {
         loop {
             // Get current left chunk
             if self.current_left_chunk.is_none() {
-                self.current_left_chunk = self.left.next()?;
+                self.current_left_chunk = self.next_left()?;
                 self.current_left_row = 0;
                 self.current_right_chunk = 0;
                 self.current_right_row = 0;
@@ -967,6 +998,7 @@ impl Operator for NestedLoopJoinOperator {
         self.right.reset();
         self.right_chunks.clear();
         self.right_materialized = false;
+        self.left_chunks = None;
         self.current_left_chunk = None;
         self.current_left_row = 0;
         self.current_right_chunk = 0;

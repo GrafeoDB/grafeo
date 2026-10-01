@@ -114,7 +114,20 @@ fn a_path_back_to_an_earlier_variable_closes_the_cycle() {
 fn a_variable_length_path_back_to_an_earlier_variable_closes_the_cycle() {
     let db = cycles();
     let closed = rows(db.execute("MATCH (a)-[:K]->(b)-[:K]->{1,2}(a) RETURN a.n, b.n"));
-    assert!(!closed.is_empty());
+    // One hop back over the 2-cycle, two hops back around each triangle.
+    assert_eq!(
+        closed,
+        vec![
+            vec![1, 2],
+            vec![1, 2],
+            vec![2, 1],
+            vec![2, 3],
+            vec![2, 3],
+            vec![3, 1],
+            vec![3, 4],
+            vec![4, 2],
+        ]
+    );
     assert_eq!(
         closed,
         rows(db.execute("MATCH (a)-[:K]->(b)-[:K]->{1,2}(d) WHERE d = a RETURN a.n, b.n"))

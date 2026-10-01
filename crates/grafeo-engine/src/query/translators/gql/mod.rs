@@ -425,6 +425,7 @@ impl GqlTranslator {
                             | ast::QueryClause::Delete(_)
                             | ast::QueryClause::Set(_)
                             | ast::QueryClause::Merge(_)
+                            | ast::QueryClause::With(_)
                     )
                 {
                     if let Some(where_clause) = &query.where_clause {
@@ -549,6 +550,9 @@ impl GqlTranslator {
                             input: Box::new(plan),
                             pass_through_input: true,
                         });
+                    }
+                    ast::QueryClause::With(with_clause) => {
+                        plan = self.apply_with(plan, with_clause)?;
                     }
                     ast::QueryClause::InlineCall { subquery, optional } => {
                         plan = self.translate_inline_call(subquery, plan, *optional)?;
@@ -699,124 +703,15 @@ impl GqlTranslator {
             }
         }
 
-        // Handle WITH clauses (projection for query chaining)
-        for with_clause in &query.with_clauses {
-            if !with_clause.is_wildcard {
-                // Check if WITH contains aggregate functions (e.g. WITH count(n) AS cnt)
-                let has_aggregates = with_clause
-                    .items
-                    .iter()
-                    .any(|item| contains_aggregate(&item.expression));
-
-                if has_aggregates {
-                    let (aggregates, auto_group_by, post_return) =
-                        self.extract_aggregates_and_groups(&with_clause.items, false)?;
-
-                    // Split the WHERE into HAVING (aggregate-referencing
-                    // conjuncts) and a post-aggregate filter (the rest).
-                    // This handles mixed predicates like
-                    // `WHERE a.name = 'Alix' AND cnt > 2` correctly.
-                    let aggregate_aliases: Vec<String> =
-                        aggregates.iter().filter_map(|a| a.alias.clone()).collect();
-                    let (having, post_agg_filter) =
-                        if let Some(where_clause) = &with_clause.where_clause {
-                            let pred = self.translate_expression(&where_clause.expression)?;
-                            let conjuncts = flatten_and_conjuncts(&pred);
-                            let (having_parts, filter_parts): (Vec<_>, Vec<_>) = conjuncts
-                                .into_iter()
-                                .partition(|c| references_any(c, &aggregate_aliases));
-                            (
-                                join_and_conjuncts(having_parts.into_iter().cloned().collect()),
-                                join_and_conjuncts(filter_parts.into_iter().cloned().collect()),
-                            )
-                        } else {
-                            (None, None)
-                        };
-
-                    plan = LogicalOperator::Aggregate(AggregateOp {
-                        group_by: auto_group_by,
-                        aggregates,
-                        input: Box::new(plan),
-                        having,
-                    });
-
-                    // Apply post-aggregate projection if aggregates were wrapped
-                    // in expressions (e.g. WITH count(n) + 1 AS cnt_plus_one)
-                    if let Some(post_items) = post_return {
-                        let post_projections: Vec<Projection> = post_items
-                            .into_iter()
-                            .map(|item| Projection {
-                                expression: item.expression,
-                                alias: item.alias,
-                            })
-                            .collect();
-                        plan = LogicalOperator::Project(ProjectOp {
-                            projections: post_projections,
-                            input: Box::new(plan),
-                            pass_through_input: false,
-                        });
-                    }
-
-                    // Apply non-aggregate WHERE conjuncts as a post-aggregate filter.
-                    if let Some(filter_pred) = post_agg_filter {
-                        plan = wrap_filter(plan, filter_pred);
-                    }
-                } else {
-                    let projections: Vec<Projection> = with_clause
-                        .items
-                        .iter()
-                        .map(|item| {
-                            Ok(Projection {
-                                expression: self.translate_expression(&item.expression)?,
-                                alias: item.alias.clone(),
-                            })
-                        })
-                        .collect::<Result<_>>()?;
-
-                    plan = LogicalOperator::Project(ProjectOp {
-                        projections,
-                        input: Box::new(plan),
-                        pass_through_input: false,
-                    });
-                }
-            }
-            // WITH * skips projection: all variables pass through unchanged
-
-            // Handle LET bindings attached to this WITH clause.
-            // LET adds new columns without replacing existing ones.
-            if !with_clause.let_bindings.is_empty() {
-                let mut let_projections = Vec::new();
-                for (name, expr) in &with_clause.let_bindings {
-                    let logical_expr = self.translate_expression(expr)?;
-                    let_projections.push(Projection {
-                        expression: logical_expr,
-                        alias: Some(name.clone()),
-                    });
-                }
-                plan = LogicalOperator::Project(ProjectOp {
-                    projections: let_projections,
-                    input: Box::new(plan),
-                    pass_through_input: true,
-                });
-            }
-
-            // Apply WHERE filter if present in WITH clause.
-            // For aggregate WITH clauses, the WHERE was already split into
-            // HAVING + post-aggregate filter above, so skip here.
-            if let Some(where_clause) = &with_clause.where_clause {
-                let has_agg = with_clause
-                    .items
-                    .iter()
-                    .any(|item| contains_aggregate(&item.expression));
-                if !has_agg {
-                    let predicate = self.translate_expression(&where_clause.expression)?;
-                    plan = wrap_filter(plan, predicate);
-                }
-            }
-
-            // Handle DISTINCT
-            if with_clause.distinct {
-                plan = wrap_distinct(plan);
+        // WITH clauses not among the ordered clauses (statements built
+        // without them) apply here, after the rest.
+        if !query
+            .ordered_clauses
+            .iter()
+            .any(|clause| matches!(clause, ast::QueryClause::With(_)))
+        {
+            for with_clause in &query.with_clauses {
+                plan = self.apply_with(plan, with_clause)?;
             }
         }
 
@@ -1311,6 +1206,134 @@ impl GqlTranslator {
             variable: load.variable.clone(),
             field_terminator: load.field_terminator,
         })
+    }
+
+    /// Applies a WITH clause to `plan`: its projection (or aggregation), the
+    /// LET bindings attached to it, its WHERE and DISTINCT. The clauses after
+    /// it read the rows it passes on.
+    fn apply_with(
+        &self,
+        mut plan: LogicalOperator,
+        with_clause: &ast::WithClause,
+    ) -> Result<LogicalOperator> {
+        if !with_clause.is_wildcard {
+            // Check if WITH contains aggregate functions (e.g. WITH count(n) AS cnt)
+            let has_aggregates = with_clause
+                .items
+                .iter()
+                .any(|item| contains_aggregate(&item.expression));
+
+            if has_aggregates {
+                let (aggregates, auto_group_by, post_return) =
+                    self.extract_aggregates_and_groups(&with_clause.items, false)?;
+
+                // Split the WHERE into HAVING (aggregate-referencing
+                // conjuncts) and a post-aggregate filter (the rest).
+                // This handles mixed predicates like
+                // `WHERE a.name = 'Alix' AND cnt > 2` correctly.
+                let aggregate_aliases: Vec<String> =
+                    aggregates.iter().filter_map(|a| a.alias.clone()).collect();
+                let (having, post_agg_filter) =
+                    if let Some(where_clause) = &with_clause.where_clause {
+                        let pred = self.translate_expression(&where_clause.expression)?;
+                        let conjuncts = flatten_and_conjuncts(&pred);
+                        let (having_parts, filter_parts): (Vec<_>, Vec<_>) = conjuncts
+                            .into_iter()
+                            .partition(|c| references_any(c, &aggregate_aliases));
+                        (
+                            join_and_conjuncts(having_parts.into_iter().cloned().collect()),
+                            join_and_conjuncts(filter_parts.into_iter().cloned().collect()),
+                        )
+                    } else {
+                        (None, None)
+                    };
+
+                plan = LogicalOperator::Aggregate(AggregateOp {
+                    group_by: auto_group_by,
+                    aggregates,
+                    input: Box::new(plan),
+                    having,
+                });
+
+                // Apply post-aggregate projection if aggregates were wrapped
+                // in expressions (e.g. WITH count(n) + 1 AS cnt_plus_one)
+                if let Some(post_items) = post_return {
+                    let post_projections: Vec<Projection> = post_items
+                        .into_iter()
+                        .map(|item| Projection {
+                            expression: item.expression,
+                            alias: item.alias,
+                        })
+                        .collect();
+                    plan = LogicalOperator::Project(ProjectOp {
+                        projections: post_projections,
+                        input: Box::new(plan),
+                        pass_through_input: false,
+                    });
+                }
+
+                // Apply non-aggregate WHERE conjuncts as a post-aggregate filter.
+                if let Some(filter_pred) = post_agg_filter {
+                    plan = wrap_filter(plan, filter_pred);
+                }
+            } else {
+                let projections: Vec<Projection> = with_clause
+                    .items
+                    .iter()
+                    .map(|item| {
+                        Ok(Projection {
+                            expression: self.translate_expression(&item.expression)?,
+                            alias: item.alias.clone(),
+                        })
+                    })
+                    .collect::<Result<_>>()?;
+
+                plan = LogicalOperator::Project(ProjectOp {
+                    projections,
+                    input: Box::new(plan),
+                    pass_through_input: false,
+                });
+            }
+        }
+        // WITH * skips projection: all variables pass through unchanged
+
+        // Handle LET bindings attached to this WITH clause.
+        // LET adds new columns without replacing existing ones.
+        if !with_clause.let_bindings.is_empty() {
+            let mut let_projections = Vec::new();
+            for (name, expr) in &with_clause.let_bindings {
+                let logical_expr = self.translate_expression(expr)?;
+                let_projections.push(Projection {
+                    expression: logical_expr,
+                    alias: Some(name.clone()),
+                });
+            }
+            plan = LogicalOperator::Project(ProjectOp {
+                projections: let_projections,
+                input: Box::new(plan),
+                pass_through_input: true,
+            });
+        }
+
+        // Apply WHERE filter if present in WITH clause.
+        // For aggregate WITH clauses, the WHERE was already split into
+        // HAVING + post-aggregate filter above, so skip here.
+        if let Some(where_clause) = &with_clause.where_clause {
+            let has_agg = with_clause
+                .items
+                .iter()
+                .any(|item| contains_aggregate(&item.expression));
+            if !has_agg {
+                let predicate = self.translate_expression(&where_clause.expression)?;
+                plan = wrap_filter(plan, predicate);
+            }
+        }
+
+        // Handle DISTINCT
+        if with_clause.distinct {
+            plan = wrap_distinct(plan);
+        }
+        Ok(plan)
     }
 
     /// as imports from the outer scope: a `ParameterScan` replaces `Empty` as

@@ -237,6 +237,8 @@ pub enum QueryClause {
     Merge(MergeClause),
     /// A LET clause (variable bindings).
     Let(Vec<(String, Expression)>),
+    /// A WITH clause: the clauses after it read the rows it passes on.
+    With(WithClause),
     /// An inline CALL { subquery } clause (optional = OPTIONAL CALL { ... }).
     InlineCall {
         /// The inner subquery.

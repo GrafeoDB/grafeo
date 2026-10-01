@@ -781,6 +781,7 @@ impl<'a> Parser<'a> {
                 wc.let_bindings = self.parse_let_clause()?;
             }
 
+            ordered_clauses.push(QueryClause::With(wc.clone()));
             with_clauses.push(wc);
 
             // After WITH (+ optional LET), we can have more clauses

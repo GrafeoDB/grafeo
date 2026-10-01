@@ -597,3 +597,74 @@ mod negative_literal_properties {
         assert_eq!(result.rows()[0][1], Value::Float64(106.845));
     }
 }
+
+// ============================================================================
+// Reads after writes in one statement (#479)
+// ============================================================================
+
+mod reads_after_writes {
+    use super::*;
+
+    fn ints(result: &grafeo_engine::database::QueryResult) -> Vec<Vec<i64>> {
+        result
+            .rows()
+            .iter()
+            .map(|row| row.iter().map(|v| v.as_int64().unwrap()).collect())
+            .collect()
+    }
+
+    /// Every row after the `WITH` sees the nodes that all rows inserted.
+    #[test]
+    fn every_row_sees_every_insert() {
+        let db = db();
+        let result = db
+            .execute(
+                "UNWIND [1, 2] AS i INSERT (:N {i: i}) WITH i \
+                 MATCH (n:N) RETURN i, n.i ORDER BY i, n.i",
+            )
+            .unwrap();
+        assert_eq!(
+            ints(&result),
+            vec![vec![1, 1], vec![1, 2], vec![2, 1], vec![2, 2]]
+        );
+    }
+
+    /// The insert runs even when the `MATCH` after it finds nothing.
+    #[test]
+    fn an_insert_runs_when_the_match_after_it_finds_nothing() {
+        let db = db();
+        let result = db
+            .execute("INSERT (:N {id: 'c'}) WITH 1 AS x MATCH (m:Missing) RETURN m")
+            .unwrap();
+        assert_eq!(result.row_count(), 0);
+
+        let result = db.execute("MATCH (n:N) RETURN n.id").unwrap();
+        assert_eq!(result.rows(), &[vec![Value::from("c")]]);
+    }
+
+    /// Both patterns of a comma-separated `MATCH` see the insert.
+    #[test]
+    fn every_pattern_of_a_match_sees_the_insert() {
+        let db = db();
+        let result = db
+            .execute(
+                "INSERT (:N {id: 'c'})-[:K]->(:M {id: 'd'}) WITH 1 AS x \
+                 MATCH (a:N), (b:M) RETURN a.id, b.id",
+            )
+            .unwrap();
+        assert_eq!(result.rows(), &[vec![Value::from("c"), Value::from("d")]]);
+    }
+
+    /// The `MATCH` sees the inserts of all input chunks, not only the first.
+    #[test]
+    fn a_match_sees_the_inserts_of_every_chunk() {
+        let db = db();
+        let result = db
+            .execute(
+                "UNWIND range(1, 5000) AS i INSERT (:N {i: i}) WITH i WHERE i = 1 \
+                 MATCH (n:N) RETURN count(n)",
+            )
+            .unwrap();
+        assert_eq!(ints(&result), vec![vec![5000]]);
+    }
+}

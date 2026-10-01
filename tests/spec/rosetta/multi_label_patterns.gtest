@@ -58,6 +58,50 @@ tests:
       rows:
         - [c]
 
+  - name: expand_target_count_keeps_all_labels
+    setup:
+      - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"
+      - "MATCH (d:Directory) INSERT (d)-[:REL]->(:Graph:Tech {id: 't'})"
+    variants:
+      gql: "MATCH (a)-[r]->(n:Graph:Concept) RETURN count(r)"
+      cypher: "MATCH (a)-[r]->(n:Graph:Concept) RETURN count(r)"
+    expect:
+      rows:
+        - [1]
+
+  - name: typed_expand_target_keeps_all_labels
+    setup:
+      - "INSERT (d:Graph:Directory {id: 'd'})-[:`Graph:CONTAINS`]->(:Graph:Concept {id: 'c'})"
+      - "MATCH (d:Directory) INSERT (d)-[:`Graph:CONTAINS`]->(:Graph:Tech {id: 't'})"
+    variants:
+      gql: "MATCH (a)-[r:`Graph:CONTAINS`]->(n:Graph:Concept) RETURN count(r)"
+      cypher: "MATCH (a)-[r:`Graph:CONTAINS`]->(n:Graph:Concept) RETURN count(r)"
+    expect:
+      rows:
+        - [1]
+
+  - name: source_and_target_keep_all_labels
+    setup:
+      - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"
+      - "MATCH (d:Directory) INSERT (d)-[:REL]->(:Graph:Tech {id: 't'})"
+    variants:
+      gql: "MATCH (a:Graph:Directory)-[r]->(n:Graph:Concept) RETURN count(r)"
+      cypher: "MATCH (a:Graph:Directory)-[r]->(n:Graph:Concept) RETURN count(r)"
+    expect:
+      rows:
+        - [1]
+
+  - name: incoming_target_keeps_all_labels
+    setup:
+      - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"
+      - "MATCH (d:Directory) INSERT (d)-[:REL]->(:Graph:Tech {id: 't'})"
+    variants:
+      gql: "MATCH (n:Graph:Directory)<-[r]-(a) RETURN count(r)"
+      cypher: "MATCH (n:Graph:Directory)<-[r]-(a) RETURN count(r)"
+    expect:
+      rows:
+        - [0]
+
   - name: variable_length_target_keeps_all_labels
     setup:
       - "INSERT (d:Graph:Directory {id: 'd'})-[:REL]->(:Graph:Concept {id: 'c'})"

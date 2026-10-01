@@ -768,7 +768,9 @@ impl<'a> Parser<'a> {
         // Parse REMOVE clauses
         let mut remove_clauses = Vec::new();
         while self.current.kind == TokenKind::Remove {
-            remove_clauses.push(self.parse_remove_clause()?);
+            let clause = self.parse_remove_clause()?;
+            ordered_clauses.push(QueryClause::Remove(clause.clone()));
+            remove_clauses.push(clause);
         }
 
         // Parse WITH clauses
@@ -10395,6 +10397,27 @@ mod tests {
         } else {
             panic!("Expected ShowGraphType");
         }
+    }
+
+    // --- Clause order ---
+
+    #[test]
+    fn test_ordered_clauses_keep_remove_and_with_in_place() {
+        let mut parser = Parser::new("MATCH (a:P) REMOVE a.w WITH a MATCH (a)-[:K]->(b) RETURN b");
+        let Statement::Query(query) = parser.parse().unwrap() else {
+            panic!("Expected Query statement");
+        };
+        let kinds: Vec<&str> = query
+            .ordered_clauses
+            .iter()
+            .map(|clause| match clause {
+                QueryClause::Match(_) => "MATCH",
+                QueryClause::Remove(_) => "REMOVE",
+                QueryClause::With(_) => "WITH",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["MATCH", "REMOVE", "WITH", "MATCH"]);
     }
 
     // --- LOAD DATA ---

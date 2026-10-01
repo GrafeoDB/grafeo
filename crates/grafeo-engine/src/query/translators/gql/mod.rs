@@ -424,6 +424,7 @@ impl GqlTranslator {
                         ast::QueryClause::Create(_)
                             | ast::QueryClause::Delete(_)
                             | ast::QueryClause::Set(_)
+                            | ast::QueryClause::Remove(_)
                             | ast::QueryClause::Merge(_)
                             | ast::QueryClause::With(_)
                     )
@@ -550,6 +551,9 @@ impl GqlTranslator {
                             input: Box::new(plan),
                             pass_through_input: true,
                         });
+                    }
+                    ast::QueryClause::Remove(remove_clause) => {
+                        plan = Self::apply_remove(plan, remove_clause);
                     }
                     ast::QueryClause::With(with_clause) => {
                         plan = self.apply_with(plan, with_clause)?;
@@ -683,23 +687,15 @@ impl GqlTranslator {
             }
         }
 
-        // REMOVE clauses (not yet in ordered_clauses, always process)
-        for remove_clause in &query.remove_clauses {
-            for label_op in &remove_clause.label_operations {
-                plan = LogicalOperator::RemoveLabel(RemoveLabelOp {
-                    variable: label_op.variable.clone(),
-                    labels: label_op.labels.clone(),
-                    input: Box::new(plan),
-                });
-            }
-            for (variable, property) in &remove_clause.property_removals {
-                plan = LogicalOperator::SetProperty(SetPropertyOp {
-                    variable: variable.clone(),
-                    properties: vec![(property.clone(), LogicalExpression::Literal(Value::Null))],
-                    replace: false,
-                    is_edge: false,
-                    input: Box::new(plan),
-                });
+        // REMOVE clauses not among the ordered clauses (statements built
+        // without them) apply here, after the rest.
+        if !query
+            .ordered_clauses
+            .iter()
+            .any(|clause| matches!(clause, ast::QueryClause::Remove(_)))
+        {
+            for remove_clause in &query.remove_clauses {
+                plan = Self::apply_remove(plan, remove_clause);
             }
         }
 
@@ -1206,6 +1202,31 @@ impl GqlTranslator {
             variable: load.variable.clone(),
             field_terminator: load.field_terminator,
         })
+    }
+
+    /// Applies a REMOVE clause to `plan`: its label removals, then its
+    /// property removals.
+    fn apply_remove(
+        mut plan: LogicalOperator,
+        remove_clause: &ast::RemoveClause,
+    ) -> LogicalOperator {
+        for label_op in &remove_clause.label_operations {
+            plan = LogicalOperator::RemoveLabel(RemoveLabelOp {
+                variable: label_op.variable.clone(),
+                labels: label_op.labels.clone(),
+                input: Box::new(plan),
+            });
+        }
+        for (variable, property) in &remove_clause.property_removals {
+            plan = LogicalOperator::SetProperty(SetPropertyOp {
+                variable: variable.clone(),
+                properties: vec![(property.clone(), LogicalExpression::Literal(Value::Null))],
+                replace: false,
+                is_edge: false,
+                input: Box::new(plan),
+            });
+        }
+        plan
     }
 
     /// Applies a WITH clause to `plan`: its projection (or aggregation), the

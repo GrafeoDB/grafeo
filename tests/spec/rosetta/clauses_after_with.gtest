@@ -78,3 +78,24 @@ tests:
     expect:
       rows:
         - [c]
+
+  # A REMOVE before WITH runs before it, also when WITH drops its variable.
+  - name: remove_before_a_with_that_drops_its_variable
+    setup:
+      - "INSERT (:P {n: 1, w: 7})"
+    variants:
+      gql: "MATCH (a:P) REMOVE a.w WITH a.n AS n MATCH (b:P) RETURN n, b.w"
+      cypher: "MATCH (a:P) REMOVE a.w WITH a.n AS n MATCH (b:P) RETURN n, b.w"
+    expect:
+      rows:
+        - [1, null]
+
+  - name: match_after_remove_with
+    setup:
+      - "INSERT (:P {n: 1, w: 7})"
+    variants:
+      gql: "MATCH (a:P {n: 1}) REMOVE a.w WITH a MATCH (b:P {n: 1}) RETURN b.w"
+      cypher: "MATCH (a:P {n: 1}) REMOVE a.w WITH a MATCH (b:P {n: 1}) RETURN b.w"
+    expect:
+      rows:
+        - [null]

@@ -233,6 +233,8 @@ pub enum QueryClause {
     Delete(DeleteStatement),
     /// A SET clause.
     Set(SetClause),
+    /// A REMOVE clause.
+    Remove(RemoveClause),
     /// A MERGE clause.
     Merge(MergeClause),
     /// A LET clause (variable bindings).

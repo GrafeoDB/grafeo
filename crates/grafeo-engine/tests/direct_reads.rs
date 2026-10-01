@@ -12,7 +12,7 @@ use std::sync::Arc;
 use grafeo_common::types::{NodeId, Value};
 use grafeo_core::graph::lpg::LpgStore;
 use grafeo_core::graph::traits::GraphStoreMut;
-use grafeo_engine::{Config, GrafeoDB, SchemaInfo};
+use grafeo_engine::{Config, GrafeoDB};
 
 fn name(db: &GrafeoDB, id: NodeId) -> Option<Value> {
     db.get_node(id)
@@ -71,6 +71,8 @@ fn direct_reads_see_the_compacted_data() {
 #[cfg(feature = "compact-store")]
 #[test]
 fn schema_views_see_the_compacted_data() {
+    use grafeo_engine::SchemaInfo;
+
     let mut db = GrafeoDB::new_in_memory();
     let alix = person(&db, "Alix");
     let amsterdam = db

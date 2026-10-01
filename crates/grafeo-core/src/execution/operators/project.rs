@@ -342,8 +342,20 @@ impl Operator for ProjectOperator {
                         evaluator = evaluator.with_transaction_context(ep, tx_id);
                     }
 
+                    // A node or edge column takes a node or edge map (the
+                    // items of `nodes(p)`) by its id.
+                    let entities = matches!(
+                        output_col.data_type(),
+                        LogicalType::Node | LogicalType::Edge
+                    );
                     for row in input.selected_indices() {
-                        let value = evaluator.eval_at(&input, row).unwrap_or(Value::Null);
+                        let mut value = evaluator.eval_at(&input, row).unwrap_or(Value::Null);
+                        if entities
+                            && let Value::Map(map) = &value
+                            && let Some(id @ Value::Int64(_)) = map.get(&PropertyKey::new("_id"))
+                        {
+                            value = id.clone();
+                        }
                         output_col.push_value(value);
                     }
                 }

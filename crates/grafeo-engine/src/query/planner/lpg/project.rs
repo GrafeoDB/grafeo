@@ -497,6 +497,13 @@ impl super::Planner {
                                 .borrow_mut()
                                 .insert(col_name.clone(), kind);
                         }
+                        // One item of such a list (`head(r)`, `last(nodes(p))`)
+                        // stays a node or an edge, like a pattern variable.
+                        Some(EntityValue::Edge) => {
+                            output_types.push(LogicalType::Edge);
+                            self.edge_columns.borrow_mut().insert(col_name.clone());
+                        }
+                        Some(EntityValue::Node) => output_types.push(LogicalType::Node),
                         _ => {
                             output_types.push(LogicalType::Any);
                             // Expression results are scalar values

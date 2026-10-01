@@ -7,6 +7,8 @@
 //! cargo test -p grafeo-engine --all-features --test entity_lists
 //! ```
 
+#![cfg(all(feature = "lpg", feature = "gql"))]
+
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
 
@@ -108,6 +110,47 @@ fn with_keeps_an_edge_list() {
         Value::List(vec![Value::Int64(1), Value::Int64(2)].into())
     );
     assert_eq!(relationships(&row[2]), vec![contains(1), contains(2)]);
+}
+
+/// One item of an edge or node list stays an edge or a node through WITH:
+/// its properties, type, id and labels can be read, and RETURN gives its map.
+#[test]
+fn with_keeps_an_item_of_an_edge_or_node_list() {
+    let db = chain();
+    let row = row(db.execute(
+        "MATCH p = (d:Dir {name: 'a'})-[r]->{1,3}(x:File) \
+         WITH head(r) AS first, r[1] AS second, last(nodes(p)) AS file, x \
+         RETURN first, second.w, type(second), file, file.name, id(file) = id(x), labels(file)",
+    ));
+
+    assert_eq!(field(&row[0], "w"), Value::Int64(1));
+    assert_eq!(row[1], Value::Int64(2));
+    assert_eq!(row[2], Value::from("CONTAINS"));
+    assert_eq!(field(&row[3], "name"), Value::from("f"));
+    assert_eq!(row[4], Value::from("f"));
+    assert_eq!(row[5], Value::Bool(true));
+    assert_eq!(row[6], Value::List(vec![Value::from("File")].into()));
+}
+
+/// A variable named with a leading underscore is the query's own: it binds
+/// the list of relationships like any other name. An anonymous edge with a
+/// property map still checks the map on every hop.
+#[test]
+fn an_underscore_edge_variable_binds_its_relationships() {
+    let db = chain();
+    let gql = row(db.execute("MATCH (d:Dir {name: 'a'})-[_r]->{1,3}(x:File) RETURN _r"));
+    assert_eq!(relationships(&gql[0]), vec![contains(1), contains(2)]);
+    #[cfg(feature = "cypher")]
+    {
+        let cypher =
+            row(db.execute_cypher("MATCH (d:Dir {name: 'a'})-[_r*1..3]->(x:File) RETURN _r"));
+        assert_eq!(relationships(&cypher[0]), vec![contains(1), contains(2)]);
+        let first_hop =
+            row(db.execute_cypher("MATCH (d:Dir {name: 'a'})-[*1..3 {w: 1}]->(x) RETURN x.name"));
+        assert_eq!(first_hop, vec![Value::from("b")]);
+    }
+    let first_hop = row(db.execute("MATCH (d:Dir {name: 'a'})-[{w: 1}]->{1,3}(x) RETURN x.name"));
+    assert_eq!(first_hop, vec![Value::from("b")]);
 }
 
 /// A zero-length match binds the edge variable to an empty list.

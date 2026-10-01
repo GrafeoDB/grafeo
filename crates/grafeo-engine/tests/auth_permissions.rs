@@ -442,12 +442,17 @@ fn per_graph_grants_hold_after_use_graph() {
             .unwrap_err()
             .to_string(),
     );
+    let Err(error) = session.execute_streaming("MATCH (n) RETURN n") else {
+        panic!("a stream of a graph without a grant");
+    };
+    denied(error.to_string());
 
     session.use_graph("readonly");
     session.execute("MATCH (n) RETURN count(n)").unwrap();
     denied(session.execute("INSERT (:X)").unwrap_err().to_string());
     denied(session.create_node(&["X"]).unwrap_err().to_string());
     session.execute("EXPLAIN MATCH (n) RETURN n").unwrap();
+    assert!(session.execute_streaming("MATCH (n) RETURN n").is_ok());
     denied(
         session
             .execute("EXPLAIN INSERT (:X)")

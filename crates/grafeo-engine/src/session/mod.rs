@@ -3144,6 +3144,7 @@ impl Session {
                 plan
             }
         };
+        self.check_graph_access(false)?;
 
         // Cache + bind + optimize (same path as execute).
         let cache_key = CacheKey::with_graph(query, QueryLanguage::Gql, self.current_graph());
@@ -4729,8 +4730,8 @@ impl Session {
 
     /// Fails when the selected graph is gone or this identity has no grant
     /// for it (see `check_active_graph` and `check_graph_grant`). Every
-    /// statement checks this, also `EXPLAIN`, which shows a plan without
-    /// running it.
+    /// statement checks this in `with_auto_commit`; `EXPLAIN`, which shows a
+    /// plan without running it, and streamed queries check it themselves.
     #[cfg(feature = "lpg")]
     fn check_graph_access(&self, writes: bool) -> Result<()> {
         self.check_active_graph()?;

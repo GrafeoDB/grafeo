@@ -3178,12 +3178,14 @@ impl Session {
         let active = self.active_store();
         let has_active_tx = self.current_transaction.lock().is_some();
         let (viewing_epoch, transaction_id) = self.get_transaction_context();
-        let planner = self.create_planner_for_store_with_read_only(
-            Arc::clone(&active),
-            viewing_epoch,
-            transaction_id,
-            !has_active_tx,
-        );
+        let planner = self
+            .create_planner_for_store_with_read_only(
+                Arc::clone(&active),
+                viewing_epoch,
+                transaction_id,
+                !has_active_tx,
+            )
+            .for_streaming();
         let physical_plan = planner.plan(&optimized_plan)?;
         let columns = physical_plan.columns.clone();
 

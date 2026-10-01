@@ -158,6 +158,17 @@ struct RangeBounds<'a> {
     max_inclusive: bool,
 }
 
+/// How a planned query without `ORDER BY` orders its rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shuffle {
+    /// In the order the operators produce them.
+    Off,
+    /// In random order, after reading the whole result.
+    Whole,
+    /// In random order within each chunk, for a stream.
+    PerChunk,
+}
+
 /// Converts a logical plan to a physical operator tree for LPG stores.
 pub struct Planner {
     /// The graph store (read-only operations).
@@ -174,8 +185,9 @@ pub struct Planner {
     pub(super) anon_edge_counter: std::cell::Cell<u32>,
     /// Whether to use factorized execution for multi-hop queries.
     pub(super) factorized_execution: bool,
-    /// Whether a plan without `ORDER BY` returns its rows in random order.
-    pub(super) shuffle_unordered: bool,
+    /// How a plan without `ORDER BY` orders its rows (the `shuffle_unordered`
+    /// test option).
+    shuffle: Shuffle,
     /// Variables that hold scalar values (from UNWIND/FOR), not node/edge IDs.
     /// Used by plan_return to assign `LogicalType::Any` instead of `Node`.
     pub(super) scalar_columns: std::cell::RefCell<std::collections::HashSet<String>>,
@@ -247,7 +259,7 @@ impl Planner {
             viewing_epoch: epoch,
             anon_edge_counter: std::cell::Cell::new(0),
             factorized_execution: true,
-            shuffle_unordered: false,
+            shuffle: Shuffle::Off,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -313,7 +325,7 @@ impl Planner {
             viewing_epoch,
             anon_edge_counter: std::cell::Cell::new(0),
             factorized_execution: true,
-            shuffle_unordered: false,
+            shuffle: Shuffle::Off,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -413,7 +425,23 @@ impl Planner {
     /// `shuffle_unordered` test option).
     #[must_use]
     pub fn with_shuffle_unordered(mut self, shuffle: bool) -> Self {
-        self.shuffle_unordered = shuffle;
+        self.shuffle = if shuffle {
+            Shuffle::Whole
+        } else {
+            Shuffle::Off
+        };
+        self
+    }
+
+    /// Plans for a stream: with `shuffle_unordered`, the rows of each chunk
+    /// are shuffled on their own instead of the whole result, which would
+    /// have to be read before the first row. Call it after
+    /// [`with_shuffle_unordered`](Self::with_shuffle_unordered).
+    #[must_use]
+    pub fn for_streaming(mut self) -> Self {
+        if self.shuffle == Shuffle::Whole {
+            self.shuffle = Shuffle::PerChunk;
+        }
         self
     }
 
@@ -425,14 +453,15 @@ impl Planner {
         operator: Box<dyn Operator>,
         columns: &[String],
     ) -> Box<dyn Operator> {
-        if self.shuffle_unordered && !super::common::orders_rows(&logical_plan.root) {
-            let schema = self.derive_schema_from_columns(columns);
-            Box::new(grafeo_core::execution::operators::ShuffleOperator::new(
-                operator, schema,
-            ))
-        } else {
-            operator
+        use grafeo_core::execution::operators::ShuffleOperator;
+        if self.shuffle == Shuffle::Off || super::common::orders_rows(&logical_plan.root) {
+            return operator;
         }
+        let schema = self.derive_schema_from_columns(columns);
+        Box::new(match self.shuffle {
+            Shuffle::PerChunk => ShuffleOperator::per_chunk(operator, schema),
+            _ => ShuffleOperator::new(operator, schema),
+        })
     }
 
     /// Sets the constraint validator for schema enforcement during mutations.

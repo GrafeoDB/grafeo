@@ -1063,7 +1063,7 @@ test_db = file_db.to_memory()  # safe copy for experiments, indexes included
 
 Converts the database to a layered [CompactStore](../../user-guide/compact-store.md) for faster queries: a columnar base with CSR adjacency, built from a snapshot of all nodes and edges, plus a mutable overlay. The original store is dropped to free memory.
 
-The database stays writable: new writes land in the overlay, and `recompact()` merges the overlay into a fresh base. Gives ~60x memory reduction and 100x+ traversal speedup for read-mostly workloads.
+The database stays writable: new writes land in the overlay, and calling `compact()` again merges them into a fresh base. Gives ~60x memory reduction and 100x+ traversal speedup for read-mostly workloads.
 
 ```python
 def compact(self) -> None

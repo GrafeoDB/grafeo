@@ -54,6 +54,28 @@ fn results_without_order_by_are_shuffled() {
     assert!(groups.len() > 1);
 }
 
+/// A stream is shuffled one chunk at a time, so it keeps its bounded memory:
+/// every row comes back, in an order that changes.
+#[test]
+fn streamed_results_are_shuffled_too() {
+    let db = shuffled_database();
+    let stream = || {
+        db.execute_streaming("MATCH (n:A) RETURN n.v")
+            .unwrap()
+            .collect()
+            .unwrap()
+            .rows()
+            .to_vec()
+    };
+    let unordered = orders(stream);
+    assert!(unordered.len() > 1, "five runs gave one order");
+    for order in &unordered {
+        let mut sorted = order.clone();
+        sorted.sort_by_key(|value| value.as_int64());
+        assert_eq!(sorted, ints(0..50), "every row once");
+    }
+}
+
 #[test]
 fn ordered_results_keep_their_order() {
     let db = shuffled_database();

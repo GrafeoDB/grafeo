@@ -371,7 +371,10 @@ impl LpgStore {
     /// Freezes an epoch from hot (arena) storage to cold (compressed) storage.
     ///
     /// This is called by the transaction manager when an epoch becomes eligible
-    /// for freezing (no active transactions can see it). The freeze process:
+    /// for freezing (no active transactions can see it). The epoch must be
+    /// finished: a write still in progress at it, such as a batch that has
+    /// allocated its records but not yet indexed them, is not frozen and its
+    /// records stay hot. The freeze process:
     ///
     /// 1. Collects all hot version refs for the epoch
     /// 2. Reads the corresponding records from arena

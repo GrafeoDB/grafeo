@@ -7,9 +7,11 @@
 //! with, and it writes as the system, stamped at its new epoch, which it
 //! publishes when done. Every check of a single call runs before it writes,
 //! so the call cannot half-apply; a batch writes as a private transaction
-//! instead, which is undone when a later row fails. While a transaction is
-//! open, the call runs as an implicit transaction of a session and is checked
-//! for conflicts with the open one.
+//! instead, which is undone when a later row fails. A call that fails still
+//! uses up its epoch: the stores take it before the write, to stamp what they
+//! record themselves, and it is not handed out twice. The gap it leaves holds
+//! no data. While a transaction is open, the call runs as an implicit
+//! transaction of a session and is checked for conflicts with the open one.
 //!
 //! This keeps a direct call close to the cost of the store write itself. Once
 //! transactions own their change set (#448), every direct call becomes an
@@ -53,6 +55,10 @@ pub(crate) struct ImplicitWrites {
     /// The CDC events of the running call, recorded at its epoch.
     #[cfg(feature = "cdc")]
     cdc_events: Arc<parking_lot::Mutex<Vec<crate::cdc::ChangeEvent>>>,
+    /// Held while a direct call on a compacted database builds its WAL
+    /// records from the state and writes them (see `log_compacted_write`).
+    #[cfg(all(feature = "wal", feature = "compact-store"))]
+    compacted_log: parking_lot::Mutex<()>,
 }
 
 /// What a direct call changed. A compacted database's sessions write the
@@ -305,6 +311,11 @@ impl GrafeoDB {
 
     /// Writes the WAL records of a direct call that a compacted database's
     /// session made, from the state it left, as one group.
+    ///
+    /// Reading the state and writing the records happen under one lock, so
+    /// every call reads the state after all calls that logged before it: the
+    /// last group in the WAL holds the newest state, never an older one that
+    /// a call read before another call's commit and wrote after it.
     #[cfg(all(feature = "wal", feature = "compact-store"))]
     fn log_compacted_write(&self, target: DirectTarget<'_>, touched: Vec<Touched>) {
         use grafeo_storage::wal::WalRecord;
@@ -312,6 +323,7 @@ impl GrafeoDB {
         let (Some(_), Some(wal)) = (&self.layered_store, &self.wal) else {
             return;
         };
+        let _logging = self.implicit_writes.compacted_log.lock();
         let Ok(Some((graph_store, graph))) = self.direct_store(target) else {
             return;
         };

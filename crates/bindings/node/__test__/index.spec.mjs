@@ -1610,8 +1610,17 @@ describe('concurrent instances', () => {
 // -- Upserts -----------------------------------------------------------
 
 describe('upserts', () => {
+  let db
+
+  beforeEach(() => {
+    db = GrafeoDB.create()
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
   it('should create then update nodes and edges by key', async () => {
-    const db = GrafeoDB.create()
     const nodes = await db.upsertNodes(
       ['Graph', 'File'],
       [{ id: 'f1', size: 3 }, { size: 4 }, { id: 'f2' }, { id: 'f1', lang: 'rs' }]
@@ -1630,11 +1639,9 @@ describe('upserts', () => {
     await db.upsertNodes(['Graph', 'File'], [{ id: 'f1', size: 9 }], { replace: true })
     const file = (await db.execute("MATCH (n:File {id: 'f1'}) RETURN n.size, n.lang")).toArray()
     expect(file).toEqual([{ 'n.size': 9, 'n.lang': null }])
-    db.close()
   })
 
   it('should take edge options', async () => {
-    const db = GrafeoDB.create()
     await db.upsertNodes(['File'], [{ id: 'f1' }, { id: 'f2' }])
     const result = await db.upsertEdges('CALLS', [{ from: 'f1', to: 'f2', rid: 'c1' }], {
       key: 'rid',
@@ -1643,15 +1650,23 @@ describe('upserts', () => {
       dstField: 'to',
     })
     expect(result.created).toBe(1)
-    db.close()
   })
 })
 
 // -- Batch writes --------------------------------------------------------
 
 describe('batch writes', () => {
+  let db
+
+  beforeEach(() => {
+    db = GrafeoDB.create()
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
   it('should create nodes with several labels and edges with their own types', async () => {
-    const db = GrafeoDB.create()
     const [alix, gus, vincent] = await db.batchCreateNodesWithProps(
       ['Graph', 'Person'],
       [{ name: 'Alix' }, { name: 'Gus' }, { name: 'Vincent' }]
@@ -1670,11 +1685,9 @@ describe('batch writes', () => {
       { 'a.name': 'Alix', 'type(r)': 'KNOWS', 'r.since': 2020 },
       { 'a.name': 'Gus', 'type(r)': 'LIKES', 'r.since': null },
     ])
-    db.close()
   })
 
   it('should create no edge of a failing batch', async () => {
-    const db = GrafeoDB.create()
     const [alix, gus] = await db.batchCreateNodesWithProps('Person', [{}, {}])
     await expect(
       db.batchCreateEdges([
@@ -1683,7 +1696,6 @@ describe('batch writes', () => {
       ])
     ).rejects.toThrow(/does not exist/)
     expect(db.edgeCount()).toBe(0)
-    db.close()
   })
 })
 

@@ -163,15 +163,20 @@ impl PyQueryResult {
     /// if result.rows_scanned:
     ///     print(f"Scanned {result.rows_scanned} rows")
     /// ```
+    #[getter]
+    fn rows_scanned(&self) -> Option<u64> {
+        self.rows_scanned
+    }
+
     /// What the query's writes changed, as a dict: `nodes_created`,
     /// `nodes_deleted`, `edges_created`, `edges_deleted`, `properties_set`,
     /// `labels_added` and `labels_removed`.
     ///
     /// Example:
-    ///     ```python
-    ///     result = db.execute("INSERT (:Person {name: 'Alix'})")
-    ///     result.counters["nodes_created"]  # 1
-    ///     ```
+    /// ```python
+    /// result = db.execute("INSERT (:Person {name: 'Alix'})")
+    /// result.counters["nodes_created"]  # 1
+    /// ```
     #[getter]
     fn counters<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let c = &self.counters;
@@ -188,11 +193,6 @@ impl PyQueryResult {
             dict.set_item(name, count)?;
         }
         Ok(dict)
-    }
-
-    #[getter]
-    fn rows_scanned(&self) -> Option<u64> {
-        self.rows_scanned
     }
 
     /// Convert to a pandas DataFrame.

@@ -1632,7 +1632,9 @@ fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::
     })
 }
 
-// After `JsGrafeoDB`: napi takes the class's JS name from the struct, so the
-// `impl` blocks of these modules must come after it.
+// After `JsGrafeoDB`: napi-derive records a struct's `js_name` when it expands
+// the struct and looks it up when it expands an `impl` block, falling back to
+// the Rust name when the struct has not expanded yet. Declared earlier, these
+// modules' methods would land on a class named after the Rust struct.
 mod batch;
 mod upsert;

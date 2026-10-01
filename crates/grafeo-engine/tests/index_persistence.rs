@@ -4,7 +4,7 @@
 //! names that `DROP INDEX` and `DROP CONSTRAINT` use.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test index_persistence
+//! cargo test -p grafeo-engine --all-features --test index_persistence
 //! ```
 
 #![cfg(all(feature = "lpg", feature = "gql"))]

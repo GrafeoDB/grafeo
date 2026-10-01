@@ -89,7 +89,6 @@ impl Executor {
         self
     }
 
-    /// Checks whether the deadline has been exceeded.
     /// Reports the writes `counter` counts in the result's counters.
     #[must_use]
     pub fn with_write_counter(mut self, counter: Arc<WriteCounter>) -> Self {
@@ -105,6 +104,7 @@ impl Executor {
         result
     }
 
+    /// Checks whether the deadline has been exceeded.
     fn check_deadline(&self) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(deadline) = self.deadline

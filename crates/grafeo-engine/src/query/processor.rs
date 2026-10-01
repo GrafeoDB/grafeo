@@ -396,8 +396,9 @@ impl QueryProcessor {
             }
             #[allow(unreachable_patterns)]
             _ => Err(Error::Internal(format!(
-                "Language {:?} is not an LPG language",
-                language
+                "Language {:?} is not an LPG language ({} bytes of query)",
+                language,
+                query.len()
             ))),
         }
     }

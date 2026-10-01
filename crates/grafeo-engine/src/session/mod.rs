@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "lpg")]
 use grafeo_common::grafeo_debug_span;
+use grafeo_common::grafeo_info_span;
 #[cfg(feature = "lpg")]
 use grafeo_common::types::{EdgeId, NodeId};
 use grafeo_common::types::{EpochId, PropertyKey, TransactionId, Value};
 use grafeo_common::utils::error::Result;
-use grafeo_common::{grafeo_info_span, grafeo_warn};
 #[cfg(feature = "lpg")]
 use grafeo_core::graph::Direction;
 #[cfg(feature = "lpg")]
@@ -114,6 +114,7 @@ pub(crate) struct SessionConfig {
     pub query_timeout: Option<Duration>,
     pub max_property_size: Option<usize>,
     /// Buffer manager for memory-aware query execution.
+    #[cfg(feature = "spill")]
     pub buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
     pub commit_counter: Arc<AtomicUsize>,
     pub gc_interval: usize,
@@ -183,6 +184,7 @@ pub struct Session {
     /// Maximum size in bytes for a single property value.
     max_property_size: Option<usize>,
     /// Buffer manager for memory-aware execution (spill decisions).
+    #[cfg(feature = "spill")]
     buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
     /// Shared commit counter for triggering auto-GC.
     commit_counter: Arc<AtomicUsize>,
@@ -311,6 +313,7 @@ impl Session {
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
+            #[cfg(feature = "spill")]
             buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
@@ -381,7 +384,7 @@ impl Session {
             && self.current_transaction.lock().is_none()
             && let Err(e) = wal.flush_implicit()
         {
-            grafeo_warn!("Session: failed to write WAL records: {}", e);
+            grafeo_common::grafeo_warn!("Session: failed to write WAL records: {}", e);
         }
     }
 
@@ -450,6 +453,7 @@ impl Session {
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
+            #[cfg(feature = "spill")]
             buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
@@ -605,25 +609,29 @@ impl Session {
             #[cfg(feature = "lpg")]
             Some(name) => match self.store.graph(name) {
                 Some(named_store) => {
-                    let mut store: Arc<dyn GraphStoreMut> = Arc::clone(&named_store) as _;
+                    let store: Arc<dyn GraphStoreMut> = Arc::clone(&named_store) as _;
 
                     #[cfg(feature = "wal")]
-                    if let Some(wal) = &self.wal {
-                        store = Arc::new(crate::database::wal_store::WalGraphStore::new_for_graph(
-                            named_store,
-                            Arc::clone(wal),
-                            name.to_string(),
-                        ));
-                    }
+                    let store: Arc<dyn GraphStoreMut> = match &self.wal {
+                        Some(wal) => {
+                            Arc::new(crate::database::wal_store::WalGraphStore::new_for_graph(
+                                named_store,
+                                Arc::clone(wal),
+                                name.to_string(),
+                            ))
+                        }
+                        None => store,
+                    };
 
                     #[cfg(feature = "cdc")]
-                    if let Some(ref pending) = self.cdc_pending_events {
-                        store = Arc::new(crate::database::cdc_store::CdcGraphStore::wrap(
+                    let store: Arc<dyn GraphStoreMut> = match &self.cdc_pending_events {
+                        Some(pending) => Arc::new(crate::database::cdc_store::CdcGraphStore::wrap(
                             store,
                             Arc::clone(&self.cdc_log),
                             Arc::clone(pending),
-                        ));
-                    }
+                        )),
+                        None => store,
+                    };
 
                     Some(store)
                 }
@@ -1244,7 +1252,7 @@ impl Session {
         if let Some(ref wal) = self.wal
             && let Err(e) = wal.wal().log_batch(&records)
         {
-            grafeo_warn!("Failed to log schema change to WAL: {}", e);
+            grafeo_common::grafeo_warn!("Failed to log schema change to WAL: {}", e);
         }
     }
 
@@ -4109,7 +4117,7 @@ impl Session {
         if let Some(ref wal) = self.wal
             && let Err(e) = wal.flush_implicit()
         {
-            grafeo_warn!("Session: failed to write WAL records: {}", e);
+            grafeo_common::grafeo_warn!("Session: failed to write WAL records: {}", e);
         }
 
         let transaction_id = if let Some(level) = isolation_level {
@@ -4265,7 +4273,7 @@ impl Session {
                     epoch: commit_epoch,
                 },
             ]) {
-                grafeo_warn!("Failed to write transaction to WAL: {}", e);
+                grafeo_common::grafeo_warn!("Failed to write transaction to WAL: {}", e);
             }
         }
 

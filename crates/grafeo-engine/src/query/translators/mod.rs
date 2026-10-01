@@ -3,6 +3,14 @@
 //! Each submodule translates a parsed AST from a specific query language
 //! (GQL, Cypher, SPARQL, etc.) into the shared [`LogicalPlan`](crate::query::plan::LogicalPlan) IR.
 
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "gremlin",
+    feature = "graphql",
+    feature = "sql-pgq"
+))]
 pub(crate) mod common;
 
 #[cfg(feature = "gql")]

@@ -65,7 +65,7 @@ mod upsert;
 #[cfg(all(feature = "wal", feature = "lpg"))]
 pub(crate) mod wal_store;
 
-use grafeo_common::{grafeo_error, grafeo_warn};
+use grafeo_common::grafeo_error;
 #[cfg(feature = "wal")]
 use std::path::Path;
 use std::sync::Arc;
@@ -197,6 +197,7 @@ pub struct GrafeoDB {
     read_only: bool,
     /// Buffers of the direct calls made outside a transaction.
     #[cfg(feature = "lpg")]
+    #[cfg(any(feature = "wal", feature = "cdc"))]
     implicit_writes: direct::ImplicitWrites,
     /// Named graph projections (virtual subgraphs), shared with sessions.
     projections:
@@ -239,12 +240,7 @@ impl GrafeoDB {
     /// Unlike [`graph_store()`](Self::graph_store) (which clones an `Arc`),
     /// this borrows from `self` — suitable for constructing accessors that
     /// need `&'a dyn GraphStore` tied to the database lifetime.
-    #[cfg(any(
-        feature = "vector-index",
-        feature = "text-index",
-        feature = "hybrid-search",
-        feature = "embed",
-    ))]
+    #[cfg(feature = "vector-index")]
     fn graph_store_ref(&self) -> &dyn grafeo_core::graph::GraphStore {
         if let Some(ref ext_read) = self.external_read_store {
             ext_read.as_ref()
@@ -700,6 +696,7 @@ impl GrafeoDB {
             current_schema: RwLock::new(None),
             read_only: is_read_only,
             #[cfg(feature = "lpg")]
+            #[cfg(any(feature = "wal", feature = "cdc"))]
             implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
@@ -835,6 +832,7 @@ impl GrafeoDB {
             current_schema: RwLock::new(None),
             read_only: false,
             #[cfg(feature = "lpg")]
+            #[cfg(any(feature = "wal", feature = "cdc"))]
             implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
@@ -932,6 +930,7 @@ impl GrafeoDB {
             current_schema: RwLock::new(None),
             read_only: true,
             #[cfg(feature = "lpg")]
+            #[cfg(any(feature = "wal", feature = "cdc"))]
             implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
@@ -1586,6 +1585,7 @@ impl GrafeoDB {
             graph_model: self.config.graph_model,
             query_timeout: self.config.query_timeout,
             max_property_size: self.config.max_property_size,
+            #[cfg(feature = "spill")]
             buffer_manager: Some(Arc::clone(&self.buffer_manager)),
             commit_counter: Arc::clone(&self.commit_counter),
             gc_interval: self.config.gc_interval,
@@ -2099,7 +2099,7 @@ impl GrafeoDB {
         if let Some(mut flusher) = self.wal_flusher.lock().take()
             && let Err(e) = flusher.shutdown()
         {
-            grafeo_warn!("failed to stop the WAL flusher: {e}");
+            grafeo_common::grafeo_warn!("failed to stop the WAL flusher: {e}");
         }
 
         // Read-only databases: just release the shared lock, no checkpointing
@@ -2115,9 +2115,9 @@ impl GrafeoDB {
         // For single-file format: checkpoint to .grafeo file, then clean up sidecar WAL.
         // We must do this BEFORE the WAL close path because checkpoint_to_file
         // removes the sidecar WAL directory.
-        #[cfg(feature = "grafeo-file")]
+        #[cfg(all(feature = "wal", feature = "grafeo-file"))]
         let is_single_file = self.file_manager.is_some();
-        #[cfg(not(feature = "grafeo-file"))]
+        #[cfg(all(feature = "wal", not(feature = "grafeo-file")))]
         let is_single_file = false;
 
         #[cfg(feature = "grafeo-file")]
@@ -2151,7 +2151,7 @@ impl GrafeoDB {
                 }
                 fm.remove_sidecar_wal()?;
             } else {
-                grafeo_warn!(
+                grafeo_common::grafeo_warn!(
                     "keeping sidecar WAL for recovery: checkpoint wrote 0 sections but WAL has records"
                 );
             }
@@ -2206,7 +2206,7 @@ impl GrafeoDB {
                 },
             ])
         {
-            grafeo_warn!("Failed to log a graph change to the WAL: {}", e);
+            grafeo_common::grafeo_warn!("Failed to log a graph change to the WAL: {}", e);
         }
     }
 

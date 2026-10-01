@@ -3149,7 +3149,7 @@ mod tests {
         MergeOp, MergeRelationshipOp, MultiWayJoinOp, OtherwiseOp, ParameterScanOp, RemoveLabelOp,
         SetPropertyOp, ShortestPathOp, TripleComponent, TripleScanOp, UnionOp, UnwindOp,
     };
-    use grafeo_core::execution::operators::{Operator, SessionContext};
+    use grafeo_core::execution::operators::SessionContext;
 
     fn full_store() -> Arc<LpgStore> {
         // Richer store so expand and shortest path tests have real data.
@@ -3877,6 +3877,7 @@ mod tests {
     #[test]
     fn test_static_result_operator_emits_rows_and_resets() {
         use grafeo_common::types::Value;
+        use grafeo_core::execution::operators::Operator;
         let rows = vec![
             vec![Value::Int64(1), Value::String("Vincent".into())],
             vec![Value::Int64(2), Value::String("Jules".into())],

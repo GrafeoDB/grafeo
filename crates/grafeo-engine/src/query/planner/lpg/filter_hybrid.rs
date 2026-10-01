@@ -6,12 +6,12 @@
 
 #[cfg(feature = "text-index")]
 use super::{
-    Arc, BinaryOp, ExpressionPredicate, FilterOp, FilterOperator, GraphStoreSearch, HashMap,
+    Arc, BinaryOp, ExpressionPredicate, FilterOperator, GraphStoreSearch, HashMap,
     LogicalExpression, LogicalOperator, Operator, Result, Value,
 };
 
 #[cfg(all(feature = "vector-index", feature = "text-index"))]
-use super::{HashJoinOperator, PhysicalJoinType};
+use super::{FilterOp, HashJoinOperator, PhysicalJoinType};
 
 // ============================================================================
 // Text predicate extraction and pushdown

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::execution::operators::{GraphWriter, OperatorError};
 use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
@@ -47,6 +47,7 @@ pub(crate) enum DirectTarget<'a> {
 
 /// Buffers the direct calls outside a transaction share. Only the call
 /// holding the transaction manager's idle gate uses them.
+#[cfg(any(feature = "wal", feature = "cdc"))]
 #[derive(Default)]
 pub(crate) struct ImplicitWrites {
     /// The WAL records of the running call, written as one group.
@@ -342,7 +343,7 @@ impl GrafeoDB {
         }
         if let Err(e) = buffer.flush(&[
             WalRecord::TransactionCommit {
-                transaction_id: TransactionId::SYSTEM,
+                transaction_id: grafeo_common::types::TransactionId::SYSTEM,
             },
             WalRecord::EpochAdvance {
                 epoch: self.transaction_manager.current_epoch(),
@@ -376,7 +377,7 @@ impl GrafeoDB {
             epoch
         };
 
-        let mut target: Arc<dyn GraphStoreMut> = Arc::clone(store) as Arc<dyn GraphStoreMut>;
+        let target: Arc<dyn GraphStoreMut> = Arc::clone(store) as Arc<dyn GraphStoreMut>;
         #[cfg(feature = "wal")]
         let wal = self.wal.as_ref().map(|wal| {
             Arc::clone(self.implicit_writes.wal.get_or_init(|| {
@@ -394,27 +395,32 @@ impl GrafeoDB {
         #[cfg(feature = "cdc")]
         self.implicit_writes.cdc_events.lock().clear();
         #[cfg(feature = "wal")]
-        if let Some(buffer) = &wal {
-            use super::wal_store::WalGraphStore;
-            target = Arc::new(match graph {
-                None => WalGraphStore::new(Arc::clone(store), Arc::clone(buffer)),
-                Some(name) => WalGraphStore::new_for_graph(
-                    Arc::clone(store),
-                    Arc::clone(buffer),
-                    name.to_string(),
-                ),
-            });
-        }
+        let target: Arc<dyn GraphStoreMut> = match &wal {
+            Some(buffer) => {
+                use super::wal_store::WalGraphStore;
+                Arc::new(match graph {
+                    None => WalGraphStore::new(Arc::clone(store), Arc::clone(buffer)),
+                    Some(name) => WalGraphStore::new_for_graph(
+                        Arc::clone(store),
+                        Arc::clone(buffer),
+                        name.to_string(),
+                    ),
+                })
+            }
+            None => target,
+        };
         #[cfg(not(feature = "wal"))]
         let _ = graph;
         #[cfg(feature = "cdc")]
-        if self.cdc_active() {
-            target = Arc::new(super::cdc_store::CdcGraphStore::wrap_buffered(
+        let target: Arc<dyn GraphStoreMut> = if self.cdc_active() {
+            Arc::new(super::cdc_store::CdcGraphStore::wrap_buffered(
                 target,
                 Arc::clone(&self.cdc_log),
                 Arc::clone(&self.implicit_writes.cdc_events),
-            ));
-        }
+            ))
+        } else {
+            target
+        };
 
         let validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
             .with_store(Arc::clone(store) as Arc<dyn GraphStoreSearch>)
@@ -471,7 +477,8 @@ impl GrafeoDB {
             use grafeo_storage::wal::WalRecord;
             if let Err(e) = buffer.flush(&[
                 WalRecord::TransactionCommit {
-                    transaction_id: transaction.unwrap_or(TransactionId::SYSTEM),
+                    transaction_id: transaction
+                        .unwrap_or(grafeo_common::types::TransactionId::SYSTEM),
                 },
                 WalRecord::EpochAdvance { epoch },
             ]) {

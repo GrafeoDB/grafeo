@@ -203,6 +203,11 @@ stores: vector/text scan and search now fall through both layers.
     - **Alternative:** assign a canonical "primary" label and store additional labels as a list property instead.
 - **No disk serialization**: `compact()` operates in memory. To persist a compacted database,
   use snapshot export (WASM) or save before compacting.
+- **Missing properties read as empty values**: after `compact()`, a node or edge that lacks a
+  property other entities with its label or type have reads it as the column's empty value
+  (`''`, `0`, `0.0` or `false`) instead of null, `keys()` lists it and `IS NULL` does not match
+  it. Give every entity the property before compacting, or avoid relying on its absence
+  ([#542](https://github.com/GrafeoDB/grafeo/issues/542), planned for 0.5.45).
 
 ## Feature Flag
 

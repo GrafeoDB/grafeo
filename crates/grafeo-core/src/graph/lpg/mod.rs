@@ -12,6 +12,7 @@
 //!
 //! Start with [`LpgStore`] - that's where everything lives.
 
+#[cfg(feature = "lpg")]
 pub(crate) mod block;
 mod edge;
 mod node;

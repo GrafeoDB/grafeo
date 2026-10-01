@@ -287,8 +287,9 @@ export declare class GrafeoDB {
    *
    * Each row names its endpoints in the source and target fields (`src`
    * and `dst` by default) and holds the edge key; every other field is an
-   * edge property. A row whose endpoint does not exist, or without the
-   * key, is skipped, never created.
+   * edge property. A row whose endpoint key no node or more than one node
+   * holds, or without the key, is skipped; endpoints are never created.
+   * The key and the two endpoint fields must be different fields.
    */
   upsertEdges(edgeType: string, rows: Array<any>, options?: UpsertEdgesOptions | undefined | null): Promise<UpsertSummary>
 }
@@ -526,7 +527,7 @@ export interface UpsertSummary {
   updated: number
   /**
    * Rows that were not written: without their key, or an edge row whose
-   * endpoint does not exist.
+   * endpoint key no node or more than one node holds.
    */
   skipped: number
   /** The indices of the skipped rows, in order (at most 1,000). */

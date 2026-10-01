@@ -580,7 +580,9 @@ impl Session {
                     }
                     named_store as Arc<dyn GraphStoreSearch>
                 }
-                None => Arc::clone(&self.graph_store),
+                // Dropped meanwhile: no data, never the default graph's (the
+                // graph check before a statement reports the drop).
+                None => Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStoreSearch>,
             },
             #[cfg(not(feature = "lpg"))]
             Some(_) => Arc::clone(&self.graph_store),
@@ -625,7 +627,9 @@ impl Session {
 
                     Some(store)
                 }
-                None => self.graph_store_mut.as_ref().map(Arc::clone),
+                // Dropped meanwhile: nothing to write to, never the default
+                // graph (see `store_for_key`).
+                None => None,
             },
             #[cfg(not(feature = "lpg"))]
             Some(_) => self.graph_store_mut.as_ref().map(Arc::clone),
@@ -4728,6 +4732,14 @@ impl Session {
         }
     }
 
+    /// Runs `body`, which may run several statements, as one write: in a
+    /// transaction of its own when none is open, otherwise inside the open
+    /// one. An error undoes everything `body` wrote; an open transaction goes
+    /// on.
+    pub(crate) fn as_one_write<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.with_auto_commit(true, body)
+    }
+
     /// Fails when the selected graph is gone or this identity has no grant
     /// for it (see `check_active_graph` and `check_graph_grant`). Every
     /// statement checks this in `with_auto_commit`; `EXPLAIN`, which shows a
@@ -7153,5 +7165,22 @@ mod tests {
             assert_eq!(result.rows.len(), 1);
             assert_eq!(result.rows[0][0], Value::from("social"));
         }
+    }
+
+    /// A selected graph that was dropped meanwhile resolves to no data and no
+    /// writable store, never to the default graph's: a statement that passed
+    /// its graph check just before the drop must not read or write there.
+    #[cfg(feature = "lpg")]
+    #[test]
+    fn a_dropped_selected_graph_resolves_to_nothing() {
+        let db = GrafeoDB::new_in_memory();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.create_graph("model").unwrap();
+        let session = db.session();
+        session.use_graph("model");
+        assert!(db.drop_graph("model"));
+
+        assert_eq!(session.active_store().node_count(), 0);
+        assert!(session.active_write_store().is_none());
     }
 }

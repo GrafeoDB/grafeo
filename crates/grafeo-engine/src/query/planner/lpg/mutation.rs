@@ -848,6 +848,7 @@ impl super::Planner {
                 transaction_id: self.transaction_id,
                 viewing_epoch: self.viewing_epoch,
                 catalog: self.catalog.clone(),
+                write_counter: self.write_counter(),
             },
         ));
 

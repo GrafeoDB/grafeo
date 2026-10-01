@@ -342,20 +342,16 @@ impl Operator for ProjectOperator {
                         evaluator = evaluator.with_transaction_context(ep, tx_id);
                     }
 
-                    // A node or edge column takes a node or edge map (the
-                    // items of `nodes(p)`) by its id.
+                    // A node or edge column holds ids: it takes a node or edge
+                    // map (the items of `nodes(p)`) by its id, and anything
+                    // that names no entity as null, never as entity 0.
                     let entities = matches!(
                         output_col.data_type(),
                         LogicalType::Node | LogicalType::Edge
                     );
                     for row in input.selected_indices() {
-                        let mut value = evaluator.eval_at(&input, row).unwrap_or(Value::Null);
-                        if entities
-                            && let Value::Map(map) = &value
-                            && let Some(id @ Value::Int64(_)) = map.get(&PropertyKey::new("_id"))
-                        {
-                            value = id.clone();
-                        }
+                        let value = evaluator.eval_at(&input, row).unwrap_or(Value::Null);
+                        let value = if entities { entity_id(value) } else { value };
                         output_col.push_value(value);
                     }
                 }
@@ -599,6 +595,19 @@ fn edge_to_map(edge: &Edge) -> Value {
     Value::Map(Arc::new(map))
 }
 
+/// The id a value gives a node or edge column: an id, the `_id` of an entity
+/// map, or null.
+fn entity_id(value: Value) -> Value {
+    match value {
+        Value::Int64(_) | Value::Null => value,
+        Value::Map(map) => match map.get(&PropertyKey::new("_id")) {
+            Some(id @ Value::Int64(_)) => id.clone(),
+            _ => Value::Null,
+        },
+        _ => Value::Null,
+    }
+}
+
 #[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
@@ -809,6 +818,49 @@ mod tests {
         let project =
             ProjectOperator::select_columns(Box::new(mock_scan), vec![0], vec![LogicalType::Int64]);
         assert_eq!(project.name(), "Project");
+    }
+
+    /// A node or edge column takes an entity map by its `_id`; a value that
+    /// names no entity is null there, never entity 0.
+    #[test]
+    fn test_project_entity_values_into_entity_columns() {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        builder.column_mut(0).unwrap().push_int64(1);
+        builder.advance_row();
+        let mock_scan = MockScanOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        let map = |entries: &[(&str, Value)]| {
+            Value::Map(Arc::new(
+                entries
+                    .iter()
+                    .map(|(key, value)| (PropertyKey::new(*key), value.clone()))
+                    .collect(),
+            ))
+        };
+        let expression = |value: Value| ProjectExpr::Expression {
+            expr: FilterExpression::Literal(value),
+            variable_columns: HashMap::new(),
+        };
+        let mut project = ProjectOperator::with_store(
+            Box::new(mock_scan),
+            vec![
+                expression(map(&[("_id", Value::Int64(7))])),
+                expression(map(&[("name", Value::from("Alix"))])),
+                expression(Value::from("Alix")),
+            ],
+            vec![LogicalType::Node, LogicalType::Node, LogicalType::Edge],
+            Arc::new(LpgStore::new().unwrap()),
+        );
+
+        let result = project.next().unwrap().unwrap();
+        assert_eq!(
+            result.column(0).unwrap().get_node_id(0),
+            Some(NodeId::new(7))
+        );
+        assert_eq!(result.column(1).unwrap().get_node_id(0), None);
+        assert_eq!(result.column(2).unwrap().get_edge_id(0), None);
     }
 
     #[test]

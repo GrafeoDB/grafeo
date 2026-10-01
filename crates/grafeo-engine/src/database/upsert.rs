@@ -1,7 +1,8 @@
 //! Upserts: create or update nodes and edges by a key property.
 //!
-//! Each call runs one `UNWIND $rows ... MERGE ... SET ...` statement, so the
-//! rows are checked, logged, reported to CDC and counted like any query. Rows
+//! Each call writes with one `UNWIND $rows ... MERGE ... SET ...` statement
+//! (an edge upsert looks up its endpoints first), so the rows are checked,
+//! logged, reported to CDC and counted like any query. Rows
 //! apply in order and see the writes of the rows before them: a key repeated
 //! within one call behaves like repeated calls (the first creates, the next
 //! update).
@@ -26,7 +27,7 @@ pub struct UpsertSummary {
     /// Rows that updated an existing node or edge.
     pub updated: usize,
     /// Rows that were not written: a row without its key, or an edge row
-    /// whose endpoint does not exist.
+    /// whose endpoint key no node or more than one node holds.
     pub skipped: usize,
     /// The indices of the skipped rows, in order (at most 1,000).
     pub skipped_rows: Vec<usize>,
@@ -103,9 +104,10 @@ fn upsert_nodes(
 /// Creates or updates one edge per row between the nodes whose
 /// `options.endpoint_key` is the row's source and target field, matched by
 /// its type and `options.key`. Every other field of a row is an edge
-/// property. A row whose endpoint does not exist is skipped, never created.
+/// property. A row whose endpoint does not exist, or whose endpoint key more
+/// than one node holds, is skipped; endpoints are never created.
 fn upsert_edges(
-    run: impl FnOnce(&str, HashMap<String, Value>) -> Result<QueryResult>,
+    session: &Session,
     edge_type: &str,
     rows: Vec<HashMap<PropertyKey, Value>>,
     options: &EdgeUpsertOptions,
@@ -119,6 +121,16 @@ fn upsert_edges(
     ] {
         check_name(what, name)?;
     }
+    let (key_field, src_field, dst_field) = (&options.key, &options.src_field, &options.dst_field);
+    if key_field == src_field || key_field == dst_field || src_field == dst_field {
+        return Err(Error::Query(QueryError::new(
+            QueryErrorKind::Semantic,
+            format!(
+                "upsert: the key ({key_field}), source field ({src_field}) and target field \
+                 ({dst_field}) must be different fields"
+            ),
+        )));
+    }
     let endpoint_labels = options
         .endpoint_labels
         .iter()
@@ -130,7 +142,7 @@ fn upsert_edges(
         PropertyKey::new(options.dst_field.as_str()),
     );
     let key = PropertyKey::new(options.key.as_str());
-    let items = rows
+    let mut items: Vec<(usize, Value)> = rows
         .into_iter()
         .enumerate()
         .filter_map(|(index, mut row)| {
@@ -139,9 +151,12 @@ fn upsert_edges(
             if row.get(&key).is_none_or(Value::is_null) {
                 return None;
             }
-            Some(item(
+            Some((
                 index,
-                [("src", source), ("dst", target), ("props", map_value(row))],
+                item(
+                    index,
+                    [("src", source), ("dst", target), ("props", map_value(row))],
+                ),
             ))
         })
         .collect();
@@ -157,11 +172,61 @@ fn upsert_edges(
         edge_type = quote(edge_type),
         key = quote(&options.key),
     );
-    summarize(run, &query, items, total, |counters| counters.edges_created)
+
+    // A row whose endpoint key more than one node holds matches one pair of
+    // endpoints per node and comes back once per pair. Such an attempt is
+    // undone and the call runs again without those rows, so they write
+    // nothing; each attempt drops at least one row.
+    let result = loop {
+        if items.is_empty() {
+            return Ok(summary(total, &BTreeSet::new(), 0));
+        }
+        let mut ambiguous = BTreeSet::new();
+        let attempt = session.as_one_write(|| {
+            let rows = items
+                .iter()
+                .map(|(_, item)| item.clone())
+                .collect::<Vec<_>>();
+            let result = session.execute_with_params(
+                &query,
+                HashMap::from([("rows".to_string(), Value::List(rows.into()))]),
+            )?;
+            ambiguous = repeated_rows(&result);
+            if ambiguous.is_empty() {
+                Ok(result)
+            } else {
+                Err(Error::Internal("upsert: ambiguous endpoint keys".into()))
+            }
+        });
+        match attempt {
+            Ok(result) => break result,
+            Err(_) if !ambiguous.is_empty() => {
+                items.retain(|(index, _)| !ambiguous.contains(index));
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    Ok(count(&result, total, result.counters.edges_created))
+}
+
+/// The row indices the upsert statement returned, from its first column.
+fn returned_rows(result: &QueryResult) -> impl Iterator<Item = usize> + '_ {
+    result.rows().iter().filter_map(|row| match row.first() {
+        Some(Value::Int64(index)) => usize::try_from(*index).ok(),
+        _ => None,
+    })
+}
+
+/// The row indices the upsert statement returned more than once.
+fn repeated_rows(result: &QueryResult) -> BTreeSet<usize> {
+    let mut seen = BTreeSet::new();
+    returned_rows(result)
+        .filter(|index| !seen.insert(*index))
+        .collect()
 }
 
 /// Runs the upsert statement over `items` and counts what it did with the
-/// `total` rows: the rows it returns were written, `created` of them new.
+/// `total` rows (see [`count`]).
 fn summarize(
     run: impl FnOnce(&str, HashMap<String, Value>) -> Result<QueryResult>,
     query: &str,
@@ -176,16 +241,18 @@ fn summarize(
         query,
         HashMap::from([("rows".to_string(), Value::List(items.into()))]),
     )?;
-    let written: BTreeSet<usize> = result
-        .rows()
-        .iter()
-        .filter_map(|row| match row.first() {
-            Some(Value::Int64(index)) => usize::try_from(*index).ok(),
-            _ => None,
-        })
-        .collect();
-    let created = usize::try_from(created(&result.counters)).unwrap_or(usize::MAX);
-    Ok(summary(total, &written, created))
+    Ok(count(&result, total, created(&result.counters)))
+}
+
+/// What the upsert statement did with the `total` rows: the rows it returns
+/// were written, `created` of them new.
+fn count(result: &QueryResult, total: usize, created: u64) -> UpsertSummary {
+    let written: BTreeSet<usize> = returned_rows(result).collect();
+    summary(
+        total,
+        &written,
+        usize::try_from(created).unwrap_or(usize::MAX),
+    )
 }
 
 fn summary(total: usize, written: &BTreeSet<usize>, created: usize) -> UpsertSummary {
@@ -267,26 +334,23 @@ impl GrafeoDB {
     /// graph, between the nodes the row's source and target fields name, in
     /// one statement (see [`EdgeUpsertOptions`]).
     ///
-    /// A row whose endpoint does not exist, or without the edge key, is
-    /// skipped, never created. Rows apply in order: a key repeated within one
-    /// call creates one edge, which the later rows update.
+    /// A row whose endpoint key no node or more than one node holds, or
+    /// without the edge key, is skipped; endpoints are never created. Rows
+    /// apply in order: a key repeated within one call creates one edge, which
+    /// the later rows update.
     ///
     /// # Errors
     ///
-    /// Returns an error if a row breaks the schema; nothing of the call is
-    /// written then.
+    /// Returns an error if a row breaks the schema, nothing of the call is
+    /// written then, or if the edge key, source field and target field are
+    /// not three different fields.
     pub fn upsert_edges(
         &self,
         edge_type: &str,
         rows: Vec<HashMap<PropertyKey, Value>>,
         options: &EdgeUpsertOptions,
     ) -> Result<UpsertSummary> {
-        upsert_edges(
-            |query, params| self.execute_with_params(query, params),
-            edge_type,
-            rows,
-            options,
-        )
+        upsert_edges(&self.session(), edge_type, rows, options)
     }
 }
 
@@ -325,12 +389,7 @@ impl GraphHandle<'_> {
         rows: Vec<HashMap<PropertyKey, Value>>,
         options: &EdgeUpsertOptions,
     ) -> Result<UpsertSummary> {
-        upsert_edges(
-            |query, params| self.execute_with_params(query, params),
-            edge_type,
-            rows,
-            options,
-        )
+        upsert_edges(&self.session()?, edge_type, rows, options)
     }
 }
 
@@ -369,11 +428,6 @@ impl Session {
         rows: Vec<HashMap<PropertyKey, Value>>,
         options: &EdgeUpsertOptions,
     ) -> Result<UpsertSummary> {
-        upsert_edges(
-            |query, params| self.execute_with_params(query, params),
-            edge_type,
-            rows,
-            options,
-        )
+        upsert_edges(self, edge_type, rows, options)
     }
 }

@@ -659,7 +659,9 @@ impl GraphWriter {
             .create_node_versioned(&label_refs, self.epoch(), self.transaction());
         self.record(Entity::Node(id))?;
         self.count(|c| &c.nodes_created, 1);
-        self.count(|c| &c.labels_added, labels.len());
+        // `(:A:A)` gives the node one label.
+        let distinct: std::collections::BTreeSet<&str> = label_refs.into_iter().collect();
+        self.count(|c| &c.labels_added, distinct.len());
         Ok(id)
     }
 

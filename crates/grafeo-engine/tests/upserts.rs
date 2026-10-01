@@ -200,6 +200,98 @@ fn edges_are_created_then_updated_between_existing_nodes() {
     );
 }
 
+/// An endpoint key that more than one node holds names no single endpoint:
+/// the row is skipped and reported, and writes no edge at all.
+#[test]
+fn a_row_with_an_ambiguous_endpoint_is_skipped() {
+    let db = GrafeoDB::new_in_memory();
+    db.create_property_index("id");
+    files(&db);
+    db.execute("INSERT (:Other {id: 'f2'})").unwrap();
+    let edge = |src: &str, dst: &str, id: &str| {
+        row(&[
+            ("src", Value::from(src)),
+            ("dst", Value::from(dst)),
+            ("id", Value::from(id)),
+        ])
+    };
+    let result = db
+        .upsert_edges(
+            "USES",
+            vec![
+                edge("f1", "f2", "u1"),
+                edge("f2", "f3", "u2"),
+                edge("f1", "f3", "u3"),
+            ],
+            &EdgeUpsertOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(result, summary(1, 0, &[0, 1]));
+    assert_eq!(
+        rows(&db, "MATCH (s)-[r:USES]->(d) RETURN s.id, d.id, r.id"),
+        [vec![
+            Value::from("f1"),
+            Value::from("f3"),
+            Value::from("u3")
+        ]]
+    );
+
+    // Inside a transaction the transaction's own writes stay.
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.execute("INSERT (:Log {n: 1})").unwrap();
+    let result = session
+        .upsert_edges(
+            "CALLS",
+            vec![edge("f1", "f2", "c1"), edge("f3", "f1", "c2")],
+            &EdgeUpsertOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(result, summary(1, 0, &[0]));
+    session.commit().unwrap();
+    assert_eq!(
+        rows(&db, "MATCH (l:Log) RETURN l.n"),
+        [vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        rows(&db, "MATCH (s)-[r:CALLS]->(d) RETURN s.id, d.id"),
+        [vec![Value::from("f3"), Value::from("f1")]]
+    );
+}
+
+/// The edge key and the two endpoint fields name three different fields of
+/// a row; otherwise one would consume another and every row would be skipped.
+#[test]
+fn clashing_field_names_are_rejected() {
+    let db = GrafeoDB::new_in_memory();
+    files(&db);
+    let rows_of = || {
+        vec![row(&[
+            ("src", Value::from("f1")),
+            ("dst", Value::from("f2")),
+            ("id", Value::from("u1")),
+        ])]
+    };
+    for (key, src_field, dst_field) in [
+        ("src", "src", "dst"),
+        ("dst", "src", "dst"),
+        ("id", "src", "src"),
+    ] {
+        let options = EdgeUpsertOptions {
+            key: key.to_string(),
+            src_field: src_field.to_string(),
+            dst_field: dst_field.to_string(),
+            ..EdgeUpsertOptions::default()
+        };
+        let error = db.upsert_edges("USES", rows_of(), &options).unwrap_err();
+        assert!(
+            error.to_string().contains("different fields"),
+            "{key} {src_field} {dst_field}: {error}"
+        );
+    }
+    assert_eq!(db.edge_count(), 0);
+}
+
 #[test]
 fn endpoint_labels_and_field_names_are_configurable() {
     let db = GrafeoDB::new_in_memory();

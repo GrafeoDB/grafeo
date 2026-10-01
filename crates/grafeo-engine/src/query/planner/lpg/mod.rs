@@ -372,6 +372,18 @@ impl Planner {
         Arc::clone(&self.write_counter)
     }
 
+    /// Counts the writes into `counter` instead of a counter of its own, so
+    /// the writes of a stored procedure's body count for the statement that
+    /// calls it.
+    #[must_use]
+    pub fn with_write_counter(
+        mut self,
+        counter: Arc<grafeo_core::execution::operators::WriteCounter>,
+    ) -> Self {
+        self.write_counter = counter;
+        self
+    }
+
     /// Returns the viewing epoch for this planner.
     #[must_use]
     pub fn viewing_epoch(&self) -> EpochId {

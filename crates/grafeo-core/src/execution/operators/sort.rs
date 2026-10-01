@@ -89,6 +89,9 @@ pub struct SortOperator {
     sort_keys: Vec<SortKey>,
     /// The column types of the materialized chunks.
     column_types: ColumnTypes,
+    /// How many leading columns the sort returns, when the trailing ones are
+    /// sort keys added only to sort by (see [`with_output_width`](Self::with_output_width)).
+    output_width: Option<usize>,
     /// Materialized chunks.
     chunks: Vec<DataChunk>,
     /// Sorted row references.
@@ -106,11 +109,28 @@ impl SortOperator {
             child,
             sort_keys,
             column_types: ColumnTypes::default(),
+            output_width: None,
             chunks: Vec::new(),
             sorted_rows: Vec::new(),
             sort_complete: false,
             output_position: 0,
         }
+    }
+
+    /// Returns only the first `width` columns of each row: the columns after
+    /// them hold sort keys the planner added to sort by, such as `x.age` for
+    /// `RETURN a AS x ORDER BY x.age`, and are not part of the result.
+    #[must_use]
+    pub fn with_output_width(mut self, width: usize) -> Self {
+        self.output_width = Some(width);
+        self
+    }
+
+    /// Whether the sort drops trailing sort-key columns. The push-based sort
+    /// returns every column, so such a sort is not converted to it.
+    #[must_use]
+    pub fn drops_columns(&self) -> bool {
+        self.output_width.is_some()
     }
 
     /// Decomposes this operator into its child and sort keys for push-based conversion.
@@ -178,14 +198,18 @@ impl Operator for SortOperator {
             return Ok(None);
         }
 
-        let mut builder = DataChunkBuilder::with_capacity(self.column_types.types(), 2048);
+        let types = self.column_types.types();
+        let width = self
+            .output_width
+            .map_or(types.len(), |width| width.min(types.len()));
+        let mut builder = DataChunkBuilder::with_capacity(&types[..width], 2048);
 
         while self.output_position < self.sorted_rows.len() && !builder.is_full() {
             let row_ref = &self.sorted_rows[self.output_position];
             let source_chunk = &self.chunks[row_ref.chunk_index];
 
-            // Copy all columns
-            for col_idx in 0..source_chunk.column_count() {
+            // Copy the returned columns
+            for col_idx in 0..width.min(source_chunk.column_count()) {
                 if let (Some(src_col), Some(dst_col)) =
                     (source_chunk.column(col_idx), builder.column_mut(col_idx))
                 {
@@ -556,5 +580,34 @@ mod tests {
         assert_eq!(sort_keys[0].column, 0);
         assert_eq!(sort_keys[1].column, 1);
         assert!(child.next().unwrap().is_none());
+    }
+
+    /// A sort with an output width returns the leading columns only, in the
+    /// sorted order and with their types: the trailing ones were sort keys.
+    #[test]
+    fn output_width_drops_the_sort_key_columns() {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Edge, LogicalType::Int64]);
+        for (id, key) in [(7_u64, 3_i64), (8, 1), (9, 2)] {
+            builder
+                .column_mut(0)
+                .unwrap()
+                .push_edge_id(grafeo_common::types::EdgeId::new(id));
+            builder.column_mut(1).unwrap().push_int64(key);
+            builder.advance_row();
+        }
+        let mock = MockOperator::new(vec![builder.finish()]);
+        let mut sort =
+            SortOperator::new(Box::new(mock), vec![SortKey::ascending(1)]).with_output_width(1);
+        assert!(sort.drops_columns());
+
+        let chunk = sort.next().unwrap().unwrap();
+        assert_eq!(chunk.column_count(), 1);
+        let edges = chunk.column(0).unwrap();
+        assert_eq!(edges.data_type(), &LogicalType::Edge);
+        let ids: Vec<u64> = chunk
+            .selected_indices()
+            .map(|row| edges.get_edge_id(row).unwrap().as_u64())
+            .collect();
+        assert_eq!(ids, [8, 9, 7]);
     }
 }

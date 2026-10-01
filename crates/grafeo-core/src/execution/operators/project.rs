@@ -2,7 +2,7 @@
 
 use super::filter::{ExpressionPredicate, FilterExpression, SessionContext};
 use super::{Operator, OperatorError, OperatorResult};
-use crate::execution::DataChunk;
+use crate::execution::{DataChunk, ValueVector};
 use crate::graph::GraphStoreSearch;
 use crate::graph::lpg::{Edge, Node};
 use grafeo_common::types::{
@@ -202,6 +202,17 @@ impl Operator for ProjectOperator {
                     let output_col = output
                         .column_mut(i)
                         .expect("column exists: index matches projection schema");
+
+                    // A copy the planner declared `Any` keeps the input's
+                    // type: node and edge IDs stay nodes and edges (in an
+                    // `Any` column an ID reads the properties of whichever
+                    // entity has it), and every value is copied as it is.
+                    if self.output_types[i] == LogicalType::Any {
+                        *output_col = ValueVector::with_capacity(
+                            input_col.data_type().clone(),
+                            input.row_count(),
+                        );
+                    }
 
                     // Copy selected rows
                     for row in input.selected_indices() {
@@ -682,6 +693,49 @@ mod tests {
         // Check values are reordered
         assert_eq!(result.column(0).unwrap().get_int64(0), Some(100));
         assert_eq!(result.column(1).unwrap().get_int64(0), Some(1));
+    }
+
+    /// A copy declared `Any` keeps the input column's type, so node IDs stay
+    /// node IDs (in an `Any` column an ID reads whichever entity has it); a
+    /// declared type still applies.
+    #[test]
+    fn a_copy_declared_any_keeps_the_input_type() {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node, LogicalType::Int64]);
+        for id in 1..=3_u64 {
+            builder
+                .column_mut(0)
+                .unwrap()
+                .push_node_id(grafeo_common::types::NodeId::new(id));
+            builder
+                .column_mut(1)
+                .unwrap()
+                .push_int64(i64::try_from(id).unwrap() * 10);
+            builder.advance_row();
+        }
+        let mock_scan = MockScanOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        let mut project = ProjectOperator::new(
+            Box::new(mock_scan),
+            vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(1),
+            ],
+            vec![LogicalType::Any, LogicalType::Any, LogicalType::Float64],
+        );
+
+        let result = project.next().unwrap().unwrap();
+        let ids = result.column(0).unwrap();
+        assert_eq!(ids.data_type(), &LogicalType::Node);
+        assert_eq!(
+            ids.get_node_id(2),
+            Some(grafeo_common::types::NodeId::new(3))
+        );
+        assert_eq!(result.column(1).unwrap().data_type(), &LogicalType::Int64);
+        assert_eq!(result.column(1).unwrap().get_int64(0), Some(10));
+        assert_eq!(result.column(2).unwrap().data_type(), &LogicalType::Float64);
     }
 
     #[test]

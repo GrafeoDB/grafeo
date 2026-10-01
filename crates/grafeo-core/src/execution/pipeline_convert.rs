@@ -127,6 +127,10 @@ fn decompose_recursive_memory(
             let sort = any
                 .downcast::<SortOperator>()
                 .expect("name() returned 'Sort' but downcast failed");
+            if sort.drops_columns() {
+                // The push-based sort returns every column.
+                return sort;
+            }
             let (child, sort_keys) = sort.into_parts();
             let push_keys: Vec<_> = sort_keys.iter().map(convert_sort_key).collect();
             push_ops.push(Box::new(SpillableSortPushOperator::with_memory_context(
@@ -208,6 +212,10 @@ fn decompose_recursive(
             let sort = any
                 .downcast::<SortOperator>()
                 .expect("name() returned 'Sort' but downcast failed");
+            if sort.drops_columns() {
+                // The push-based sort returns every column.
+                return sort;
+            }
             let (child, sort_keys) = sort.into_parts();
             let push_keys: Vec<_> = sort_keys.iter().map(convert_sort_key).collect();
             push_ops.push(Box::new(SortPushOperator::new(push_keys)));

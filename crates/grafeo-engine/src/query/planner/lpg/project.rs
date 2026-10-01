@@ -951,27 +951,23 @@ impl super::Planner {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let mut operator: Box<dyn Operator> = Box::new(SortOperator::new(input_op, physical_keys));
+        let mut sort = SortOperator::new(input_op, physical_keys);
 
-        // Strip the columns added for ORDER BY: the pre-Return projections
-        // (sort_extra_count) and every projection added after it (properties
-        // of a RETURN alias such as `e.w` in `RETURN r AS e ORDER BY e.w`,
-        // and complex expressions like labels(n)[0] or type(r)).
+        // The sort drops the columns added for ORDER BY, which come last: the
+        // pre-Return projections (sort_extra_count) and every projection added
+        // after it (properties of a RETURN alias such as `e.w` in
+        // `RETURN r AS e ORDER BY e.w`, and complex expressions like
+        // labels(n)[0] or type(r)). It keeps the other columns' types: a
+        // projection here would make them `Any`, and an edge ID in an `Any`
+        // column reads its properties from the node with that ID.
         let total_extra = sort_extra_count + extra_projection_count;
         if total_extra > 0 {
             let keep_count = output_columns.len() - total_extra;
-            let strip_projections: Vec<ProjectExpr> =
-                (0..keep_count).map(ProjectExpr::Column).collect();
-            let strip_types: Vec<LogicalType> = (0..keep_count).map(|_| LogicalType::Any).collect();
-            operator = Box::new(ProjectOperator::new(
-                operator,
-                strip_projections,
-                strip_types,
-            ));
+            sort = sort.with_output_width(keep_count);
             output_columns.truncate(keep_count);
         }
 
-        Ok((operator, output_columns))
+        Ok((Box::new(sort), output_columns))
     }
 
     /// Resolves a sort expression to a column index, using projected property columns.

@@ -86,3 +86,109 @@ tests:
     expect:
       columns: [e]
       count: 3
+
+  # ---------------------------------------------------------------------------
+  # A Person/City graph whose nodes and edges both carry `w` (see
+  # values_through_ordering.gtest): duplicates, nulls and mixed branches
+  # ---------------------------------------------------------------------------
+
+  # One row per outgoing edge: Alix 3, Gus 2, Vincent, Jules, Mia; one Alix removed.
+  - name: except_all_on_nodes_with_duplicates
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    query: "MATCH (a:Person)-[]->(b) RETURN a EXCEPT ALL MATCH (a:Person {name: 'Alix'}) RETURN a"
+    expect:
+      count: 7
+
+  # Each person as often as both sides have them: Alix 2, Gus, Vincent, Jules.
+  - name: intersect_all_on_nodes_with_duplicates
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    query: "MATCH (a:Person)-[]->(b) RETURN a INTERSECT ALL MATCH (a:Person)-[:KNOWS]->(b) RETURN a"
+    expect:
+      count: 5
+
+  # The KNOWS edges of Gus, Vincent and Jules.
+  - name: except_on_node_and_edge_pairs
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    query: "MATCH (a:Person)-[r:KNOWS]->(b) RETURN a, r EXCEPT MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN a, r"
+    expect:
+      count: 3
+
+  # Edges with w below 3 and above 1: all 8 once.
+  - name: union_of_overlapping_edge_sets
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person)-[r]->(b) WHERE r.w < 3 RETURN r UNION MATCH (a:Person)-[r]->(b) WHERE r.w > 1 RETURN r"
+      cypher: "MATCH (a:Person)-[r]->(b) WHERE r.w < 3 RETURN r UNION MATCH (a:Person)-[r]->(b) WHERE r.w > 1 RETURN r"
+    expect:
+      count: 8
+
+  # One name, three branches: a node, an edge and a node.
+  - name: union_all_of_a_node_an_edge_and_a_node
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (x:Person {name: 'Gus'}) RETURN x UNION ALL MATCH ()-[x:KNOWS]->() WHERE x.w = 1 RETURN x UNION ALL MATCH (x:City {name: 'Paris'}) RETURN x"
+      cypher: "MATCH (x:Person {name: 'Gus'}) RETURN x UNION ALL MATCH ()-[x:KNOWS]->() WHERE x.w = 1 RETURN x UNION ALL MATCH (x:City {name: 'Paris'}) RETURN x"
+    expect:
+      count: 3
+
+  # Each branch reads `w` of its own entities.
+  - name: union_all_of_node_and_edge_properties
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person) RETURN a.w AS w UNION ALL MATCH ()-[r:KNOWS]->() RETURN r.w AS w"
+      cypher: "MATCH (a:Person) RETURN a.w AS w UNION ALL MATCH ()-[r:KNOWS]->() RETURN r.w AS w"
+    expect:
+      rows:
+        - [100]
+        - [101]
+        - [103]
+        - [null]
+        - [null]
+        - [1]
+        - [2]
+        - [3]
+        - [4]
+        - [5]
+
+  # Persons not older than 29.
+  - name: except_on_names
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    query: "MATCH (a:Person) RETURN a.name AS n EXCEPT MATCH (a:Person) WHERE a.age > 29 RETURN a.name AS n"
+    expect:
+      rows:
+        - [Gus]
+        - [Mia]
+
+  # No person is older than 100.
+  - name: otherwise_takes_the_right_branch_when_the_left_is_empty
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    query: "MATCH (a:Person) WHERE a.age > 100 RETURN a.name AS n OTHERWISE MATCH (c:City) RETURN c.name AS n"
+    expect:
+      rows:
+        - [Amsterdam]
+        - [Berlin]
+        - [Paris]
+
+  # Null equals null in a set operation.
+  - name: except_with_nulls
+    query: "UNWIND [1, 2, 2, 3, null] AS x RETURN x EXCEPT UNWIND [2, null] AS x RETURN x"
+    expect:
+      rows:
+        - [1]
+        - [3]
+
+  # 2 appears twice on the left, three times on the right.
+  - name: intersect_all_with_duplicates
+    query: "UNWIND [1, 2, 2, 3] AS x RETURN x INTERSECT ALL UNWIND [2, 2, 2, 4] AS x RETURN x"
+    expect:
+      rows:
+        - [2]
+        - [2]

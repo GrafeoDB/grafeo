@@ -1881,26 +1881,19 @@ mod tests {
         let physical = planner.plan(&logical).unwrap();
         let root = physical.into_operator();
 
-        // Walk down: Limit → Project → Sort → Project → RangeScan, asserting
-        // at each step.
+        // Walk down: Limit → Sort → RangeScan, asserting at each step.
         let limit_op = root
             .into_any()
             .downcast::<LimitOperator>()
             .expect("top operator is LimitOperator");
         let (after_limit, _cap) = limit_op.into_parts();
 
-        // The Project above the Sort drops the sort-key column (`n_name`)
-        // the Sort needed: the Sort's rows have the columns of its input.
-        let strip_op = after_limit
-            .into_any()
-            .downcast::<ProjectOperator>()
-            .expect("operator under Limit must be the Project that drops the sort key");
-        let (after_strip, _projs, _types) = strip_op.into_parts();
-
-        let sort_op = after_strip
+        // The Sort also drops the sort-key column (`n_name`) it needed.
+        let sort_op = after_limit
             .into_any()
             .downcast::<SortOperator>()
-            .expect("operator under the Project must be Sort (Sort blocks pushdown)");
+            .expect("operator under Limit must be Sort (Sort blocks pushdown)");
+        assert!(sort_op.drops_columns());
         let (after_sort, _keys) = sort_op.into_parts();
 
         // Sort wraps its input in a Project that materializes the sort

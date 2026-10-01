@@ -283,12 +283,22 @@ mod subqueries_over_paths {
     #[test]
     fn subqueries_one_edge_cannot_decide_fail_in_return() {
         let db = tree();
-        for query in [
-            "MATCH (n:Directory) RETURN n.id, EXISTS { MATCH (n)-[:CONTAINS*]->(:File) } AS e",
-            "MATCH (n:Directory) RETURN n.id, COUNT { MATCH (n)-[:CONTAINS*]->() } AS c",
-            "MATCH (n:Directory) RETURN n.id, EXISTS { MATCH (n)-[:CONTAINS*2..]->() } AS e",
+        for (query, reason) in [
+            (
+                "MATCH (n:Directory) RETURN n.id, EXISTS { MATCH (n)-[:CONTAINS*]->(:File) } AS e",
+                "Unsupported EXISTS subquery pattern",
+            ),
+            (
+                "MATCH (n:Directory) RETURN n.id, COUNT { MATCH (n)-[:CONTAINS*]->() } AS c",
+                "Unsupported COUNT subquery pattern",
+            ),
+            (
+                "MATCH (n:Directory) RETURN n.id, EXISTS { MATCH (n)-[:CONTAINS*2..]->() } AS e",
+                "Unsupported EXISTS subquery pattern",
+            ),
         ] {
-            assert!(db.execute_cypher(query).is_err(), "{query}");
+            let error = db.execute_cypher(query).expect_err(query).to_string();
+            assert!(error.contains(reason), "{query}: {error}");
         }
     }
 

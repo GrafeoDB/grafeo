@@ -24,6 +24,7 @@
 //! [pf]: super::Planner::plan_filter
 
 use grafeo_common::collections::GrafeoSet;
+use grafeo_common::types::NodeId;
 
 use super::{
     ApplyOperator, Arc, BinaryOp, DistinctOperator, EmptyOperator, ExpressionPredicate,
@@ -43,6 +44,17 @@ fn values_equal_coerced(a: &Value, b: &Value) -> bool {
 }
 
 impl super::Planner {
+    /// Whether node `id` is visible to this query and, when `label` is given,
+    /// carries it. An index lookup checks its few results this way, instead of
+    /// collecting every node with the label.
+    fn visible_with_label(&self, id: NodeId, label: Option<&str>) -> bool {
+        let node = match self.transaction_id {
+            Some(tx) => self.store.get_node_versioned(id, self.viewing_epoch, tx),
+            None => self.store.get_node_at_epoch(id, self.viewing_epoch),
+        };
+        node.is_some_and(|node| label.is_none_or(|label| node.has_label(label)))
+    }
+
     /// Plans a filter operator.
     ///
     /// Uses zone map pre-filtering to potentially skip scans when predicates
@@ -929,15 +941,8 @@ impl super::Planner {
                 .iter()
                 .map(|(p, v)| (p.as_str(), v.clone()))
                 .collect();
-            let mut nodes = self.store.find_nodes_by_properties(&conditions_ref);
-
-            // Intersect with label if present
-            if let Some(label) = &scan_label {
-                let label_nodes: std::collections::HashSet<_> =
-                    self.store.nodes_by_label(label).into_iter().collect();
-                nodes.retain(|n| label_nodes.contains(n));
-            }
-            nodes
+            // The scan's label is checked on each found node below.
+            self.store.find_nodes_by_properties(&conditions_ref)
         } else {
             // No index but we have a label: scan label first, then check properties.
             // This is more efficient than ScanOperator → DataChunk → FilterOperator
@@ -965,14 +970,10 @@ impl super::Planner {
                 .collect()
         };
 
-        // MVCC visibility: filter out nodes not visible at the current epoch/tx.
-        // Without this, rolled-back or uncommitted nodes could leak through.
-        let epoch = self.viewing_epoch;
-        if let Some(tx) = self.transaction_id {
-            matching_nodes.retain(|id| self.store.get_node_versioned(*id, epoch, tx).is_some());
-        } else {
-            matching_nodes.retain(|id| self.store.get_node_at_epoch(*id, epoch).is_some());
-        }
+        // MVCC visibility: filter out nodes not visible at the current epoch/tx
+        // (rolled-back or uncommitted nodes could leak through otherwise), and
+        // nodes without the scan's label.
+        matching_nodes.retain(|&id| self.visible_with_label(id, scan_label.as_deref()));
 
         let columns = vec![scan_variable.clone()];
         let node_list_op: Box<dyn Operator> = Box::new(NodeListOperator::new(matching_nodes, 2048));
@@ -1084,20 +1085,8 @@ impl super::Planner {
             }
         }
 
-        // Intersect with the label constraint, if any.
-        if let Some(label) = &scan_label {
-            let label_nodes: GrafeoSet<_> = self.store.nodes_by_label(label).into_iter().collect();
-            matching_nodes.retain(|n| label_nodes.contains(n));
-        }
-
-        // MVCC visibility: drop nodes that aren't visible at the current
-        // epoch/tx, matching the equality fast path's semantics.
-        let epoch = self.viewing_epoch;
-        if let Some(tx) = self.transaction_id {
-            matching_nodes.retain(|id| self.store.get_node_versioned(*id, epoch, tx).is_some());
-        } else {
-            matching_nodes.retain(|id| self.store.get_node_at_epoch(*id, epoch).is_some());
-        }
+        // MVCC visibility and the label constraint, as in the equality fast path.
+        matching_nodes.retain(|&id| self.visible_with_label(id, scan_label.as_deref()));
 
         // Absorbed-scan PROFILE entry: see `record_absorbed_scan_entry`.
         self.record_absorbed_scan_entry("NodeScan", &filter.input);

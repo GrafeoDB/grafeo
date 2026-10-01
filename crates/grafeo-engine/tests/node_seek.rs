@@ -116,6 +116,84 @@ fn a_seek_returns_what_a_scan_returns() {
     );
 }
 
+/// A literal key is looked up in the index once; of what it finds, only the
+/// visible nodes with the pattern's label count (`:Other {id: 'd1'}` shares the
+/// key), also for labels set or removed in the transaction.
+#[test]
+fn a_literal_key_keeps_the_nodes_with_the_label() {
+    let (sought, scanned) = (docs(true), docs(false));
+    for query in [
+        "MATCH (n:Doc {id: 'd1'}) RETURN n.n",
+        "MATCH (n:Other {id: 'd1'}) RETURN n.id",
+        "MATCH (n:Doc) WHERE n.id IN ['d1', 'd2', 'x'] RETURN n.id",
+        "MATCH (n:Other) WHERE n.id IN ['d1', 'd2'] RETURN n.id",
+    ] {
+        assert_eq!(
+            rows(&sought, query, &[]),
+            rows(&scanned, query, &[]),
+            "{query}"
+        );
+    }
+    assert_eq!(
+        rows(&sought, "MATCH (n:Doc {id: 'd1'}) RETURN n.n", &[]),
+        [vec![Value::Int64(1)]]
+    );
+
+    let mut session = sought.session();
+    session.begin_transaction().unwrap();
+    session
+        .execute("MATCH (n:Other {id: 'd1'}) SET n:Doc")
+        .unwrap();
+    session
+        .execute("MATCH (n:Doc {id: 'd2'}) REMOVE n:Doc")
+        .unwrap();
+    let count = |query: &str| session.execute(query).unwrap().rows().len();
+    assert_eq!(count("MATCH (n:Doc {id: 'd1'}) RETURN n"), 2);
+    assert_eq!(count("MATCH (n:Doc {id: 'd2'}) RETURN n"), 0);
+    assert_eq!(
+        count("MATCH (n:Doc) WHERE n.id IN ['d1', 'd2'] RETURN n"),
+        2
+    );
+    session.rollback().unwrap();
+    assert_eq!(
+        rows(&sought, "MATCH (n:Doc {id: 'd2'}) RETURN n.n", &[]),
+        [vec![Value::Int64(2)]]
+    );
+}
+
+/// A labeled point lookup costs about what an unlabeled one does, however many
+/// nodes have the label: the label is checked on the index's results, not by
+/// collecting every node with it (which took 3 ms per lookup at 60,000 nodes).
+#[cfg(not(debug_assertions))]
+#[test]
+fn a_labeled_point_lookup_does_not_grow_with_the_label() {
+    use std::time::{Duration, Instant};
+
+    let db = GrafeoDB::new_in_memory();
+    db.execute("UNWIND range(0, 59999) AS i INSERT (:Graph:File {id: 'n' + toString(i)})")
+        .unwrap();
+    db.create_property_index("id");
+    // The fastest of five batches, to keep a busy machine out of the ratio.
+    let time = |query: &str| -> Duration {
+        (0..5)
+            .map(|_| {
+                let start = Instant::now();
+                for _ in 0..100 {
+                    db.execute(query).unwrap();
+                }
+                start.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let unlabeled = time("MATCH (s {id: 'n10'}) RETURN s.id");
+    let labeled = time("MATCH (s:File {id: 'n10'}) RETURN s.id");
+    assert!(
+        labeled < unlabeled * 5,
+        "labeled {labeled:?} vs unlabeled {unlabeled:?} per 100 lookups"
+    );
+}
+
 #[test]
 fn a_key_from_the_row_is_looked_up_in_the_index() {
     let db = docs(true);

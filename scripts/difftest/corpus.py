@@ -460,4 +460,12 @@ for case_id, query in [
 ]:
     case(case_id, query, GQL)
 
+# T: the MATCH clauses of a subquery go on from each other
+for case_id, query, languages in [
+    ("T1", "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) MATCH (b)-[:LIVES_IN]->(c:City) } RETURN a.name AS n", BOTH),
+    ("T2", "MATCH (a:Person) RETURN a.name AS n, COUNT { MATCH (a)-[:KNOWS]->(b) MATCH (b:City) } AS c", BOTH),
+    ("T3", "MATCH (a:Person) RETURN a.name AS n, COUNT { MATCH (a)-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:LIVES_IN]->(c) } AS c", GQL),
+]:
+    case(case_id, query, languages)
+
 # fmt: on

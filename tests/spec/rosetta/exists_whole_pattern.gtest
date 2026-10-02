@@ -53,13 +53,13 @@ tests:
     expect:
       empty: true
 
-  # A second MATCH on the end of the edge adds its label to that end. Cypher
-  # only: GQL does not join the MATCH clauses inside a subquery on their shared
-  # variables yet.
+  # A second MATCH on the end of the edge adds its label to that end: the
+  # MATCH clauses of a subquery share their variables.
   - name: exists_with_a_label_on_the_end_in_a_second_match
     setup:
       - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
     variants:
+      gql: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) MATCH (b:City) } RETURN a.name AS a"
       cypher: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) MATCH (b:City) } RETURN a.name AS a"
     expect:
       empty: true
@@ -68,6 +68,7 @@ tests:
     setup:
       - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
     variants:
+      gql: "MATCH (a:Person) RETURN a.name AS a, COUNT { MATCH (a)-[r]->(b) MATCH (b:City) } AS cities"
       cypher: "MATCH (a:Person) RETURN a.name AS a, COUNT { MATCH (a)-[r]->(b) MATCH (b:City) } AS cities"
     expect:
       rows:
@@ -75,6 +76,46 @@ tests:
         - [Gus, 0]
         - [Vincent, 0]
         - [Mia, 1]
+
+  # The second MATCH goes on from the end of the first: Gus knows Alix and
+  # Vincent knows Mia, who live in Amsterdam; Gus, whom Alix knows, lives
+  # nowhere.
+  - name: exists_through_a_second_match_from_the_end
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) MATCH (b)-[:LIVES_IN]->(c:City) } RETURN a.name AS a"
+      cypher: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) MATCH (b)-[:LIVES_IN]->(c:City) } RETURN a.name AS a"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: value_count_through_a_second_match_from_the_end
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) RETURN a.name AS a, VALUE { MATCH (a)-[:KNOWS]->(b) MATCH (b)-[:LIVES_IN]->(c) RETURN count(*) } AS c"
+    expect:
+      rows:
+        - [Alix, 0]
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Mia, 0]
+
+  # An OPTIONAL MATCH keeps every row of the MATCH before it. GQL only: the
+  # Cypher parser takes no OPTIONAL MATCH in a COUNT subquery yet.
+  - name: count_with_an_optional_match_from_the_end
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) RETURN a.name AS a, COUNT { MATCH (a)-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:LIVES_IN]->(c) } AS c"
+    expect:
+      rows:
+        - [Alix, 1]
+        - [Gus, 2]
+        - [Vincent, 1]
+        - [Mia, 0]
 
   # ---------------------------------------------------------------------------
   # A path mode (GQL only, except the plain walk: Cypher has no path modes)

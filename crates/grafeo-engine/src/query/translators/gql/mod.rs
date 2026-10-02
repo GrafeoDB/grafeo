@@ -1978,16 +1978,18 @@ impl GqlTranslator {
         let mut inner_defined = std::collections::HashSet::new();
         for match_clause in &query.match_clauses {
             Self::collect_pattern_variables(&match_clause.patterns, &mut inner_defined);
-            let match_plan = self.translate_match(match_clause)?;
-            plan = if matches!(plan, LogicalOperator::Empty) {
-                match_plan
-            } else {
-                LogicalOperator::Join(JoinOp {
+            // Each MATCH goes on from the ones before it, as in the outer
+            // query, so a variable in two clauses is the same node or edge.
+            plan = if match_clause.optional {
+                LogicalOperator::LeftJoin(LeftJoinOp {
                     left: Box::new(plan),
-                    right: Box::new(match_plan),
-                    join_type: JoinType::Cross,
-                    conditions: vec![],
+                    right: Box::new(self.translate_match(match_clause)?),
+                    condition: None,
                 })
+            } else if matches!(plan, LogicalOperator::Empty) {
+                self.translate_match(match_clause)?
+            } else {
+                self.translate_match_with_input(match_clause, Some(plan))?
             };
         }
 

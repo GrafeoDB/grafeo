@@ -77,6 +77,7 @@ Durability and consistency release. Crash-safe checkpoints and WAL recovery, ind
 - **`keys(r)` of an edge returned null**: it now lists the edge's property keys, as `keys(n)` does for a node, so `WHERE 'since' IN keys(r)` finds edges. `keys()` of a node or edge now returns its keys sorted, like `properties()`; the order used to change from one run to the next.
 - **A variable used as both a node and an edge matched by a coincidence of IDs**: `MATCH (r) MATCH ()-[r]->()`, `MATCH (a)-[a]->(b)`, `WITH 1 AS r MATCH ()-[r]->()` and a node imported into `CALL { WITH a ... }` and matched as an edge returned rows; they now fail with an error that names the variable. A variable imported into `CALL` keeps what it is, so an imported edge can be matched as an edge.
 - **Gremlin `union()` of edges and vertices returned null for the vertices** (`union(outE(), out())`): each row is now returned as the node or edge it is.
+- **`EXISTS` and `COUNT` subqueries counted edges the query could not see**: at an earlier epoch (`execute_at_epoch`) they counted edges created later, they counted edges another transaction had not committed, and a transaction missed its own new edges when the pattern named an edge type. They now see the same graph as the rest of the query.
 - **A transaction on a `.grafeo` file, a WAL directory or a compacted database did not see the type of an edge it had created**: `MATCH (a)-[:KNOWS]->(b)` missed the new edge and `type(r)` was null until the commit.
 - **GQL statements with a `MATCH` after `WITH` failed** with `Variable '...' not found in input` ([#480](https://github.com/GrafeoDB/grafeo/issues/480)), e.g. `MATCH (a) SET a.w = 7 WITH a MATCH (b) RETURN b.w`: the `WITH` was applied at the end of the statement. Clauses after a `WITH` now read the rows it passes on.
 - **A `MATCH` after a write in the same statement missed the write** ([#479](https://github.com/GrafeoDB/grafeo/issues/479)): `CREATE (:N {id: 'c'}) WITH 1 AS x MATCH (n:N) RETURN n.id` did not return the new node, and when the `MATCH` found nothing, the `CREATE` did not run at all.
@@ -112,6 +113,7 @@ Changes for [Deriva](https://github.com/StevenBtw/deriva), which generates Archi
 - **CI toolchain pins restored** ([#509](https://github.com/GrafeoDB/grafeo/issues/509)); Dependabot no longer bumps the Rust toolchain.
 - **Pull request eligibility check**: a `PR Policy` check applies the contribution rules in CONTRIBUTING.md.
 - **Differential test**: `scripts/difftest` runs a GQL and Cypher query corpus on the previous release and on a release build of a commit, and fails on any changed result that was not reviewed for the release; it also compares GQL with Cypher within one run.
+- **Browser WASM size limit**: the CI limit for the gzipped browser build is now 760 KB (warning at 740 KB); the build is about 721 KB after this release's fixes.
 
 ## [0.5.43] - 2026-09-27
 

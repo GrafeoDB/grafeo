@@ -453,3 +453,126 @@ mod subqueries_beyond_the_edge {
         );
     }
 }
+
+/// The `EXISTS` and `COUNT` checks see the graph the query sees: at an earlier
+/// epoch an edge created later does not count, an edge another transaction
+/// has not committed does not count, and neither does one this transaction
+/// deleted.
+mod subqueries_see_what_the_query_sees {
+    use super::*;
+
+    /// One query per shape the check answers from edges: one edge to a bound
+    /// end, one edge counted, one edge in `WHERE`, a path to a bound end, a
+    /// path from a free end.
+    const SHAPES: [&str; 5] = [
+        "MATCH (g:Person {name: 'Gus'}), (m:Person {name: 'Mia'}) \
+         RETURN EXISTS { MATCH (g)-[:KNOWS]->(m) } AS e",
+        "MATCH (g:Person {name: 'Gus'}) RETURN COUNT { MATCH (g)-[:KNOWS]->() } AS c",
+        "MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:KNOWS]->() } RETURN p.name AS n ORDER BY n",
+        "MATCH (a:Person {name: 'Alix'}), (m:Person {name: 'Mia'}) \
+         RETURN EXISTS { MATCH (a)-[:KNOWS]->{1,3}(m) } AS e",
+        "MATCH (v:Person {name: 'Vincent'}) RETURN EXISTS { MATCH (v)-[:KNOWS]->{1,2}() } AS e",
+    ];
+
+    fn rows(result: &grafeo_engine::database::QueryResult) -> Vec<Vec<Value>> {
+        result.rows().to_vec()
+    }
+
+    fn names(names: &[&str]) -> Vec<Vec<Value>> {
+        names
+            .iter()
+            .map(|name| vec![Value::String((*name).into())])
+            .collect()
+    }
+
+    /// The answers with Alix->Gus and Gus->Vincent only.
+    fn before() -> Vec<Vec<Vec<Value>>> {
+        vec![
+            vec![vec![Value::Bool(false)]],
+            vec![vec![Value::Int64(1)]],
+            names(&["Alix", "Gus"]),
+            vec![vec![Value::Bool(false)]],
+            vec![vec![Value::Bool(false)]],
+        ]
+    }
+
+    /// The answers once Gus->Mia and Vincent->Mia exist too.
+    fn after() -> Vec<Vec<Vec<Value>>> {
+        vec![
+            vec![vec![Value::Bool(true)]],
+            vec![vec![Value::Int64(2)]],
+            names(&["Alix", "Gus", "Vincent"]),
+            vec![vec![Value::Bool(true)]],
+            vec![vec![Value::Bool(true)]],
+        ]
+    }
+
+    fn people() -> GrafeoDB {
+        let db = GrafeoDB::new_in_memory();
+        db.execute(
+            "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), \
+             (gus)-[:KNOWS]->(:Person {name: 'Vincent'}), (:Person {name: 'Mia'})",
+        )
+        .unwrap();
+        db
+    }
+
+    const LATER_EDGES: &str = "MATCH (g:Person {name: 'Gus'}), (v:Person {name: 'Vincent'}), \
+                               (m:Person {name: 'Mia'}) INSERT (g)-[:KNOWS]->(m), (v)-[:KNOWS]->(m)";
+
+    #[test]
+    fn at_an_earlier_epoch_later_edges_do_not_count() {
+        let db = people();
+        let epoch = db.current_epoch();
+        db.execute(LATER_EDGES).unwrap();
+        for ((query, then), now) in SHAPES.iter().zip(before()).zip(after()) {
+            assert_eq!(
+                rows(&db.execute_at_epoch(query, epoch).unwrap()),
+                then,
+                "at the earlier epoch: {query}"
+            );
+            assert_eq!(rows(&db.execute(query).unwrap()), now, "now: {query}");
+        }
+    }
+
+    #[test]
+    fn edges_another_transaction_has_not_committed_do_not_count() {
+        let db = people();
+        let mut writer = db.session();
+        writer.begin_transaction().unwrap();
+        writer.execute(LATER_EDGES).unwrap();
+        for ((query, outside), inside) in SHAPES.iter().zip(before()).zip(after()) {
+            assert_eq!(
+                rows(&db.execute(query).unwrap()),
+                outside,
+                "another session: {query}"
+            );
+            assert_eq!(
+                rows(&writer.execute(query).unwrap()),
+                inside,
+                "the writing transaction: {query}"
+            );
+        }
+        writer.rollback().unwrap();
+    }
+
+    #[test]
+    fn edges_this_transaction_deleted_do_not_count() {
+        let db = people();
+        db.execute(LATER_EDGES).unwrap();
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        session
+            .execute("MATCH (:Person {name: 'Gus'})-[r:KNOWS]->(:Person {name: 'Mia'}) DELETE r")
+            .unwrap();
+        session
+            .execute(
+                "MATCH (:Person {name: 'Vincent'})-[r:KNOWS]->(:Person {name: 'Mia'}) DELETE r",
+            )
+            .unwrap();
+        for (query, expected) in SHAPES.iter().zip(before()) {
+            assert_eq!(rows(&session.execute(query).unwrap()), expected, "{query}");
+        }
+        session.rollback().unwrap();
+    }
+}

@@ -608,14 +608,43 @@ impl ExpressionPredicate {
         self.edge_type_matches(edge_id, edge_types) && self.has_labels(other_node_id, end_labels)
     }
 
-    /// Whether the edge has one of `edge_types` (any type when empty).
+    /// Whether the edge has one of `edge_types` (any type when empty). The
+    /// type is read as this query sees the edge, so a transaction finds the
+    /// type of an edge it created.
     fn edge_type_matches(&self, edge_id: EdgeId, edge_types: &[String]) -> bool {
-        edge_types.is_empty()
-            || self.store.edge_type(edge_id).is_some_and(|actual| {
-                edge_types
-                    .iter()
-                    .any(|t| actual.as_str().eq_ignore_ascii_case(t.as_str()))
-            })
+        if edge_types.is_empty() {
+            return true;
+        }
+        let actual = if let (Some(ep), Some(tx)) = (self.viewing_epoch, self.transaction_id) {
+            self.store.edge_type_versioned(edge_id, ep, tx)
+        } else {
+            self.store.edge_type(edge_id)
+        };
+        actual.is_some_and(|actual| {
+            edge_types
+                .iter()
+                .any(|t| actual.as_str().eq_ignore_ascii_case(t.as_str()))
+        })
+    }
+
+    /// The edges of `node` in `direction` that this query sees, with the
+    /// node at their other end: not one created after the viewing epoch, by
+    /// another transaction that has not committed, or deleted by this one
+    /// (the checks the expand operators make).
+    fn visible_edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
+        let mut edges = self.store.edges_from(node, direction);
+        if let Some(epoch) = self.viewing_epoch {
+            edges.retain(|&(other, edge)| {
+                if let Some(tx) = self.transaction_id {
+                    self.store.is_edge_visible_versioned(edge, epoch, tx)
+                        && self.store.is_node_visible_versioned(other, epoch, tx)
+                } else {
+                    self.store.is_edge_visible_at_epoch(edge, epoch)
+                        && self.store.is_node_visible_at_epoch(other, epoch)
+                }
+            });
+        }
+        edges
     }
 
     /// Whether the node has every label of `labels` (any node when `None`).
@@ -691,8 +720,7 @@ impl ExpressionPredicate {
         }
         match (start, end) {
             (Some(start), end) => self
-                .store
-                .edges_from(start, pattern.direction)
+                .visible_edges_from(start, pattern.direction)
                 .into_iter()
                 .filter(|&(other, id)| {
                     end.is_none_or(|end| end == other)
@@ -704,8 +732,7 @@ impl ExpressionPredicate {
                 if !self.has_labels(end, pattern.end_labels) {
                     return 0;
                 }
-                self.store
-                    .edges_from(end, pattern.direction.reverse())
+                self.visible_edges_from(end, pattern.direction.reverse())
                     .into_iter()
                     .filter(|&(_, id)| self.edge_type_matches(id, pattern.edge_types))
                     .take(limit)
@@ -715,8 +742,7 @@ impl ExpressionPredicate {
                 let mut found = 0;
                 for start in self.visible_nodes() {
                     found += self
-                        .store
-                        .edges_from(start, pattern.direction)
+                        .visible_edges_from(start, pattern.direction)
                         .into_iter()
                         .filter(|&(other, id)| {
                             self.edge_matches(other, id, pattern.edge_types, pattern.end_labels)
@@ -789,8 +815,7 @@ impl ExpressionPredicate {
             }
         }
         let has_edge = |node: NodeId, direction: Direction| {
-            self.store
-                .edges_from(node, direction)
+            self.visible_edges_from(node, direction)
                 .into_iter()
                 .any(|(_, id)| self.edge_type_matches(id, pattern.edge_types))
         };
@@ -821,7 +846,7 @@ impl ExpressionPredicate {
             hops += 1;
             let mut next = Vec::new();
             for node in frontier {
-                for (other, id) in self.store.edges_from(node, pattern.direction) {
+                for (other, id) in self.visible_edges_from(node, pattern.direction) {
                     if !self.edge_type_matches(id, pattern.edge_types) {
                         continue;
                     }

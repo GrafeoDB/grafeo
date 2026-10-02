@@ -1,7 +1,7 @@
 //! Unwind operator for expanding lists into individual rows.
 
 use super::{Operator, OperatorResult};
-use crate::execution::chunk::{DataChunk, DataChunkBuilder};
+use crate::execution::chunk::{DataChunk, DataChunkBuilder, copied_column_types};
 use grafeo_common::types::{LogicalType, Value};
 
 /// Unwind operator that expands a list column into individual rows.
@@ -139,8 +139,17 @@ impl UnwindOperator {
             .expect("current_list is Some: set before emit_row call");
         let element = list[self.current_list_idx].clone();
 
-        // Build output row: copy all columns from input + add the unwound element
-        let mut builder = DataChunkBuilder::new(&self.output_schema);
+        // Build output row: copy all columns from input + add the unwound
+        // element. The copied columns keep the input's types (a node or edge
+        // stays one, see `ColumnTypes`); the new ones have the declared types.
+        let mut types = chunk.column_types();
+        types.extend(
+            self.output_schema
+                .iter()
+                .skip(chunk.column_count())
+                .cloned(),
+        );
+        let mut builder = DataChunkBuilder::new(&copied_column_types(&types, &self.output_schema));
 
         // Copy existing columns (except the list column which we're replacing)
         for col_idx in 0..chunk.column_count() {
@@ -250,6 +259,47 @@ mod tests {
         fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
             self
         }
+    }
+
+    /// The input columns keep their types: a node stays a node.
+    #[test]
+    fn unwind_keeps_the_input_column_types() {
+        use grafeo_common::types::NodeId;
+
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node, LogicalType::Any]);
+        builder
+            .column_mut(0)
+            .unwrap()
+            .push_node_id(NodeId::new(101));
+        builder
+            .column_mut(1)
+            .unwrap()
+            .push_value(Value::List(vec![Value::Int64(1), Value::Int64(2)].into()));
+        builder.advance_row();
+        let child = MockOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        let mut unwind = UnwindOperator::new(
+            Box::new(child),
+            1,
+            "k".to_string(),
+            vec![LogicalType::Any, LogicalType::Any, LogicalType::Any],
+            false,
+            false,
+        );
+
+        let mut elements = Vec::new();
+        while let Some(chunk) = unwind.next().unwrap() {
+            assert_eq!(chunk.column_types()[0], LogicalType::Node);
+            assert_eq!(
+                chunk.column(0).unwrap().get_node_id(0).unwrap().as_u64(),
+                101
+            );
+            assert!(chunk.column(0).unwrap().get_edge_id(0).is_none());
+            elements.push(chunk.column(2).unwrap().get_value(0));
+        }
+        assert_eq!(elements, [Some(Value::Int64(1)), Some(Value::Int64(2))]);
     }
 
     #[test]

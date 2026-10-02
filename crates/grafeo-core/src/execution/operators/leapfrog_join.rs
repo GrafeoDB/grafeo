@@ -10,7 +10,7 @@ use grafeo_common::types::{EdgeId, LogicalType, NodeId, Value};
 
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
-use crate::execution::chunk::DataChunkBuilder;
+use crate::execution::chunk::{ColumnTypes, DataChunkBuilder, copied_column_types};
 use crate::index::trie::{LeapfrogJoin, TrieIndex};
 
 /// Row identifier for reconstructing output: (input_index, chunk_index, row_index).
@@ -43,6 +43,9 @@ pub struct LeapfrogJoinOperator {
     // === Materialization state ===
     /// Materialized input chunks (built once during first next() call).
     materialized_inputs: Vec<Vec<DataChunk>>,
+
+    /// The column types of each input's materialized chunks.
+    input_types: Vec<ColumnTypes>,
 
     /// TrieIndex structures built from materialized inputs.
     tries: Vec<TrieIndex>,
@@ -85,6 +88,7 @@ impl LeapfrogJoinOperator {
             output_schema,
             output_column_mapping,
             materialized_inputs: Vec::new(),
+            input_types: Vec::new(),
             tries: Vec::new(),
             materialized: false,
             results: Vec::new(),
@@ -94,15 +98,38 @@ impl LeapfrogJoinOperator {
         }
     }
 
+    /// The output column types: those of the input columns they are copied
+    /// from (a node or edge stays one, see [`ColumnTypes`]), declared for an
+    /// input without rows.
+    fn output_types(&self) -> Vec<LogicalType> {
+        let input: Vec<LogicalType> = self
+            .output_column_mapping
+            .iter()
+            .enumerate()
+            .map(|(out_col, &(input_idx, column))| {
+                self.input_types
+                    .get(input_idx)
+                    .and_then(|types| types.types().get(column))
+                    .or_else(|| self.output_schema.get(out_col))
+                    .cloned()
+                    .unwrap_or(LogicalType::Any)
+            })
+            .collect();
+        copied_column_types(&input, &self.output_schema)
+    }
+
     /// Materializes all inputs and builds trie indexes.
     fn materialize_inputs(&mut self) -> Result<(), OperatorError> {
         // Phase 1: Collect all chunks from each input
         for input in &mut self.inputs {
             let mut chunks = Vec::new();
+            let mut types = ColumnTypes::default();
             while let Some(chunk) = input.next()? {
+                types.add(&chunk);
                 chunks.push(chunk);
             }
             self.materialized_inputs.push(chunks);
+            self.input_types.push(types);
         }
 
         // Phase 2: Build TrieIndex for each input
@@ -336,7 +363,7 @@ impl Operator for LeapfrogJoinOperator {
             return Ok(None);
         }
 
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);
+        let mut builder = DataChunkBuilder::with_capacity(&self.output_types(), 2048);
 
         while !builder.is_full() {
             self.build_output_row(&mut builder)?;
@@ -359,6 +386,7 @@ impl Operator for LeapfrogJoinOperator {
             input.reset();
         }
         self.materialized_inputs.clear();
+        self.input_types.clear();
         self.tries.clear();
         self.materialized = false;
         self.results.clear();
@@ -425,6 +453,38 @@ mod tests {
             col.push_int64(id);
         }
         DataChunk::new(vec![col])
+    }
+
+    /// The output columns keep the types of the input columns they come from.
+    #[test]
+    fn output_columns_keep_their_input_types() {
+        let mut keys = ValueVector::with_type(LogicalType::Int64);
+        let mut nodes = ValueVector::with_type(LogicalType::Node);
+        for key in [1_u64, 2] {
+            keys.push_int64(i64::try_from(key).unwrap());
+            nodes.push_node_id(NodeId::new(100 + key));
+        }
+        let inputs: Vec<Box<dyn Operator>> = vec![
+            Box::new(MockScanOperator::new(DataChunk::new(vec![keys, nodes]))),
+            Box::new(MockScanOperator::new(create_node_chunk(&[2]))),
+        ];
+        let mut leapfrog = LeapfrogJoinOperator::new(
+            inputs,
+            vec![vec![0], vec![0]],
+            vec![LogicalType::Any; 3],
+            vec![(0, 0), (0, 1), (1, 0)],
+        );
+
+        let chunk = leapfrog.next().unwrap().unwrap();
+        assert_eq!(
+            chunk.column_types(),
+            [LogicalType::Int64, LogicalType::Node, LogicalType::Int64]
+        );
+        assert_eq!(chunk.row_count(), 1);
+        assert_eq!(
+            chunk.column(1).unwrap().get_node_id(0).unwrap().as_u64(),
+            102
+        );
     }
 
     #[test]

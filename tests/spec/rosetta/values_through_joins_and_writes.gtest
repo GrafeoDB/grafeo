@@ -1,0 +1,193 @@
+# Rosetta: values through joins, CALL, UNWIND, grouping and writes
+#
+# A node or edge that goes through a join, a CALL subquery, UNWIND, a group
+# key or a write stays what it is. The setup gives nodes and edges a property
+# with the same name (`w`) and overlapping IDs, so one that loses track of what
+# it is reads the other entity's `w` (nodes have 100 and up, edges 1 to 8):
+# every expected `w` below tells which entity was read. Jules, Mia and Berlin
+# have no `w`, so for them the wrong entity shows as a number instead of null.
+#
+# Setup (GQL, one statement): Alix, Gus, Vincent (with w 100, 101, 103), Jules
+# and Mia; Amsterdam (w 104), Berlin, Paris (w 105). KNOWS edges w 1 to 5
+# (Alix->Gus, Gus->Vincent, Vincent->Alix, Jules->Mia, Alix->Jules), LIVES_IN
+# edges w 6 to 8 (Alix->Amsterdam, Gus->Berlin, Mia->Paris).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Values through joins, CALL, UNWIND, grouping and writes
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Joins
+  # ---------------------------------------------------------------------------
+
+  - name: nodes_without_a_property_after_optional_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person) OPTIONAL MATCH (a)-[:LIVES_IN]->(c) RETURN a.name AS a, a.w AS w, c.w AS cw"
+      cypher: "MATCH (a:Person) OPTIONAL MATCH (a)-[:LIVES_IN]->(c) RETURN a.name AS a, a.w AS w, c.w AS cw"
+    expect:
+      rows:
+        - [Alix, 100, 104]
+        - [Gus, 101, null]
+        - [Vincent, 103, null]
+        - [Jules, null, null]
+        - [Mia, null, 105]
+
+  - name: a_node_without_a_property_after_a_comma_join
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person)-[:KNOWS]->(b), (b)-[r:LIVES_IN]->(c) RETURN a.name AS a, b.name AS b, b.w AS bw, r.w AS rw"
+      cypher: "MATCH (a:Person)-[:KNOWS]->(b), (b)-[r:LIVES_IN]->(c) RETURN a.name AS a, b.name AS b, b.w AS bw, r.w AS rw"
+    expect:
+      rows:
+        - [Alix, Gus, 101, 7]
+        - [Jules, Mia, null, 8]
+        - [Vincent, Alix, 100, 6]
+
+  # Jules knows Mia, who lives in Paris: Jules passes the semi-join.
+  - name: a_node_without_a_property_after_a_semi_join
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(m)-[:LIVES_IN]->() } RETURN a.name AS a, a.w AS w"
+      cypher: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(m)-[:LIVES_IN]->() } RETURN a.name AS a, a.w AS w"
+    expect:
+      rows:
+        - [Alix, 100]
+        - [Vincent, 103]
+        - [Jules, null]
+
+  - name: nodes_without_a_property_after_an_anti_join
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person) WHERE NOT EXISTS { MATCH (a)-[:KNOWS]->()-[:KNOWS]->() } RETURN a.name AS a, a.w AS w"
+      cypher: "MATCH (a:Person) WHERE NOT EXISTS { MATCH (a)-[:KNOWS]->()-[:KNOWS]->() } RETURN a.name AS a, a.w AS w"
+    expect:
+      rows:
+        - [Jules, null]
+        - [Mia, null]
+
+  # ---------------------------------------------------------------------------
+  # CALL subqueries and UNWIND
+  # ---------------------------------------------------------------------------
+
+  - name: nodes_after_a_call_subquery_that_imports_them
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person) CALL { WITH a RETURN 1 AS one } RETURN a.name AS a, a.w AS w"
+      cypher: "MATCH (a:Person) CALL { WITH a RETURN 1 AS one } RETURN a.name AS a, a.w AS w"
+    expect:
+      rows:
+        - [Alix, 100]
+        - [Gus, 101]
+        - [Vincent, 103]
+        - [Jules, null]
+        - [Mia, null]
+
+  - name: edges_after_a_call_subquery
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH ()-[r:KNOWS]->() CALL { RETURN 1 AS one } RETURN r.w AS w"
+      cypher: "MATCH ()-[r:KNOWS]->() CALL { RETURN 1 AS one } RETURN r.w AS w"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+        - [4]
+        - [5]
+
+  - name: nodes_after_unwind
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person) UNWIND [1, 2] AS k RETURN a.name AS a, a.w AS w, k"
+      cypher: "MATCH (a:Person) UNWIND [1, 2] AS k RETURN a.name AS a, a.w AS w, k"
+    expect:
+      rows:
+        - [Alix, 100, 1]
+        - [Alix, 100, 2]
+        - [Gus, 101, 1]
+        - [Gus, 101, 2]
+        - [Vincent, 103, 1]
+        - [Vincent, 103, 2]
+        - [Jules, null, 1]
+        - [Jules, null, 2]
+        - [Mia, null, 1]
+        - [Mia, null, 2]
+
+  # ---------------------------------------------------------------------------
+  # Group keys
+  # ---------------------------------------------------------------------------
+
+  - name: nodes_as_group_keys
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person)-[r]->() WITH a, count(r) AS n RETURN a.name AS a, a.w AS w, n"
+      cypher: "MATCH (a:Person)-[r]->() WITH a, count(r) AS n RETURN a.name AS a, a.w AS w, n"
+    expect:
+      rows:
+        - [Alix, 100, 3]
+        - [Gus, 101, 2]
+        - [Vincent, 103, 1]
+        - [Jules, null, 1]
+        - [Mia, null, 1]
+
+  - name: edges_as_group_keys
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH ()-[r:KNOWS]->() WITH r, count(*) AS n RETURN r.w AS w, n"
+      cypher: "MATCH ()-[r:KNOWS]->() WITH r, count(*) AS n RETURN r.w AS w, n"
+    expect:
+      rows:
+        - [1, 1]
+        - [2, 1]
+        - [3, 1]
+        - [4, 1]
+        - [5, 1]
+
+  # ---------------------------------------------------------------------------
+  # Writes that pass their input rows on
+  # ---------------------------------------------------------------------------
+
+  - name: a_node_without_a_property_after_set
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Jules'}) SET a.seen = true RETURN a.w AS w, a.seen AS seen"
+      cypher: "MATCH (a:Person {name: 'Jules'}) SET a.seen = true RETURN a.w AS w, a.seen AS seen"
+    expect:
+      rows:
+        - [null, true]
+
+  - name: a_node_without_a_property_after_an_insert
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Mia'}) INSERT (a)-[:LIKES]->(:Person {name: 'Hans'}) RETURN a.w AS w"
+      cypher: "MATCH (a:Person {name: 'Mia'}) CREATE (a)-[:LIKES]->(:Person {name: 'Hans'}) RETURN a.w AS w"
+    expect:
+      rows:
+        - [null]
+
+  - name: a_node_without_a_property_after_merge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Jules'}) MERGE (a)-[:VISITED]->(c:City {name: 'Prague'}) RETURN a.w AS w, c.name AS c"
+      cypher: "MATCH (a:Person {name: 'Jules'}) MERGE (a)-[:VISITED]->(c:City {name: 'Prague'}) RETURN a.w AS w, c.name AS c"
+    expect:
+      rows:
+        - [null, Prague]

@@ -502,6 +502,36 @@ impl ColumnTypes {
     }
 }
 
+/// The type for a column copied from an input column of type `input`, which
+/// the planner declared as `declared`: the input's, so that every value is
+/// copied as it is, except where the input's is [`LogicalType::Any`] and the
+/// planner declared a node or edge: an ID whose kind the input lost is that
+/// entity again.
+pub(crate) fn copied_column_type(
+    input: &LogicalType,
+    declared: Option<&LogicalType>,
+) -> LogicalType {
+    match (input, declared) {
+        (LogicalType::Any, Some(entity @ (LogicalType::Node | LogicalType::Edge))) => {
+            entity.clone()
+        }
+        _ => input.clone(),
+    }
+}
+
+/// [`copied_column_type`] for each of the `input` types, declared as the
+/// `declared` types at the same positions.
+pub(crate) fn copied_column_types(
+    input: &[LogicalType],
+    declared: &[LogicalType],
+) -> Vec<LogicalType> {
+    input
+        .iter()
+        .enumerate()
+        .map(|(i, input_type)| copied_column_type(input_type, declared.get(i)))
+        .collect()
+}
+
 impl Clone for DataChunk {
     fn clone(&self) -> Self {
         Self {
@@ -580,6 +610,22 @@ impl DataChunkBuilder {
 mod tests {
     use super::*;
     use grafeo_common::types::Value;
+
+    /// A copied column keeps its input type; a declared node or edge only
+    /// gives an `Any` column back its entity kind, never a scalar type.
+    #[test]
+    fn copied_columns_keep_the_input_type_or_a_declared_entity() {
+        use LogicalType::{Any, Edge, Int64, Node};
+        let text = LogicalType::String;
+
+        assert_eq!(
+            copied_column_types(
+                &[Any, Any, Any, Node, Int64, text.clone(), Any],
+                &[Edge, Node, Int64, Edge, Any, Node],
+            ),
+            [Edge, Node, Any, Node, Int64, text, Any]
+        );
+    }
 
     #[test]
     fn test_chunk_creation() {

@@ -9,7 +9,7 @@ use super::{
     ExpressionPredicate, GraphWriter, Operator, OperatorError, OperatorResult, PropertySource,
     SessionContext,
 };
-use crate::execution::chunk::{DataChunk, DataChunkBuilder};
+use crate::execution::chunk::{DataChunk, DataChunkBuilder, copied_column_types};
 use crate::graph::{GraphStore, GraphStoreSearch};
 use grafeo_common::types::{
     EdgeId, EpochId, LogicalType, NodeId, PropertyKey, TransactionId, Value,
@@ -36,6 +36,25 @@ pub struct MergeConfig {
     /// is used to detect NULL references (e.g., from unmatched OPTIONAL MATCH).
     /// `None` for standalone MERGE that introduces a new variable.
     pub bound_variable_column: Option<usize>,
+}
+
+/// The column types of output rows for `chunk` (none for a standalone MERGE):
+/// its own for the input columns, which are copied (a node or edge stays one,
+/// see `ColumnTypes`), then the declared ones, with `entity` for the column of
+/// the merged node or edge.
+fn output_types(
+    chunk: Option<&DataChunk>,
+    declared: &[LogicalType],
+    entity_column: usize,
+    entity: LogicalType,
+) -> Vec<LogicalType> {
+    let input = chunk.map(DataChunk::column_types).unwrap_or_default();
+    let mut types = copied_column_types(&input, declared);
+    types.extend(declared.iter().skip(input.len()).cloned());
+    if let Some(column_type) = types.get_mut(entity_column) {
+        *column_type = entity;
+    }
+    types
 }
 
 /// Merge operator for MERGE clause.
@@ -150,7 +169,13 @@ impl MergeOperator {
         row: usize,
         merged_node: NodeId,
     ) -> DataChunk {
-        let mut builder = DataChunkBuilder::with_capacity(&self.config.output_schema, 1);
+        let types = output_types(
+            chunk,
+            &self.config.output_schema,
+            self.config.output_column,
+            LogicalType::Node,
+        );
+        let mut builder = DataChunkBuilder::with_capacity(&types, 1);
         if let Some(input) = chunk {
             for col_idx in 0..input.column_count() {
                 let val = input
@@ -368,8 +393,13 @@ impl Operator for MergeOperator {
         // merged node ID appended (used for chained inline MERGE patterns).
         if let Some(ref mut input) = self.input {
             if let Some(chunk) = input.next()? {
-                let mut builder =
-                    DataChunkBuilder::with_capacity(&self.config.output_schema, chunk.row_count());
+                let types = output_types(
+                    Some(&chunk),
+                    &self.config.output_schema,
+                    self.config.output_column,
+                    LogicalType::Node,
+                );
+                let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
                 for row in chunk.selected_indices() {
                     // Reject NULL bound variables (e.g., from unmatched OPTIONAL MATCH)
@@ -423,7 +453,13 @@ impl Operator for MergeOperator {
 
         let node_id = self.merge_node_for_row(None, 0)?;
 
-        let mut builder = DataChunkBuilder::new(&self.config.output_schema);
+        let types = output_types(
+            None,
+            &self.config.output_schema,
+            self.config.output_column,
+            LogicalType::Node,
+        );
+        let mut builder = DataChunkBuilder::new(&types);
         if let Some(dst) = builder.column_mut(self.config.output_column) {
             dst.push_node_id(node_id);
         }
@@ -532,7 +568,13 @@ impl MergeRelationshipOperator {
         row: usize,
         merged_edge: EdgeId,
     ) -> DataChunk {
-        let mut builder = DataChunkBuilder::with_capacity(&self.config.output_schema, 1);
+        let types = output_types(
+            Some(chunk),
+            &self.config.output_schema,
+            self.config.edge_output_column,
+            LogicalType::Edge,
+        );
+        let mut builder = DataChunkBuilder::with_capacity(&types, 1);
         for col_idx in 0..chunk.column_count() {
             let val = chunk
                 .column(col_idx)
@@ -655,8 +697,13 @@ impl Operator for MergeRelationshipOperator {
         use super::OperatorError;
 
         if let Some(chunk) = self.input.next()? {
-            let mut builder =
-                DataChunkBuilder::with_capacity(&self.config.output_schema, chunk.row_count());
+            let types = output_types(
+                Some(&chunk),
+                &self.config.output_schema,
+                self.config.edge_output_column,
+                LogicalType::Edge,
+            );
+            let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
             for row in chunk.selected_indices() {
                 let src_val = chunk

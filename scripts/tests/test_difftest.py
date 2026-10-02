@@ -168,9 +168,12 @@ def test_compare_fails_when_a_reviewed_difference_is_gone(tmp_path, capsys):
     assert "A2|gql [NO LONGER DIFFERENT]" in capsys.readouterr().out
 
 
-def test_compare_without_a_reviewed_list_only_reports(tmp_path):
+def test_compare_without_a_reviewed_list_only_reports(tmp_path, capsys):
     old, new, _ = gate_files(tmp_path, [])
     assert difftest.compare(old, new) == 0
+    out = capsys.readouterr().out
+    assert "=== A1|gql [changed]" in out
+    assert "REVIEW" not in out
 
 
 # --- parity --------------------------------------------------------------------

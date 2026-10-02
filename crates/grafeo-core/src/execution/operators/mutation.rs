@@ -15,7 +15,7 @@ use grafeo_common::types::{
 
 use super::filter::{ExpressionPredicate, FilterExpression};
 use super::{GraphWriter, Operator, OperatorError, OperatorResult, SessionContext};
-use crate::execution::chunk::{DataChunk, DataChunkBuilder};
+use crate::execution::chunk::{DataChunk, DataChunkBuilder, copied_column_types};
 use crate::graph::{GraphStore, GraphStoreSearch};
 
 /// Trait for validating schema constraints during mutation operations.
@@ -399,8 +399,11 @@ impl Operator for CreateNodeOperator {
             let Some(chunk) = input.next()? else {
                 return Ok(None);
             };
-            let mut builder =
-                DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
+            let mut types = output_types(&chunk, self.output_column, &self.output_schema);
+            if let Some(node_type) = types.get_mut(self.output_column) {
+                *node_type = LogicalType::Node;
+            }
+            let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
             for row in chunk.selected_indices() {
                 let properties = self.expressions.resolve_row(
@@ -445,7 +448,11 @@ impl Operator for CreateNodeOperator {
             .collect();
         let node_id = self.writer.create_node(&self.labels, properties)?;
 
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
+        let mut types = self.output_schema.clone();
+        if let Some(node_type) = types.get_mut(self.output_column) {
+            *node_type = LogicalType::Node;
+        }
+        let mut builder = DataChunkBuilder::with_capacity(&types, 1);
         if let Some(dst) = builder.column_mut(self.output_column) {
             dst.push_value(id_value(node_id.0));
         }
@@ -491,6 +498,17 @@ fn id_at(
             found: format!("{other:?}"),
         }),
     }
+}
+
+/// The column types of the output chunk for `chunk`: its own for the first
+/// `copied` columns, copied from it (a node or edge stays one, see
+/// `ColumnTypes`), then the declared ones.
+fn output_types(chunk: &DataChunk, copied: usize, declared: &[LogicalType]) -> Vec<LogicalType> {
+    let copied = copied.min(chunk.column_count());
+    let input: Vec<LogicalType> = chunk.column_types().into_iter().take(copied).collect();
+    let mut types = copied_column_types(&input, declared);
+    types.extend(declared.iter().skip(copied).cloned());
+    types
 }
 
 /// Copies the first `columns` input columns of `row` to the output row.
@@ -589,7 +607,11 @@ impl Operator for CreateEdgeOperator {
         let Some(chunk) = self.input.next()? else {
             return Ok(None);
         };
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
+        let mut types = output_types(&chunk, chunk.column_count(), &self.output_schema);
+        if let Some(edge_type) = self.output_column.and_then(|column| types.get_mut(column)) {
+            *edge_type = LogicalType::Edge;
+        }
+        let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
             let from = NodeId(id_at(&chunk, self.from_column, row, "from", "node")?);
@@ -669,7 +691,8 @@ impl Operator for DeleteNodeOperator {
         let Some(chunk) = self.input.next()? else {
             return Ok(None);
         };
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
+        let types = output_types(&chunk, chunk.column_count(), &self.output_schema);
+        let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
             let node_id = NodeId(id_at(&chunk, self.node_column, row, "node", "node")?);
@@ -731,7 +754,8 @@ impl Operator for DeleteEdgeOperator {
         let Some(chunk) = self.input.next()? else {
             return Ok(None);
         };
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
+        let types = output_types(&chunk, chunk.column_count(), &self.output_schema);
+        let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
             let edge_id = EdgeId(id_at(&chunk, self.edge_column, row, "edge", "edge")?);
@@ -798,7 +822,8 @@ impl Operator for AddLabelOperator {
         let Some(chunk) = self.input.next()? else {
             return Ok(None);
         };
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
+        let types = output_types(&chunk, chunk.column_count(), &self.output_schema);
+        let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
             let node_id = NodeId(id_at(&chunk, self.node_column, row, "node", "node")?);
@@ -869,7 +894,8 @@ impl Operator for RemoveLabelOperator {
         let Some(chunk) = self.input.next()? else {
             return Ok(None);
         };
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
+        let types = output_types(&chunk, chunk.column_count(), &self.output_schema);
+        let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
             let node_id = NodeId(id_at(&chunk, self.node_column, row, "node", "node")?);
@@ -970,7 +996,8 @@ impl Operator for SetPropertyOperator {
         let Some(chunk) = self.input.next()? else {
             return Ok(None);
         };
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, chunk.row_count());
+        let types = output_types(&chunk, chunk.column_count(), &self.output_schema);
+        let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
             let entity_id = id_at(&chunk, self.entity_column, row, "entity", "entity")?;
@@ -1604,12 +1631,13 @@ mod tests {
         assert_eq!(chunk.row_count(), 1);
         assert_eq!(store.edge_count(), 1);
 
-        // Verify the output chunk contains the edge ID in column 2
-        let edge_id_raw = chunk
+        // Verify the output chunk contains the edge in column 2, as an edge
+        // (whatever type the planner declared for it)
+        assert_eq!(chunk.column_types()[2], LogicalType::Edge);
+        let edge_id = chunk
             .column(2)
-            .and_then(|c| c.get_int64(0))
+            .and_then(|c| c.get_edge_id(0))
             .expect("edge ID should be in output column 2");
-        let edge_id = EdgeId(edge_id_raw as u64);
 
         // Verify the edge has the property
         let edge = store.get_edge(edge_id).expect("edge should exist");

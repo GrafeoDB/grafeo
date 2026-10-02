@@ -383,4 +383,20 @@ for case_id, query, languages, fixture in [
 ]:
     case(case_id, query, languages, fixture)
 
+# N: nodes and edges through joins, EXISTS, CALL, UNWIND and group keys
+for case_id, query in [
+    ("N1", "MATCH (a:Person) OPTIONAL MATCH (a)-[:LIVES_IN]->(c) RETURN a.name AS a, a.w AS w, c.w AS cw"),
+    ("N2", "MATCH (a:Person)-[:KNOWS]->(b), (b)-[r:LIVES_IN]->(c) RETURN a.name AS a, b.name AS b, b.w AS bw, r.w AS rw"),
+    ("N3", "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(m)-[:LIVES_IN]->() } RETURN a.name AS a, a.w AS w"),
+    ("N4", "MATCH (a:Person) WHERE NOT EXISTS { MATCH (a)-[:KNOWS]->()-[:KNOWS]->() } RETURN a.name AS a, a.w AS w"),
+    ("N5", "MATCH (a:Person) CALL { WITH a RETURN 1 AS one } RETURN a.name AS a, a.w AS w"),
+    ("N6", "MATCH ()-[r:KNOWS]->() CALL { RETURN 1 AS one } RETURN r.w AS w"),
+    ("N7", "MATCH (a:Person) CALL { WITH a MATCH (a)-[r:KNOWS]->(b) RETURN r, b } RETURN a.name AS a, r.w AS rw, b.w AS bw"),
+    ("N8", "MATCH (a:Person) UNWIND [1, 2] AS k RETURN a.name AS a, a.w AS w, k"),
+    ("N9", "MATCH (a:Person)-[r]->() WITH a, count(r) AS n RETURN a.name AS a, a.w AS w, n"),
+    ("N10", "MATCH ()-[r:KNOWS]->() WITH r, count(*) AS n RETURN r.w AS w, n"),
+    ("N11", "MATCH (c:City) OPTIONAL MATCH (p:Person)-[:LIVES_IN]->(c) RETURN c.name AS c, c.w AS w, p.name AS p"),
+]:
+    case(case_id, query)
+
 # fmt: on

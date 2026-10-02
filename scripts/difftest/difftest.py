@@ -215,13 +215,15 @@ def compare(old_path: Path, new_path: Path, reviewed_path: Path | None = None) -
     failures = 0
     for key in keys:
         digest = fingerprint(new_results[key])
-        if key not in reviewed:
+        if not reviewed_path:
+            state = "changed"
+        elif key not in reviewed:
             state = "NOT REVIEWED"
         elif reviewed[key][0] != digest:
             state = "CHANGED SINCE THE REVIEW"
         else:
             state = "reviewed"
-        failures += state != "reviewed"
+        failures += state not in ("changed", "reviewed")
         print(f"=== {key} [{state}]: {new_results[key]['query']}")
         print("  old:", summary(old_results[key]))
         print("  new:", summary(new_results[key]))

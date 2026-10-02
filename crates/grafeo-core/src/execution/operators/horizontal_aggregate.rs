@@ -104,9 +104,15 @@ impl Operator for HorizontalAggregateOperator {
             return Ok(None);
         };
 
-        // Build output columns: copy input columns + one new aggregate result column
+        // Build output columns: copy input columns, in their types (a node or
+        // edge stays one), + one new aggregate result column
         let mut output_columns: Vec<ValueVector> = (0..self.input_column_count)
-            .map(|_| ValueVector::with_capacity(LogicalType::Any, input.row_count()))
+            .map(|col_idx| {
+                let column_type = input
+                    .column(col_idx)
+                    .map_or(LogicalType::Any, |column| column.data_type().clone());
+                ValueVector::with_capacity(column_type, input.row_count())
+            })
             .collect();
         let mut result_column = ValueVector::with_capacity(LogicalType::Float64, input.row_count());
 
@@ -243,6 +249,36 @@ mod tests {
             Value::Int64(n3.0 as i64),
         ];
         (Arc::new(store), node_ids)
+    }
+
+    /// The copied input columns keep their types: a node stays a node.
+    #[test]
+    fn copied_columns_keep_their_types() {
+        let (store, edge_ids) = setup_store_with_edges();
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node, LogicalType::Any]);
+        builder.column_mut(0).unwrap().push_node_id(NodeId::new(5));
+        builder
+            .column_mut(1)
+            .unwrap()
+            .push_value(Value::List(edge_ids.into()));
+        builder.advance_row();
+        let mut op = HorizontalAggregateOperator::new(
+            Box::new(MockOperator::new(vec![builder.finish()])),
+            1,
+            EntityKind::Edge,
+            AggregateFunction::Sum,
+            "weight".to_string(),
+            store,
+            2,
+        );
+
+        let result = op.next().unwrap().unwrap();
+        assert_eq!(result.column_types()[0], LogicalType::Node);
+        assert_eq!(
+            result.column(0).unwrap().get_node_id(0).unwrap().as_u64(),
+            5
+        );
+        assert!(result.column(0).unwrap().get_edge_id(0).is_none());
     }
 
     #[test]

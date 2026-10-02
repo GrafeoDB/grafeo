@@ -4,7 +4,7 @@
 //! and physical execution. Both GQL and Cypher queries are translated to this
 //! common representation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use grafeo_common::types::Value;
@@ -799,6 +799,128 @@ impl LogicalOperator {
             Self::VectorJoin(op) => op.right_variable.clone(),
             Self::TextScan(op) => format!("{}:{}", op.variable, op.label),
             _ => String::new(),
+        }
+    }
+}
+
+impl LogicalOperator {
+    /// The variables the rows of this operator hold, or `None` for an
+    /// operator that is not modeled here (callers then leave its plan as it
+    /// is). A `WITH` (`Project`) holds only what it projects. `imports` is
+    /// what a subquery's `CALL { WITH * ... }` imports: the variables of the
+    /// row it runs for.
+    #[must_use]
+    pub(crate) fn bound_variables(
+        &self,
+        imports: Option<&HashSet<String>>,
+    ) -> Option<HashSet<String>> {
+        let mut bound = HashSet::new();
+        match self {
+            Self::Empty => {}
+            Self::NodeScan(scan) => {
+                if let Some(input) = &scan.input {
+                    bound = input.bound_variables(imports)?;
+                }
+                bound.insert(scan.variable.clone());
+            }
+            Self::EdgeScan(scan) => {
+                if let Some(input) = &scan.input {
+                    bound = input.bound_variables(imports)?;
+                }
+                bound.insert(scan.variable.clone());
+            }
+            Self::Expand(expand) => {
+                bound = expand.input.bound_variables(imports)?;
+                bound.insert(expand.to_variable.clone());
+                bound.extend(expand.edge_variable.iter().cloned());
+                bound.extend(expand.path_alias.iter().cloned());
+            }
+            Self::Filter(filter) => return filter.input.bound_variables(imports),
+            Self::Limit(limit) => return limit.input.bound_variables(imports),
+            Self::Skip(skip) => return skip.input.bound_variables(imports),
+            Self::Sort(sort) => return sort.input.bound_variables(imports),
+            Self::Distinct(distinct) => return distinct.input.bound_variables(imports),
+            Self::Project(project) => {
+                if project.pass_through_input {
+                    bound = project.input.bound_variables(imports)?;
+                }
+                for projection in &project.projections {
+                    match (&projection.alias, &projection.expression) {
+                        (Some(alias), _) => {
+                            bound.insert(alias.clone());
+                        }
+                        (None, LogicalExpression::Variable(name)) => {
+                            bound.insert(name.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Self::Aggregate(aggregate) => {
+                for key in &aggregate.group_by {
+                    if let LogicalExpression::Variable(name) = key {
+                        bound.insert(name.clone());
+                    }
+                }
+                bound.extend(aggregate.aggregates.iter().filter_map(|a| a.alias.clone()));
+            }
+            Self::Unwind(unwind) => {
+                bound = unwind.input.bound_variables(imports)?;
+                bound.insert(unwind.variable.clone());
+                bound.extend(unwind.ordinality_var.iter().cloned());
+                bound.extend(unwind.offset_var.iter().cloned());
+            }
+            Self::Bind(bind) => {
+                bound = bind.input.bound_variables(imports)?;
+                bound.insert(bind.variable.clone());
+            }
+            Self::Join(join) => {
+                bound = join.left.bound_variables(imports)?;
+                bound.extend(join.right.bound_variables(imports)?);
+            }
+            Self::LeftJoin(join) => {
+                bound = join.left.bound_variables(imports)?;
+                bound.extend(join.right.bound_variables(imports)?);
+            }
+            // A subquery starts from the variables it imports from the row it
+            // runs for: the ones its `WITH` names, or all of them for `WITH *`.
+            Self::ParameterScan(scan) => {
+                if scan.columns.iter().any(|column| column == "*") {
+                    return imports.cloned();
+                }
+                bound.extend(scan.columns.iter().cloned());
+            }
+            // `CALL { ... }` adds the columns its subquery returns to each row.
+            Self::Apply(apply) => {
+                bound = apply.input.bound_variables(imports)?;
+                apply.subplan.add_returned_variables(&mut bound);
+            }
+            _ => return None,
+        }
+        Some(bound)
+    }
+
+    /// Adds the variables a subquery's `RETURN` names. A `RETURN *` adds none.
+    fn add_returned_variables(&self, bound: &mut HashSet<String>) {
+        match self {
+            Self::Return(ret) => {
+                for item in &ret.items {
+                    match (&item.alias, &item.expression) {
+                        (Some(alias), _) => {
+                            bound.insert(alias.clone());
+                        }
+                        (None, LogicalExpression::Variable(name)) if name != "*" => {
+                            bound.insert(name.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Self::Sort(sort) => sort.input.add_returned_variables(bound),
+            Self::Limit(limit) => limit.input.add_returned_variables(bound),
+            Self::Skip(skip) => skip.input.add_returned_variables(bound),
+            Self::Distinct(distinct) => distinct.input.add_returned_variables(bound),
+            _ => {}
         }
     }
 }

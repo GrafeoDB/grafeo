@@ -23,6 +23,8 @@
 //!
 //! [pf]: super::Planner::plan_filter
 
+use std::collections::HashSet;
+
 use grafeo_common::collections::GrafeoSet;
 use grafeo_common::types::NodeId;
 
@@ -66,10 +68,11 @@ impl super::Planner {
         filter: &FilterOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Check for complex EXISTS/NOT EXISTS patterns and rewrite as semi/anti join.
-        // Simple single-hop EXISTS patterns are handled by the fast path in
-        // convert_expression() -> extract_exists_pattern().
+        // Simple single-hop EXISTS patterns from a node of the row are handled
+        // by the fast path in convert_expression() -> extract_exists_pattern().
+        let outer = filter.input.bound_variables(None);
         if let Some((subquery, is_negated, remaining)) =
-            self.extract_complex_exists(&filter.predicate)
+            self.extract_complex_exists(&filter.predicate, outer.as_ref())
         {
             return self.plan_exists_as_semi_join(&filter.input, subquery, is_negated, remaining);
         }
@@ -78,7 +81,7 @@ impl super::Planner {
         // Instead, split the OR into two branches (EXISTS via semi-join, scalar
         // via filter), union the results, and deduplicate.
         if let Some((subquery, is_negated, other_pred)) =
-            self.extract_exists_from_or(&filter.predicate)
+            self.extract_exists_from_or(&filter.predicate, outer.as_ref())
         {
             return self.plan_exists_or_as_union(&filter.input, subquery, is_negated, other_pred);
         }
@@ -192,18 +195,22 @@ impl super::Planner {
     /// depths. The recursive semi-join handler (`plan_exists_as_semi_join`) calls
     /// this function again on each remaining predicate, peeling off one EXISTS
     /// per level until only scalar predicates remain.
+    ///
+    /// `outer` holds the variables of the rows the predicate filters (`None`:
+    /// not known), see [`Self::exists_fast_path_fits`].
     fn extract_complex_exists<'a>(
         &self,
         predicate: &'a LogicalExpression,
+        outer: Option<&HashSet<String>>,
     ) -> Option<(&'a LogicalOperator, bool, Option<LogicalExpression>)> {
         match predicate {
             LogicalExpression::ExistsSubquery(subplan) => {
                 // Top-level EXISTS: only use semi-join for complex patterns.
                 // Simple single-hop patterns use the fast path in convert_expression().
-                if self.extract_exists_pattern(subplan).is_err() {
-                    Some((subplan.as_ref(), false, None))
-                } else {
+                if self.exists_fast_path_fits(subplan, outer) {
                     None
+                } else {
+                    Some((subplan.as_ref(), false, None))
                 }
             }
             LogicalExpression::Unary {
@@ -211,10 +218,10 @@ impl super::Planner {
                 operand,
             } => {
                 if let LogicalExpression::ExistsSubquery(subplan) = operand.as_ref() {
-                    if self.extract_exists_pattern(subplan).is_err() {
-                        Some((subplan.as_ref(), true, None))
-                    } else {
+                    if self.exists_fast_path_fits(subplan, outer) {
                         None
+                    } else {
+                        Some((subplan.as_ref(), true, None))
                     }
                 } else {
                     None
@@ -237,7 +244,8 @@ impl super::Planner {
                 }
                 // Recurse into left subtree (handles left-leaning AND trees where
                 // EXISTS nodes are buried deeper than immediate children)
-                if let Some((subplan, negated, inner_remaining)) = self.extract_complex_exists(left)
+                if let Some((subplan, negated, inner_remaining)) =
+                    self.extract_complex_exists(left, outer)
                 {
                     let remaining = match inner_remaining {
                         Some(inner) => LogicalExpression::Binary {
@@ -251,7 +259,7 @@ impl super::Planner {
                 }
                 // Recurse into right subtree
                 if let Some((subplan, negated, inner_remaining)) =
-                    self.extract_complex_exists(right)
+                    self.extract_complex_exists(right, outer)
                 {
                     let remaining = match inner_remaining {
                         Some(inner) => LogicalExpression::Binary {
@@ -267,6 +275,29 @@ impl super::Planner {
             }
             _ => None,
         }
+    }
+
+    /// Whether an `EXISTS` subplan takes the fast path for rows that bind
+    /// `outer` (`None`: not known): its pattern must start from a node of the
+    /// row, and its other end and edge must be new to it. Anything else is a
+    /// semi-join, which matches every variable the subquery shares with the
+    /// row by name.
+    fn exists_fast_path_fits(
+        &self,
+        subplan: &LogicalOperator,
+        outer: Option<&HashSet<String>>,
+    ) -> bool {
+        let Ok(check) = self.extract_exists_pattern(subplan) else {
+            return false;
+        };
+        outer.is_some_and(|outer| {
+            outer.contains(&check.start_var)
+                && !outer.contains(&check.end_var)
+                && check
+                    .edge_var
+                    .as_ref()
+                    .is_none_or(|edge| !outer.contains(edge))
+        })
     }
 
     /// Helper: extracts EXISTS or NOT EXISTS from a single expression node.
@@ -294,6 +325,7 @@ impl super::Planner {
     fn extract_exists_from_or<'a>(
         &self,
         predicate: &'a LogicalExpression,
+        outer: Option<&HashSet<String>>,
     ) -> Option<(&'a LogicalOperator, bool, &'a LogicalExpression)> {
         let LogicalExpression::Binary {
             op: BinaryOp::Or,
@@ -306,13 +338,13 @@ impl super::Planner {
 
         // Check left side for complex EXISTS
         if let Some((subplan, negated)) = Self::extract_exists_from_expr(left)
-            && self.extract_exists_pattern(subplan).is_err()
+            && !self.exists_fast_path_fits(subplan, outer)
         {
             return Some((subplan, negated, right));
         }
         // Check right side for complex EXISTS
         if let Some((subplan, negated)) = Self::extract_exists_from_expr(right)
-            && self.extract_exists_pattern(subplan).is_err()
+            && !self.exists_fast_path_fits(subplan, outer)
         {
             return Some((subplan, negated, left));
         }
@@ -419,8 +451,9 @@ impl super::Planner {
         // contains more EXISTS subqueries that need semi-join rewriting.
         if let Some(ref remaining) = remaining_predicate {
             // Recursively handle nested EXISTS in the remaining predicate
+            let outer: HashSet<String> = output_columns.iter().cloned().collect();
             if let Some((nested_sub, nested_neg, nested_rest)) =
-                self.extract_complex_exists(remaining)
+                self.extract_complex_exists(remaining, Some(&outer))
             {
                 return self.plan_exists_as_semi_join_with_input(
                     join_op,
@@ -509,8 +542,9 @@ impl super::Planner {
 
         // Handle remaining predicate (from AND splitting)
         if let Some(ref remaining) = remaining_predicate {
+            let outer: HashSet<String> = output_columns.iter().cloned().collect();
             if let Some((nested_sub, nested_neg, nested_rest)) =
-                self.extract_complex_exists(remaining)
+                self.extract_complex_exists(remaining, Some(&outer))
             {
                 return self.plan_exists_as_semi_join_with_input(
                     result,
@@ -583,8 +617,9 @@ impl super::Planner {
 
         // Recursively handle any further EXISTS in the remaining predicate
         if let Some(ref remaining) = remaining_predicate {
+            let outer: HashSet<String> = output_columns.iter().cloned().collect();
             if let Some((nested_sub, nested_neg, nested_rest)) =
-                self.extract_complex_exists(remaining)
+                self.extract_complex_exists(remaining, Some(&outer))
             {
                 return self.plan_exists_as_semi_join_with_input(
                     join_op,

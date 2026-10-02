@@ -415,30 +415,45 @@ pub enum FilterExpression {
         /// The predicate to test for each element.
         predicate: Box<FilterExpression>,
     },
-    /// EXISTS subquery: evaluates inner plan and returns true if results exist.
+    /// EXISTS subquery over one edge, or one variable-length edge, between
+    /// `start_var` and `end_var` (fast path): whether the pattern matches for
+    /// the row. A pattern variable the row binds must match what the row
+    /// holds (a null matches nothing); see [`ExpressionPredicate`] for a row
+    /// that binds the end but not the start, or neither.
     ExistsSubquery {
-        /// The start node variable from outer query.
+        /// The pattern's start node variable.
         start_var: String,
-        /// Direction of edge traversal.
+        /// The pattern's other end.
+        end_var: String,
+        /// The pattern's edge variable, if it has one.
+        edge_var: Option<String>,
+        /// Direction of edge traversal, from the start.
         direction: Direction,
         /// Edge type filter (empty = match all types, multiple = match any).
         edge_types: Vec<String>,
-        /// Optional end node labels filter.
+        /// Labels the other end must have (single-edge patterns only).
         end_labels: Option<Vec<String>>,
-        /// Minimum number of hops (for variable-length patterns).
+        /// `Some(1)` for a variable-length pattern, `None` for one edge.
         min_hops: Option<u32>,
-        /// Maximum number of hops (for variable-length patterns).
+        /// Maximum number of hops of a variable-length pattern (`None`:
+        /// unbounded).
         max_hops: Option<u32>,
     },
-    /// COUNT subquery: counts matching edges from a node (fast path).
+    /// COUNT subquery over one edge between `start_var` and `end_var` (fast
+    /// path): how many edges match for the row, with the same rules as
+    /// [`ExistsSubquery`](Self::ExistsSubquery).
     CountSubquery {
-        /// The start node variable from outer query.
+        /// The pattern's start node variable.
         start_var: String,
-        /// Direction of edge traversal.
+        /// The pattern's other end.
+        end_var: String,
+        /// The pattern's edge variable, if it has one.
+        edge_var: Option<String>,
+        /// Direction of edge traversal, from the start.
         direction: Direction,
         /// Edge type filter (empty = match all types, multiple = match any).
         edge_types: Vec<String>,
-        /// Optional end node labels filter.
+        /// Labels the other end must have.
         end_labels: Option<Vec<String>>,
     },
     /// reduce() accumulator: `reduce(acc = init, x IN list | expr)`.
@@ -590,31 +605,280 @@ impl ExpressionPredicate {
         edge_types: &[String],
         end_labels: &Option<Vec<String>>,
     ) -> bool {
-        // Check edge type if specified
-        if !edge_types.is_empty() {
-            let type_ok = if let Some(actual_type) = self.store.edge_type(edge_id) {
+        self.edge_type_matches(edge_id, edge_types) && self.has_labels(other_node_id, end_labels)
+    }
+
+    /// Whether the edge has one of `edge_types` (any type when empty).
+    fn edge_type_matches(&self, edge_id: EdgeId, edge_types: &[String]) -> bool {
+        edge_types.is_empty()
+            || self.store.edge_type(edge_id).is_some_and(|actual| {
                 edge_types
                     .iter()
-                    .any(|t| actual_type.as_str().eq_ignore_ascii_case(t.as_str()))
-            } else {
-                false
-            };
-            if !type_ok {
-                return false;
-            }
-        }
+                    .any(|t| actual.as_str().eq_ignore_ascii_case(t.as_str()))
+            })
+    }
 
-        // Check end node labels if specified (e.g., (:Person)-[:KNOWS]->(n) requires
-        // the other endpoint to have the Person label after direction flipping).
-        if let Some(labels) = end_labels {
-            if let Some(node) = self.resolve_node(other_node_id) {
-                labels.iter().all(|l| node.has_label(l))
-            } else {
-                false
-            }
-        } else {
-            true
+    /// Whether the node has every label of `labels` (any node when `None`).
+    fn has_labels(&self, node_id: NodeId, labels: &Option<Vec<String>>) -> bool {
+        labels.as_ref().is_none_or(|labels| {
+            self.resolve_node(node_id)
+                .is_some_and(|node| labels.iter().all(|label| node.has_label(label)))
+        })
+    }
+
+    /// What the row binds the pattern variable `name` to, read with `read`.
+    fn bound<T>(
+        &self,
+        name: &str,
+        chunk: &DataChunk,
+        row: usize,
+        read: impl FnOnce(&ValueVector, usize) -> Option<T>,
+    ) -> Bound<T> {
+        match self
+            .variable_columns
+            .get(name)
+            .and_then(|&index| chunk.column(index))
+        {
+            None => Bound::No,
+            Some(column) => read(column, row).map_or(Bound::Null, Bound::To),
         }
+    }
+
+    /// The nodes this query sees.
+    fn visible_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.store
+            .node_ids()
+            .into_iter()
+            .filter(|&id| self.resolve_node(id).is_some())
+    }
+
+    /// How many matches a fast-path `EXISTS` or `COUNT` pattern has for the
+    /// row, counting up to `limit` (`EXISTS` needs one).
+    ///
+    /// The subquery pattern shares a variable with the row when the row binds
+    /// it: an end or edge the row binds must be that node or edge, and one the
+    /// row holds as null matches nothing. A row that binds the edge is
+    /// answered from that edge; one that binds the end but not the start has
+    /// its edges found from the end; one that binds none of them, which makes
+    /// the subquery the same for every row, from every node.
+    fn subquery_matches(
+        &self,
+        pattern: &SubqueryPattern<'_>,
+        chunk: &DataChunk,
+        row: usize,
+        limit: usize,
+    ) -> usize {
+        let (start, end) = match (
+            self.bound(pattern.start, chunk, row, ValueVector::get_node_id),
+            self.bound(pattern.end, chunk, row, ValueVector::get_node_id),
+        ) {
+            (Bound::Null, _) | (_, Bound::Null) => return 0,
+            (start, end) => (start.node(), end.node()),
+        };
+        if let Hops::Path(max_hops) = pattern.hops {
+            return usize::from(self.path_exists(pattern, chunk, row, start, end, max_hops));
+        }
+        match pattern.edge.map_or(Bound::No, |name| {
+            self.bound(name, chunk, row, ValueVector::get_edge_id)
+        }) {
+            Bound::Null => return 0,
+            Bound::To(edge) => {
+                return self
+                    .bound_edge_matches(edge, start, end, pattern)
+                    .min(limit);
+            }
+            Bound::No => {}
+        }
+        match (start, end) {
+            (Some(start), end) => self
+                .store
+                .edges_from(start, pattern.direction)
+                .into_iter()
+                .filter(|&(other, id)| {
+                    end.is_none_or(|end| end == other)
+                        && self.edge_matches(other, id, pattern.edge_types, pattern.end_labels)
+                })
+                .take(limit)
+                .count(),
+            (None, Some(end)) => {
+                if !self.has_labels(end, pattern.end_labels) {
+                    return 0;
+                }
+                self.store
+                    .edges_from(end, pattern.direction.reverse())
+                    .into_iter()
+                    .filter(|&(_, id)| self.edge_type_matches(id, pattern.edge_types))
+                    .take(limit)
+                    .count()
+            }
+            (None, None) => {
+                let mut found = 0;
+                for start in self.visible_nodes() {
+                    found += self
+                        .store
+                        .edges_from(start, pattern.direction)
+                        .into_iter()
+                        .filter(|&(other, id)| {
+                            self.edge_matches(other, id, pattern.edge_types, pattern.end_labels)
+                        })
+                        .take(limit - found)
+                        .count();
+                    if found == limit {
+                        break;
+                    }
+                }
+                found
+            }
+        }
+    }
+
+    /// How often the row's edge matches a one-edge pattern between `start`
+    /// and `end` (the nodes the row binds, if any): once, or once each way
+    /// for an undirected pattern with free ends, as walking the edges of
+    /// every node would find it (a self-loop too).
+    fn bound_edge_matches(
+        &self,
+        edge: EdgeId,
+        start: Option<NodeId>,
+        end: Option<NodeId>,
+        pattern: &SubqueryPattern<'_>,
+    ) -> usize {
+        let Some(record) = self.resolve_edge(edge) else {
+            return 0;
+        };
+        if !self.edge_type_matches(edge, pattern.edge_types) {
+            return 0;
+        }
+        // The edge read from the start: forward from its source, backward
+        // from its target.
+        let forward = matches!(pattern.direction, Direction::Outgoing | Direction::Both)
+            .then_some((record.src, record.dst));
+        let backward = matches!(pattern.direction, Direction::Incoming | Direction::Both)
+            .then_some((record.dst, record.src));
+        [forward, backward]
+            .into_iter()
+            .flatten()
+            .filter(|&(from, to)| {
+                start.map_or_else(|| self.resolve_node(from).is_some(), |start| start == from)
+                    && end.is_none_or(|end| end == to)
+                    && self.has_labels(to, pattern.end_labels)
+            })
+            .count()
+    }
+
+    /// Whether a variable-length fast-path pattern (1 to `max_hops` edges,
+    /// any number when `None`) matches for the row; `start` and `end` are the
+    /// nodes the row binds. A path from an unbound end exists when its first
+    /// edge does.
+    fn path_exists(
+        &self,
+        pattern: &SubqueryPattern<'_>,
+        chunk: &DataChunk,
+        row: usize,
+        start: Option<NodeId>,
+        end: Option<NodeId>,
+        max_hops: Option<u32>,
+    ) -> bool {
+        if let Some(name) = pattern.edge {
+            match self.bound(name, chunk, row, edge_id_list) {
+                Bound::Null => return false,
+                Bound::To(edges) => {
+                    return self.path_follows(&edges, start, end, pattern, max_hops);
+                }
+                Bound::No => {}
+            }
+        }
+        let has_edge = |node: NodeId, direction: Direction| {
+            self.store
+                .edges_from(node, direction)
+                .into_iter()
+                .any(|(_, id)| self.edge_type_matches(id, pattern.edge_types))
+        };
+        match (start, end) {
+            (Some(start), Some(end)) => self.reaches(start, end, pattern, max_hops),
+            (Some(start), None) => has_edge(start, pattern.direction),
+            (None, Some(end)) => has_edge(end, pattern.direction.reverse()),
+            (None, None) => self
+                .visible_nodes()
+                .any(|node| has_edge(node, pattern.direction)),
+        }
+    }
+
+    /// Whether `to` is reached from `from` over 1 to `max_hops` edges of the
+    /// pattern (any number when `None`).
+    fn reaches(
+        &self,
+        from: NodeId,
+        to: NodeId,
+        pattern: &SubqueryPattern<'_>,
+        max_hops: Option<u32>,
+    ) -> bool {
+        // `from` is not marked seen, so a cycle back to it counts.
+        let mut seen = std::collections::HashSet::new();
+        let mut frontier = vec![from];
+        let mut hops = 0;
+        while !frontier.is_empty() && max_hops.is_none_or(|max| hops < max) {
+            hops += 1;
+            let mut next = Vec::new();
+            for node in frontier {
+                for (other, id) in self.store.edges_from(node, pattern.direction) {
+                    if !self.edge_type_matches(id, pattern.edge_types) {
+                        continue;
+                    }
+                    if other == to {
+                        return true;
+                    }
+                    if seen.insert(other) {
+                        next.push(other);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        false
+    }
+
+    /// Whether `edges` are a path of the pattern, one after the other: 1 to
+    /// `max_hops` edges of its types in its direction, from `start` and to
+    /// `end` when the row binds them.
+    fn path_follows(
+        &self,
+        edges: &[EdgeId],
+        start: Option<NodeId>,
+        end: Option<NodeId>,
+        pattern: &SubqueryPattern<'_>,
+        max_hops: Option<u32>,
+    ) -> bool {
+        if max_hops.is_some_and(|max| usize::try_from(max).is_ok_and(|max| edges.len() > max)) {
+            return false;
+        }
+        let Some(first) = edges.first().and_then(|&id| self.resolve_edge(id)) else {
+            return false;
+        };
+        let starts = match (start, pattern.direction) {
+            (Some(start), _) => vec![start],
+            (None, Direction::Outgoing) => vec![first.src],
+            (None, Direction::Incoming) => vec![first.dst],
+            (None, Direction::Both) => vec![first.src, first.dst],
+        };
+        starts.into_iter().any(|mut node| {
+            for &id in edges {
+                let Some(edge) = self.resolve_edge(id) else {
+                    return false;
+                };
+                if !self.edge_type_matches(id, pattern.edge_types) {
+                    return false;
+                }
+                node = match pattern.direction {
+                    Direction::Outgoing if edge.src == node => edge.dst,
+                    Direction::Incoming if edge.dst == node => edge.src,
+                    Direction::Both if edge.src == node => edge.dst,
+                    Direction::Both if edge.dst == node => edge.src,
+                    _ => return false,
+                };
+            }
+            end.is_none_or(|end| end == node)
+        })
     }
 
     /// Resolves an edge using transaction-aware access when available.
@@ -950,52 +1214,50 @@ impl ExpressionPredicate {
             }
             FilterExpression::ExistsSubquery {
                 start_var,
+                end_var,
+                edge_var,
                 direction,
                 edge_types,
                 end_labels,
-                // min_hops/max_hops are always None: the planner takes this
-                // path only when one edge from the start node decides the
-                // answer (see `extract_exists_pattern`).
-                ..
+                min_hops,
+                max_hops,
             } => {
-                // Get the start node ID from the current row
-                let col_idx = *self.variable_columns.get(start_var)?;
-                let col = chunk.column(col_idx)?;
-                let start_node_id = col.get_node_id(row)?;
-
-                // Check if any matching edges exist
-                let exists = self
-                    .store
-                    .edges_from(start_node_id, *direction)
-                    .into_iter()
-                    .any(|(other_node_id, edge_id)| {
-                        self.edge_matches(other_node_id, edge_id, edge_types, end_labels)
-                    });
-
-                Some(Value::Bool(exists))
+                let pattern = SubqueryPattern {
+                    start: start_var,
+                    end: end_var,
+                    edge: edge_var.as_deref(),
+                    direction: *direction,
+                    edge_types,
+                    end_labels,
+                    hops: if min_hops.is_some() {
+                        Hops::Path(*max_hops)
+                    } else {
+                        Hops::One
+                    },
+                };
+                Some(Value::Bool(
+                    self.subquery_matches(&pattern, chunk, row, 1) > 0,
+                ))
             }
             FilterExpression::CountSubquery {
                 start_var,
+                end_var,
+                edge_var,
                 direction,
                 edge_types,
                 end_labels,
             } => {
-                let col_idx = *self.variable_columns.get(start_var)?;
-                let col = chunk.column(col_idx)?;
-                let start_node_id = col.get_node_id(row)?;
-
-                let count = self
-                    .store
-                    .edges_from(start_node_id, *direction)
-                    .into_iter()
-                    .filter(|(other_node_id, edge_id)| {
-                        self.edge_matches(*other_node_id, *edge_id, edge_types, end_labels)
-                    })
-                    .count();
-
-                // reason: edge count from a single node fits i64
-                #[allow(clippy::cast_possible_wrap)]
-                Some(Value::Int64(count as i64))
+                let pattern = SubqueryPattern {
+                    start: start_var,
+                    end: end_var,
+                    edge: edge_var.as_deref(),
+                    direction: *direction,
+                    edge_types,
+                    end_labels,
+                    hops: Hops::One,
+                };
+                let count = self.subquery_matches(&pattern, chunk, row, usize::MAX);
+                Some(Value::Int64(i64::try_from(count).unwrap_or(i64::MAX)))
             }
             FilterExpression::Reduce {
                 accumulator,
@@ -3567,6 +3829,63 @@ impl ExpressionPredicate {
             _ => None,
         }
     }
+}
+
+/// A fast-path `EXISTS` or `COUNT` pattern (see
+/// [`FilterExpression::ExistsSubquery`]).
+struct SubqueryPattern<'a> {
+    start: &'a str,
+    end: &'a str,
+    edge: Option<&'a str>,
+    direction: Direction,
+    edge_types: &'a [String],
+    end_labels: &'a Option<Vec<String>>,
+    hops: Hops,
+}
+
+/// How many edges a subquery pattern has.
+#[derive(Clone, Copy)]
+enum Hops {
+    /// One edge.
+    One,
+    /// A variable-length edge: 1 to this many (`None`: any number).
+    Path(Option<u32>),
+}
+
+/// What a row binds a variable of a subquery pattern to.
+enum Bound<T> {
+    /// The row has no such variable: the pattern binds it.
+    No,
+    /// The row holds null there, or not a node or edge: nothing matches it.
+    Null,
+    /// The row holds this node or edge.
+    To(T),
+}
+
+impl Bound<NodeId> {
+    /// The node, when the row binds one.
+    fn node(self) -> Option<NodeId> {
+        match self {
+            Self::To(node) => Some(node),
+            Self::No | Self::Null => None,
+        }
+    }
+}
+
+/// The edges of a path's edge list in `column`, as a variable-length expand
+/// writes it.
+fn edge_id_list(column: &ValueVector, row: usize) -> Option<Vec<EdgeId>> {
+    let Value::List(items) = column.get_value(row)? else {
+        return None;
+    };
+    items
+        .iter()
+        .map(|item| {
+            item.as_int64()
+                .and_then(|id| u64::try_from(id).ok())
+                .map(EdgeId::new)
+        })
+        .collect()
 }
 
 /// What the items of a list a comprehension, list predicate or `reduce`

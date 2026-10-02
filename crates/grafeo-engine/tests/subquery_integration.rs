@@ -323,3 +323,133 @@ mod subqueries_over_paths {
         );
     }
 }
+
+/// `EXISTS` and `COUNT` through the edge of the row: Alix knows Gus, and Mia
+/// likes herself.
+mod subqueries_through_a_bound_edge {
+    use super::*;
+
+    fn people() -> GrafeoDB {
+        let db = GrafeoDB::new_in_memory();
+        db.execute(
+            "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), \
+             (mia:Person {name: 'Mia'})-[:LIKES]->(mia)",
+        )
+        .unwrap();
+        db
+    }
+
+    /// The pattern reads the row's edge from the ends it names: forward from
+    /// the source, backward into the target, and both ways when undirected
+    /// with free ends. Mia's self-loop is both her source and her target.
+    #[test]
+    fn the_edge_is_read_from_the_ends_the_pattern_names() {
+        let db = people();
+        let result = db
+            .execute(
+                "MATCH (a)-[r]->(b) RETURN a.name, \
+                 COUNT { MATCH (a)-[r]->(x) } AS from_a, \
+                 COUNT { MATCH (b)-[r]->(x) } AS from_b, \
+                 COUNT { MATCH (b)<-[r]-(x) } AS into_b, \
+                 COUNT { MATCH (x)-[r]-(y) } AS either_way, \
+                 EXISTS { MATCH (x)-[r]->(:Person) } AS to_a_person, \
+                 EXISTS { MATCH (x)-[r]->(:City) } AS to_a_city \
+                 ORDER BY a.name",
+            )
+            .unwrap();
+        let rows: Vec<Vec<Value>> = result.rows().to_vec();
+        assert_eq!(
+            rows,
+            [("Alix", [1, 0, 1, 2]), ("Mia", [1, 1, 1, 2])]
+                .map(|(name, counts)| {
+                    let mut row = vec![Value::from(name)];
+                    row.extend(counts.map(Value::Int64));
+                    row.extend([Value::Bool(true), Value::Bool(false)]);
+                    row
+                })
+                .to_vec()
+        );
+    }
+
+    /// A compared `COUNT` in `WHERE` is planned as a join; it counts the
+    /// undirected matches of the row's edge like the per-row check does.
+    #[test]
+    fn a_compared_count_counts_the_edge_both_ways() {
+        let db = people();
+        let result = db
+            .execute(
+                "MATCH (a)-[r]->(b) WHERE COUNT { MATCH (x)-[r]-(y) } = 2 \
+                 RETURN a.name ORDER BY a.name",
+            )
+            .unwrap();
+        let names: Vec<Value> = result.rows().iter().map(|row| row[0].clone()).collect();
+        assert_eq!(names, [Value::from("Alix"), Value::from("Mia")]);
+    }
+}
+
+/// `EXISTS` and `COUNT` whose pattern holds more than its edge: another node
+/// pattern, or a path mode on a variable-length edge. Alix knows Gus and
+/// lives in Amsterdam, and Mia likes herself; there is no Robot.
+mod subqueries_beyond_the_edge {
+    use super::*;
+
+    fn people() -> GrafeoDB {
+        let db = GrafeoDB::new_in_memory();
+        db.execute(
+            "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), \
+             (alix)-[:LIVES_IN]->(:City {name: 'Amsterdam'}), \
+             (mia:Person {name: 'Mia'})-[:LIKES]->(mia)",
+        )
+        .unwrap();
+        db
+    }
+
+    /// In `RETURN`, such a subquery fails rather than answering from its edge
+    /// alone: Alix knows someone but there is no Robot, and Mia's only path
+    /// returns to her, which ACYCLIC excludes. A correlated plan for these is
+    /// #543.
+    #[test]
+    fn subqueries_with_more_than_the_edge_fail_in_return() {
+        let db = people();
+        for query in [
+            "MATCH (a:Person) RETURN a.name, EXISTS { MATCH (a)-[:KNOWS]->(b), (c:Robot) } AS e",
+            "MATCH (a:Person) RETURN a.name, EXISTS { MATCH (c:Robot), (a)-[:KNOWS]->(b) } AS e",
+            "MATCH (a:Person) RETURN a.name, COUNT { MATCH (a)-[:KNOWS]->(b), (c:Person) } AS n",
+            "MATCH (a:Person) RETURN a.name, EXISTS { MATCH ACYCLIC (a)-[:LIKES*1..2]->(x) } AS e",
+            "MATCH (a:Person) RETURN a.name, EXISTS { MATCH TRAIL (a)-[:KNOWS*1..2]-(x) } AS e",
+        ] {
+            let error = db.execute(query).expect_err(query).to_string();
+            assert!(
+                error.contains("Unsupported EXISTS subquery pattern"),
+                "{query}: {error}"
+            );
+        }
+    }
+
+    /// A node pattern on the end of the edge is that end: its label joins the
+    /// edge check, also in `RETURN`.
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn a_later_node_pattern_on_the_end_labels_it() {
+        let db = people();
+        let result = db
+            .execute_cypher(
+                "MATCH (a:Person) RETURN a.name, \
+                 COUNT { MATCH (a)-[r]->(b) MATCH (b:Person) } AS people, \
+                 EXISTS { MATCH (a)-[r]->(b) MATCH (b:Robot) } AS robots \
+                 ORDER BY a.name",
+            )
+            .unwrap();
+        let rows: Vec<Vec<Value>> = result.rows().to_vec();
+        assert_eq!(
+            rows,
+            [("Alix", 1), ("Gus", 0), ("Mia", 1)]
+                .map(|(name, people)| vec![
+                    Value::from(name),
+                    Value::Int64(people),
+                    Value::Bool(false)
+                ])
+                .to_vec()
+        );
+    }
+}

@@ -1,0 +1,124 @@
+# Rosetta: an EXISTS subquery matches its whole pattern
+#
+# Besides its edge, the subquery's pattern can hold another node pattern,
+# which has to match as well, and a path mode, which limits the paths of a
+# variable-length edge.
+#
+# Setup (GQL, one statement): Alix, Gus, Vincent and Mia, and Amsterdam.
+# KNOWS Alix->Gus, Gus->Alix, Gus->Vincent and Vincent->Mia; LIVES_IN
+# Alix->Amsterdam and Mia->Amsterdam; LIKES Alix->Gus and Mia->Mia. There is
+# no Robot.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: An EXISTS subquery matches its whole pattern
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # A node pattern apart from the edge
+  # ---------------------------------------------------------------------------
+
+  - name: exists_with_a_second_node_pattern
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b), (c:Robot) } RETURN a.name AS a"
+      cypher: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b), (c:Robot) } RETURN a.name AS a"
+    expect:
+      empty: true
+
+  - name: not_exists_with_a_node_pattern_before_the_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) WHERE NOT EXISTS { MATCH (c:Robot), (a)-[:KNOWS]->(b) } RETURN a.name AS a"
+      cypher: "MATCH (a:Person) WHERE NOT EXISTS { MATCH (c:Robot), (a)-[:KNOWS]->(b) } RETURN a.name AS a"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+        - [Mia]
+
+  - name: exists_with_a_second_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) MATCH (c:Robot) } RETURN a.name AS a"
+      cypher: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) MATCH (c:Robot) } RETURN a.name AS a"
+    expect:
+      empty: true
+
+  # A second MATCH on the end of the edge adds its label to that end.
+  - name: exists_with_a_label_on_the_end_in_a_second_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
+    variants:
+      cypher: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) MATCH (b:City) } RETURN a.name AS a"
+    expect:
+      empty: true
+
+  - name: return_count_with_a_label_on_the_end_in_a_second_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
+    variants:
+      cypher: "MATCH (a:Person) RETURN a.name AS a, COUNT { MATCH (a)-[r]->(b) MATCH (b:City) } AS cities"
+    expect:
+      rows:
+        - [Alix, 1]
+        - [Gus, 0]
+        - [Vincent, 0]
+        - [Mia, 1]
+
+  # ---------------------------------------------------------------------------
+  # A path mode
+  # ---------------------------------------------------------------------------
+
+  # Mia's only LIKES edge returns to her: a walk, not an acyclic path.
+  - name: exists_a_walk
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:LIKES*1..2]->(x) } RETURN a.name AS a"
+    expect:
+      rows:
+        - [Alix]
+        - [Mia]
+
+  - name: exists_an_acyclic_path
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) WHERE EXISTS { MATCH ACYCLIC (a)-[:LIKES*1..2]->(x) } RETURN a.name AS a"
+    expect:
+      rows:
+        - [Alix]
+
+  # Back to the start in at most two KNOWS edges, either way: Vincent and Mia
+  # only over the edge they left by, Alix and Gus also over the other edge
+  # between them.
+  - name: exists_a_closed_walk
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) WITH a, a AS b WHERE EXISTS { MATCH (a)-[:KNOWS*1..2]-(b) } RETURN a.name AS a"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+        - [Mia]
+
+  - name: exists_a_closed_trail
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) WITH a, a AS b WHERE EXISTS { MATCH TRAIL (a)-[:KNOWS*1..2]-(b) } RETURN a.name AS a"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]

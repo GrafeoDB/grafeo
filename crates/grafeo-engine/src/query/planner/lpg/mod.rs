@@ -43,7 +43,9 @@
 //!    per outer row; the join form piggy-backs on the regular hash-join
 //!    infrastructure. The fast path in `expression::convert_expression`
 //!    keeps trivial single-hop EXISTS as inline predicates so small
-//!    queries stay scan-local.
+//!    queries stay scan-local; in WHERE only when the pattern starts from a
+//!    node of the row and shares no other variable with it, because the
+//!    join form matches every shared variable.
 //!
 //! 3. **EXISTS inside OR** (`filter::extract_exists_from_or`):
 //!    semi-joins filter rows and therefore compose incorrectly with the

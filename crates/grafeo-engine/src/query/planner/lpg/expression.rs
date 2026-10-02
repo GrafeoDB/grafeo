@@ -18,7 +18,7 @@
 
 use super::{
     Direction, Error, ExpandDirection, FilterExpression, LogicalExpression, LogicalOperator,
-    Result, Value, convert_binary_op, convert_unary_op,
+    PathMode, Result, Value, convert_binary_op, convert_unary_op,
 };
 
 impl super::Planner {
@@ -193,11 +193,13 @@ impl super::Planner {
                 let check = self.extract_exists_pattern(subplan)?;
                 Ok(FilterExpression::ExistsSubquery {
                     start_var: check.start_var,
+                    end_var: check.end_var,
+                    edge_var: check.edge_var,
                     direction: check.direction,
                     edge_types: check.edge_types,
                     end_labels: check.end_labels,
-                    min_hops: None,
-                    max_hops: None,
+                    min_hops: (!check.one_edge).then_some(1),
+                    max_hops: check.max_hops,
                 })
             }
             LogicalExpression::CountSubquery(subplan) => {
@@ -210,6 +212,8 @@ impl super::Planner {
                 }
                 Ok(FilterExpression::CountSubquery {
                     start_var: check.start_var,
+                    end_var: check.end_var,
+                    edge_var: check.edge_var,
                     direction: check.direction,
                     edge_types: check.edge_types,
                     end_labels: check.end_labels,
@@ -282,33 +286,42 @@ impl super::Planner {
     }
 
     /// Extracts the edge check that an `EXISTS` subplan reduces to, for the
-    /// fast path that looks only at the correlated node's own edges.
+    /// fast path that looks only at the start node's own edges.
     ///
-    /// Accepts a single edge from or to an outer variable, like
-    /// `(n)-[:TYPE]->()`, `(n)-[:TYPE]->(:Label)` or `()-[:TYPE]->(n)`, and a
-    /// path of at least one edge with no condition on its end, like
-    /// `(n)-[:TYPE*]->()`, which exists exactly when its first edge does.
+    /// Accepts a single edge, like `(n)-[:TYPE]->()`, `(n)-[:TYPE]->(:Label)`
+    /// or `()-[:TYPE]->(n)`, and a path of at least one edge with no
+    /// condition on its end, like `(n)-[:TYPE*]->()`, in the WALK path mode.
     /// Everything else goes to the semi-join rewrite in `plan_filter`: a path
-    /// with a minimum other than one hop or with a labeled end, a label on the
-    /// outer variable, an inner `WHERE` other than a label on the end, and
-    /// patterns with no outer variable.
+    /// with a minimum other than one hop, a labeled end or another path mode,
+    /// a label on the start, an inner `WHERE` other than a label on the end,
+    /// a node pattern apart from the edge, and patterns with no named node.
     ///
-    /// When the outer variable is on the target side of the pattern (e.g.
-    /// `()-[:CALLS]->(m)`), the direction is flipped so the runtime can
-    /// evaluate from the outer node.
+    /// The start is the pattern's named source, or its target when the source
+    /// is anonymous (e.g. `()-[:CALLS]->(m)`, with the direction flipped).
+    /// Which of the pattern's variables the outer row binds is known only per
+    /// row: the evaluation matches its end and edge to the row's when it binds
+    /// them, and `plan_filter` takes the fast path only for a start the
+    /// outer row binds.
     pub(super) fn extract_exists_pattern(&self, subplan: &LogicalOperator) -> Result<EdgeCheck> {
         let unsupported = || Error::Internal("Unsupported EXISTS subquery pattern".to_string());
         match subplan {
             LogicalOperator::Expand(expand) => {
                 // The Expand's input must be the plain scan of its source: another
-                // Expand means more edges, a Filter an inner WHERE or a second label.
+                // Expand means more edges, a Filter an inner WHERE or a second label,
+                // and a scan with an input a pattern before this one.
                 let LogicalOperator::NodeScan(source) = expand.input.as_ref() else {
                     return Err(unsupported());
                 };
-                if expand.min_hops != 1 {
+                if expand.min_hops != 1 || source.input.is_some() {
                     return Err(unsupported());
                 }
                 let one_edge = expand.max_hops == Some(1);
+                // A path mode other than WALK (TRAIL, SIMPLE, ACYCLIC) limits the
+                // paths of a longer pattern, which the check does not; a single
+                // edge is expanded the same way in every mode.
+                if !one_edge && expand.path_mode != PathMode::Walk {
+                    return Err(unsupported());
+                }
 
                 let from_is_anon = expand.from_variable.starts_with("_anon_");
                 let to_is_anon = expand.to_variable.starts_with("_anon_");
@@ -337,10 +350,12 @@ impl super::Planner {
                     Ok(EdgeCheck {
                         start_var: expand.to_variable.clone(),
                         end_var: expand.from_variable.clone(),
+                        edge_var: expand.edge_variable.clone(),
                         direction,
                         edge_types: expand.edge_types.clone(),
                         end_labels,
                         one_edge,
+                        max_hops: expand.max_hops,
                     })
                 } else {
                     // Outer variable on the source side, e.g. (m)-[:CALLS]->(). A
@@ -357,20 +372,38 @@ impl super::Planner {
                     Ok(EdgeCheck {
                         start_var: expand.from_variable.clone(),
                         end_var: expand.to_variable.clone(),
+                        edge_var: expand.edge_variable.clone(),
                         direction,
                         edge_types: expand.edge_types.clone(),
                         end_labels: None,
                         one_edge,
+                        max_hops: expand.max_hops,
                     })
                 }
             }
+            // A node pattern after the edge, like the second MATCH of
+            // `MATCH (n)-[:R]->(m) MATCH (m:Label)`, reuses the node of the edge it
+            // names: a label on the end joins the end labels. Any other node is a
+            // pattern of its own, which the edge check cannot make.
             LogicalOperator::NodeScan(scan) => {
-                if let Some(input) = &scan.input {
-                    self.extract_exists_pattern(input)
-                } else {
-                    Err(Error::Internal(
+                let Some(input) = &scan.input else {
+                    return Err(Error::Internal(
                         "EXISTS subquery must contain an edge pattern".to_string(),
-                    ))
+                    ));
+                };
+                let mut check = self.extract_exists_pattern(input)?;
+                if scan.variable == check.end_var && (scan.label.is_none() || check.one_edge) {
+                    if let Some(label) = &scan.label {
+                        check
+                            .end_labels
+                            .get_or_insert_with(Vec::new)
+                            .push(label.clone());
+                    }
+                    Ok(check)
+                } else if scan.variable == check.start_var && scan.label.is_none() {
+                    Ok(check)
+                } else {
+                    Err(unsupported())
                 }
             }
             // A label on the far end of a single edge, e.g.
@@ -409,20 +442,25 @@ impl super::Planner {
     }
 }
 
-/// The check on an outer node's own edges that an `EXISTS` or `COUNT`
-/// subquery reduces to (see `extract_exists_pattern`).
+/// The check on a node's own edges that an `EXISTS` or `COUNT` subquery
+/// reduces to (see `extract_exists_pattern`).
 pub(super) struct EdgeCheck {
-    /// The outer variable the check starts from.
+    /// The variable the check starts from.
     pub start_var: String,
     /// The pattern's other end.
     pub end_var: String,
-    /// The direction of the edge, seen from the outer node.
+    /// The pattern's edge variable, if it has one.
+    pub edge_var: Option<String>,
+    /// The direction of the edge, seen from the start.
     pub direction: Direction,
     /// The edge types to match (empty matches any).
     pub edge_types: Vec<String>,
     /// The labels the other end must all have.
     pub end_labels: Option<Vec<String>>,
     /// Whether the pattern is a single edge. A longer path is accepted only for
-    /// `EXISTS`: it exists when its first edge does, but counts differently.
+    /// `EXISTS`, where it exists when its first edge does (unless the row
+    /// binds its other end or edge), but counts differently.
     pub one_edge: bool,
+    /// The maximum number of hops of a longer path (`None`: unbounded).
+    pub max_hops: Option<u32>,
 }

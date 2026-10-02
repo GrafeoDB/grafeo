@@ -46,7 +46,7 @@ fn close(
 ) -> LogicalOperator {
     if let LogicalOperator::Apply(mut apply) = op {
         apply.input = Box::new(close(*apply.input, fresh, imports));
-        let outer = bound_variables(&apply.input, imports);
+        let outer = apply.input.bound_variables(imports);
         apply.subplan = Box::new(close(*apply.subplan, fresh, outer.as_ref()));
         return LogicalOperator::Apply(apply);
     }
@@ -54,7 +54,7 @@ fn close(
     let LogicalOperator::Expand(mut expand) = op else {
         return op;
     };
-    let Some(bound) = bound_variables(&expand.input, imports) else {
+    let Some(bound) = expand.input.bound_variables(imports) else {
         return LogicalOperator::Expand(expand);
     };
     let mut checks = Vec::new();
@@ -164,124 +164,5 @@ fn plan_names(op: &LogicalOperator, names: &mut HashSet<String>) {
     names.extend(bound.into_iter().cloned());
     for child in op.children() {
         plan_names(child, names);
-    }
-}
-
-/// The variables the rows of `op` hold, or `None` for an operator this pass
-/// does not model, which then keeps its plan as it is. A `WITH` (`Project`)
-/// holds only what it projects; `imports` is what a subquery's `WITH *`
-/// imports.
-fn bound_variables(
-    op: &LogicalOperator,
-    imports: Option<&HashSet<String>>,
-) -> Option<HashSet<String>> {
-    let mut bound = HashSet::new();
-    match op {
-        LogicalOperator::Empty => {}
-        LogicalOperator::NodeScan(scan) => {
-            if let Some(input) = &scan.input {
-                bound = bound_variables(input, imports)?;
-            }
-            bound.insert(scan.variable.clone());
-        }
-        LogicalOperator::EdgeScan(scan) => {
-            if let Some(input) = &scan.input {
-                bound = bound_variables(input, imports)?;
-            }
-            bound.insert(scan.variable.clone());
-        }
-        LogicalOperator::Expand(expand) => {
-            bound = bound_variables(&expand.input, imports)?;
-            bound.insert(expand.to_variable.clone());
-            bound.extend(expand.edge_variable.iter().cloned());
-            bound.extend(expand.path_alias.iter().cloned());
-        }
-        LogicalOperator::Filter(filter) => return bound_variables(&filter.input, imports),
-        LogicalOperator::Limit(limit) => return bound_variables(&limit.input, imports),
-        LogicalOperator::Skip(skip) => return bound_variables(&skip.input, imports),
-        LogicalOperator::Sort(sort) => return bound_variables(&sort.input, imports),
-        LogicalOperator::Distinct(distinct) => return bound_variables(&distinct.input, imports),
-        LogicalOperator::Project(project) => {
-            if project.pass_through_input {
-                bound = bound_variables(&project.input, imports)?;
-            }
-            for projection in &project.projections {
-                match (&projection.alias, &projection.expression) {
-                    (Some(alias), _) => {
-                        bound.insert(alias.clone());
-                    }
-                    (None, LogicalExpression::Variable(name)) => {
-                        bound.insert(name.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
-        LogicalOperator::Aggregate(aggregate) => {
-            for key in &aggregate.group_by {
-                if let LogicalExpression::Variable(name) = key {
-                    bound.insert(name.clone());
-                }
-            }
-            bound.extend(aggregate.aggregates.iter().filter_map(|a| a.alias.clone()));
-        }
-        LogicalOperator::Unwind(unwind) => {
-            bound = bound_variables(&unwind.input, imports)?;
-            bound.insert(unwind.variable.clone());
-            bound.extend(unwind.ordinality_var.iter().cloned());
-            bound.extend(unwind.offset_var.iter().cloned());
-        }
-        LogicalOperator::Bind(bind) => {
-            bound = bound_variables(&bind.input, imports)?;
-            bound.insert(bind.variable.clone());
-        }
-        LogicalOperator::Join(join) => {
-            bound = bound_variables(&join.left, imports)?;
-            bound.extend(bound_variables(&join.right, imports)?);
-        }
-        LogicalOperator::LeftJoin(join) => {
-            bound = bound_variables(&join.left, imports)?;
-            bound.extend(bound_variables(&join.right, imports)?);
-        }
-        // A subquery starts from the variables it imports from the row it
-        // runs for: the ones its `WITH` names, or all of them for `WITH *`.
-        LogicalOperator::ParameterScan(scan) => {
-            if scan.columns.iter().any(|column| column == "*") {
-                return imports.cloned();
-            }
-            bound.extend(scan.columns.iter().cloned());
-        }
-        // `CALL { ... }` adds the columns its subquery returns to each row.
-        LogicalOperator::Apply(apply) => {
-            bound = bound_variables(&apply.input, imports)?;
-            returned_variables(&apply.subplan, &mut bound);
-        }
-        _ => return None,
-    }
-    Some(bound)
-}
-
-/// Adds the variables a subquery's `RETURN` names. A `RETURN *` adds none:
-/// this pass then leaves a later pattern on them as it is.
-fn returned_variables(op: &LogicalOperator, bound: &mut HashSet<String>) {
-    match op {
-        LogicalOperator::Return(ret) => {
-            for item in &ret.items {
-                match (&item.alias, &item.expression) {
-                    (Some(alias), _) => {
-                        bound.insert(alias.clone());
-                    }
-                    (None, LogicalExpression::Variable(name)) if name != "*" => {
-                        bound.insert(name.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
-        LogicalOperator::Sort(sort) => returned_variables(&sort.input, bound),
-        LogicalOperator::Limit(limit) => returned_variables(&limit.input, bound),
-        LogicalOperator::Skip(skip) => returned_variables(&skip.input, bound),
-        LogicalOperator::Distinct(distinct) => returned_variables(&distinct.input, bound),
-        _ => {}
     }
 }

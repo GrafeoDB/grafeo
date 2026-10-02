@@ -366,7 +366,7 @@ impl Operator for ProjectOperator {
                         output_col.push_value(value);
                     }
                 }
-                ProjectExpr::NodeResolve { column } => {
+                ProjectExpr::NodeResolve { column } | ProjectExpr::EdgeResolve { column } => {
                     let input_col = input
                         .column(*column)
                         .ok_or_else(|| OperatorError::ColumnNotFound(format!("Column {column}")))?;
@@ -376,54 +376,43 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution("Store required for node resolution".to_string())
+                        OperatorError::Execution("Store required for entity resolution".to_string())
                     })?;
 
+                    // The planner says by name whether the column holds nodes
+                    // or edges; a column typed by its rows says it per chunk,
+                    // which wins: the branches of a set operation may bind one
+                    // name to nodes in one branch and to edges in another.
+                    let edges = match input_col.data_type() {
+                        LogicalType::Edge => true,
+                        LogicalType::Node => false,
+                        _ => matches!(proj, ProjectExpr::EdgeResolve { .. }),
+                    };
                     let epoch = self.viewing_epoch;
                     let tx_id = self.transaction_id;
                     for row in input.selected_indices() {
-                        let value = if let Some(node_id) = input_col.get_node_id(row) {
-                            let node = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                store.get_node_versioned(node_id, ep, tx)
-                            } else if let Some(ep) = epoch {
-                                store.get_node_at_epoch(node_id, ep)
-                            } else {
-                                store.get_node(node_id)
-                            };
-                            node.map_or(Value::Null, |n| node_to_map(&n))
+                        let value = if edges {
+                            input_col.get_edge_id(row).map_or(Value::Null, |edge_id| {
+                                let edge = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
+                                    store.get_edge_versioned(edge_id, ep, tx)
+                                } else if let Some(ep) = epoch {
+                                    store.get_edge_at_epoch(edge_id, ep)
+                                } else {
+                                    store.get_edge(edge_id)
+                                };
+                                edge.map_or(Value::Null, |e| edge_to_map(&e))
+                            })
                         } else {
-                            Value::Null
-                        };
-                        output_col.push_value(value);
-                    }
-                }
-                ProjectExpr::EdgeResolve { column } => {
-                    let input_col = input
-                        .column(*column)
-                        .ok_or_else(|| OperatorError::ColumnNotFound(format!("Column {column}")))?;
-
-                    let output_col = output
-                        .column_mut(i)
-                        .expect("column exists: index matches projection schema");
-
-                    let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution("Store required for edge resolution".to_string())
-                    })?;
-
-                    let epoch = self.viewing_epoch;
-                    let tx_id = self.transaction_id;
-                    for row in input.selected_indices() {
-                        let value = if let Some(edge_id) = input_col.get_edge_id(row) {
-                            let edge = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                store.get_edge_versioned(edge_id, ep, tx)
-                            } else if let Some(ep) = epoch {
-                                store.get_edge_at_epoch(edge_id, ep)
-                            } else {
-                                store.get_edge(edge_id)
-                            };
-                            edge.map_or(Value::Null, |e| edge_to_map(&e))
-                        } else {
-                            Value::Null
+                            input_col.get_node_id(row).map_or(Value::Null, |node_id| {
+                                let node = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
+                                    store.get_node_versioned(node_id, ep, tx)
+                                } else if let Some(ep) = epoch {
+                                    store.get_node_at_epoch(node_id, ep)
+                                } else {
+                                    store.get_node(node_id)
+                                };
+                                node.map_or(Value::Null, |n| node_to_map(&n))
+                            })
                         };
                         output_col.push_value(value);
                     }

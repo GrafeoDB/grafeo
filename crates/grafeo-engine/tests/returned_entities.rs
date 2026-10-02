@@ -57,6 +57,8 @@ fn rows(db: &GrafeoDB, language: &str, query: &str) -> Vec<Vec<String>> {
     let result = match language {
         "gql" => db.execute(query),
         "cypher" => db.execute_cypher(query),
+        #[cfg(feature = "gremlin")]
+        "gremlin" => db.execute_gremlin(query),
         other => panic!("unknown language {other}"),
     }
     .unwrap_or_else(|error| panic!("{language}: {query}: {error}"));
@@ -376,6 +378,25 @@ fn collected_grouped_and_unwound_entities_are_records() {
             rows("MATCH (a)-[r]->(b) WITH collect(r) AS rs UNWIND rs AS e RETURN e"),
             edges(&[1, 2, 3]),
             "{language}"
+        );
+    }
+}
+
+/// A step that combines an edge and a node under one name returns each as
+/// what it is: the planner knows only that the name holds an edge in one
+/// branch, so the result is resolved from each row's own column.
+#[cfg(feature = "gremlin")]
+#[test]
+fn an_edge_and_a_node_from_one_union_step_are_both_records() {
+    let db = three_edges(Config::in_memory());
+    for query in [
+        "g.V().has('n', 1).union(outE('K'), out('K'))",
+        "g.V().has('n', 1).union(out('K'), outE('K'))",
+    ] {
+        assert_eq!(
+            sorted(rows(&db, "gremlin", query)),
+            [["K w=Int64(1)"], ["n=Int64(2)"]],
+            "{query}"
         );
     }
 }

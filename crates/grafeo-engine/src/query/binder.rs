@@ -27,6 +27,29 @@ fn binding_error_with_hint(message: impl Into<String>, hint: impl Into<String>) 
     Error::Query(QueryError::new(QueryErrorKind::Semantic, message).with_hint(hint))
 }
 
+/// What a pattern binds a variable to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Element {
+    Node,
+    Edge,
+}
+
+/// Whether a variable holds a value of a known type that is not a node or an
+/// edge (`WITH 1 AS r`). A variable of unknown type may hold either.
+fn holds_a_value(info: &VariableInfo) -> bool {
+    !info.is_node
+        && !info.is_edge
+        && !matches!(
+            info.data_type,
+            LogicalType::Any
+                | LogicalType::Null
+                | LogicalType::Node
+                | LogicalType::Edge
+                | LogicalType::List(_)
+                | LogicalType::Path
+        )
+}
+
 /// Creates an "undefined variable" error with a suggestion if a similar variable exists.
 fn undefined_variable_error(variable: &str, context: &BindingContext, suffix: &str) -> Error {
     let candidates: Vec<String> = context.variable_names();
@@ -215,16 +238,7 @@ impl Binder {
                 if let Some(ref input) = scan.input {
                     self.bind_operator(input)?;
                 }
-                self.context.add_variable(
-                    scan.variable.clone(),
-                    VariableInfo {
-                        name: scan.variable.clone(),
-                        data_type: LogicalType::Edge,
-                        is_node: false,
-                        is_edge: true,
-                    },
-                );
-                Ok(())
+                self.bind_element(&scan.variable, Element::Edge)
             }
             LogicalOperator::Distinct(distinct) => self.bind_operator(&distinct.input),
             LogicalOperator::Join(join) => self.bind_join(join),
@@ -350,12 +364,7 @@ impl Binder {
 
             // RDF/SPARQL operators
             LogicalOperator::TripleScan(scan) => self.bind_triple_scan(scan),
-            LogicalOperator::Union(union) => {
-                for input in &union.inputs {
-                    self.bind_operator(input)?;
-                }
-                Ok(())
-            }
+            LogicalOperator::Union(union) => self.bind_branches(&union.inputs),
             LogicalOperator::LeftJoin(lj) => {
                 self.bind_operator(&lj.left)?;
                 self.bind_operator(&lj.right)?;
@@ -601,19 +610,13 @@ impl Binder {
                 Ok(())
             }
             LogicalOperator::Except(except) => {
-                self.bind_operator(&except.left)?;
-                self.bind_operator(&except.right)?;
-                Ok(())
+                self.bind_branches([except.left.as_ref(), except.right.as_ref()])
             }
             LogicalOperator::Intersect(intersect) => {
-                self.bind_operator(&intersect.left)?;
-                self.bind_operator(&intersect.right)?;
-                Ok(())
+                self.bind_branches([intersect.left.as_ref(), intersect.right.as_ref()])
             }
             LogicalOperator::Otherwise(otherwise) => {
-                self.bind_operator(&otherwise.left)?;
-                self.bind_operator(&otherwise.right)?;
-                Ok(())
+                self.bind_branches([otherwise.left.as_ref(), otherwise.right.as_ref()])
             }
             LogicalOperator::Apply(apply) => {
                 // Snapshot context BEFORE binding the input, so we can detect
@@ -692,8 +695,13 @@ impl Binder {
                 Ok(())
             }
             LogicalOperator::ParameterScan(param_scan) => {
-                // Register parameter columns as variables (injected by outer Apply)
+                // Register parameter columns as variables (injected by outer
+                // Apply). A variable of the outer query keeps what it is, so a
+                // CALL subquery can match an imported edge as an edge.
                 for col in &param_scan.columns {
+                    if self.context.contains(col) {
+                        continue;
+                    }
                     self.context.add_variable(
                         col.clone(),
                         VariableInfo {
@@ -844,16 +852,77 @@ impl Binder {
         }
 
         // Add the scanned variable to scope
+        self.bind_element(&scan.variable, Element::Node)
+    }
+
+    /// Binds `name` to a node or an edge of a pattern. A name already bound
+    /// to the other kind, or to a value, is an error: matching it would
+    /// compare a node with an edge (or a number) and match by a coincidence
+    /// of IDs. A name bound to the same kind, or to something of unknown
+    /// kind (an UNWIND variable, a procedure result), is bound again.
+    fn bind_element(&mut self, name: &str, element: Element) -> Result<()> {
+        if let Some(info) = self.context.get(name) {
+            let conflict = match element {
+                Element::Node if info.is_edge => Some("is an edge, so it cannot also be a node"),
+                Element::Edge if info.is_node => Some("is a node, so it cannot also be an edge"),
+                Element::Node if holds_a_value(info) => {
+                    Some("holds a value, so it cannot be a node")
+                }
+                Element::Edge if holds_a_value(info) => {
+                    Some("holds a value, so it cannot be an edge")
+                }
+                _ => None,
+            };
+            if let Some(conflict) = conflict {
+                return Err(binding_error(format!("Variable '{name}' {conflict}")));
+            }
+        }
+        let is_edge = element == Element::Edge;
         self.context.add_variable(
-            scan.variable.clone(),
+            name.to_string(),
             VariableInfo {
-                name: scan.variable.clone(),
-                data_type: LogicalType::Node,
-                is_node: true,
-                is_edge: false,
+                name: name.to_string(),
+                data_type: if is_edge {
+                    LogicalType::Edge
+                } else {
+                    LogicalType::Node
+                },
+                is_node: !is_edge,
+                is_edge,
             },
         );
+        Ok(())
+    }
 
+    /// Binds the branches of a set operation, each in the scope the first one
+    /// started from: a branch is a query of its own, so a name may be a node
+    /// in one branch and an edge in the next. After the last branch the scope
+    /// has every name a branch bound; a name the branches bind differently is
+    /// of unknown kind.
+    fn bind_branches<'a>(
+        &mut self,
+        branches: impl IntoIterator<Item = &'a LogicalOperator>,
+    ) -> Result<()> {
+        let before = self.context.clone();
+        let mut after: IndexMap<String, VariableInfo> = IndexMap::new();
+        for branch in branches {
+            self.context = before.clone();
+            self.bind_operator(branch)?;
+            for (name, info) in &self.context.variables {
+                match after.get_mut(name) {
+                    Some(seen) if seen.is_node != info.is_node || seen.is_edge != info.is_edge => {
+                        seen.is_node = false;
+                        seen.is_edge = false;
+                        seen.data_type = LogicalType::Any;
+                    }
+                    Some(_) => {}
+                    None => {
+                        after.insert(name.clone(), info.clone());
+                    }
+                }
+            }
+        }
+        self.context = BindingContext { variables: after };
         Ok(())
     }
 
@@ -883,27 +952,11 @@ impl Binder {
 
         // Add edge variable if present
         if let Some(ref edge_var) = expand.edge_variable {
-            self.context.add_variable(
-                edge_var.clone(),
-                VariableInfo {
-                    name: edge_var.clone(),
-                    data_type: LogicalType::Edge,
-                    is_node: false,
-                    is_edge: true,
-                },
-            );
+            self.bind_element(edge_var, Element::Edge)?;
         }
 
         // Add target variable
-        self.context.add_variable(
-            expand.to_variable.clone(),
-            VariableInfo {
-                name: expand.to_variable.clone(),
-                data_type: LogicalType::Node,
-                is_node: true,
-                is_edge: false,
-            },
-        );
+        self.bind_element(&expand.to_variable, Element::Node)?;
 
         // Add path variables for variable-length paths
         if let Some(ref path_alias) = expand.path_alias {

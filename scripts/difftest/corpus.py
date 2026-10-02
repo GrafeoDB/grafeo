@@ -415,4 +415,17 @@ for case_id, query in [
 ]:
     case(case_id, query)
 
+# P: keys() of nodes and edges, and a variable that is a node, an edge or a value
+for case_id, query, languages in [
+    ("P1", "MATCH ()-[r:KNOWS {w: 1}]->() RETURN size(keys(r)) AS n, 'since' IN keys(r) AS s", BOTH),
+    ("P2", "MATCH ()-[r]->() WHERE 'since' IN keys(r) RETURN count(*) AS n", BOTH),
+    ("P3", "MATCH (r) MATCH ()-[r]->() RETURN count(*) AS c", BOTH),
+    ("P4", "MATCH (a)-[a]->(b) RETURN count(*) AS c", BOTH),
+    ("P5", "MATCH (a)-[r]->(r) RETURN count(*) AS c", BOTH),
+    ("P6", "WITH 1 AS r MATCH ()-[r]->() RETURN count(*) AS c", CYPHER),
+    ("P7", "MATCH (a:Person) CALL { WITH a MATCH ()-[a]->(b) RETURN b } RETURN count(*) AS c", CYPHER),
+    ("P8", "MATCH ()-[r:KNOWS]->() CALL { WITH r MATCH (x)-[r]->(y) RETURN x.name AS xn } RETURN count(*) AS c", CYPHER),
+]:
+    case(case_id, query, languages)
+
 # fmt: on

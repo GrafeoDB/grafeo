@@ -2124,18 +2124,32 @@ impl ExpressionPredicate {
                 if args.len() != 1 {
                     return None;
                 }
-                // keys(n) on a node variable: get property keys from the store
+                // keys(n) or keys(r) on a node or edge variable: the property
+                // keys from the store, sorted (as `properties` and map keys
+                // are), so their order does not depend on how they are stored
                 if let FilterExpression::Variable(var) = &args[0] {
                     let col_idx = *self.variable_columns.get(var)?;
                     let col = chunk.column(col_idx)?;
+                    let key_list = |mut keys: Vec<Value>| {
+                        keys.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+                        Some(Value::List(keys.into()))
+                    };
                     if let Some(node_id) = col.get_node_id(row) {
                         let node = self.resolve_node(node_id)?;
-                        let keys: Vec<Value> = node
-                            .properties
-                            .iter()
-                            .map(|(k, _)| Value::String(k.as_str().into()))
-                            .collect();
-                        return Some(Value::List(keys.into()));
+                        return key_list(
+                            node.properties
+                                .iter()
+                                .map(|(k, _)| Value::String(k.as_str().into()))
+                                .collect(),
+                        );
+                    } else if let Some(edge_id) = col.get_edge_id(row) {
+                        let edge = self.resolve_edge(edge_id)?;
+                        return key_list(
+                            edge.properties
+                                .iter()
+                                .map(|(k, _)| Value::String(k.as_str().into()))
+                                .collect(),
+                        );
                     }
                 }
                 // keys(map) on a map value

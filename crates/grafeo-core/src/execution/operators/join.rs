@@ -11,7 +11,7 @@ use arcstr::ArcStr;
 use grafeo_common::types::{LogicalType, Value};
 
 use super::{Operator, OperatorError, OperatorResult};
-use crate::execution::chunk::DataChunkBuilder;
+use crate::execution::chunk::{ColumnTypes, DataChunkBuilder};
 use crate::execution::{DataChunk, ValueVector};
 
 /// The type of join to perform.
@@ -646,7 +646,8 @@ impl Operator for HashJoinOperator {
 /// Nested loop join operator.
 ///
 /// Performs a cartesian product of both sides, filtering by the join condition.
-/// Less efficient than hash join but supports any join condition.
+/// Less efficient than hash join but supports any join condition. A row keeps
+/// the column types of the rows it joins: a node or edge stays one.
 pub struct NestedLoopJoinOperator {
     /// Left side operator.
     left: Box<dyn Operator>,
@@ -656,8 +657,11 @@ pub struct NestedLoopJoinOperator {
     condition: Option<Box<dyn JoinCondition>>,
     /// Join type.
     join_type: JoinType,
-    /// Output schema.
+    /// Output schema. Only its right-side part is used: for the right side's
+    /// columns of a left join when the right side has no rows.
     output_schema: Vec<LogicalType>,
+    /// The column types of the materialized right side.
+    right_types: ColumnTypes,
     /// Materialized right side chunks.
     right_chunks: Vec<DataChunk>,
     /// Whether the right side is materialized.
@@ -745,6 +749,7 @@ impl NestedLoopJoinOperator {
             condition,
             join_type,
             output_schema,
+            right_types: ColumnTypes::default(),
             right_chunks: Vec::new(),
             right_materialized: false,
             left_first: false,
@@ -777,10 +782,30 @@ impl NestedLoopJoinOperator {
     /// Materializes the right side.
     fn materialize_right(&mut self) -> Result<(), OperatorError> {
         while let Some(chunk) = self.right.next()? {
+            self.right_types.add(&chunk);
             self.right_chunks.push(chunk);
         }
         self.right_materialized = true;
         Ok(())
+    }
+
+    /// The column types of the rows joined from `left_chunk`: its own, then
+    /// the right side's, so the copied values keep their types (see
+    /// [`ColumnTypes`]). The declared schema gives the right side's types
+    /// while it has no rows.
+    fn output_types(&self, left_chunk: &DataChunk) -> Vec<LogicalType> {
+        let mut types = left_chunk.column_types();
+        if self.right_chunks.is_empty() {
+            types.extend(
+                self.output_schema
+                    .iter()
+                    .skip(left_chunk.column_count())
+                    .cloned(),
+            );
+        } else {
+            types.extend_from_slice(self.right_types.types());
+        }
+        types
     }
 
     /// Produces an output row.
@@ -876,8 +901,6 @@ impl Operator for NestedLoopJoinOperator {
             return Ok(None);
         }
 
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);
-
         loop {
             // Get current left chunk
             if self.current_left_chunk.is_none() {
@@ -888,11 +911,7 @@ impl Operator for NestedLoopJoinOperator {
 
                 if self.current_left_chunk.is_none() {
                     // No more left data
-                    return if builder.row_count() > 0 {
-                        Ok(Some(builder.finish()))
-                    } else {
-                        Ok(None)
-                    };
+                    return Ok(None);
                 }
             }
 
@@ -901,6 +920,9 @@ impl Operator for NestedLoopJoinOperator {
                 .as_ref()
                 .expect("left chunk is Some: loaded in loop above");
             let left_rows: Vec<usize> = left_chunk.selected_indices().collect();
+            // Each returned chunk holds rows of one left chunk, built in its
+            // column types.
+            let mut builder = DataChunkBuilder::with_capacity(&self.output_types(left_chunk), 2048);
 
             // Calculate right column count for potential unmatched rows
             let right_col_count = if !self.right_chunks.is_empty() {
@@ -996,6 +1018,7 @@ impl Operator for NestedLoopJoinOperator {
     fn reset(&mut self) {
         self.left.reset();
         self.right.reset();
+        self.right_types = ColumnTypes::default();
         self.right_chunks.clear();
         self.right_materialized = false;
         self.left_chunks = None;
@@ -1164,6 +1187,52 @@ mod tests {
 
         results.sort_unstable();
         assert_eq!(results, vec![(1, 10), (1, 20), (2, 10), (2, 20)]);
+    }
+
+    /// A cross join keeps the column types of both sides, whatever schema it
+    /// declares: an edge stays an edge, so its properties are not read from
+    /// the node with the same ID.
+    #[test]
+    fn a_cross_join_keeps_the_column_types() {
+        use grafeo_common::types::{EdgeId, NodeId};
+
+        let mut left = DataChunkBuilder::new(&[LogicalType::Edge, LogicalType::Node]);
+        for id in [3_u64, 5] {
+            left.column_mut(0).unwrap().push_edge_id(EdgeId::new(id));
+            left.column_mut(1)
+                .unwrap()
+                .push_node_id(NodeId::new(id + 100));
+            left.advance_row();
+        }
+        let mut right = DataChunkBuilder::new(&[LogicalType::Node]);
+        right.column_mut(0).unwrap().push_node_id(NodeId::new(7));
+        right.advance_row();
+
+        let mut join = NestedLoopJoinOperator::new(
+            Box::new(MockOperator::new(vec![left.finish()])),
+            Box::new(MockOperator::new(vec![right.finish()])),
+            None,
+            JoinType::Cross,
+            vec![LogicalType::Any, LogicalType::Any, LogicalType::Node],
+        );
+
+        let chunk = join.next().unwrap().unwrap();
+        assert_eq!(
+            chunk.column_types(),
+            [LogicalType::Edge, LogicalType::Node, LogicalType::Node]
+        );
+        let rows: Vec<(u64, u64, u64)> = chunk
+            .selected_indices()
+            .map(|row| {
+                (
+                    chunk.column(0).unwrap().get_edge_id(row).unwrap().as_u64(),
+                    chunk.column(1).unwrap().get_node_id(row).unwrap().as_u64(),
+                    chunk.column(2).unwrap().get_node_id(row).unwrap().as_u64(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, [(3, 103, 7), (5, 105, 7)]);
+        assert!(join.next().unwrap().is_none());
     }
 
     #[test]

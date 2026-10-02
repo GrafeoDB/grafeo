@@ -160,6 +160,30 @@ fn a_sql_pgq_path_back_to_an_earlier_variable_closes_the_cycle() {
     );
 }
 
+/// A subquery that imports both ends, by name or with `WITH *`, closes the
+/// cycle on them: only the 2-cycle 1 <-> 2 has an edge back.
+#[test]
+fn a_subquery_closes_the_cycle_on_the_nodes_it_imports() {
+    let db = cycles();
+    for import in ["WITH a, b", "WITH *"] {
+        let query = format!(
+            "MATCH (a)-[:K]->(b) CALL {{ {import} MATCH (b)-[:K]->(a) RETURN count(*) AS back }} \
+             RETURN a.n, b.n, back"
+        );
+        let want = vec![
+            vec![1, 2, 1],
+            vec![2, 1, 1],
+            vec![2, 3, 0],
+            vec![3, 1, 0],
+            vec![3, 4, 0],
+            vec![4, 2, 0],
+        ];
+        assert_eq!(rows(db.execute(&query)), want, "GQL: {query}");
+        #[cfg(feature = "cypher")]
+        assert_eq!(rows(db.execute_cypher(&query)), want, "Cypher: {query}");
+    }
+}
+
 /// After `WITH b` the earlier `a` is out of scope: the second `MATCH` binds a
 /// new `a`, so every edge out of `b` counts, cycle or not.
 #[cfg(feature = "cypher")]

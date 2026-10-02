@@ -147,6 +147,9 @@ tests:
         - [1, Alix, Gus]
         - [2, Gus, Vincent]
 
+  # GQL only: openCypher matches each relationship at most once per pattern,
+  # so in Cypher this pattern has no match (Grafeo's Cypher does not apply that
+  # rule yet).
   - name: same_edge_twice_in_a_path_is_a_loop
     setup:
       - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"

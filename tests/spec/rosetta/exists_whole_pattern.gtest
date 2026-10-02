@@ -53,7 +53,9 @@ tests:
     expect:
       empty: true
 
-  # A second MATCH on the end of the edge adds its label to that end.
+  # A second MATCH on the end of the edge adds its label to that end. Cypher
+  # only: GQL does not join the MATCH clauses inside a subquery on their shared
+  # variables yet.
   - name: exists_with_a_label_on_the_end_in_a_second_match
     setup:
       - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
@@ -75,7 +77,7 @@ tests:
         - [Mia, 1]
 
   # ---------------------------------------------------------------------------
-  # A path mode
+  # A path mode (GQL only, except the plain walk: Cypher has no path modes)
   # ---------------------------------------------------------------------------
 
   # Mia's only LIKES edge returns to her: a walk, not an acyclic path.
@@ -84,6 +86,7 @@ tests:
       - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"
     variants:
       gql: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:LIKES*1..2]->(x) } RETURN a.name AS a"
+      cypher: "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:LIKES*1..2]->(x) } RETURN a.name AS a"
     expect:
       rows:
         - [Alix]
@@ -100,7 +103,8 @@ tests:
 
   # Back to the start in at most two KNOWS edges, either way: Vincent and Mia
   # only over the edge they left by, Alix and Gus also over the other edge
-  # between them.
+  # between them. GQL only: openCypher uses each relationship at most once per
+  # pattern, so Vincent and Mia would not come back.
   - name: exists_a_closed_walk
     setup:
       - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams), (alix)-[:LIKES]->(gus), (mia)-[:LIKES]->(mia)"

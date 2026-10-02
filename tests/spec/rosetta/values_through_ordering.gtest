@@ -7,15 +7,16 @@
 # below tells which entity was read. The row-batch tests cross the 2048-row
 # boundary where LIMIT and SKIP cut a batch.
 #
-# Setup (GQL, one statement): Alix, Gus, Vincent (with w 100, 101, 103), Jules
-# and Mia; Amsterdam (w 104), Berlin, Paris (w 105). KNOWS edges w 1 to 5,
-# LIVES_IN edges w 6 to 8.
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): Alix, Gus,
+# Vincent (with w 100, 101, 103), Jules and Mia; Amsterdam (w 104), Berlin,
+# Paris (w 105). KNOWS edges w 1 to 5, LIVES_IN edges w 6 to 8. The row-batch
+# tests add `:N` nodes of their own and read only those.
 
 meta:
   model: lpg
   section: rosetta
   title: Values through ORDER BY, LIMIT, SKIP and DISTINCT
-  dataset: empty
+  dataset: entity_kinds
   requires: [cypher]
 
 tests:
@@ -25,8 +26,6 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: edge_properties_after_an_ordered_cut
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
     variants:
       cypher: "MATCH (a:Person)-[r]->(b) WITH a, r ORDER BY r.w LIMIT 4 RETURN a.name AS n, r.w AS w, type(r) AS t"
     expect:
@@ -37,8 +36,6 @@ tests:
         - [Jules, 4, KNOWS]
 
   - name: edge_properties_after_skip
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
     variants:
       cypher: "MATCH (a:Person)-[r]->(b) WITH r, b ORDER BY r.w SKIP 2 RETURN r.w AS w, b.name AS n"
     expect:
@@ -51,8 +48,6 @@ tests:
         - [8, Paris]
 
   - name: an_aliased_edge_after_an_ordered_cut
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
     variants:
       cypher: "MATCH (a:Person)-[r]->(b) WITH r AS e ORDER BY e.w LIMIT 3 RETURN e.w AS w, type(e) AS t"
     expect:
@@ -62,8 +57,6 @@ tests:
         - [3, KNOWS]
 
   - name: edge_properties_after_a_computed_sort_key
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
     variants:
       cypher: "MATCH (a:Person)-[r]->(b) WITH a, r ORDER BY toString(r.w) RETURN r.w AS w, a.name AS n"
     expect:
@@ -78,8 +71,6 @@ tests:
         - [8, Mia]
 
   - name: edge_properties_after_sorting_by_type
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
     variants:
       cypher: "MATCH (a:Person)-[r]->(b) WITH r ORDER BY type(r) DESC, r.w LIMIT 3 RETURN r.w AS w"
     expect:
@@ -89,8 +80,6 @@ tests:
         - [8]
 
   - name: node_properties_after_distinct
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
     variants:
       cypher: "MATCH (a:Person)-[r]->(b) WITH DISTINCT a RETURN a.w AS w, a.name AS n"
     expect:
@@ -102,8 +91,6 @@ tests:
         - [null, Mia]
 
   - name: node_properties_after_an_ordered_cut
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
     variants:
       cypher: "MATCH (a:Person) WITH a ORDER BY a.age DESC LIMIT 2 RETURN a.w AS w, a.name AS n"
     expect:
@@ -112,8 +99,6 @@ tests:
         - [null, Jules]
 
   - name: node_properties_after_skip
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
     variants:
       cypher: "MATCH (a:Person) WITH a ORDER BY a.name SKIP 1 RETURN a.w AS w, a.name AS n"
     expect:
@@ -124,8 +109,6 @@ tests:
         - [null, Mia]
 
   - name: end_node_properties_after_an_ordered_cut
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
     variants:
       cypher: "MATCH (a:Person)-[r]->(b) WITH b ORDER BY b.name LIMIT 3 RETURN b.w AS w, b.name AS n"
     expect:
@@ -135,8 +118,6 @@ tests:
         - [null, Berlin]
 
   - name: node_properties_sorted_with_an_edge_key
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
     variants:
       cypher: "MATCH (a:Person)-[r]->(b) WITH r, a ORDER BY a.age, r.w SKIP 1 LIMIT 3 RETURN r.w AS w, a.w AS aw"
     expect:
@@ -146,8 +127,6 @@ tests:
         - [1, 100]
 
   - name: a_let_copy_of_an_edge
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
     query: "MATCH (a:Person)-[r]->(b) LET x = r RETURN x.w AS w ORDER BY w"
     expect:
       ordered: true
@@ -166,8 +145,6 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: sort_by_a_property_that_is_not_returned
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28})"
     variants:
       gql: "MATCH (a:Person) RETURN a.name AS n ORDER BY a.age DESC"
       cypher: "MATCH (a:Person) RETURN a.name AS n ORDER BY a.age DESC"
@@ -182,8 +159,6 @@ tests:
         - [Gus]
 
   - name: sort_by_a_property_of_a_returned_alias
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28})"
     variants:
       gql: "MATCH (a:Person) RETURN a.name AS n, a AS x ORDER BY x.age SKIP 2"
       cypher: "MATCH (a:Person) RETURN a.name AS n, a AS x ORDER BY x.age SKIP 2"
@@ -192,8 +167,6 @@ tests:
       count: 3
 
   - name: sort_by_an_expression_and_a_property_of_an_alias
-    setup:
-      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28})"
     variants:
       gql: "MATCH (a:Person) RETURN a AS x ORDER BY labels(x)[0], x.name"
       cypher: "MATCH (a:Person) RETURN a AS x ORDER BY labels(x)[0], x.name"

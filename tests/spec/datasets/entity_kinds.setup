@@ -1,0 +1,10 @@
+# Entity Kinds Dataset
+# 5 Person and 3 City nodes, 5 KNOWS and 3 LIVES_IN edges. Nodes and edges
+# both carry `w` (nodes 100 and up, edges 1 to 8) and their IDs overlap, so a
+# node read as an edge, or the reverse, shows a value from the wrong range.
+# Alix, Gus, Vincent (w 100, 101, 103), Jules and Mia; Amsterdam (w 104),
+# Berlin, Paris (w 105). KNOWS w 1 to 5: Alix->Gus, Gus->Vincent,
+# Vincent->Alix, Jules->Mia, Alix->Jules. LIVES_IN w 6 to 8: Alix->Amsterdam,
+# Gus->Berlin, Mia->Paris. Jules, Mia and Berlin have no `w`.
+
+INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)

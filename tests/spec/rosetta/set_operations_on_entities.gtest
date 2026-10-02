@@ -5,6 +5,12 @@
 # INTERSECT compare entities. A column added to sort by a RETURN alias's
 # property is not part of the result.
 #
+# The two sides of a set operation reach the same entity through different
+# patterns, so a side that returned it differently would not match. Rows are
+# counted here because nodes and edges print differently in each binding;
+# crates/grafeo-engine/tests/returned_entities.rs compares the entities
+# themselves. EXCEPT, INTERSECT and OTHERWISE are GQL only (Cypher has UNION).
+#
 # Setup (GQL): (:A {n: 1})-[:K {w: 1}]->(:B {n: 2}), the same with n 3, 4 and
 # w 2, and with n 5, 6 and w 3.
 
@@ -23,8 +29,8 @@ tests:
       - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
       - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
     variants:
-      gql: "MATCH ()-[r]->() WHERE r.w = 1 RETURN r UNION MATCH ()-[r]->() WHERE r.w = 1 RETURN r"
-      cypher: "MATCH ()-[r]->() WHERE r.w = 1 RETURN r UNION MATCH ()-[r]->() WHERE r.w = 1 RETURN r"
+      gql: "MATCH ()-[r]->() WHERE r.w = 1 RETURN r UNION MATCH (:A {n: 1})-[r:K]->(:B) RETURN r"
+      cypher: "MATCH ()-[r]->() WHERE r.w = 1 RETURN r UNION MATCH (:A {n: 1})-[r:K]->(:B) RETURN r"
     expect:
       count: 1
 
@@ -34,8 +40,8 @@ tests:
       - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
       - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
     variants:
-      gql: "MATCH (a:A) WHERE a.n = 3 RETURN a UNION MATCH (a:A) WHERE a.n = 3 RETURN a"
-      cypher: "MATCH (a:A) WHERE a.n = 3 RETURN a UNION MATCH (a:A) WHERE a.n = 3 RETURN a"
+      gql: "MATCH (a:A) WHERE a.n = 3 RETURN a UNION MATCH (a:A)-[:K]->(:B {n: 4}) RETURN a"
+      cypher: "MATCH (a:A) WHERE a.n = 3 RETURN a UNION MATCH (a:A)-[:K]->(:B {n: 4}) RETURN a"
     expect:
       count: 1
 
@@ -44,7 +50,7 @@ tests:
       - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
       - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
       - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
-    query: "MATCH ()-[r]->() RETURN r EXCEPT MATCH ()-[r]->() WHERE r.w = 2 RETURN r"
+    query: "MATCH ()-[r]->() RETURN r EXCEPT MATCH (:A {n: 3})-[r:K]->() RETURN r"
     expect:
       count: 2
 
@@ -53,7 +59,7 @@ tests:
       - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
       - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
       - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
-    query: "MATCH ()-[r]->() RETURN r INTERSECT MATCH ()-[r]->() WHERE r.w = 2 RETURN r"
+    query: "MATCH ()-[r]->() RETURN r INTERSECT MATCH (:A {n: 3})-[r:K]->() RETURN r"
     expect:
       count: 1
 
@@ -62,7 +68,7 @@ tests:
       - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
       - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
       - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
-    query: "MATCH (a:A) RETURN a EXCEPT MATCH (a:A) WHERE a.n = 3 RETURN a"
+    query: "MATCH (a:A) RETURN a EXCEPT MATCH (a:A)-[:K]->(:B {n: 4}) RETURN a"
     expect:
       count: 2
 
@@ -71,7 +77,7 @@ tests:
       - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
       - "INSERT (:A {n: 3})-[:K {w: 2}]->(:B {n: 4})"
       - "INSERT (:A {n: 5})-[:K {w: 3}]->(:B {n: 6})"
-    query: "MATCH (a:A) RETURN a INTERSECT MATCH (a:A) WHERE a.n = 3 RETURN a"
+    query: "MATCH (a:A) RETURN a INTERSECT MATCH (a:A)-[:K]->(:B {n: 4}) RETURN a"
     expect:
       count: 1
 

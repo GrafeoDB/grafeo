@@ -93,6 +93,9 @@ tests:
         - [2, 20]
         - [1, 10]
 
+  # Nodes and edges print differently in each binding, so this case checks the
+  # columns and the count; the next one checks the order by name, and
+  # crates/grafeo-engine/tests/returned_entities.rs compares the entities.
   - name: nodes_and_edges_ordered_by_an_edge_property
     setup:
       - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:LIVES_IN {years: 5}]->(ams), (gus)-[:LIVES_IN {years: 3}]->(ber), (mia)-[:LIVES_IN {years: 1}]->(par)"
@@ -102,3 +105,16 @@ tests:
     expect:
       columns: [p, r, c]
       count: 2
+
+  # Cypher only: GQL has no ORDER BY after WITH, and NEXT does not pass rows on
+  # yet.
+  - name: names_ordered_by_an_edge_property_through_with_star
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:LIVES_IN {years: 5}]->(ams), (gus)-[:LIVES_IN {years: 3}]->(ber), (mia)-[:LIVES_IN {years: 1}]->(par)"
+    variants:
+      cypher: "MATCH (p:Person)-[r:LIVES_IN]->(c:City) WITH * ORDER BY r.years LIMIT 2 RETURN p.name AS p, r.years AS years, c.name AS c"
+    expect:
+      ordered: true
+      rows:
+        - [Mia, 1, Paris]
+        - [Gus, 3, Berlin]

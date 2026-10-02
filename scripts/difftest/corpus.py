@@ -441,4 +441,15 @@ for case_id, query in [
 ]:
     case(case_id, query)
 
+# R: EXISTS in WHERE tied to the outer row by a value, inside OR, and through the row's edge
+for case_id, query in [
+    ("R1", "MATCH (a:Person) WHERE EXISTS { MATCH (c:City) WHERE c.w = a.w + 4 } RETURN a.name AS n"),
+    ("R2", "MATCH (a:Person) WHERE NOT EXISTS { MATCH (c:City) WHERE c.w = a.w + 4 } RETURN a.name AS n"),
+    ("R3", "MATCH (a:Person)-[:KNOWS]->(b) WITH a WHERE a.name = 'none' OR EXISTS { MATCH (a)-[:KNOWS]->(x), (c:City) } RETURN a.name AS n"),
+    ("R4", "MATCH (a:Person)-[r:KNOWS]->(b) WHERE EXISTS { MATCH (a)-[s:KNOWS]->(c) WHERE s <> r } RETURN a.name AS a, b.name AS b"),
+    ("R5", "UNWIND [25, 31] AS k WITH k WHERE EXISTS { MATCH (p:Person {age: k}) } RETURN k"),
+]:
+    case(case_id, query)
+case("R6", "MATCH (a:Person) CALL { WITH a MATCH (a)-[:KNOWS]->(m)-[:KNOWS]->(x) RETURN x.name AS x } RETURN a.name AS a, x", CYPHER)
+
 # fmt: on

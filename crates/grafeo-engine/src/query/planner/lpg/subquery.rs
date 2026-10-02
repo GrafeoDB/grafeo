@@ -325,12 +325,26 @@ fn visit_subqueries(
     }
 }
 
-/// Puts `parameters` under the first pattern of `plan`: in place of a
-/// parameter scan the translator already put there, or as the input of its
+/// Puts `parameters` under the first pattern of `plan`, as the input of its
 /// leftmost node or edge scan, so the scan continues from the outer row (a
-/// scan of an outer variable reuses its value). Returns false when the plan
-/// has neither.
+/// scan of an outer variable reuses its value). A parameter scan the
+/// translator joined with the pattern (a join without a condition, which would
+/// pair every outer row with every match) gives way to the pattern, seeded the
+/// same way; one on its own is replaced. Returns false when the plan has no
+/// scan to start from.
 fn seed_with_parameters(plan: &mut LogicalOperator, parameters: LogicalOperator) -> bool {
+    if let LogicalOperator::Join(join) = plan
+        && (matches!(*join.left, LogicalOperator::ParameterScan(_))
+            || matches!(*join.right, LogicalOperator::ParameterScan(_)))
+    {
+        let pattern = if matches!(*join.left, LogicalOperator::ParameterScan(_)) {
+            std::mem::replace(&mut *join.right, LogicalOperator::Empty)
+        } else {
+            std::mem::replace(&mut *join.left, LogicalOperator::Empty)
+        };
+        *plan = pattern;
+        return seed_with_parameters(plan, parameters);
+    }
     match plan {
         LogicalOperator::ParameterScan(_) => {
             *plan = parameters;
@@ -376,6 +390,66 @@ fn seed_with_parameters(plan: &mut LogicalOperator, parameters: LogicalOperator)
             }
         }
         _ => false,
+    }
+}
+
+/// Whether a subquery reads a value of the outer row other than through a
+/// node or edge its patterns share with it: a variable its expressions use
+/// that its patterns do not bind (`{id: s.id}`, `WHERE x.id = s.id`, an
+/// `UNWIND` variable, a parameter scan of outer variables). Such a subquery
+/// runs per row; one tied to the row by shared pattern variables alone can be
+/// a semi-join on them.
+pub(super) fn reads_outer_values(subplan: &LogicalOperator) -> bool {
+    let Some(used) = subplan_variables(subplan) else {
+        return true;
+    };
+    let mut bound = HashSet::new();
+    bound_names(subplan, &mut bound);
+    used.iter().any(|name| !bound.contains(name))
+}
+
+/// The names `plan` binds itself: its pattern variables, projection and
+/// aggregate aliases, and the variables of `UNWIND` and `LET`.
+fn bound_names(plan: &LogicalOperator, names: &mut HashSet<String>) {
+    match plan {
+        LogicalOperator::NodeScan(scan) => {
+            names.insert(scan.variable.clone());
+        }
+        LogicalOperator::EdgeScan(scan) => {
+            names.insert(scan.variable.clone());
+        }
+        LogicalOperator::Expand(expand) => {
+            names.insert(expand.from_variable.clone());
+            names.insert(expand.to_variable.clone());
+            names.extend(expand.edge_variable.iter().cloned());
+            names.extend(expand.path_alias.iter().cloned());
+        }
+        LogicalOperator::Project(project) => {
+            names.extend(project.projections.iter().filter_map(|p| p.alias.clone()));
+        }
+        LogicalOperator::Return(ret) => {
+            names.extend(ret.items.iter().filter_map(|item| item.alias.clone()));
+        }
+        LogicalOperator::Aggregate(aggregate) => {
+            names.extend(aggregate.aggregates.iter().filter_map(|a| a.alias.clone()));
+            for key in &aggregate.group_by {
+                if let LogicalExpression::Variable(name) = key {
+                    names.insert(name.clone());
+                }
+            }
+        }
+        LogicalOperator::Unwind(unwind) => {
+            names.insert(unwind.variable.clone());
+            names.extend(unwind.ordinality_var.iter().cloned());
+            names.extend(unwind.offset_var.iter().cloned());
+        }
+        LogicalOperator::Bind(bind) => {
+            names.insert(bind.variable.clone());
+        }
+        _ => {}
+    }
+    for child in plan.children() {
+        bound_names(child, names);
     }
 }
 

@@ -740,31 +740,44 @@ describe('transaction edge cases', () => {
         const r = await db.execute('MATCH (p:Person) RETURN p.name')
         expect(r.length).toBe(1)
       } else {
-        // Commit won the race: the queued query must fail, not run auto-committed.
-        await expect(pending).rejects.toThrow(/no longer active/)
+        // Commit went first. A query that had not started yet must fail, not
+        // run auto-committed; one that had already finished ran inside the
+        // transaction and was committed with it. (The rollback test below shows
+        // that a query never runs after its transaction ended.)
+        const ran = await pending.then(
+          () => true,
+          (e) => {
+            expect(e.message).toMatch(/no longer active/)
+            return false
+          },
+        )
         const r = await db.execute('MATCH (p:Person) RETURN p.name')
-        expect(r.length).toBe(0)
+        expect(r.length).toBe(ran ? 1 : 0)
       }
       db.close()
     }
   })
 
   it('should refuse rollback while a query is running, then allow it', async () => {
-    const db = GrafeoDB.create()
-    const tx = db.beginTransaction()
-    const pending = tx.execute("INSERT (:Person {name: 'Jules'})")
-    try {
-      tx.rollback()
-    } catch (e) {
-      expect(e.message).toMatch(/still running/)
-      await pending
-      tx.rollback()
+    for (let i = 0; i < 20; i++) {
+      const db = GrafeoDB.create()
+      const tx = db.beginTransaction()
+      const pending = tx.execute("INSERT (:Person {name: 'Jules'})")
+      try {
+        tx.rollback()
+      } catch (e) {
+        expect(e.message).toMatch(/still running/)
+        await pending
+        tx.rollback()
+      }
+      // Whether the query ran before the rollback, was still running or had not
+      // started, nothing it wrote survives.
+      await pending.catch(() => {})
+      expect(tx.isActive).toBe(false)
+      const r = await db.execute('MATCH (p:Person) RETURN p.name')
+      expect(r.length).toBe(0)
+      db.close()
     }
-    await pending.catch(() => {})
-    expect(tx.isActive).toBe(false)
-    const r = await db.execute('MATCH (p:Person) RETURN p.name')
-    expect(r.length).toBe(0)
-    db.close()
   })
 })
 

@@ -191,3 +191,24 @@ tests:
     expect:
       rows:
         - [null, Prague]
+
+  # A SET with a computed value works it out in a column of its own first; that
+  # column must not take the place of what the next write creates. Cypher only:
+  # GQL does not allow INSERT or MERGE after SET yet (#483).
+  - name: an_edge_created_after_a_computed_set
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) SET a.x = b.w + 1 CREATE (a)-[r:LIKES {w: 9}]->(b) RETURN type(r) AS t, a.x AS x, r.w AS rw"
+    expect:
+      rows:
+        - [LIKES, 102, 9]
+
+  - name: a_node_merged_after_a_computed_set
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      cypher: "MATCH (a:Person {name: 'Jules'}), (b:Person {name: 'Gus'}) SET a.x = b.w + 99 MERGE (a)-[:VISITED]->(c:City {name: 'Prague'}) RETURN a.x AS x, c.name AS c"
+    expect:
+      rows:
+        - [200, Prague]

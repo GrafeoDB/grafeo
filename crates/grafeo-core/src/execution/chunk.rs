@@ -472,33 +472,46 @@ impl DataChunk {
 
 /// The column types for rows taken from the chunks of one input.
 ///
-/// A column keeps its type while every chunk has that type there and becomes
-/// [`LogicalType::Any`] where they differ. Rows copied into columns of these
-/// types keep every value: a typed column stores a value of another type as
-/// that type's default (see [`ValueVector::push_value`]), so an operator that
-/// only reorders, cuts or deduplicates rows must not copy them by a declared
-/// schema.
+/// A column keeps its type while every chunk with rows has that type there and
+/// becomes [`LogicalType::Any`] where they differ; a chunk without rows counts
+/// only until one with rows comes. Rows copied into columns of these types keep
+/// every value: a typed column stores a value of another type as that type's
+/// default (see [`ValueVector::push_value`]), so an operator that only reorders,
+/// cuts or deduplicates rows must not copy them by a declared schema.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct ColumnTypes(Option<Vec<LogicalType>>);
+pub(crate) struct ColumnTypes {
+    /// The types so far (none before the first chunk).
+    types: Option<Vec<LogicalType>>,
+    /// Whether they come from chunks with rows.
+    from_rows: bool,
+}
 
 impl ColumnTypes {
     /// Takes the column types of `chunk` into account.
     pub(crate) fn add(&mut self, chunk: &DataChunk) {
-        match &mut self.0 {
-            None => self.0 = Some(chunk.column_types()),
-            Some(types) => {
+        let has_rows = chunk.row_count() > 0;
+        match &mut self.types {
+            Some(types) if self.from_rows && has_rows => {
                 for (known, column) in types.iter_mut().zip(chunk.columns()) {
                     if known != column.data_type() {
                         *known = LogicalType::Any;
                     }
                 }
             }
+            // A chunk without rows says nothing about the values: its types
+            // count only while no other chunk gave any.
+            Some(_) if self.from_rows || !has_rows => {}
+            // The first chunk, or the first with rows after chunks without.
+            _ => {
+                self.types = Some(chunk.column_types());
+                self.from_rows = has_rows;
+            }
         }
     }
 
     /// The column types of the chunks seen so far (none before the first).
     pub(crate) fn types(&self) -> &[LogicalType] {
-        self.0.as_deref().unwrap_or(&[])
+        self.types.as_deref().unwrap_or(&[])
     }
 }
 
@@ -610,6 +623,39 @@ impl DataChunkBuilder {
 mod tests {
     use super::*;
     use grafeo_common::types::Value;
+
+    /// Chunks without rows do not turn a node column into `Any`: their types
+    /// count only until a chunk with rows comes. Chunks with rows of different
+    /// types do.
+    #[test]
+    fn column_types_ignore_chunks_without_rows() {
+        let empty = || DataChunk::with_capacity(&[LogicalType::Any], 0);
+        let nodes = || {
+            let mut builder = DataChunkBuilder::new(&[LogicalType::Node]);
+            builder
+                .column_mut(0)
+                .unwrap()
+                .push_node_id(grafeo_common::types::NodeId::new(1));
+            builder.advance_row();
+            builder.finish()
+        };
+
+        let mut types = ColumnTypes::default();
+        types.add(&empty());
+        assert_eq!(types.types(), [LogicalType::Any]);
+        types.add(&nodes());
+        types.add(&empty());
+        assert_eq!(types.types(), [LogicalType::Node]);
+
+        let mut edges = DataChunkBuilder::new(&[LogicalType::Edge]);
+        edges
+            .column_mut(0)
+            .unwrap()
+            .push_edge_id(grafeo_common::types::EdgeId::new(1));
+        edges.advance_row();
+        types.add(&edges.finish());
+        assert_eq!(types.types(), [LogicalType::Any]);
+    }
 
     /// A copied column keeps its input type; a declared node or edge only
     /// gives an `Any` column back its entity kind, never a scalar type.

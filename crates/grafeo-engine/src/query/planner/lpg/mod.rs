@@ -132,7 +132,7 @@ use grafeo_core::execution::operators::{
     FilterOperator, HashAggregateOperator, HashJoinOperator, HorizontalAggregateOperator,
     JoinType as PhysicalJoinType, LazyFactorizedChainOperator, LeapfrogJoinOperator,
     LoadDataOperator, MapCollectOperator, MergeConfig, MergeOperator, MergeRelationshipConfig,
-    MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator, NullOrder, Operator,
+    MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator, Operator,
     ParameterScanOperator, ProjectExpr, ProjectOperator, PropertySource, RangeScanOperator,
     RemoveLabelOperator, ScanOperator, SetPropertyOperator, ShortestPathOperator,
     SimpleAggregateOperator, SortDirection, SortKey as PhysicalSortKey, SortOperator,
@@ -1883,7 +1883,7 @@ mod tests {
         let physical = planner.plan(&logical).unwrap();
         let root = physical.into_operator();
 
-        // Walk down: Limit → Sort → RangeScan, asserting at each step.
+        // Walk down: Limit → Sort → Project → RangeScan, asserting at each step.
         let limit_op = root
             .into_any()
             .downcast::<LimitOperator>()

@@ -38,17 +38,18 @@ pub struct MergeConfig {
     pub bound_variable_column: Option<usize>,
 }
 
-/// The column types of output rows for `chunk` (none for a standalone MERGE):
-/// its own for the input columns, which are copied (a node or edge stays one,
-/// see `ColumnTypes`), then the declared ones, with `entity` for the column of
-/// the merged node or edge.
+/// The column types of output rows for `chunk` (none for a standalone MERGE),
+/// as many as the declared ones: its own for the input columns, which are
+/// copied (a node or edge stays one, see `ColumnTypes`), then the declared
+/// ones, with `entity` for the column of the merged node or edge.
 fn output_types(
     chunk: Option<&DataChunk>,
     declared: &[LogicalType],
     entity_column: usize,
     entity: LogicalType,
 ) -> Vec<LogicalType> {
-    let input = chunk.map(DataChunk::column_types).unwrap_or_default();
+    let mut input = chunk.map(DataChunk::column_types).unwrap_or_default();
+    input.truncate(declared.len());
     let mut types = copied_column_types(&input, declared);
     types.extend(declared.iter().skip(input.len()).cloned());
     if let Some(column_type) = types.get_mut(entity_column) {

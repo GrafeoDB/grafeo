@@ -75,6 +75,12 @@ def test_ordered_rows_compare_in_order():
     assert difftest.canonical(first) != difftest.canonical(second)
 
 
+def test_a_value_that_changes_type_differs():
+    old = {"A1|gql": rows([1]), "A2|gql": rows([1]), "A3|gql": rows([True])}
+    new = {"A1|gql": rows([1.0]), "A2|gql": rows([True]), "A3|gql": rows([True])}
+    assert difftest.differing(old, new) == ["A1|gql", "A2|gql"]
+
+
 def test_differing_lists_changed_cases_in_corpus_order():
     old = {
         "A10|gql": rows([1]),

@@ -157,9 +157,14 @@ def canonical(result: dict):
     return ["rows", result.get("columns"), rows]
 
 
+def canonical_text(result: dict) -> str:
+    """The canonical form as JSON text: unlike Python values, it tells 1, 1.0
+    and true apart, so a value that changes type counts as a difference."""
+    return json.dumps(canonical(result), sort_keys=True)
+
+
 def fingerprint(result: dict) -> str:
-    text = json.dumps(canonical(result), sort_keys=True)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
+    return hashlib.sha256(canonical_text(result).encode("utf-8")).hexdigest()[:10]
 
 
 def case_order(key: str):
@@ -173,7 +178,9 @@ def case_order(key: str):
 def differing(old: dict, new: dict) -> list[str]:
     """The case keys of both runs whose results differ, in corpus order."""
     common = old.keys() & new.keys()
-    keys = [key for key in common if canonical(old[key]) != canonical(new[key])]
+    keys = [
+        key for key in common if canonical_text(old[key]) != canonical_text(new[key])
+    ]
     return sorted(keys, key=case_order)
 
 
@@ -261,9 +268,10 @@ def parity(path: Path) -> int:
         gql, cypher = results[key], results[other]
         if "error" in gql and "error" in cypher:
             continue
-        if canonical(gql)[2:] != canonical(cypher)[2:] or ("error" in gql) != (
-            "error" in cypher
-        ):
+        # Rows only: the column names may differ by language.
+        gql_rows = json.dumps(canonical(gql)[2:], sort_keys=True)
+        cypher_rows = json.dumps(canonical(cypher)[2:], sort_keys=True)
+        if gql_rows != cypher_rows:
             mismatches.append(case_id)
             print(f"=== {case_id}: {gql['query']}")
             print("  gql:   ", summary(gql))

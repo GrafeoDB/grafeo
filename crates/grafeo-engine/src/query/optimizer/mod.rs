@@ -243,8 +243,8 @@ impl Optimizer {
     /// Returns an error if optimization fails.
     pub fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::optimize");
-        // Correctness first: a pattern through a node or edge bound before
-        // must check it.
+        // Correctness first: a pattern through a node or edge that was bound
+        // before must be checked.
         let mut root = cycles::close_cycles(plan.root);
 
         // Apply optimization rules

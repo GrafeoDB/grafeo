@@ -500,11 +500,12 @@ fn id_at(
     }
 }
 
-/// The column types of the output chunk for `chunk`: its own for the first
-/// `copied` columns, copied from it (a node or edge stays one, see
-/// `ColumnTypes`), then the declared ones.
+/// The column types of the output chunk for `chunk`, as many as the declared
+/// ones: its own for the first `copied` columns, copied from it (a node or edge
+/// stays one, see `ColumnTypes`), then the declared ones. Input columns past the
+/// declared ones (the planner's hidden expression columns) are not passed on.
 fn output_types(chunk: &DataChunk, copied: usize, declared: &[LogicalType]) -> Vec<LogicalType> {
-    let copied = copied.min(chunk.column_count());
+    let copied = copied.min(chunk.column_count()).min(declared.len());
     let input: Vec<LogicalType> = chunk.column_types().into_iter().take(copied).collect();
     let mut types = copied_column_types(&input, declared);
     types.extend(declared.iter().skip(copied).cloned());

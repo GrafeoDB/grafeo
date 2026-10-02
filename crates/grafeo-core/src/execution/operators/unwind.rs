@@ -139,20 +139,24 @@ impl UnwindOperator {
             .expect("current_list is Some: set before emit_row call");
         let element = list[self.current_list_idx].clone();
 
-        // Build output row: copy all columns from input + add the unwound
+        // The unwound element comes after the declared input columns, followed
+        // by any ordinality/offset columns.
+        let extra_cols = usize::from(self.emit_ordinality) + usize::from(self.emit_offset);
+        let element_col_idx = self.output_schema.len() - 1 - extra_cols;
+
+        // Build output row: copy the declared input columns + add the unwound
         // element. The copied columns keep the input's types (a node or edge
         // stays one, see `ColumnTypes`); the new ones have the declared types.
+        // The row is as wide as the declared schema.
         let mut types = chunk.column_types();
-        types.extend(
-            self.output_schema
-                .iter()
-                .skip(chunk.column_count())
-                .cloned(),
-        );
-        let mut builder = DataChunkBuilder::new(&copied_column_types(&types, &self.output_schema));
+        types.truncate(element_col_idx);
+        let copied = types.len();
+        let mut types = copied_column_types(&types, &self.output_schema);
+        types.extend(self.output_schema.iter().skip(copied).cloned());
+        let mut builder = DataChunkBuilder::new(&types);
 
         // Copy existing columns (except the list column which we're replacing)
-        for col_idx in 0..chunk.column_count() {
+        for col_idx in 0..copied {
             if col_idx == self.list_col_idx {
                 continue; // Skip the list column
             }
@@ -165,9 +169,6 @@ impl UnwindOperator {
         }
 
         // Add the unwound element column.
-        // It's at the end of the output schema, minus any ordinality/offset columns.
-        let extra_cols = usize::from(self.emit_ordinality) + usize::from(self.emit_offset);
-        let element_col_idx = self.output_schema.len() - 1 - extra_cols;
         if let Some(out_col) = builder.column_mut(element_col_idx) {
             out_col.push_value(element);
         }
@@ -300,6 +301,51 @@ mod tests {
             elements.push(chunk.column(2).unwrap().get_value(0));
         }
         assert_eq!(elements, [Some(Value::Int64(1)), Some(Value::Int64(2))]);
+    }
+
+    /// The row is as wide as the declared schema: an input column past the
+    /// declared ones does not take the place of the unwound element.
+    #[test]
+    fn unwind_passes_on_only_the_declared_input_columns() {
+        let mut builder =
+            DataChunkBuilder::new(&[LogicalType::Int64, LogicalType::Any, LogicalType::Int64]);
+        builder.column_mut(0).unwrap().push_value(Value::Int64(7));
+        builder
+            .column_mut(1)
+            .unwrap()
+            .push_value(Value::List(vec![Value::Int64(1), Value::Int64(2)].into()));
+        builder.column_mut(2).unwrap().push_value(Value::Int64(99));
+        builder.advance_row();
+        let child = MockOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        // Declared: a column, the list and the element; the input's third
+        // column is not one of them.
+        let mut unwind = UnwindOperator::new(
+            Box::new(child),
+            1,
+            "k".to_string(),
+            vec![LogicalType::Int64, LogicalType::Any, LogicalType::Any],
+            false,
+            false,
+        );
+
+        let mut rows = Vec::new();
+        while let Some(chunk) = unwind.next().unwrap() {
+            assert_eq!(chunk.column_count(), 3);
+            rows.push((
+                chunk.column(0).unwrap().get_value(0),
+                chunk.column(2).unwrap().get_value(0),
+            ));
+        }
+        assert_eq!(
+            rows,
+            [
+                (Some(Value::Int64(7)), Some(Value::Int64(1))),
+                (Some(Value::Int64(7)), Some(Value::Int64(2)))
+            ]
+        );
     }
 
     #[test]

@@ -5,9 +5,9 @@ use grafeo_core::execution::operators::EntityValue;
 
 use super::{
     Arc, Error, FilterExpression, GraphStoreSearch, HashMap, LimitOp, LogicalExpression,
-    LogicalOperator, LogicalType, NullOrder, Operator, PhysicalSortKey, ProjectExpr,
-    ProjectOperator, Result, ReturnOp, SkipOp, SortDirection, SortOp, SortOperator, SortOrder,
-    common, output_column_name, resolved_column_name, value_to_logical_type,
+    LogicalOperator, LogicalType, Operator, PhysicalSortKey, ProjectExpr, ProjectOperator, Result,
+    ReturnOp, SkipOp, SortDirection, SortOp, SortOperator, SortOrder, common, output_column_name,
+    resolved_column_name, value_to_logical_type,
 };
 
 impl super::Planner {
@@ -930,7 +930,7 @@ impl super::Planner {
                         SortOrder::Ascending => SortDirection::Ascending,
                         SortOrder::Descending => SortDirection::Descending,
                     },
-                    null_order: physical_null_order(key),
+                    null_order: common::physical_null_order(key),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1454,7 +1454,7 @@ fn register_return_property_sort_aliases(
 ///   - Looks up the column index via `common::resolve_expression_to_column`.
 ///   - Maps `SortOrder` → physical `SortDirection`.
 ///   - Maps `Option<NullsOrdering>` → physical `NullOrder` with
-///     [`physical_null_order`], as `plan_sort` does.
+///     [`common::physical_null_order`], as `plan_sort` does.
 ///
 /// Returns `Err` if any key fails to resolve in `variable_columns`.
 /// Callers translate that to `Ok(None)` to fall through to the unfused path.
@@ -1481,22 +1481,10 @@ fn resolve_logical_to_physical_keys(
         out.push(PhysSortKey {
             column: col,
             direction,
-            null_order: physical_null_order(key),
+            null_order: common::physical_null_order(key),
         });
     }
     Ok(out)
-}
-
-/// Where a sort key puts nulls: as its `NULLS FIRST` or `NULLS LAST` says,
-/// in either direction, and otherwise as the largest value (last ascending,
-/// first descending), as in openCypher.
-fn physical_null_order(key: &crate::query::plan::SortKey) -> NullOrder {
-    use crate::query::plan::NullsOrdering;
-
-    match (key.nulls, key.order) {
-        (Some(NullsOrdering::First), _) | (None, SortOrder::Descending) => NullOrder::NullsFirst,
-        (Some(NullsOrdering::Last), _) | (None, SortOrder::Ascending) => NullOrder::NullsLast,
-    }
 }
 
 /// Stand-in reported by [`collect_vars`] for a subquery: never the name of a

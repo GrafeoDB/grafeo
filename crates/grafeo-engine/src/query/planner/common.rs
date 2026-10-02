@@ -12,8 +12,8 @@ use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
     DistinctOperator, ExceptOperator, HashJoinOperator, IntersectOperator,
-    JoinType as PhysicalJoinType, LimitOperator, Operator, OtherwiseOperator, ProjectExpr,
-    ProjectOperator, SkipOperator, UnionOperator,
+    JoinType as PhysicalJoinType, LimitOperator, NullOrder, Operator, OtherwiseOperator,
+    ProjectExpr, ProjectOperator, SkipOperator, UnionOperator,
 };
 
 /// Builds a LIMIT physical operator.
@@ -418,6 +418,18 @@ pub(crate) fn resolve_expression_to_column(
                 "Cannot resolve expression to column{context}: {expr:?}"
             )),
         })
+}
+
+/// Where a sort key puts nulls: as its `NULLS FIRST` or `NULLS LAST` says,
+/// in either direction, and otherwise as the largest value (last ascending,
+/// first descending), as in openCypher.
+pub(crate) fn physical_null_order(key: &crate::query::plan::SortKey) -> NullOrder {
+    use crate::query::plan::{NullsOrdering, SortOrder};
+
+    match (key.nulls, key.order) {
+        (Some(NullsOrdering::First), _) | (None, SortOrder::Descending) => NullOrder::NullsFirst,
+        (Some(NullsOrdering::Last), _) | (None, SortOrder::Ascending) => NullOrder::NullsLast,
+    }
 }
 
 /// Whether a plan's rows come out in an order it defines: an `ORDER BY` at

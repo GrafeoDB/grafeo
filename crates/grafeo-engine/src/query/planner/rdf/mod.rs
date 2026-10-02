@@ -665,7 +665,7 @@ impl RdfPlanner {
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::plan::SortOrder;
         use grafeo_core::execution::operators::{
-            FilterExpression, NullOrder, ProjectExpr, ProjectOperator, SortDirection, SortKey,
+            FilterExpression, ProjectExpr, ProjectOperator, SortDirection, SortKey,
         };
 
         let (mut input_op, columns, types) = self.plan_operator(&sort.input)?;
@@ -720,22 +720,23 @@ impl RdfPlanner {
             .iter()
             .map(|key| {
                 let col_idx = resolve_expression(&key.expression, &variable_columns)?;
-                // Unbound values sort as the largest value: last ascending,
-                // first descending.
-                let (direction, null_order) = match key.order {
-                    SortOrder::Ascending => (SortDirection::Ascending, NullOrder::NullsLast),
-                    SortOrder::Descending => (SortDirection::Descending, NullOrder::NullsFirst),
-                };
                 Ok(SortKey {
                     column: col_idx,
-                    direction,
-                    null_order,
+                    direction: match key.order {
+                        SortOrder::Ascending => SortDirection::Ascending,
+                        SortOrder::Descending => SortDirection::Descending,
+                    },
+                    null_order: super::common::physical_null_order(key),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let operator = Box::new(SortOperator::new(input_op, physical_keys));
-        Ok((operator, columns, types))
+        let mut sort = SortOperator::new(input_op, physical_keys);
+        // The columns computed for ORDER BY come last and are not returned.
+        if !expression_projections.is_empty() {
+            sort = sort.with_output_width(columns.len());
+        }
+        Ok((Box::new(sort), columns, types))
     }
 
     /// Plans a PROJECT operator.
@@ -6565,6 +6566,82 @@ mod tests {
                 Value::String("2".into()),
                 Value::String("3".into())
             ]
+        );
+    }
+
+    #[test]
+    fn test_plan_sort_honors_explicit_null_order() {
+        use crate::query::plan::{LeftJoinOp, NullsOrdering, SortKey, SortOp, SortOrder};
+        let store = Arc::new(RdfStore::new());
+        for (person, name, age) in [
+            ("alix", "Alix", Some("30")),
+            ("gus", "Gus", None),
+            ("vincent", "Vincent", Some("25")),
+        ] {
+            let subject = Term::iri(format!("http://example.org/{person}"));
+            store.insert(Triple::new(
+                subject.clone(),
+                Term::iri("http://xmlns.com/foaf/0.1/name"),
+                Term::literal(name),
+            ));
+            if let Some(age) = age {
+                store.insert(Triple::new(
+                    subject,
+                    Term::iri("http://xmlns.com/foaf/0.1/age"),
+                    Term::literal(age),
+                ));
+            }
+        }
+        let scan = |predicate: &str, object: &str| {
+            LogicalOperator::TripleScan(TripleScanOp {
+                subject: TripleComponent::Variable("s".to_string()),
+                predicate: TripleComponent::Iri(format!("http://xmlns.com/foaf/0.1/{predicate}")),
+                object: TripleComponent::Variable(object.to_string()),
+                graph: None,
+                input: None,
+                dataset: None,
+            })
+        };
+        // The ages in sort order, `None` for the person without one.
+        let ages = |order: SortOrder, nulls: NullsOrdering| {
+            let sort = LogicalOperator::Sort(SortOp {
+                keys: vec![SortKey {
+                    expression: LogicalExpression::Variable("age".to_string()),
+                    order,
+                    nulls: Some(nulls),
+                }],
+                input: Box::new(LogicalOperator::LeftJoin(LeftJoinOp {
+                    left: Box::new(scan("name", "name")),
+                    right: Box::new(scan("age", "age")),
+                    condition: None,
+                })),
+            });
+            let physical = RdfPlanner::new(Arc::clone(&store))
+                .plan(&LogicalPlan::new(sort))
+                .unwrap();
+            let column = physical.columns.iter().position(|c| c == "age").unwrap();
+            let mut op = physical.operator;
+            let mut ages = Vec::new();
+            while let Some(chunk) = op.next().unwrap() {
+                let values = chunk.column(column).unwrap();
+                for row in chunk.selected_indices() {
+                    ages.push(match values.get_value(row) {
+                        Some(Value::String(age)) => Some(age.to_string()),
+                        _ => None,
+                    });
+                }
+            }
+            ages
+        };
+        let some = |age: &str| Some(age.to_string());
+
+        assert_eq!(
+            ages(SortOrder::Ascending, NullsOrdering::First),
+            vec![None, some("25"), some("30")]
+        );
+        assert_eq!(
+            ages(SortOrder::Descending, NullsOrdering::Last),
+            vec![some("30"), some("25"), None]
         );
     }
 

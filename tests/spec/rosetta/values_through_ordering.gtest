@@ -202,7 +202,8 @@ tests:
       count: 5
 
   # ---------------------------------------------------------------------------
-  # Cuts across the 2048-row batch boundary
+  # Cuts across the 2048-row batch boundary (the edges each have a pair of nodes
+  # of their own: a setup linear in the row count, fast enough for WASM)
   # ---------------------------------------------------------------------------
 
   - name: skip_across_a_row_batch
@@ -222,8 +223,7 @@ tests:
 
   - name: edge_properties_after_a_cut_across_row_batches
     setup:
-      - "UNWIND range(0, 2099) AS i INSERT (:N {i: i, w: 1000 + i})"
-      - "MATCH (a:N), (b:N) WHERE b.i = a.i + 1 INSERT (a)-[:NEXT {k: a.i, w: a.i}]->(b)"
+      - "UNWIND range(0, 2098) AS i INSERT (:N {i: i, w: 1000 + i})-[:NEXT {k: i, w: i}]->(:N {i: i + 1, w: 1001 + i})"
     variants:
       cypher: "MATCH (n:N)-[r]->(m) WITH r ORDER BY r.k SKIP 2047 LIMIT 3 RETURN r.w AS w"
     expect:
@@ -234,8 +234,7 @@ tests:
 
   - name: top_k_across_row_batches
     setup:
-      - "UNWIND range(0, 2099) AS i INSERT (:N {i: i, w: 1000 + i})"
-      - "MATCH (a:N), (b:N) WHERE b.i = a.i + 1 INSERT (a)-[:NEXT {k: a.i, w: a.i}]->(b)"
+      - "UNWIND range(0, 2098) AS i INSERT (:N {i: i, w: 1000 + i})-[:NEXT {k: i, w: i}]->(:N {i: i + 1, w: 1001 + i})"
     variants:
       gql: "MATCH (n:N)-[r]->(m) RETURN r.w AS w ORDER BY r.k DESC LIMIT 2"
       cypher: "MATCH (n:N)-[r]->(m) RETURN r.w AS w ORDER BY r.k DESC LIMIT 2"

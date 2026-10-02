@@ -106,6 +106,7 @@ Changes for [Deriva](https://github.com/StevenBtw/deriva), which generates Archi
 - **CI gate and policy checks** ([#511](https://github.com/GrafeoDB/grafeo/issues/511)): a single `CI Gate` check to require before merging, and a `Policy` job for crate boundaries, toolchain pins and public-text rules.
 - **CI toolchain pins restored** ([#509](https://github.com/GrafeoDB/grafeo/issues/509)); Dependabot no longer bumps the Rust toolchain.
 - **Pull request eligibility check**: a `PR Policy` check applies the contribution rules in CONTRIBUTING.md.
+- **Differential test**: `scripts/difftest` runs a GQL and Cypher query corpus on the previous release and on a release build of a commit, and fails on any changed result that was not reviewed for the release; it also compares GQL with Cypher within one run.
 
 ## [0.5.43] - 2026-09-27
 

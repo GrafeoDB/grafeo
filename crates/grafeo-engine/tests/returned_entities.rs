@@ -150,6 +150,53 @@ fn a_sort_key_on_an_alias_is_not_returned() {
     }
 }
 
+/// `RETURN *` with `ORDER BY` returns the pattern's variables as records, in
+/// order, and no column for the sort key: a property of a returned variable,
+/// the variable itself, and a cut or deduplicated result.
+#[test]
+fn return_star_with_order_by() {
+    let db = three_edges(Config::in_memory());
+    let record = |a: i64, w: i64, b: i64| {
+        vec![
+            format!("n=Int64({a})"),
+            format!("K w=Int64({w})"),
+            format!("n=Int64({b})"),
+        ]
+    };
+    for language in LANGUAGES {
+        for (query, expected) in [
+            (
+                "MATCH (a)-[r]->(b) RETURN * ORDER BY r.w DESC",
+                vec![record(5, 3, 6), record(3, 2, 4), record(1, 1, 2)],
+            ),
+            (
+                "MATCH (a)-[r]->(b) RETURN * ORDER BY a.n LIMIT 1",
+                vec![record(1, 1, 2)],
+            ),
+            (
+                "MATCH (a)-[r]->(b) RETURN * ORDER BY b.n DESC SKIP 1",
+                vec![record(3, 2, 4), record(1, 1, 2)],
+            ),
+            (
+                "MATCH (a)-[r]->(b) RETURN DISTINCT * ORDER BY r.w",
+                vec![record(1, 1, 2), record(3, 2, 4), record(5, 3, 6)],
+            ),
+            (
+                "MATCH (a)-[r]->(b) RETURN * ORDER BY a DESC",
+                vec![record(5, 3, 6), record(3, 2, 4), record(1, 1, 2)],
+            ),
+        ] {
+            let result = match language {
+                "gql" => db.execute(query),
+                _ => db.execute_cypher(query),
+            }
+            .unwrap_or_else(|error| panic!("{language}: {query}: {error}"));
+            assert_eq!(result.columns, ["a", "r", "b"], "{language}: {query}");
+            assert_eq!(rows(&db, language, query), expected, "{language}: {query}");
+        }
+    }
+}
+
 /// Every branch of a UNION returns records, so the branches' rows compare.
 #[test]
 fn every_union_branch_returns_records() {

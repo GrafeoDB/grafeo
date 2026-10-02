@@ -52,23 +52,8 @@ impl super::Planner {
         input_op: Box<dyn Operator>,
         input_columns: Vec<String>,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Expand RETURN * wildcard: replace with all user-visible input columns
-        let expanded_items;
-        let items = if ret.items.len() == 1
-            && matches!(&ret.items[0].expression, LogicalExpression::Variable(n) if n == "*")
-        {
-            expanded_items = input_columns
-                .iter()
-                .filter(|col| !col.starts_with('_')) // Skip internal columns
-                .map(|col| crate::query::plan::ReturnItem {
-                    expression: LogicalExpression::Variable(col.clone()),
-                    alias: None,
-                })
-                .collect::<Vec<_>>();
-            &expanded_items
-        } else {
-            &ret.items
-        };
+        let expanded_items = expand_return_star(&ret.items, &input_columns);
+        let items = expanded_items.as_deref().unwrap_or(&ret.items);
 
         // Build variable to column index mapping
         let variable_columns: HashMap<String, usize> = input_columns
@@ -696,8 +681,11 @@ impl super::Planner {
             // Build augmented Return items: original items plus ORDER BY
             // expressions that reference variables available in the Match but
             // not in the Return. This includes both property accesses and
-            // complex expressions (labels(n)[0], type(r), etc.).
-            let mut augmented_items = ret.items.clone();
+            // complex expressions (labels(n)[0], type(r), etc.). `RETURN *`
+            // is expanded first: `*` is only expanded when it is the sole item.
+            let return_items =
+                expand_return_star(&ret.items, &inner_columns).unwrap_or_else(|| ret.items.clone());
+            let mut augmented_items = return_items.clone();
             let mut extra_columns = Vec::new();
             let mut seen: GrafeoSet<String> = GrafeoSet::default();
             for key in &sort.keys {
@@ -711,7 +699,7 @@ impl super::Planner {
                         if !inner_vars.contains_key(variable) {
                             continue;
                         }
-                        let already_in_return = ret.items.iter().any(|item| {
+                        let already_in_return = return_items.iter().any(|item| {
                             item.alias.as_deref() == Some(variable.as_str())
                                 || matches!(
                                     &item.expression,
@@ -737,7 +725,7 @@ impl super::Planner {
                         // property access (possibly under an alias). E.g.
                         // RETURN caller.name AS caller ORDER BY caller.name
                         // already has caller.name in the Return items.
-                        let already_in_return = ret.items.iter().any(|item| {
+                        let already_in_return = return_items.iter().any(|item| {
                             matches!(
                                 &item.expression,
                                 LogicalExpression::Property {
@@ -1383,6 +1371,31 @@ impl super::Planner {
         ));
         Ok(Some((op, columns)))
     }
+}
+
+/// The items of `RETURN *`: every input column a query can name (internal
+/// columns start with `_`). `None` for any other RETURN: `*` is expanded
+/// only when it is the only item.
+fn expand_return_star(
+    items: &[crate::query::plan::ReturnItem],
+    input_columns: &[String],
+) -> Option<Vec<crate::query::plan::ReturnItem>> {
+    let [item] = items else {
+        return None;
+    };
+    if !matches!(&item.expression, LogicalExpression::Variable(name) if name == "*") {
+        return None;
+    }
+    Some(
+        input_columns
+            .iter()
+            .filter(|column| !column.starts_with('_'))
+            .map(|column| crate::query::plan::ReturnItem {
+                expression: LogicalExpression::Variable(column.clone()),
+                alias: None,
+            })
+            .collect(),
+    )
 }
 
 /// Predicts the output column names of `op` without planning it.

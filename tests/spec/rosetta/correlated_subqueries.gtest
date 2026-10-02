@@ -315,3 +315,57 @@ tests:
     expect:
       rows:
         - [Vincent, Gus]
+
+  # ---------------------------------------------------------------------------
+  # GQL VALUE subqueries that count (GQL only: VALUE is GQL)
+  # ---------------------------------------------------------------------------
+
+  # Alix knows Gus (age 25) and Vincent (no age), and likes Gus twice.
+  - name: value_count_of_a_property_skips_nulls
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus', age: 25}), (alix)-[:KNOWS]->(:Person {name: 'Vincent'}), (alix)-[:LIKES]->(gus), (alix)-[:LIKES]->(gus)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) RETURN VALUE { MATCH (a)-[:KNOWS]->(b) RETURN count(b.age) } AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: value_count_distinct
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus', age: 25}), (alix)-[:KNOWS]->(:Person {name: 'Vincent'}), (alix)-[:LIKES]->(gus), (alix)-[:LIKES]->(gus)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) RETURN VALUE { MATCH (a)-[:LIKES]->(b) RETURN count(DISTINCT b) } AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: value_count_distinct_property_skips_nulls_and_duplicates
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus', age: 25}), (alix)-[:KNOWS]->(:Person {name: 'Vincent'}), (alix)-[:KNOWS]->(:Person {name: 'Jules', age: 25})"
+    variants:
+      gql: "MATCH (a:Person) RETURN a.name AS n, VALUE { MATCH (a)-[:KNOWS]->(b) RETURN count(DISTINCT b.age) } AS c ORDER BY n"
+    expect:
+      ordered: true
+      rows:
+        - [Alix, 1]
+        - [Gus, 0]
+        - [Jules, 0]
+        - [Vincent, 0]
+
+  - name: value_count_of_all_matches
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus', age: 25}), (alix)-[:KNOWS]->(:Person {name: 'Vincent'}), (alix)-[:LIKES]->(gus), (alix)-[:LIKES]->(gus)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) RETURN VALUE { MATCH (a)-[:LIKES]->(b) RETURN count(*) } AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: value_count_of_a_property_in_where
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus', age: 25}), (alix)-[:KNOWS]->(:Person {name: 'Vincent'}), (alix)-[:LIKES]->(gus), (alix)-[:LIKES]->(gus)"
+    variants:
+      gql: "MATCH (a:Person) WHERE VALUE { MATCH (a)-[:KNOWS]->(b) RETURN count(b.age) } = 1 RETURN a.name AS n"
+    expect:
+      rows:
+        - [Alix]

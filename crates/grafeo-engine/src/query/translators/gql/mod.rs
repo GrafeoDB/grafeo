@@ -2016,15 +2016,23 @@ impl GqlTranslator {
         Ok(plan)
     }
 
-    /// Returns true if the RETURN clause is a single count() aggregate.
-    fn is_count_aggregate_return(ret: &ast::ReturnClause) -> bool {
-        if ret.items.len() != 1 {
-            return false;
+    /// If the RETURN clause is a single `count()` aggregate of at most one
+    /// argument, returns that argument (`None` for `count(*)`) and whether it
+    /// is counted DISTINCT.
+    fn count_aggregate_return(ret: &ast::ReturnClause) -> Option<(Option<&ast::Expression>, bool)> {
+        let [item] = ret.items.as_slice() else {
+            return None;
+        };
+        match &item.expression {
+            ast::Expression::FunctionCall {
+                name,
+                args,
+                distinct,
+            } if name.eq_ignore_ascii_case("count") && args.len() <= 1 => {
+                Some((args.first(), *distinct))
+            }
+            _ => None,
         }
-        matches!(
-            &ret.items[0].expression,
-            ast::Expression::FunctionCall { name, .. } if name.eq_ignore_ascii_case("count")
-        )
     }
 
     /// Extracts the first output column name from a Return operator in a logical plan.

@@ -178,11 +178,34 @@ impl GqlTranslator {
             }
             ast::Expression::ValueSubquery { query } => {
                 // VALUE { subquery } returns a scalar from the inner query.
-                // If the inner RETURN is a count() aggregate over an edge pattern,
-                // use CountSubquery (optimized path that handles correlation).
-                // Otherwise, translate the full query and use ValueSubquery + Apply.
-                if Self::is_count_aggregate_return(&query.return_clause) {
-                    let inner_plan = self.translate_subquery_to_operator(query)?;
+                // A count() return becomes a CountSubquery over the rows it
+                // counts: those where the argument is not null, one per value
+                // with DISTINCT. Otherwise, translate the full query and use
+                // ValueSubquery + Apply.
+                if let Some((argument, distinct)) =
+                    Self::count_aggregate_return(&query.return_clause)
+                {
+                    let mut inner_plan = self.translate_subquery_to_operator(query)?;
+                    if let Some(argument) = argument {
+                        let argument = self.translate_expression(argument)?;
+                        inner_plan = wrap_filter(
+                            inner_plan,
+                            LogicalExpression::Unary {
+                                op: UnaryOp::IsNotNull,
+                                operand: Box::new(argument.clone()),
+                            },
+                        );
+                        if distinct {
+                            inner_plan = wrap_distinct(LogicalOperator::Project(ProjectOp {
+                                projections: vec![Projection {
+                                    expression: argument,
+                                    alias: Some("__counted".to_string()),
+                                }],
+                                input: Box::new(inner_plan),
+                                pass_through_input: false,
+                            }));
+                        }
+                    }
                     Ok(LogicalExpression::CountSubquery(Box::new(inner_plan)))
                 } else {
                     let inner_logical_plan = self.translate_query(query)?;

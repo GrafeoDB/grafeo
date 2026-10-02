@@ -452,4 +452,12 @@ for case_id, query in [
     case(case_id, query)
 case("R6", "MATCH (a:Person) CALL { WITH a MATCH (a)-[:KNOWS]->(m)-[:KNOWS]->(x) RETURN x.name AS x } RETURN a.name AS a, x", CYPHER)
 
+# S: GQL VALUE subqueries returning count(x) skip nulls and count DISTINCT values once
+for case_id, query in [
+    ("S1", "MATCH (a:Person) RETURN a.name AS n, VALUE { MATCH (a)-[:KNOWS]->(b) RETURN count(b.w) } AS c"),
+    ("S2", "MATCH (a:Person) RETURN a.name AS n, VALUE { MATCH (a)-[:KNOWS]->(b), (c:City) RETURN count(DISTINCT b) } AS c"),
+    ("S3", "MATCH (a:Person) WHERE VALUE { MATCH (a)-[:KNOWS]->(b) RETURN count(b.w) } = 1 RETURN a.name AS n"),
+]:
+    case(case_id, query, GQL)
+
 # fmt: on

@@ -127,16 +127,17 @@ impl SortOperator {
         self
     }
 
-    /// Whether the sort drops trailing sort-key columns. The push-based sort
-    /// returns every column, so such a sort is not converted to it.
+    /// How many leading columns each output row keeps, when the sort drops
+    /// trailing sort-key columns.
     #[must_use]
-    pub fn drops_columns(&self) -> bool {
-        self.output_width.is_some()
+    pub fn output_width(&self) -> Option<usize> {
+        self.output_width
     }
 
-    /// Decomposes this operator into its child and sort keys for push-based conversion.
-    pub fn into_parts(self) -> (Box<dyn Operator>, Vec<SortKey>) {
-        (self.child, self.sort_keys)
+    /// Decomposes this operator into its child, sort keys and output width for
+    /// push-based conversion.
+    pub fn into_parts(self) -> (Box<dyn Operator>, Vec<SortKey>, Option<usize>) {
+        (self.child, self.sort_keys, self.output_width)
     }
 
     /// Materializes and sorts the input.
@@ -625,7 +626,8 @@ mod tests {
             Box::new(mock),
             vec![SortKey::ascending(0), SortKey::descending(1)],
         );
-        let (mut child, sort_keys) = op.into_parts();
+        let (mut child, sort_keys, output_width) = op.into_parts();
+        assert_eq!(output_width, None);
         assert_eq!(sort_keys.len(), 2);
         assert_eq!(sort_keys[0].column, 0);
         assert_eq!(sort_keys[1].column, 1);
@@ -648,7 +650,7 @@ mod tests {
         let mock = MockOperator::new(vec![builder.finish()]);
         let mut sort =
             SortOperator::new(Box::new(mock), vec![SortKey::ascending(1)]).with_output_width(1);
-        assert!(sort.drops_columns());
+        assert_eq!(sort.output_width(), Some(1));
 
         let chunk = sort.next().unwrap().unwrap();
         assert_eq!(chunk.column_count(), 1);

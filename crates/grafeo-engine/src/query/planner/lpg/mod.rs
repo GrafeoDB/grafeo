@@ -1895,8 +1895,8 @@ mod tests {
             .into_any()
             .downcast::<SortOperator>()
             .expect("operator under Limit must be Sort (Sort blocks pushdown)");
-        assert!(sort_op.drops_columns());
-        let (after_sort, _keys) = sort_op.into_parts();
+        assert_eq!(sort_op.output_width(), Some(1));
+        let (after_sort, _keys, _width) = sort_op.into_parts();
 
         // Sort wraps its input in a Project that materializes the sort
         // keys. The fold from Filter+NodeScan to RangeScan happens

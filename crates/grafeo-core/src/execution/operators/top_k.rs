@@ -25,7 +25,7 @@ use std::sync::Arc;
 use grafeo_common::types::Value;
 
 use super::sort::SortKey;
-use super::value_utils::compare_values_with_nulls;
+use super::value_utils::compare_sort_values;
 use super::{Operator, OperatorResult};
 use crate::execution::DataChunk;
 use crate::execution::chunk::{ColumnTypes, DataChunkBuilder};
@@ -277,13 +277,13 @@ fn extract_row_values(chunk: &DataChunk, row_idx: usize, n_cols: usize) -> Vec<O
 /// Inserting a new row that ties on every key must NOT displace the existing
 /// top. The existing top arrived first and wins ties (stability).
 fn row_beats_heap_top(new: &[Option<Value>], top: &HeapEntry, keys: &[SortKey]) -> bool {
-    use super::sort::SortDirection;
     for (i, key) in keys.iter().enumerate() {
-        let cmp = compare_values_with_nulls(&new[i], &top.sort_values[i], key.null_order);
-        let user_cmp = match key.direction {
-            SortDirection::Ascending => cmp,
-            SortDirection::Descending => cmp.reverse(),
-        };
+        let user_cmp = compare_sort_values(
+            new[i].as_ref(),
+            top.sort_values[i].as_ref(),
+            key.direction,
+            key.null_order,
+        );
         match user_cmp {
             Ordering::Less => return true,
             Ordering::Greater => return false,
@@ -309,26 +309,19 @@ impl PartialOrd for HeapEntry {
 
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        use super::sort::SortDirection;
         // Both entries share the same Arc<Vec<SortKey>> (one per
         // TopKOperator); use self's view.
         //
         // Goal: BinaryHeap is a max-heap. peek() must return the
-        // worst-by-user-order so we can evict it on overflow.
-        //   User ASC:  worst = largest value, peek wants largest, so
-        //              Ord must say "larger is greater": heap_cmp = cmp.
-        //   User DESC: worst = smallest value, peek wants smallest, so
-        //              Ord must say "smaller is greater": heap_cmp = cmp.reverse().
+        // worst-by-user-order so we can evict it on overflow, so Ord is the
+        // user order itself: a row that comes later is greater.
         for (i, key) in self.sort_keys.iter().enumerate() {
-            let cmp = compare_values_with_nulls(
-                &self.sort_values[i],
-                &other.sort_values[i],
+            let heap_cmp = compare_sort_values(
+                self.sort_values[i].as_ref(),
+                other.sort_values[i].as_ref(),
+                key.direction,
                 key.null_order,
             );
-            let heap_cmp = match key.direction {
-                SortDirection::Ascending => cmp,
-                SortDirection::Descending => cmp.reverse(),
-            };
             if heap_cmp != Ordering::Equal {
                 return heap_cmp;
             }
@@ -580,6 +573,43 @@ mod tests {
                 Some(Value::Int64(19)),
                 Some(Value::Int64(88))
             ]
+        );
+    }
+
+    /// `NULLS LAST` holds when descending too, and descending puts nulls
+    /// first by default (null sorts as the largest value).
+    #[test]
+    fn top_k_places_nulls_as_the_key_says_when_descending() {
+        use super::super::sort::NullOrder;
+        let input = || {
+            let mut b = DataChunkBuilder::new(&[LogicalType::Int64]);
+            for v in [Some(19_i64), None, Some(88), None, Some(3)] {
+                match v {
+                    Some(n) => b.column_mut(0).unwrap().push_int64(n),
+                    None => b.column_mut(0).unwrap().push_value(Value::Null),
+                }
+                b.advance_row();
+            }
+            MockOperator::new(vec![b.finish()])
+        };
+        let top = |key: SortKey| {
+            let mut top_k = TopKOperator::new(Box::new(input()), vec![key], 3);
+            let mut out = Vec::new();
+            while let Some(chunk) = top_k.next().unwrap() {
+                for row in chunk.selected_indices() {
+                    out.push(chunk.column(0).unwrap().get_value(row).unwrap());
+                }
+            }
+            out
+        };
+
+        assert_eq!(
+            top(SortKey::descending(0).with_null_order(NullOrder::NullsLast)),
+            [Value::Int64(88), Value::Int64(19), Value::Int64(3)]
+        );
+        assert_eq!(
+            top(SortKey::descending(0)),
+            [Value::Null, Value::Null, Value::Int64(88)]
         );
     }
 

@@ -2,7 +2,7 @@
 
 use crate::execution::chunk::DataChunk;
 use crate::execution::operators::OperatorError;
-use crate::execution::operators::value_utils::compare_values_total;
+use crate::execution::operators::value_utils::order_by;
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 #[cfg(feature = "spill")]
 use crate::execution::spill::{ExternalSort, SpillManager};
@@ -22,7 +22,7 @@ pub enum SortDirection {
     Descending,
 }
 
-/// Null handling in sort.
+/// Where nulls go, in either sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NullOrder {
@@ -100,28 +100,12 @@ impl SortPushOperator {
 /// Compare two rows by sort keys.
 fn compare_rows(a: &[Value], b: &[Value], keys: &[SortKey]) -> Ordering {
     for key in keys {
-        let a_val = a.get(key.column);
-        let b_val = b.get(key.column);
-
-        let ordering = match (a_val, b_val) {
-            (Some(Value::Null), Some(Value::Null)) => Ordering::Equal,
-            (Some(Value::Null), _) => match key.null_order {
-                NullOrder::First => Ordering::Less,
-                NullOrder::Last => Ordering::Greater,
-            },
-            (_, Some(Value::Null)) => match key.null_order {
-                NullOrder::First => Ordering::Greater,
-                NullOrder::Last => Ordering::Less,
-            },
-            (Some(a), Some(b)) => compare_values_total(a, b),
-            _ => Ordering::Equal,
-        };
-
-        let ordering = match key.direction {
-            SortDirection::Ascending => ordering,
-            SortDirection::Descending => ordering.reverse(),
-        };
-
+        let ordering = order_by(
+            a.get(key.column),
+            b.get(key.column),
+            key.direction == SortDirection::Descending,
+            key.null_order == NullOrder::First,
+        );
         if ordering != Ordering::Equal {
             return ordering;
         }
@@ -554,6 +538,84 @@ mod tests {
         assert_eq!(col.get_value(0), Some(Value::Int64(5)));
         assert_eq!(col.get_value(1), Some(Value::Int64(4)));
         assert_eq!(col.get_value(2), Some(Value::Int64(3)));
+    }
+
+    /// Two chunks of mixed values with nulls.
+    fn mixed_chunks() -> Vec<DataChunk> {
+        let first = [
+            Value::Int64(3),
+            Value::String("a".into()),
+            Value::Null,
+            Value::Float64(2.5),
+        ];
+        let second = [
+            Value::Bool(true),
+            Value::Null,
+            Value::Int64(1),
+            Value::List(vec![Value::Int64(1)].into()),
+        ];
+        vec![
+            DataChunk::new(vec![ValueVector::from_values(&first)]),
+            DataChunk::new(vec![ValueVector::from_values(&second)]),
+        ]
+    }
+
+    /// `ORDER BY x DESC NULLS LAST` over [`mixed_chunks`].
+    const MIXED_DESC_NULLS_LAST: [&str; 8] =
+        ["3", "2.5", "1", "true", "\"a\"", "[1]", "NULL", "NULL"];
+
+    fn first_column_texts(sink: CollectorSink) -> Vec<String> {
+        sink.into_chunks()
+            .iter()
+            .flat_map(|chunk| {
+                let column = chunk.column(0).unwrap();
+                (0..chunk.len())
+                    .map(|row| column.get_value(row).unwrap().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Values of different types sort in one order, and `NULLS LAST` holds
+    /// when descending.
+    #[test]
+    fn mixed_values_sort_in_one_order_with_nulls_last_descending() {
+        let key = SortKey {
+            column: 0,
+            direction: SortDirection::Descending,
+            null_order: NullOrder::Last,
+        };
+        let mut sort = SortPushOperator::new(vec![key]);
+        let mut sink = CollectorSink::new();
+        for chunk in mixed_chunks() {
+            sort.push(chunk, &mut sink).unwrap();
+        }
+        sort.finalize(&mut sink).unwrap();
+
+        assert_eq!(first_column_texts(sink), MIXED_DESC_NULLS_LAST);
+    }
+
+    /// Spilled runs merge in the same order as an in-memory sort.
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spilled_runs_merge_mixed_values_in_the_same_order() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let manager = Arc::new(SpillManager::new(temp_dir.path()).unwrap());
+        let key = SortKey {
+            column: 0,
+            direction: SortDirection::Descending,
+            null_order: NullOrder::Last,
+        };
+        let mut sort = SpillableSortPushOperator::with_spilling(vec![key], manager, 3);
+        let mut sink = CollectorSink::new();
+        for chunk in mixed_chunks() {
+            sort.push(chunk, &mut sink).unwrap();
+        }
+        sort.finalize(&mut sink).unwrap();
+
+        assert_eq!(first_column_texts(sink), MIXED_DESC_NULLS_LAST);
     }
 
     #[test]

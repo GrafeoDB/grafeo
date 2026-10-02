@@ -720,13 +720,16 @@ impl RdfPlanner {
             .iter()
             .map(|key| {
                 let col_idx = resolve_expression(&key.expression, &variable_columns)?;
+                // Unbound values sort as the largest value: last ascending,
+                // first descending.
+                let (direction, null_order) = match key.order {
+                    SortOrder::Ascending => (SortDirection::Ascending, NullOrder::NullsLast),
+                    SortOrder::Descending => (SortDirection::Descending, NullOrder::NullsFirst),
+                };
                 Ok(SortKey {
                     column: col_idx,
-                    direction: match key.order {
-                        SortOrder::Ascending => SortDirection::Ascending,
-                        SortOrder::Descending => SortDirection::Descending,
-                    },
-                    null_order: NullOrder::NullsLast,
+                    direction,
+                    null_order,
                 })
             })
             .collect::<Result<Vec<_>>>()?;

@@ -7,6 +7,7 @@
 use super::file::{SpillFile, SpillFileReader};
 use super::manager::SpillManager;
 use super::serializer::{deserialize_row, serialize_row};
+use crate::execution::operators::value_utils::order_by;
 use grafeo_common::types::Value;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -22,7 +23,7 @@ pub enum SortDirection {
     Descending,
 }
 
-/// Null handling in sort.
+/// Where nulls go, in either sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NullOrder {
@@ -359,48 +360,18 @@ impl PartialOrd for HeapEntry {
 /// Compares two rows by sort keys.
 fn compare_rows(a: &[Value], b: &[Value], keys: &[SortKey]) -> Ordering {
     for key in keys {
-        let a_val = a.get(key.column);
-        let b_val = b.get(key.column);
-
-        let ordering = match (a_val, b_val) {
-            (Some(Value::Null), Some(Value::Null)) => Ordering::Equal,
-            (Some(Value::Null), _) => match key.null_order {
-                NullOrder::First => Ordering::Less,
-                NullOrder::Last => Ordering::Greater,
-            },
-            (_, Some(Value::Null)) => match key.null_order {
-                NullOrder::First => Ordering::Greater,
-                NullOrder::Last => Ordering::Less,
-            },
-            (Some(a), Some(b)) => compare_values(a, b),
-            _ => Ordering::Equal,
-        };
-
-        let ordering = match key.direction {
-            SortDirection::Ascending => ordering,
-            SortDirection::Descending => ordering.reverse(),
-        };
-
+        let ordering = order_by(
+            a.get(key.column),
+            b.get(key.column),
+            key.direction == SortDirection::Descending,
+            key.null_order == NullOrder::First,
+        );
         if ordering != Ordering::Equal {
             return ordering;
         }
     }
 
     Ordering::Equal
-}
-
-/// Compares two values.
-fn compare_values(a: &Value, b: &Value) -> Ordering {
-    match (a, b) {
-        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-        (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
-        (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-        (Value::String(a), Value::String(b)) => a.cmp(b),
-        (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
-        (Value::Date(a), Value::Date(b)) => a.cmp(b),
-        (Value::Time(a), Value::Time(b)) => a.cmp(b),
-        _ => Ordering::Equal,
-    }
 }
 
 /// Adapter to write to SpillFile through std::io::Write.

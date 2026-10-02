@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 
 use grafeo_common::types::Value;
 
-use super::value_utils::compare_values_with_nulls;
+use super::value_utils::compare_sort_values;
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::execution::chunk::{ColumnTypes, DataChunkBuilder};
@@ -22,7 +22,7 @@ pub enum SortDirection {
     Descending,
 }
 
-/// Null ordering.
+/// Where nulls go, in either sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NullOrder {
@@ -44,7 +44,7 @@ pub struct SortKey {
 }
 
 impl SortKey {
-    /// Creates a new sort key with ascending order.
+    /// Creates a new sort key with ascending order, nulls last.
     pub fn ascending(column: usize) -> Self {
         Self {
             column,
@@ -53,12 +53,13 @@ impl SortKey {
         }
     }
 
-    /// Creates a new sort key with descending order.
+    /// Creates a new sort key with descending order, nulls first: null sorts
+    /// as the largest value, as in openCypher.
     pub fn descending(column: usize) -> Self {
         Self {
             column,
             direction: SortDirection::Descending,
-            null_order: NullOrder::NullsLast,
+            null_order: NullOrder::NullsFirst,
         }
     }
 
@@ -169,12 +170,12 @@ impl SortOperator {
                     .column(key.column)
                     .and_then(|c| c.get_value(b.row_index));
 
-                let cmp = compare_values_with_nulls(&val_a, &val_b, key.null_order);
-
-                let cmp = match key.direction {
-                    SortDirection::Ascending => cmp,
-                    SortDirection::Descending => cmp.reverse(),
-                };
+                let cmp = compare_sort_values(
+                    val_a.as_ref(),
+                    val_b.as_ref(),
+                    key.direction,
+                    key.null_order,
+                );
 
                 if cmp != Ordering::Equal {
                     return cmp;
@@ -336,6 +337,55 @@ mod tests {
                 (3, "cherry".to_string()),
                 (4, "date".to_string()),
             ]
+        );
+    }
+
+    /// Values of different types sort in one order (maps and lists, strings,
+    /// booleans, numbers), and nulls go where the key says, in either
+    /// direction: last ascending and first descending unless it says otherwise.
+    #[test]
+    fn mixed_values_sort_in_one_order_with_nulls_where_the_key_says() {
+        let input = || {
+            let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+            for value in [
+                Value::Int64(3),
+                Value::String("a".into()),
+                Value::Float64(2.5),
+                Value::Null,
+                Value::Bool(true),
+                Value::List(vec![Value::Int64(1)].into()),
+            ] {
+                builder.column_mut(0).unwrap().push_value(value);
+                builder.advance_row();
+            }
+            MockOperator::new(vec![builder.finish()])
+        };
+        let sorted = |key: SortKey| {
+            let mut sort = SortOperator::new(Box::new(input()), vec![key]);
+            let mut out = Vec::new();
+            while let Some(chunk) = sort.next().unwrap() {
+                for row in chunk.selected_indices() {
+                    out.push(chunk.column(0).unwrap().get_value(row).unwrap().to_string());
+                }
+            }
+            out
+        };
+
+        assert_eq!(
+            sorted(SortKey::ascending(0)),
+            ["[1]", "\"a\"", "true", "2.5", "3", "NULL"]
+        );
+        assert_eq!(
+            sorted(SortKey::descending(0)),
+            ["NULL", "3", "2.5", "true", "\"a\"", "[1]"]
+        );
+        assert_eq!(
+            sorted(SortKey::descending(0).with_null_order(NullOrder::NullsLast)),
+            ["3", "2.5", "true", "\"a\"", "[1]", "NULL"]
+        );
+        assert_eq!(
+            sorted(SortKey::ascending(0).with_null_order(NullOrder::NullsFirst)),
+            ["NULL", "[1]", "\"a\"", "true", "2.5", "3"]
         );
     }
 

@@ -318,31 +318,37 @@ fn order_by_nulls_last_puts_nulls_at_bottom() {
 
 #[test]
 fn order_by_desc_with_nulls_ordering() {
-    // DESC combined with an explicit NULLS clause exercises the Descending
-    // branch of the direction match plus the NullOrder pass-through. The
-    // underlying sort operator reverses the whole comparison (including null
-    // position) when direction=Descending, so DESC+NULLS LAST ends up placing
-    // nulls first. We pin that observed behavior so regressions in either
-    // plan_sort's mapping or the sort operator's semantics get caught.
+    // An explicit NULLS clause holds in either direction: DESC NULLS LAST puts
+    // the nulls after the values, DESC NULLS FIRST before them. (The sort used
+    // to reverse the null position along with the values for DESC, so both
+    // came out the other way around.) Pin the full row ordering, not just the
+    // non-null subsequence.
     let db = people_graph();
     let session = db.session();
+    let ages = |order: &str| -> Vec<Value> {
+        session
+            .execute(&format!(
+                "MATCH (n:Person) RETURN n.name AS name, n.age AS age ORDER BY age {order}"
+            ))
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| row[1].clone())
+            .collect()
+    };
 
-    let r = session
-        .execute(
-            "MATCH (n:Person) RETURN n.name AS name, n.age AS age \
-             ORDER BY age DESC NULLS LAST",
-        )
-        .unwrap();
-
-    assert_eq!(r.rows().len(), 5);
-    // The underlying sort operator reverses the comparison including null
-    // position for DESC, so DESC NULLS LAST currently produces nulls first.
-    // Pin the full row ordering so any regression in either plan_sort's
-    // mapping or the sort operator's null handling is caught, not just
-    // the non-null subsequence.
-    let ages: Vec<Value> = r.rows().iter().map(|row| row[1].clone()).collect();
     assert_eq!(
-        ages,
+        ages("DESC NULLS LAST"),
+        vec![
+            Value::Int64(40),
+            Value::Int64(30),
+            Value::Int64(25),
+            Value::Null,
+            Value::Null,
+        ],
+    );
+    assert_eq!(
+        ages("DESC NULLS FIRST"),
         vec![
             Value::Null,
             Value::Null,
@@ -350,9 +356,6 @@ fn order_by_desc_with_nulls_ordering() {
             Value::Int64(30),
             Value::Int64(25),
         ],
-        "DESC NULLS LAST currently places nulls first due to the operator \
-         reversing null position along with value comparison; if this test \
-         fails the sort semantics changed",
     );
 }
 

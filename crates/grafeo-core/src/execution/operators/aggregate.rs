@@ -493,7 +493,7 @@ impl AggregateState {
                     Value::Null
                 } else {
                     let mut sorted = values.clone();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    sorted.sort_by(|a, b| compare_floats(*a, *b));
                     // Index calculation per SQL standard: floor(p * (n - 1))
                     // reason: percentile index is bounded by sorted.len(), fits usize
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -507,7 +507,7 @@ impl AggregateState {
                     Value::Null
                 } else {
                     let mut sorted = values.clone();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    sorted.sort_by(|a, b| compare_floats(*a, *b));
                     // Linear interpolation per SQL standard
                     let rank = percentile * (sorted.len() - 1) as f64;
                     // reason: rank is bounded by sorted.len() - 1, fits usize
@@ -632,7 +632,7 @@ impl AggregateState {
     }
 }
 
-use super::value_utils::{compare_values, value_to_f64};
+use super::value_utils::{compare_floats, compare_values, value_to_f64};
 
 /// Converts a Value to its string representation for GROUP_CONCAT.
 fn agg_value_to_string(val: &Value) -> String {
@@ -1560,6 +1560,35 @@ mod tests {
         // 100th percentile = maximum = 9
         let p100 = result.column(1).unwrap().get_float64(0).unwrap();
         assert!((p100 - 9.0).abs() < 0.01);
+    }
+
+    /// NaN sorts after every other number in percentiles too. Sorting it as
+    /// equal to everything was not a total order: the sort could panic.
+    #[test]
+    fn percentiles_sort_nan_last() {
+        let input = || {
+            let mut builder = DataChunkBuilder::new(&[LogicalType::Float64]);
+            for value in [3.0, f64::NAN, 1.0, 2.0, f64::NAN, 4.0, 0.5, 2.5] {
+                builder.column_mut(0).unwrap().push_float64(value);
+                builder.advance_row();
+            }
+            MockOperator::new(vec![builder.finish()])
+        };
+        let mut agg = SimpleAggregateOperator::new(
+            Box::new(input()),
+            vec![
+                AggregateExpr::percentile_disc(0, 0.5),
+                AggregateExpr::percentile_cont(0, 0.5),
+                AggregateExpr::percentile_disc(0, 1.0),
+            ],
+            vec![LogicalType::Float64; 3],
+        );
+
+        let result = agg.next().unwrap().unwrap();
+        // Sorted: [0.5, 1, 2, 2.5, 3, 4, NaN, NaN]; rank 0.5 * 7 = 3.5.
+        assert_eq!(result.column(0).unwrap().get_float64(0), Some(2.5));
+        assert_eq!(result.column(1).unwrap().get_float64(0), Some(2.75));
+        assert!(result.column(2).unwrap().get_float64(0).unwrap().is_nan());
     }
 
     #[test]

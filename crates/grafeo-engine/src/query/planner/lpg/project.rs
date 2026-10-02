@@ -54,6 +54,11 @@ impl super::Planner {
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let expanded_items = expand_return_star(&ret.items, &input_columns);
         let items = expanded_items.as_deref().unwrap_or(&ret.items);
+        // EXISTS and COUNT subqueries the edge check cannot answer run per row
+        // first (see `subquery.rs`); the items read their counts.
+        let (lifted_items, input_op, input_columns) =
+            self.lift_return_items(items, input_op, input_columns)?;
+        let items = lifted_items.as_deref().unwrap_or(items);
 
         // Build variable to column index mapping
         let variable_columns: HashMap<String, usize> = input_columns
@@ -391,6 +396,13 @@ impl super::Planner {
             } else {
                 self.plan_operator(&project.input)?
             };
+        // EXISTS and COUNT subqueries the edge check cannot answer run per row
+        // first (see `subquery.rs`); the projections read their counts.
+        let (lifted_projections, input_op, input_columns) =
+            self.lift_projections(&project.projections, input_op, input_columns)?;
+        let project_projections = lifted_projections
+            .as_deref()
+            .unwrap_or(&project.projections);
 
         // Build variable to column index mapping
         let variable_columns: HashMap<String, usize> = input_columns
@@ -420,7 +432,7 @@ impl super::Planner {
             }
         }
 
-        for projection in &project.projections {
+        for projection in project_projections {
             let col_name = output_column_name(projection.alias.as_deref(), &projection.expression);
 
             match &projection.expression {

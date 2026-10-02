@@ -103,6 +103,7 @@ mod mutation;
 mod project;
 mod scan;
 pub(crate) mod seek;
+mod subquery;
 
 #[cfg(feature = "algos")]
 use crate::query::plan::CallProcedureOp;
@@ -147,8 +148,8 @@ use crate::query::planner::common::{
     expression_to_string, output_column_name, resolved_column_name,
 };
 use crate::query::planner::{
-    PhysicalPlan, convert_aggregate_function, convert_binary_op, convert_filter_expression,
-    convert_unary_op, value_to_logical_type,
+    PhysicalPlan, convert_aggregate_function, convert_binary_op, convert_unary_op,
+    value_to_logical_type,
 };
 use crate::transaction::TransactionManager;
 
@@ -203,6 +204,8 @@ pub struct Planner {
     pub(super) viewing_epoch: EpochId,
     /// Counter for generating unique anonymous edge column names.
     pub(super) anon_edge_counter: std::cell::Cell<u32>,
+    /// Counter for the column names of subqueries planned per row.
+    pub(super) subquery_counter: std::cell::Cell<u32>,
     /// Whether to use factorized execution for multi-hop queries.
     pub(super) factorized_execution: bool,
     /// Whether a plan without `ORDER BY` returns its rows in random order.
@@ -280,6 +283,7 @@ impl Planner {
             transaction_id: None,
             viewing_epoch: epoch,
             anon_edge_counter: std::cell::Cell::new(0),
+            subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             shuffle_unordered: false,
             delivery: Delivery::Collected,
@@ -347,6 +351,7 @@ impl Planner {
             transaction_id,
             viewing_epoch,
             anon_edge_counter: std::cell::Cell::new(0),
+            subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             shuffle_unordered: false,
             delivery: Delivery::Collected,

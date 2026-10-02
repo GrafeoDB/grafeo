@@ -428,4 +428,17 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages)
 
+# Q: EXISTS and COUNT subqueries tied to the outer row by a value, or that one edge does not decide
+for case_id, query in [
+    ("Q1", "MATCH (a:Person) RETURN a.name AS n, EXISTS { MATCH (c:City) WHERE c.w = a.w + 4 } AS e"),
+    ("Q2", "MATCH (a:Person) RETURN a.name AS n, COUNT { MATCH (b:Person) WHERE b.age < a.age } AS younger"),
+    ("Q3", "MATCH (a:Person) WHERE COUNT { MATCH (b:Person) WHERE b.age < a.age } = 2 RETURN a.name AS n"),
+    ("Q4", "UNWIND [25, 30] AS k RETURN k, COUNT { MATCH (p:Person {age: k}) } AS c"),
+    ("Q5", "MATCH (a:Person) RETURN a.name AS n, COUNT { MATCH (a)-[:KNOWS*1..2]->() } AS c"),
+    ("Q6", "MATCH (a:Person) RETURN a.name AS n, EXISTS { MATCH (a)-[:KNOWS]->(b), (c:Robot) } AS e"),
+    ("Q7", "MATCH (a:Person)-[:KNOWS]->(b) WITH a WHERE COUNT { MATCH (a)-[:KNOWS]->(x), (y:City) } = 6 RETURN a.name AS n"),
+    ("Q8", "MATCH (a:Person) WITH a, COUNT { MATCH (b:Person) WHERE b.age < a.age } AS y RETURN a.name AS n, y"),
+]:
+    case(case_id, query)
+
 # fmt: on

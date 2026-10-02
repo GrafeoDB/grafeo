@@ -4,9 +4,10 @@
 //! is load-bearing, not a performance tweak:
 //!
 //! 1. Subquery rewrites (`extract_complex_exists`, `extract_exists_from_or`,
-//!    `extract_count_comparison`) must run first. The later steps assume
-//!    a scalar predicate with no subquery shape; once a rewrite fires,
-//!    the rest of the method is bypassed.
+//!    then the subqueries planned per row, `plan_filter_with_subqueries`)
+//!    must run first. The later steps assume a predicate whose subqueries
+//!    the edge check answers; once a rewrite fires, the rest of the method
+//!    is bypassed.
 //! 2. Zone-map short-circuit fires before any index lookup so we can
 //!    skip opening an index file at all when summary statistics prove
 //!    emptiness.
@@ -29,11 +30,10 @@ use grafeo_common::collections::GrafeoSet;
 use grafeo_common::types::NodeId;
 
 use super::{
-    ApplyOperator, Arc, BinaryOp, DistinctOperator, EmptyOperator, ExpressionPredicate,
-    FilterExpression, FilterOp, FilterOperator, GraphStoreSearch, HashAggregateOperator,
-    HashJoinOperator, HashMap, LogicalExpression, LogicalOperator, NodeListOperator, Operator,
-    PhysicalAggregateExpr, PhysicalJoinType, RangeBounds, RangeScanOperator, Result, TransactionId,
-    UnaryOp, UnionOperator, Value, convert_binary_op, convert_filter_expression,
+    ApplyOperator, Arc, BinaryOp, DistinctOperator, EmptyOperator, Error, ExpressionPredicate,
+    FilterOp, FilterOperator, GraphStoreSearch, HashJoinOperator, HashMap, LogicalExpression,
+    LogicalOperator, NodeListOperator, Operator, PhysicalJoinType, RangeBounds, RangeScanOperator,
+    Result, TransactionId, UnaryOp, UnionOperator, Value,
 };
 
 /// Cross-type equality comparison with Int64/Float64 coercion.
@@ -86,12 +86,10 @@ impl super::Planner {
             return self.plan_exists_or_as_union(&filter.input, subquery, is_negated, other_pred);
         }
 
-        // Check for COUNT subquery comparisons and rewrite as Apply + Aggregate + Filter.
-        // Handles patterns like: COUNT { MATCH ... } > 5, COUNT { ... } = 0, etc.
-        if let Some((subquery, op, threshold, remaining)) =
-            Self::extract_count_comparison(&filter.predicate)
-        {
-            return self.plan_count_as_apply(&filter.input, subquery, op, threshold, remaining);
+        // EXISTS and COUNT subqueries the edge check cannot answer run per row
+        // of the input (see `subquery.rs`).
+        if self.has_subquery_to_lift(&filter.predicate) {
+            return self.plan_filter_with_subqueries(filter);
         }
 
         // Check zone maps for simple property predicates before scanning
@@ -176,6 +174,48 @@ impl super::Planner {
         let operator = Box::new(FilterOperator::new(input_op, Box::new(predicate)));
 
         Ok((operator, columns))
+    }
+
+    /// Plans a filter whose predicate has `EXISTS` or `COUNT` subqueries that
+    /// run per row: the parts of an `AND` without one are a filter of their
+    /// own first (which may use an index), then each subquery adds its count
+    /// to the row and the rest of the predicate reads it.
+    fn plan_filter_with_subqueries(
+        &self,
+        filter: &FilterOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let mut conjuncts = Vec::new();
+        split_conjuncts(&filter.predicate, &mut conjuncts);
+        let (with_subqueries, plain): (Vec<_>, Vec<_>) = conjuncts
+            .into_iter()
+            .partition(|conjunct| self.has_subquery_to_lift(conjunct));
+        let (input_op, columns) = match join_conjuncts(plain) {
+            Some(predicate) => self.plan_filter(&FilterOp {
+                predicate,
+                input: filter.input.clone(),
+                pushdown_hint: filter.pushdown_hint.clone(),
+            })?,
+            None => self.plan_operator(&filter.input)?,
+        };
+        let predicate = join_conjuncts(with_subqueries)
+            .ok_or_else(|| Error::Internal("filter without a subquery to lift".to_string()))?;
+        let (predicate, input_op, columns) = self.lift_subqueries(&predicate, input_op, columns)?;
+        let variable_columns: HashMap<String, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+        let predicate = ExpressionPredicate::new(
+            self.convert_expression(&predicate)?,
+            variable_columns,
+            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+        )
+        .with_transaction_context(self.viewing_epoch, self.transaction_id)
+        .with_session_context(self.session_context.clone());
+        Ok((
+            Box::new(FilterOperator::new(input_op, Box::new(predicate))),
+            columns,
+        ))
     }
 
     /// Extracts an EXISTS or NOT EXISTS subquery from a filter predicate for
@@ -648,179 +688,6 @@ impl super::Planner {
         }
 
         Ok((join_op, output_columns))
-    }
-
-    /// Extracts a COUNT subquery comparison from a filter predicate.
-    ///
-    /// Recognizes patterns like:
-    /// - `COUNT { MATCH ... } > 5`
-    /// - `COUNT { MATCH ... } = 0`
-    /// - `5 < COUNT { MATCH ... }` (reversed operands)
-    ///
-    /// Returns `(subquery, comparison_op, threshold_value, remaining_predicate)`.
-    fn extract_count_comparison(
-        predicate: &LogicalExpression,
-    ) -> Option<(
-        &LogicalOperator,
-        BinaryOp,
-        &LogicalExpression,
-        Option<&LogicalExpression>,
-    )> {
-        match predicate {
-            LogicalExpression::Binary { left, op, right } => {
-                // Check for AND-combined: extract COUNT comparison from either side
-                if *op == BinaryOp::And {
-                    if let Some(result) = Self::extract_count_from_binary(left) {
-                        return Some((result.0, result.1, result.2, Some(right)));
-                    }
-                    if let Some(result) = Self::extract_count_from_binary(right) {
-                        return Some((result.0, result.1, result.2, Some(left)));
-                    }
-                    return None;
-                }
-
-                // Direct comparison: COUNT { ... } op value
-                Self::extract_count_from_binary(predicate)
-                    .map(|(sub, op, threshold)| (sub, op, threshold, None))
-            }
-            _ => None,
-        }
-    }
-
-    /// Helper: extracts COUNT subquery comparison from a binary expression.
-    fn extract_count_from_binary(
-        expr: &LogicalExpression,
-    ) -> Option<(&LogicalOperator, BinaryOp, &LogicalExpression)> {
-        if let LogicalExpression::Binary { left, op, right } = expr {
-            match op {
-                BinaryOp::Eq
-                | BinaryOp::Ne
-                | BinaryOp::Gt
-                | BinaryOp::Ge
-                | BinaryOp::Lt
-                | BinaryOp::Le => {
-                    // COUNT { ... } op literal
-                    if let LogicalExpression::CountSubquery(subplan) = left.as_ref() {
-                        return Some((subplan.as_ref(), *op, right.as_ref()));
-                    }
-                    // literal op COUNT { ... } (flip the operator)
-                    if let LogicalExpression::CountSubquery(subplan) = right.as_ref() {
-                        let flipped = match op {
-                            BinaryOp::Gt => BinaryOp::Lt,
-                            BinaryOp::Ge => BinaryOp::Le,
-                            BinaryOp::Lt => BinaryOp::Gt,
-                            BinaryOp::Le => BinaryOp::Ge,
-                            other => *other, // Eq/Ne are symmetric
-                        };
-                        return Some((subplan.as_ref(), flipped, left.as_ref()));
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
-    /// Plans a COUNT subquery comparison as Join + Aggregate + Filter.
-    ///
-    /// Rewrites `WHERE COUNT { MATCH pattern } > N` into:
-    /// 1. Inner join on shared variables to get all matches per outer row
-    /// 2. Aggregate(COUNT) grouped by outer columns
-    /// 3. Filter(count > N) on the aggregated result
-    fn plan_count_as_apply(
-        &self,
-        outer_input: &LogicalOperator,
-        subquery: &LogicalOperator,
-        op: BinaryOp,
-        threshold: &LogicalExpression,
-        remaining_predicate: Option<&LogicalExpression>,
-    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (left_op, left_columns) = self.plan_operator(outer_input)?;
-        let (right_op, right_columns) = self.plan_operator(subquery)?;
-
-        let output_columns = left_columns.clone();
-
-        // Find shared variables for equi-join keys
-        let mut probe_keys = Vec::new();
-        let mut build_keys = Vec::new();
-        for (right_idx, right_col) in right_columns.iter().enumerate() {
-            if let Some(left_idx) = left_columns.iter().position(|c| c == right_col) {
-                probe_keys.push(left_idx);
-                build_keys.push(right_idx);
-            }
-        }
-
-        // Left join to preserve outer rows with no matches (needed for COUNT = 0).
-        // The join physically outputs both left and right columns.
-        let mut join_columns = left_columns.clone();
-        join_columns.extend(right_columns.iter().cloned());
-        let join_schema = self.derive_schema_from_columns(&join_columns);
-        let join_op: Box<dyn Operator> = Box::new(HashJoinOperator::new(
-            left_op,
-            right_op,
-            probe_keys,
-            build_keys,
-            PhysicalJoinType::Left,
-            join_schema,
-        ));
-
-        // Aggregate: COUNT(right_col) grouped by all outer columns.
-        // Using COUNT on a right-side column so nulls (no match) produce 0 instead of 1.
-        let count_alias = "_count_subquery_".to_string();
-        let mut agg_columns = output_columns.clone();
-        agg_columns.push(count_alias.clone());
-
-        let group_keys: Vec<usize> = (0..output_columns.len()).collect();
-        // Pick the first right-side column for COUNT (index = left_columns.len())
-        let right_col_idx = left_columns.len();
-        let agg_exprs = vec![PhysicalAggregateExpr::count(right_col_idx)];
-        let agg_schema = self.derive_schema_from_columns(&agg_columns);
-
-        let agg_op: Box<dyn Operator> = Box::new(HashAggregateOperator::new(
-            join_op, group_keys, agg_exprs, agg_schema,
-        ));
-
-        // Filter: _count_ op threshold
-        let threshold_expr = convert_filter_expression(threshold)?;
-        let count_var_columns: HashMap<String, usize> = agg_columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
-            .collect();
-        let filter_op_code = convert_binary_op(op)?;
-        let count_filter = FilterExpression::Binary {
-            left: Box::new(FilterExpression::Variable(count_alias)),
-            op: filter_op_code,
-            right: Box::new(threshold_expr),
-        };
-
-        let predicate = ExpressionPredicate::new(
-            count_filter,
-            count_var_columns.clone(),
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-        )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
-        .with_session_context(self.session_context.clone());
-        let mut result_op: Box<dyn Operator> =
-            Box::new(FilterOperator::new(agg_op, Box::new(predicate)));
-
-        // If there's a remaining predicate, apply it too
-        if let Some(remaining) = remaining_predicate {
-            let remaining_expr = self.convert_expression(remaining)?;
-            let remaining_predicate = ExpressionPredicate::new(
-                remaining_expr,
-                count_var_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-            )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_session_context(self.session_context.clone());
-            result_op = Box::new(FilterOperator::new(
-                result_op,
-                Box::new(remaining_predicate),
-            ));
-        }
-
-        Ok((result_op, output_columns))
     }
 
     /// Checks zone maps for a predicate to see if we can skip the scan entirely.
@@ -1868,4 +1735,30 @@ fn binding_kind(op: &LogicalOperator, variable: &str) -> Option<BindingKind> {
         }
         _ => None,
     }
+}
+
+/// Adds the parts of an `AND` (the predicate itself when it is not one).
+fn split_conjuncts(predicate: &LogicalExpression, out: &mut Vec<LogicalExpression>) {
+    match predicate {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => {
+            split_conjuncts(left, out);
+            split_conjuncts(right, out);
+        }
+        other => out.push(other.clone()),
+    }
+}
+
+/// The `AND` of `conjuncts`, or `None` when there are none.
+fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
+    conjuncts
+        .into_iter()
+        .reduce(|left, right| LogicalExpression::Binary {
+            left: Box::new(left),
+            op: BinaryOp::And,
+            right: Box::new(right),
+        })
 }

@@ -11,7 +11,7 @@ use crate::query::plan::{BinaryOp, FilterOp, LogicalExpression, LogicalOperator}
 /// instead, under a filter that it is the same node or edge. Binding the
 /// variable itself again would return every path of that shape instead of
 /// the ones through the bound node or edge.
-pub(super) fn close_cycles(op: LogicalOperator) -> LogicalOperator {
+pub(crate) fn close_cycles(op: LogicalOperator) -> LogicalOperator {
     let mut taken = HashSet::new();
     plan_names(&op, &mut taken);
     close(op, &mut FreshNames { taken, next: 0 }, None)

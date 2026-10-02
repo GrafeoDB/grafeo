@@ -277,28 +277,51 @@ mod subqueries_over_paths {
         );
     }
 
-    /// In `RETURN`, a subquery that one edge cannot decide fails rather than
-    /// answering for the first hop only (`top` reaches a file in two hops, and
-    /// counts two nodes below it). A correlated plan for these is #543.
+    /// In `RETURN`, a subquery that one edge cannot decide is answered for the
+    /// whole path, not the first hop: `top` reaches a file in two hops and has
+    /// two nodes below it, `sub` and `lone` one each.
     #[test]
-    fn subqueries_one_edge_cannot_decide_fail_in_return() {
+    fn subqueries_one_edge_cannot_decide_in_return() {
         let db = tree();
-        for (query, reason) in [
+        for (query, expected) in [
             (
-                "MATCH (n:Directory) RETURN n.id, EXISTS { MATCH (n)-[:CONTAINS*]->(:File) } AS e",
-                "Unsupported EXISTS subquery pattern",
+                "MATCH (n:Directory) RETURN n.id, EXISTS { MATCH (n)-[:CONTAINS*]->(:File) } AS e ORDER BY n.id",
+                [
+                    ("lone", Value::Bool(true)),
+                    ("sub", Value::Bool(true)),
+                    ("top", Value::Bool(true)),
+                ],
             ),
             (
-                "MATCH (n:Directory) RETURN n.id, COUNT { MATCH (n)-[:CONTAINS*]->() } AS c",
-                "Unsupported COUNT subquery pattern",
+                "MATCH (n:Directory) RETURN n.id, COUNT { MATCH (n)-[:CONTAINS*]->() } AS c ORDER BY n.id",
+                [
+                    ("lone", Value::Int64(1)),
+                    ("sub", Value::Int64(1)),
+                    ("top", Value::Int64(2)),
+                ],
             ),
             (
-                "MATCH (n:Directory) RETURN n.id, EXISTS { MATCH (n)-[:CONTAINS*2..]->() } AS e",
-                "Unsupported EXISTS subquery pattern",
+                "MATCH (n:Directory) RETURN n.id, EXISTS { MATCH (n)-[:CONTAINS*2..]->() } AS e ORDER BY n.id",
+                [
+                    ("lone", Value::Bool(false)),
+                    ("sub", Value::Bool(false)),
+                    ("top", Value::Bool(true)),
+                ],
             ),
         ] {
-            let error = db.execute_cypher(query).expect_err(query).to_string();
-            assert!(error.contains(reason), "{query}: {error}");
+            let result = db
+                .execute_cypher(query)
+                .unwrap_or_else(|e| panic!("{query}: {e}"));
+            let rows: Vec<(Value, Value)> = result
+                .rows()
+                .iter()
+                .map(|row| (row[0].clone(), row[1].clone()))
+                .collect();
+            assert_eq!(
+                rows,
+                expected.map(|(id, value)| (Value::from(id), value)),
+                "{query}"
+            );
         }
     }
 
@@ -404,24 +427,52 @@ mod subqueries_beyond_the_edge {
         db
     }
 
-    /// In `RETURN`, such a subquery fails rather than answering from its edge
-    /// alone: Alix knows someone but there is no Robot, and Mia's only path
-    /// returns to her, which ACYCLIC excludes. A correlated plan for these is
-    /// #543.
+    /// In `RETURN`, such a subquery is answered for the whole pattern, not
+    /// its edge alone: there is no Robot, Alix knows Gus and there are three
+    /// people, Mia's only LIKES path returns to her (which ACYCLIC excludes),
+    /// and the one KNOWS edge is a trail from either end.
     #[test]
-    fn subqueries_with_more_than_the_edge_fail_in_return() {
+    fn subqueries_with_more_than_the_edge_in_return() {
         let db = people();
-        for query in [
-            "MATCH (a:Person) RETURN a.name, EXISTS { MATCH (a)-[:KNOWS]->(b), (c:Robot) } AS e",
-            "MATCH (a:Person) RETURN a.name, EXISTS { MATCH (c:Robot), (a)-[:KNOWS]->(b) } AS e",
-            "MATCH (a:Person) RETURN a.name, COUNT { MATCH (a)-[:KNOWS]->(b), (c:Person) } AS n",
-            "MATCH (a:Person) RETURN a.name, EXISTS { MATCH ACYCLIC (a)-[:LIKES*1..2]->(x) } AS e",
-            "MATCH (a:Person) RETURN a.name, EXISTS { MATCH TRAIL (a)-[:KNOWS*1..2]-(x) } AS e",
+        for (query, expected) in [
+            (
+                "MATCH (a:Person) RETURN a.name, EXISTS { MATCH (a)-[:KNOWS]->(b), (c:Robot) } AS e",
+                [Value::Bool(false), Value::Bool(false), Value::Bool(false)],
+            ),
+            (
+                "MATCH (a:Person) RETURN a.name, EXISTS { MATCH (c:Robot), (a)-[:KNOWS]->(b) } AS e",
+                [Value::Bool(false), Value::Bool(false), Value::Bool(false)],
+            ),
+            (
+                "MATCH (a:Person) RETURN a.name, COUNT { MATCH (a)-[:KNOWS]->(b), (c:Person) } AS n",
+                [Value::Int64(3), Value::Int64(0), Value::Int64(0)],
+            ),
+            (
+                "MATCH (a:Person) RETURN a.name, EXISTS { MATCH ACYCLIC (a)-[:LIKES*1..2]->(x) } AS e",
+                [Value::Bool(false), Value::Bool(false), Value::Bool(false)],
+            ),
+            (
+                "MATCH (a:Person) RETURN a.name, EXISTS { MATCH TRAIL (a)-[:KNOWS*1..2]-(x) } AS e",
+                [Value::Bool(true), Value::Bool(true), Value::Bool(false)],
+            ),
         ] {
-            let error = db.execute(query).expect_err(query).to_string();
-            assert!(
-                error.contains("Unsupported EXISTS subquery pattern"),
-                "{query}: {error}"
+            let query = format!("{query} ORDER BY a.name");
+            let result = db
+                .execute(&query)
+                .unwrap_or_else(|e| panic!("{query}: {e}"));
+            let rows: Vec<(Value, Value)> = result
+                .rows()
+                .iter()
+                .map(|row| (row[0].clone(), row[1].clone()))
+                .collect();
+            assert_eq!(
+                rows,
+                ["Alix", "Gus", "Mia"]
+                    .into_iter()
+                    .zip(expected)
+                    .map(|(name, value)| (Value::from(name), value))
+                    .collect::<Vec<_>>(),
+                "{query}"
             );
         }
     }

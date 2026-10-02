@@ -1,0 +1,565 @@
+# LDBC SNB Interactive v1: the read queries in SQL/PGQ
+#
+# SQL/PGQ (SQL:2023 GRAPH_TABLE) translations of the LDBC Social Network Benchmark Interactive workload v1 read
+# queries that fit one SELECT over one GRAPH_TABLE. LDBC's own SQL implementations (PostgreSQL, DuckDB) query
+# relational tables and cannot run on a graph; these translations follow the Cypher reference queries in
+# lpg/cypher/ldbc_snb_interactive.gtest. A WHERE comes after the OPTIONAL MATCH clauses (Grafeo's GRAPH_TABLE takes
+# one WHERE, last); walks, optional matches and DISTINCT aggregates replace the WITH stages of the Cypher queries.
+#
+# Not translated, since Grafeo's SQL/PGQ has no form for them yet: IC7 (the latest like per liker needs a subquery
+# or a window function), IC10 (a negative pattern inside GRAPH_TABLE and a date from epoch milliseconds), IC13 (a
+# shortest-path search inside GRAPH_TABLE), IC14 (ALL SHORTEST and a per-edge weight subquery) and the updates
+# (no data modification in SQL/PGQ).
+#
+# Dataset: ldbc_snb_mini, a small slice of the LDBC SNB Interactive v1 test data, every value copied unchanged (see
+# its .setup file). The parameters are chosen from that slice; IC13 also uses the LDBC parameter pair (Gary Hill,
+# Abdullah Koksal). The expected rows come from LDBC's own DuckDB (SQL) implementation run on the same slice, in the
+# result shape of the Cypher reference queries.
+#
+# A skipped case names the bug it hits (and the issue, when there is one); remove the skip once it is fixed.
+
+meta:
+  language: sql-pgq
+  model: lpg
+  section: ldbc
+  title: LDBC SNB Interactive v1 (SQL/PGQ)
+  dataset: ldbc_snb_mini
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Short reads
+  # ---------------------------------------------------------------------------
+
+  # IS1. Profile of a person.
+  - name: is1_profile_of_a_person
+    params:
+      personId: 228
+    query: |
+      SELECT firstName, lastName, birthday, locationIP, browserUsed, cityId, gender, creationDate
+      FROM GRAPH_TABLE (
+          MATCH (n:Person {id: $personId})-[:IS_LOCATED_IN]->(p:City)
+          COLUMNS (n.firstName AS firstName, n.lastName AS lastName, n.birthday AS birthday,
+                   n.locationIP AS locationIP, n.browserUsed AS browserUsed, p.id AS cityId,
+                   n.gender AS gender, n.creationDate AS creationDate)
+      )
+    expect:
+      ordered: true
+      rows:
+        - [Asher, Mamo, 524016000000, "213.55.93.153", Chrome, 1127, female, 1266720721912]
+
+  # IS2. Recent messages of a person.
+  - name: is2_recent_messages_of_a_person
+    params:
+      personId: 228
+    query: |
+      SELECT messageId, messageContent, messageCreationDate, postId, personId, personFirstName, personLastName
+      FROM GRAPH_TABLE (
+          MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(message:Message)-[:REPLY_OF*0..]->(post:Post)
+                -[:HAS_CREATOR]->(person:Person)
+          COLUMNS (message.id AS messageId, COALESCE(message.imageFile, message.content) AS messageContent,
+                   message.creationDate AS messageCreationDate, post.id AS postId, person.id AS personId,
+                   person.firstName AS personFirstName, person.lastName AS personLastName)
+      )
+      ORDER BY messageCreationDate DESC, messageId ASC
+      LIMIT 10
+    expect:
+      ordered: true
+      rows:
+        - [343597393779, "photo343597393779.jpg", 1290590906265, 343597393779, 228, Asher, Mamo]
+        - [343597393778, "photo343597393778.jpg", 1290590905265, 343597393778, 228, Asher, Mamo]
+        - [343597393747, "About Luis Horna, as a strong serve for a relatively shoAbout Djibouti, uti National Army and its sub-branchesAbout Leonard Bernstein, hilharmonic, ", 1289066095205, 343597393747, 228, Asher, Mamo]
+        - [343597392325, "About Ne-Yo, November 22, 2010. InAbout Brian Wilson, elled for various reaAbout V", 1289049183991, 343597392324, 76, Jae-Jin, Park]
+        - [206158440292, "photo206158440292.jpg", 1279208419298, 206158440292, 228, Asher, Mamo]
+        - [206158431893, roflol, 1278531351427, 206158431892, 102, Philibert, Roindefo]
+        - [137438963511, "About William Lyon Mackenzie King, y. King worked to bring compromise andAbout Thomas Jefferson, erson, his wife", 1277076649771, 137438963511, 228, Asher, Mamo]
+        - [137438963744, "About Christopher Lee, or services to dramAbout Tina Turner, inning with a", 1273650346399, 137438963740, 150, Alfonso, Alvarez]
+        - [137438963499, "About William Lyon Mackenzie King, allowed his intense spirituality to distort About T", 1272740097725, 137438963499, 228, Asher, Mamo]
+        - [68719478457, "About Oscar Wilde, intellectuals. Their sAbout Anne, Queen of Great Britain, II became joint monarcAbout Lebanon, ld national infrastrucAbout Bad, Bad L", 1271850332021, 68719478453, 2199023255712, Aurora, Cruz]
+
+  # IS3. Friends of a person.
+  - name: is3_friends_of_a_person
+    params:
+      personId: 228
+    query: |
+      SELECT personId, firstName, lastName, friendshipCreationDate
+      FROM GRAPH_TABLE (
+          MATCH (n:Person {id: $personId})-[r:KNOWS]-(friend:Person)
+          COLUMNS (friend.id AS personId, friend.firstName AS firstName, friend.lastName AS lastName,
+                   r.creationDate AS friendshipCreationDate)
+      )
+      ORDER BY friendshipCreationDate DESC, personId ASC
+    expect:
+      ordered: true
+      rows:
+        - [8796093022357, Gary, Hill, 1288580721183]
+        - [2199023255712, Aurora, Cruz, 1271536640884]
+        - [102, Philibert, Roindefo, 1268755084867]
+        - [76, Jae-Jin, Park, 1267889385714]
+        - [150, Alfonso, Alvarez, 1267126413921]
+
+  # IS4. Content of a message.
+  - name: is4_content_of_a_message_post
+    params:
+      messageId: 10169
+    query: |
+      SELECT messageCreationDate, messageContent
+      FROM GRAPH_TABLE (
+          MATCH (m:Message {id: $messageId})
+          COLUMNS (m.creationDate AS messageCreationDate, COALESCE(m.content, m.imageFile) AS messageContent)
+      )
+    expect:
+      ordered: true
+      rows:
+        - [1267290597839, "photo10169.jpg"]
+
+  # IS4. Content of a message.
+  - name: is4_content_of_a_message_comment
+    params:
+      messageId: 343597392326
+    query: |
+      SELECT messageCreationDate, messageContent
+      FROM GRAPH_TABLE (
+          MATCH (m:Message {id: $messageId})
+          COLUMNS (m.creationDate AS messageCreationDate, COALESCE(m.content, m.imageFile) AS messageContent)
+      )
+    expect:
+      ordered: true
+      rows:
+        - [1289092584789, "no way!"]
+
+  # IS5. Creator of a message.
+  - name: is5_creator_of_a_message
+    params:
+      messageId: 343597392326
+    query: |
+      SELECT personId, firstName, lastName
+      FROM GRAPH_TABLE (
+          MATCH (m:Message {id: $messageId})-[:HAS_CREATOR]->(p:Person)
+          COLUMNS (p.id AS personId, p.firstName AS firstName, p.lastName AS lastName)
+      )
+    expect:
+      ordered: true
+      rows:
+        - [6597069766775, Jie, Yang]
+
+  # IS6. Forum of a message.
+  - name: is6_forum_of_a_message
+    params:
+      messageId: 343597393752
+    query: |
+      SELECT forumId, forumTitle, moderatorId, moderatorFirstName, moderatorLastName
+      FROM GRAPH_TABLE (
+          MATCH (m:Message {id: $messageId})-[:REPLY_OF*0..]->(p:Post)<-[:CONTAINER_OF]-(f:Forum)
+                -[:HAS_MODERATOR]->(mod:Person)
+          COLUMNS (f.id AS forumId, f.title AS forumTitle, mod.id AS moderatorId,
+                   mod.firstName AS moderatorFirstName, mod.lastName AS moderatorLastName)
+      )
+    expect:
+      ordered: true
+      rows:
+        - [872, "Wall of Asher Mamo", 228, Asher, Mamo]
+
+  # IS7. Replies of a message.
+  - name: is7_replies_of_a_message
+    params:
+      messageId: 137438963499
+    query: |
+      SELECT commentId, commentContent, commentCreationDate, replyAuthorId, replyAuthorFirstName,
+             replyAuthorLastName, replyAuthorKnowsOriginalMessageAuthor
+      FROM GRAPH_TABLE (
+          MATCH (m:Message {id: $messageId})<-[:REPLY_OF]-(c:Comment)-[:HAS_CREATOR]->(p:Person)
+          OPTIONAL MATCH (m)-[:HAS_CREATOR]->(a:Person)-[r:KNOWS]-(p)
+          COLUMNS (c.id AS commentId, c.content AS commentContent, c.creationDate AS commentCreationDate,
+                   p.id AS replyAuthorId, p.firstName AS replyAuthorFirstName, p.lastName AS replyAuthorLastName,
+                   a.id IS NOT NULL AS replyAuthorKnowsOriginalMessageAuthor)
+      )
+      ORDER BY commentCreationDate DESC, replyAuthorId ASC
+    expect:
+      ordered: true
+      rows:
+        - [137438963506, "About Thomas Hardy, y published as serials in magazines, weAbout Thomas Jeffe", 1272757138003, 150, Alfonso, Alvarez, true]
+        - [137438963501, "About Frank Zappa, ollages. His later albums shared this eclectic and experimental approach, irrespectiv", 1272755669544, 102, Philibert, Roindefo, true]
+
+
+  # ---------------------------------------------------------------------------
+  # Complex reads
+  # ---------------------------------------------------------------------------
+
+  # IC1. Transitive friends with certain name.
+  - name: ic1_transitive_friends_with_a_name_maria
+    params:
+      personId: 228
+      firstName: "Maria"
+    query: |
+      SELECT friendId, friendLastName, MIN(distance) AS distanceFromPerson, friendBirthday, friendCreationDate,
+             friendGender, friendBrowserUsed, friendLocationIp, friendEmails, friendLanguages, friendCityName,
+             COLLECT(DISTINCT university) AS friendUniversities, COLLECT(DISTINCT company) AS friendCompanies
+      FROM GRAPH_TABLE (
+          MATCH (p:Person {id: $personId})-[k:KNOWS*1..3]-(friend:Person)-[:IS_LOCATED_IN]->(friendCity:City)
+          OPTIONAL MATCH (friend)-[studyAt:STUDY_AT]->(uni:University)-[:IS_LOCATED_IN]->(uniCity:City)
+          OPTIONAL MATCH (friend)-[workAt:WORK_AT]->(company:Company)-[:IS_LOCATED_IN]->(companyCountry:Country)
+          WHERE friend.firstName = $firstName AND friend.id <> p.id
+          COLUMNS (friend.id AS friendId, friend.lastName AS friendLastName, LENGTH(k) AS distance,
+                   friend.birthday AS friendBirthday, friend.creationDate AS friendCreationDate,
+                   friend.gender AS friendGender, friend.browserUsed AS friendBrowserUsed,
+                   friend.locationIP AS friendLocationIp, friend.email AS friendEmails, friend.speaks AS friendLanguages,
+                   friendCity.name AS friendCityName,
+                   CASE WHEN uni IS NULL THEN NULL ELSE [uni.name, studyAt.classYear, uniCity.name] END AS university,
+                   CASE WHEN company IS NULL THEN NULL
+                        ELSE [company.name, workAt.workFrom, companyCountry.name] END AS company)
+      )
+      GROUP BY friendId, friendLastName, friendBirthday, friendCreationDate, friendGender, friendBrowserUsed,
+               friendLocationIp, friendEmails, friendLanguages, friendCityName
+      ORDER BY distanceFromPerson ASC, friendLastName ASC, friendId ASC
+      LIMIT 20
+    expect:
+      ordered: true
+      rows:
+        - [143, Alkaios, 2, 410659200000, 1262456643976, female, Firefox, "62.217.119.183", "[Maria143@gmail.com]", "[fr, en]", Athens, "[[National_and_Kapodistrian_University_of_Athens, 2003, Athens]]", "[[Macedonian_Airlines, 2004, Greece]]"]
+
+  # IC1. Transitive friends with certain name.
+  - name: ic1_transitive_friends_with_a_name_john
+    params:
+      personId: 228
+      firstName: "John"
+    query: |
+      SELECT friendId, friendLastName, MIN(distance) AS distanceFromPerson, friendBirthday, friendCreationDate,
+             friendGender, friendBrowserUsed, friendLocationIp, friendEmails, friendLanguages, friendCityName,
+             COLLECT(DISTINCT university) AS friendUniversities, COLLECT(DISTINCT company) AS friendCompanies
+      FROM GRAPH_TABLE (
+          MATCH (p:Person {id: $personId})-[k:KNOWS*1..3]-(friend:Person)-[:IS_LOCATED_IN]->(friendCity:City)
+          OPTIONAL MATCH (friend)-[studyAt:STUDY_AT]->(uni:University)-[:IS_LOCATED_IN]->(uniCity:City)
+          OPTIONAL MATCH (friend)-[workAt:WORK_AT]->(company:Company)-[:IS_LOCATED_IN]->(companyCountry:Country)
+          WHERE friend.firstName = $firstName AND friend.id <> p.id
+          COLUMNS (friend.id AS friendId, friend.lastName AS friendLastName, LENGTH(k) AS distance,
+                   friend.birthday AS friendBirthday, friend.creationDate AS friendCreationDate,
+                   friend.gender AS friendGender, friend.browserUsed AS friendBrowserUsed,
+                   friend.locationIP AS friendLocationIp, friend.email AS friendEmails, friend.speaks AS friendLanguages,
+                   friendCity.name AS friendCityName,
+                   CASE WHEN uni IS NULL THEN NULL ELSE [uni.name, studyAt.classYear, uniCity.name] END AS university,
+                   CASE WHEN company IS NULL THEN NULL
+                        ELSE [company.name, workAt.workFrom, companyCountry.name] END AS company)
+      )
+      GROUP BY friendId, friendLastName, friendBirthday, friendCreationDate, friendGender, friendBrowserUsed,
+               friendLocationIp, friendEmails, friendLanguages, friendCityName
+      ORDER BY distanceFromPerson ASC, friendLastName ASC, friendId ASC
+      LIMIT 20
+    expect:
+      ordered: true
+      rows:
+        - [41, Kumar, 3, 527731200000, 1266276257359, male, Safari, "27.116.33.147", "[John41@gmail.com, John41@jizan.cc, John41@yahoo.com, John41@zoho.com]", "[gu, mr, en]", Puttur, "[[The_Oxford_Educational_Institutions, 2004, Bangalore]]", "[[Jet_Airways, 2005, India], [Jagson_Airlines, 2005, India], [Deccan_360, 2006, India]]"]
+
+  # IC2. Recent messages by your friends.
+  - name: ic2_recent_messages_by_friends
+    params:
+      personId: 228
+      maxDate: 1285891200000
+    query: |
+      SELECT personId, personFirstName, personLastName, postOrCommentId, postOrCommentContent, postOrCommentCreationDate
+      FROM GRAPH_TABLE (
+          MATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(message:Message)
+          WHERE message.creationDate <= $maxDate
+          COLUMNS (friend.id AS personId, friend.firstName AS personFirstName, friend.lastName AS personLastName,
+                   message.id AS postOrCommentId, COALESCE(message.content, message.imageFile) AS postOrCommentContent,
+                   message.creationDate AS postOrCommentCreationDate)
+      )
+      ORDER BY postOrCommentCreationDate DESC, postOrCommentId ASC
+      LIMIT 20
+    expect:
+      ordered: true
+      rows:
+        - [2199023255712, Aurora, Cruz, 274877909928, "no way!", 1285681173411]
+        - [76, Jae-Jin, Park, 274877909925, thx, 1285676860041]
+        - [102, Philibert, Roindefo, 274877912148, fine, 1284597772686]
+        - [76, Jae-Jin, Park, 206158432797, thx, 1280907556754]
+        - [102, Philibert, Roindefo, 206158431892, "About William Penn, – 16 September 1670) was an English admiral and politician who sat in the House of Commons from 1660 to 1670. He was the father of Wi", 1278511907643]
+        - [2199023255712, Aurora, Cruz, 206158432090, "photo206158432090.jpg", 1277597415173]
+        - [102, Philibert, Roindefo, 137438958564, cool, 1277084387523]
+        - [2199023255712, Aurora, Cruz, 137438963517, "I see", 1277076710526]
+        - [2199023255712, Aurora, Cruz, 137438955279, "photo137438955279.jpg", 1276553301898]
+        - [2199023255712, Aurora, Cruz, 137438955277, "photo137438955277.jpg", 1276553299898]
+        - [2199023255712, Aurora, Cruz, 137438955264, "photo137438955264.jpg", 1276274322999]
+        - [76, Jae-Jin, Park, 137438963765, right, 1273696787135]
+        - [150, Alfonso, Alvarez, 137438963740, "About Pope Paul VI,  Church life during his pontificate excAbout Winston Churchill,  United Kingdom during the Second WorldAbout Julia Gillard, ing Mitcham Demonstration School and UnAbout S", 1273649436061]
+        - [150, Alfonso, Alvarez, 137438963751, "About Julia Gillard, ister upon Labor's victory in the 2007 federal electionAbout Chile, Republic of Chile, is a country in South America occupyAbout South Korea, ith production focusing on electronics, automobiles, ", 1273617306061]
+        - [2199023255712, Aurora, Cruz, 137438963510, great, 1272813417041]
+        - [102, Philibert, Roindefo, 137438963508, "no way!", 1272758692818]
+        - [150, Alfonso, Alvarez, 137438963502, "About Stephen Sondheim, an composer and lyricist known for his contributions to musical th", 1272758679985]
+        - [150, Alfonso, Alvarez, 137438963506, "About Thomas Hardy, y published as serials in magazines, weAbout Thomas Jeffe", 1272757138003]
+        - [102, Philibert, Roindefo, 137438963501, "About Frank Zappa, ollages. His later albums shared this eclectic and experimental approach, irrespectiv", 1272755669544]
+        - [150, Alfonso, Alvarez, 68719487342, ok, 1271910621171]
+
+  # IC3. Friends and friends of friends that have been to given countries.
+  - name: ic3_friends_in_countries_x_and_y
+    skip: "an aggregate over a CASE expression breaks GROUP BY: the grouping columns come out as 0 (friendFirstName, friendLastName)"
+    params:
+      personId: 228
+      countryXName: "Uruguay"
+      countryYName: "Canada"
+      startDate: 1275350400000
+      endDate: 1277942400000
+    query: |
+      SELECT friendId, friendFirstName, friendLastName,
+             COUNT(DISTINCT CASE WHEN country = $countryXName THEN messageId END) AS xCount,
+             COUNT(DISTINCT CASE WHEN country = $countryYName THEN messageId END) AS yCount,
+             COUNT(DISTINCT messageId) AS xyCount
+      FROM GRAPH_TABLE (
+          MATCH (person:Person {id: $personId})-[:KNOWS*1..2]-(friend:Person)-[:IS_LOCATED_IN]->(:City)
+                -[:IS_PART_OF]->(home:Country),
+                (friend)<-[:HAS_CREATOR]-(message:Message)-[:IS_LOCATED_IN]->(c:Country)
+          WHERE friend.id <> person.id AND home.name <> $countryXName AND home.name <> $countryYName
+            AND c.name IN [$countryXName, $countryYName]
+            AND message.creationDate >= $startDate AND message.creationDate < $endDate
+          COLUMNS (friend.id AS friendId, friend.firstName AS friendFirstName, friend.lastName AS friendLastName,
+                   message.id AS messageId, c.name AS country)
+      )
+      GROUP BY friendId, friendFirstName, friendLastName
+      HAVING xCount > 0 AND yCount > 0
+      ORDER BY xyCount DESC, friendId ASC
+      LIMIT 20
+    expect:
+      ordered: true
+      rows:
+        - [2199023255712, Aurora, Cruz, 1, 2, 3]
+
+  # IC4. New topics.
+  - name: ic4_new_topics
+    skip: "an aggregate over a CASE expression breaks GROUP BY: no rows"
+    params:
+      personId: 228
+      startDate: 1272672000000
+      endDate: 1275264000000
+    query: |
+      SELECT tagName,
+             COUNT(DISTINCT CASE WHEN creationDate >= $startDate AND creationDate < $endDate THEN postId END) AS postCount,
+             COUNT(DISTINCT CASE WHEN creationDate < $startDate THEN postId END) AS oldPostCount
+      FROM GRAPH_TABLE (
+          MATCH (person:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(post:Post)-[:HAS_TAG]->(tag:Tag)
+          COLUMNS (tag.name AS tagName, post.id AS postId, post.creationDate AS creationDate)
+      )
+      GROUP BY tagName
+      HAVING postCount > 0 AND oldPostCount = 0
+      ORDER BY postCount DESC, tagName ASC
+      LIMIT 10
+    expect:
+      ordered: true
+      rows:
+        - [Julia_Gillard, 2]
+        - [Chile, 1]
+        - [Monaco, 1]
+        - [Nigeria, 1]
+        - [Pope_Paul_VI, 1]
+        - [South_Korea, 1]
+        - [South_Vietnam, 1]
+        - [Winston_Churchill, 1]
+
+  # IC5. New groups.
+  - name: ic5_new_groups
+    skip: "LIMIT is applied before GROUP BY: 3 of the 16 forums are missing"
+    params:
+      personId: 228
+      minDate: 1275350400000
+    query: |
+      SELECT forumName, COUNT(DISTINCT postId) AS postCount
+      FROM GRAPH_TABLE (
+          MATCH (person:Person {id: $personId})-[:KNOWS*1..2]-(friend:Person)<-[membership:HAS_MEMBER]-(forum:Forum)
+          OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post)<-[:CONTAINER_OF]-(forum)
+          WHERE friend.id <> person.id AND membership.joinDate > $minDate
+          COLUMNS (forum.id AS forumId, forum.title AS forumName, post.id AS postId)
+      )
+      GROUP BY forumId, forumName
+      ORDER BY postCount DESC, forumId ASC
+      LIMIT 20
+    expect:
+      ordered: true
+      rows:
+        - ["Wall of Maria Alkaios", 0]
+        - ["Wall of Jae-Jin Park", 0]
+        - ["Wall of Asher Mamo", 0]
+        - ["Album 9 of Asher Mamo", 0]
+        - ["Wall of Alfonso Alvarez", 0]
+        - ["Wall of Abdala Ndiaye", 0]
+        - ["Wall of Aurora Cruz", 0]
+        - ["Album 3 of Asher Mamo", 0]
+        - ["Album 1 of Aurora Cruz", 0]
+        - ["Album 2 of Aurora Cruz", 0]
+        - ["Wall of Rafael Fernández", 0]
+        - ["Album 7 of Aurora Cruz", 0]
+        - ["Wall of Jie Yang", 0]
+        - ["Album 0 of Asher Mamo", 0]
+        - ["Album 6 of Alfonso Alvarez", 0]
+        - ["Album 8 of Abdala Ndiaye", 0]
+
+  # IC6. Tag co-occurrence.
+  - name: ic6_tag_co_occurrence
+    skip: "a property map on a later node of the pattern is ignored ((:Tag {name: $tagName})), so every post of a friend counts"
+    params:
+      personId: 228
+      tagName: "Luis_Horna"
+    query: |
+      SELECT tagName, COUNT(DISTINCT postId) AS postCount
+      FROM GRAPH_TABLE (
+          MATCH (person:Person {id: $personId})-[:KNOWS*1..2]-(friend:Person)<-[:HAS_CREATOR]-(post:Post)
+                -[:HAS_TAG]->(:Tag {name: $tagName}),
+                (post)-[:HAS_TAG]->(tag:Tag)
+          WHERE friend.id <> person.id AND tag.name <> $tagName
+          COLUMNS (tag.name AS tagName, post.id AS postId)
+      )
+      GROUP BY tagName
+      ORDER BY postCount DESC, tagName ASC
+      LIMIT 10
+    expect:
+      ordered: true
+      rows:
+        - [Brian_Wilson, 1]
+        - [Gibraltar, 1]
+        - ["Harry_S._Truman", 1]
+        - [Israel, 1]
+        - [Republic_of_the_Congo, 1]
+        - [Robert_Altman, 1]
+        - [Xiongnu, 1]
+
+  # IC8. Recent replies.
+  - name: ic8_recent_replies
+    params:
+      personId: 228
+    query: |
+      SELECT personId, personFirstName, personLastName, commentCreationDate, commentId, commentContent
+      FROM GRAPH_TABLE (
+          MATCH (start:Person {id: $personId})<-[:HAS_CREATOR]-(:Message)<-[:REPLY_OF]-(comment:Comment)
+                -[:HAS_CREATOR]->(person:Person)
+          COLUMNS (person.id AS personId, person.firstName AS personFirstName, person.lastName AS personLastName,
+                   comment.creationDate AS commentCreationDate, comment.id AS commentId,
+                   comment.content AS commentContent)
+      )
+      ORDER BY commentCreationDate DESC, commentId ASC
+      LIMIT 20
+    expect:
+      ordered: true
+      rows:
+        - [76, Jae-Jin, Park, 1289135518830, 343597393750, "About Luis Horna, e surface is clay. He was the About Waiting for the End, ough it was "]
+        - [6597069766775, Jie, Yang, 1289092584789, 343597392326, "no way!"]
+        - [102, Philibert, Roindefo, 1289090250676, 343597393755, "About Al Capone, ing the money he made from his actAbout Djibouti, military forces of Djibouti and coAbout Leonard Bernstein, talent"]
+        - [2199023255712, Aurora, Cruz, 1277076710526, 137438963517, "I see"]
+        - [150, Alfonso, Alvarez, 1272757138003, 137438963506, "About Thomas Hardy, y published as serials in magazines, weAbout Thomas Jeffe"]
+        - [102, Philibert, Roindefo, 1272755669544, 137438963501, "About Frank Zappa, ollages. His later albums shared this eclectic and experimental approach, irrespectiv"]
+        - [143, Maria, Alkaios, 1271884315385, 68719478447, "About Kevin Rudd, ia's remaining About William Morris,  traditional teAbout France, c"]
+
+  # IC9. Recent messages by friends or friends of friends.
+  - name: ic9_recent_messages_by_friends_of_friends
+    skip: "LIMIT is applied before DISTINCT: 10 rows instead of 20"
+    params:
+      personId: 228
+      maxDate: 1285891200000
+    query: |
+      SELECT DISTINCT personId, personFirstName, personLastName, commentOrPostId, commentOrPostContent,
+             commentOrPostCreationDate
+      FROM GRAPH_TABLE (
+          MATCH (root:Person {id: $personId})-[:KNOWS*1..2]-(friend:Person)<-[:HAS_CREATOR]-(message:Message)
+          WHERE friend.id <> root.id AND message.creationDate < $maxDate
+          COLUMNS (friend.id AS personId, friend.firstName AS personFirstName, friend.lastName AS personLastName,
+                   message.id AS commentOrPostId, COALESCE(message.content, message.imageFile) AS commentOrPostContent,
+                   message.creationDate AS commentOrPostCreationDate)
+      )
+      ORDER BY commentOrPostCreationDate DESC, commentOrPostId ASC
+      LIMIT 20
+    expect:
+      ordered: true
+      rows:
+        - [143, Maria, Alkaios, 274877909920, roflol, 1285685102274]
+        - [6597069766775, Jie, Yang, 274877909919, "About Manuel Noriega, uest in April 2010. He arrived in Paris on April 27, 2010, and after a re-trial as a condition", 1285682584114]
+        - [2199023255712, Aurora, Cruz, 274877909928, "no way!", 1285681173411]
+        - [76, Jae-Jin, Park, 274877909925, thx, 1285676860041]
+        - [143, Maria, Alkaios, 274877909929, "I see", 1285665988168]
+        - [4398046511333, Rafael, "Fernández", 274877909927, "About Manuel Noriega, trafficking, racketeering, andAbout Mikhail Gorbachev,  was the onl", 1285665306179]
+        - [6597069766775, Jie, Yang, 274877909924, "About Manuel Noriega, g, racketeering, and money laundering About Arthur Wellesley, 1st Duke of Wellington, m. He", 1285664359114]
+        - [4398046511333, Rafael, "Fernández", 274877912142, "no", 1284613964426]
+        - [102, Philibert, Roindefo, 274877912148, fine, 1284597772686]
+        - [143, Maria, Alkaios, 274877912139, "About Enrique Iglesias, hits on the various Billboard charts. Billboard has called him The King of Latin Pop and The King of DanAbout California King Bed, ive reviews from music critics, who praised Rihanna", 1284593996258]
+        - [4398046511333, Rafael, "Fernández", 274877909514, "About Guy Sebastian, 08 Australian tour. Like It Like That has three tracks with John Mayer o", 1283465660488]
+        - [143, Maria, Alkaios, 274877913531, right, 1283303511849]
+        - [153, Abdala, Ndiaye, 206158432792, duh, 1280914332302]
+        - [76, Jae-Jin, Park, 206158432797, thx, 1280907556754]
+        - [4398046511333, Rafael, "Fernández", 206158432782, "About Guy Sebastian, ur Asian countries and New Zealand. Sebastian had a second number one in New Zealand with Who's That Girl, two other top ten singles and a number three album, and gained four platinum and two gold certifications there. He ha", 1280894717004]
+        - [143, Maria, Alkaios, 206158431896, "yes", 1278512054636]
+        - [102, Philibert, Roindefo, 206158431892, "About William Penn, – 16 September 1670) was an English admiral and politician who sat in the House of Commons from 1660 to 1670. He was the father of Wi", 1278511907643]
+        - [2199023255712, Aurora, Cruz, 206158432090, "photo206158432090.jpg", 1277597415173]
+        - [102, Philibert, Roindefo, 137438958564, cool, 1277084387523]
+        - [2199023255712, Aurora, Cruz, 137438963517, "I see", 1277076710526]
+
+  # IC11. Job referral.
+  - name: ic11_job_referral
+    skip: "a property map on a later node of the pattern is ignored ((:Country {name: $countryName})), so every company counts"
+    params:
+      personId: 228
+      countryName: "Philippines"
+      workFromYear: 2008
+    query: |
+      SELECT DISTINCT personId, personFirstName, personLastName, organizationName, organizationWorkFromYear
+      FROM GRAPH_TABLE (
+          MATCH (person:Person {id: $personId})-[:KNOWS*1..2]-(friend:Person)-[workAt:WORK_AT]->(company:Company)
+                -[:IS_LOCATED_IN]->(:Country {name: $countryName})
+          WHERE friend.id <> person.id AND workAt.workFrom < $workFromYear
+          COLUMNS (friend.id AS personId, friend.firstName AS personFirstName, friend.lastName AS personLastName,
+                   company.name AS organizationName, workAt.workFrom AS organizationWorkFromYear)
+      )
+      ORDER BY organizationWorkFromYear ASC, personId ASC, organizationName DESC
+      LIMIT 10
+    expect:
+      ordered: true
+      rows:
+        - [2199023255712, Aurora, Cruz, South_East_Asian_Airlines, 2007]
+        - [2199023255712, Aurora, Cruz, Filipinas_Orient_Airways, 2007]
+
+  # IC12. Expert search.
+  - name: ic12_expert_search_office_holder
+    params:
+      personId: 228
+      tagClassName: "OfficeHolder"
+    query: |
+      SELECT personId, personFirstName, personLastName, COLLECT(DISTINCT tagName) AS tagNames,
+             COUNT(DISTINCT commentId) AS replyCount
+      FROM GRAPH_TABLE (
+          MATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(comment:Comment)-[:REPLY_OF]->(:Post)
+                -[:HAS_TAG]->(tag:Tag)-[:HAS_TYPE]->(:TagClass)-[:IS_SUBCLASS_OF*0..]->(baseTagClass:TagClass)
+          WHERE baseTagClass.name = $tagClassName
+          COLUMNS (friend.id AS personId, friend.firstName AS personFirstName, friend.lastName AS personLastName,
+                   tag.name AS tagName, comment.id AS commentId)
+      )
+      GROUP BY personId, personFirstName, personLastName
+      ORDER BY replyCount DESC, personId ASC
+      LIMIT 20
+    expect:
+      ordered: true
+      rows:
+        - [76, Jae-Jin, Park, "[Julia_Gillard, Arthur_Wellesley,_1st_Duke_of_Wellington]", 2]
+        - [102, Philibert, Roindefo, "[Aung_San_Suu_Kyi, William_Lyon_Mackenzie_King, Thomas_Jefferson]", 2]
+        - [150, Alfonso, Alvarez, "[William_Lyon_Mackenzie_King, Thomas_Jefferson]", 1]
+        - [2199023255712, Aurora, Cruz, "[William_Lyon_Mackenzie_King, Thomas_Jefferson]", 1]
+
+  # IC12. Expert search.
+  - name: ic12_expert_search_tennis_player
+    params:
+      personId: 228
+      tagClassName: "TennisPlayer"
+    query: |
+      SELECT personId, personFirstName, personLastName, COLLECT(DISTINCT tagName) AS tagNames,
+             COUNT(DISTINCT commentId) AS replyCount
+      FROM GRAPH_TABLE (
+          MATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(comment:Comment)-[:REPLY_OF]->(:Post)
+                -[:HAS_TAG]->(tag:Tag)-[:HAS_TYPE]->(:TagClass)-[:IS_SUBCLASS_OF*0..]->(baseTagClass:TagClass)
+          WHERE baseTagClass.name = $tagClassName
+          COLUMNS (friend.id AS personId, friend.firstName AS personFirstName, friend.lastName AS personLastName,
+                   tag.name AS tagName, comment.id AS commentId)
+      )
+      GROUP BY personId, personFirstName, personLastName
+      ORDER BY replyCount DESC, personId ASC
+      LIMIT 20
+    expect:
+      ordered: true
+      rows:
+        - [76, Jae-Jin, Park, "[Dudi_Sela, Luis_Horna]", 2]
+        - [150, Alfonso, Alvarez, "[Dudi_Sela, Venus_Williams]", 2]
+        - [102, Philibert, Roindefo, "[Luis_Horna]", 1]
+        - [2199023255712, Aurora, Cruz, "[Luis_Horna]", 1]

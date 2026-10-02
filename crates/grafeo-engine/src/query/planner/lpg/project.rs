@@ -541,7 +541,7 @@ impl super::Planner {
     /// them (as ids): `relationships(p)`, `nodes(p)` and list columns (the
     /// variable of a variable-length edge pattern), also through `reverse`,
     /// `tail` and slices, and one item of such a list (`head`, `last`, `[i]`).
-    fn entity_value(&self, expression: &LogicalExpression) -> Option<EntityValue> {
+    pub(super) fn entity_value(&self, expression: &LogicalExpression) -> Option<EntityValue> {
         let item = |kind: EntityValue| match kind {
             EntityValue::Nodes => Some(EntityValue::Node),
             EntityValue::Edges => Some(EntityValue::Edge),

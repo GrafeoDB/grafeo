@@ -1042,6 +1042,21 @@ impl ExpressionPredicate {
                                 return edge.get_property(key.as_str()).cloned();
                             }
                         }
+                        // One item of a node or edge list (`rs[0].w`,
+                        // `head(rs).w`) is the ID of a node or edge.
+                        if let Value::Int64(id) = &base_val
+                            && let Ok(id) = u64::try_from(*id)
+                        {
+                            return match self.element_kind(base, chunk) {
+                                ItemKind::Node => self
+                                    .resolve_node(NodeId::new(id))
+                                    .and_then(|node| node.get_property(key.as_str()).cloned()),
+                                ItemKind::Edge => self
+                                    .resolve_edge(EdgeId::new(id))
+                                    .and_then(|edge| edge.get_property(key.as_str()).cloned()),
+                                ItemKind::Value => None,
+                            };
+                        }
                         None
                     }
                     _ => None,
@@ -1293,6 +1308,21 @@ impl ExpressionPredicate {
                     .collect(),
             ),
             _ => None,
+        }
+    }
+
+    /// What one item taken from a list refers to: `list[i]`, `head(list)`
+    /// and `last(list)` are nodes or edges when the items of `list` are.
+    fn element_kind(&self, expr: &FilterExpression, chunk: &DataChunk) -> ItemKind {
+        match expr {
+            FilterExpression::IndexAccess { base, .. } => self.item_kind(base, chunk),
+            FilterExpression::FunctionCall { name, args, .. }
+                if name.eq_ignore_ascii_case("head") || name.eq_ignore_ascii_case("last") =>
+            {
+                args.first()
+                    .map_or(ItemKind::Value, |list| self.item_kind(list, chunk))
+            }
+            _ => ItemKind::Value,
         }
     }
 

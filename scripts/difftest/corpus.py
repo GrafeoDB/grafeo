@@ -399,4 +399,20 @@ for case_id, query in [
 ]:
     case(case_id, query)
 
+# O: lists of nodes and edges (collect, path functions) and UNWIND of lists computed per row
+for case_id, query in [
+    ("O1", "MATCH (a:Person) WITH collect(a) AS people UNWIND people AS p RETURN p.name AS n, p.w AS w"),
+    ("O2", "MATCH ()-[r:KNOWS]->() WITH collect(r) AS rs UNWIND rs AS e RETURN e.w AS w"),
+    ("O3", "MATCH ()-[r:LIVES_IN]->() WITH collect(r) AS rs UNWIND rs AS e RETURN type(e) AS t, e.w AS w"),
+    ("O4", "MATCH ()-[r:KNOWS]->() WITH collect(r) AS rs RETURN size([x IN rs WHERE x.w < 10]) AS n"),
+    ("O5", "MATCH p = (:Person {name: 'Alix'})-[:KNOWS*2]->() UNWIND relationships(p) AS e RETURN e.w AS w"),
+    ("O6", "MATCH p = (:Person {name: 'Jules'})-[:KNOWS]->() UNWIND nodes(p) AS n RETURN n.name AS n, n.w AS w"),
+    ("O7", "MATCH (a:Person) UNWIND range(1, a.w - 99) AS i RETURN a.name AS a, i"),
+    ("O8", "MATCH ()-[r:LIVES_IN {w: 6}]->() RETURN collect(r) AS rs"),
+    ("O9", "MATCH (a:Person)-[r:KNOWS]->() WITH a, count(r) AS n RETURN a, n"),
+    ("O10", "MATCH ()-[r:LIVES_IN]->() WITH collect(r) AS rs UNWIND rs AS e MATCH (x)-[e]->(y) RETURN x.name AS x, y.name AS y"),
+    ("O11", "MATCH ()-[r:KNOWS {w: 5}]->() WITH collect(r) AS rs RETURN rs[0].w AS w, rs[-1].since AS since"),
+]:
+    case(case_id, query)
+
 # fmt: on

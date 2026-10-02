@@ -44,6 +44,10 @@ fn describe(value: &Value) -> String {
                 _ => format!("{value:?}"),
             }
         }
+        Value::List(items) => {
+            let items: Vec<String> = items.iter().map(describe).collect();
+            format!("[{}]", items.join(", "))
+        }
         other => format!("{other:?}"),
     }
 }
@@ -338,4 +342,40 @@ fn an_edge_from_a_subquery_keeps_its_properties() {
         rows(&db, "cypher", query),
         [(5, 3), (3, 2)].map(|(n, w)| vec![format!("Int64({n})"), format!("Int64({w})")])
     );
+}
+
+/// Nodes and edges collected into a list, kept as a group key or unwound from
+/// a collected list are returned as records: `collect` and grouping used to
+/// return their raw IDs, which overlap (edge 0 and node 0 both exist here).
+#[test]
+fn collected_grouped_and_unwound_entities_are_records() {
+    let db = three_edges(Config::in_memory());
+    for language in LANGUAGES {
+        let rows = |query: &str| sorted(rows(&db, language, query));
+        assert_eq!(
+            rows("MATCH (a)-[r]->(b) WHERE r.w = 2 RETURN collect(r) AS rs"),
+            [["[K w=Int64(2)]"]],
+            "{language}"
+        );
+        assert_eq!(
+            rows("MATCH (a:A) WHERE a.n = 3 RETURN collect(a) AS ns"),
+            [["[n=Int64(3)]"]],
+            "{language}"
+        );
+        assert_eq!(
+            rows("MATCH (a)-[r]->(b) WITH r, count(*) AS c RETURN r"),
+            edges(&[1, 2, 3]),
+            "{language}"
+        );
+        assert_eq!(
+            rows("MATCH (a:A)-[r]->(b) WITH a, count(r) AS c RETURN a"),
+            nodes(&[1, 3, 5]),
+            "{language}"
+        );
+        assert_eq!(
+            rows("MATCH (a)-[r]->(b) WITH collect(r) AS rs UNWIND rs AS e RETURN e"),
+            edges(&[1, 2, 3]),
+            "{language}"
+        );
+    }
 }

@@ -127,16 +127,16 @@ use grafeo_core::execution::AdaptiveContext;
 use grafeo_core::execution::operators::{
     AddLabelOperator, AggregateExpr as PhysicalAggregateExpr, ApplyOperator, ConstraintValidator,
     CreateEdgeOperator, CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator,
-    DistinctOperator, EmptyOperator, EntityKind, ExecutionPathMode, ExpandOperator, ExpandStep,
-    ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
-    FilterOperator, HashAggregateOperator, HashJoinOperator, HorizontalAggregateOperator,
-    JoinType as PhysicalJoinType, LazyFactorizedChainOperator, LeapfrogJoinOperator,
-    LoadDataOperator, MapCollectOperator, MergeConfig, MergeOperator, MergeRelationshipConfig,
-    MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator, Operator,
-    ParameterScanOperator, ProjectExpr, ProjectOperator, PropertySource, RangeScanOperator,
-    RemoveLabelOperator, ScanOperator, SetPropertyOperator, ShortestPathOperator,
-    SimpleAggregateOperator, SortDirection, SortKey as PhysicalSortKey, SortOperator,
-    UnionOperator, UnwindOperator, VariableLengthExpandOperator,
+    DistinctOperator, EmptyOperator, EntityKind, EntityValue, ExecutionPathMode, ExpandOperator,
+    ExpandStep, ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator,
+    FilterExpression, FilterOperator, HashAggregateOperator, HashJoinOperator,
+    HorizontalAggregateOperator, JoinType as PhysicalJoinType, LazyFactorizedChainOperator,
+    LeapfrogJoinOperator, LoadDataOperator, MapCollectOperator, MergeConfig, MergeOperator,
+    MergeRelationshipConfig, MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator,
+    Operator, ParameterScanOperator, ProjectExpr, ProjectOperator, PropertySource,
+    RangeScanOperator, RemoveLabelOperator, ScanOperator, SetPropertyOperator,
+    ShortestPathOperator, SimpleAggregateOperator, SortDirection, SortKey as PhysicalSortKey,
+    SortOperator, UnionOperator, UnwindOperator, VariableLengthExpandOperator,
 };
 use grafeo_core::graph::{Direction, GraphStoreMut, GraphStoreSearch};
 use std::collections::HashMap;
@@ -519,6 +519,48 @@ impl Planner {
             edge: self.edge_columns.borrow().clone(),
             entity_list: self.entity_list_columns.borrow().clone(),
             group_list: self.group_list_variables.borrow().clone(),
+        }
+    }
+
+    /// What the named column holds when it holds nodes or edges, classified
+    /// the way RETURN classifies it: a node or edge list as registered, nothing
+    /// for a scalar, a path detail or a group list, an edge for an edge column
+    /// and otherwise a node.
+    pub(super) fn column_entity(&self, name: &str) -> Option<EntityValue> {
+        if let Some(kind) = self.entity_list_columns.borrow().get(name).copied() {
+            return Some(kind);
+        }
+        if name.starts_with("_path_")
+            || self.scalar_columns.borrow().contains(name)
+            || self.group_list_variables.borrow().contains(name)
+        {
+            return None;
+        }
+        Some(if self.edge_columns.borrow().contains(name) {
+            EntityValue::Edge
+        } else {
+            EntityValue::Node
+        })
+    }
+
+    /// Records that the named column holds `kind`: a node (the default), an
+    /// edge, a node or edge list, or a scalar value (`None`).
+    pub(super) fn set_column_entity(&self, name: &str, kind: Option<EntityValue>) {
+        let name = name.to_string();
+        self.scalar_columns.borrow_mut().remove(&name);
+        self.edge_columns.borrow_mut().remove(&name);
+        self.entity_list_columns.borrow_mut().remove(&name);
+        match kind {
+            Some(EntityValue::Node) => {}
+            Some(EntityValue::Edge) => {
+                self.edge_columns.borrow_mut().insert(name);
+            }
+            Some(list @ (EntityValue::Nodes | EntityValue::Edges)) => {
+                self.entity_list_columns.borrow_mut().insert(name, list);
+            }
+            _ => {
+                self.scalar_columns.borrow_mut().insert(name);
+            }
         }
     }
 

@@ -310,3 +310,80 @@ tests:
         - [Alix, Amsterdam]
         - [Gus, Berlin]
         - [Mia, Paris]
+
+  # ---------------------------------------------------------------------------
+  # RETURN * in a CALL subquery returns the variables the subquery binds
+  # itself; the outer row's variables stay as they are
+  # ---------------------------------------------------------------------------
+
+  - name: return_star_returns_the_variables_of_the_subquery
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN * } RETURN a.name AS a, b.name AS b"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN * } RETURN a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Alix, Jules]
+
+  - name: return_star_with_an_implicit_scope
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) RETURN * } RETURN a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Alix, Jules]
+
+  - name: return_star_with_a_scope_clause
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[r:KNOWS]->(b) RETURN * } RETURN type(r) AS t, b.name AS b"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[r:KNOWS]->(b) RETURN * } RETURN type(r) AS t, b.name AS b"
+    expect:
+      rows:
+        - [KNOWS, Gus]
+        - [KNOWS, Jules]
+
+  # The later MATCH ends at the b the subquery returned, not at any node.
+  - name: a_node_return_star_returns_starts_a_later_match
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN * } MATCH (x:Person)-[:KNOWS]->(b) RETURN b.name AS b, x.name AS x"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN * } MATCH (x:Person)-[:KNOWS]->(b) RETURN b.name AS b, x.name AS x"
+    expect:
+      rows:
+        - [Gus, Alix]
+        - [Jules, Alix]
+
+  - name: return_star_from_a_call_that_comes_first
+    variants:
+      gql: "CALL { MATCH (c:City) RETURN * } RETURN c.name AS c"
+      cypher: "CALL { MATCH (c:City) RETURN * } RETURN c.name AS c"
+    expect:
+      rows:
+        - [Amsterdam]
+        - [Berlin]
+        - [Paris]
+
+  - name: return_star_from_a_nested_call
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { CALL { MATCH (a)-[:KNOWS]->(b) RETURN * } RETURN b.name AS bn } RETURN bn"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  # A subquery that binds nothing new returns no column: each outer row once.
+  - name: return_star_of_nothing_new
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a RETURN * } RETURN a.name AS a"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a RETURN * } RETURN a.name AS a"
+    expect:
+      rows:
+        - [Alix]
+
+  # After a procedure call the outer row's variables are not known to the
+  # translator, so RETURN * cannot leave them out: the subquery names its
+  # columns instead.
+  - name: return_star_after_a_procedure_call
+    variants:
+      cypher: "CALL db.labels() YIELD label CALL { WITH label MATCH (p:Person) RETURN * } RETURN count(*) AS c"
+    expect:
+      error: "RETURN * in this CALL subquery cannot tell which variables it binds: return them by name"

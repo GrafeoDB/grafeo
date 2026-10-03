@@ -14,6 +14,58 @@ use crate::query::plan::{
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 
+/// Expands the `RETURN *` that ends a `CALL` subquery into the variables the
+/// subquery binds itself, in name order: the variables of the outer row
+/// (`outer`) stay where they are, and internal names (`_...`) are not
+/// returned. Fails when those variables are not known, so that the subquery
+/// names what it returns.
+pub(crate) fn expand_subquery_return_star(
+    subplan: &mut LogicalOperator,
+    outer: Option<&HashSet<String>>,
+) -> Result<()> {
+    let Some(ret) = final_return_mut(subplan) else {
+        return Ok(());
+    };
+    let [item] = ret.items.as_slice() else {
+        return Ok(());
+    };
+    if !matches!(&item.expression, LogicalExpression::Variable(name) if name == "*") {
+        return Ok(());
+    }
+    let (Some(outer), Some(bound)) = (outer, ret.input.bound_variables(outer)) else {
+        return Err(Error::Query(QueryError::new(
+            QueryErrorKind::Semantic,
+            "RETURN * in this CALL subquery cannot tell which variables it binds: return them by name",
+        )));
+    };
+    let mut names: Vec<String> = bound
+        .into_iter()
+        .filter(|name| !name.starts_with('_') && !outer.contains(name))
+        .collect();
+    names.sort();
+    ret.items = names
+        .into_iter()
+        .map(|name| ReturnItem {
+            expression: LogicalExpression::Variable(name),
+            alias: None,
+        })
+        .collect();
+    Ok(())
+}
+
+/// The `RETURN` that ends `plan`, under the `ORDER BY`, `SKIP`, `LIMIT` or
+/// `DISTINCT` that follow it.
+fn final_return_mut(plan: &mut LogicalOperator) -> Option<&mut ReturnOp> {
+    match plan {
+        LogicalOperator::Return(ret) => Some(ret),
+        LogicalOperator::Sort(op) => final_return_mut(&mut op.input),
+        LogicalOperator::Limit(op) => final_return_mut(&mut op.input),
+        LogicalOperator::Skip(op) => final_return_mut(&mut op.input),
+        LogicalOperator::Distinct(op) => final_return_mut(&mut op.input),
+        _ => None,
+    }
+}
+
 /// Returns true if the function name is a recognized aggregate function.
 pub(crate) fn is_aggregate_function(name: &str) -> bool {
     matches!(

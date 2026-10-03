@@ -9,10 +9,10 @@ mod pattern;
 use std::collections::{HashMap, HashSet};
 
 use super::common::{
-    build_left_join_with_predicates, check_branch_columns, combine_with_and, flatten_and_conjuncts,
-    has_all_labels, is_aggregate_function, is_binary_set_function, join_and_conjuncts,
-    references_any, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
-    wrap_skip, wrap_sort,
+    build_left_join_with_predicates, check_branch_columns, combine_with_and,
+    expand_subquery_return_star, flatten_and_conjuncts, has_all_labels, is_aggregate_function,
+    is_binary_set_function, join_and_conjuncts, references_any, to_aggregate_function,
+    wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,
@@ -79,12 +79,17 @@ struct GqlTranslator {
     /// Edge variables from variable-length expand patterns (group-list variables).
     /// Maps edge variable name to the path alias used for `_path_edges_{alias}` lookup.
     group_list_variables: std::cell::RefCell<HashMap<String, String>>,
+    /// The variables of the row the `CALL` subquery being translated runs
+    /// for (`None` outside one, or when they are not known): what a nested
+    /// subquery's `RETURN *` leaves out.
+    call_scope: std::cell::RefCell<Option<HashSet<String>>>,
 }
 
 impl GqlTranslator {
     fn new() -> Self {
         Self {
             group_list_variables: std::cell::RefCell::new(HashMap::new()),
+            call_scope: std::cell::RefCell::new(None),
         }
     }
 
@@ -1404,7 +1409,14 @@ impl GqlTranslator {
                 columns: shared_variables.clone(),
             })
         };
-        let inner_plan = self.translate_query_from(subquery, input)?.root;
+        // The outer row's variables: what a `RETURN *` of the subquery leaves
+        // out, and the scope of a CALL nested in it.
+        let outer_names = outer.bound_variables(self.call_scope.borrow().as_ref());
+        let enclosing = self.call_scope.replace(outer_names.clone());
+        let inner = self.translate_query_from(subquery, input);
+        self.call_scope.replace(enclosing);
+        let mut inner_plan = inner?.root;
+        expand_subquery_return_star(&mut inner_plan, outer_names.as_ref())?;
         Ok(LogicalOperator::Apply(ApplyOp {
             input: Box::new(outer),
             subplan: Box::new(inner_plan),

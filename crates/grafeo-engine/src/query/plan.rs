@@ -893,15 +893,17 @@ impl LogicalOperator {
             // `CALL { ... }` adds the columns its subquery returns to each row.
             Self::Apply(apply) => {
                 bound = apply.input.bound_variables(imports)?;
-                apply.subplan.add_returned_variables(&mut bound);
+                apply.subplan.add_returned_variables(&mut bound)?;
             }
             _ => return None,
         }
         Some(bound)
     }
 
-    /// Adds the variables a subquery's `RETURN` names. A `RETURN *` adds none.
-    fn add_returned_variables(&self, bound: &mut HashSet<String>) {
+    /// Adds the variables a subquery's `RETURN` names, or returns `None` for a
+    /// `RETURN *` (the translators expand the one that ends a `CALL`
+    /// subquery, so one left here returns variables not known here).
+    fn add_returned_variables(&self, bound: &mut HashSet<String>) -> Option<()> {
         match self {
             Self::Return(ret) => {
                 for item in &ret.items {
@@ -909,18 +911,20 @@ impl LogicalOperator {
                         (Some(alias), _) => {
                             bound.insert(alias.clone());
                         }
-                        (None, LogicalExpression::Variable(name)) if name != "*" => {
+                        (None, LogicalExpression::Variable(name)) if name == "*" => return None,
+                        (None, LogicalExpression::Variable(name)) => {
                             bound.insert(name.clone());
                         }
                         _ => {}
                     }
                 }
+                Some(())
             }
             Self::Sort(sort) => sort.input.add_returned_variables(bound),
             Self::Limit(limit) => limit.input.add_returned_variables(bound),
             Self::Skip(skip) => skip.input.add_returned_variables(bound),
             Self::Distinct(distinct) => distinct.input.add_returned_variables(bound),
-            _ => {}
+            _ => Some(()),
         }
     }
 }
@@ -4718,5 +4722,41 @@ mod tests {
             .as_variable(),
             None
         );
+    }
+
+    /// A `CALL` adds the variables its subquery returns to the row. A
+    /// `RETURN *` left unexpanded returns variables not known here, so the
+    /// row's are not known either (the translators expand the one that ends a
+    /// `CALL` subquery).
+    #[test]
+    fn bound_variables_through_a_call_subquery() {
+        let scan = |variable: &str| {
+            LogicalOperator::NodeScan(NodeScanOp {
+                variable: variable.into(),
+                label: None,
+                input: None,
+            })
+        };
+        let item = |name: &str| ReturnItem {
+            expression: LogicalExpression::Variable(name.into()),
+            alias: None,
+        };
+        let call = |items: Vec<ReturnItem>| {
+            LogicalOperator::Apply(ApplyOp {
+                input: Box::new(scan("a")),
+                subplan: Box::new(LogicalOperator::Return(ReturnOp {
+                    items,
+                    distinct: false,
+                    input: Box::new(scan("b")),
+                })),
+                shared_variables: vec![],
+                optional: false,
+            })
+        };
+        assert_eq!(
+            call(vec![item("b")]).bound_variables(None),
+            Some(HashSet::from(["a".to_string(), "b".to_string()]))
+        );
+        assert_eq!(call(vec![item("*")]).bound_variables(None), None);
     }
 }

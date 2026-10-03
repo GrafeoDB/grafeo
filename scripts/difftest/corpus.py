@@ -514,4 +514,14 @@ for case_id, query in [
 ]:
     case(case_id, query, CYPHER)
 
+# Y: RETURN * in a CALL subquery returns the variables the subquery binds itself
+Y_STAR = "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN * }"
+for case_id, query, languages in [
+    ("Y1", f"{Y_STAR} RETURN a.name AS a, b.name AS b", BOTH),
+    ("Y2", f"{Y_STAR} MATCH (x:Person)-[:KNOWS]->(b) RETURN b.name AS b, x.name AS x", BOTH),
+    ("Y3", "CALL { MATCH (c:City) RETURN * } RETURN c.name AS c", BOTH),
+    ("Y4", "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[r:KNOWS]->(b) RETURN * } RETURN type(r) AS t, b.name AS b", GQL),
+]:
+    case(case_id, query, languages)
+
 # fmt: on

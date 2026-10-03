@@ -5,8 +5,9 @@
 
 use super::common::{
     build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
-    combine_with_and, has_all_labels, is_aggregate_function, to_aggregate_function, wrap_distinct,
-    wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
+    combine_with_and, expand_subquery_return_star, has_all_labels, is_aggregate_function,
+    to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
+    wrap_sort,
 };
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
@@ -325,12 +326,17 @@ impl CypherTranslator {
         for clause in clauses_iter {
             inner_plan = Some(self.translate_clause(clause, inner_plan)?);
         }
-        let inner_plan = inner_plan.ok_or_else(|| {
+        let mut inner_plan = inner_plan.ok_or_else(|| {
             Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 "CALL subquery requires at least one clause",
             ))
         })?;
+        let outer_names = match &input {
+            Some(outer) => outer.bound_variables(None),
+            None => Some(HashSet::new()),
+        };
+        expand_subquery_return_star(&mut inner_plan, outer_names.as_ref())?;
 
         // A CALL that comes first runs once, on one empty row.
         Ok(LogicalOperator::Apply(ApplyOp {

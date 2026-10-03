@@ -4,9 +4,9 @@
 //! that can be optimized and executed.
 
 use super::common::{
-    build_left_join_with_predicates, check_branch_columns, combine_with_and, has_all_labels,
-    is_aggregate_function, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit,
-    wrap_return, wrap_skip, wrap_sort,
+    build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
+    combine_with_and, has_all_labels, is_aggregate_function, to_aggregate_function, wrap_distinct,
+    wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
@@ -266,43 +266,30 @@ impl CypherTranslator {
 
     /// Translates `CALL { subquery }` to an Apply operator.
     ///
-    /// When the inner subquery starts with `WITH <vars>` and there is an outer
-    /// input, the WITH items are treated as variable imports from the outer scope.
-    /// The imported variable names are recorded in `ApplyOp.shared_variables` so
-    /// the planner can wire them through `ParameterState`.
+    /// When the inner subquery starts with an importing `WITH` and there is an
+    /// outer input, the variables it names come from the outer scope. They are
+    /// recorded in `ApplyOp.shared_variables` so the planner can wire them
+    /// through `ParameterState`.
     fn translate_call_subquery(
         &self,
         inner: &ast::Query,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
-        // Detect importing WITH: if the first clause is WITH and we have outer input,
-        // extract the imported variable names and start the inner plan from a
-        // ParameterScan instead of Empty.
+        // An importing WITH is replaced by a ParameterScan of the variables it
+        // names, which the rest of the subquery starts from.
         let mut shared_variables = Vec::new();
         let mut inner_plan: Option<LogicalOperator> = None;
         let mut clauses_iter = inner.clauses.iter();
 
         if input.is_some()
             && let Some(ast::Clause::With(with_clause)) = inner.clauses.first()
+            && let Some(imported) = self.importing_with(with_clause)?
         {
-            if with_clause.is_wildcard {
-                // WITH * imports all outer variables
-                shared_variables.push("*".to_string());
-            } else {
-                for item in &with_clause.items {
-                    if let ast::Expression::Variable(name) = &item.expression {
-                        let var_name = item.alias.as_deref().unwrap_or(name);
-                        shared_variables.push(var_name.to_string());
-                    }
-                }
-            }
-            if !shared_variables.is_empty() {
-                // Skip the importing WITH and start from a ParameterScan
-                clauses_iter.next();
-                inner_plan = Some(LogicalOperator::ParameterScan(ParameterScanOp {
-                    columns: shared_variables.clone(),
-                }));
-            }
+            shared_variables = imported;
+            clauses_iter.next();
+            inner_plan = Some(LogicalOperator::ParameterScan(ParameterScanOp {
+                columns: shared_variables.clone(),
+            }));
         }
 
         // Translate the remaining inner subquery clauses
@@ -325,6 +312,60 @@ impl CypherTranslator {
             })),
             None => Ok(inner_plan),
         }
+    }
+
+    /// Reads the first `WITH` of a `CALL` subquery: the outer variables it
+    /// imports (`*` for `WITH *`), or `None` when it names no variable and is
+    /// an ordinary `WITH`. As in Neo4j, an importing `WITH` only lists
+    /// variables; an alias, an expression, `WHERE` or `DISTINCT` in it is an
+    /// error (a second `WITH` can do those).
+    fn importing_with(&self, with_clause: &ast::WithClause) -> Result<Option<Vec<String>>> {
+        let mut imported = Vec::new();
+        let mut names_variables = with_clause.is_wildcard;
+        let mut only_names = true;
+        if with_clause.is_wildcard {
+            imported.push("*".to_string());
+        }
+        for item in &with_clause.items {
+            match &item.expression {
+                ast::Expression::Variable(name)
+                    if item.alias.as_ref().is_none_or(|alias| alias == name) =>
+                {
+                    imported.push(name.clone());
+                    names_variables = true;
+                }
+                expression => {
+                    only_names = false;
+                    let mut variables = HashSet::new();
+                    collect_expression_variables(
+                        &self.translate_expression(expression)?,
+                        &mut variables,
+                    );
+                    names_variables |= !variables.is_empty();
+                }
+            }
+        }
+        if !names_variables {
+            return Ok(None);
+        }
+        let not_allowed = if !only_names {
+            Some("Aliasing or expressions are not supported.")
+        } else if with_clause.where_clause.is_some() {
+            Some("WHERE is not allowed.")
+        } else if with_clause.distinct {
+            Some("DISTINCT is not allowed.")
+        } else {
+            None
+        };
+        if let Some(reason) = not_allowed {
+            const IMPORTING_WITH: &str =
+                "Importing WITH should consist only of simple references to outside variables.";
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!("{IMPORTING_WITH} {reason}"),
+            )));
+        }
+        Ok(Some(imported))
     }
 
     /// Translates `FOREACH (var IN list | clauses)` to Unwind + mutation pipeline.

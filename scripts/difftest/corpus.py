@@ -468,4 +468,13 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages)
 
+# U: a Cypher importing WITH only lists outer variables, as in Neo4j
+for case_id, query in [
+    ("U1", "MATCH (a:Person) CALL { WITH a WHERE a.age > 30 RETURN a.name AS m } RETURN m"),
+    ("U2", "MATCH (a:Person) CALL { WITH a AS b RETURN b.name AS m } RETURN m"),
+    ("U3", "MATCH (a:Person) CALL { WITH a WITH a WHERE a.age > 30 RETURN a.name AS m } RETURN m"),
+    ("U4", "MATCH (a:Person) CALL { WITH a WITH a AS b RETURN b.name AS m } RETURN a.name AS a, m"),
+]:
+    case(case_id, query, CYPHER)
+
 # fmt: on

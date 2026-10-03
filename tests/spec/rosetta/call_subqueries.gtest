@@ -1,0 +1,83 @@
+# Rosetta: CALL subqueries
+#
+# A Cypher CALL subquery sees the outer variables its importing WITH names.
+# As in Neo4j, that WITH may only list them: a WHERE, DISTINCT, an alias or an
+# expression in it is an error (a second WITH can filter or rename), and so is
+# a name the outer query does not have. A first WITH that names no variable is
+# an ordinary WITH.
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): Alix (30),
+# Gus (25), Vincent (40), Jules (35) and Mia (28); KNOWS Alix->Gus,
+# Gus->Vincent, Vincent->Alix, Jules->Mia and Alix->Jules.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: CALL subqueries
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # The importing WITH (Cypher)
+  # ---------------------------------------------------------------------------
+
+  - name: importing_with_where_is_rejected
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH a WHERE a.age > 30 RETURN a.name AS m } RETURN m"
+    expect:
+      error: "Importing WITH should consist only of simple references to outside variables. WHERE is not allowed"
+
+  - name: importing_with_star_and_where_is_rejected
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH * WHERE a.age > 30 RETURN a.name AS m } RETURN m"
+    expect:
+      error: "Importing WITH should consist only of simple references to outside variables. WHERE is not allowed"
+
+  - name: importing_with_an_alias_is_rejected
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH a AS b RETURN b.name AS m } RETURN m"
+    expect:
+      error: "Importing WITH should consist only of simple references to outside variables. Aliasing or expressions are not supported"
+
+  - name: importing_with_an_expression_is_rejected
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH a, a.age + 1 AS next RETURN next } RETURN next"
+    expect:
+      error: "Importing WITH should consist only of simple references to outside variables. Aliasing or expressions are not supported"
+
+  - name: importing_with_distinct_is_rejected
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH DISTINCT a RETURN a.name AS m } RETURN m"
+    expect:
+      error: "Importing WITH should consist only of simple references to outside variables. DISTINCT is not allowed"
+
+  - name: importing_a_name_the_outer_query_lacks_is_rejected
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH b RETURN 1 AS one } RETURN one"
+    expect:
+      error: "Undefined variable 'b'"
+
+  - name: a_second_with_filters_the_imported_rows
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH a WITH a WHERE a.age > 30 RETURN a.name AS m } RETURN m"
+    expect:
+      rows:
+        - [Vincent]
+        - [Jules]
+
+  - name: a_second_with_renames_an_imported_variable
+    variants:
+      cypher: "MATCH (a:Person) WHERE a.age > 30 CALL { WITH a WITH a AS b RETURN b.name AS m } RETURN a.name AS a, m"
+    expect:
+      rows:
+        - [Vincent, Vincent]
+        - [Jules, Jules]
+
+  - name: a_first_with_without_variables_imports_nothing
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH 1 AS x RETURN x } RETURN a.name AS a, x"
+    expect:
+      rows:
+        - [Alix, 1]

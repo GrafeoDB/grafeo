@@ -656,6 +656,20 @@ impl Binder {
                 let outer_names: HashSet<String> =
                     self.context.variable_names().iter().cloned().collect();
 
+                // A name the subquery imports must be a variable of the outer
+                // query (`*` imports all of them).
+                if let Some(missing) = apply
+                    .shared_variables
+                    .iter()
+                    .find(|name| *name != "*" && !outer_names.contains(*name))
+                {
+                    return Err(undefined_variable_error(
+                        missing,
+                        &self.context,
+                        " imported into CALL",
+                    ));
+                }
+
                 self.bind_operator(&apply.subplan)?;
 
                 // Remove internal-only variables added by the subplan (those that

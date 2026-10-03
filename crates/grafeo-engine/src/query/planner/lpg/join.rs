@@ -345,11 +345,18 @@ impl super::Planner {
             grafeo_core::execution::operators::ParameterState::new(shared_vars.clone()),
         );
 
-        // Find column indices for the shared variables in outer columns
+        // Find column indices for the shared variables in outer columns (the
+        // binder has checked that the outer query has them)
         let param_col_indices: Vec<usize> = shared_vars
             .iter()
-            .map(|var| outer_columns.iter().position(|c| c == var).unwrap_or(0))
-            .collect();
+            .map(|var| {
+                outer_columns.iter().position(|c| c == var).ok_or_else(|| {
+                    Error::Internal(format!(
+                        "variable '{var}' imported into CALL is not a column of the outer query"
+                    ))
+                })
+            })
+            .collect::<Result<_>>()?;
 
         // Set the parameter state so the inner plan's ParameterScan can find it
         *self.correlated_param_state.borrow_mut() = Some(std::sync::Arc::clone(&param_state));

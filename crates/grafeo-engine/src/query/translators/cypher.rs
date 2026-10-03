@@ -181,6 +181,19 @@ impl CypherTranslator {
     }
 
     fn translate_query(&self, query: &ast::Query) -> Result<LogicalPlan> {
+        // As in Neo4j, the rows of a CALL subquery that returns some are not
+        // the result of a query: a RETURN after it says what is.
+        if let Some(ast::Clause::CallSubquery(inner)) = query.clauses.last()
+            && matches!(inner.clauses.last(), Some(ast::Clause::Return(_)))
+        {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                concat!(
+                    "Query cannot conclude with CALL (must be a RETURN clause, an update clause, ",
+                    "a unit subquery call, or a procedure call with no YIELD)"
+                ),
+            )));
+        }
         let mut plan: Option<LogicalOperator> = None;
 
         for clause in &query.clauses {
@@ -303,15 +316,13 @@ impl CypherTranslator {
             ))
         })?;
 
-        match input {
-            Some(outer) => Ok(LogicalOperator::Apply(ApplyOp {
-                input: Box::new(outer),
-                subplan: Box::new(inner_plan),
-                shared_variables,
-                optional: false,
-            })),
-            None => Ok(inner_plan),
-        }
+        // A CALL that comes first runs once, on one empty row.
+        Ok(LogicalOperator::Apply(ApplyOp {
+            input: Box::new(input.unwrap_or(LogicalOperator::Empty)),
+            subplan: Box::new(inner_plan),
+            shared_variables,
+            optional: false,
+        }))
     }
 
     /// Reads the first `WITH` of a `CALL` subquery: the outer variables it

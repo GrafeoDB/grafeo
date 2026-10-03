@@ -346,6 +346,51 @@ fn an_edge_from_a_subquery_keeps_its_properties() {
     );
 }
 
+/// Nodes and edges a `CALL` subquery returns are records when the outer
+/// query returns them: the subquery passes them on as references (so a later
+/// `MATCH` can start from them), whether it reads the outer row or comes
+/// first.
+#[test]
+fn entities_from_a_call_subquery_are_records() {
+    let db = three_edges(Config::in_memory());
+    let pairs = [(2, 1), (4, 2), (6, 3)]
+        .map(|(n, w)| vec![format!("n=Int64({n})"), format!("K w=Int64({w})")]);
+    for language in LANGUAGES {
+        for (query, expected) in [
+            (
+                "MATCH (a:A) CALL { WITH a MATCH (a)-[r]->(b) RETURN b, r } RETURN b, r",
+                pairs.to_vec(),
+            ),
+            (
+                "MATCH (a:A) CALL { WITH a MATCH (a)-[r]->(b) RETURN DISTINCT b } RETURN b",
+                nodes(&[2, 4, 6]),
+            ),
+            ("CALL { MATCH (b:B) RETURN b } RETURN b", nodes(&[2, 4, 6])),
+            (
+                "CALL { MATCH ()-[r]->() RETURN r } RETURN r",
+                edges(&[1, 2, 3]),
+            ),
+        ] {
+            assert_eq!(
+                sorted(rows(&db, language, query)),
+                sorted(expected),
+                "{language}: {query}"
+            );
+        }
+    }
+    // A query does not end with such a subquery: a GQL query ends with
+    // RETURN, and Cypher rejects it as Neo4j does.
+    let error = db
+        .execute_cypher("MATCH (a:A) CALL { WITH a MATCH (a)-[r]->(b) RETURN b, r }")
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Query cannot conclude with CALL"),
+        "{error}"
+    );
+}
+
 /// Nodes and edges collected into a list, kept as a group key or unwound from
 /// a collected list are returned as records: `collect` and grouping used to
 /// return their raw IDs, which overlap (edge 0 and node 0 both exist here).

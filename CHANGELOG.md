@@ -18,6 +18,7 @@ Durability and consistency release. Crash-safe checkpoints and WAL recovery, ind
 - **Breaking (Rust, `grafeo-engine`): the transaction manager tracks writes per graph**: its write and read sets hold `GraphEntity` (graph plus node or edge).
 - **Breaking (Rust, `grafeo-engine`): `RdfPlanner::with_wal` is no longer public.**
 - **CDC label change events**: `labels` is now always the labels after the change (removals reported the labels before it), and the new `before_labels` holds the previous ones.
+- **A Cypher query no longer ends with a `CALL` subquery that returns rows**, as in openCypher: `MATCH (a) CALL { WITH a MATCH (a)-->(b) RETURN b }` returned `a` as a raw ID; add a `RETURN` after the subquery.
 
 ### Fixed
 
@@ -83,6 +84,7 @@ Durability and consistency release. Crash-safe checkpoints and WAL recovery, ind
 - **GQL `VALUE { ... RETURN count(x) }` counted every match**: the argument and `DISTINCT` were ignored, so `count(b.age)` also counted matches where `b.age` is null and `count(DISTINCT b)` counted a node once per match. Both now count as `count` does outside a subquery.
 - **GQL subqueries matched each `MATCH` clause on its own**: in `EXISTS`, `COUNT` and `VALUE`, a variable in two `MATCH` clauses was not the same node, so `EXISTS { MATCH (a)-[:KNOWS]->(b) MATCH (b)-[:LIVES_IN]->(c) }` was true for everyone who knows someone. The clauses now go on from each other, as in the outer query.
 - **A Cypher `CALL` subquery ignored the `WHERE` of its importing `WITH`, and an alias imported the wrong value**: `CALL { WITH a WHERE a.age > 30 ... }` ran for every row, and in `CALL { WITH a AS b ... }` `b` held the outer row's first column. As in Neo4j, an importing `WITH` now only lists outer variables: a `WHERE`, `DISTINCT`, alias or expression in it fails with an error (a second `WITH` can filter or rename), and so does a name the outer query does not have.
+- **Nodes and edges a `CALL` subquery returned were only copies of their properties**: a later `MATCH` from a returned node failed with `Expected node ID in source column`, one that ended at it or went through a returned edge matched every node or edge instead, `y = b` never held, and `id(b)` and `type(r)` returned null; the same after a `CALL` at the start of the query. The subquery now passes on the nodes and edges themselves, as `WITH` does.
 - **A transaction on a `.grafeo` file, a WAL directory or a compacted database did not see the type of an edge it had created**: `MATCH (a)-[:KNOWS]->(b)` missed the new edge and `type(r)` was null until the commit.
 - **GQL statements with a `MATCH` after `WITH` failed** with `Variable '...' not found in input` ([#480](https://github.com/GrafeoDB/grafeo/issues/480)), e.g. `MATCH (a) SET a.w = 7 WITH a MATCH (b) RETURN b.w`: the `WITH` was applied at the end of the statement. Clauses after a `WITH` now read the rows it passes on.
 - **A `MATCH` after a write in the same statement missed the write** ([#479](https://github.com/GrafeoDB/grafeo/issues/479)): `CREATE (:N {id: 'c'}) WITH 1 AS x MATCH (n:N) RETURN n.id` did not return the new node, and when the `MATCH` found nothing, the `CREATE` did not run at all.

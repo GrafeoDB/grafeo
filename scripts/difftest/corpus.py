@@ -477,4 +477,19 @@ for case_id, query in [
 ]:
     case(case_id, query, CYPHER)
 
+# V: the nodes and edges a CALL subquery returns are the nodes and edges themselves
+V_NODE = "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b }"
+V_EDGE = "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[r:KNOWS]->() RETURN r }"
+for case_id, query in [
+    ("V1", f"{V_NODE} MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"),
+    ("V2", f"{V_NODE} MATCH (x:Person)-[:KNOWS]->(b) RETURN b.name AS b, x.name AS x"),
+    ("V3", f"{V_NODE} MATCH (y:Person) WHERE y = b RETURN y.name AS y"),
+    ("V4", "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b, id(b) AS inner } RETURN b.name AS b, id(b) = inner AS same"),
+    ("V5", f"{V_EDGE} RETURN type(r) AS t, r.w AS w"),
+    ("V6", f"{V_EDGE} MATCH (x)-[r]->(z) RETURN x.name AS x, z.name AS z"),
+    ("V7", "CALL { MATCH (c:City) RETURN c } MATCH (p:Person)-[:LIVES_IN]->(c) RETURN p.name AS p, c.name AS c"),
+]:
+    case(case_id, query)
+case("V8", V_NODE, CYPHER)
+
 # fmt: on

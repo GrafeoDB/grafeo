@@ -2,9 +2,10 @@
 
 use super::{
     ApplyOp, ApplyOperator, DistinctOp, Error, ExceptOp, HashJoinOperator, IntersectOp, JoinOp,
-    JoinType, LeapfrogJoinOperator, LogicalExpression, MultiWayJoinOp, Operator, OtherwiseOp,
-    PhysicalJoinType, ProjectExpr, ProjectOperator, Result, UnionOp, Value, common,
+    JoinType, LeapfrogJoinOperator, LogicalExpression, LogicalOperator, MultiWayJoinOp, Operator,
+    OtherwiseOp, PhysicalJoinType, ProjectExpr, ProjectOperator, Result, UnionOp, Value, common,
 };
+use crate::query::plan::{ProjectOp, Projection};
 
 impl super::Planner {
     /// Plans a JOIN operator.
@@ -313,15 +314,30 @@ impl super::Planner {
     /// When `shared_variables` is non-empty, creates a correlated Apply that
     /// injects outer row values into the inner plan via [`ParameterState`].
     pub(super) fn plan_apply(&self, apply: &ApplyOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (outer_op, outer_columns) = self.plan_operator(&apply.input)?;
+        // A subquery that comes first runs once, on one empty row.
+        let (outer_op, outer_columns): (Box<dyn Operator>, Vec<String>) =
+            if matches!(apply.input.as_ref(), LogicalOperator::Empty) {
+                (
+                    Box::new(
+                        grafeo_core::execution::operators::single_row::SingleRowOperator::new(),
+                    ),
+                    Vec::new(),
+                )
+            } else {
+                self.plan_operator(&apply.input)?
+            };
+        let output = subquery_output(&apply.subplan);
+        let subplan = output.as_ref().unwrap_or(&apply.subplan);
 
         if apply.shared_variables.is_empty() {
             // Uncorrelated Apply
-            let (inner_op, inner_columns) = self.plan_operator(&apply.subplan)?;
-            // Inner subquery RETURN materializes values (PropertyAccess, NodeResolve,
-            // aggregates, etc.), so all its output columns are scalar.
-            for col in &inner_columns {
-                self.scalar_columns.borrow_mut().insert(col.clone());
+            let (inner_op, inner_columns) = self.plan_operator(subplan)?;
+            // Any other subquery materializes values (PropertyAccess,
+            // NodeResolve, aggregates, etc.), so its output columns are scalar.
+            if output.is_none() {
+                for col in &inner_columns {
+                    self.scalar_columns.borrow_mut().insert(col.clone());
+                }
             }
             let inner_col_count = inner_columns.len();
             let mut columns = outer_columns;
@@ -361,15 +377,17 @@ impl super::Planner {
         // Set the parameter state so the inner plan's ParameterScan can find it
         *self.correlated_param_state.borrow_mut() = Some(std::sync::Arc::clone(&param_state));
 
-        let (inner_op, inner_columns) = self.plan_operator(&apply.subplan)?;
+        let (inner_op, inner_columns) = self.plan_operator(subplan)?;
 
         // Clear the parameter state after planning the inner operator
         *self.correlated_param_state.borrow_mut() = None;
 
-        // Inner subquery RETURN materializes values, so register as scalar
+        // Any other subquery materializes values, so register them as scalar
         // to prevent the outer RETURN from misinterpreting them as node IDs.
-        for col in &inner_columns {
-            self.scalar_columns.borrow_mut().insert(col.clone());
+        if output.is_none() {
+            for col in &inner_columns {
+                self.scalar_columns.borrow_mut().insert(col.clone());
+            }
         }
 
         // Build correlated Apply
@@ -383,4 +401,42 @@ impl super::Planner {
         }
         Ok((Box::new(op), columns))
     }
+}
+
+/// The plan of a subquery whose `RETURN` passes its values on as `WITH` does:
+/// nodes and edges stay references, so the outer query can match from them,
+/// compare them and take their ids, and resolves them when it returns them.
+/// `None` when the subquery does not end in such a `RETURN` (`RETURN *` is
+/// expanded when its own operator is planned).
+fn subquery_output(subplan: &LogicalOperator) -> Option<LogicalOperator> {
+    let LogicalOperator::Return(ret) = subplan else {
+        return None;
+    };
+    if ret
+        .items
+        .iter()
+        .any(|item| matches!(&item.expression, LogicalExpression::Variable(name) if name == "*"))
+    {
+        return None;
+    }
+    let project = LogicalOperator::Project(ProjectOp {
+        projections: ret
+            .items
+            .iter()
+            .map(|item| Projection {
+                expression: item.expression.clone(),
+                alias: item.alias.clone(),
+            })
+            .collect(),
+        input: ret.input.clone(),
+        pass_through_input: false,
+    });
+    Some(if ret.distinct {
+        LogicalOperator::Distinct(DistinctOp {
+            input: Box::new(project),
+            columns: None,
+        })
+    } else {
+        project
+    })
 }

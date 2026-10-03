@@ -81,3 +81,108 @@ tests:
     expect:
       rows:
         - [Alix, 1]
+
+  # ---------------------------------------------------------------------------
+  # What a CALL subquery returns: its nodes and edges stay nodes and edges, so
+  # a later MATCH, id() and equality see the same entity
+  # ---------------------------------------------------------------------------
+
+  - name: a_returned_node_starts_a_later_match
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+    expect:
+      rows:
+        - [Gus, Vincent]
+        - [Jules, Mia]
+
+  - name: a_returned_node_ends_a_later_match
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } MATCH (x:Person)-[:KNOWS]->(b) RETURN b.name AS b, x.name AS x"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } MATCH (x:Person)-[:KNOWS]->(b) RETURN b.name AS b, x.name AS x"
+    expect:
+      rows:
+        - [Gus, Alix]
+        - [Jules, Alix]
+
+  - name: a_returned_node_equals_a_matched_node
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } MATCH (y:Person) WHERE y = b RETURN y.name AS y"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } MATCH (y:Person) WHERE y = b RETURN y.name AS y"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  - name: a_returned_node_keeps_its_id
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b, id(b) AS inner } RETURN b.name AS b, id(b) = inner AS same"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b, id(b) AS inner } RETURN b.name AS b, id(b) = inner AS same"
+    expect:
+      rows:
+        - [Gus, true]
+        - [Jules, true]
+
+  - name: a_returned_node_through_a_with
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } WITH b MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } WITH b MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+    expect:
+      rows:
+        - [Gus, Vincent]
+        - [Jules, Mia]
+
+  - name: a_distinct_returned_node_starts_a_later_match
+    variants:
+      gql: "MATCH (a:Person) CALL { WITH a MATCH (a)-[:LIVES_IN]->(c) RETURN DISTINCT c } MATCH (p:Person)-[:LIVES_IN]->(c) RETURN a.name AS a, p.name AS p"
+      cypher: "MATCH (a:Person) CALL { WITH a MATCH (a)-[:LIVES_IN]->(c) RETURN DISTINCT c } MATCH (p:Person)-[:LIVES_IN]->(c) RETURN a.name AS a, p.name AS p"
+    expect:
+      rows:
+        - [Alix, Alix]
+        - [Gus, Gus]
+        - [Mia, Mia]
+
+  - name: a_returned_edge_in_a_later_match
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[r:KNOWS]->() RETURN r } MATCH (x)-[r]->(z) RETURN x.name AS x, z.name AS z, r.w AS w"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[r:KNOWS]->() RETURN r } MATCH (x)-[r]->(z) RETURN x.name AS x, z.name AS z, r.w AS w"
+    expect:
+      rows:
+        - [Alix, Gus, 1]
+        - [Alix, Jules, 5]
+
+  - name: a_returned_edge_is_an_edge
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[r:KNOWS]->() RETURN r } RETURN type(r) AS t, r.w AS w"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[r:KNOWS]->() RETURN r } RETURN type(r) AS t, r.w AS w"
+    expect:
+      rows:
+        - [KNOWS, 1]
+        - [KNOWS, 5]
+
+  - name: collected_returned_nodes_start_a_later_match
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN collect(b) AS bs } UNWIND bs AS b MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN collect(b) AS bs } UNWIND bs AS b MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+    expect:
+      rows:
+        - [Gus, Vincent]
+        - [Jules, Mia]
+
+  - name: an_uncorrelated_call_returns_nodes
+    variants:
+      gql: "CALL { MATCH (c:City) RETURN c } MATCH (p:Person)-[:LIVES_IN]->(c) RETURN p.name AS p, c.name AS c"
+      cypher: "CALL { MATCH (c:City) RETURN c } MATCH (p:Person)-[:LIVES_IN]->(c) RETURN p.name AS p, c.name AS c"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Berlin]
+        - [Mia, Paris]
+
+  - name: an_uncorrelated_call_after_a_match_returns_nodes
+    variants:
+      gql: "MATCH (p:Person {name: 'Gus'}) CALL { MATCH (c:City) RETURN c } MATCH (p)-[:LIVES_IN]->(c) RETURN p.name AS p, c.name AS c"
+      cypher: "MATCH (p:Person {name: 'Gus'}) CALL { MATCH (c:City) RETURN c } MATCH (p)-[:LIVES_IN]->(c) RETURN p.name AS p, c.name AS c"
+    expect:
+      rows:
+        - [Gus, Berlin]

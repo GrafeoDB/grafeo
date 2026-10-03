@@ -1512,18 +1512,14 @@ impl GqlTranslator {
             self.translate_query(subquery)?.root
         };
 
-        // Wire the inner plan to the outer plan
-        if has_outer {
-            Ok(LogicalOperator::Apply(ApplyOp {
-                input: Box::new(outer),
-                subplan: Box::new(inner_plan),
-                shared_variables,
-                optional,
-            }))
-        } else {
-            // No outer input: just use the inner plan directly
-            Ok(inner_plan)
-        }
+        // Wire the inner plan to the outer plan; a CALL that comes first runs
+        // once, on one empty row (`Empty`).
+        Ok(LogicalOperator::Apply(ApplyOp {
+            input: Box::new(outer),
+            subplan: Box::new(inner_plan),
+            shared_variables,
+            optional,
+        }))
     }
 
     fn translate_match(&self, match_clause: &ast::MatchClause) -> Result<LogicalOperator> {

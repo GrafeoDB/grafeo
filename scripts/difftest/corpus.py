@@ -492,4 +492,16 @@ for case_id, query in [
     case(case_id, query)
 case("V8", V_NODE, CYPHER)
 
+# W: a GQL CALL subquery sees the outer row's variables, or those its scope clause names
+for case_id, query in [
+    ("W1", "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"),
+    ("W2", "MATCH ()-[r:KNOWS]->() CALL { MATCH (x)-[r]->(y) RETURN x.name AS xn } RETURN count(*) AS c"),
+    ("W3", "MATCH (a:Person) CALL { WITH a WHERE a.age > 30 RETURN a.name AS m } RETURN m"),
+    ("W4", "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"),
+    ("W5", "MATCH (a:Person {name: 'Alix'}) CALL () { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN count(*) AS c"),
+    ("W6", "MATCH (a:Person {name: 'Alix'}), (c:City {name: 'Paris'}) CALL (a) { MATCH (c:City) RETURN count(c) AS n } RETURN n"),
+    ("W7", "MATCH (a:Person) OPTIONAL CALL (a) { MATCH (a)-[:LIVES_IN]->(c) RETURN c.name AS c } RETURN a.name AS a, c"),
+]:
+    case(case_id, query, GQL)
+
 # fmt: on

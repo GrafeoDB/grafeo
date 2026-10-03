@@ -247,6 +247,10 @@ pub enum QueryClause {
         subquery: QueryStatement,
         /// Whether this is OPTIONAL CALL (left-join semantics).
         optional: bool,
+        /// The variable scope clause, `CALL (a, b) { ... }`: the outer
+        /// variables the subquery sees. `None` without one, when it sees all
+        /// of them.
+        scope: Option<Vec<String>>,
     },
     /// A CALL procedure clause within a query.
     CallProcedure(CallStatement),

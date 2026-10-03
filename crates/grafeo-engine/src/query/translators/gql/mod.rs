@@ -408,7 +408,17 @@ impl GqlTranslator {
     }
 
     fn translate_query(&self, query: &ast::QueryStatement) -> Result<LogicalPlan> {
-        let mut plan = LogicalOperator::Empty;
+        self.translate_query_from(query, LogicalOperator::Empty)
+    }
+
+    /// Translates `query` on the rows of `input`: `Empty` for a query of its
+    /// own, the outer row's variables for a `CALL` subquery.
+    fn translate_query_from(
+        &self,
+        query: &ast::QueryStatement,
+        input: LogicalOperator,
+    ) -> Result<LogicalPlan> {
+        let mut plan = input;
         let mut where_applied = false;
 
         // Process clauses in source order for correct variable scoping.
@@ -558,8 +568,17 @@ impl GqlTranslator {
                     ast::QueryClause::With(with_clause) => {
                         plan = self.apply_with(plan, with_clause)?;
                     }
-                    ast::QueryClause::InlineCall { subquery, optional } => {
-                        plan = self.translate_inline_call(subquery, plan, *optional)?;
+                    ast::QueryClause::InlineCall {
+                        subquery,
+                        optional,
+                        scope,
+                    } => {
+                        plan = self.translate_inline_call(
+                            subquery,
+                            plan,
+                            *optional,
+                            scope.as_deref(),
+                        )?;
                     }
                     ast::QueryClause::CallProcedure(call_stmt) => {
                         // CALL procedure(...) within a query context
@@ -1357,163 +1376,35 @@ impl GqlTranslator {
         Ok(plan)
     }
 
-    /// as imports from the outer scope: a `ParameterScan` replaces `Empty` as
-    /// the inner plan root and `shared_variables` is populated so the planner
-    /// can wire them through `ParameterState`.
+    /// Translates `CALL { subquery }` to an `Apply` that runs the subquery for
+    /// each row of `outer`. As in GQL, the subquery sees the outer row's
+    /// variables: all of them, or the ones its variable scope clause names
+    /// (`CALL (a, b) { ... }`; none for `CALL () { ... }`). It starts from a
+    /// `ParameterScan` of them, which the planner fills for each row through
+    /// `ParameterState`, so a `WITH` in it is an ordinary `WITH`.
     fn translate_inline_call(
         &self,
         subquery: &ast::QueryStatement,
         outer: LogicalOperator,
         optional: bool,
+        scope: Option<&[String]>,
     ) -> Result<LogicalOperator> {
-        let has_outer = !matches!(outer, LogicalOperator::Empty);
-
-        // Detect importing WITH: extract shared variable names and skip it.
-        let mut shared_variables = Vec::new();
-        let skip_with = if has_outer && !subquery.with_clauses.is_empty() {
-            let first_with = &subquery.with_clauses[0];
-            if first_with.is_wildcard {
-                shared_variables.push("*".to_string());
-                true
-            } else {
-                for item in &first_with.items {
-                    if let ast::Expression::Variable(name) = &item.expression {
-                        let var_name = item.alias.as_deref().unwrap_or(name);
-                        shared_variables.push(var_name.to_string());
-                    }
-                }
-                !shared_variables.is_empty()
-            }
-        } else {
-            false
+        // A CALL that comes first has no outer row to see: it runs once, on
+        // one empty row (`Empty`). A scope clause there names variables the
+        // binder reports as undefined.
+        let shared_variables: Vec<String> = match scope {
+            Some(names) => names.to_vec(),
+            None if matches!(outer, LogicalOperator::Empty) => Vec::new(),
+            None => vec!["*".to_string()],
         };
-
-        // Build the inner plan: start from ParameterScan when importing variables.
-        let inner_plan = if skip_with && !shared_variables.is_empty() {
-            // Translate the subquery but override the first WITH clause:
-            // start from ParameterScan instead of Empty, skip the importing WITH.
-            let mut plan = LogicalOperator::ParameterScan(ParameterScanOp {
+        let input = if shared_variables.is_empty() {
+            LogicalOperator::Empty
+        } else {
+            LogicalOperator::ParameterScan(ParameterScanOp {
                 columns: shared_variables.clone(),
-            });
-
-            // Process MATCH clauses
-            for match_clause in &subquery.match_clauses {
-                if match_clause.optional {
-                    let match_plan = self.translate_match(match_clause)?;
-                    plan = LogicalOperator::LeftJoin(LeftJoinOp {
-                        left: Box::new(plan),
-                        right: Box::new(match_plan),
-                        condition: None,
-                    });
-                } else {
-                    let input = std::mem::replace(&mut plan, LogicalOperator::Empty);
-                    plan = self.translate_match_with_input(match_clause, Some(input))?;
-                }
-            }
-
-            // Apply WHERE filter
-            if let Some(where_clause) = &subquery.where_clause {
-                let predicate = self.translate_expression(&where_clause.expression)?;
-                plan = wrap_filter(plan, predicate);
-            }
-
-            // Process remaining WITH clauses (skip the first importing one)
-            for with_clause in subquery.with_clauses.iter().skip(1) {
-                if !with_clause.is_wildcard {
-                    let projections: Vec<Projection> = with_clause
-                        .items
-                        .iter()
-                        .map(|item| {
-                            Ok(Projection {
-                                expression: self.translate_expression(&item.expression)?,
-                                alias: item.alias.clone(),
-                            })
-                        })
-                        .collect::<Result<_>>()?;
-                    plan = LogicalOperator::Project(ProjectOp {
-                        projections,
-                        input: Box::new(plan),
-                        pass_through_input: false,
-                    });
-                }
-                // Handle LET bindings in inline call WITH clause
-                if !with_clause.let_bindings.is_empty() {
-                    let mut let_projections = Vec::new();
-                    for (name, expr) in &with_clause.let_bindings {
-                        let logical_expr = self.translate_expression(expr)?;
-                        let_projections.push(Projection {
-                            expression: logical_expr,
-                            alias: Some(name.clone()),
-                        });
-                    }
-                    plan = LogicalOperator::Project(ProjectOp {
-                        projections: let_projections,
-                        input: Box::new(plan),
-                        pass_through_input: true,
-                    });
-                }
-                if let Some(wc) = &with_clause.where_clause {
-                    let predicate = self.translate_expression(&wc.expression)?;
-                    plan = wrap_filter(plan, predicate);
-                }
-            }
-
-            // Translate RETURN clause
-            let has_aggregates = !subquery.return_clause.is_wildcard
-                && subquery
-                    .return_clause
-                    .items
-                    .iter()
-                    .any(|item| contains_aggregate(&item.expression));
-
-            if has_aggregates {
-                let (aggregates, auto_group_by, post_return) = self.extract_aggregates_and_groups(
-                    &subquery.return_clause.items,
-                    !subquery.return_clause.group_by.is_empty(),
-                )?;
-                let group_by = if subquery.return_clause.group_by.is_empty() {
-                    auto_group_by
-                } else {
-                    subquery
-                        .return_clause
-                        .group_by
-                        .iter()
-                        .map(|e| self.translate_expression(e))
-                        .collect::<Result<Vec<_>>>()?
-                };
-                let agg_op = LogicalOperator::Aggregate(AggregateOp {
-                    group_by,
-                    aggregates,
-                    input: Box::new(plan),
-                    having: None,
-                });
-                plan = if let Some(return_items) = post_return {
-                    wrap_return(agg_op, return_items, subquery.return_clause.distinct)
-                } else {
-                    agg_op
-                };
-            } else {
-                let return_items = subquery
-                    .return_clause
-                    .items
-                    .iter()
-                    .map(|item| {
-                        Ok(ReturnItem {
-                            expression: self.translate_expression(&item.expression)?,
-                            alias: item.alias.clone(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                plan = wrap_return(plan, return_items, subquery.return_clause.distinct);
-            }
-            plan
-        } else {
-            // No importing WITH: translate the entire subquery independently
-            self.translate_query(subquery)?.root
+            })
         };
-
-        // Wire the inner plan to the outer plan; a CALL that comes first runs
-        // once, on one empty row (`Empty`).
+        let inner_plan = self.translate_query_from(subquery, input)?.root;
         Ok(LogicalOperator::Apply(ApplyOp {
             input: Box::new(outer),
             subplan: Box::new(inner_plan),

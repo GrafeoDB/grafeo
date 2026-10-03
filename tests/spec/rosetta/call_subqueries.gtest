@@ -186,3 +186,96 @@ tests:
     expect:
       rows:
         - [Gus, Berlin]
+
+  # ---------------------------------------------------------------------------
+  # GQL: a CALL subquery sees every variable of the outer row; CALL (a, b)
+  # limits that to a and b, CALL () to none. A WITH in it is an ordinary WITH.
+  # ---------------------------------------------------------------------------
+
+  - name: gql_call_sees_an_outer_node
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  - name: gql_call_sees_an_outer_edge
+    variants:
+      gql: "MATCH ()-[r:KNOWS]->() CALL { MATCH (x)-[r]->(y) RETURN x.name AS xn } RETURN count(*) AS c"
+    expect:
+      rows:
+        - [5]
+
+  - name: gql_call_nested_sees_the_outermost_row
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn } RETURN bn"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  - name: gql_call_with_where_filters
+    variants:
+      gql: "MATCH (a:Person) CALL { WITH a WHERE a.age > 30 RETURN a.name AS m } RETURN m"
+    expect:
+      rows:
+        - [Vincent]
+        - [Jules]
+
+  - name: gql_call_with_renames
+    variants:
+      gql: "MATCH (a:Person WHERE a.age > 30) CALL { WITH a AS b RETURN b.name AS m } RETURN a.name AS a, m"
+    expect:
+      rows:
+        - [Vincent, Vincent]
+        - [Jules, Jules]
+
+  - name: gql_call_with_after_a_match
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) WITH b RETURN b.name AS bn } RETURN bn"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  - name: gql_call_scope_clause
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  # c is not imported, so the subquery's c is any city.
+  - name: gql_call_scope_clause_limits_what_the_subquery_sees
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}), (c:City {name: 'Paris'}) CALL (a) { MATCH (c:City) RETURN count(c) AS n } RETURN n"
+    expect:
+      rows:
+        - [3]
+
+  # Nothing is imported: the subquery's a is any person who knows someone.
+  - name: gql_call_empty_scope_clause
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL () { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN count(*) AS c"
+    expect:
+      rows:
+        - [5]
+
+  - name: gql_optional_call_scope_clause
+    variants:
+      gql: "MATCH (a:Person) OPTIONAL CALL (a) { MATCH (a)-[:LIVES_IN]->(c) RETURN c.name AS c } RETURN a.name AS a, c"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, null]
+        - [Jules, null]
+        - [Mia, Paris]
+
+  - name: gql_call_scope_clause_naming_a_missing_variable
+    variants:
+      gql: "MATCH (a:Person) CALL (b) { RETURN 1 AS one } RETURN one"
+    expect:
+      error: "Undefined variable 'b'"

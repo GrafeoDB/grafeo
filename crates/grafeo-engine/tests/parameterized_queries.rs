@@ -24,6 +24,33 @@ fn count(db: &GrafeoDB, label: &str) -> Value {
         .clone()
 }
 
+/// A write that uses a parameter nobody supplied fails before it writes:
+/// it used to store the text "$e". Through `execute` (no parameter map at
+/// all), an empty map, and Cypher.
+#[test]
+fn an_unsupplied_parameter_fails_before_writing() {
+    let db = GrafeoDB::new_in_memory();
+    for result in [
+        db.execute("INSERT (:P {e: $e})"),
+        db.execute_with_params("INSERT (:P {e: $e})", HashMap::new()),
+        #[cfg(feature = "cypher")]
+        db.execute_cypher("CREATE (:P {e: $e})"),
+    ] {
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("Missing parameter: $e"), "{error}");
+    }
+    assert_eq!(count(&db, "P"), Value::Int64(0));
+
+    // EXPLAIN shows the plan without the values; PROFILE runs it, so it fails.
+    db.execute("EXPLAIN INSERT (:P {e: $e})").unwrap();
+    let error = db
+        .execute("PROFILE INSERT (:P {e: $e})")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Missing parameter: $e"), "{error}");
+    assert_eq!(count(&db, "P"), Value::Int64(0));
+}
+
 #[test]
 fn constraints_hold_for_parameterized_writes() {
     let db = GrafeoDB::new_in_memory();

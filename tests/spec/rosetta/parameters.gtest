@@ -1,0 +1,94 @@
+# Rosetta: parameters
+#
+# A statement that uses a parameter nobody supplied fails with "Missing
+# parameter" before it writes anything, in every path (a write used to store
+# the text "$e"). An unaliased column that reads a parameter is named after
+# the query text ($x), not after the value that replaces it.
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): Alix (30),
+# Gus (25), Vincent (40), Jules (35) and Mia (28).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Parameters
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # A parameter nobody supplied
+  # ---------------------------------------------------------------------------
+
+  - name: unsupplied_parameter_in_a_write
+    variants:
+      gql: "INSERT (:P {e: $e}) RETURN 1 AS one"
+      cypher: "CREATE (:P {e: $e}) RETURN 1 AS one"
+    expect:
+      error: "Missing parameter: $e"
+
+  - name: unsupplied_parameter_in_return
+    variants:
+      gql: "RETURN $x AS x"
+      cypher: "RETURN $x AS x"
+    expect:
+      error: "Missing parameter: $x"
+
+  - name: unsupplied_parameter_in_where
+    variants:
+      gql: "MATCH (p:Person) WHERE p.age = $age RETURN p.name AS n"
+      cypher: "MATCH (p:Person) WHERE p.age = $age RETURN p.name AS n"
+    expect:
+      error: "Missing parameter: $age"
+
+  # ---------------------------------------------------------------------------
+  # Column names
+  # ---------------------------------------------------------------------------
+
+  - name: an_unaliased_parameter_is_named_after_it
+    params:
+      x: 5
+    variants:
+      gql: "RETURN $x"
+      cypher: "RETURN $x"
+    expect:
+      columns: ["$x"]
+      rows:
+        - [5]
+
+  - name: an_unaliased_expression_with_a_parameter_is_named_after_its_text
+    params:
+      x: 5
+    variants:
+      gql: "MATCH (p:Person) WHERE p.age > 35 RETURN p.age + $x"
+      cypher: "MATCH (p:Person) WHERE p.age > 35 RETURN p.age + $x"
+    expect:
+      columns: ["p.age + $x"]
+      rows:
+        - [45]
+
+  # The ORDER BY repeats the parameter expression: it still sorts by it.
+  - name: an_unaliased_parameter_expression_in_order_by
+    params:
+      x: 5
+    variants:
+      gql: "MATCH (p:Person) WHERE p.age < 30 RETURN p.age + $x ORDER BY p.age + $x DESC"
+      cypher: "MATCH (p:Person) WHERE p.age < 30 RETURN p.age + $x ORDER BY p.age + $x DESC"
+    expect:
+      ordered: true
+      columns: ["p.age + $x"]
+      rows:
+        - [33]
+        - [30]
+
+  - name: an_aliased_parameter_keeps_its_alias
+    params:
+      x: 5
+    variants:
+      gql: "RETURN $x AS five"
+      cypher: "RETURN $x AS five"
+    expect:
+      columns: [five]
+      rows:
+        - [5]

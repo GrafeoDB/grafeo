@@ -209,6 +209,8 @@ for (const filePath of gtestFiles) {
             for (const req of (tc.requires || [])) {
               if (!isAvailable(db, req)) return ctx.skip()
             }
+            // WASM executeRaw does not support params yet
+            if (tc.params && Object.keys(tc.params).length > 0) return ctx.skip()
             const effectiveDataset = tc.dataset || meta.dataset
             if (effectiveDataset && effectiveDataset !== 'empty') {
               loadDataset(db, effectiveDataset)

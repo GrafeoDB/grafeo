@@ -5768,6 +5768,15 @@ fn params_to_fill<'a>(
             crate::query::processor::substitute_params(plan, values)?;
             Ok(None)
         }
+        // An EXPLAIN without parameters shows the plan with them unresolved.
+        None if plan.explain && plan.default_params.is_empty() => Ok(None),
+        // No parameters: the plan's defaults fill what they can, and a
+        // parameter nobody supplied fails here, before planning.
+        None => {
+            let defaults = plan.default_params.clone();
+            crate::query::processor::substitute_params(plan, &defaults)?;
+            Ok(None)
+        }
         other => Ok(other),
     }
 }

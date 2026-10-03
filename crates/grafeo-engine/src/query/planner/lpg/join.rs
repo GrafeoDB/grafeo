@@ -451,9 +451,9 @@ fn sort_reads_only_returned(keys: &[SortKey], ret: &ReturnOp) -> bool {
             _ => None,
         })
         .collect();
-    let mut read = std::collections::HashSet::new();
+    let mut read = Vec::new();
     for key in keys {
-        crate::query::translators::common::collect_expression_variables(&key.expression, &mut read);
+        super::project::collect_vars(&key.expression, &mut read);
     }
     read.iter().all(|name| returned.contains(&name.as_str()))
 }

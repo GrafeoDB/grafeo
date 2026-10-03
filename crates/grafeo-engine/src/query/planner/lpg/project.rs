@@ -1509,7 +1509,7 @@ const OPAQUE_SUBQUERY_VARIABLE: &str = "\0subquery";
 /// `sort_needs_augmenting_projection` and `plan_sort`'s pre-return projection
 /// logic to determine whether ORDER BY references variables that the RETURN
 /// clause has dropped.
-fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
+pub(super) fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
     match expr {
         LogicalExpression::Variable(v)
         | LogicalExpression::Property { variable: v, .. }

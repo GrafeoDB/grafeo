@@ -525,4 +525,11 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages)
 
+# Z: a CALL subquery's RETURN under ORDER BY and LIMIT passes on its nodes too
+for case_id, query in [
+    ("Z1", "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b ORDER BY b.name DESC LIMIT 1 } MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"),
+    ("Z2", "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS n ORDER BY b.age LIMIT 1 } RETURN n"),
+]:
+    case(case_id, query, GQL)
+
 # fmt: on

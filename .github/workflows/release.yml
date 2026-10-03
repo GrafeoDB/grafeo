@@ -194,7 +194,6 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: ./checksums.txt
-        continue-on-error: true
 
   # Publish crates to crates.io (in dependency order)
   publish-crates:
@@ -350,6 +349,10 @@ jobs:
     name: Publish to npm
     runs-on: ubuntu-latest
     needs: [create-release, build-node-native]
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -381,30 +384,31 @@ jobs:
           echo "=== Platform packages ==="
           find npm -name '*.node' -ls
 
+      - name: Update npm (trusted publishing needs 11.5.1 or later)
+        run: npm install -g npm@^11.5.1
+
       - name: Publish platform packages
         working-directory: crates/bindings/node
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for dir in npm/*/; do
             if ls "$dir"*.node 1>/dev/null 2>&1; then
-              echo "Publishing $(basename "$dir")..."
-              (cd "$dir" && npm publish --access public) || true
+              (cd "$dir" && bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh")
             fi
           done
 
       - name: Publish @grafeo-db/js
         working-directory: crates/bindings/node
-        run: npm publish --access public --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        continue-on-error: true
+        run: bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh" --ignore-scripts
 
   # Publish WASM package to npm
   publish-wasm:
     name: Publish WASM to npm
     runs-on: ubuntu-latest
     needs: create-release
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -431,18 +435,22 @@ jobs:
           # Copy our maintained package.json over the generated one.
           cp crates/bindings/wasm/package.json crates/bindings/wasm/pkg/package.json
 
+      - name: Update npm (trusted publishing needs 11.5.1 or later)
+        run: npm install -g npm@^11.5.1
+
       - name: Publish @grafeo-db/wasm
         working-directory: crates/bindings/wasm/pkg
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        continue-on-error: true
+        run: bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh"
 
   # Publish WASM lite package to npm
   publish-wasm-lite:
     name: Publish WASM Lite to npm
     runs-on: ubuntu-latest
     needs: create-release
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -466,18 +474,22 @@ jobs:
       - name: Fix WASM lite package metadata
         run: cp crates/bindings/wasm/package-lite.json crates/bindings/wasm/pkg-lite/package.json
 
+      - name: Update npm (trusted publishing needs 11.5.1 or later)
+        run: npm install -g npm@^11.5.1
+
       - name: Publish @grafeo-db/wasm-lite
         working-directory: crates/bindings/wasm/pkg-lite
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        continue-on-error: true
+        run: bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh"
 
   # Publish CLI npm wrapper packages
   publish-cli-npm:
     name: Publish CLI to npm
     runs-on: ubuntu-latest
     needs: build-binaries
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -544,18 +556,22 @@ jobs:
           chmod +x ${{ matrix.binary }} 2>/dev/null || true
           ls -la
 
+      - name: Update npm (trusted publishing needs 11.5.1 or later)
+        run: npm install -g npm@^11.5.1
+
       - name: Publish platform package
         working-directory: platform-pkg
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        continue-on-error: true
+        run: bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh"
 
   # Publish main CLI npm launcher (after platform packages)
   publish-cli-npm-launcher:
     name: Publish @grafeo-db/cli
     runs-on: ubuntu-latest
     needs: publish-cli-npm
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -565,12 +581,12 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Update npm (trusted publishing needs 11.5.1 or later)
+        run: npm install -g npm@^11.5.1
+
       - name: Publish launcher package
         working-directory: packages/grafeo-cli-npm
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        continue-on-error: true
+        run: bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh"
 
   # Publish C# bindings to NuGet
   publish-nuget:
@@ -608,8 +624,7 @@ jobs:
         run: dotnet pack -c Release -o ../../nupkg
 
       - name: Publish to NuGet
-        run: dotnet nuget push "crates/bindings/csharp/nupkg/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json
-        continue-on-error: true
+        run: dotnet nuget push "crates/bindings/csharp/nupkg/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
 
   # Build CLI Python wheels using workflow artifacts (no release asset race)
   build-cli-wheels:
@@ -700,7 +715,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
-        continue-on-error: true
+          skip-existing: true
 
   # Notify Discord about the new release
   notify-discord:

@@ -567,6 +567,54 @@ fn updates_to_a_node_created_in_the_same_transaction_fold_into_its_create() {
     );
 }
 
+/// The fold stays within one graph. A transaction creates a node in the
+/// default graph and one in a named graph, which number their nodes alike,
+/// and changes the second: each node gets its own create event, and only the
+/// second shows the change.
+#[test]
+fn creates_in_two_graphs_fold_separately() {
+    let db = db();
+    db.create_graph("g").unwrap();
+    let mut session = db.session();
+
+    session.begin_transaction().unwrap();
+    session.execute("INSERT (:InDefault {a: 1})").unwrap();
+    session.use_graph("g");
+    session.execute("INSERT (:InG {b: 1})").unwrap();
+    session.execute("MATCH (n:InG) SET n.c = 99").unwrap();
+    session.commit().unwrap();
+
+    let changes = db
+        .changes_between(
+            grafeo_common::types::EpochId::new(0),
+            grafeo_common::types::EpochId::new(u64::MAX),
+        )
+        .unwrap();
+    let creates: Vec<_> = changes
+        .iter()
+        .filter(|e| e.kind == ChangeKind::Create)
+        .map(|e| (e.labels.clone().unwrap_or_default(), e.after.clone()))
+        .collect();
+    assert_eq!(changes.len(), 2, "{changes:?}");
+    assert!(
+        creates.contains(&(
+            vec!["InDefault".to_string()],
+            Some(HashMap::from([("a".to_string(), Value::Int64(1))]))
+        )),
+        "{changes:?}"
+    );
+    assert!(
+        creates.contains(&(
+            vec!["InG".to_string()],
+            Some(HashMap::from([
+                ("b".to_string(), Value::Int64(1)),
+                ("c".to_string(), Value::Int64(99)),
+            ]))
+        )),
+        "{changes:?}"
+    );
+}
+
 /// Create and delete events say what was created or deleted: a node's labels,
 /// an edge's type and endpoints, and on a delete the last properties.
 #[test]

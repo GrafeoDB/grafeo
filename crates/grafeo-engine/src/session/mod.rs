@@ -200,7 +200,7 @@ pub struct Session {
     /// Buffered CDC events for the current transaction.
     /// Flushed to `cdc_log` on commit, discarded on rollback.
     #[cfg(feature = "cdc")]
-    cdc_pending_events: Option<Arc<parking_lot::Mutex<Vec<crate::cdc::ChangeEvent>>>>,
+    cdc_pending_events: Option<Arc<parking_lot::Mutex<Vec<crate::cdc::PendingEvent>>>>,
     /// Current graph name (for multi-graph USE GRAPH support). None = default graph.
     current_graph: parking_lot::Mutex<Option<String>>,
     /// Current schema name (ISO/IEC 39075 Section 4.7.3: independent from session graph).
@@ -625,11 +625,14 @@ impl Session {
 
                     #[cfg(feature = "cdc")]
                     let store: Arc<dyn GraphStoreMut> = match &self.cdc_pending_events {
-                        Some(pending) => Arc::new(crate::database::cdc_store::CdcGraphStore::wrap(
-                            store,
-                            Arc::clone(&self.cdc_log),
-                            Arc::clone(pending),
-                        )),
+                        Some(pending) => Arc::new(
+                            crate::database::cdc_store::CdcGraphStore::wrap(
+                                store,
+                                Arc::clone(&self.cdc_log),
+                                Arc::clone(pending),
+                            )
+                            .for_graph(name.to_string()),
+                        ),
                         None => store,
                     };
 

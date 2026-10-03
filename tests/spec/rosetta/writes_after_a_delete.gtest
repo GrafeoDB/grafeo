@@ -1,0 +1,65 @@
+# Rosetta: a write to a node or edge deleted earlier in the statement fails
+#
+# SET, REMOVE and label changes on a node or edge the statement (or its
+# transaction) deleted before fail with an error, as in Neo4j, instead of
+# writing to an entity nobody sees. With a node type defined, the write used to
+# skip the type's checks as well.
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): Mia has no
+# `w`; the KNOWS edge with `w: 1` goes from Alix to Gus.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: A write to a deleted node or edge fails
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  - name: set_a_property_of_a_deleted_node
+    variants:
+      gql: "MATCH (n:Person {name: 'Mia'}) DETACH DELETE n SET n.x = 1 RETURN n.x AS x"
+      cypher: "MATCH (n:Person {name: 'Mia'}) DETACH DELETE n SET n.x = 1 RETURN n.x AS x"
+    expect:
+      error: "has been deleted in this transaction"
+
+  - name: remove_a_property_of_a_deleted_node
+    variants:
+      gql: "MATCH (n:Person {name: 'Alix'}) DETACH DELETE n REMOVE n.w RETURN n.w AS w"
+      cypher: "MATCH (n:Person {name: 'Alix'}) DETACH DELETE n REMOVE n.w RETURN n.w AS w"
+    expect:
+      error: "has been deleted in this transaction"
+
+  - name: add_a_label_to_a_deleted_node
+    variants:
+      gql: "MATCH (n:Person {name: 'Mia'}) DETACH DELETE n SET n:Admin RETURN labels(n) AS l"
+      cypher: "MATCH (n:Person {name: 'Mia'}) DETACH DELETE n SET n:Admin RETURN labels(n) AS l"
+    expect:
+      error: "has been deleted in this transaction"
+
+  - name: set_a_property_of_a_deleted_edge
+    variants:
+      gql: "MATCH ()-[r:KNOWS {w: 1}]->() DELETE r SET r.w = 9 RETURN r.w AS w"
+      cypher: "MATCH ()-[r:KNOWS {w: 1}]->() DELETE r SET r.w = 9 RETURN r.w AS w"
+    expect:
+      error: "has been deleted in this transaction"
+
+  # The node-type check used to be skipped for a node it could not see.
+  - name: set_a_property_of_a_deleted_typed_node
+    setup:
+      - "CREATE NODE TYPE Robot (serial STRING NOT NULL)"
+      - "INSERT (:Robot {serial: 'R1'})"
+    variants:
+      gql: "MATCH (n:Robot) DETACH DELETE n SET n.serial = 7 RETURN n.serial AS s"
+    expect:
+      error: "has been deleted in this transaction"
+
+  # A SET before the DELETE is an ordinary write. Cypher only: GQL takes no
+  # DELETE after a WITH yet.
+  - name: set_before_a_delete
+    variants:
+      cypher: "MATCH (n:Person {name: 'Mia'}) SET n.x = 1 WITH n DETACH DELETE n RETURN count(*) AS c"
+    expect:
+      rows:
+        - [1]

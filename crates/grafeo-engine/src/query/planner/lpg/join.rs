@@ -5,7 +5,7 @@ use super::{
     JoinType, LeapfrogJoinOperator, LogicalExpression, LogicalOperator, MultiWayJoinOp, Operator,
     OtherwiseOp, PhysicalJoinType, ProjectExpr, ProjectOperator, Result, UnionOp, Value, common,
 };
-use crate::query::plan::{ProjectOp, Projection};
+use crate::query::plan::{LimitOp, ProjectOp, Projection, ReturnOp, SkipOp, SortKey, SortOp};
 
 impl super::Planner {
     /// Plans a JOIN operator.
@@ -406,12 +406,60 @@ impl super::Planner {
 /// The plan of a subquery whose `RETURN` passes its values on as `WITH` does:
 /// nodes and edges stay references, so the outer query can match from them,
 /// compare them and take their ids, and resolves them when it returns them.
-/// `None` when the subquery does not end in such a `RETURN` (`RETURN *` is
-/// expanded when its own operator is planned).
+/// An `ORDER BY`, `SKIP`, `LIMIT` or `DISTINCT` after the `RETURN` stays on
+/// top. `None` when the subquery does not end in such a `RETURN`, or when its
+/// `ORDER BY` reads a variable the `RETURN` leaves out (only the `RETURN`'s
+/// own planning keeps those for the sort).
 fn subquery_output(subplan: &LogicalOperator) -> Option<LogicalOperator> {
-    let LogicalOperator::Return(ret) = subplan else {
-        return None;
-    };
+    match subplan {
+        LogicalOperator::Return(ret) => return_as_projection(ret),
+        LogicalOperator::Sort(sort) => {
+            if let LogicalOperator::Return(ret) = sort.input.as_ref()
+                && !sort_reads_only_returned(&sort.keys, ret)
+            {
+                return None;
+            }
+            Some(LogicalOperator::Sort(SortOp {
+                keys: sort.keys.clone(),
+                input: Box::new(subquery_output(&sort.input)?),
+            }))
+        }
+        LogicalOperator::Limit(limit) => Some(LogicalOperator::Limit(LimitOp {
+            count: limit.count.clone(),
+            input: Box::new(subquery_output(&limit.input)?),
+        })),
+        LogicalOperator::Skip(skip) => Some(LogicalOperator::Skip(SkipOp {
+            count: skip.count.clone(),
+            input: Box::new(subquery_output(&skip.input)?),
+        })),
+        LogicalOperator::Distinct(distinct) => Some(LogicalOperator::Distinct(DistinctOp {
+            input: Box::new(subquery_output(&distinct.input)?),
+            columns: distinct.columns.clone(),
+        })),
+        _ => None,
+    }
+}
+
+/// Whether every variable the sort `keys` read is a column `ret` returns.
+fn sort_reads_only_returned(keys: &[SortKey], ret: &ReturnOp) -> bool {
+    let returned: Vec<&str> = ret
+        .items
+        .iter()
+        .filter_map(|item| match (&item.alias, &item.expression) {
+            (Some(alias), _) => Some(alias.as_str()),
+            (None, LogicalExpression::Variable(name)) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut read = std::collections::HashSet::new();
+    for key in keys {
+        crate::query::translators::common::collect_expression_variables(&key.expression, &mut read);
+    }
+    read.iter().all(|name| returned.contains(&name.as_str()))
+}
+
+/// A `RETURN` as the projection that passes its values on.
+fn return_as_projection(ret: &ReturnOp) -> Option<LogicalOperator> {
     if ret
         .items
         .iter()

@@ -670,7 +670,27 @@ impl Binder {
                     ));
                 }
 
-                self.bind_operator(&apply.subplan)?;
+                // A subquery that names what it imports (`CALL (a, b)`, an
+                // importing `WITH a`) sees only those outer variables; `*`
+                // imports all of them.
+                let scoped = !apply.shared_variables.is_empty()
+                    && !apply.shared_variables.iter().any(|name| name == "*");
+                let outer_context = if scoped {
+                    let mut imported = BindingContext::new();
+                    for name in &apply.shared_variables {
+                        if let Some(info) = self.context.get(name) {
+                            imported.add_variable(name.clone(), info.clone());
+                        }
+                    }
+                    Some(std::mem::replace(&mut self.context, imported))
+                } else {
+                    None
+                };
+                let bound = self.bind_operator(&apply.subplan);
+                if let Some(outer_context) = outer_context {
+                    self.context = outer_context;
+                }
+                bound?;
 
                 // Remove internal-only variables added by the subplan (those that
                 // are not output columns). Prevents subplan internals from leaking

@@ -55,7 +55,7 @@ pub(crate) struct ImplicitWrites {
     wal: std::sync::OnceLock<Arc<crate::transaction::wal_buffer::WalBuffer>>,
     /// The CDC events of the running call, recorded at its epoch.
     #[cfg(feature = "cdc")]
-    cdc_events: Arc<parking_lot::Mutex<Vec<crate::cdc::ChangeEvent>>>,
+    cdc_events: Arc<parking_lot::Mutex<Vec<crate::cdc::PendingEvent>>>,
     /// Held while a direct call on a compacted database builds its WAL
     /// records from the state and writes them (see `log_compacted_write`).
     #[cfg(all(feature = "wal", feature = "compact-store"))]
@@ -584,14 +584,28 @@ impl DirectCalls<'_> {
 
     pub(crate) fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
         self.write(
-            |writer| writer.remove_node_property(id, key),
+            // The direct API reports a missing node as `false`; a query that
+            // writes to one fails (see `GraphWriter`).
+            |writer| {
+                if writer.has_node(id) {
+                    writer.remove_node_property(id, key)
+                } else {
+                    Ok(false)
+                }
+            },
             |_| vec![Touched::NodeProperty(id, key.to_string())],
         )
     }
 
     pub(crate) fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
         self.write(
-            |writer| writer.remove_edge_property(id, key),
+            |writer| {
+                if writer.has_edge(id) {
+                    writer.remove_edge_property(id, key)
+                } else {
+                    Ok(false)
+                }
+            },
             |_| vec![Touched::EdgeProperty(id, key.to_string())],
         )
     }
@@ -721,6 +735,9 @@ pub(crate) fn add_node_label(
     id: NodeId,
     label: &str,
 ) -> std::result::Result<bool, OperatorError> {
+    if !writer.has_node(id) {
+        return Ok(false);
+    }
     Ok(writer.add_labels(id, &[label.to_string()])? == 1)
 }
 
@@ -730,6 +747,9 @@ pub(crate) fn remove_node_label(
     id: NodeId,
     label: &str,
 ) -> std::result::Result<bool, OperatorError> {
+    if !writer.has_node(id) {
+        return Ok(false);
+    }
     Ok(writer.remove_labels(id, &[label.to_string()])? == 1)
 }
 

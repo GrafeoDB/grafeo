@@ -396,3 +396,41 @@ tests:
       cypher: "CALL db.labels() YIELD label CALL { WITH label MATCH (p:Person) RETURN * } RETURN count(*) AS c"
     expect:
       error: "RETURN * in this CALL subquery cannot tell which variables it binds: return them by name"
+
+  # GQL only (Cypher takes no ORDER BY in a CALL subquery yet): the RETURN
+  # under an ORDER BY and LIMIT also passes on the node itself.
+  - name: a_returned_node_after_order_by_and_limit
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b ORDER BY b.name DESC LIMIT 1 } MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+    expect:
+      rows:
+        - [Jules, Mia]
+
+  # The sort key reads a variable the RETURN leaves out (b.age).
+  - name: a_sort_key_the_return_leaves_out
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS n ORDER BY b.age LIMIT 1 } RETURN n"
+    expect:
+      rows:
+        - [Gus]
+
+  # The scope clause names a only: the outer b is not visible in the subquery.
+  - name: call_scope_clause_hides_other_outer_variables
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}), (b:City {name: 'Paris'}) CALL (a) { RETURN b.name AS bn } RETURN bn"
+      cypher: "MATCH (a:Person {name: 'Alix'}), (b:City {name: 'Paris'}) CALL (a) { RETURN b.name AS bn } RETURN bn"
+    expect:
+      error: "Undefined variable 'b'"
+
+  # An OPTIONAL MATCH that starts a scoped subquery keeps each outer row's own
+  # match (or none).
+  - name: an_optional_match_first_in_a_scoped_call
+    variants:
+      gql: "MATCH (a:Person) CALL (a) { OPTIONAL MATCH (a)-[:LIVES_IN]->(c) RETURN c.name AS c } RETURN a.name AS a, c"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, null]
+        - [Jules, null]
+        - [Mia, Paris]

@@ -504,4 +504,14 @@ for case_id, query in [
 ]:
     case(case_id, query, GQL)
 
+# X: a Cypher CALL subquery with a variable scope clause
+for case_id, query in [
+    ("X1", "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"),
+    ("X2", "MATCH (a:Person {name: 'Alix'}) CALL (*) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"),
+    ("X3", "MATCH (a:Person {name: 'Alix'}) CALL () { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN count(*) AS c"),
+    ("X4", "MATCH (a:Person {name: 'Alix'}), (c:City {name: 'Paris'}) CALL (a) { MATCH (c:City) RETURN count(c) AS n } RETURN n"),
+    ("X5", "MATCH (a:Person) CALL (a) { WITH a WHERE a.age > 30 RETURN a.name AS m } RETURN m"),
+]:
+    case(case_id, query, CYPHER)
+
 # fmt: on

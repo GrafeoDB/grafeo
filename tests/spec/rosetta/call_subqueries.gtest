@@ -188,8 +188,9 @@ tests:
         - [Gus, Berlin]
 
   # ---------------------------------------------------------------------------
-  # GQL: a CALL subquery sees every variable of the outer row; CALL (a, b)
-  # limits that to a and b, CALL () to none. A WITH in it is an ordinary WITH.
+  # GQL: a CALL subquery sees every variable of the outer row. In GQL and
+  # Cypher, CALL (a, b) limits that to a and b and CALL () to none (Cypher's
+  # CALL (*) imports all). A WITH in it is an ordinary WITH.
   # ---------------------------------------------------------------------------
 
   - name: gql_call_sees_an_outer_node
@@ -239,26 +240,29 @@ tests:
         - [Gus]
         - [Jules]
 
-  - name: gql_call_scope_clause
+  - name: call_scope_clause
     variants:
       gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"
     expect:
       rows:
         - [Gus]
         - [Jules]
 
   # c is not imported, so the subquery's c is any city.
-  - name: gql_call_scope_clause_limits_what_the_subquery_sees
+  - name: call_scope_clause_limits_what_the_subquery_sees
     variants:
       gql: "MATCH (a:Person {name: 'Alix'}), (c:City {name: 'Paris'}) CALL (a) { MATCH (c:City) RETURN count(c) AS n } RETURN n"
+      cypher: "MATCH (a:Person {name: 'Alix'}), (c:City {name: 'Paris'}) CALL (a) { MATCH (c:City) RETURN count(c) AS n } RETURN n"
     expect:
       rows:
         - [3]
 
   # Nothing is imported: the subquery's a is any person who knows someone.
-  - name: gql_call_empty_scope_clause
+  - name: call_empty_scope_clause
     variants:
       gql: "MATCH (a:Person {name: 'Alix'}) CALL () { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN count(*) AS c"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL () { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN count(*) AS c"
     expect:
       rows:
         - [5]
@@ -274,8 +278,35 @@ tests:
         - [Jules, null]
         - [Mia, Paris]
 
-  - name: gql_call_scope_clause_naming_a_missing_variable
+  - name: call_scope_clause_naming_a_missing_variable
     variants:
       gql: "MATCH (a:Person) CALL (b) { RETURN 1 AS one } RETURN one"
+      cypher: "MATCH (a:Person) CALL (b) { RETURN 1 AS one } RETURN one"
     expect:
       error: "Undefined variable 'b'"
+
+  - name: cypher_call_scope_clause_imports_all
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (*) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  # After a scope clause a WITH is an ordinary WITH: its WHERE filters.
+  - name: cypher_call_scope_clause_then_an_ordinary_with
+    variants:
+      cypher: "MATCH (a:Person) CALL (a) { WITH a WHERE a.age > 30 RETURN a.name AS m } RETURN m"
+    expect:
+      rows:
+        - [Vincent]
+        - [Jules]
+
+  - name: cypher_call_with_an_empty_scope_clause_comes_first
+    variants:
+      cypher: "CALL () { MATCH (c:City) RETURN c } MATCH (p:Person)-[:LIVES_IN]->(c) RETURN p.name AS p, c.name AS c"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Berlin]
+        - [Mia, Paris]

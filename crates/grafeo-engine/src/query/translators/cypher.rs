@@ -183,7 +183,7 @@ impl CypherTranslator {
     fn translate_query(&self, query: &ast::Query) -> Result<LogicalPlan> {
         // As in Neo4j, the rows of a CALL subquery that returns some are not
         // the result of a query: a RETURN after it says what is.
-        if let Some(ast::Clause::CallSubquery(inner)) = query.clauses.last()
+        if let Some(ast::Clause::CallSubquery { query: inner, .. }) = query.clauses.last()
             && matches!(inner.clauses.last(), Some(ast::Clause::Return(_)))
         {
             return Err(Error::Query(QueryError::new(
@@ -231,8 +231,8 @@ impl CypherTranslator {
             ast::Clause::Set(set_clause) => self.translate_set(set_clause, input),
             ast::Clause::Remove(remove_clause) => self.translate_remove(remove_clause, input),
             ast::Clause::Call(call) => self.translate_call_clause(call, input),
-            ast::Clause::CallSubquery(inner_query) => {
-                self.translate_call_subquery(inner_query, input)
+            ast::Clause::CallSubquery { query, scope } => {
+                self.translate_call_subquery(query, scope.as_deref(), input)
             }
             ast::Clause::ForEach(foreach) => self.translate_foreach(foreach, input),
             ast::Clause::LoadCsv(load_csv) => self.translate_load_csv(load_csv),
@@ -279,31 +279,47 @@ impl CypherTranslator {
 
     /// Translates `CALL { subquery }` to an Apply operator.
     ///
-    /// When the inner subquery starts with an importing `WITH` and there is an
-    /// outer input, the variables it names come from the outer scope. They are
-    /// recorded in `ApplyOp.shared_variables` so the planner can wire them
-    /// through `ParameterState`.
+    /// The subquery sees the outer variables its variable scope clause names
+    /// (`CALL (a, b) { ... }`, all of them for `(*)`, none for `()`), or
+    /// without one, the variables its importing `WITH` names. It starts from a
+    /// `ParameterScan` of them, and they are recorded in
+    /// `ApplyOp.shared_variables` so the planner can wire them through
+    /// `ParameterState`.
     fn translate_call_subquery(
         &self,
         inner: &ast::Query,
+        scope: Option<&[String]>,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
-        // An importing WITH is replaced by a ParameterScan of the variables it
-        // names, which the rest of the subquery starts from.
         let mut shared_variables = Vec::new();
-        let mut inner_plan: Option<LogicalOperator> = None;
         let mut clauses_iter = inner.clauses.iter();
 
-        if input.is_some()
-            && let Some(ast::Clause::With(with_clause)) = inner.clauses.first()
-            && let Some(imported) = self.importing_with(with_clause)?
-        {
-            shared_variables = imported;
-            clauses_iter.next();
-            inner_plan = Some(LogicalOperator::ParameterScan(ParameterScanOp {
-                columns: shared_variables.clone(),
-            }));
+        match scope {
+            // After a scope clause, a WITH is an ordinary WITH. With no outer
+            // row, `(*)` imports nothing, and named variables are reported as
+            // undefined by the binder.
+            Some(names) => {
+                if input.is_some() || names.iter().any(|name| name != "*") {
+                    shared_variables = names.to_vec();
+                }
+            }
+            // Without one, an importing WITH names what the subquery sees and
+            // is replaced by the ParameterScan.
+            None => {
+                if input.is_some()
+                    && let Some(ast::Clause::With(with_clause)) = inner.clauses.first()
+                    && let Some(imported) = self.importing_with(with_clause)?
+                {
+                    shared_variables = imported;
+                    clauses_iter.next();
+                }
+            }
         }
+        let mut inner_plan = (!shared_variables.is_empty()).then(|| {
+            LogicalOperator::ParameterScan(ParameterScanOp {
+                columns: shared_variables.clone(),
+            })
+        });
 
         // Translate the remaining inner subquery clauses
         for clause in clauses_iter {

@@ -225,13 +225,19 @@ impl<'a> Parser<'a> {
                     clauses.push(Clause::Limit(self.parse_expression()?));
                 }
                 TokenKind::Call => {
-                    // CALL { subquery } vs CALL procedure(...)
-                    if self.peek_kind() == TokenKind::LBrace {
+                    // CALL [(scope)] { subquery } vs CALL procedure(...): a
+                    // procedure name comes before any `(`
+                    if matches!(self.peek_kind(), TokenKind::LBrace | TokenKind::LParen) {
                         self.advance(); // consume CALL
-                        self.advance(); // consume {
-                        let inner = self.parse_subquery_body()?;
+                        let scope = if self.current.kind == TokenKind::LParen {
+                            Some(self.parse_call_scope()?)
+                        } else {
+                            None
+                        };
+                        self.expect(TokenKind::LBrace)?;
+                        let query = self.parse_subquery_body()?;
                         self.expect(TokenKind::RBrace)?;
-                        clauses.push(Clause::CallSubquery(inner));
+                        clauses.push(Clause::CallSubquery { query, scope });
                     } else {
                         clauses.push(Clause::Call(self.parse_call_clause()?));
                     }
@@ -1969,6 +1975,27 @@ impl<'a> Parser<'a> {
         } else {
             Err(self.error(&format!("Expected {:?}", kind)))
         }
+    }
+
+    /// Parses the variable scope clause of `CALL (a, b) { ... }`: the names
+    /// in parentheses, `*` for all outer variables, none for `()`.
+    fn parse_call_scope(&mut self) -> Result<Vec<String>> {
+        self.expect(TokenKind::LParen)?;
+        let mut names = Vec::new();
+        if self.current.kind == TokenKind::Star {
+            self.advance();
+            names.push("*".to_string());
+        } else if self.current.kind != TokenKind::RParen {
+            loop {
+                names.push(self.expect_identifier()?);
+                if self.current.kind != TokenKind::Comma {
+                    break;
+                }
+                self.advance();
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        Ok(names)
     }
 
     fn expect_identifier(&mut self) -> Result<String> {
@@ -4237,5 +4264,48 @@ mod tests {
             err.contains("[Cypher]"),
             "Cypher errors should be prefixed with [Cypher], got: {err}"
         );
+    }
+
+    /// The variable scope clause of `CALL (a, b) { ... }`: the names, `*` for
+    /// `(*)`, none for `()`, and `None` without a clause. A procedure call
+    /// has its name before any parenthesis.
+    #[test]
+    fn test_call_subquery_scope_clause() {
+        let scope_of = |query: &str| {
+            let Statement::Query(statement) = parse_ok(query) else {
+                panic!("expected a query: {query}");
+            };
+            statement
+                .clauses
+                .iter()
+                .find_map(|clause| match clause {
+                    Clause::CallSubquery { scope, .. } => Some(scope.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected a CALL subquery: {query}"))
+        };
+        let names = |names: &[&str]| Some(names.iter().map(ToString::to_string).collect());
+        assert_eq!(
+            scope_of("MATCH (a), (b) CALL (a, b) { RETURN 1 AS x } RETURN x"),
+            names(&["a", "b"])
+        );
+        assert_eq!(
+            scope_of("MATCH (a) CALL (*) { RETURN 1 AS x } RETURN x"),
+            names(&["*"])
+        );
+        assert_eq!(
+            scope_of("MATCH (a) CALL () { RETURN 1 AS x } RETURN x"),
+            names(&[])
+        );
+        assert_eq!(
+            scope_of("MATCH (a) CALL { WITH a RETURN 1 AS x } RETURN x"),
+            None
+        );
+        parse_err("MATCH (a) CALL (1) { RETURN 1 AS x } RETURN x");
+        let Statement::Query(procedure) = parse_ok("CALL db.labels() YIELD label RETURN label")
+        else {
+            panic!("expected a query");
+        };
+        assert!(matches!(procedure.clauses[0], Clause::Call(_)));
     }
 }

@@ -423,25 +423,34 @@ pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut 
                 collect_expression_variables(else_expr, vars);
             }
         }
+        // The variable a comprehension, list predicate or `reduce` binds is
+        // its own: only the other names its body uses come from outside.
         LogicalExpression::ListComprehension {
+            variable,
             list_expr,
             filter_expr,
             map_expr,
-            ..
         } => {
             collect_expression_variables(list_expr, vars);
+            let mut body = HashSet::new();
             if let Some(filter) = filter_expr {
-                collect_expression_variables(filter, vars);
+                collect_expression_variables(filter, &mut body);
             }
-            collect_expression_variables(map_expr, vars);
+            collect_expression_variables(map_expr, &mut body);
+            body.remove(variable);
+            vars.extend(body);
         }
         LogicalExpression::ListPredicate {
+            variable,
             list_expr,
             predicate,
             ..
         } => {
             collect_expression_variables(list_expr, vars);
-            collect_expression_variables(predicate, vars);
+            let mut body = HashSet::new();
+            collect_expression_variables(predicate, &mut body);
+            body.remove(variable);
+            vars.extend(body);
         }
         LogicalExpression::MapProjection { base, entries } => {
             vars.insert(base.clone());
@@ -452,14 +461,19 @@ pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut 
             }
         }
         LogicalExpression::Reduce {
+            accumulator,
             initial,
+            variable,
             list,
             expression,
-            ..
         } => {
             collect_expression_variables(initial, vars);
             collect_expression_variables(list, vars);
-            collect_expression_variables(expression, vars);
+            let mut body = HashSet::new();
+            collect_expression_variables(expression, &mut body);
+            body.remove(accumulator);
+            body.remove(variable);
+            vars.extend(body);
         }
         LogicalExpression::PatternComprehension { projection, .. } => {
             collect_expression_variables(projection, vars);

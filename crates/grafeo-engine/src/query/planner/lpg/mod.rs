@@ -1024,6 +1024,8 @@ impl Planner {
                     load.field_terminator,
                     load.variable.clone(),
                 ));
+                // A loaded row is a value (a map or a list), not a node.
+                self.set_column_entity(&load.variable, None);
                 Ok((operator, vec![load.variable.clone()]))
             }
             LogicalOperator::Empty => Err(Error::Internal("Empty plan".to_string())),

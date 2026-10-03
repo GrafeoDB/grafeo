@@ -75,6 +75,15 @@ tests:
         - [Vincent, Vincent]
         - [Jules, Jules]
 
+  # The variable a list comprehension binds is its own, not an outer one: the
+  # WITH names no outer variable and is an ordinary WITH.
+  - name: a_first_with_of_a_comprehension_imports_nothing
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH [x IN [1, 2] | x * 10] AS xs RETURN xs } RETURN a.name AS a, xs"
+    expect:
+      rows:
+        - [Alix, "[10, 20]"]
+
   - name: a_first_with_without_variables_imports_nothing
     variants:
       cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH 1 AS x RETURN x } RETURN a.name AS a, x"

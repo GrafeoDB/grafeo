@@ -117,6 +117,22 @@ tests:
         - [Vincent, 1]
         - [Mia, 0]
 
+  # The OPTIONAL MATCH reads a variable of the outer row (a.age) and one of the
+  # MATCH before it (b). Alix knows Gus, who knows the older Vincent, and
+  # Jules, who knows nobody older than Alix: 2 rows. GQL only, as above.
+  - name: count_with_an_optional_match_reading_earlier_variables
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30}), (gus:Person {name: 'Gus', age: 25}), (vincent:Person {name: 'Vincent', age: 40}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(alix), (jules)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(jules)"
+    variants:
+      gql: "MATCH (a:Person) RETURN a.name AS a, COUNT { MATCH (a)-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c WHERE c.age > a.age) } AS n"
+    expect:
+      rows:
+        - [Alix, 2]
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Jules, 1]
+        - [Mia, 0]
+
   # ---------------------------------------------------------------------------
   # A path mode (GQL only, except the plain walk: Cypher has no path modes)
   # ---------------------------------------------------------------------------

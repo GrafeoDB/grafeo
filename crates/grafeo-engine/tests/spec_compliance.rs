@@ -1511,6 +1511,57 @@ mod cypher_features {
         std::fs::remove_file(&csv_path).ok();
     }
 
+    /// A loaded row is a value, not a node: returned whole or collected, it
+    /// comes back as the row's map.
+    #[test]
+    fn cypher_load_csv_rows_returned_whole_and_collected() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let csv_path = dir.join("grafeo_test_load_csv_collect.csv");
+        {
+            let mut f = std::fs::File::create(&csv_path).unwrap();
+            writeln!(f, "name,city").unwrap();
+            writeln!(f, "Alix,Amsterdam").unwrap();
+            writeln!(f, "Gus,Berlin").unwrap();
+        }
+        let row = |name: &str, city: &str| {
+            Value::Map(std::sync::Arc::new(
+                [
+                    (PropertyKey::new("name"), Value::String(name.into())),
+                    (PropertyKey::new("city"), Value::String(city.into())),
+                ]
+                .into_iter()
+                .collect(),
+            ))
+        };
+
+        let db = GrafeoDB::new_in_memory();
+        let session = db.session();
+        let path = csv_path.display();
+        let whole = session
+            .execute_cypher(&format!(
+                "LOAD CSV WITH HEADERS FROM '{path}' AS row RETURN row ORDER BY row.name"
+            ))
+            .unwrap();
+        assert_eq!(
+            whole.rows(),
+            [vec![row("Alix", "Amsterdam")], vec![row("Gus", "Berlin")]]
+        );
+        let collected = session
+            .execute_cypher(&format!(
+                "LOAD CSV WITH HEADERS FROM '{path}' AS row RETURN collect(row) AS rows"
+            ))
+            .unwrap();
+        let Value::List(rows) = &collected.rows()[0][0] else {
+            panic!("expected a list: {:?}", collected.rows());
+        };
+        let mut rows = rows.to_vec();
+        rows.sort_by_key(|value| format!("{value:?}"));
+        assert_eq!(rows, [row("Alix", "Amsterdam"), row("Gus", "Berlin")]);
+
+        std::fs::remove_file(&csv_path).ok();
+    }
+
     #[test]
     fn cypher_load_csv_without_headers() {
         use std::io::Write;

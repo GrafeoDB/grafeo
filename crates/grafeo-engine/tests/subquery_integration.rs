@@ -537,8 +537,8 @@ mod subqueries_see_what_the_query_sees {
     }
 
     /// The answers with Alix->Gus and Gus->Vincent only.
-    fn before() -> Vec<Vec<Vec<Value>>> {
-        vec![
+    fn before() -> [Vec<Vec<Value>>; SHAPES.len()] {
+        [
             vec![vec![Value::Bool(false)]],
             vec![vec![Value::Int64(1)]],
             names(&["Alix", "Gus"]),
@@ -548,8 +548,8 @@ mod subqueries_see_what_the_query_sees {
     }
 
     /// The answers once Gus->Mia and Vincent->Mia exist too.
-    fn after() -> Vec<Vec<Vec<Value>>> {
-        vec![
+    fn after() -> [Vec<Vec<Value>>; SHAPES.len()] {
+        [
             vec![vec![Value::Bool(true)]],
             vec![vec![Value::Int64(2)]],
             names(&["Alix", "Gus", "Vincent"]),

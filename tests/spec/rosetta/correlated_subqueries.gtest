@@ -369,3 +369,15 @@ tests:
     expect:
       rows:
         - [Alix]
+
+  # A variable named like the planner's own subquery columns keeps its value:
+  # the planner picks a name the row does not have.
+  - name: a_variable_named_like_a_subquery_column
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) LET __subquery_0 = 7 RETURN __subquery_0 AS mine, EXISTS { MATCH (a)-[:KNOWS]->(b), (c:City) } AS e"
+      cypher: "MATCH (a:Person {name: 'Alix'}) WITH a, 7 AS __subquery_0 RETURN __subquery_0 AS mine, EXISTS { MATCH (a)-[:KNOWS]->(b), (c:City) } AS e"
+    expect:
+      rows:
+        - [7, true]

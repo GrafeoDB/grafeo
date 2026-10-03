@@ -53,7 +53,7 @@ impl super::Planner {
                 LogicalExpression::CountSubquery(subplan) => (subplan.as_ref().clone(), false),
                 _ => return Ok(()),
             };
-            let column = self.next_subquery_column();
+            let column = self.next_subquery_column(&columns);
             let outer = std::mem::replace(
                 &mut input,
                 Box::new(grafeo_core::execution::operators::EmptyOperator::new(
@@ -148,11 +148,17 @@ impl super::Planner {
         }
     }
 
-    /// A name for the column of a lifted subquery, unique in the query.
-    fn next_subquery_column(&self) -> String {
-        let n = self.subquery_counter.get();
-        self.subquery_counter.set(n + 1);
-        format!("__subquery_{n}")
+    /// A name for the column of a lifted subquery, unique in the query and
+    /// not one of the row's `columns` (a variable may be named so).
+    fn next_subquery_column(&self, columns: &[String]) -> String {
+        loop {
+            let n = self.subquery_counter.get();
+            self.subquery_counter.set(n + 1);
+            let name = format!("__subquery_{n}");
+            if !columns.contains(&name) {
+                return name;
+            }
+        }
     }
 
     /// Plans `subplan` once per row of `outer`, counting its rows (up to one
@@ -430,13 +436,10 @@ fn bound_names(plan: &LogicalOperator, names: &mut HashSet<String>) {
         LogicalOperator::Return(ret) => {
             names.extend(ret.items.iter().filter_map(|item| item.alias.clone()));
         }
+        // A group key only reads a name: one the subquery binds is bound by
+        // its pattern, and one from the outer row stays an outer value.
         LogicalOperator::Aggregate(aggregate) => {
             names.extend(aggregate.aggregates.iter().filter_map(|a| a.alias.clone()));
-            for key in &aggregate.group_by {
-                if let LogicalExpression::Variable(name) = key {
-                    names.insert(name.clone());
-                }
-            }
         }
         LogicalOperator::Unwind(unwind) => {
             names.insert(unwind.variable.clone());
@@ -652,5 +655,40 @@ fn expression_names(expression: &LogicalExpression, names: &mut HashSet<String>)
             subplan,
             projection,
         } => plan_names(subplan, names) && expression_names(projection, names),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::plan::{AggregateExpr, AggregateFunction, AggregateOp, NodeScanOp};
+
+    /// A subquery grouping by a name its patterns do not bind (here `k`, an
+    /// outer `UNWIND` variable) reads that outer value, so it runs per row;
+    /// grouping by its own pattern variable does not.
+    #[test]
+    fn a_group_key_from_the_outer_row_is_an_outer_value() {
+        let grouped_by = |key: &str| {
+            LogicalOperator::Aggregate(AggregateOp {
+                group_by: vec![LogicalExpression::Variable(key.into())],
+                aggregates: vec![AggregateExpr {
+                    function: AggregateFunction::Count,
+                    expression: Some(LogicalExpression::Variable("p".into())),
+                    expression2: None,
+                    distinct: false,
+                    alias: Some("c".into()),
+                    percentile: None,
+                    separator: None,
+                }],
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "p".into(),
+                    label: None,
+                    input: None,
+                })),
+                having: None,
+            })
+        };
+        assert!(reads_outer_values(&grouped_by("k")));
+        assert!(!reads_outer_values(&grouped_by("p")));
     }
 }

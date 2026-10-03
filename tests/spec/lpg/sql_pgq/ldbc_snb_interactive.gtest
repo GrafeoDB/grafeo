@@ -345,14 +345,14 @@ tests:
     expect:
       ordered: true
       rows:
-        - [Julia_Gillard, 2]
-        - [Chile, 1]
-        - [Monaco, 1]
-        - [Nigeria, 1]
-        - [Pope_Paul_VI, 1]
-        - [South_Korea, 1]
-        - [South_Vietnam, 1]
-        - [Winston_Churchill, 1]
+        - [Julia_Gillard, 2, 0]
+        - [Chile, 1, 0]
+        - [Monaco, 1, 0]
+        - [Nigeria, 1, 0]
+        - [Pope_Paul_VI, 1, 0]
+        - [South_Korea, 1, 0]
+        - [South_Vietnam, 1, 0]
+        - [Winston_Churchill, 1, 0]
 
   # IC5. New groups.
   - name: ic5_new_groups

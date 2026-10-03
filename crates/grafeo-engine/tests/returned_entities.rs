@@ -398,29 +398,29 @@ fn entities_from_a_call_subquery_are_records() {
 fn collected_grouped_and_unwound_entities_are_records() {
     let db = three_edges(Config::in_memory());
     for language in LANGUAGES {
-        let rows = |query: &str| sorted(rows(&db, language, query));
+        let sorted_rows = |query: &str| sorted(rows(&db, language, query));
         assert_eq!(
-            rows("MATCH (a)-[r]->(b) WHERE r.w = 2 RETURN collect(r) AS rs"),
+            sorted_rows("MATCH (a)-[r]->(b) WHERE r.w = 2 RETURN collect(r) AS rs"),
             [["[K w=Int64(2)]"]],
             "{language}"
         );
         assert_eq!(
-            rows("MATCH (a:A) WHERE a.n = 3 RETURN collect(a) AS ns"),
+            sorted_rows("MATCH (a:A) WHERE a.n = 3 RETURN collect(a) AS ns"),
             [["[n=Int64(3)]"]],
             "{language}"
         );
         assert_eq!(
-            rows("MATCH (a)-[r]->(b) WITH r, count(*) AS c RETURN r"),
+            sorted_rows("MATCH (a)-[r]->(b) WITH r, count(*) AS c RETURN r"),
             edges(&[1, 2, 3]),
             "{language}"
         );
         assert_eq!(
-            rows("MATCH (a:A)-[r]->(b) WITH a, count(r) AS c RETURN a"),
+            sorted_rows("MATCH (a:A)-[r]->(b) WITH a, count(r) AS c RETURN a"),
             nodes(&[1, 3, 5]),
             "{language}"
         );
         assert_eq!(
-            rows("MATCH (a)-[r]->(b) WITH collect(r) AS rs UNWIND rs AS e RETURN e"),
+            sorted_rows("MATCH (a)-[r]->(b) WITH collect(r) AS rs UNWIND rs AS e RETURN e"),
             edges(&[1, 2, 3]),
             "{language}"
         );

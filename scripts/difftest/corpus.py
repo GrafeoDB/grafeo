@@ -423,8 +423,8 @@ for case_id, query, languages in [
     ("P4", "MATCH (a)-[a]->(b) RETURN count(*) AS c", BOTH),
     ("P5", "MATCH (a)-[r]->(r) RETURN count(*) AS c", BOTH),
     ("P6", "WITH 1 AS r MATCH ()-[r]->() RETURN count(*) AS c", CYPHER),
-    ("P7", "MATCH (a:Person) CALL { WITH a MATCH ()-[a]->(b) RETURN b } RETURN count(*) AS c", CYPHER),
-    ("P8", "MATCH ()-[r:KNOWS]->() CALL { WITH r MATCH (x)-[r]->(y) RETURN x.name AS xn } RETURN count(*) AS c", CYPHER),
+    ("P7", "MATCH (a:Person) CALL { WITH a MATCH ()-[a]->(b) RETURN b } RETURN count(*) AS c", BOTH),
+    ("P8", "MATCH ()-[r:KNOWS]->() CALL { WITH r MATCH (x)-[r]->(y) RETURN x.name AS xn } RETURN count(*) AS c", BOTH),
 ]:
     case(case_id, query, languages)
 
@@ -435,17 +435,18 @@ for case_id, query in [
     ("Q3", "MATCH (a:Person) WHERE COUNT { MATCH (b:Person) WHERE b.age < a.age } = 2 RETURN a.name AS n"),
     ("Q4", "UNWIND [25, 30] AS k RETURN k, COUNT { MATCH (p:Person {age: k}) } AS c"),
     ("Q5", "MATCH (a:Person) RETURN a.name AS n, COUNT { MATCH (a)-[:KNOWS*1..2]->() } AS c"),
-    ("Q6", "MATCH (a:Person) RETURN a.name AS n, EXISTS { MATCH (a)-[:KNOWS]->(b), (c:Robot) } AS e"),
+    ("Q6", "MATCH (a:Person) WHERE COUNT { MATCH (a)-[:KNOWS]->(b), (c:Robot) } = 0 RETURN a.name AS n"),
     ("Q7", "MATCH (a:Person)-[:KNOWS]->(b) WITH a WHERE COUNT { MATCH (a)-[:KNOWS]->(x), (y:City) } = 6 RETURN a.name AS n"),
     ("Q8", "MATCH (a:Person) WITH a, COUNT { MATCH (b:Person) WHERE b.age < a.age } AS y RETURN a.name AS n, y"),
 ]:
     case(case_id, query)
 
-# R: EXISTS in WHERE tied to the outer row by a value, inside OR, and through the row's edge
+# R: EXISTS in WHERE tied to the outer row by a value, inside OR, and through the row's edge;
+#    R6: a CALL subquery over two edges in a row, which runs again for each outer row like those
 for case_id, query in [
     ("R1", "MATCH (a:Person) WHERE EXISTS { MATCH (c:City) WHERE c.w = a.w + 4 } RETURN a.name AS n"),
     ("R2", "MATCH (a:Person) WHERE NOT EXISTS { MATCH (c:City) WHERE c.w = a.w + 4 } RETURN a.name AS n"),
-    ("R3", "MATCH (a:Person)-[:KNOWS]->(b) WITH a WHERE a.name = 'none' OR EXISTS { MATCH (a)-[:KNOWS]->(x), (c:City) } RETURN a.name AS n"),
+    ("R3", "MATCH (a:Person)-[:KNOWS]->(b) WITH a WHERE a.name = 'Jules' OR EXISTS { MATCH (a)-[:KNOWS]->(x), (c:City) WHERE c.w = a.w + 4 } RETURN a.name AS n"),
     ("R4", "MATCH (a:Person)-[r:KNOWS]->(b) WHERE EXISTS { MATCH (a)-[s:KNOWS]->(c) WHERE s <> r } RETURN a.name AS a, b.name AS b"),
     ("R5", "UNWIND [25, 31] AS k WITH k WHERE EXISTS { MATCH (p:Person {age: k}) } RETURN k"),
 ]:

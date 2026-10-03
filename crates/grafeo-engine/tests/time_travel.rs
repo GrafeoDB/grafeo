@@ -205,6 +205,63 @@ fn test_session_set_viewing_epoch() {
     assert_eq!(result.rows().len(), 2);
 }
 
+/// A session that reads at an earlier epoch does not write: statements and
+/// the session's direct writes fail until the viewing epoch is cleared, and
+/// nothing reaches the store, so the past stays as it was.
+#[test]
+fn test_writes_fail_while_reading_an_earlier_epoch() {
+    let db = setup_db();
+    let mut session = db.session();
+    session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    bump_epoch(&mut session);
+    session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+    let names = |session: &grafeo_engine::Session| -> Vec<Value> {
+        session
+            .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| row[0].clone())
+            .collect()
+    };
+
+    session.set_viewing_epoch(EpochId::new(0));
+    let error = session
+        .execute("INSERT (:Person {name: 'Vincent'})")
+        .unwrap_err();
+    assert!(error.to_string().contains("earlier epoch"), "{error}");
+    assert!(
+        session
+            .execute("MATCH (p:Person {name: 'Alix'}) SET p.age = 30")
+            .is_err()
+    );
+    assert!(session.create_node(&["Person"]).is_err());
+    // Reads still work at that epoch.
+    session.execute("MATCH (p:Person) RETURN p.name").unwrap();
+    session.clear_viewing_epoch();
+
+    assert!(
+        session
+            .execute_at_epoch("INSERT (:Person {name: 'Mia'})", EpochId::new(0))
+            .is_err()
+    );
+    assert_eq!(names(&session), [Value::from("Alix"), Value::from("Gus")]);
+    assert!(
+        session
+            .execute("MATCH (p:Person) WHERE p.age IS NOT NULL RETURN p")
+            .unwrap()
+            .rows()
+            .is_empty()
+    );
+
+    // With the viewing epoch cleared, the session writes again.
+    session.execute("INSERT (:Person {name: 'Mia'})").unwrap();
+    assert_eq!(
+        names(&session),
+        [Value::from("Alix"), Value::from("Gus"), Value::from("Mia")]
+    );
+}
+
 #[test]
 fn test_session_reset_clears_viewing_epoch() {
     let db = setup_db();

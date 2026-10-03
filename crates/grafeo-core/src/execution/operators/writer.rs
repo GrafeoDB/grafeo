@@ -240,14 +240,15 @@ impl GraphWriter {
         }
     }
 
-    /// Fails when this writer's transaction cannot see the node, for one it
-    /// deleted earlier: a write to it would change nothing anyone sees.
+    /// Fails when this writer's transaction cannot see the node: one it
+    /// deleted earlier, or one that does not exist. A write to it would change
+    /// nothing anyone sees.
     fn require_node(&self, id: NodeId) -> Result<(), OperatorError> {
         if self.has_node(id) {
             Ok(())
         } else {
             Err(OperatorError::Execution(format!(
-                "Node {} has been deleted in this transaction",
+                "Node {} does not exist or has been deleted in this transaction",
                 id.as_u64()
             )))
         }
@@ -260,7 +261,7 @@ impl GraphWriter {
             Ok(())
         } else {
             Err(OperatorError::Execution(format!(
-                "Relationship {} has been deleted in this transaction",
+                "Relationship {} does not exist or has been deleted in this transaction",
                 id.as_u64()
             )))
         }

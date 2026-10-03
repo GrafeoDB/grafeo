@@ -304,3 +304,25 @@ fn the_selected_graph_holds_after_compact() {
     db.set_current_graph(None).unwrap();
     assert_eq!(names(&db), [Value::from("Alix")]);
 }
+
+/// `compact()` keeps a database opened read-only read-only: writes fail as
+/// before, and `close()` has nothing to write back.
+#[cfg(feature = "grafeo-file")]
+#[test]
+fn compact_keeps_a_read_only_database_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("people.grafeo");
+    {
+        let db = GrafeoDB::open(&path).unwrap();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.close().unwrap();
+    }
+
+    let mut db = GrafeoDB::open_read_only(&path).unwrap();
+    db.compact().unwrap();
+    assert!(db.is_read_only());
+    assert!(db.execute("INSERT (:Person {name: 'Gus'})").is_err());
+    assert!(db.create_node(&["Person"]).is_err());
+    assert_eq!(names(&db), [Value::from("Alix")]);
+    db.close().unwrap();
+}

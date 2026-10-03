@@ -4779,7 +4779,29 @@ impl Session {
     #[cfg(feature = "lpg")]
     fn check_graph_access(&self, writes: bool) -> Result<()> {
         self.check_active_graph()?;
+        if writes {
+            self.check_reads_the_present()?;
+        }
         self.check_graph_grant(writes)
+    }
+
+    /// Fails while the session reads at an earlier epoch
+    /// ([`set_viewing_epoch`](Self::set_viewing_epoch), `execute_at_epoch`): a
+    /// write there would change the past.
+    fn check_reads_the_present(&self) -> Result<()> {
+        match *self.viewing_epoch_override.lock() {
+            Some(epoch) => Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::new(
+                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    format!(
+                        "cannot write while the session reads at an earlier epoch ({}): \
+                         clear the viewing epoch first",
+                        epoch.as_u64()
+                    ),
+                ),
+            )),
+            None => Ok(()),
+        }
     }
 
     /// Fails when this identity has per-graph grants and none covers the
@@ -5100,6 +5122,7 @@ impl Session {
     ) -> Result<T> {
         use grafeo_core::execution::operators::GraphWriter;
 
+        self.check_reads_the_present()?;
         self.with_auto_commit(true, || {
             let key = self.active_graph_storage_key();
             if self.current_transaction.lock().is_some() {

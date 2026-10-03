@@ -1057,7 +1057,9 @@ impl GrafeoDB {
         self.buffer_manager.register_consumer(overlay_consumer);
 
         self.layered_store = Some(layered);
-        self.read_only = false;
+        // A database opened read-only stays read-only; an external read-only
+        // store becomes an owned copy that takes writes.
+        self.read_only = self.config.access_mode == crate::config::AccessMode::ReadOnly;
         self.query_cache = Arc::new(QueryCache::default());
         self.projections.write().clear();
 

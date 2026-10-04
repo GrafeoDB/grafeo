@@ -243,7 +243,7 @@ mod tests {
 
         let section = LpgStoreSection::new(Arc::clone(&store));
         let bytes = section.serialize().expect("serialize should succeed");
-        assert!(!bytes.is_empty());
+        assert!(!bytes.is_empty(), "bytes is empty");
         assert!(block::is_block_format(&bytes));
 
         // Deserialize into a fresh store

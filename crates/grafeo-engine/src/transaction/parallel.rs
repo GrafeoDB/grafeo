@@ -859,7 +859,7 @@ mod tests {
     #[test]
     fn test_partitioner_empty() {
         let (clusters, largest) = ConflictPartitioner::partition(&[], &[], &[]);
-        assert!(clusters.is_empty());
+        assert!(clusters.is_empty(), "{clusters:?}");
         assert_eq!(largest, 0);
     }
 
@@ -1374,7 +1374,7 @@ mod tests {
         });
 
         let failed: Vec<usize> = result.failed_indices().collect();
-        assert!(failed.is_empty());
+        assert!(failed.is_empty(), "{failed:?}");
     }
 
     #[test]

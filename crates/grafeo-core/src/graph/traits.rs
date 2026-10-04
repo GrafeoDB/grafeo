@@ -876,8 +876,14 @@ mod tests {
         let store = NullGraphStore;
         let nid = NodeId(1);
 
-        assert!(store.neighbors(nid, Direction::Outgoing).is_empty());
-        assert!(store.edges_from(nid, Direction::Incoming).is_empty());
+        assert!(
+            store.neighbors(nid, Direction::Outgoing).is_empty(),
+            "expected empty"
+        );
+        assert!(
+            store.edges_from(nid, Direction::Incoming).is_empty(),
+            "expected empty"
+        );
         assert_eq!(store.out_degree(nid), 0);
         assert_eq!(store.in_degree(nid), 0);
         assert!(!store.has_backward_adjacency());
@@ -887,9 +893,13 @@ mod tests {
     fn null_graph_store_scans_and_counts() {
         let store = NullGraphStore;
 
-        assert!(store.node_ids().is_empty());
-        assert!(store.all_node_ids().is_empty());
-        assert!(store.nodes_by_label("Person").is_empty());
+        assert!(store.node_ids().is_empty(), "{:?}", store.node_ids());
+        assert!(
+            store.all_node_ids().is_empty(),
+            "{:?}",
+            store.all_node_ids()
+        );
+        assert!(store.nodes_by_label("Person").is_empty(), "expected empty");
         assert_eq!(store.node_count(), 0);
         assert_eq!(store.edge_count(), 0);
     }
@@ -904,9 +914,17 @@ mod tests {
         assert!(store.edge_type(eid).is_none());
         assert!(store.edge_type_versioned(eid, epoch, txn).is_none());
         assert!(!store.has_property_index("name"));
-        assert!(store.all_labels().is_empty());
-        assert!(store.all_edge_types().is_empty());
-        assert!(store.all_property_keys().is_empty());
+        assert!(store.all_labels().is_empty(), "{:?}", store.all_labels());
+        assert!(
+            store.all_edge_types().is_empty(),
+            "{:?}",
+            store.all_edge_types()
+        );
+        assert!(
+            store.all_property_keys().is_empty(),
+            "{:?}",
+            store.all_property_keys()
+        );
     }
 
     #[test]
@@ -915,16 +933,21 @@ mod tests {
         let key = PropertyKey::from("age");
         let val = Value::Int64(30);
 
-        assert!(store.find_nodes_by_property("age", &val).is_empty());
+        assert!(
+            store.find_nodes_by_property("age", &val).is_empty(),
+            "expected empty"
+        );
         assert!(
             store
                 .find_nodes_by_properties(&[("age", val.clone())])
-                .is_empty()
+                .is_empty(),
+            "expected no nodes"
         );
         assert!(
             store
                 .find_nodes_in_range("age", Some(&val), None, true, false)
-                .is_empty()
+                .is_empty(),
+            "expected no nodes"
         );
         assert!(!store.node_property_might_match(&key, CompareOp::Eq, &val));
         assert!(!store.edge_property_might_match(&key, CompareOp::Eq, &val));
@@ -956,12 +979,14 @@ mod tests {
         assert!(
             store
                 .filter_visible_node_ids(&[nid, NodeId(2)], epoch)
-                .is_empty()
+                .is_empty(),
+            "expected no visible nodes"
         );
         assert!(
             store
                 .filter_visible_node_ids_versioned(&[nid], epoch, txn)
-                .is_empty()
+                .is_empty(),
+            "expected no visible nodes"
         );
     }
 
@@ -1417,7 +1442,7 @@ mod tests {
         let store: Arc<dyn GraphStoreSearch> = Arc::new(TestMutStore::new());
         assert_eq!(store.node_count(), 0);
         assert_eq!(store.edge_count(), 0);
-        assert!(store.node_ids().is_empty());
+        assert!(store.node_ids().is_empty(), "{:?}", store.node_ids());
         assert!(store.get_node(NodeId(1)).is_none());
         assert_eq!(store.current_epoch(), EpochId(0));
     }

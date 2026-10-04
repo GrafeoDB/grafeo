@@ -159,9 +159,9 @@ mod tests {
         session
             .execute_sparql(r#"DELETE WHERE { <http://ex.org/alix> <http://ex.org/p> ?o }"#)
             .unwrap();
-        assert!(default_graph(&session).is_empty());
+        assert!(default_graph(&session).is_empty(), "expected empty");
         session.commit().unwrap();
-        assert!(default_graph(&db.session()).is_empty());
+        assert!(default_graph(&db.session()).is_empty(), "expected empty");
     }
 
     #[cfg(feature = "wal")]

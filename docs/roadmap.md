@@ -18,19 +18,19 @@ For what has shipped, see the [CHANGELOG](changelog.md).
 
 ---
 
-## Planned: finishing the 0.5 beta
+## Planned: finishing the beta
 
-The rest of the 0.5 series makes Grafeo dependable by design: durable and crash-safe persistence, real snapshot isolation, and memory use close to what a dense layout needs, followed by driver, protocol and language completeness.
+The 0.6 series makes Grafeo dependable by design: durable and crash-safe persistence, real snapshot isolation, and memory use close to what a dense layout needs, followed by driver, protocol and language completeness.
 
 | Release | Focus |
 | --- | --- |
-| [**0.5.45**](https://github.com/GrafeoDB/grafeo/milestone/3) | One storage format: WAL v2 and chunked sections without the 4 GiB limit, with automatic migration |
-| [**0.5.46**](https://github.com/GrafeoDB/grafeo/milestone/4) | Transactions own their changes: snapshot isolation for properties and labels, one write path; ADBC driver, SPARQL 1.1 Protocol and Graph Store Protocol, GQL vector types |
-| [**0.5.47**](https://github.com/GrafeoDB/grafeo/milestone/5) | Compact-core store: a dense memory layout, enforced memory limits, incremental checkpoints |
-| [**0.5.48**](https://github.com/GrafeoDB/grafeo/milestone/6) | Push-only execution engine and benchmark-gated parallelism |
-| [**0.5.49**](https://github.com/GrafeoDB/grafeo/milestone/7) | API parity across bindings, feature flag cleanup, query language completeness, test depth |
+| [**0.6.0**](https://github.com/GrafeoDB/grafeo/milestone/3) | One storage format: WAL v2 and chunked sections without the 4 GiB limit, with automatic migration. Transactions own their changes: versioned properties and labels, a commit that is logged before it becomes visible. A compact-core store: a dense memory layout, enforced memory limits, incremental checkpoints |
+| [**0.6.1**](https://github.com/GrafeoDB/grafeo/milestone/4) | Transaction fixes on the new model; ADBC driver, SPARQL 1.1 Protocol and Graph Store Protocol, GQL vector types |
+| [**0.6.2**](https://github.com/GrafeoDB/grafeo/milestone/5) | To be planned |
+| [**0.6.3**](https://github.com/GrafeoDB/grafeo/milestone/6) | Push-only execution engine and benchmark-gated parallelism |
+| [**0.6.4**](https://github.com/GrafeoDB/grafeo/milestone/7) | API parity across bindings, feature flag cleanup, query language completeness, test depth |
 
-The 0.5.45 storage format change is the only planned migration: older files are converted automatically on open.
+The 0.6.0 storage format change is the only planned migration: older files are converted automatically on open, and the old file is kept next to the new one (see [Versioning](versioning.md)).
 
 ---
 
@@ -38,8 +38,8 @@ The 0.5.45 storage format change is the only planned migration: older files are 
 
 | Release | Focus |
 | --- | --- |
-| [**0.6.0**](https://github.com/GrafeoDB/grafeo/milestone/8) | Release candidate: no new features, blocker review and final audit. If it works in 0.6, it works in 1.0 |
-| [**0.7.0**](https://github.com/GrafeoDB/grafeo/milestone/9) | Per-graph access control with pluggable authentication (JWT, OIDC), reactive event bus, removal of the deprecated feature profile names |
+| [**0.7.0**](https://github.com/GrafeoDB/grafeo/milestone/8) | Release candidate: no new features, blocker review and final audit. If it works in 0.7, it works in 1.0 |
+| [**0.8.0**](https://github.com/GrafeoDB/grafeo/milestone/9) | Per-graph access control with pluggable authentication (JWT, OIDC), reactive event bus, removal of the deprecated feature profile names |
 | **1.0** | Stable: semantic versioning commitment, public API frozen |
 
 **Later, not scheduled**: enterprise authorization (row-level security, property masking, `GRANT`/`REVOKE`, LDAP and SAML), inbound connectors starting with Kafka, distributed deployment, more language bindings.

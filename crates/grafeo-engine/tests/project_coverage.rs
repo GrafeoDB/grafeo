@@ -469,7 +469,7 @@ fn skip_beyond_result_set_yields_empty() {
     let r = session
         .execute("MATCH (n:Person) RETURN n.name SKIP 10")
         .unwrap();
-    assert!(r.rows().is_empty());
+    assert!(r.rows().is_empty(), "{:?}", r.rows());
 }
 
 // ---------------------------------------------------------------------------

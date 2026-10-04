@@ -59,7 +59,7 @@ fn writes_go_to_the_selected_graph() {
 
     // The default graph got none of it.
     db.set_current_graph(None).unwrap();
-    assert!(ids(&db).is_empty());
+    assert!(ids(&db).is_empty(), "expected empty");
     assert!(db.get_node(component).is_none());
 }
 
@@ -230,7 +230,8 @@ fn a_failing_batch_creates_nothing() {
         assert_eq!(db.node_count(), 0, "with_index: {with_index}");
         assert!(
             db.find_nodes_by_property("id", &Value::from("a"))
-                .is_empty()
+                .is_empty(),
+            "expected no nodes"
         );
 
         let created = db

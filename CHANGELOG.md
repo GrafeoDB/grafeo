@@ -2,13 +2,23 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.5.45] - Unreleased
+## [0.6.0] - Unreleased
+
+### Changed
+
+- **Versioning**: before 1.0, a release that changes the file format or breaks the stable surface (the `grafeo` crate, the bindings, the CLI) bumps the minor version, as Cargo and npm expect for `0.x`. This release, first planned as 0.5.45, is 0.6.0 for that reason. See [Versioning and Compatibility](https://grafeo.dev/versioning/).
+- **Breaking: the minimum Rust version is 1.99.0** (was 1.91.1).
+- **Rust (`grafeo-engine`): `TransactionState::Committing`**: `TransactionManager::state` reports it while a commit is being completed, between its commit epoch and its WAL records.
+
+### Fixed
+
+- **Writes during a commit could land in the middle of it** ([#548](https://github.com/GrafeoDB/grafeo/issues/548)): a direct write, or another transaction writing what the committing one wrote, could hide the committed value from point-in-time reads, remove it on rollback or mark an uncommitted value as committed; a transaction that began during a commit could miss it; and after a crash, two commits could be replayed in the wrong order. A commit now completes before anything that comes after it.
 
 ## [0.5.44] - 2026-10-04
 
 Durability and consistency release. Crash-safe checkpoints and WAL recovery, indexes and constraints that survive a reopen, schema checks on every write path, per-graph conflicts and grants, commit and rollback in O(changes), and fixes for shortest paths, variable-length edges, list comprehensions, subqueries, `OPTIONAL MATCH` and `MERGE`. Plus graph handles, upserts by key and write counters.
 
-> **Heads-up: 0.5.45 changes the on-disk format.** 0.5.45 migrates a database automatically on first open (WAL-directory databases become a single `.grafeo` file); after that, 0.5.44 and older can no longer open it, so keep a backup if you may need to go back.
+> **Heads-up: 0.6.0 (first announced as 0.5.45) changes the on-disk format.** 0.6.0 migrates a database automatically on first open (WAL-directory databases become a single `.grafeo` file); after that, 0.5.44 and older can no longer open it, so keep a backup if you may need to go back.
 
 ### Changed
 
@@ -37,7 +47,7 @@ Every query result in the differential test corpus that differs from 0.5.43 is l
 - **`DurabilityMode::Adaptive` never synced the WAL**, so it behaved like `NoSync`, and backups missed writes made while they ran; those now land in this backup or the next.
 - **Schema changes, constraints and `create_graph()` / `drop_graph()` were lost on WAL replay** ([#421](https://github.com/GrafeoDB/grafeo/issues/421), [#422](https://github.com/GrafeoDB/grafeo/issues/422)). An unknown WAL record now fails the open instead of being skipped.
 - **`DROP CONSTRAINT` did nothing** ([#420](https://github.com/GrafeoDB/grafeo/issues/420)). Constraints are now stored by name: `CREATE` and `DROP CONSTRAINT` support `IF NOT EXISTS` / `IF EXISTS`, `SHOW CONSTRAINTS` lists them, and unnamed ones get a name such as `City_name_not_null`. Constraints from 0.5.43 files have no name and cannot be dropped by name.
-- **Reopening a `.grafeo` database or `to_memory()` lost its indexes** (lookups on a reopened file scanned every node, [#459](https://github.com/GrafeoDB/grafeo/issues/459)), and `to_memory()` also dropped the schema, constraints and property history. WAL-directory databases still lose their indexes until 0.5.45 ([#401](https://github.com/GrafeoDB/grafeo/issues/401)).
+- **Reopening a `.grafeo` database or `to_memory()` lost its indexes** (lookups on a reopened file scanned every node, [#459](https://github.com/GrafeoDB/grafeo/issues/459)), and `to_memory()` also dropped the schema, constraints and property history. WAL-directory databases still lose their indexes until 0.6.0 ([#401](https://github.com/GrafeoDB/grafeo/issues/401)).
 - **Rust builds with only the `rdf` profile kept no data across a reopen** ([#544](https://github.com/GrafeoDB/grafeo/issues/544)); the facade's `rdf` profile now includes the LPG store.
 - **Embeddings changed while their vector index was spilled reverted on reload** ([#522](https://github.com/GrafeoDB/grafeo/issues/522)).
 - **Sessions and direct reads after `compact()` missed parts of the database**: SPARQL writes were lost, CDC missed queries, the selected graph was ignored, and `get_node`, `node_count`, `info()`, `schema()` and similar did not see pre-compaction data (or panicked on a `with_store` database). Queries after `compact()` are still not written to the WAL, so a crash loses them; direct calls are logged.
@@ -133,7 +143,7 @@ Stabilization release. Fixes for silent wrong results (`ORDER BY` + `LIMIT`, `UN
 - **GQL ran only the first statement and ignored the rest** ([#380](https://github.com/GrafeoDB/grafeo/issues/380)): `INSERT ... INSERT ...` (as in the quickstart) created only the first node and `INSERT ... RETURN` ignored its `RETURN`; both now work. Gremlin and Cypher had similar gaps.
 - **GQL `^` (power) was not parsed**: `RETURN 2 ^ 10` returned `2`. It now computes the power, binding tighter than `*` and right associative.
 - **`ALTER NODE TYPE / ALTER EDGE TYPE ... ADD PROPERTY name TYPE` added a property called `PROPERTY`** of type `name` and dropped the real type; `DROP PROPERTY name` dropped the wrong property. `PROPERTY` is now an optional keyword.
-- **Databases over the storage format's limits were written corrupt** ([#392](https://github.com/GrafeoDB/grafeo/issues/392)): an LPG section over 4 GiB or 65,535 blocks, or over 65,535 labels on one node or versions of one property, wrapped a size field, and the file failed to open with `CRC mismatch`. Such a checkpoint now fails with an error naming the limit and keeps the sidecar WAL, so nothing is lost. Larger sections are planned for 0.5.45.
+- **Databases over the storage format's limits were written corrupt** ([#392](https://github.com/GrafeoDB/grafeo/issues/392)): an LPG section over 4 GiB or 65,535 blocks, or over 65,535 labels on one node or versions of one property, wrapped a size field, and the file failed to open with `CRC mismatch`. Such a checkpoint now fails with an error naming the limit and keeps the sidecar WAL, so nothing is lost. Larger sections are planned for 0.6.0.
 - **Rolling back a transaction on a persistent database did not undo `SET`, `REMOVE` or label changes**, and single-file databases wrote them to disk on `close()`.
 - **`ORDER BY ... LIMIT` over a whole-node `RETURN` returned raw NodeIds** instead of node maps, both for property sort keys ([#335](https://github.com/GrafeoDB/grafeo/issues/335)) and for expression keys such as `text_score(...)`, `CASE` or arithmetic ([#347](https://github.com/GrafeoDB/grafeo/issues/347)). ([#337](https://github.com/GrafeoDB/grafeo/pull/337), [#349](https://github.com/GrafeoDB/grafeo/pull/349), [@temporaryfix](https://github.com/temporaryfix))
 - **Duplicate column names silently lost data** ([#371](https://github.com/GrafeoDB/grafeo/issues/371)), e.g. `RETURN id(s), id(t)`. Distinct expressions now get distinct names, and a result that would still repeat a name is an error asking for an alias; in SPARQL, an `AS ?x` that repeats a projected or bound name is a parse error. ([#372](https://github.com/GrafeoDB/grafeo/pull/372), [@teipsum](https://github.com/teipsum); [#350](https://github.com/GrafeoDB/grafeo/pull/350), [@temporaryfix](https://github.com/temporaryfix))

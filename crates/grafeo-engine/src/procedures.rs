@@ -1350,7 +1350,7 @@ mod tests {
             vec!["name", "description", "parameters", "output_columns"],
             "column shape is part of the public CALL grafeo.procedures() contract"
         );
-        assert!(!result.rows.is_empty());
+        assert!(!result.rows.is_empty(), "result.rows is empty");
     }
 
     #[test]

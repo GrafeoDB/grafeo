@@ -392,7 +392,7 @@ mod tests {
         index.insert(NodeId::new(3), "the brown dog sleeps all day");
 
         let results = index.search("brown dog", 10);
-        assert!(!results.is_empty());
+        assert!(!results.is_empty(), "results is empty");
         // Node 3 mentions both "brown" and "dog" in a shorter document
         assert_eq!(results[0].0, NodeId::new(3));
     }
@@ -401,7 +401,7 @@ mod tests {
     fn test_empty_index_search() {
         let index = InvertedIndex::new(BM25Config::default());
         let results = index.search("anything", 10);
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
     }
 
     #[test]
@@ -409,7 +409,7 @@ mod tests {
         let mut index = InvertedIndex::new(BM25Config::default());
         index.insert(NodeId::new(1), "hello world");
         let results = index.search("", 10);
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
     }
 
     #[test]
@@ -417,7 +417,7 @@ mod tests {
         let mut index = InvertedIndex::new(BM25Config::default());
         index.insert(NodeId::new(1), "hello world");
         let results = index.search("the a an", 10);
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
     }
 
     #[test]
@@ -449,7 +449,7 @@ mod tests {
 
         assert_eq!(index.len(), 1);
         let results = index.search("old", 10);
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
 
         let results = index.search("completely different", 10);
         assert_eq!(results.len(), 1);
@@ -509,7 +509,7 @@ mod tests {
         let mut index = InvertedIndex::new(BM25Config::default());
         index.insert(NodeId::new(1), "hello world");
         let results = index.search("nonexistent term", 10);
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
     }
 
     #[test]

@@ -130,7 +130,7 @@ mod tests {
     #[test]
     fn test_empty_candidates() {
         let result = mmr_select(&[1.0, 0.0], &[], 5, 0.5, DistanceMetric::Euclidean);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     #[test]
@@ -138,7 +138,7 @@ mod tests {
         let v = [1.0f32, 0.0];
         let candidates = vec![(NodeId::new(1), 0.0, v.as_slice())];
         let result = mmr_select(&[1.0, 0.0], &candidates, 0, 0.5, DistanceMetric::Euclidean);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     #[test]

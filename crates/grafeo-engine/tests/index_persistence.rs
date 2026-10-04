@@ -65,7 +65,8 @@ fn to_memory_keeps_indexes_and_constraints() {
     assert_built(&db);
     assert!(
         db.find_nodes_by_property("id", &Value::from("f1"))
-            .is_empty()
+            .is_empty(),
+        "expected no nodes"
     );
 }
 

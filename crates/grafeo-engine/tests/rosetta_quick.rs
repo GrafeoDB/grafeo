@@ -21,7 +21,7 @@ fn gql_count_star() {
     let db = setup_db();
     let r = db.execute("MATCH ()-[r:RELATED_TO]->() RETURN r.relationship AS rel_type, count(*) AS cnt ORDER BY cnt DESC LIMIT 20");
     assert!(r.is_ok(), "GQL count(*) failed: {:?}", r.err());
-    assert!(!r.unwrap().rows().is_empty());
+    assert!(!r.unwrap().rows().is_empty(), "r.unwrap().rows() is empty");
 }
 
 #[test]

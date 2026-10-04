@@ -455,7 +455,7 @@ mod tests {
         std::fs::write(&file_path, "Alix,30\n").unwrap();
 
         let columns = read_csv_columns(&file_path, false, None).unwrap();
-        assert!(columns.is_empty());
+        assert!(columns.is_empty(), "{columns:?}");
     }
 
     #[test]
@@ -475,7 +475,7 @@ mod tests {
         std::fs::write(&file_path, "").unwrap();
 
         let columns = read_csv_columns(&file_path, true, None).unwrap();
-        assert!(columns.is_empty());
+        assert!(columns.is_empty(), "{columns:?}");
     }
 
     // ── read_jsonl_keys ──────────────────────────────────────────────
@@ -501,7 +501,7 @@ mod tests {
         std::fs::write(&file_path, "").unwrap();
 
         let keys = read_jsonl_keys(&file_path).unwrap();
-        assert!(keys.is_empty());
+        assert!(keys.is_empty(), "{keys:?}");
     }
 
     #[test]
@@ -523,7 +523,7 @@ mod tests {
         std::fs::write(&file_path, "not valid json\n").unwrap();
 
         let keys = read_jsonl_keys(&file_path).unwrap();
-        assert!(keys.is_empty());
+        assert!(keys.is_empty(), "{keys:?}");
     }
 
     // ── import_csv error cases ───────────────────────────────────────

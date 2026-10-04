@@ -556,7 +556,7 @@ mod tests {
         let nonce = build_nonce(0, 0);
         let encrypted = encryptor.encrypt(b"", &nonce, b"").unwrap();
         let decrypted = encryptor.decrypt(&encrypted, b"").unwrap();
-        assert!(decrypted.is_empty());
+        assert!(decrypted.is_empty(), "{decrypted:?}");
     }
 
     #[test]

@@ -232,7 +232,8 @@ fn reads_of_a_dropped_selected_graph_find_nothing() {
     assert!(db.get_node_labels(component).is_none());
     assert!(
         db.find_nodes_by_property("name", &Value::from("Alix"))
-            .is_empty()
+            .is_empty(),
+        "expected no nodes"
     );
 
     db.set_current_graph(None).unwrap();

@@ -831,7 +831,7 @@ mod tests {
         );
         let batch = query_result_to_record_batch(&cols, &types, &rows).unwrap();
         let ipc_bytes = record_batch_to_ipc_stream(&batch).unwrap();
-        assert!(!ipc_bytes.is_empty());
+        assert!(!ipc_bytes.is_empty(), "ipc_bytes is empty");
 
         // Read back
         let cursor = std::io::Cursor::new(ipc_bytes);
@@ -943,7 +943,7 @@ mod tests {
                 .insert(PropertyKey::new("name"), Value::String("Alix".into()));
 
             let ipc_bytes = crate::database::arrow::nodes_to_ipc_stream(&[node]).unwrap();
-            assert!(!ipc_bytes.is_empty());
+            assert!(!ipc_bytes.is_empty(), "ipc_bytes is empty");
 
             let cursor = std::io::Cursor::new(ipc_bytes);
             let reader = arrow_ipc::reader::StreamReader::try_new(cursor, None).unwrap();
@@ -1034,7 +1034,7 @@ mod tests {
         fn test_edges_ipc_roundtrip() {
             let edge = make_edge(1, 10, 20, "KNOWS");
             let ipc_bytes = crate::database::arrow::edges_to_ipc_stream(&[edge]).unwrap();
-            assert!(!ipc_bytes.is_empty());
+            assert!(!ipc_bytes.is_empty(), "ipc_bytes is empty");
 
             let cursor = std::io::Cursor::new(ipc_bytes);
             let reader = arrow_ipc::reader::StreamReader::try_new(cursor, None).unwrap();

@@ -956,7 +956,10 @@ mod tests {
         let algo = ClusteringCoefficientAlgorithm;
 
         assert_eq!(algo.name(), "clustering_coefficient");
-        assert!(!algo.description().is_empty());
+        assert!(
+            !algo.description().is_empty(),
+            "algo.description() is empty"
+        );
         assert_eq!(algo.parameters().len(), 2);
 
         let params = Parameters::new();

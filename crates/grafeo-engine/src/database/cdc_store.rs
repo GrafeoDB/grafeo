@@ -1155,7 +1155,7 @@ mod tests {
         let (cdc, _log) = setup();
         let a = cdc.create_node(&["City"]);
         assert!(cdc.nodes_by_label("City").contains(&a));
-        assert!(cdc.nodes_by_label("Unknown").is_empty());
+        assert!(cdc.nodes_by_label("Unknown").is_empty(), "expected empty");
     }
 
     #[test]
@@ -1174,7 +1174,10 @@ mod tests {
         let b = cdc.create_node(&[]);
         cdc.create_edge(a, b, "E");
         assert!(cdc.neighbors(a, Direction::Outgoing).contains(&b));
-        assert!(!cdc.edges_from(a, Direction::Outgoing).is_empty());
+        assert!(
+            !cdc.edges_from(a, Direction::Outgoing).is_empty(),
+            "expected non-empty"
+        );
     }
 
     #[test]
@@ -2138,7 +2141,7 @@ mod tests {
     fn batch_create_edges_empty_slice_records_nothing() {
         let (cdc, _log) = setup();
         let ids = cdc.batch_create_edges(&[]);
-        assert!(ids.is_empty());
+        assert!(ids.is_empty(), "{ids:?}");
         // No transactional buffering either (batch uses direct recording).
         assert!(cdc.pending_events().lock().is_empty());
     }
@@ -2157,7 +2160,7 @@ mod tests {
             .labels
             .as_ref()
             .expect("labels must be Some even with empty input");
-        assert!(labels.is_empty());
+        assert!(labels.is_empty(), "{labels:?}");
     }
 
     // ---------------------------------------------------------------

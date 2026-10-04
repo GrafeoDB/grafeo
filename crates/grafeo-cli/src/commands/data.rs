@@ -470,7 +470,7 @@ mod tests {
         .expect("dump with explicit json format should succeed");
 
         let content = std::fs::read_to_string(&dump_path).unwrap();
-        assert!(!content.is_empty());
+        assert!(!content.is_empty(), "content is empty");
     }
 
     #[test]
@@ -759,7 +759,7 @@ mod tests {
         .expect("dump with jsonl format should succeed");
 
         let content = std::fs::read_to_string(&dump_path).unwrap();
-        assert!(!content.is_empty());
+        assert!(!content.is_empty(), "content is empty");
     }
 
     #[test]

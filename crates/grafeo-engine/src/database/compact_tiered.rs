@@ -362,7 +362,7 @@ mod tests {
         // the heap now.
         let store = tiered.store();
         let person_ids = store.nodes_by_label("Person");
-        assert!(!person_ids.is_empty());
+        assert!(!person_ids.is_empty(), "person_ids is empty");
         for id in person_ids.iter().take(4) {
             assert!(
                 store
@@ -477,7 +477,7 @@ mod tests {
         let reopened = CompactStoreTiered::open_mmap(&path).expect("open_mmap");
         let store = reopened.store();
         let person_ids = store.nodes_by_label("Person");
-        assert!(!person_ids.is_empty());
+        assert!(!person_ids.is_empty(), "person_ids is empty");
 
         // Reads work; values come from the mmap-backed Bytes via
         // `data.slice(range)` constructors in `read_from_v3`.

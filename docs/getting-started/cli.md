@@ -234,7 +234,7 @@ $ grafeo version
 grafeo 0.5.44
 
 Build:
-  rustc:    1.91.1
+  rustc:    1.99.0
   target:   x86_64
   os:       linux
   features: gql, cypher, sparql, sql-pgq

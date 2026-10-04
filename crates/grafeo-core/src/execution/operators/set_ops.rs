@@ -457,7 +457,7 @@ mod tests {
         let mut op = IntersectOperator::new(Box::new(left), Box::new(right), false);
 
         let result = collect_ints(&mut op);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     #[test]
@@ -487,7 +487,7 @@ mod tests {
         let mut op = OtherwiseOperator::new(Box::new(left), Box::new(right));
 
         let result = collect_ints(&mut op);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     #[test]

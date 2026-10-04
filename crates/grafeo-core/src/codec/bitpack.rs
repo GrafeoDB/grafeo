@@ -960,7 +960,7 @@ mod tests {
         // Force the zero-bits path by constructing manually.
         let zero_bits = BitPackedInts::from_raw_parts(Vec::new(), 0, 64);
         assert_eq!(zero_bits.scan_eq(0), (0..64).collect::<Vec<_>>());
-        assert!(zero_bits.scan_eq(1).is_empty());
+        assert!(zero_bits.scan_eq(1).is_empty(), "expected empty");
     }
 
     #[test]
@@ -970,13 +970,13 @@ mod tests {
         let values: Vec<u64> = (0..10).map(|i| i % 16).collect();
         let packed = BitPackedInts::pack(&values);
         assert!(packed.bits_per_value() <= 4);
-        assert!(packed.scan_eq(100).is_empty());
+        assert!(packed.scan_eq(100).is_empty(), "expected empty");
     }
 
     #[test]
     fn test_scan_eq_empty_column() {
         let packed = BitPackedInts::pack(&[]);
-        assert!(packed.scan_eq(0).is_empty());
-        assert!(packed.scan_eq(42).is_empty());
+        assert!(packed.scan_eq(0).is_empty(), "expected empty");
+        assert!(packed.scan_eq(42).is_empty(), "expected empty");
     }
 }

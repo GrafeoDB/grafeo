@@ -485,7 +485,7 @@ fn equality_with_null_literal_is_not_pushed_down() {
     let result = session
         .execute("MATCH (n:Person) WHERE n.city = NULL RETURN n.name")
         .unwrap();
-    assert!(result.rows().is_empty());
+    assert!(result.rows().is_empty(), "{:?}", result.rows());
 }
 
 // ---------------------------------------------------------------------------

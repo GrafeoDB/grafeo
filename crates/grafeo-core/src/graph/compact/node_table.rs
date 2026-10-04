@@ -269,7 +269,7 @@ mod tests {
         let table = NodeTable::new(schema);
         assert_eq!(table.len(), 0);
         assert!(table.is_empty());
-        assert!(table.node_ids().is_empty());
+        assert!(table.node_ids().is_empty(), "{:?}", table.node_ids());
     }
 
     #[test]

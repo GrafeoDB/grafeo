@@ -1,6 +1,6 @@
 //! Two-layer graph store: read-only columnar base + mutable LPG overlay.
 //!
-//! `LayeredStore` coordinates reads between a [`CompactStore`](crate::graph::compact::CompactStore) (cold, columnar)
+//! `LayeredStore` coordinates reads between a [`CompactStore`] (cold, columnar)
 //! and an [`LpgStore`](crate::graph::lpg::LpgStore) (hot, HashMap-based). All writes go to the overlay.
 //! Reads check the overlay first and fall through to the compact base for
 //! unmodified entities.
@@ -3681,16 +3681,25 @@ mod tests {
 
         // Only the overlay copy is deleted; the base copy must stay hidden.
         assert!(layered.get_edge(eid).is_none());
-        assert!(layered.edges_from(alix, Direction::Outgoing).is_empty());
+        assert!(
+            layered.edges_from(alix, Direction::Outgoing).is_empty(),
+            "expected empty"
+        );
         assert!(
             !layered
                 .edges_from(amsterdam, Direction::Incoming)
                 .iter()
                 .any(|(_, e)| *e == eid)
         );
-        assert!(layered.neighbors(alix, Direction::Outgoing).is_empty());
+        assert!(
+            layered.neighbors(alix, Direction::Outgoing).is_empty(),
+            "expected empty"
+        );
         assert_eq!(layered.neighbors(amsterdam, Direction::Incoming), vec![gus]);
-        assert!(layered.neighbors(alix, Direction::Both).is_empty());
+        assert!(
+            layered.neighbors(alix, Direction::Both).is_empty(),
+            "expected empty"
+        );
         assert_eq!(layered.out_degree(alix), 0);
     }
 
@@ -3702,7 +3711,10 @@ mod tests {
         layered.set_edge_property(eid, "since", Value::Int64(2024));
         assert!(layered.delete_edge_versioned(eid, EpochId::from(1), TransactionId::from(1)));
 
-        assert!(layered.edges_from(alix, Direction::Outgoing).is_empty());
+        assert!(
+            layered.edges_from(alix, Direction::Outgoing).is_empty(),
+            "expected empty"
+        );
         assert_eq!(layered.neighbors(amsterdam, Direction::Incoming), vec![gus]);
     }
 
@@ -3716,8 +3728,14 @@ mod tests {
         // Both endpoints still exist; only the edge is gone.
         assert!(layered.get_node(alix).is_some());
         assert!(layered.get_node(amsterdam).is_some());
-        assert!(layered.neighbors(alix, Direction::Outgoing).is_empty());
-        assert!(layered.neighbors(alix, Direction::Both).is_empty());
+        assert!(
+            layered.neighbors(alix, Direction::Outgoing).is_empty(),
+            "expected empty"
+        );
+        assert!(
+            layered.neighbors(alix, Direction::Both).is_empty(),
+            "expected empty"
+        );
         assert_eq!(layered.neighbors(amsterdam, Direction::Incoming), vec![gus]);
     }
 
@@ -3732,8 +3750,14 @@ mod tests {
         layered.set_node_property(alix, "age", Value::Int64(31));
         layered.set_node_property(amsterdam, "touched", Value::Bool(true));
 
-        assert!(layered.edges_from(alix, Direction::Outgoing).is_empty());
-        assert!(layered.neighbors(alix, Direction::Outgoing).is_empty());
+        assert!(
+            layered.edges_from(alix, Direction::Outgoing).is_empty(),
+            "expected empty"
+        );
+        assert!(
+            layered.neighbors(alix, Direction::Outgoing).is_empty(),
+            "expected empty"
+        );
         assert_eq!(layered.neighbors(amsterdam, Direction::Incoming), vec![gus]);
     }
 

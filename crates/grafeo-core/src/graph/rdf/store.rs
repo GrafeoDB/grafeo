@@ -2395,7 +2395,7 @@ mod tests {
 
         // Serialize to Turtle and re-parse.
         let output = store.to_turtle().unwrap();
-        assert!(!output.is_empty());
+        assert!(!output.is_empty(), "output is empty");
 
         let store2 = RdfStore::new();
         let result2 = store2.load_turtle(&output).unwrap();

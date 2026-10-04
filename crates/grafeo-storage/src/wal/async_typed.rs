@@ -320,7 +320,7 @@ mod tests {
         assert!(wal.checkpoint_epoch().await.is_none());
 
         let files = wal.log_files().await.unwrap();
-        assert!(!files.is_empty());
+        assert!(!files.is_empty(), "no WAL files");
 
         let _mode = wal.durability_mode();
     }

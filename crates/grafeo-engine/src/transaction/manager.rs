@@ -15,6 +15,10 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 pub enum TransactionState {
     /// Transaction is active.
     Active,
+    /// The commit is decided (its epoch is assigned) and its versions, events
+    /// and WAL records are being written; it becomes `Committed` when that is
+    /// done. Its writes still conflict with other transactions' writes.
+    Committing,
     /// Transaction is committed.
     Committed,
     /// Transaction is aborted.
@@ -182,6 +186,50 @@ pub struct TransactionManager {
     /// and briefly by every [`begin`](Self::begin), so no transaction starts
     /// while such a write runs.
     idle_gate: Mutex<()>,
+    /// Held by a commit from its epoch until it is complete (see
+    /// [`CommitGuard`]) and briefly by every [`begin`](Self::begin): commits
+    /// complete one at a time, in epoch order, and no transaction starts in
+    /// the middle of one.
+    commit_lock: Mutex<()>,
+}
+
+/// A commit in progress, from [`TransactionManager::start_commit`] until it
+/// is dropped. Until then the transaction is [`TransactionState::Committing`]:
+/// it still counts as open, so no write outside a transaction can start (see
+/// [`TransactionManager::idle_gate`]), its writes still conflict with other
+/// transactions' writes, and no other commit and no
+/// [`begin`](TransactionManager::begin) can run. Drop it once the commit's
+/// versions, events and WAL records are written.
+#[must_use = "the commit is complete when the guard is dropped"]
+pub(crate) struct CommitGuard<'a> {
+    manager: &'a TransactionManager,
+    transaction_id: TransactionId,
+    epoch: EpochId,
+    _commit: MutexGuard<'a, ()>,
+}
+
+impl CommitGuard<'_> {
+    /// The commit epoch.
+    pub(crate) fn epoch(&self) -> EpochId {
+        self.epoch
+    }
+}
+
+impl Drop for CommitGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(info) = self
+            .manager
+            .transactions
+            .write()
+            .get_mut(&self.transaction_id)
+        {
+            info.state = TransactionState::Committed;
+        }
+        // Release pairs with the acquire in `idle_gate`: a write outside a
+        // transaction sees everything the commit wrote.
+        self.manager.active_count.fetch_sub(1, Ordering::Release);
+        // The commit lock is released after this, with `_commit`.
+    }
 }
 
 impl TransactionManager {
@@ -197,6 +245,7 @@ impl TransactionManager {
             transactions: RwLock::new(FxHashMap::default()),
             committed_epochs: RwLock::new(FxHashMap::default()),
             idle_gate: Mutex::new(()),
+            commit_lock: Mutex::new(()),
         }
     }
 
@@ -207,8 +256,11 @@ impl TransactionManager {
 
     /// Begins a new transaction with the specified isolation level.
     pub fn begin_with_isolation(&self, isolation_level: IsolationLevel) -> TransactionId {
-        // Wait for a write outside any transaction to finish.
+        // Wait for a write outside any transaction to finish, and for a
+        // commit in progress: the snapshot holds every commit up to its
+        // epoch, complete.
         let _gate = self.idle_gate.lock();
+        let _commit = self.commit_lock.lock();
         let transaction_id =
             TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed));
         let epoch = EpochId::new(self.current_epoch.load(Ordering::Acquire));
@@ -262,11 +314,15 @@ impl TransactionManager {
         let mut txns = self.transactions.write();
 
         // First-writer-wins conflict detection. Skip the scan when only one
-        // transaction is active (common case for auto-commit).
+        // transaction is active (common case for auto-commit). A commit in
+        // progress still holds its writes.
         if self.active_count.load(Ordering::Relaxed) > 1 {
             for (other_tx, other_info) in txns.iter() {
                 if *other_tx != transaction_id
-                    && other_info.state == TransactionState::Active
+                    && matches!(
+                        other_info.state,
+                        TransactionState::Active | TransactionState::Committing
+                    )
                     && other_info.write_set.contains(&entity)
                 {
                     return Err(Error::Transaction(TransactionError::WriteConflict(
@@ -338,6 +394,18 @@ impl TransactionManager {
     /// - There's a write-write conflict with another committed transaction
     /// - (Serializable only) There's a read-write conflict (SSI violation)
     pub fn commit(&self, transaction_id: TransactionId) -> Result<EpochId> {
+        Ok(self.start_commit(transaction_id)?.epoch())
+    }
+
+    /// Commits a transaction like [`commit`](Self::commit), but completes the
+    /// commit only when the returned guard is dropped (see [`CommitGuard`]):
+    /// the caller writes the commit's versions, events and WAL records first.
+    ///
+    /// # Errors
+    ///
+    /// As [`commit`](Self::commit); the transaction then stays active.
+    pub(crate) fn start_commit(&self, transaction_id: TransactionId) -> Result<CommitGuard<'_>> {
+        let commit_lock = self.commit_lock.lock();
         // Lock ordering: transactions first, then committed_epochs (matches gc()).
         // Both held as write locks to ensure state and epoch are updated atomically,
         // preventing a race where another thread sees state == Committed but the
@@ -422,14 +490,20 @@ impl TransactionManager {
         // SeqCst ensures all threads see commits in a consistent total order.
         let commit_epoch = EpochId::new(self.current_epoch.fetch_add(1, Ordering::SeqCst) + 1);
 
-        // Update state and record commit epoch atomically (both write locks held).
+        // Update state and record commit epoch atomically (both write locks
+        // held). The transaction stays counted as active until the guard is
+        // dropped.
         if let Some(info) = txns.get_mut(&transaction_id) {
-            info.state = TransactionState::Committed;
+            info.state = TransactionState::Committing;
         }
-        self.active_count.fetch_sub(1, Ordering::Relaxed);
         committed.insert(transaction_id, commit_epoch);
 
-        Ok(commit_epoch)
+        Ok(CommitGuard {
+            manager: self,
+            transaction_id,
+            epoch: commit_epoch,
+            _commit: commit_lock,
+        })
     }
 
     /// Aborts a transaction.
@@ -588,7 +662,8 @@ impl TransactionManager {
             .iter()
             .filter(|(transaction_id, info)| {
                 match info.state {
-                    TransactionState::Active => false, // Never remove active transactions
+                    // Never remove active transactions or a commit in progress
+                    TransactionState::Active | TransactionState::Committing => false,
                     TransactionState::Aborted => true, // Always safe to remove aborted transactions
                     TransactionState::Committed => {
                         // Only remove committed transactions if their commit epoch
@@ -1305,5 +1380,79 @@ mod tests {
             Some(epoch),
             "committed_epochs must contain tx immediately after commit()"
         );
+    }
+
+    /// Until a commit is complete, a write outside any transaction cannot
+    /// start and another transaction cannot write what the committing one
+    /// wrote; dropping the guard allows both again.
+    #[test]
+    fn a_commit_holds_its_writes_until_it_is_complete() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        let other = mgr.begin();
+        mgr.record_write(tx, NodeId::new(1)).unwrap();
+
+        let commit = mgr.start_commit(tx).unwrap();
+        assert_eq!(mgr.state(tx), Some(TransactionState::Committing));
+        assert_eq!(mgr.committed_epoch(tx), Some(commit.epoch()));
+        assert!(matches!(
+            mgr.record_write(other, NodeId::new(1)),
+            Err(Error::Transaction(TransactionError::WriteConflict(_)))
+        ));
+        mgr.record_write(other, NodeId::new(2)).unwrap();
+        mgr.abort(other).unwrap();
+        assert!(
+            mgr.idle_gate().is_none(),
+            "a write outside a transaction waits for the commit"
+        );
+
+        drop(commit);
+        assert_eq!(mgr.state(tx), Some(TransactionState::Committed));
+        assert!(mgr.idle_gate().is_some());
+        let next = mgr.begin();
+        mgr.record_write(next, NodeId::new(1)).unwrap();
+    }
+
+    /// A transaction begins between commits, never during one: it waits for
+    /// the commit in progress and starts at its epoch.
+    #[test]
+    fn begin_waits_for_a_commit_in_progress() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        let commit = mgr.start_commit(tx).unwrap();
+        let epoch = commit.epoch();
+
+        let manager = &mgr;
+        std::thread::scope(|scope| {
+            let (began, waited) = std::sync::mpsc::channel();
+            let late = scope.spawn(move || {
+                let late = manager.begin();
+                began.send(()).unwrap();
+                late
+            });
+            assert!(
+                waited
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .is_err(),
+                "begin returned while the commit was in progress"
+            );
+            drop(commit);
+            let late = late.join().unwrap();
+            assert_eq!(mgr.start_epoch(late), Some(epoch));
+        });
+    }
+
+    /// `commit` completes at once: nothing waits for it afterwards.
+    #[test]
+    fn commit_completes_at_once() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        mgr.record_write(tx, NodeId::new(1)).unwrap();
+        mgr.commit(tx).unwrap();
+
+        assert_eq!(mgr.state(tx), Some(TransactionState::Committed));
+        assert!(mgr.idle_gate().is_some());
+        let next = mgr.begin();
+        mgr.record_write(next, NodeId::new(1)).unwrap();
     }
 }

@@ -1391,7 +1391,7 @@ mod tests {
 
         // Out-of-range query should return empty
         let empty = adj.edges_in_range(NodeId::new(0), NodeId::new(200), NodeId::new(300));
-        assert!(empty.is_empty());
+        assert!(empty.is_empty(), "{empty:?}");
     }
 
     #[test]

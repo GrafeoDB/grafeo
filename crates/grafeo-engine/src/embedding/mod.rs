@@ -116,7 +116,7 @@ mod tests {
     fn trait_empty_input_returns_empty() {
         let model = MockEmbeddingModel::new(64);
         let vecs = model.embed(&[]).unwrap();
-        assert!(vecs.is_empty());
+        assert!(vecs.is_empty(), "{vecs:?}");
     }
 
     #[test]

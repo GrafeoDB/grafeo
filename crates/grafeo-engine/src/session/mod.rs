@@ -4264,6 +4264,9 @@ impl Session {
             store.commit_transaction_properties(transaction_id);
         }
 
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_after_commit_stamped();
+
         // Flush buffered CDC events now that the transaction is committed.
         // All buffered events have PENDING epoch; assign the real commit_epoch.
         // Uses record_batch to acquire the write lock once per commit.

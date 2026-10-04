@@ -2,9 +2,9 @@
 //!
 //! A commit assigns its epoch, then writes its versions, CDC events and WAL
 //! records. These tests run work on another thread from inside a commit,
-//! right after its epoch is assigned (the `testing-statement-injection`
-//! commit hook), and check that the work lands after the commit, never in the
-//! middle of it. The WAL tests crash a child process (it exits without
+//! right after its epoch is assigned or once its versions are stamped (the
+//! `testing-statement-injection` commit hooks), and check that the work lands
+//! after the commit, never in the middle of it. The WAL tests crash a child process (it exits without
 //! `close()`, so nothing is checkpointed) and reopen, so the WAL is replayed.
 //!
 //! ```bash
@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use grafeo_common::testing::commit_hook::after_next_commit_epoch;
+use grafeo_common::testing::commit_hook::{after_next_commit_epoch, after_next_commit_stamped};
 use grafeo_common::types::{NodeId, Value};
 use grafeo_engine::GrafeoDB;
 
@@ -39,25 +39,53 @@ impl<T> DuringCommit<T> {
     }
 }
 
+/// Where in the next commit the work starts.
+#[derive(Clone, Copy)]
+enum Moment {
+    /// Right after the commit epoch is assigned, before anything is stamped.
+    EpochAssigned,
+    /// Once the commit's versions are stamped, before it is complete.
+    Stamped,
+}
+
 /// Starts `work` on another thread from inside the next commit on this
-/// thread, right after its epoch is assigned, and gives it time to finish
-/// there: work that does not wait for the commit runs in the middle of it.
-fn during_next_commit<T: Send + 'static>(
+/// thread, at `moment`, and gives it time to finish there once it runs: work
+/// that does not wait for the commit runs in the middle of it.
+fn during_next_commit_at<T: Send + 'static>(
+    moment: Moment,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> DuringCommit<T> {
     let slot = Arc::new(Mutex::new(None));
     let handle_slot = Arc::clone(&slot);
-    after_next_commit_epoch(move || {
+    let hook = move || {
+        let (started, running) = mpsc::channel();
         let (done, finished) = mpsc::channel();
         let handle = std::thread::spawn(move || {
+            let _ = started.send(());
             let result = work();
             let _ = done.send(());
             result
         });
+        // Time the wait from the moment the worker runs, so a worker that is
+        // scheduled late cannot slip past the commit unnoticed.
+        running
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker did not start");
         let _ = finished.recv_timeout(Duration::from_millis(300));
         *handle_slot.lock().unwrap() = Some(handle);
-    });
+    };
+    match moment {
+        Moment::EpochAssigned => after_next_commit_epoch(hook),
+        Moment::Stamped => after_next_commit_stamped(hook),
+    }
     DuringCommit(slot)
+}
+
+/// [`during_next_commit_at`] right after the commit epoch is assigned.
+fn during_next_commit<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> DuringCommit<T> {
+    during_next_commit_at(Moment::EpochAssigned, work)
 }
 
 fn by(db: &GrafeoDB, node: NodeId) -> Option<Value> {
@@ -126,6 +154,26 @@ fn a_transaction_that_begins_during_a_commit_sees_it() {
     session.commit().unwrap();
 
     assert!(reader.join(), "the new transaction did not see the commit");
+}
+
+/// A read outside a transaction does not see a commit before it is complete,
+/// even once the commit's versions are stamped.
+#[test]
+fn a_plain_read_does_not_see_a_commit_before_it_completes() {
+    let db = Arc::new(GrafeoDB::new_in_memory());
+    let count =
+        |db: &GrafeoDB| db.execute("MATCH (d:Doc) RETURN count(d)").unwrap().rows()[0][0].clone();
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.execute("INSERT (:Doc {id: 1})").unwrap();
+    let read = {
+        let db = Arc::clone(&db);
+        during_next_commit_at(Moment::Stamped, move || count(&db))
+    };
+    session.commit().unwrap();
+
+    assert_eq!(read.join(), Value::Int64(0));
+    assert_eq!(count(&db), Value::Int64(1));
 }
 
 /// An open transaction that writes what a committing one wrote gets a write

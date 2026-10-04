@@ -14,7 +14,7 @@ For what has shipped, see the [CHANGELOG](changelog.md).
 | **0.2** | Performance: factorized execution, worst-case optimal joins, lock-free reads, plan caching |
 | **0.3** | AI compatibility: vector type, HNSW index, SIMD distance functions, quantization, hybrid graph and vector queries |
 | **0.4** | Developer accessibility: Node.js, Go and WASM bindings, SQL/PGQ, CLI, filtered vector search |
-| **0.5.0 to 0.5.43** | Beta: text and hybrid search, 25+ graph algorithms callable from queries, schema and constraints, RDF with SPARQL and SHACL, single-file storage, encryption at rest, backup, access control, compact and tiered storage, C#, Dart and C bindings; 0.5.43 was a stabilization release |
+| **0.5.0 to 0.5.44** | Beta: text and hybrid search, 25+ graph algorithms callable from queries, schema and constraints, RDF with SPARQL and SHACL, single-file storage, encryption at rest, backup, access control, compact and tiered storage, C#, Dart and C bindings; 0.5.43 was a stabilization release and 0.5.44 a durability and consistency release |
 
 ---
 
@@ -24,9 +24,8 @@ The rest of the 0.5 series makes Grafeo dependable by design: durable and crash-
 
 | Release | Focus |
 | --- | --- |
-| [**0.5.44**](https://github.com/GrafeoDB/grafeo/milestone/2) | Stop data loss: durable commits, crash-safe checkpoints, a database lock, DDL that does what it reports, planner fixes from downstream reports |
-| [**0.5.45**](https://github.com/GrafeoDB/grafeo/milestone/3) | One storage format: WAL v2 and chunked sections without the 4 GiB limit, with automatic migration; ADBC driver |
-| [**0.5.46**](https://github.com/GrafeoDB/grafeo/milestone/4) | Transactions own their changes: snapshot isolation for properties and labels, one write path; SPARQL 1.1 Protocol and Graph Store Protocol, GQL vector types |
+| [**0.5.45**](https://github.com/GrafeoDB/grafeo/milestone/3) | One storage format: WAL v2 and chunked sections without the 4 GiB limit, with automatic migration |
+| [**0.5.46**](https://github.com/GrafeoDB/grafeo/milestone/4) | Transactions own their changes: snapshot isolation for properties and labels, one write path; ADBC driver, SPARQL 1.1 Protocol and Graph Store Protocol, GQL vector types |
 | [**0.5.47**](https://github.com/GrafeoDB/grafeo/milestone/5) | Compact-core store: a dense memory layout, enforced memory limits, incremental checkpoints |
 | [**0.5.48**](https://github.com/GrafeoDB/grafeo/milestone/6) | Push-only execution engine and benchmark-gated parallelism |
 | [**0.5.49**](https://github.com/GrafeoDB/grafeo/milestone/7) | API parity across bindings, feature flag cleanup, query language completeness, test depth |
@@ -53,4 +52,4 @@ Issues in the upcoming milestones are a good place to start, especially the ones
 
 ---
 
-Last updated: September 2026
+Last updated: October 2026

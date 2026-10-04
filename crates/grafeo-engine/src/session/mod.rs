@@ -6506,7 +6506,7 @@ mod tests {
 
             // No edges of this type
             let no_neighbors = session.get_neighbors_outgoing_by_type(alix, "LIKES");
-            assert!(no_neighbors.is_empty());
+            assert!(no_neighbors.is_empty(), "{no_neighbors:?}");
         }
 
         #[test]
@@ -6665,12 +6665,19 @@ mod tests {
 
             let lonely = session.create_node(&["Person"]).unwrap();
 
-            assert!(session.get_neighbors_outgoing(lonely).is_empty());
-            assert!(session.get_neighbors_incoming(lonely).is_empty());
+            assert!(
+                session.get_neighbors_outgoing(lonely).is_empty(),
+                "expected empty"
+            );
+            assert!(
+                session.get_neighbors_incoming(lonely).is_empty(),
+                "expected empty"
+            );
             assert!(
                 session
                     .get_neighbors_outgoing_by_type(lonely, "KNOWS")
-                    .is_empty()
+                    .is_empty(),
+                "expected no neighbors"
             );
         }
     }
@@ -7071,7 +7078,7 @@ mod tests {
             session.execute("ROLLBACK").unwrap();
 
             let result = session.execute("MATCH (n:Person) RETURN n.name").unwrap();
-            assert!(result.rows.is_empty());
+            assert!(result.rows.is_empty(), "{:?}", result.rows);
         }
 
         #[test]

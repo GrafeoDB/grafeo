@@ -200,7 +200,7 @@ mod tests {
         let store = Arc::new(RdfStore::new());
         let section = RdfRingSection::new(store);
         let bytes = section.serialize().unwrap();
-        assert!(bytes.is_empty());
+        assert!(bytes.is_empty(), "{bytes:?}");
     }
 
     #[test]
@@ -210,7 +210,7 @@ mod tests {
 
         // Serialize
         let bytes = section.serialize().unwrap();
-        assert!(!bytes.is_empty());
+        assert!(!bytes.is_empty(), "bytes is empty");
 
         // Create a fresh store and deserialize into it
         let store2 = Arc::new(RdfStore::new());

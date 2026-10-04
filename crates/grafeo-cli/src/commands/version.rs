@@ -83,7 +83,7 @@ mod tests {
     #[test]
     fn test_rustc_version_not_empty() {
         let v = rustc_version();
-        assert!(!v.is_empty());
+        assert!(!v.is_empty(), "v is empty");
     }
 
     #[test]

@@ -833,7 +833,10 @@ mod tests {
 
         // Test trait methods
         assert_eq!(algo.name(), "pagerank");
-        assert!(!algo.description().is_empty());
+        assert!(
+            !algo.description().is_empty(),
+            "algo.description() is empty"
+        );
         assert_eq!(algo.parameters().len(), 3);
 
         // Test execute with default params
@@ -858,7 +861,10 @@ mod tests {
 
         // Test trait methods
         assert_eq!(algo.name(), "betweenness_centrality");
-        assert!(!algo.description().is_empty());
+        assert!(
+            !algo.description().is_empty(),
+            "algo.description() is empty"
+        );
         assert_eq!(algo.parameters().len(), 1);
 
         // Test execute with default params (normalized=true)
@@ -881,7 +887,10 @@ mod tests {
 
         // Test trait methods
         assert_eq!(algo.name(), "closeness_centrality");
-        assert!(!algo.description().is_empty());
+        assert!(
+            !algo.description().is_empty(),
+            "algo.description() is empty"
+        );
         assert_eq!(algo.parameters().len(), 1);
 
         // Test execute with default params (wf_improved=false)
@@ -904,7 +913,10 @@ mod tests {
 
         // Test trait methods
         assert_eq!(algo.name(), "degree_centrality");
-        assert!(!algo.description().is_empty());
+        assert!(
+            !algo.description().is_empty(),
+            "algo.description() is empty"
+        );
         assert_eq!(algo.parameters().len(), 1);
 
         // Test execute with default params (normalized=false) - returns 4 columns

@@ -81,7 +81,7 @@ fn test_project_type_function() {
     let r = session
         .execute("MATCH ()-[r:KNOWS]->() RETURN type(r) AS t")
         .unwrap();
-    assert!(!r.rows().is_empty());
+    assert!(!r.rows().is_empty(), "r.rows() is empty");
     for row in r.rows() {
         assert_eq!(row[0], Value::String("KNOWS".into()));
     }
@@ -97,7 +97,7 @@ fn test_project_length_function() {
              RETURN length(p) AS len ORDER BY len",
         )
         .unwrap();
-    assert!(!r.rows().is_empty());
+    assert!(!r.rows().is_empty(), "r.rows() is empty");
     for row in r.rows() {
         match &row[0] {
             Value::Int64(n) => assert!((1..=3).contains(n)),
@@ -116,7 +116,7 @@ fn test_project_nodes_and_edges_functions() {
              RETURN nodes(p) AS ns, edges(p) AS es",
         )
         .unwrap();
-    assert!(!r.rows().is_empty());
+    assert!(!r.rows().is_empty(), "r.rows() is empty");
     for row in r.rows() {
         let (nodes, edges) = match (&row[0], &row[1]) {
             (Value::List(a), Value::List(b)) => (a, b),
@@ -137,7 +137,7 @@ fn test_project_case_expression_ok() {
              ORDER BY name",
         )
         .unwrap();
-    assert!(!r.rows().is_empty());
+    assert!(!r.rows().is_empty(), "r.rows() is empty");
     for row in r.rows() {
         match &row[1] {
             Value::String(s) => {

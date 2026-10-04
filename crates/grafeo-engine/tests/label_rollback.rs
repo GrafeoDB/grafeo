@@ -161,7 +161,7 @@ fn test_label_remove_undo_on_transaction_rollback() {
     session.execute("MATCH (n:Animal) REMOVE n:Pet").unwrap();
 
     let during = session.execute("MATCH (n:Pet) RETURN n.species").unwrap();
-    assert!(during.rows().is_empty());
+    assert!(during.rows().is_empty(), "{:?}", during.rows());
 
     session.rollback().unwrap();
 

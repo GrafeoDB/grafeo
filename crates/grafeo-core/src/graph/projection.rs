@@ -549,8 +549,8 @@ mod tests {
 
         assert_eq!(proj.node_count(), 2);
         assert_eq!(proj.nodes_by_label("Person").len(), 2);
-        assert!(proj.nodes_by_label("City").is_empty());
-        assert!(proj.nodes_by_label("Software").is_empty());
+        assert!(proj.nodes_by_label("City").is_empty(), "expected empty");
+        assert!(proj.nodes_by_label("Software").is_empty(), "expected empty");
     }
 
     #[test]
@@ -924,7 +924,7 @@ mod tests {
 
         // Amsterdam (City) is filtered out, so edges_from returns empty
         let amsterdam_edges = proj.edges_from(nodes[2], Direction::Outgoing);
-        assert!(amsterdam_edges.is_empty());
+        assert!(amsterdam_edges.is_empty(), "{amsterdam_edges:?}");
     }
 
     // 9. out_degree and in_degree with filtered projection
@@ -1030,7 +1030,7 @@ mod tests {
 
         // "name" = "Amsterdam" exists but on a City node, which is filtered
         let found = proj.find_nodes_by_property("name", &Value::from("Amsterdam"));
-        assert!(found.is_empty());
+        assert!(found.is_empty(), "{found:?}");
     }
 
     // 13. find_nodes_by_properties with label filter
@@ -1049,7 +1049,7 @@ mod tests {
         // Search for city name, filtered out
         let conditions = vec![("name", Value::from("Amsterdam"))];
         let found = proj.find_nodes_by_properties(&conditions);
-        assert!(found.is_empty());
+        assert!(found.is_empty(), "{found:?}");
     }
 
     // 14. find_nodes_in_range with label filter
@@ -1079,7 +1079,7 @@ mod tests {
         let min = Value::from(20);
         let max = Value::from(30);
         let found = proj.find_nodes_in_range("age", Some(&min), Some(&max), true, true);
-        assert!(found.is_empty());
+        assert!(found.is_empty(), "{found:?}");
     }
 
     // 15. node_property_might_match and edge_property_might_match

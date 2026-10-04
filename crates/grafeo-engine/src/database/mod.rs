@@ -4127,7 +4127,7 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
         let prom = db.metrics_prometheus();
         // Should contain at least some metric names
-        assert!(!prom.is_empty());
+        assert!(!prom.is_empty(), "prom is empty");
     }
 
     #[cfg(feature = "metrics")]

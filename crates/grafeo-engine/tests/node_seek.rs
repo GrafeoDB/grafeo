@@ -232,7 +232,10 @@ fn id_lookups_do_not_scan() {
     let params = [("s", four.clone()), ("d", five.clone())];
     assert_eq!(rows(&db, edge, &params), [vec![Value::Int64(4)]]);
     assert_eq!(rows(&db, edge, &params), rows(&scanned, edge, &params));
-    assert!(rows(&db, edge, &[("s", five), ("d", four.clone())]).is_empty());
+    assert!(
+        rows(&db, edge, &[("s", five), ("d", four.clone())]).is_empty(),
+        "expected empty"
+    );
 
     let explained = plan(
         &db,
@@ -244,8 +247,14 @@ fn id_lookups_do_not_scan() {
         rows(&db, single, &[("id", four)]),
         [vec![Value::from("d4")]]
     );
-    assert!(rows(&db, single, &[("id", Value::Int64(-1))]).is_empty());
-    assert!(rows(&db, single, &[("id", Value::Null)]).is_empty());
+    assert!(
+        rows(&db, single, &[("id", Value::Int64(-1))]).is_empty(),
+        "expected empty"
+    );
+    assert!(
+        rows(&db, single, &[("id", Value::Null)]).is_empty(),
+        "expected empty"
+    );
 }
 
 /// A key that reads the clock is not looked up: the lookup and the filter
@@ -297,14 +306,18 @@ fn a_seek_sees_what_the_transaction_sees() {
             .execute("UNWIND ['d1'] AS k MATCH (n:Doc {id: k}) RETURN n")
             .unwrap()
             .rows()
-            .is_empty()
+            .is_empty(),
+        "expected no rows"
     );
     assert!(
         db.execute(lookup).unwrap().rows().is_empty(),
         "not committed"
     );
     session.rollback().unwrap();
-    assert!(db.execute(lookup).unwrap().rows().is_empty());
+    assert!(
+        db.execute(lookup).unwrap().rows().is_empty(),
+        "expected empty"
+    );
     assert_eq!(
         db.execute("UNWIND ['d1'] AS k MATCH (n:Doc {id: k}) RETURN n")
             .unwrap()

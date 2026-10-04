@@ -3533,7 +3533,7 @@ fn extract_isolation_level(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<
     from_py_object,
     rename_all = "SCREAMING_SNAKE_CASE"
 )]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum PyIsolationLevel {
     /// Each statement sees committed writes from other transactions.
     ReadCommitted = 0,
@@ -3544,7 +3544,7 @@ pub enum PyIsolationLevel {
 }
 
 impl PyIsolationLevel {
-    fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             Self::ReadCommitted => "read_committed",
             Self::Snapshot => "snapshot",
@@ -3555,7 +3555,6 @@ impl PyIsolationLevel {
 
 #[pymethods]
 impl PyIsolationLevel {
-    #[allow(clippy::trivially_copy_pass_by_ref)]
     fn __repr__(&self) -> &'static str {
         match self {
             Self::ReadCommitted => "IsolationLevel.READ_COMMITTED",
@@ -3564,7 +3563,6 @@ impl PyIsolationLevel {
         }
     }
 
-    #[allow(clippy::trivially_copy_pass_by_ref)]
     fn __str__(&self) -> &'static str {
         self.as_str()
     }

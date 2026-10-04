@@ -244,7 +244,7 @@ mod tests {
         assert!(log.latest_entry().is_none());
         assert!(log.latest_epoch().is_none());
         assert!(log.at(epoch(0)).is_none());
-        assert!(log.history().is_empty());
+        assert!(log.history().is_empty(), "{:?}", log.history());
     }
 
     #[test]

@@ -1162,7 +1162,7 @@ mod tests {
 
         let pattern = TriplePattern::with_subject(Term::iri("nonexistent"));
         let results: Vec<Triple> = ring.find(&pattern).collect();
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
     }
 
     #[test]
@@ -1239,7 +1239,7 @@ mod tests {
 
         // Find on empty ring
         let results: Vec<Triple> = ring.find(&TriplePattern::any()).collect();
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
     }
 
     #[test]
@@ -1268,7 +1268,7 @@ mod tests {
         // Save to buffer
         let mut buf = Vec::new();
         ring.save(&mut buf).expect("save should succeed");
-        assert!(!buf.is_empty());
+        assert!(!buf.is_empty(), "buf is empty");
 
         // Load from buffer
         let loaded = TripleRing::load(&buf[..]).expect("load should succeed");

@@ -105,7 +105,7 @@ mod tests {
     fn error_message_is_non_empty() {
         let err = Error::Internal("something broke".into());
         let msg = error_message(&err);
-        assert!(!msg.is_empty());
+        assert!(!msg.is_empty(), "msg is empty");
         assert!(msg.contains("something broke"));
     }
 }

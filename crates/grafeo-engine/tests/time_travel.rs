@@ -124,7 +124,7 @@ fn test_deleted_node_history_preserves_epoch() {
     let result = session
         .execute("MATCH (p:Person {name: 'Vincent'}) RETURN p")
         .unwrap();
-    assert!(result.rows().is_empty());
+    assert!(result.rows().is_empty(), "{:?}", result.rows());
 
     // The version history API still tracks the deletion metadata.
     // Note: MATCH-based time-travel on deleted nodes is not supported
@@ -251,7 +251,8 @@ fn test_writes_fail_while_reading_an_earlier_epoch() {
             .execute("MATCH (p:Person) WHERE p.age IS NOT NULL RETURN p")
             .unwrap()
             .rows()
-            .is_empty()
+            .is_empty(),
+        "expected no rows"
     );
 
     // With the viewing epoch cleared, the session writes again.

@@ -1405,7 +1405,7 @@ mod tests {
         // Verify backward edges (incoming to cities).
         for &cid in &city_ids {
             let incoming = converted.edges_from(cid, crate::graph::Direction::Incoming);
-            assert!(!incoming.is_empty());
+            assert!(!incoming.is_empty(), "incoming is empty");
         }
     }
 

@@ -2162,7 +2162,7 @@ mod tests {
         let col = ColumnCodec::BitPacked(BitPackedInts::pack(&values));
 
         let result = col.find_in_range(None, Some(&Value::Int64(-1)), false, true);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     #[test]
@@ -2189,7 +2189,7 @@ mod tests {
         );
         // Fallback uses compare_values which returns None for Int vs String,
         // so no rows match.
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     #[test]
@@ -2201,7 +2201,7 @@ mod tests {
         // Range scan on list values uses compare_values, which returns None
         // for lists, so nothing matches.
         let result = col.find_in_range(Some(&Value::Int64(0)), Some(&Value::Int64(10)), true, true);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     #[test]
@@ -2747,7 +2747,7 @@ mod tests {
         // Bitmap column + Int64 range -> compare returns None -> rows excluded.
         let col = ColumnCodec::Bitmap(BitVector::from_bools(&[true, false, true]));
         let result = col.find_in_range(Some(&Value::Int64(0)), Some(&Value::Int64(5)), true, true);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     // -----------------------------------------------------------------------
@@ -2805,7 +2805,7 @@ mod tests {
 
         // Target "Prague" does not exist in the dictionary, so encode returns None.
         let result = col.find_eq(&Value::String(ArcStr::from("Prague")));
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     // -----------------------------------------------------------------------
@@ -2889,11 +2889,11 @@ mod tests {
 
         // min alone: the None (Uncomparable) branch returns false.
         let result = col.find_in_range(Some(&min), None, true, true);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
 
         // max alone: same story for the max arm.
         let result = col.find_in_range(None, Some(&max), true, true);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     // -----------------------------------------------------------------------
@@ -3555,7 +3555,7 @@ mod tests {
         // verify find_eq agrees on both forms.
         let target = col.get(42).expect("row 42 exists");
         assert_eq!(decoded.find_eq(&target), col.find_eq(&target));
-        assert!(!col.find_eq(&target).is_empty());
+        assert!(!col.find_eq(&target).is_empty(), "expected non-empty");
     }
 
     #[test]
@@ -3582,7 +3582,7 @@ mod tests {
         // we know is present.
         let target = Value::Float64(0.0);
         assert_eq!(decoded.find_eq(&target), col.find_eq(&target));
-        assert!(!col.find_eq(&target).is_empty());
+        assert!(!col.find_eq(&target).is_empty(), "expected non-empty");
     }
 
     // ── Phase 3a: Bytes-backed fixed-width codecs ─────────────────────
@@ -3777,7 +3777,7 @@ mod tests {
         let result: Vec<usize> = col
             .range_iter(Some(&zm), Some(&min), None, true, false)
             .collect();
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     #[test]

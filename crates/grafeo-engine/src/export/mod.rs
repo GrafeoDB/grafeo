@@ -296,7 +296,7 @@ mod tests {
         let dur = Duration::new(2, 5, 0);
         let v = Value::Duration(dur);
         let result = value_to_xml_string(&v).unwrap();
-        assert!(!result.is_empty());
+        assert!(!result.is_empty(), "result is empty");
     }
 
     #[test]
@@ -305,7 +305,7 @@ mod tests {
         let zdt = ZonedDatetime::from_timestamp_offset(Timestamp::from_micros(0), 3600);
         let v = Value::ZonedDatetime(zdt);
         let result = value_to_xml_string(&v).unwrap();
-        assert!(!result.is_empty());
+        assert!(!result.is_empty(), "result is empty");
     }
 
     #[test]

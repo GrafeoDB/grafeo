@@ -1243,7 +1243,7 @@ mod tests {
 
         let manager = GrafeoFileManager::create(&path).unwrap();
         let data = manager.read_snapshot().unwrap();
-        assert!(data.is_empty());
+        assert!(data.is_empty(), "{data:?}");
     }
 
     #[test]

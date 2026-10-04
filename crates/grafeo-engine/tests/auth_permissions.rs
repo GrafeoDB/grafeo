@@ -208,7 +208,11 @@ fn drop_projection_existing() {
         db.drop_projection("temp"),
         "dropping existing projection should return true"
     );
-    assert!(db.list_projections().is_empty());
+    assert!(
+        db.list_projections().is_empty(),
+        "{:?}",
+        db.list_projections()
+    );
 }
 
 #[test]

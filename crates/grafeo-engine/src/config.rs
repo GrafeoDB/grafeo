@@ -1224,7 +1224,10 @@ mod tests {
         // Ensure it implements std::error::Error (no source)
         let dyn_err: &dyn std::error::Error = &err;
         assert!(dyn_err.source().is_none());
-        assert!(!dyn_err.to_string().is_empty());
+        assert!(
+            !dyn_err.to_string().is_empty(),
+            "dyn_err.to_string() is empty"
+        );
     }
 
     // --- Validate accepts non-zero memory limit ---

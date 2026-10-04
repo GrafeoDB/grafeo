@@ -2880,7 +2880,7 @@ mod tests {
         {
             if let Pattern::Path(path) = &patterns[0] {
                 assert!(path.chain[0].where_clause.is_some());
-                assert!(path.chain[0].types.is_empty());
+                assert!(path.chain[0].types.is_empty(), "expected empty");
             } else {
                 panic!("Expected Path pattern");
             }

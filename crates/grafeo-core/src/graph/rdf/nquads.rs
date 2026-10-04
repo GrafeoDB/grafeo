@@ -130,6 +130,6 @@ mod tests {
     fn test_nquads_empty() {
         let store = RdfStore::new();
         let output = to_nquads_string(&store).unwrap();
-        assert!(output.is_empty());
+        assert!(output.is_empty(), "{output:?}");
     }
 }

@@ -189,7 +189,7 @@ mod tests {
             vec![Target::Class(Term::iri("http://ex.org/NonExistent"))],
         );
         let nodes = resolve_targets(&shape, &data);
-        assert!(nodes.is_empty());
+        assert!(nodes.is_empty(), "{nodes:?}");
     }
 
     #[test]

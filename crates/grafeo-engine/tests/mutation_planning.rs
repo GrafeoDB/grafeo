@@ -552,7 +552,7 @@ fn test_remove_label() {
         .unwrap();
 
     let result = session.execute("MATCH (n:Temp) RETURN n.name").unwrap();
-    assert!(result.rows().is_empty());
+    assert!(result.rows().is_empty(), "{:?}", result.rows());
 }
 
 // ── Regression: SET/REMOVE label variable binding (#178, #182) ──────────────
@@ -1468,7 +1468,7 @@ fn test_call_list_procedures() {
     let result = session.execute("CALL grafeo.procedures()").unwrap();
 
     // Should return a list of available procedures
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
 }
 
 #[cfg(feature = "algos")]
@@ -1480,7 +1480,7 @@ fn test_call_degree_centrality() {
     let result = session.execute("CALL grafeo.degree_centrality()").unwrap();
 
     // Should return results for each node
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
 }
 
 #[cfg(feature = "algos")]
@@ -1493,7 +1493,7 @@ fn test_call_procedure_with_yield() {
         .execute("CALL grafeo.pagerank() YIELD node_id, score RETURN node_id, score")
         .unwrap();
 
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     // Each row should have node_id and score
     assert!(result.columns.len() >= 2);
 }
@@ -1930,7 +1930,7 @@ mod cypher_mutations {
             )
             .unwrap();
 
-        assert!(!result.rows().is_empty());
+        assert!(!result.rows().is_empty(), "result.rows() is empty");
         for row in result.rows() {
             assert_eq!(row[1], Value::String("TechCorp".into()));
         }

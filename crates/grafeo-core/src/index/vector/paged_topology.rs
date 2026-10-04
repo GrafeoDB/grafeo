@@ -786,7 +786,7 @@ mod tests {
         let (ep, lvl, nodes) = round_trip(None, 0, Vec::new());
         assert_eq!(ep, None);
         assert_eq!(lvl, 0);
-        assert!(nodes.is_empty());
+        assert!(nodes.is_empty(), "{nodes:?}");
     }
 
     #[test]
@@ -1030,7 +1030,7 @@ mod tests {
             .neighbors_at(NodeId::new(40), 0)
             .expect("layer 0 exists")
             .collect();
-        assert!(layer0.is_empty());
+        assert!(layer0.is_empty(), "{layer0:?}");
     }
 
     #[test]

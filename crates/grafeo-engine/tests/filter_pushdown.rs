@@ -104,7 +104,7 @@ fn mixed_equality_and_range_no_match() {
         .execute("MATCH (n:Person) WHERE n.city = 'London' AND n.age > 50 RETURN n.name")
         .unwrap();
 
-    assert!(result.rows().is_empty());
+    assert!(result.rows().is_empty(), "{:?}", result.rows());
 }
 
 // ── Range-only pushdown ──
@@ -187,7 +187,7 @@ fn label_narrows_scan_correctly() {
         .execute("MATCH (n:Person) WHERE n.name = 'Acme' RETURN n.name")
         .unwrap();
 
-    assert!(result.rows().is_empty());
+    assert!(result.rows().is_empty(), "{:?}", result.rows());
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn or_filter_matches_no_side() {
         .execute("MATCH (n:Person) WHERE n.name = 'Nobody' OR n.name = 'Ghost' RETURN n.name")
         .unwrap();
 
-    assert!(result.rows().is_empty());
+    assert!(result.rows().is_empty(), "{:?}", result.rows());
 }
 
 #[test]

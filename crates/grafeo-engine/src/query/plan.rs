@@ -4735,7 +4735,7 @@ mod tests {
             silent: false,
         });
         let out = graph_op.explain_tree();
-        assert!(!out.is_empty());
+        assert!(!out.is_empty(), "out is empty");
     }
 
     // ==================== fmt_expr helper ====================

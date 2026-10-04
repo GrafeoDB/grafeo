@@ -990,14 +990,14 @@ mod tests {
         let br = bridges(&store);
 
         // Diamond has no bridges (every edge is part of a cycle)
-        assert!(br.is_empty());
+        assert!(br.is_empty(), "{br:?}");
     }
 
     #[test]
     fn test_bridges_empty() {
         let store = LpgStore::new().unwrap();
         let br = bridges(&store);
-        assert!(br.is_empty());
+        assert!(br.is_empty(), "{br:?}");
     }
 
     #[test]
@@ -1173,7 +1173,7 @@ mod tests {
 
         let edges_5 = k_truss(&store, 5);
         // No edges should be in 5-truss for K_4
-        assert!(edges_5.is_empty());
+        assert!(edges_5.is_empty(), "{edges_5:?}");
     }
 
     #[test]

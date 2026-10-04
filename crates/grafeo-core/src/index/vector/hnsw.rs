@@ -1477,7 +1477,8 @@ mod tests {
         assert!(
             index
                 .search(&[0.0, 0.0, 0.0, 0.0], 10, &accessor)
-                .is_empty()
+                .is_empty(),
+            "expected no results"
         );
     }
 
@@ -1802,7 +1803,7 @@ mod tests {
         let results = index.batch_search(&queries, 10, &accessor);
 
         assert_eq!(results.len(), 1);
-        assert!(results[0].is_empty());
+        assert!(results[0].is_empty(), "expected empty");
     }
 
     /// Brute-force k-NN for recall verification.
@@ -2013,7 +2014,7 @@ mod tests {
         let accessor = make_accessor(&map);
 
         let results = index.search(&[1.0, 0.0, 0.0], 5, &accessor);
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
     }
 
     /// Builds a seeded 2-D index where every node is inserted once.
@@ -2170,7 +2171,8 @@ mod tests {
         assert!(
             index
                 .search(&[0.0, 0.0], 1, &make_accessor(&map))
-                .is_empty()
+                .is_empty(),
+            "expected no results"
         );
     }
 
@@ -2355,7 +2357,7 @@ mod tests {
         let allowlist: HashSet<NodeId> = (1..=50).filter(|i| i % 2 == 0).map(NodeId::new).collect();
 
         let results = index.search_with_filter(&vectors[25], 5, &allowlist, &accessor);
-        assert!(!results.is_empty());
+        assert!(!results.is_empty(), "results is empty");
         assert!(results.len() <= 5);
 
         // Every result must be in the allowlist
@@ -2385,7 +2387,7 @@ mod tests {
 
         let allowlist: HashSet<NodeId> = HashSet::new();
         let results = index.search_with_filter(&vectors[5], 5, &allowlist, &accessor);
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
     }
 
     #[test]
@@ -2596,7 +2598,7 @@ mod tests {
         let results = index.search_with_filter(&[0.9, 0.1, 0.0, 0.0], 2, &allowlist, &accessor);
 
         // Node 1 is closest overall but not in allowlist
-        assert!(!results.is_empty());
+        assert!(!results.is_empty(), "results is empty");
         for (id, _) in &results {
             assert!(allowlist.contains(id));
         }
@@ -2635,7 +2637,7 @@ mod tests {
         // Reference: search results from heap-backed index.
         let query: Vec<f32> = vec![0.1, 0.4, 0.6, 0.2, 0.8, 0.5, 0.3, 0.7];
         let heap_results = heap_index.search(&query, 5, &accessor);
-        assert!(!heap_results.is_empty());
+        assert!(!heap_results.is_empty(), "heap_results is empty");
 
         // Snapshot + serialize + load back as mmap topology.
         let (ep, ml, nodes) = heap_index.snapshot_topology();
@@ -2911,7 +2913,7 @@ mod tests {
 
         let allowlist: HashSet<NodeId> = HashSet::new();
         let results = mmap_index.search_with_filter(&[0.1; 4], 5, &allowlist, &accessor);
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
     }
 
     /// Mmap-backed search on an empty index must not panic.
@@ -2928,7 +2930,7 @@ mod tests {
         let accessor = |id: NodeId| -> Option<Arc<[f32]>> { map.get(&id).cloned() };
 
         let results = mmap_index.search(&[0.1; 4], 5, &accessor);
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
         assert_eq!(mmap_index.len(), 0);
         assert!(mmap_index.is_empty());
     }

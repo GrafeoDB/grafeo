@@ -643,7 +643,7 @@ fn test_nodes_by_label_nonexistent() {
     store.create_node(&["Person"]);
 
     let empty = store.nodes_by_label("NonExistent");
-    assert!(empty.is_empty());
+    assert!(empty.is_empty(), "{empty:?}");
 }
 
 #[test]
@@ -994,7 +994,7 @@ fn test_property_index_maintained_on_update() {
 
     // Old value should not find it
     let pending = store.find_nodes_by_property("status", &Value::from("pending"));
-    assert!(pending.is_empty());
+    assert!(pending.is_empty(), "{pending:?}");
 
     // New value should find it
     let done = store.find_nodes_by_property("status", &Value::from("done"));
@@ -1020,7 +1020,7 @@ fn test_property_index_maintained_on_remove() {
 
     // Should no longer find it
     let found = store.find_nodes_by_property("tag", &Value::from("important"));
-    assert!(found.is_empty());
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -1072,7 +1072,8 @@ fn test_property_index_restored_when_delete_rolls_back() {
     assert!(
         store
             .find_nodes_by_property("id", &Value::from("a"))
-            .is_empty()
+            .is_empty(),
+        "expected no nodes"
     );
 
     store.rollback_transaction_properties(tx);
@@ -1149,7 +1150,7 @@ fn test_property_index_multiple_values() {
     assert_eq!(age_30.len(), 1);
 
     let age_40 = store.find_nodes_by_property("age", &Value::from(40i64));
-    assert!(age_40.is_empty());
+    assert!(age_40.is_empty(), "{age_40:?}");
 }
 
 #[test]
@@ -1202,7 +1203,7 @@ fn test_get_node_property_batch_empty() {
     let key = PropertyKey::new("any");
 
     let values = store.get_node_property_batch(&[], &key);
-    assert!(values.is_empty());
+    assert!(values.is_empty(), "{values:?}");
 }
 
 #[test]
@@ -1240,7 +1241,7 @@ fn test_get_nodes_properties_batch_empty() {
     let store = LpgStore::new().unwrap();
 
     let all_props = store.get_nodes_properties_batch(&[]);
-    assert!(all_props.is_empty());
+    assert!(all_props.is_empty(), "{all_props:?}");
 }
 
 #[test]
@@ -1401,7 +1402,7 @@ fn test_find_nodes_in_range_empty_result() {
         true,
         true,
     );
-    assert!(result.is_empty());
+    assert!(result.is_empty(), "{result:?}");
 }
 
 #[test]
@@ -1417,7 +1418,7 @@ fn test_find_nodes_in_range_nonexistent_property() {
         true,
         true,
     );
-    assert!(result.is_empty());
+    assert!(result.is_empty(), "{result:?}");
 }
 
 // === Multi-Property Query Tests ===
@@ -1465,7 +1466,7 @@ fn test_find_nodes_by_properties_no_match() {
     store.create_node_with_props(&["Person"], [("name", Value::from("Alix"))]);
 
     let result = store.find_nodes_by_properties(&[("name", Value::from("Nobody"))]);
-    assert!(result.is_empty());
+    assert!(result.is_empty(), "{result:?}");
 }
 
 #[test]
@@ -1811,14 +1812,14 @@ mod version_gc {
         );
 
         store.gc_versions(epochs[2]);
-        assert!(labels_at(vincent, epochs[0]).is_empty());
+        assert!(labels_at(vincent, epochs[0]).is_empty(), "expected empty");
         assert_eq!(labels_at(vincent, epochs[1]), ["Employee", "Person"]);
         assert_eq!(labels_at(vincent, epochs[2]), ["Person"]);
         assert_eq!(labels_at(vincent, epochs[3]), ["Manager", "Person"]);
 
         let later = store.new_epoch();
         store.gc_versions(later);
-        assert!(labels_at(vincent, epochs[1]).is_empty());
+        assert!(labels_at(vincent, epochs[1]).is_empty(), "expected empty");
         assert_eq!(labels_at(vincent, later), ["Manager", "Person"]);
         assert_eq!(labels_at(jules, epochs[0]), ["Person"]);
         assert!(store.gc_candidates.lock().labels.is_empty());

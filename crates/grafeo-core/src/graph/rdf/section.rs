@@ -458,7 +458,7 @@ mod tests {
 
         let section = RdfStoreSection::new(Arc::clone(&store));
         let bytes = section.serialize().expect("serialize should succeed");
-        assert!(!bytes.is_empty());
+        assert!(!bytes.is_empty(), "bytes is empty");
         assert_eq!(&bytes[0..4], b"RDFB");
 
         let store2 = Arc::new(RdfStore::new());

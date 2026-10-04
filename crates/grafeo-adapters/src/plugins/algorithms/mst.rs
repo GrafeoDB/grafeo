@@ -464,7 +464,7 @@ mod tests {
         let store = LpgStore::new().unwrap();
         let result = kruskal(&store, None);
 
-        assert!(result.edges.is_empty());
+        assert!(result.edges.is_empty(), "{:?}", result.edges);
         assert_eq!(result.total_weight, 0.0);
     }
 
@@ -475,7 +475,7 @@ mod tests {
 
         let result = kruskal(&store, None);
 
-        assert!(result.edges.is_empty());
+        assert!(result.edges.is_empty(), "{:?}", result.edges);
         assert!(result.is_spanning_tree(1));
     }
 
@@ -514,7 +514,7 @@ mod tests {
         let store = LpgStore::new().unwrap();
         let result = prim(&store, None, None);
 
-        assert!(result.edges.is_empty());
+        assert!(result.edges.is_empty(), "{:?}", result.edges);
     }
 
     #[test]

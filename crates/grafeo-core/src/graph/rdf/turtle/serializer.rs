@@ -435,7 +435,7 @@ mod tests {
     fn test_serialize_empty() {
         let serializer = TurtleSerializer::new();
         let output = serializer.to_string(&[]).unwrap();
-        assert!(output.is_empty());
+        assert!(output.is_empty(), "{output:?}");
     }
 
     #[test]

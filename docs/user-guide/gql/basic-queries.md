@@ -138,6 +138,16 @@ OPTIONAL MATCH (c)-[:LOCATED_IN]->(city:City)
 RETURN p.name, c.name, city.name
 ```
 
+A condition on the optional part (a `WHERE` after it, or one inside its pattern) decides which matches count,
+also when it reads a variable bound before: a row none of whose matches pass it keeps `null`.
+
+```sql
+-- Friends of Alix's friends who are older than Alix; a friend without one keeps null
+MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b)
+OPTIONAL MATCH (b)-[:KNOWS]->(c WHERE c.age > a.age)
+RETURN b.name, c.name
+```
+
 ## SELECT (ISO Alternative to RETURN)
 
 The ISO GQL standard uses `SELECT` as an alternative to `RETURN`. The semantics are identical.
@@ -164,7 +174,9 @@ FINISH
 
 ## Query Composition with NEXT
 
-`NEXT` chains queries together: the output of the left query feeds into the right query as input. This enables multi-step transformations.
+`NEXT` chains queries together: the rows the left query returns are the input of the right query, as the rows of
+a `WITH` are for the clauses after it. Only the last query's `RETURN` is the result, and what a `RETURN` before
+`NEXT` leaves out is not visible after it.
 
 ```sql
 -- Find friends, then filter by age
@@ -192,6 +204,9 @@ WITH *
 WHERE friend.age > 25
 RETURN p.name, friend.name
 ```
+
+An expression in `WITH` needs a name (`WITH p.name AS name`), and a variable a `WITH` leaves out is not visible
+after it.
 
 ## LET (Variable Binding)
 
@@ -241,6 +256,30 @@ CALL {
     RETURN count(friend) AS friend_count
 }
 RETURN p.name, friend_count
+```
+
+A variable scope clause limits what the subquery sees: `CALL (p) { ... }` sees only `p`, and `CALL () { ... }`
+sees no outer variable. A subquery returns new names only: returning an outer variable is an error, so rename it
+(`RETURN p AS person`). The body can order and cut its rows, for the top rows per input row, and combine queries
+with `UNION`, `EXCEPT`, `INTERSECT` or `OTHERWISE`:
+
+```sql
+-- Each person's oldest friend
+MATCH (p:Person)
+CALL (p) {
+    MATCH (p)-[:KNOWS]->(friend)
+    RETURN friend.name AS oldest_friend ORDER BY friend.age DESC LIMIT 1
+}
+RETURN p.name, oldest_friend
+
+-- Whom each person knows or is known by
+MATCH (p:Person)
+CALL (p) {
+    MATCH (p)-[:KNOWS]->(other) RETURN other.name AS contact
+    UNION
+    MATCH (other)-[:KNOWS]->(p) RETURN other.name AS contact
+}
+RETURN p.name, contact
 ```
 
 ### OPTIONAL CALL

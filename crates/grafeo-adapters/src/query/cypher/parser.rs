@@ -474,6 +474,15 @@ impl<'a> Parser<'a> {
                 TokenKind::Set => {
                     clauses.push(Clause::Set(self.parse_set_clause()?));
                 }
+                TokenKind::Merge => {
+                    clauses.push(Clause::Merge(self.parse_merge_clause()?));
+                }
+                TokenKind::Delete | TokenKind::Detach => {
+                    clauses.push(Clause::Delete(self.parse_delete_clause()?));
+                }
+                TokenKind::Remove => {
+                    clauses.push(Clause::Remove(self.parse_remove_clause()?));
+                }
                 TokenKind::Order => {
                     clauses.push(Clause::OrderBy(self.parse_order_by_clause()?));
                 }
@@ -486,6 +495,12 @@ impl<'a> Parser<'a> {
                     clauses.push(Clause::Limit(self.parse_expression()?));
                 }
                 TokenKind::Call => clauses.push(self.parse_call()?),
+                // FOREACH is a contextual keyword (not reserved)
+                _ if self.can_be_identifier()
+                    && self.get_identifier_text().eq_ignore_ascii_case("FOREACH") =>
+                {
+                    clauses.push(Clause::ForEach(self.parse_foreach_clause()?));
+                }
                 _ => break,
             }
         }

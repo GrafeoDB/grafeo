@@ -72,7 +72,7 @@ Welcome to Grafeo! This guide covers getting started with the high-performance g
 
 ### For Rust Users
 
-- Rust 1.91.1 or later
+- Rust 1.99.0 or later
 - Cargo package manager
 
 ## What's Next?

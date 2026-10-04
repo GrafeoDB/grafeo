@@ -146,6 +146,31 @@ fn a_failed_direct_batch_in_a_transaction_leaves_nothing() {
     assert_eq!(doc_ids(&db), ids(&[]));
 }
 
+/// A MERGE whose `ON CREATE SET` fails on the new edge does not leave the
+/// edge it created.
+#[test]
+fn a_failed_edge_merge_in_a_transaction_leaves_nothing() {
+    let db = typed_docs();
+    db.execute("CREATE EDGE TYPE CITES (since INTEGER, note STRING)")
+        .unwrap();
+    db.execute("INSERT (:Doc {id: 1}), (:Doc {id: 2})").unwrap();
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session
+        .execute(
+            "MATCH (a:Doc {id: 1}), (b:Doc {id: 2}) \
+             MERGE (a)-[r:CITES {since: 2020}]->(b) ON CREATE SET r.note = r.since + 1",
+        )
+        .unwrap_err();
+    session.commit().unwrap();
+
+    let edges = db
+        .execute("MATCH ()-[r:CITES]->() RETURN count(r)")
+        .unwrap();
+    assert_eq!(edges.rows()[0][0], grafeo_common::types::Value::Int64(0));
+    assert_eq!(doc_ids(&db), ids(&[1, 2]));
+}
+
 /// The undone statement's WAL records are dropped too: a reopen replays only
 /// what committed.
 #[cfg(feature = "wal")]

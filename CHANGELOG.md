@@ -4,6 +4,14 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.5.45] - Unreleased
 
+### Changed
+
+- **Rust (`grafeo-engine`): `TransactionState::Committing`**: `TransactionManager::state` reports it while a commit is being completed, between its commit epoch and its WAL records.
+
+### Fixed
+
+- **Writes during a commit could land in the middle of it** ([#548](https://github.com/GrafeoDB/grafeo/issues/548)): a direct write, or another transaction writing what the committing one wrote, could hide the committed value from point-in-time reads, remove it on rollback or mark an uncommitted value as committed; a transaction that began during a commit could miss it; and after a crash, two commits could be replayed in the wrong order. A commit now completes before anything that comes after it.
+
 ## [0.5.44] - 2026-10-04
 
 Durability and consistency release. Crash-safe checkpoints and WAL recovery, indexes and constraints that survive a reopen, schema checks on every write path, per-graph conflicts and grants, commit and rollback in O(changes), and fixes for shortest paths, variable-length edges, list comprehensions, subqueries, `OPTIONAL MATCH` and `MERGE`. Plus graph handles, upserts by key and write counters.

@@ -10,6 +10,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Breaking: the minimum Rust version is 1.99.0** (was 1.91.1).
 - **Rust (`grafeo-engine`): `TransactionState::Committing`**: `TransactionManager::state` reports it while a commit is being completed, between its commit epoch and its WAL records.
 
+
 ### Fixed
 
 - **Writes during a commit could land in the middle of it** ([#548](https://github.com/GrafeoDB/grafeo/issues/548)): a direct write, or another transaction writing what the committing one wrote, could hide the committed value from point-in-time reads, remove it on rollback or mark an uncommitted value as committed; a transaction that began during a commit could miss it; and after a crash, two commits could be replayed in the wrong order. A commit now completes before anything that comes after it.

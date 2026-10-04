@@ -424,6 +424,18 @@ tests:
         - [Berlin, 0]
         - [Paris, 0]
 
+  # In WHERE too: one count for every city, combined with a row condition.
+  - name: a_count_that_shares_nothing_in_where
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (c:City) WHERE COUNT { MATCH (x)-[:KNOWS]->(y) } = 5 AND c.name <> 'Berlin' RETURN c.name AS c"
+      cypher: "MATCH (c:City) WHERE COUNT { MATCH (x)-[:KNOWS]->(y) } = 5 AND c.name <> 'Berlin' RETURN c.name AS c"
+    expect:
+      rows:
+        - [Amsterdam]
+        - [Paris]
+
   # After a write in the same statement the subquery sees every row's write:
   # three tags, one per city, counted on each row.
   - name: a_count_that_shares_nothing_after_a_write

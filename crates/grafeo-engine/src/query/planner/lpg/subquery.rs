@@ -606,6 +606,9 @@ fn starts_with_optional_match(plan: &LogicalOperator) -> bool {
         LogicalOperator::NodeScan(op) => {
             op.input.as_deref().is_some_and(starts_with_optional_match)
         }
+        LogicalOperator::EdgeScan(op) => {
+            op.input.as_deref().is_some_and(starts_with_optional_match)
+        }
         _ => false,
     }
 }
@@ -886,5 +889,37 @@ mod tests {
         };
         assert!(reads_outer_values(&grouped_by("k")));
         assert!(!reads_outer_values(&grouped_by("p")));
+    }
+
+    /// A subquery that starts with OPTIONAL MATCH runs per row (its row of
+    /// nulls binds no shared variable), also under a node or edge scan.
+    #[test]
+    fn a_subquery_that_starts_with_optional_match_runs_per_row() {
+        use crate::query::plan::{EdgeScanOp, LeftJoinOp};
+
+        let optional = || {
+            Box::new(LogicalOperator::LeftJoin(LeftJoinOp {
+                left: Box::new(LogicalOperator::Empty),
+                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "p".into(),
+                    label: None,
+                    input: None,
+                })),
+                condition: None,
+            }))
+        };
+        let under_a_node_scan = LogicalOperator::NodeScan(NodeScanOp {
+            variable: "q".into(),
+            label: None,
+            input: Some(optional()),
+        });
+        let under_an_edge_scan = LogicalOperator::EdgeScan(EdgeScanOp {
+            variable: "r".into(),
+            edge_types: Vec::new(),
+            input: Some(optional()),
+        });
+        assert!(reads_outer_values(&optional()));
+        assert!(reads_outer_values(&under_a_node_scan));
+        assert!(reads_outer_values(&under_an_edge_scan));
     }
 }

@@ -65,6 +65,48 @@ fn undefined_variable_error(variable: &str, context: &BindingContext, suffix: &s
     }
 }
 
+/// The parts of a subquery body joined by `UNION` (under the `DISTINCT` of
+/// a plain `UNION`), or `None` for a body of one part.
+fn union_parts(plan: &LogicalOperator) -> Option<&[LogicalOperator]> {
+    match plan {
+        LogicalOperator::Union(union) => Some(&union.inputs),
+        LogicalOperator::Distinct(distinct) => match distinct.input.as_ref() {
+            LogicalOperator::Union(union) => Some(&union.inputs),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The outer variables one part of a subquery imports: the columns of the
+/// parameter scan its plan starts from, none without one.
+fn leading_imports(plan: &LogicalOperator) -> Vec<String> {
+    match plan {
+        LogicalOperator::ParameterScan(scan) => scan.columns.clone(),
+        LogicalOperator::NodeScan(scan) => {
+            scan.input.as_deref().map_or_else(Vec::new, leading_imports)
+        }
+        LogicalOperator::EdgeScan(scan) => {
+            scan.input.as_deref().map_or_else(Vec::new, leading_imports)
+        }
+        LogicalOperator::Expand(op) => leading_imports(&op.input),
+        LogicalOperator::Filter(op) => leading_imports(&op.input),
+        LogicalOperator::Project(op) => leading_imports(&op.input),
+        LogicalOperator::Return(op) => leading_imports(&op.input),
+        LogicalOperator::Aggregate(op) => leading_imports(&op.input),
+        LogicalOperator::Limit(op) => leading_imports(&op.input),
+        LogicalOperator::Skip(op) => leading_imports(&op.input),
+        LogicalOperator::Sort(op) => leading_imports(&op.input),
+        LogicalOperator::Distinct(op) => leading_imports(&op.input),
+        LogicalOperator::Unwind(op) => leading_imports(&op.input),
+        LogicalOperator::Bind(op) => leading_imports(&op.input),
+        LogicalOperator::Join(join) => leading_imports(&join.left),
+        LogicalOperator::LeftJoin(join) => leading_imports(&join.left),
+        LogicalOperator::Apply(apply) => leading_imports(&apply.input),
+        _ => Vec::new(),
+    }
+}
+
 /// Information about a bound variable.
 #[derive(Debug, Clone)]
 pub struct VariableInfo {
@@ -695,20 +737,29 @@ impl Binder {
                 // outer row. It binds in a context of its own, so neither its
                 // internal variables nor a `WITH` in it that drops outer ones
                 // change the outer scope.
-                let subplan_context = if apply.shared_variables.iter().any(|name| name == "*") {
-                    self.context.clone()
-                } else {
-                    let mut imported = BindingContext::new();
-                    for name in &apply.shared_variables {
-                        if let Some(info) = self.context.get(name) {
-                            imported.add_variable(name.clone(), info.clone());
-                        }
+                let imports_all = apply.shared_variables.iter().any(|name| name == "*");
+                let bound = match union_parts(&apply.subplan) {
+                    // Each part of a UNION imports its own outer variables (the
+                    // Apply imports all of them): the ones its scan starts from.
+                    Some(parts) if !imports_all => parts.iter().try_for_each(|part| {
+                        let part_context = self.imported(&leading_imports(part));
+                        let outer_context = std::mem::replace(&mut self.context, part_context);
+                        let bound = self.bind_operator(part);
+                        self.context = outer_context;
+                        bound
+                    }),
+                    _ => {
+                        let subplan_context = if imports_all {
+                            self.context.clone()
+                        } else {
+                            self.imported(&apply.shared_variables)
+                        };
+                        let outer_context = std::mem::replace(&mut self.context, subplan_context);
+                        let bound = self.bind_operator(&apply.subplan);
+                        self.context = outer_context;
+                        bound
                     }
-                    imported
                 };
-                let outer_context = std::mem::replace(&mut self.context, subplan_context);
-                let bound = self.bind_operator(&apply.subplan);
-                self.context = outer_context;
                 bound?;
 
                 // A subquery returns new variables only, as in openCypher: an
@@ -1436,6 +1487,18 @@ impl Binder {
         }
 
         Ok(())
+    }
+
+    /// The outer variables named in `names`, with what they are in the
+    /// current context.
+    fn imported(&self, names: &[String]) -> BindingContext {
+        let mut imported = BindingContext::new();
+        for name in names {
+            if let Some(info) = self.context.get(name) {
+                imported.add_variable(name.clone(), info.clone());
+            }
+        }
+        imported
     }
 
     /// Binds the two inputs of a join. The right one sees the left one's

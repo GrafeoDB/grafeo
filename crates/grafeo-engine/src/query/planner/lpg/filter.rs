@@ -81,7 +81,13 @@ impl super::Planner {
 
         // EXISTS and COUNT subqueries the edge check cannot answer run per row
         // of the input (see `subquery.rs`).
-        if self.has_subquery_to_lift(&filter.predicate, None) {
+        // With the variables the input's rows hold, a subquery that shares
+        // none of them is lifted too (counted once instead of per row).
+        let input_columns: Option<Vec<String>> = filter
+            .input
+            .bound_variables(None)
+            .map(|names| names.into_iter().collect());
+        if self.has_subquery_to_lift(&filter.predicate, input_columns.as_deref()) {
             return self.plan_filter_with_subqueries(filter);
         }
 
@@ -179,9 +185,13 @@ impl super::Planner {
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let mut conjuncts = Vec::new();
         split_conjuncts(&filter.predicate, &mut conjuncts);
+        let input_columns: Option<Vec<String>> = filter
+            .input
+            .bound_variables(None)
+            .map(|names| names.into_iter().collect());
         let (with_subqueries, plain): (Vec<_>, Vec<_>) = conjuncts
             .into_iter()
-            .partition(|conjunct| self.has_subquery_to_lift(conjunct, None));
+            .partition(|conjunct| self.has_subquery_to_lift(conjunct, input_columns.as_deref()));
         let (input_op, columns) = match join_conjuncts(plain) {
             Some(predicate) => self.plan_filter(&FilterOp {
                 predicate,

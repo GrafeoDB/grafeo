@@ -571,6 +571,22 @@ tests:
         - [Jules]
         - [Vincent]
 
+  # Each part sees only what its own importing WITH imports: the first part
+  # imports a, not b.
+  - name: a_union_part_sees_only_its_own_imports
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'}), (b:City {name: 'Paris'}) CALL { WITH a RETURN b.name AS x UNION WITH b RETURN b.name AS x } RETURN x"
+    expect:
+      error: "Undefined variable 'b'"
+
+  - name: union_parts_with_imports_of_their_own
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'}), (b:City {name: 'Paris'}) CALL { WITH a RETURN a.name AS x UNION WITH b RETURN b.name AS x } RETURN x"
+    expect:
+      rows:
+        - [Alix]
+        - [Paris]
+
   # UNION ALL keeps both rows; UNION keeps one.
   - name: union_all_in_the_body
     variants:

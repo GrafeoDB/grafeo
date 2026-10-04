@@ -4213,8 +4213,12 @@ impl Session {
         // track_graph_touch() for this transaction (it checks current_transaction
         // first), so this is safe.
         let touched = std::mem::take(&mut *self.touched_graphs.lock());
-        let commit_epoch = match self.transaction_manager.commit(transaction_id) {
-            Ok(epoch) => epoch,
+        // Until `commit` is dropped, the commit holds its writes and no other
+        // commit, transaction start or write outside a transaction can run:
+        // the versions, events and WAL records below are complete before
+        // anything that comes after the commit (#548).
+        let commit = match self.transaction_manager.start_commit(transaction_id) {
+            Ok(commit) => commit,
             Err(e) => {
                 // Conflict detected: abort the transaction completely so its
                 // entities are released and its versions discarded (#409).
@@ -4236,6 +4240,10 @@ impl Session {
                 return Err(e);
             }
         };
+        let commit_epoch = commit.epoch();
+
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_after_commit_epoch();
 
         // Finalize PENDING epochs: make uncommitted versions visible at the commit epoch.
         for graph_name in &touched {
@@ -4292,6 +4300,7 @@ impl Session {
             let store = self.resolve_store(graph_name);
             store.sync_epoch(current_epoch);
         }
+        drop(commit);
 
         // Reset read-only flag and clear savepoints.
         // touched_graphs was already emptied by mem::take above.

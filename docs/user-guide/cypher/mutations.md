@@ -193,7 +193,7 @@ CALL {
 }
 RETURN p.name, deleted
 
--- Top row per input row, with a scope clause
+-- Each person's oldest friend, with a scope clause (a person who knows nobody is left out)
 MATCH (p:Person)
 CALL (p) {
     MATCH (p)-[:KNOWS]->(friend)

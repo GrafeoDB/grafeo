@@ -10,7 +10,7 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
 
 use super::CompactStore;
-use super::column::ColumnCodec;
+use super::column::{ColumnCodec, CompactColumn};
 use super::csr::CsrAdjacency;
 use super::id::MAX_TABLE_ID;
 use super::node_table::NodeTable;
@@ -77,7 +77,7 @@ pub enum CompactStoreError {
 /// Builder for node table columns. Obtained through [`CompactStoreBuilder::node_table`].
 pub struct NodeTableBuilder {
     label: ArcStr,
-    columns: Vec<(PropertyKey, ColumnCodec)>,
+    columns: Vec<(PropertyKey, CompactColumn)>,
     zone_maps: Vec<(PropertyKey, ZoneMap)>,
     len: Option<usize>,
     length_mismatch: Option<(usize, usize)>,
@@ -117,7 +117,7 @@ impl NodeTableBuilder {
         self.zone_maps.push((PropertyKey::new(name), zone_map));
 
         self.columns
-            .push((PropertyKey::new(name), ColumnCodec::BitPacked(bp)));
+            .push((PropertyKey::new(name), ColumnCodec::BitPacked(bp).into()));
         self
     }
 
@@ -136,7 +136,7 @@ impl NodeTableBuilder {
         self.zone_maps.push((PropertyKey::new(name), zone_map));
 
         self.columns
-            .push((PropertyKey::new(name), ColumnCodec::Dict(dict)));
+            .push((PropertyKey::new(name), ColumnCodec::Dict(dict).into()));
         self
     }
 
@@ -162,7 +162,7 @@ impl NodeTableBuilder {
         // No meaningful zone map for vector columns.
         self.columns.push((
             PropertyKey::new(name),
-            ColumnCodec::int8_vector(data, dimensions),
+            ColumnCodec::int8_vector(data, dimensions).into(),
         ));
         self
     }
@@ -178,14 +178,14 @@ impl NodeTableBuilder {
         self.zone_maps.push((PropertyKey::new(name), zone_map));
 
         self.columns
-            .push((PropertyKey::new(name), ColumnCodec::Bitmap(bv)));
+            .push((PropertyKey::new(name), ColumnCodec::Bitmap(bv).into()));
         self
     }
 
     /// Adds a pre-built column codec (for advanced use).
     pub fn column(&mut self, name: &str, codec: ColumnCodec) -> &mut Self {
         self.record_len(codec.len());
-        self.columns.push((PropertyKey::new(name), codec));
+        self.columns.push((PropertyKey::new(name), codec.into()));
         self
     }
 
@@ -213,7 +213,7 @@ pub struct RelTableBuilder {
     dst_label: ArcStr,
     edges: Vec<(u32, u32)>,
     backward: bool,
-    properties: Vec<(PropertyKey, ColumnCodec)>,
+    properties: Vec<(PropertyKey, CompactColumn)>,
 }
 
 impl RelTableBuilder {
@@ -248,7 +248,7 @@ impl RelTableBuilder {
     pub fn column_bitpacked(&mut self, name: &str, values: &[u64], bits: u8) -> &mut Self {
         let bp = BitPackedInts::pack_with_bits(values, bits);
         self.properties
-            .push((PropertyKey::new(name), ColumnCodec::BitPacked(bp)));
+            .push((PropertyKey::new(name), ColumnCodec::BitPacked(bp).into()));
         self
     }
 }
@@ -410,15 +410,15 @@ impl CompactStoreBuilder {
             let col_defs: Vec<ColumnDef> = ntb
                 .columns
                 .iter()
-                .map(|(key, codec)| {
-                    let col_type = infer_column_type(codec);
+                .map(|(key, column)| {
+                    let col_type = infer_column_type(column.codec());
                     ColumnDef::new(key.as_str(), col_type)
                 })
                 .collect();
 
             let schema = TableSchema::new(ntb.label.as_str(), table_id, col_defs);
 
-            let columns: FxHashMap<PropertyKey, ColumnCodec> = ntb.columns.into_iter().collect();
+            let columns: FxHashMap<PropertyKey, CompactColumn> = ntb.columns.into_iter().collect();
 
             let zone_maps: FxHashMap<PropertyKey, ZoneMap> = ntb.zone_maps.into_iter().collect();
 
@@ -427,7 +427,12 @@ impl CompactStoreBuilder {
             // when a column is empty; otherwise one entry per block.
             let block_zone_maps: FxHashMap<PropertyKey, Vec<ZoneMap>> = columns
                 .iter()
-                .map(|(key, codec)| (key.clone(), super::zone_map::compute_block_zone_maps(codec)))
+                .map(|(key, column)| {
+                    (
+                        key.clone(),
+                        super::zone_map::compute_block_zone_maps(column),
+                    )
+                })
                 .collect();
 
             let table = NodeTable::from_columns_with_block_stats(
@@ -513,8 +518,8 @@ impl CompactStoreBuilder {
             let property_col_defs: Vec<ColumnDef> = rtb
                 .properties
                 .iter()
-                .map(|(key, codec)| {
-                    let col_type = infer_column_type(codec);
+                .map(|(key, column)| {
+                    let col_type = infer_column_type(column.codec());
                     ColumnDef::new(key.as_str(), col_type)
                 })
                 .collect();
@@ -527,7 +532,7 @@ impl CompactStoreBuilder {
                 property_col_defs,
             );
 
-            let properties: FxHashMap<PropertyKey, ColumnCodec> =
+            let properties: FxHashMap<PropertyKey, CompactColumn> =
                 rtb.properties.into_iter().collect();
 
             let table = RelTable::new(schema, fwd, bwd, properties, src_table_id, dst_table_id);
@@ -623,23 +628,6 @@ fn compute_zone_map_u64(values: &[u64]) -> ZoneMap {
     ZoneMap {
         min: Some(Value::Int64(min as i64)),
         max: Some(Value::Int64(max as i64)),
-        null_count: 0,
-        row_count: values.len(),
-    }
-}
-
-/// Computes a zone map from signed i64 values (RawI64 column).
-///
-/// Produces `Value::Int64` min/max, which flows naturally into `compare_values`
-/// and yields correct signed ordering in predicate pushdown.
-fn compute_zone_map_i64(values: &[i64]) -> ZoneMap {
-    let Some(&min) = values.iter().min() else {
-        return ZoneMap::new();
-    };
-    let max = *values.iter().max().expect("non-empty after min check");
-    ZoneMap {
-        min: Some(Value::Int64(min)),
-        max: Some(Value::Int64(max)),
         null_count: 0,
         row_count: values.len(),
     }
@@ -816,101 +804,12 @@ pub fn from_graph_store(
             // Ensure row count is set even when there are no properties.
             t.record_len(node_count);
             for (key, values) in props_map {
-                let inferred = infer_type_from_values(values);
-                match inferred {
-                    InferredType::BitPacked => {
-                        let u64_values: Vec<u64> = values
-                            .iter()
-                            .map(|v| match v {
-                                // reason: ID encoding: i64 <-> u64 for bit-packed storage
-                                #[allow(clippy::cast_sign_loss)]
-                                Value::Int64(n) => *n as u64,
-                                _ => 0,
-                            })
-                            .collect();
-                        let bp = BitPackedInts::pack(&u64_values);
-                        let zone_map = compute_zone_map_u64(&u64_values);
-                        t.zone_maps.push((key.clone(), zone_map));
-                        t.columns.push((key.clone(), ColumnCodec::BitPacked(bp)));
-                        t.record_len(u64_values.len());
-                    }
-                    InferredType::RawI64 => {
-                        let i64_values: Vec<i64> = values
-                            .iter()
-                            .map(|v| match v {
-                                Value::Int64(n) => *n,
-                                _ => 0,
-                            })
-                            .collect();
-                        let zone_map = compute_zone_map_i64(&i64_values);
-                        t.zone_maps.push((key.clone(), zone_map));
-                        t.columns
-                            .push((key.clone(), ColumnCodec::raw_i64(i64_values)));
-                        t.record_len(values.len());
-                    }
-                    InferredType::Float64 => {
-                        let f64_values: Vec<f64> = values
-                            .iter()
-                            .map(|v| match v {
-                                Value::Float64(f) => *f,
-                                Value::Int64(n) => *n as f64,
-                                _ => 0.0,
-                            })
-                            .collect();
-                        t.columns
-                            .push((key.clone(), ColumnCodec::float64(f64_values)));
-                        t.record_len(values.len());
-                    }
-                    InferredType::Float32Vector { dimensions } => {
-                        let mut flat: Vec<f32> =
-                            Vec::with_capacity(values.len() * dimensions as usize);
-                        for v in values {
-                            match v {
-                                Value::Vector(vec) => flat.extend_from_slice(vec),
-                                _ => {
-                                    flat.extend(std::iter::repeat_n(
-                                        0.0f32,
-                                        usize::from(dimensions),
-                                    ));
-                                }
-                            }
-                        }
-                        t.columns
-                            .push((key.clone(), ColumnCodec::float32_vector(flat, dimensions)));
-                        t.record_len(values.len());
-                    }
-                    InferredType::Bitmap => {
-                        let bool_values: Vec<bool> = values
-                            .iter()
-                            .map(|v| matches!(v, Value::Bool(true)))
-                            .collect();
-                        let bv = BitVector::from_bools(&bool_values);
-                        let zone_map = compute_zone_map_bool(&bool_values);
-                        t.zone_maps.push((key.clone(), zone_map));
-                        t.columns.push((key.clone(), ColumnCodec::Bitmap(bv)));
-                        t.record_len(bool_values.len());
-                    }
-                    InferredType::Dict => {
-                        let str_values: Vec<String> = values
-                            .iter()
-                            .map(|v| match v {
-                                Value::Null => String::new(),
-                                Value::String(s) => s.to_string(),
-                                other => format!("{other}"),
-                            })
-                            .collect();
-                        let str_refs: Vec<&str> = str_values.iter().map(String::as_str).collect();
-                        let mut dict_builder = DictionaryBuilder::new();
-                        for s in &str_refs {
-                            dict_builder.add(s);
-                        }
-                        let dict = dict_builder.build();
-                        let zone_map = compute_zone_map_strings(&str_refs);
-                        t.zone_maps.push((key.clone(), zone_map));
-                        t.columns.push((key.clone(), ColumnCodec::Dict(dict)));
-                        t.record_len(str_values.len());
-                    }
+                let (column, zone_map) = encode_column(values);
+                if let Some(zone_map) = zone_map {
+                    t.zone_maps.push((key.clone(), zone_map));
                 }
+                t.record_len(column.len());
+                t.columns.push((key.clone(), column));
             }
             t
         });
@@ -984,86 +883,8 @@ pub fn from_graph_store(
                 // Add edge property columns.
                 if let Some(props) = edge_props {
                     for (key, values) in props {
-                        let inferred = infer_type_from_values(values);
-                        match inferred {
-                            InferredType::BitPacked => {
-                                let u64_values: Vec<u64> = values
-                                    .iter()
-                                    .map(|v| match v {
-                                        // reason: ID encoding: i64 <-> u64 for bit-packed storage
-                                        #[allow(clippy::cast_sign_loss)]
-                                        Value::Int64(n) => *n as u64,
-                                        _ => 0,
-                                    })
-                                    .collect();
-                                let bp = BitPackedInts::pack(&u64_values);
-                                r.properties.push((key.clone(), ColumnCodec::BitPacked(bp)));
-                            }
-                            InferredType::RawI64 => {
-                                let i64_values: Vec<i64> = values
-                                    .iter()
-                                    .map(|v| match v {
-                                        Value::Int64(n) => *n,
-                                        _ => 0,
-                                    })
-                                    .collect();
-                                r.properties
-                                    .push((key.clone(), ColumnCodec::raw_i64(i64_values)));
-                            }
-                            InferredType::Float64 => {
-                                let f64_values: Vec<f64> = values
-                                    .iter()
-                                    .map(|v| match v {
-                                        Value::Float64(f) => *f,
-                                        Value::Int64(n) => *n as f64,
-                                        _ => 0.0,
-                                    })
-                                    .collect();
-                                r.properties
-                                    .push((key.clone(), ColumnCodec::float64(f64_values)));
-                            }
-                            InferredType::Float32Vector { dimensions } => {
-                                let mut flat: Vec<f32> =
-                                    Vec::with_capacity(values.len() * dimensions as usize);
-                                for v in values {
-                                    match v {
-                                        Value::Vector(vec) => flat.extend_from_slice(vec),
-                                        _ => flat.extend(std::iter::repeat_n(
-                                            0.0f32,
-                                            usize::from(dimensions),
-                                        )),
-                                    }
-                                }
-                                r.properties.push((
-                                    key.clone(),
-                                    ColumnCodec::float32_vector(flat, dimensions),
-                                ));
-                            }
-                            InferredType::Bitmap => {
-                                let bool_values: Vec<bool> = values
-                                    .iter()
-                                    .map(|v| matches!(v, Value::Bool(true)))
-                                    .collect();
-                                let bv = BitVector::from_bools(&bool_values);
-                                r.properties.push((key.clone(), ColumnCodec::Bitmap(bv)));
-                            }
-                            InferredType::Dict => {
-                                let str_values: Vec<String> = values
-                                    .iter()
-                                    .map(|v| match v {
-                                        Value::Null => String::new(),
-                                        Value::String(s) => s.to_string(),
-                                        other => format!("{other}"),
-                                    })
-                                    .collect();
-                                let mut dict_builder = DictionaryBuilder::new();
-                                for s in &str_values {
-                                    dict_builder.add(s);
-                                }
-                                let dict = dict_builder.build();
-                                r.properties.push((key.clone(), ColumnCodec::Dict(dict)));
-                            }
-                        }
+                        let (column, _) = encode_column(values);
+                        r.properties.push((key.clone(), column));
                     }
                 }
 
@@ -1222,6 +1043,90 @@ pub fn from_graph_store_preserving_ids(
         edge_offset_to_id,
     );
     Ok(compact)
+}
+
+/// Encodes one property column for [`from_graph_store`]: the values in the
+/// codec their type calls for, and which rows have a value (a node or edge
+/// without the property holds `Value::Null` here, and its row is marked
+/// missing instead of holding the codec's empty value). Returns the column
+/// and, for the types that keep one, its zone map.
+fn encode_column(values: &[Value]) -> (CompactColumn, Option<ZoneMap>) {
+    let present: Vec<bool> = values.iter().map(|v| !matches!(v, Value::Null)).collect();
+    let (codec, zoned) = match infer_type_from_values(values) {
+        InferredType::BitPacked => {
+            let u64_values: Vec<u64> = values
+                .iter()
+                .map(|v| match v {
+                    #[allow(
+                        clippy::cast_sign_loss,
+                        reason = "infer_type_from_values picks BitPacked only when no Int64 is negative"
+                    )]
+                    Value::Int64(n) => *n as u64,
+                    _ => 0,
+                })
+                .collect();
+            (
+                ColumnCodec::BitPacked(BitPackedInts::pack(&u64_values)),
+                true,
+            )
+        }
+        InferredType::RawI64 => {
+            let i64_values: Vec<i64> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Int64(n) => *n,
+                    _ => 0,
+                })
+                .collect();
+            (ColumnCodec::raw_i64(i64_values), true)
+        }
+        InferredType::Float64 => {
+            let f64_values: Vec<f64> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Float64(f) => *f,
+                    Value::Int64(n) => *n as f64,
+                    _ => 0.0,
+                })
+                .collect();
+            (ColumnCodec::float64(f64_values), false)
+        }
+        InferredType::Float32Vector { dimensions } => {
+            let mut flat: Vec<f32> = Vec::with_capacity(values.len() * dimensions as usize);
+            for v in values {
+                match v {
+                    Value::Vector(vec) => flat.extend_from_slice(vec),
+                    _ => flat.extend(std::iter::repeat_n(0.0f32, usize::from(dimensions))),
+                }
+            }
+            (ColumnCodec::float32_vector(flat, dimensions), false)
+        }
+        InferredType::Bitmap => {
+            let bool_values: Vec<bool> = values
+                .iter()
+                .map(|v| matches!(v, Value::Bool(true)))
+                .collect();
+            (
+                ColumnCodec::Bitmap(BitVector::from_bools(&bool_values)),
+                true,
+            )
+        }
+        InferredType::Dict => {
+            let mut dict_builder = DictionaryBuilder::new();
+            for v in values {
+                // A missing value takes the empty string; `present` masks it.
+                match v {
+                    Value::Null => dict_builder.add(""),
+                    Value::String(s) => dict_builder.add(s.as_str()),
+                    other => dict_builder.add(&format!("{other}")),
+                };
+            }
+            (ColumnCodec::Dict(dict_builder.build()), true)
+        }
+    };
+    let column = CompactColumn::with_present(codec, BitVector::from_bools(&present));
+    let zone_map = zoned.then(|| super::zone_map::compute_zone_map(&column));
+    (column, zone_map)
 }
 
 /// Infers the columnar encoding type from a slice of [`Value`]s.

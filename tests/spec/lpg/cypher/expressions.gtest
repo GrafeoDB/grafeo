@@ -338,3 +338,12 @@ tests:
     expect:
       rows:
         - [true, false]
+
+  # A map projection is a map: dotted access reads its keys
+  - name: dotted_access_on_a_map_projection
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 30})"
+    query: "MATCH (p:Person) RETURN p{.name}.name AS name, p{.name, next: p.age + 1}.next AS next"
+    expect:
+      rows:
+        - [Alix, 31]

@@ -13,6 +13,8 @@
 
 pub mod cardinality;
 pub mod cost;
+mod cycles;
+pub(crate) use cycles::close_cycles;
 pub mod join_order;
 
 pub use cardinality::{
@@ -242,7 +244,9 @@ impl Optimizer {
     /// Returns an error if optimization fails.
     pub fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::optimize");
-        let mut root = plan.root;
+        // Correctness first: a pattern through a node or edge that was bound
+        // before must be checked.
+        let mut root = cycles::close_cycles(plan.root);
 
         // Apply optimization rules
         if self.enable_filter_pushdown {
@@ -1656,6 +1660,7 @@ mod tests {
                 },
                 pushdown_hint: None,
                 input: Box::new(LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: "a".to_string(),
                     to_variable: "b".to_string(),
                     edge_variable: None,
@@ -1714,6 +1719,7 @@ mod tests {
                 },
                 pushdown_hint: None,
                 input: Box::new(LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: "a".to_string(),
                     to_variable: "b".to_string(),
                     edge_variable: None,

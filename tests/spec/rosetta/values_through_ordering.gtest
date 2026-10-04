@@ -1,0 +1,259 @@
+# Rosetta: values through ORDER BY, LIMIT, SKIP and DISTINCT
+#
+# Ordering, cutting and deduplicating rows must not change a value. The
+# setup gives nodes and edges a property with the same name (`w`) and
+# overlapping IDs, so a node or edge that loses track of what it is reads the
+# other entity's `w` (nodes have 100 and up, edges 1 to 8): every expected `w`
+# below tells which entity was read. The row-batch tests cross the 2048-row
+# boundary where LIMIT and SKIP cut a batch.
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): Alix, Gus,
+# Vincent (with w 100, 101, 103), Jules and Mia; Amsterdam (w 104), Berlin,
+# Paris (w 105). KNOWS edges w 1 to 5, LIVES_IN edges w 6 to 8. The row-batch
+# tests add `:N` nodes of their own and read only those.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Values through ORDER BY, LIMIT, SKIP and DISTINCT
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # A node or edge ordered, cut or deduplicated before RETURN stays itself
+  # ---------------------------------------------------------------------------
+
+  - name: edge_properties_after_an_ordered_cut
+    variants:
+      cypher: "MATCH (a:Person)-[r]->(b) WITH a, r ORDER BY r.w LIMIT 4 RETURN a.name AS n, r.w AS w, type(r) AS t"
+    expect:
+      rows:
+        - [Alix, 1, KNOWS]
+        - [Gus, 2, KNOWS]
+        - [Vincent, 3, KNOWS]
+        - [Jules, 4, KNOWS]
+
+  - name: edge_properties_after_skip
+    variants:
+      cypher: "MATCH (a:Person)-[r]->(b) WITH r, b ORDER BY r.w SKIP 2 RETURN r.w AS w, b.name AS n"
+    expect:
+      rows:
+        - [3, Alix]
+        - [4, Mia]
+        - [5, Jules]
+        - [6, Amsterdam]
+        - [7, Berlin]
+        - [8, Paris]
+
+  - name: an_aliased_edge_after_an_ordered_cut
+    variants:
+      cypher: "MATCH (a:Person)-[r]->(b) WITH r AS e ORDER BY e.w LIMIT 3 RETURN e.w AS w, type(e) AS t"
+    expect:
+      rows:
+        - [1, KNOWS]
+        - [2, KNOWS]
+        - [3, KNOWS]
+
+  - name: edge_properties_after_a_computed_sort_key
+    variants:
+      cypher: "MATCH (a:Person)-[r]->(b) WITH a, r ORDER BY toString(r.w) RETURN r.w AS w, a.name AS n"
+    expect:
+      rows:
+        - [1, Alix]
+        - [2, Gus]
+        - [3, Vincent]
+        - [4, Jules]
+        - [5, Alix]
+        - [6, Alix]
+        - [7, Gus]
+        - [8, Mia]
+
+  - name: edge_properties_after_sorting_by_type
+    variants:
+      cypher: "MATCH (a:Person)-[r]->(b) WITH r ORDER BY type(r) DESC, r.w LIMIT 3 RETURN r.w AS w"
+    expect:
+      rows:
+        - [6]
+        - [7]
+        - [8]
+
+  - name: node_properties_after_distinct
+    variants:
+      cypher: "MATCH (a:Person)-[r]->(b) WITH DISTINCT a RETURN a.w AS w, a.name AS n"
+    expect:
+      rows:
+        - [100, Alix]
+        - [101, Gus]
+        - [103, Vincent]
+        - [null, Jules]
+        - [null, Mia]
+
+  - name: node_properties_after_an_ordered_cut
+    variants:
+      cypher: "MATCH (a:Person) WITH a ORDER BY a.age DESC LIMIT 2 RETURN a.w AS w, a.name AS n"
+    expect:
+      rows:
+        - [103, Vincent]
+        - [null, Jules]
+
+  - name: node_properties_after_skip
+    variants:
+      cypher: "MATCH (a:Person) WITH a ORDER BY a.name SKIP 1 RETURN a.w AS w, a.name AS n"
+    expect:
+      rows:
+        - [101, Gus]
+        - [103, Vincent]
+        - [null, Jules]
+        - [null, Mia]
+
+  - name: end_node_properties_after_an_ordered_cut
+    variants:
+      cypher: "MATCH (a:Person)-[r]->(b) WITH b ORDER BY b.name LIMIT 3 RETURN b.w AS w, b.name AS n"
+    expect:
+      rows:
+        - [100, Alix]
+        - [104, Amsterdam]
+        - [null, Berlin]
+
+  - name: node_properties_sorted_with_an_edge_key
+    variants:
+      cypher: "MATCH (a:Person)-[r]->(b) WITH r, a ORDER BY a.age, r.w SKIP 1 LIMIT 3 RETURN r.w AS w, a.w AS aw"
+    expect:
+      rows:
+        - [7, 101]
+        - [8, null]
+        - [1, 100]
+
+  - name: a_let_copy_of_an_edge
+    query: "MATCH (a:Person)-[r]->(b) LET x = r RETURN x.w AS w ORDER BY w"
+    expect:
+      ordered: true
+      rows:
+        - [1]
+        - [2]
+        - [3]
+        - [4]
+        - [5]
+        - [6]
+        - [7]
+        - [8]
+
+  # ---------------------------------------------------------------------------
+  # ORDER BY on a property: only the RETURN items are columns
+  # ---------------------------------------------------------------------------
+
+  - name: sort_by_a_property_that_is_not_returned
+    variants:
+      gql: "MATCH (a:Person) RETURN a.name AS n ORDER BY a.age DESC"
+      cypher: "MATCH (a:Person) RETURN a.name AS n ORDER BY a.age DESC"
+    expect:
+      ordered: true
+      columns: [n]
+      rows:
+        - [Vincent]
+        - [Jules]
+        - [Alix]
+        - [Mia]
+        - [Gus]
+
+  - name: sort_by_a_property_of_a_returned_alias
+    variants:
+      gql: "MATCH (a:Person) RETURN a.name AS n, a AS x ORDER BY x.age SKIP 2"
+      cypher: "MATCH (a:Person) RETURN a.name AS n, a AS x ORDER BY x.age SKIP 2"
+    expect:
+      columns: [n, x]
+      count: 3
+
+  - name: sort_by_an_expression_and_a_property_of_an_alias
+    variants:
+      gql: "MATCH (a:Person) RETURN a AS x ORDER BY labels(x)[0], x.name"
+      cypher: "MATCH (a:Person) RETURN a AS x ORDER BY labels(x)[0], x.name"
+    expect:
+      columns: [x]
+      count: 5
+
+  # ---------------------------------------------------------------------------
+  # Cuts across the 2048-row batch boundary (the edges each have a pair of nodes
+  # of their own: a setup linear in the row count, fast enough for WASM)
+  # ---------------------------------------------------------------------------
+
+  - name: skip_across_a_row_batch
+    setup:
+      - "UNWIND range(0, 2099) AS i INSERT (:N {i: i, w: 1000 + i})"
+    variants:
+      gql: "MATCH (n:N) RETURN n.i AS i ORDER BY n.i SKIP 2046 LIMIT 5"
+      cypher: "MATCH (n:N) RETURN n.i AS i ORDER BY n.i SKIP 2046 LIMIT 5"
+    expect:
+      ordered: true
+      rows:
+        - [2046]
+        - [2047]
+        - [2048]
+        - [2049]
+        - [2050]
+
+  - name: edge_properties_after_a_cut_across_row_batches
+    setup:
+      - "UNWIND range(0, 2098) AS i INSERT (:N {i: i, w: 1000 + i})-[:NEXT {k: i, w: i}]->(:N {i: i + 1, w: 1001 + i})"
+    variants:
+      cypher: "MATCH (n:N)-[r]->(m) WITH r ORDER BY r.k SKIP 2047 LIMIT 3 RETURN r.w AS w"
+    expect:
+      rows:
+        - [2047]
+        - [2048]
+        - [2049]
+
+  - name: top_k_across_row_batches
+    setup:
+      - "UNWIND range(0, 2098) AS i INSERT (:N {i: i, w: 1000 + i})-[:NEXT {k: i, w: i}]->(:N {i: i + 1, w: 1001 + i})"
+    variants:
+      gql: "MATCH (n:N)-[r]->(m) RETURN r.w AS w ORDER BY r.k DESC LIMIT 2"
+      cypher: "MATCH (n:N)-[r]->(m) RETURN r.w AS w ORDER BY r.k DESC LIMIT 2"
+    expect:
+      ordered: true
+      rows:
+        - [2098]
+        - [2097]
+
+  # ---------------------------------------------------------------------------
+  # Values of several types in one column
+  # ---------------------------------------------------------------------------
+
+  - name: mixed_values_through_skip_and_limit
+    variants:
+      gql: "UNWIND [1, 'a', 2.5, null] AS x RETURN x SKIP 1 LIMIT 2"
+      cypher: "UNWIND [1, 'a', 2.5, null] AS x RETURN x SKIP 1 LIMIT 2"
+    expect:
+      rows:
+        - [a]
+        - [2.5]
+
+  - name: mixed_values_in_a_later_row_batch
+    variants:
+      gql: "UNWIND range(1, 3000) AS i RETURN CASE WHEN i < 2500 THEN i ELSE 'x' END AS v SKIP 2498 LIMIT 3"
+      cypher: "UNWIND range(1, 3000) AS i RETURN CASE WHEN i < 2500 THEN i ELSE 'x' END AS v SKIP 2498 LIMIT 3"
+    expect:
+      rows:
+        - [2499]
+        - [x]
+        - [x]
+
+  - name: mixed_values_sorted_across_row_batches
+    variants:
+      gql: "UNWIND range(1, 3000) AS i RETURN CASE WHEN i > 2048 THEN 'late' ELSE i END AS v ORDER BY i DESC LIMIT 2"
+      cypher: "UNWIND range(1, 3000) AS i RETURN CASE WHEN i > 2048 THEN 'late' ELSE i END AS v ORDER BY i DESC LIMIT 2"
+    expect:
+      ordered: true
+      rows:
+        - [late]
+        - [late]
+
+  - name: for_loop_ordered_and_cut
+    query: "FOR x IN [3, 1, 2] RETURN x ORDER BY x LIMIT 2"
+    expect:
+      ordered: true
+      rows:
+        - [1]
+        - [2]

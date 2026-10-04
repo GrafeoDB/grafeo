@@ -15,7 +15,8 @@ memory and query wins. After ingesting data, call `compact()` to switch the data
 to a columnar layout with CSR adjacency. From 0.5.39, `compact()` is **non-destructive
 and writable**: it produces a layered store with an immutable columnar base plus a
 mutable overlay. Inserts and property updates after `compact()` land in the overlay;
-`recompact()` merges the overlay back into a fresh base.
+compacting again merges the overlay back into a fresh base (`recompact()` in Rust,
+`compact()` again in Python and Node.js).
 
 Queries keep working across all supported languages, indexes (vector, text, hybrid)
 can be created and searched post-compact, and named graphs are preserved across
@@ -144,7 +145,7 @@ memory reads.
 3. **Builds** forward and backward CSR adjacency for each edge type
 4. **Swaps** the database to a layered store: the new columnar tables become the
    immutable base and a mutable overlay is attached on top to absorb subsequent
-   writes. `recompact()` later folds the overlay back into a fresh base.
+   writes. Compacting again later folds the overlay back into a fresh base.
 
 The result is a `CompactStore` backed by:
 
@@ -180,11 +181,11 @@ Since 0.5.39, `compact()` returns a layered store: an immutable columnar base pl
 mutable overlay. New inserts and property updates land in the overlay and are visible
 to subsequent queries (`get_node`, property reads, pattern matching, `list_graphs`).
 
-Call `recompact()` to merge the overlay back into a fresh base:
+Compact again to merge the overlay back into a fresh base (`recompact()` in Rust):
 
     db.compact()
     db.execute("INSERT (:Person {name: 'Mia'})")   # lands in overlay
-    db.recompact()                                  # merges overlay into new base
+    db.compact()                                    # merges overlay into new base
 
 Indexes (`create_vector_index`, `create_text_index`, hybrid search) work on layered
 stores: vector/text scan and search now fall through both layers.
@@ -193,7 +194,7 @@ stores: vector/text scan and search now fall through both layers.
 
 - **Overlay write path**: writes go through the overlay, which is less optimized than
   `LpgStore`'s full MVCC path. Sustained write-heavy workloads should stay on `LpgStore`
-  or call `recompact()` periodically.
+  or compact again periodically.
 - **Multi-label nodes**: nodes with multiple labels are stored under a compound key
   (e.g., `"Actor|Person"`, sorted alphabetically). A query like `MATCH (n:Person)` will
   not match nodes stored under `"Actor|Person"`. Workarounds:
@@ -202,6 +203,11 @@ stores: vector/text scan and search now fall through both layers.
     - **Alternative:** assign a canonical "primary" label and store additional labels as a list property instead.
 - **No disk serialization**: `compact()` operates in memory. To persist a compacted database,
   use snapshot export (WASM) or save before compacting.
+- **Missing properties read as empty values**: after `compact()`, when other entities with the
+  same label or type have a property that a node or edge lacks, reading it on that node or edge
+  gives the column's empty value (`''`, `0`, `0.0` or `false`) instead of null, `keys()` lists
+  it and `IS NULL` does not match it. Give every entity the property before compacting, or avoid relying on its absence
+  ([#542](https://github.com/GrafeoDB/grafeo/issues/542), planned for 0.5.45).
 
 ## Feature Flag
 

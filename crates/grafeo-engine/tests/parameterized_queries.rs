@@ -24,6 +24,57 @@ fn count(db: &GrafeoDB, label: &str) -> Value {
         .clone()
 }
 
+/// A write that uses a parameter nobody supplied fails before it writes:
+/// it used to store the text "$e". Through `execute` (no parameter map at
+/// all), an empty map, Cypher and GraphQL (a declared variable without a
+/// default).
+#[test]
+fn an_unsupplied_parameter_fails_before_writing() {
+    let db = GrafeoDB::new_in_memory();
+    for result in [
+        db.execute("INSERT (:P {e: $e})"),
+        db.execute_with_params("INSERT (:P {e: $e})", HashMap::new()),
+        #[cfg(feature = "cypher")]
+        db.execute_cypher("CREATE (:P {e: $e})"),
+        #[cfg(feature = "graphql")]
+        db.execute_graphql("mutation ($e: String) { createP(e: $e) { e } }"),
+    ] {
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("Missing parameter: $e"), "{error}");
+    }
+    assert_eq!(count(&db, "P"), Value::Int64(0));
+
+    // EXPLAIN shows the plan without the values; PROFILE runs it, so it fails.
+    db.execute("EXPLAIN INSERT (:P {e: $e})").unwrap();
+    let error = db
+        .execute("PROFILE INSERT (:P {e: $e})")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Missing parameter: $e"), "{error}");
+    assert_eq!(count(&db, "P"), Value::Int64(0));
+}
+
+/// Gremlin without a parameter map fails the same way where it reads a
+/// parameter (`has`); it used to reach the planner with the parameter unset.
+#[cfg(feature = "gremlin")]
+#[test]
+fn an_unsupplied_gremlin_parameter_is_missing() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    let error = db
+        .execute_gremlin("g.V().has('name', $name).values('name')")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Missing parameter: $name"), "{error}");
+    let result = db
+        .execute_gremlin_with_params(
+            "g.V().has('name', $name).values('name')",
+            params(&[("name", Value::from("Alix"))]),
+        )
+        .unwrap();
+    assert_eq!(result.rows(), [vec![Value::from("Alix")]]);
+}
+
 #[test]
 fn constraints_hold_for_parameterized_writes() {
     let db = GrafeoDB::new_in_memory();
@@ -151,6 +202,39 @@ fn a_cached_plan_does_not_keep_the_values() {
     }
 }
 
+/// An empty map fills in nothing: a statement without parameters reuses its
+/// optimized plan like the same call without a map, and one that names a
+/// parameter still fails as missing it.
+#[test]
+fn an_empty_parameter_map_uses_the_cached_plan() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    let query = "MATCH (p:Person) RETURN p.name";
+    let hits = || db.query_cache().stats().optimized_hits;
+    let before = hits();
+    for _ in 0..3 {
+        let rows = db
+            .execute_with_params(query, HashMap::new())
+            .unwrap()
+            .rows()
+            .to_vec();
+        assert_eq!(rows, [vec![Value::from("Alix")]]);
+    }
+    assert_eq!(
+        hits() - before,
+        2,
+        "the second and third call reuse the plan"
+    );
+
+    let error = db
+        .execute_with_params(
+            "MATCH (p:Person) WHERE p.name = $name RETURN p.name",
+            HashMap::new(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("$name"), "{error}");
+}
+
 #[test]
 fn explain_and_profile_take_parameters() {
     let db = GrafeoDB::new_in_memory();
@@ -229,5 +313,5 @@ fn dotted_access_on_a_node_expression_explains_itself() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("startNode(r) is not a map value"), "{err}");
-    assert!(err.contains("read its property"), "{err}");
+    assert!(err.contains("bound to a variable in the pattern"), "{err}");
 }

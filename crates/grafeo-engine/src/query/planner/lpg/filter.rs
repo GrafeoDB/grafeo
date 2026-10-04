@@ -3,10 +3,11 @@
 //! The order of the rewrite/pushdown attempts in [`Planner::plan_filter`][pf]
 //! is load-bearing, not a performance tweak:
 //!
-//! 1. Subquery rewrites (`extract_complex_exists`, `extract_exists_from_or`,
-//!    `extract_count_comparison`) must run first. The later steps assume
-//!    a scalar predicate with no subquery shape; once a rewrite fires,
-//!    the rest of the method is bypassed.
+//! 1. Subquery rewrites (`extract_complex_exists` for semi-joins, then the
+//!    subqueries planned per row, `plan_filter_with_subqueries`) must run
+//!    first. The later steps assume a predicate whose subqueries
+//!    the edge check answers; once a rewrite fires, the rest of the method
+//!    is bypassed.
 //! 2. Zone-map short-circuit fires before any index lookup so we can
 //!    skip opening an index file at all when summary statistics prove
 //!    emptiness.
@@ -23,14 +24,18 @@
 //!
 //! [pf]: super::Planner::plan_filter
 
+use std::collections::HashSet;
+
 use grafeo_common::collections::GrafeoSet;
 
+use super::subquery::reads_outer_values;
+use grafeo_common::types::NodeId;
+
 use super::{
-    ApplyOperator, Arc, BinaryOp, DistinctOperator, EmptyOperator, ExpressionPredicate,
-    FilterExpression, FilterOp, FilterOperator, GraphStoreSearch, HashAggregateOperator,
-    HashJoinOperator, HashMap, LogicalExpression, LogicalOperator, NodeListOperator, Operator,
-    PhysicalAggregateExpr, PhysicalJoinType, RangeBounds, RangeScanOperator, Result, TransactionId,
-    UnaryOp, UnionOperator, Value, convert_binary_op, convert_filter_expression,
+    Arc, BinaryOp, EmptyOperator, Error, ExpressionPredicate, FilterOp, FilterOperator,
+    GraphStoreSearch, HashJoinOperator, HashMap, LogicalExpression, LogicalOperator,
+    NodeListOperator, Operator, PhysicalJoinType, RangeBounds, RangeScanOperator, Result,
+    TransactionId, UnaryOp, Value,
 };
 
 /// Cross-type equality comparison with Int64/Float64 coercion.
@@ -43,6 +48,17 @@ fn values_equal_coerced(a: &Value, b: &Value) -> bool {
 }
 
 impl super::Planner {
+    /// Whether node `id` is visible to this query and, when `label` is given,
+    /// carries it. An index lookup checks its few results this way, instead of
+    /// collecting every node with the label.
+    fn visible_with_label(&self, id: NodeId, label: Option<&str>) -> bool {
+        let node = match self.transaction_id {
+            Some(tx) => self.store.get_node_versioned(id, self.viewing_epoch, tx),
+            None => self.store.get_node_at_epoch(id, self.viewing_epoch),
+        };
+        node.is_some_and(|node| label.is_none_or(|label| node.has_label(label)))
+    }
+
     /// Plans a filter operator.
     ///
     /// Uses zone map pre-filtering to potentially skip scans when predicates
@@ -54,29 +70,19 @@ impl super::Planner {
         filter: &FilterOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Check for complex EXISTS/NOT EXISTS patterns and rewrite as semi/anti join.
-        // Simple single-hop EXISTS patterns are handled by the fast path in
-        // convert_expression() -> extract_exists_pattern().
+        // Simple single-hop EXISTS patterns from a node of the row are handled
+        // by the fast path in convert_expression() -> extract_exists_pattern().
+        let outer = filter.input.bound_variables(None);
         if let Some((subquery, is_negated, remaining)) =
-            self.extract_complex_exists(&filter.predicate)
+            self.extract_complex_exists(&filter.predicate, outer.as_ref())
         {
             return self.plan_exists_as_semi_join(&filter.input, subquery, is_negated, remaining);
         }
 
-        // Complex EXISTS inside OR predicates can't use semi-join (which filters).
-        // Instead, split the OR into two branches (EXISTS via semi-join, scalar
-        // via filter), union the results, and deduplicate.
-        if let Some((subquery, is_negated, other_pred)) =
-            self.extract_exists_from_or(&filter.predicate)
-        {
-            return self.plan_exists_or_as_union(&filter.input, subquery, is_negated, other_pred);
-        }
-
-        // Check for COUNT subquery comparisons and rewrite as Apply + Aggregate + Filter.
-        // Handles patterns like: COUNT { MATCH ... } > 5, COUNT { ... } = 0, etc.
-        if let Some((subquery, op, threshold, remaining)) =
-            Self::extract_count_comparison(&filter.predicate)
-        {
-            return self.plan_count_as_apply(&filter.input, subquery, op, threshold, remaining);
+        // EXISTS and COUNT subqueries the edge check cannot answer run per row
+        // of the input (see `subquery.rs`).
+        if self.has_subquery_to_lift(&filter.predicate) {
+            return self.plan_filter_with_subqueries(filter);
         }
 
         // Check zone maps for simple property predicates before scanning
@@ -163,6 +169,59 @@ impl super::Planner {
         Ok((operator, columns))
     }
 
+    /// Plans a filter whose predicate has `EXISTS` or `COUNT` subqueries that
+    /// run per row: the parts of an `AND` without one are a filter of their
+    /// own first (which may use an index), then each subquery adds its count
+    /// to the row and the rest of the predicate reads it.
+    fn plan_filter_with_subqueries(
+        &self,
+        filter: &FilterOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let mut conjuncts = Vec::new();
+        split_conjuncts(&filter.predicate, &mut conjuncts);
+        let (with_subqueries, plain): (Vec<_>, Vec<_>) = conjuncts
+            .into_iter()
+            .partition(|conjunct| self.has_subquery_to_lift(conjunct));
+        let (input_op, columns) = match join_conjuncts(plain) {
+            Some(predicate) => self.plan_filter(&FilterOp {
+                predicate,
+                input: filter.input.clone(),
+                pushdown_hint: filter.pushdown_hint.clone(),
+            })?,
+            None => self.plan_operator(&filter.input)?,
+        };
+        let predicate = join_conjuncts(with_subqueries)
+            .ok_or_else(|| Error::Internal("filter without a subquery to lift".to_string()))?;
+        self.filter_rest(input_op, columns, &predicate)
+    }
+
+    /// Filters `input` by `predicate`, whose `EXISTS` and `COUNT` subqueries
+    /// the edge check cannot answer run per row first (see `subquery.rs`).
+    fn filter_rest(
+        &self,
+        input: Box<dyn Operator>,
+        columns: Vec<String>,
+        predicate: &LogicalExpression,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let (predicate, input, columns) = self.lift_subqueries(predicate, input, columns)?;
+        let variable_columns: HashMap<String, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+        let predicate = ExpressionPredicate::new(
+            self.convert_expression(&predicate)?,
+            variable_columns,
+            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+        )
+        .with_transaction_context(self.viewing_epoch, self.transaction_id)
+        .with_session_context(self.session_context.clone());
+        Ok((
+            Box::new(FilterOperator::new(input, Box::new(predicate))),
+            columns,
+        ))
+    }
+
     /// Extracts an EXISTS or NOT EXISTS subquery from a filter predicate for
     /// semi-join rewriting.
     ///
@@ -180,18 +239,22 @@ impl super::Planner {
     /// depths. The recursive semi-join handler (`plan_exists_as_semi_join`) calls
     /// this function again on each remaining predicate, peeling off one EXISTS
     /// per level until only scalar predicates remain.
+    ///
+    /// `outer` holds the variables of the rows the predicate filters (`None`:
+    /// not known), see [`Self::exists_fast_path_fits`].
     fn extract_complex_exists<'a>(
         &self,
         predicate: &'a LogicalExpression,
+        outer: Option<&HashSet<String>>,
     ) -> Option<(&'a LogicalOperator, bool, Option<LogicalExpression>)> {
         match predicate {
             LogicalExpression::ExistsSubquery(subplan) => {
                 // Top-level EXISTS: only use semi-join for complex patterns.
                 // Simple single-hop patterns use the fast path in convert_expression().
-                if self.extract_exists_pattern(subplan).is_err() {
-                    Some((subplan.as_ref(), false, None))
-                } else {
+                if self.exists_fast_path_fits(subplan, outer) || reads_outer_values(subplan) {
                     None
+                } else {
+                    Some((subplan.as_ref(), false, None))
                 }
             }
             LogicalExpression::Unary {
@@ -199,10 +262,10 @@ impl super::Planner {
                 operand,
             } => {
                 if let LogicalExpression::ExistsSubquery(subplan) = operand.as_ref() {
-                    if self.extract_exists_pattern(subplan).is_err() {
-                        Some((subplan.as_ref(), true, None))
-                    } else {
+                    if self.exists_fast_path_fits(subplan, outer) || reads_outer_values(subplan) {
                         None
+                    } else {
+                        Some((subplan.as_ref(), true, None))
                     }
                 } else {
                     None
@@ -217,15 +280,20 @@ impl super::Planner {
                 // When multiple EXISTS appear in the same WHERE, extracting the
                 // first one (even if simple) lets the recursive semi-join handler
                 // find and extract the remaining complex ones from the rest.
-                if let Some((subplan, negated)) = Self::extract_exists_from_expr(left) {
+                if let Some((subplan, negated)) = Self::extract_exists_from_expr(left)
+                    && !reads_outer_values(subplan)
+                {
                     return Some((subplan, negated, Some(right.as_ref().clone())));
                 }
-                if let Some((subplan, negated)) = Self::extract_exists_from_expr(right) {
+                if let Some((subplan, negated)) = Self::extract_exists_from_expr(right)
+                    && !reads_outer_values(subplan)
+                {
                     return Some((subplan, negated, Some(left.as_ref().clone())));
                 }
                 // Recurse into left subtree (handles left-leaning AND trees where
                 // EXISTS nodes are buried deeper than immediate children)
-                if let Some((subplan, negated, inner_remaining)) = self.extract_complex_exists(left)
+                if let Some((subplan, negated, inner_remaining)) =
+                    self.extract_complex_exists(left, outer)
                 {
                     let remaining = match inner_remaining {
                         Some(inner) => LogicalExpression::Binary {
@@ -239,7 +307,7 @@ impl super::Planner {
                 }
                 // Recurse into right subtree
                 if let Some((subplan, negated, inner_remaining)) =
-                    self.extract_complex_exists(right)
+                    self.extract_complex_exists(right, outer)
                 {
                     let remaining = match inner_remaining {
                         Some(inner) => LogicalExpression::Binary {
@@ -255,6 +323,29 @@ impl super::Planner {
             }
             _ => None,
         }
+    }
+
+    /// Whether an `EXISTS` subplan takes the fast path for rows that bind
+    /// `outer` (`None`: not known): its pattern must start from a node of the
+    /// row, and its other end and edge must be new to it. Anything else is a
+    /// semi-join, which matches every variable the subquery shares with the
+    /// row by name.
+    fn exists_fast_path_fits(
+        &self,
+        subplan: &LogicalOperator,
+        outer: Option<&HashSet<String>>,
+    ) -> bool {
+        let Ok(check) = self.extract_exists_pattern(subplan) else {
+            return false;
+        };
+        outer.is_some_and(|outer| {
+            outer.contains(&check.start_var)
+                && !outer.contains(&check.end_var)
+                && check
+                    .edge_var
+                    .as_ref()
+                    .is_none_or(|edge| !outer.contains(edge))
+        })
     }
 
     /// Helper: extracts EXISTS or NOT EXISTS from a single expression node.
@@ -276,73 +367,6 @@ impl super::Planner {
         }
     }
 
-    /// Checks if a top-level OR predicate contains a complex EXISTS subquery that
-    /// cannot use the inline fast path. Returns the EXISTS subplan, its negation
-    /// flag, and the other side of the OR.
-    fn extract_exists_from_or<'a>(
-        &self,
-        predicate: &'a LogicalExpression,
-    ) -> Option<(&'a LogicalOperator, bool, &'a LogicalExpression)> {
-        let LogicalExpression::Binary {
-            op: BinaryOp::Or,
-            left,
-            right,
-        } = predicate
-        else {
-            return None;
-        };
-
-        // Check left side for complex EXISTS
-        if let Some((subplan, negated)) = Self::extract_exists_from_expr(left)
-            && self.extract_exists_pattern(subplan).is_err()
-        {
-            return Some((subplan, negated, right));
-        }
-        // Check right side for complex EXISTS
-        if let Some((subplan, negated)) = Self::extract_exists_from_expr(right)
-            && self.extract_exists_pattern(subplan).is_err()
-        {
-            return Some((subplan, negated, left));
-        }
-        None
-    }
-
-    /// Plans a filter with `complex_EXISTS OR other_pred` using Union + Distinct.
-    ///
-    /// The OR is split into two branches:
-    /// 1. Semi-join (or anti-join for NOT EXISTS) for the EXISTS branch
-    /// 2. Normal filter for the scalar predicate branch
-    ///
-    /// The results are combined with UNION ALL and deduplicated.
-    fn plan_exists_or_as_union(
-        &self,
-        input: &LogicalOperator,
-        subquery: &LogicalOperator,
-        is_negated: bool,
-        other_predicate: &LogicalExpression,
-    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Branch 1: rows matching EXISTS (via semi-join / anti-join)
-        let (exists_op, exists_cols) =
-            self.plan_exists_as_semi_join(input, subquery, is_negated, None)?;
-
-        // Branch 2: rows matching the scalar predicate (via normal filter)
-        let other_filter = super::FilterOp {
-            predicate: other_predicate.clone(),
-            input: Box::new(input.clone()),
-            pushdown_hint: None,
-        };
-        let (other_op, _other_cols) = self.plan_filter(&other_filter)?;
-
-        // Union both branches
-        let schema = self.derive_schema_from_columns(&exists_cols);
-        let union_op = UnionOperator::new(vec![exists_op, other_op], schema.clone());
-
-        // Deduplicate (OR semantics: each row appears at most once)
-        let distinct_op = DistinctOperator::new(Box::new(union_op), schema);
-
-        Ok((Box::new(distinct_op), exists_cols))
-    }
-
     /// Plans a complex EXISTS/NOT EXISTS as a hash-based semi-join or anti-join.
     ///
     /// The inner subquery is planned as a full operator tree via `plan_operator()`.
@@ -359,17 +383,6 @@ impl super::Planner {
         is_negated: bool,
         remaining_predicate: Option<LogicalExpression>,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Detect correlated subquery (contains ParameterScan from translator)
-        if let Some(param_vars) = Self::extract_parameter_scan_vars(subquery) {
-            return self.plan_correlated_exists(
-                outer_input,
-                subquery,
-                &param_vars,
-                is_negated,
-                remaining_predicate,
-            );
-        }
-
         let (left_op, left_columns) = self.plan_operator(outer_input)?;
         let (right_op, right_columns) = self.plan_operator(subquery)?;
 
@@ -407,8 +420,9 @@ impl super::Planner {
         // contains more EXISTS subqueries that need semi-join rewriting.
         if let Some(ref remaining) = remaining_predicate {
             // Recursively handle nested EXISTS in the remaining predicate
+            let outer: HashSet<String> = output_columns.iter().cloned().collect();
             if let Some((nested_sub, nested_neg, nested_rest)) =
-                self.extract_complex_exists(remaining)
+                self.extract_complex_exists(remaining, Some(&outer))
             {
                 return self.plan_exists_as_semi_join_with_input(
                     join_op,
@@ -419,113 +433,10 @@ impl super::Planner {
                 );
             }
 
-            let variable_columns: HashMap<String, usize> = output_columns
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-            let filter_expr = self.convert_expression(remaining)?;
-            let predicate = ExpressionPredicate::new(
-                filter_expr,
-                variable_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-            )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_session_context(self.session_context.clone());
-            let filter_op = Box::new(FilterOperator::new(join_op, Box::new(predicate)));
-            return Ok((filter_op, output_columns));
+            return self.filter_rest(join_op, output_columns, remaining);
         }
 
         Ok((join_op, output_columns))
-    }
-
-    /// Extracts `ParameterScan` variable names from a logical plan, if present.
-    ///
-    /// Returns `Some(vars)` when the plan contains a `ParameterScan` node
-    /// (indicating a correlated subquery from the translator).
-    fn extract_parameter_scan_vars(plan: &LogicalOperator) -> Option<Vec<String>> {
-        match plan {
-            LogicalOperator::ParameterScan(ps) => Some(ps.columns.clone()),
-            LogicalOperator::Filter(f) => Self::extract_parameter_scan_vars(&f.input),
-            LogicalOperator::Join(j) => Self::extract_parameter_scan_vars(&j.left)
-                .or_else(|| Self::extract_parameter_scan_vars(&j.right)),
-            LogicalOperator::NodeScan(s) => s
-                .input
-                .as_ref()
-                .and_then(|i| Self::extract_parameter_scan_vars(i)),
-            LogicalOperator::Expand(e) => Self::extract_parameter_scan_vars(&e.input),
-            _ => None,
-        }
-    }
-
-    /// Plans a correlated EXISTS/NOT EXISTS using `ApplyOperator` with EXISTS mode.
-    ///
-    /// The inner subquery contains a `ParameterScan` for outer variable references.
-    /// For each outer row, the inner subquery is executed with the outer values
-    /// injected via `ParameterState`. Semi-join keeps rows where inner has results,
-    /// anti-join keeps rows where inner has no results.
-    fn plan_correlated_exists(
-        &self,
-        outer_input: &LogicalOperator,
-        subquery: &LogicalOperator,
-        param_vars: &[String],
-        is_negated: bool,
-        remaining_predicate: Option<LogicalExpression>,
-    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (left_op, left_columns) = self.plan_operator(outer_input)?;
-
-        // Set up ParameterState for correlated variables
-        let param_state = std::sync::Arc::new(
-            grafeo_core::execution::operators::ParameterState::new(param_vars.to_vec()),
-        );
-        let param_col_indices: Vec<usize> = param_vars
-            .iter()
-            .map(|var| left_columns.iter().position(|c| c == var).unwrap_or(0))
-            .collect();
-
-        // Plan inner subquery with correlated context
-        *self.correlated_param_state.borrow_mut() = Some(std::sync::Arc::clone(&param_state));
-        let (inner_op, _inner_columns) = self.plan_operator(subquery)?;
-        *self.correlated_param_state.borrow_mut() = None;
-
-        // Create Apply with EXISTS mode (semi or anti join)
-        let op = ApplyOperator::new_correlated(left_op, inner_op, param_state, param_col_indices)
-            .with_exists_mode(!is_negated);
-
-        let output_columns = left_columns;
-        let mut result: Box<dyn Operator> = Box::new(op);
-
-        // Handle remaining predicate (from AND splitting)
-        if let Some(ref remaining) = remaining_predicate {
-            if let Some((nested_sub, nested_neg, nested_rest)) =
-                self.extract_complex_exists(remaining)
-            {
-                return self.plan_exists_as_semi_join_with_input(
-                    result,
-                    &output_columns,
-                    nested_sub,
-                    nested_neg,
-                    nested_rest,
-                );
-            }
-
-            let variable_columns: HashMap<String, usize> = output_columns
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-            let filter_expr = self.convert_expression(remaining)?;
-            let predicate = ExpressionPredicate::new(
-                filter_expr,
-                variable_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-            )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_session_context(self.session_context.clone());
-            result = Box::new(FilterOperator::new(result, Box::new(predicate)));
-        }
-
-        Ok((result, output_columns))
     }
 
     /// Plans an EXISTS/NOT EXISTS semi-join with an already-planned outer input.
@@ -571,8 +482,9 @@ impl super::Planner {
 
         // Recursively handle any further EXISTS in the remaining predicate
         if let Some(ref remaining) = remaining_predicate {
+            let outer: HashSet<String> = output_columns.iter().cloned().collect();
             if let Some((nested_sub, nested_neg, nested_rest)) =
-                self.extract_complex_exists(remaining)
+                self.extract_complex_exists(remaining, Some(&outer))
             {
                 return self.plan_exists_as_semi_join_with_input(
                     join_op,
@@ -583,197 +495,10 @@ impl super::Planner {
                 );
             }
 
-            let variable_columns: HashMap<String, usize> = output_columns
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-            let filter_expr = self.convert_expression(remaining)?;
-            let predicate = ExpressionPredicate::new(
-                filter_expr,
-                variable_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-            )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_session_context(self.session_context.clone());
-            let filter_op = Box::new(FilterOperator::new(join_op, Box::new(predicate)));
-            return Ok((filter_op, output_columns));
+            return self.filter_rest(join_op, output_columns, remaining);
         }
 
         Ok((join_op, output_columns))
-    }
-
-    /// Extracts a COUNT subquery comparison from a filter predicate.
-    ///
-    /// Recognizes patterns like:
-    /// - `COUNT { MATCH ... } > 5`
-    /// - `COUNT { MATCH ... } = 0`
-    /// - `5 < COUNT { MATCH ... }` (reversed operands)
-    ///
-    /// Returns `(subquery, comparison_op, threshold_value, remaining_predicate)`.
-    fn extract_count_comparison(
-        predicate: &LogicalExpression,
-    ) -> Option<(
-        &LogicalOperator,
-        BinaryOp,
-        &LogicalExpression,
-        Option<&LogicalExpression>,
-    )> {
-        match predicate {
-            LogicalExpression::Binary { left, op, right } => {
-                // Check for AND-combined: extract COUNT comparison from either side
-                if *op == BinaryOp::And {
-                    if let Some(result) = Self::extract_count_from_binary(left) {
-                        return Some((result.0, result.1, result.2, Some(right)));
-                    }
-                    if let Some(result) = Self::extract_count_from_binary(right) {
-                        return Some((result.0, result.1, result.2, Some(left)));
-                    }
-                    return None;
-                }
-
-                // Direct comparison: COUNT { ... } op value
-                Self::extract_count_from_binary(predicate)
-                    .map(|(sub, op, threshold)| (sub, op, threshold, None))
-            }
-            _ => None,
-        }
-    }
-
-    /// Helper: extracts COUNT subquery comparison from a binary expression.
-    fn extract_count_from_binary(
-        expr: &LogicalExpression,
-    ) -> Option<(&LogicalOperator, BinaryOp, &LogicalExpression)> {
-        if let LogicalExpression::Binary { left, op, right } = expr {
-            match op {
-                BinaryOp::Eq
-                | BinaryOp::Ne
-                | BinaryOp::Gt
-                | BinaryOp::Ge
-                | BinaryOp::Lt
-                | BinaryOp::Le => {
-                    // COUNT { ... } op literal
-                    if let LogicalExpression::CountSubquery(subplan) = left.as_ref() {
-                        return Some((subplan.as_ref(), *op, right.as_ref()));
-                    }
-                    // literal op COUNT { ... } (flip the operator)
-                    if let LogicalExpression::CountSubquery(subplan) = right.as_ref() {
-                        let flipped = match op {
-                            BinaryOp::Gt => BinaryOp::Lt,
-                            BinaryOp::Ge => BinaryOp::Le,
-                            BinaryOp::Lt => BinaryOp::Gt,
-                            BinaryOp::Le => BinaryOp::Ge,
-                            other => *other, // Eq/Ne are symmetric
-                        };
-                        return Some((subplan.as_ref(), flipped, left.as_ref()));
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
-    /// Plans a COUNT subquery comparison as Join + Aggregate + Filter.
-    ///
-    /// Rewrites `WHERE COUNT { MATCH pattern } > N` into:
-    /// 1. Inner join on shared variables to get all matches per outer row
-    /// 2. Aggregate(COUNT) grouped by outer columns
-    /// 3. Filter(count > N) on the aggregated result
-    fn plan_count_as_apply(
-        &self,
-        outer_input: &LogicalOperator,
-        subquery: &LogicalOperator,
-        op: BinaryOp,
-        threshold: &LogicalExpression,
-        remaining_predicate: Option<&LogicalExpression>,
-    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (left_op, left_columns) = self.plan_operator(outer_input)?;
-        let (right_op, right_columns) = self.plan_operator(subquery)?;
-
-        let output_columns = left_columns.clone();
-
-        // Find shared variables for equi-join keys
-        let mut probe_keys = Vec::new();
-        let mut build_keys = Vec::new();
-        for (right_idx, right_col) in right_columns.iter().enumerate() {
-            if let Some(left_idx) = left_columns.iter().position(|c| c == right_col) {
-                probe_keys.push(left_idx);
-                build_keys.push(right_idx);
-            }
-        }
-
-        // Left join to preserve outer rows with no matches (needed for COUNT = 0).
-        // The join physically outputs both left and right columns.
-        let mut join_columns = left_columns.clone();
-        join_columns.extend(right_columns.iter().cloned());
-        let join_schema = self.derive_schema_from_columns(&join_columns);
-        let join_op: Box<dyn Operator> = Box::new(HashJoinOperator::new(
-            left_op,
-            right_op,
-            probe_keys,
-            build_keys,
-            PhysicalJoinType::Left,
-            join_schema,
-        ));
-
-        // Aggregate: COUNT(right_col) grouped by all outer columns.
-        // Using COUNT on a right-side column so nulls (no match) produce 0 instead of 1.
-        let count_alias = "_count_subquery_".to_string();
-        let mut agg_columns = output_columns.clone();
-        agg_columns.push(count_alias.clone());
-
-        let group_keys: Vec<usize> = (0..output_columns.len()).collect();
-        // Pick the first right-side column for COUNT (index = left_columns.len())
-        let right_col_idx = left_columns.len();
-        let agg_exprs = vec![PhysicalAggregateExpr::count(right_col_idx)];
-        let agg_schema = self.derive_schema_from_columns(&agg_columns);
-
-        let agg_op: Box<dyn Operator> = Box::new(HashAggregateOperator::new(
-            join_op, group_keys, agg_exprs, agg_schema,
-        ));
-
-        // Filter: _count_ op threshold
-        let threshold_expr = convert_filter_expression(threshold)?;
-        let count_var_columns: HashMap<String, usize> = agg_columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
-            .collect();
-        let filter_op_code = convert_binary_op(op)?;
-        let count_filter = FilterExpression::Binary {
-            left: Box::new(FilterExpression::Variable(count_alias)),
-            op: filter_op_code,
-            right: Box::new(threshold_expr),
-        };
-
-        let predicate = ExpressionPredicate::new(
-            count_filter,
-            count_var_columns.clone(),
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-        )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
-        .with_session_context(self.session_context.clone());
-        let mut result_op: Box<dyn Operator> =
-            Box::new(FilterOperator::new(agg_op, Box::new(predicate)));
-
-        // If there's a remaining predicate, apply it too
-        if let Some(remaining) = remaining_predicate {
-            let remaining_expr = self.convert_expression(remaining)?;
-            let remaining_predicate = ExpressionPredicate::new(
-                remaining_expr,
-                count_var_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-            )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_session_context(self.session_context.clone());
-            result_op = Box::new(FilterOperator::new(
-                result_op,
-                Box::new(remaining_predicate),
-            ));
-        }
-
-        Ok((result_op, output_columns))
     }
 
     /// Checks zone maps for a predicate to see if we can skip the scan entirely.
@@ -929,15 +654,8 @@ impl super::Planner {
                 .iter()
                 .map(|(p, v)| (p.as_str(), v.clone()))
                 .collect();
-            let mut nodes = self.store.find_nodes_by_properties(&conditions_ref);
-
-            // Intersect with label if present
-            if let Some(label) = &scan_label {
-                let label_nodes: std::collections::HashSet<_> =
-                    self.store.nodes_by_label(label).into_iter().collect();
-                nodes.retain(|n| label_nodes.contains(n));
-            }
-            nodes
+            // The scan's label is checked on each found node below.
+            self.store.find_nodes_by_properties(&conditions_ref)
         } else {
             // No index but we have a label: scan label first, then check properties.
             // This is more efficient than ScanOperator → DataChunk → FilterOperator
@@ -965,14 +683,10 @@ impl super::Planner {
                 .collect()
         };
 
-        // MVCC visibility: filter out nodes not visible at the current epoch/tx.
-        // Without this, rolled-back or uncommitted nodes could leak through.
-        let epoch = self.viewing_epoch;
-        if let Some(tx) = self.transaction_id {
-            matching_nodes.retain(|id| self.store.get_node_versioned(*id, epoch, tx).is_some());
-        } else {
-            matching_nodes.retain(|id| self.store.get_node_at_epoch(*id, epoch).is_some());
-        }
+        // MVCC visibility: filter out nodes not visible at the current epoch/tx
+        // (rolled-back or uncommitted nodes could leak through otherwise), and
+        // nodes without the scan's label.
+        matching_nodes.retain(|&id| self.visible_with_label(id, scan_label.as_deref()));
 
         let columns = vec![scan_variable.clone()];
         let node_list_op: Box<dyn Operator> = Box::new(NodeListOperator::new(matching_nodes, 2048));
@@ -1084,20 +798,8 @@ impl super::Planner {
             }
         }
 
-        // Intersect with the label constraint, if any.
-        if let Some(label) = &scan_label {
-            let label_nodes: GrafeoSet<_> = self.store.nodes_by_label(label).into_iter().collect();
-            matching_nodes.retain(|n| label_nodes.contains(n));
-        }
-
-        // MVCC visibility: drop nodes that aren't visible at the current
-        // epoch/tx, matching the equality fast path's semantics.
-        let epoch = self.viewing_epoch;
-        if let Some(tx) = self.transaction_id {
-            matching_nodes.retain(|id| self.store.get_node_versioned(*id, epoch, tx).is_some());
-        } else {
-            matching_nodes.retain(|id| self.store.get_node_at_epoch(*id, epoch).is_some());
-        }
+        // MVCC visibility and the label constraint, as in the equality fast path.
+        matching_nodes.retain(|&id| self.visible_with_label(id, scan_label.as_deref()));
 
         // Absorbed-scan PROFILE entry: see `record_absorbed_scan_entry`.
         self.record_absorbed_scan_entry("NodeScan", &filter.input);
@@ -1823,7 +1525,8 @@ fn binding_kind(op: &LogicalOperator, variable: &str) -> Option<BindingKind> {
             }
             if expand.edge_variable.as_deref() == Some(variable) {
                 // A variable-length expand binds a list of edges.
-                let single_hop = expand.min_hops == 1 && expand.max_hops == Some(1);
+                let single_hop =
+                    !expand.quantified && expand.min_hops == 1 && expand.max_hops == Some(1);
                 return single_hop.then_some(BindingKind::Edge);
             }
             if expand.path_alias.as_deref() == Some(variable) {
@@ -1844,4 +1547,30 @@ fn binding_kind(op: &LogicalOperator, variable: &str) -> Option<BindingKind> {
         }
         _ => None,
     }
+}
+
+/// Adds the parts of an `AND` (the predicate itself when it is not one).
+fn split_conjuncts(predicate: &LogicalExpression, out: &mut Vec<LogicalExpression>) {
+    match predicate {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => {
+            split_conjuncts(left, out);
+            split_conjuncts(right, out);
+        }
+        other => out.push(other.clone()),
+    }
+}
+
+/// The `AND` of `conjuncts`, or `None` when there are none.
+fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
+    conjuncts
+        .into_iter()
+        .reduce(|left, right| LogicalExpression::Binary {
+            left: Box::new(left),
+            op: BinaryOp::And,
+            right: Box::new(right),
+        })
 }

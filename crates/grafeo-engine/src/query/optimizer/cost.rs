@@ -885,6 +885,7 @@ mod tests {
     fn test_cost_model_expand() {
         let model = CostModel::new();
         let expand = ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,
@@ -912,6 +913,7 @@ mod tests {
 
         // Outgoing KNOWS: fanout = 5
         let knows_out = ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,
@@ -927,6 +929,7 @@ mod tests {
 
         // Outgoing WORKS_AT: fanout = 1 (each person works at one company)
         let works_out = ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,
@@ -948,6 +951,7 @@ mod tests {
 
         // Incoming WORKS_AT: fanout = 50 (company has many employees)
         let works_in = ExpandOp {
+            quantified: false,
             from_variable: "c".to_string(),
             to_variable: "p".to_string(),
             edge_variable: None,
@@ -972,6 +976,7 @@ mod tests {
     fn test_cost_model_expand_unknown_edge_type_uses_global_fanout() {
         let model = CostModel::new().with_avg_fanout(7.0);
         let expand = ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,
@@ -987,6 +992,7 @@ mod tests {
 
         // Without edge type (uses global fanout too)
         let expand_no_type = ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,
@@ -1425,6 +1431,7 @@ mod tests {
 
         // Multi-type outgoing: KNOWS(5) + FOLLOWS(20) = 25
         let multi_expand = ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,
@@ -1440,6 +1447,7 @@ mod tests {
 
         // Single type: KNOWS(5) only
         let single_expand = ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,

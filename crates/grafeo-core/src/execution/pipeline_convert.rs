@@ -127,12 +127,14 @@ fn decompose_recursive_memory(
             let sort = any
                 .downcast::<SortOperator>()
                 .expect("name() returned 'Sort' but downcast failed");
-            let (child, sort_keys) = sort.into_parts();
+            let (child, sort_keys, output_width) = sort.into_parts();
             let push_keys: Vec<_> = sort_keys.iter().map(convert_sort_key).collect();
-            push_ops.push(Box::new(SpillableSortPushOperator::with_memory_context(
-                push_keys,
-                ctx.clone(),
-            )));
+            let mut push_sort =
+                SpillableSortPushOperator::with_memory_context(push_keys, ctx.clone());
+            if let Some(width) = output_width {
+                push_sort = push_sort.with_output_width(width);
+            }
+            push_ops.push(Box::new(push_sort));
             decompose_recursive_memory(child, push_ops, ctx)
         }
         "HashAggregate" => {
@@ -208,9 +210,13 @@ fn decompose_recursive(
             let sort = any
                 .downcast::<SortOperator>()
                 .expect("name() returned 'Sort' but downcast failed");
-            let (child, sort_keys) = sort.into_parts();
+            let (child, sort_keys, output_width) = sort.into_parts();
             let push_keys: Vec<_> = sort_keys.iter().map(convert_sort_key).collect();
-            push_ops.push(Box::new(SortPushOperator::new(push_keys)));
+            let mut push_sort = SortPushOperator::new(push_keys);
+            if let Some(width) = output_width {
+                push_sort = push_sort.with_output_width(width);
+            }
+            push_ops.push(Box::new(push_sort));
             decompose_recursive(child, push_ops)
         }
         "HashAggregate" => {
@@ -305,6 +311,119 @@ mod tests {
         }
     }
 
+    /// A test operator that produces one chunk: nodes 7, 8 and 9 with the
+    /// sort keys 3, 1 and 2 in a second column.
+    struct NodesWithKeys {
+        emitted: bool,
+    }
+
+    impl Operator for NodesWithKeys {
+        fn next(&mut self) -> OperatorResult {
+            if self.emitted {
+                return Ok(None);
+            }
+            self.emitted = true;
+            let mut builder = crate::execution::chunk::DataChunkBuilder::new(&[
+                LogicalType::Node,
+                LogicalType::Int64,
+            ]);
+            for (id, key) in [(7_u64, 3_i64), (8, 1), (9, 2)] {
+                builder
+                    .column_mut(0)
+                    .unwrap()
+                    .push_node_id(grafeo_common::types::NodeId::new(id));
+                builder.column_mut(1).unwrap().push_int64(key);
+                builder.advance_row();
+            }
+            Ok(Some(builder.finish()))
+        }
+
+        fn reset(&mut self) {
+            self.emitted = false;
+        }
+
+        fn name(&self) -> &'static str {
+            "NodesWithKeys"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// The nodes of [`NodesWithKeys`] sorted by their key, which the sort
+    /// drops: like `RETURN n ORDER BY n.key`.
+    fn nodes_sorted_by_a_dropped_key() -> Box<dyn Operator> {
+        let scan = Box::new(NodesWithKeys { emitted: false });
+        Box::new(SortOperator::new(scan, vec![SortKey::ascending(1)]).with_output_width(1))
+    }
+
+    /// Runs a converted pipeline and returns the node IDs it produces, after
+    /// checking that each chunk holds one node column.
+    fn run_for_node_ids(
+        source: Box<dyn Operator>,
+        push_ops: Vec<Box<dyn PushOperator>>,
+    ) -> Vec<u64> {
+        use crate::execution::pipeline::Pipeline;
+        use crate::execution::sink::CollectorSink;
+        use crate::execution::source::OperatorSource;
+
+        let source = Box::new(OperatorSource::new(source));
+        let mut pipeline = Pipeline::new(source, push_ops, Box::new(CollectorSink::new()));
+        pipeline.execute().unwrap();
+        let collector = pipeline
+            .into_sink()
+            .into_any()
+            .downcast::<CollectorSink>()
+            .unwrap();
+        let mut ids = Vec::new();
+        for chunk in collector.into_chunks() {
+            assert_eq!(chunk.column_count(), 1);
+            let nodes = chunk.column(0).unwrap();
+            assert_eq!(nodes.data_type(), &LogicalType::Node);
+            ids.extend(
+                chunk
+                    .selected_indices()
+                    .map(|row| nodes.get_node_id(row).unwrap().as_u64()),
+            );
+        }
+        ids
+    }
+
+    /// A sort that drops its trailing sort-key columns becomes a push sort
+    /// like any other (so it can spill), and returns only the leading column,
+    /// still a node column, in the order of the dropped key.
+    #[test]
+    fn convert_sort_that_drops_columns_produces_one_push_op() {
+        let (source, push_ops) = convert_to_pipeline(nodes_sorted_by_a_dropped_key());
+        assert_eq!(source.name(), "NodesWithKeys");
+        assert_eq!(push_ops.len(), 1);
+        assert!(push_ops[0].name().contains("Sort"));
+        assert_eq!(run_for_node_ids(source, push_ops), [8, 9, 7]);
+    }
+
+    /// With a memory context the same sort is the spillable push sort.
+    #[test]
+    #[cfg(feature = "spill")]
+    fn convert_sort_that_drops_columns_with_memory_produces_a_spillable_sort() {
+        use crate::execution::memory::OperatorMemoryContext;
+        use crate::execution::spill::SpillManager;
+        use grafeo_common::memory::buffer::BufferManager;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let context = OperatorMemoryContext::new(
+            BufferManager::with_budget(1024 * 1024),
+            Arc::new(SpillManager::new(temp_dir.path()).unwrap()),
+        );
+        let (source, push_ops) =
+            convert_to_pipeline_with_memory(nodes_sorted_by_a_dropped_key(), Some(context));
+        assert_eq!(source.name(), "NodesWithKeys");
+        assert_eq!(push_ops.len(), 1);
+        assert_eq!(push_ops[0].name(), "SpillableSortPush");
+        assert_eq!(run_for_node_ids(source, push_ops), [8, 9, 7]);
+    }
+
     #[test]
     fn convert_bare_scan_produces_empty_pipeline() {
         let scan: Box<dyn Operator> = Box::new(TestScanOperator::new());
@@ -336,8 +455,7 @@ mod tests {
         let scan: Box<dyn Operator> = Box::new(TestScanOperator::new());
         let predicate: Box<dyn Predicate> = Box::new(AlwaysTruePredicate);
         let filter: Box<dyn Operator> = Box::new(FilterOperator::new(scan, predicate));
-        let limit: Box<dyn Operator> =
-            Box::new(LimitOperator::new(filter, 10, vec![LogicalType::Int64]));
+        let limit: Box<dyn Operator> = Box::new(LimitOperator::new(filter, 10));
 
         let (source, push_ops) = convert_to_pipeline(limit);
         assert_eq!(source.name(), "TestScan");
@@ -351,8 +469,7 @@ mod tests {
     fn convert_sort_scan_produces_one_push_op() {
         let scan: Box<dyn Operator> = Box::new(TestScanOperator::new());
         let keys = vec![SortKey::ascending(0)];
-        let sort: Box<dyn Operator> =
-            Box::new(SortOperator::new(scan, keys, vec![LogicalType::Int64]));
+        let sort: Box<dyn Operator> = Box::new(SortOperator::new(scan, keys));
 
         let (source, push_ops) = convert_to_pipeline(sort);
         assert_eq!(source.name(), "TestScan");
@@ -390,8 +507,7 @@ mod tests {
     #[test]
     fn convert_distinct_scan_produces_one_push_op() {
         let scan: Box<dyn Operator> = Box::new(TestScanOperator::new());
-        let distinct: Box<dyn Operator> =
-            Box::new(DistinctOperator::new(scan, vec![LogicalType::Int64]));
+        let distinct: Box<dyn Operator> = Box::new(DistinctOperator::new(scan));
 
         let (source, push_ops) = convert_to_pipeline(distinct);
         assert_eq!(source.name(), "TestScan");
@@ -402,11 +518,7 @@ mod tests {
     #[test]
     fn convert_distinct_on_columns_scan() {
         let scan: Box<dyn Operator> = Box::new(TestScanOperator::new());
-        let distinct: Box<dyn Operator> = Box::new(DistinctOperator::on_columns(
-            scan,
-            vec![0],
-            vec![LogicalType::Int64],
-        ));
+        let distinct: Box<dyn Operator> = Box::new(DistinctOperator::on_columns(scan, vec![0]));
 
         let (source, push_ops) = convert_to_pipeline(distinct);
         assert_eq!(source.name(), "TestScan");
@@ -420,10 +532,8 @@ mod tests {
         let predicate: Box<dyn Predicate> = Box::new(AlwaysTruePredicate);
         let filter: Box<dyn Operator> = Box::new(FilterOperator::new(scan, predicate));
         let keys = vec![SortKey::ascending(0)];
-        let sort: Box<dyn Operator> =
-            Box::new(SortOperator::new(filter, keys, vec![LogicalType::Int64]));
-        let limit: Box<dyn Operator> =
-            Box::new(LimitOperator::new(sort, 5, vec![LogicalType::Int64]));
+        let sort: Box<dyn Operator> = Box::new(SortOperator::new(filter, keys));
+        let limit: Box<dyn Operator> = Box::new(LimitOperator::new(sort, 5));
 
         let (source, push_ops) = convert_to_pipeline(limit);
         assert_eq!(source.name(), "TestScan");
@@ -445,8 +555,7 @@ mod tests {
         let predicate: Box<dyn Predicate> = Box::new(AlwaysTruePredicate);
         let filter: Box<dyn Operator> = Box::new(FilterOperator::new(scan, predicate));
         let keys = vec![SortKey::ascending(0)];
-        let sort: Box<dyn Operator> =
-            Box::new(SortOperator::new(filter, keys, vec![LogicalType::Int64]));
+        let sort: Box<dyn Operator> = Box::new(SortOperator::new(filter, keys));
 
         // Convert to pipeline
         let (source, push_ops) = convert_to_pipeline(sort);
@@ -509,11 +618,7 @@ mod tests {
 
         // Build: Scan -> Distinct(on column 0)
         let scan: Box<dyn Operator> = Box::new(TestScanOperator::new());
-        let distinct: Box<dyn Operator> = Box::new(DistinctOperator::on_columns(
-            scan,
-            vec![0],
-            vec![LogicalType::Int64],
-        ));
+        let distinct: Box<dyn Operator> = Box::new(DistinctOperator::on_columns(scan, vec![0]));
 
         let (source, push_ops) = convert_to_pipeline(distinct);
         assert_eq!(push_ops.len(), 1);

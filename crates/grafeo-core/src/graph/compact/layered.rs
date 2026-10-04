@@ -744,6 +744,28 @@ impl GraphStore for LayeredStore {
             .or_else(|| self.overlay.load().edge_type(id))
     }
 
+    fn edge_type_versioned(
+        &self,
+        id: EdgeId,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> Option<ArcStr> {
+        if self.is_edge_deleted_from_base(id) {
+            return None;
+        }
+        if self.is_edge_dirty(id) {
+            return self
+                .overlay
+                .load()
+                .edge_type_versioned(id, epoch, transaction_id);
+        }
+        self.base.load().edge_type(id).or_else(|| {
+            self.overlay
+                .load()
+                .edge_type_versioned(id, epoch, transaction_id)
+        })
+    }
+
     fn has_property_index(&self, property: &str) -> bool {
         // Property indexes only live on the overlay LpgStore (the columnar
         // base has no index store). Without this delegate the trait default

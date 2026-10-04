@@ -14,6 +14,58 @@ use crate::query::plan::{
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 
+/// Expands the `RETURN *` that ends a `CALL` subquery into the variables the
+/// subquery binds itself, in name order: the variables of the outer row
+/// (`outer`) stay where they are, and internal names (`_...`) are not
+/// returned. Fails when those variables are not known, so that the subquery
+/// names what it returns.
+pub(crate) fn expand_subquery_return_star(
+    subplan: &mut LogicalOperator,
+    outer: Option<&HashSet<String>>,
+) -> Result<()> {
+    let Some(ret) = final_return_mut(subplan) else {
+        return Ok(());
+    };
+    let [item] = ret.items.as_slice() else {
+        return Ok(());
+    };
+    if !matches!(&item.expression, LogicalExpression::Variable(name) if name == "*") {
+        return Ok(());
+    }
+    let (Some(outer), Some(bound)) = (outer, ret.input.bound_variables(outer)) else {
+        return Err(Error::Query(QueryError::new(
+            QueryErrorKind::Semantic,
+            "RETURN * in this CALL subquery cannot tell which variables it binds: return them by name",
+        )));
+    };
+    let mut names: Vec<String> = bound
+        .into_iter()
+        .filter(|name| !name.starts_with('_') && !outer.contains(name))
+        .collect();
+    names.sort();
+    ret.items = names
+        .into_iter()
+        .map(|name| ReturnItem {
+            expression: LogicalExpression::Variable(name),
+            alias: None,
+        })
+        .collect();
+    Ok(())
+}
+
+/// The `RETURN` that ends `plan`, under the `ORDER BY`, `SKIP`, `LIMIT` or
+/// `DISTINCT` that follow it.
+fn final_return_mut(plan: &mut LogicalOperator) -> Option<&mut ReturnOp> {
+    match plan {
+        LogicalOperator::Return(ret) => Some(ret),
+        LogicalOperator::Sort(op) => final_return_mut(&mut op.input),
+        LogicalOperator::Limit(op) => final_return_mut(&mut op.input),
+        LogicalOperator::Skip(op) => final_return_mut(&mut op.input),
+        LogicalOperator::Distinct(op) => final_return_mut(&mut op.input),
+        _ => None,
+    }
+}
+
 /// Returns true if the function name is a recognized aggregate function.
 pub(crate) fn is_aggregate_function(name: &str) -> bool {
     matches!(
@@ -193,6 +245,7 @@ impl VarGen {
     }
 
     /// Returns the current counter value without incrementing.
+    #[cfg(any(feature = "gremlin", test))]
     pub fn current(&self) -> u32 {
         self.counter.load(Ordering::Relaxed)
     }
@@ -277,9 +330,8 @@ pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalEx
         return Err(Error::Query(QueryError::new(
             QueryErrorKind::Semantic,
             format!(
-                "{base} is not a map value, so .{key} cannot read from it: match a node or edge \
-                 with a variable and read its property, or bind a value with WITH ... AS m and \
-                 use m.{key}"
+                "{base} is not a map value, so .{key} cannot read from it: read .{key} of a node \
+                 or edge bound to a variable in the pattern, or of a map value"
             ),
         )));
     }
@@ -290,14 +342,15 @@ pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalEx
 }
 
 /// Whether an expression can evaluate to a map: a variable, a parameter, a
-/// property, a map literal, `properties(...)`, or a key or element of one of
-/// those (or of a list literal).
+/// property, a map literal or projection, `properties(...)`, or a key or
+/// element of one of those (or of a list literal).
 fn can_be_map(expr: &LogicalExpression) -> bool {
     match expr {
         LogicalExpression::Variable(_)
         | LogicalExpression::Parameter(_)
         | LogicalExpression::Property { .. }
         | LogicalExpression::Map(_)
+        | LogicalExpression::MapProjection { .. }
         | LogicalExpression::MapAccess { .. } => true,
         LogicalExpression::IndexAccess { base, .. } => {
             matches!(**base, LogicalExpression::List(_)) || can_be_map(base)
@@ -370,25 +423,34 @@ pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut 
                 collect_expression_variables(else_expr, vars);
             }
         }
+        // The variable a comprehension, list predicate or `reduce` binds is
+        // its own: only the other names its body uses come from outside.
         LogicalExpression::ListComprehension {
+            variable,
             list_expr,
             filter_expr,
             map_expr,
-            ..
         } => {
             collect_expression_variables(list_expr, vars);
+            let mut body = HashSet::new();
             if let Some(filter) = filter_expr {
-                collect_expression_variables(filter, vars);
+                collect_expression_variables(filter, &mut body);
             }
-            collect_expression_variables(map_expr, vars);
+            collect_expression_variables(map_expr, &mut body);
+            body.remove(variable);
+            vars.extend(body);
         }
         LogicalExpression::ListPredicate {
+            variable,
             list_expr,
             predicate,
             ..
         } => {
             collect_expression_variables(list_expr, vars);
-            collect_expression_variables(predicate, vars);
+            let mut body = HashSet::new();
+            collect_expression_variables(predicate, &mut body);
+            body.remove(variable);
+            vars.extend(body);
         }
         LogicalExpression::MapProjection { base, entries } => {
             vars.insert(base.clone());
@@ -399,14 +461,19 @@ pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut 
             }
         }
         LogicalExpression::Reduce {
+            accumulator,
             initial,
+            variable,
             list,
             expression,
-            ..
         } => {
             collect_expression_variables(initial, vars);
             collect_expression_variables(list, vars);
-            collect_expression_variables(expression, vars);
+            let mut body = HashSet::new();
+            collect_expression_variables(expression, &mut body);
+            body.remove(accumulator);
+            body.remove(variable);
+            vars.extend(body);
         }
         LogicalExpression::PatternComprehension { projection, .. } => {
             collect_expression_variables(projection, vars);

@@ -120,15 +120,14 @@ impl GrafeoFileManager {
             })?;
 
         // Acquire an exclusive lock: prevents other processes from opening the same file
-        {
-            let _no_child_start = child_process::lock_acquisition();
-            file.try_lock_exclusive().map_err(|_| {
+        child_process::take_lock(|| file.try_lock_exclusive(), is_lock_contended).map_err(
+            |_| {
                 Error::Internal(format!(
                     "database file is locked by another process: {}",
                     path.display()
                 ))
-            })?;
-        }
+            },
+        )?;
 
         let file_header = FileHeader::new();
         header::write_file_header(&mut file, &file_header)?;
@@ -166,15 +165,14 @@ impl GrafeoFileManager {
         let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
 
         // Acquire an exclusive lock: prevents other processes from opening the same file
-        {
-            let _no_child_start = child_process::lock_acquisition();
-            file.try_lock_exclusive().map_err(|_| {
+        child_process::take_lock(|| file.try_lock_exclusive(), is_lock_contended).map_err(
+            |_| {
                 Error::Internal(format!(
                     "database file is locked by another process: {}",
                     path.display()
                 ))
-            })?;
-        }
+            },
+        )?;
 
         finish_interrupted_checkpoint(&path, &mut file)?;
 
@@ -224,15 +222,16 @@ impl GrafeoFileManager {
 
         // Acquire a shared lock: coexists with other shared locks but
         // blocks if an exclusive lock cannot be shared (platform-dependent).
-        {
-            let _no_child_start = child_process::lock_acquisition();
-            database_file.try_lock_shared().map_err(|_| {
-                Error::Internal(format!(
-                    "database file cannot be locked for reading: {}",
-                    path.display()
-                ))
-            })?;
-        }
+        child_process::take_lock(
+            || database_file.try_lock_shared(),
+            |e| matches!(e, std::fs::TryLockError::WouldBlock),
+        )
+        .map_err(|_| {
+            Error::Internal(format!(
+                "database file cannot be locked for reading: {}",
+                path.display()
+            ))
+        })?;
 
         let pending_image = checkpoint_image_path(&path);
         let (mut file, lock_holder) = if pending_image.exists() {
@@ -1079,6 +1078,12 @@ fn install_image(file: &mut File, image: &Path) -> Result<()> {
     file.set_len(length)?;
     file.sync_all()?;
     Ok(())
+}
+
+/// Whether a failed `fs2` lock attempt failed because another handle holds
+/// the lock (as opposed to an I/O error).
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
 /// Opening a database file for writing: an image that was still being
@@ -2188,6 +2193,7 @@ mod tests {
         (manager, completed)
     }
 
+    #[cfg(feature = "testing-crash-injection")]
     fn try_lpg_payload(manager: &GrafeoFileManager) -> Result<Vec<u8>> {
         use grafeo_common::storage::SectionType;
 

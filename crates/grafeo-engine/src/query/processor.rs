@@ -297,7 +297,9 @@ impl QueryProcessor {
 
         // 2. Substitute parameters if provided (merge defaults from the plan first)
         let has_defaults = !logical_plan.default_params.is_empty();
-        if params.is_some() || has_defaults {
+        // A parameter nobody supplied fails here, before planning; only an
+        // EXPLAIN without parameters shows the plan with them unresolved.
+        if params.is_some() || has_defaults || !logical_plan.explain {
             let merged = if has_defaults {
                 let mut merged = logical_plan.default_params.clone();
                 if let Some(params) = params {
@@ -396,8 +398,9 @@ impl QueryProcessor {
             }
             #[allow(unreachable_patterns)]
             _ => Err(Error::Internal(format!(
-                "Language {:?} is not an LPG language",
-                language
+                "Language {:?} is not an LPG language ({} bytes of query)",
+                language,
+                query.len()
             ))),
         }
     }
@@ -482,7 +485,9 @@ impl QueryProcessor {
 
         // 2. Substitute parameters if provided (merge defaults from the plan first)
         let has_defaults = !logical_plan.default_params.is_empty();
-        if params.is_some() || has_defaults {
+        // A parameter nobody supplied fails here, before planning; only an
+        // EXPLAIN without parameters shows the plan with them unresolved.
+        if params.is_some() || has_defaults || !logical_plan.explain {
             let merged = if has_defaults {
                 let mut merged = logical_plan.default_params.clone();
                 if let Some(params) = params {
@@ -778,7 +783,18 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
         }
         LogicalOperator::Return(ret) => {
             for item in &mut ret.items {
+                // An unaliased column that reads a parameter is named after
+                // the query text (`$x`), not after the value replacing it.
+                let name = item.alias.is_none().then(|| {
+                    crate::query::planner::common::output_column_name(None, &item.expression)
+                });
                 substitute_in_expression(&mut item.expression, params)?;
+                if let Some(name) = name
+                    && name
+                        != crate::query::planner::common::output_column_name(None, &item.expression)
+                {
+                    item.alias = Some(name);
+                }
             }
             substitute_in_operator(&mut ret.input, params)?;
         }
@@ -1053,7 +1069,10 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &QueryParams) 
             if let Some(value) = params.get(name) {
                 *expr = LogicalExpression::Literal(value.clone());
             } else {
-                return Err(Error::Internal(format!("Missing parameter: ${}", name)));
+                return Err(Error::Query(grafeo_common::utils::error::QueryError::new(
+                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    format!("Missing parameter: ${name}"),
+                )));
             }
         }
         LogicalExpression::Binary { left, right, .. } => {

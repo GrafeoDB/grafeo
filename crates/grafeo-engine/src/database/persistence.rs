@@ -1,6 +1,6 @@
 //! Persistence, snapshots, and data export for GrafeoDB.
 
-#[cfg(any(feature = "wal", feature = "grafeo-file"))]
+#[cfg(feature = "wal")]
 use std::path::Path;
 
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
@@ -751,8 +751,8 @@ impl super::GrafeoDB {
         Ok(())
     }
 
-    /// Saves the database to a single `.grafeo` file.
-    #[cfg(feature = "grafeo-file")]
+    /// Saves the database to a single `.grafeo` file (see [`save`](Self::save)).
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     fn save_as_grafeo_file(&self, path: &Path) -> Result<()> {
         use grafeo_storage::file::GrafeoFileManager;
 

@@ -1,0 +1,123 @@
+# Rosetta: a variable is a node or an edge, and keys() of both
+#
+# keys() lists the property keys of an edge as it does for a node, sorted (as
+# properties() returns them), so the order is the same on every run. A variable
+# bound to a node cannot later be used as an edge, nor an edge as a node, nor a
+# value as either: the query fails with an error instead of matching by a
+# coincidence of IDs. A variable imported into CALL keeps what it is.
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): KNOWS edges
+# have `since` and `w`, LIVES_IN edges `years` and `w`; Alix has `name`, `age`
+# and `w`.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: A variable is a node or an edge
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # keys()
+  # ---------------------------------------------------------------------------
+
+  - name: keys_of_an_edge
+    variants:
+      gql: "MATCH ()-[r:KNOWS {w: 1}]->() RETURN keys(r) AS k"
+      cypher: "MATCH ()-[r:KNOWS {w: 1}]->() RETURN keys(r) AS k"
+    expect:
+      rows:
+        - ["[since, w]"]
+
+  - name: keys_of_an_unwound_edge
+    variants:
+      gql: "MATCH ()-[r:LIVES_IN {w: 6}]->() WITH collect(r) AS rs UNWIND rs AS e RETURN keys(e) AS k"
+      cypher: "MATCH ()-[r:LIVES_IN {w: 6}]->() WITH collect(r) AS rs UNWIND rs AS e RETURN keys(e) AS k"
+    expect:
+      rows:
+        - ["[w, years]"]
+
+  # The five KNOWS edges have `since`; the LIVES_IN edges do not.
+  - name: edges_filtered_by_their_keys
+    variants:
+      gql: "MATCH ()-[r]->() WHERE 'since' IN keys(r) RETURN count(*) AS n"
+      cypher: "MATCH ()-[r]->() WHERE 'since' IN keys(r) RETURN count(*) AS n"
+    expect:
+      rows:
+        - [5]
+
+  - name: keys_of_a_node
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) RETURN keys(a) AS k"
+      cypher: "MATCH (a:Person {name: 'Alix'}) RETURN keys(a) AS k"
+    expect:
+      rows:
+        - ["[age, name, w]"]
+
+  # ---------------------------------------------------------------------------
+  # A node, an edge or a value, never two of them
+  # ---------------------------------------------------------------------------
+
+  - name: a_node_used_as_an_edge_in_a_later_match
+    variants:
+      gql: "MATCH (r) MATCH ()-[r]->() RETURN count(*) AS c"
+      cypher: "MATCH (r) MATCH ()-[r]->() RETURN count(*) AS c"
+    expect:
+      error: "cannot also be an edge"
+
+  - name: an_edge_used_as_a_node_in_a_later_match
+    variants:
+      gql: "MATCH ()-[r]->() MATCH (r)-[]->() RETURN count(*) AS c"
+      cypher: "MATCH ()-[r]->() MATCH (r)-->() RETURN count(*) AS c"
+    expect:
+      error: "cannot also be a node"
+
+  - name: one_name_for_a_node_and_an_edge_in_one_pattern
+    variants:
+      gql: "MATCH (a)-[a]->(b) RETURN count(*) AS c"
+      cypher: "MATCH (a)-[a]->(b) RETURN count(*) AS c"
+    expect:
+      error: "cannot also be an edge"
+
+  - name: one_name_for_an_edge_and_its_end_node
+    variants:
+      gql: "MATCH (a)-[r]->(r) RETURN count(*) AS c"
+      cypher: "MATCH (a)-[r]->(r) RETURN count(*) AS c"
+    expect:
+      error: "cannot also be a node"
+
+  # Cypher only: GQL has no WITH of a literal before a MATCH that reaches here
+  # (LET and FOR bind values of any kind).
+  - name: a_value_used_as_an_edge
+    variants:
+      cypher: "WITH 1 AS r MATCH ()-[r]->() RETURN count(*) AS c"
+    expect:
+      error: "cannot be an edge"
+
+  # Cypher only: GQL's CALL does not import outer variables yet.
+  - name: a_node_imported_into_call_used_as_an_edge
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH a MATCH ()-[a]->(b) RETURN b } RETURN count(*) AS c"
+    expect:
+      error: "cannot also be an edge"
+
+  # Each KNOWS edge, imported into CALL, is matched again as an edge.
+  - name: an_edge_imported_into_call_stays_an_edge
+    variants:
+      cypher: "MATCH ()-[r:KNOWS]->() CALL { WITH r MATCH (x)-[r]->(y) RETURN x.name AS xn } RETURN count(*) AS c"
+    expect:
+      rows:
+        - [5]
+
+  # The KNOWS triangle Alix, Gus, Vincent: a node bound again as a node.
+  - name: a_node_bound_again_as_a_node
+    variants:
+      gql: "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(a) RETURN a.name AS a"
+      cypher: "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(a) RETURN a.name AS a"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]

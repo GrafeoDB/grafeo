@@ -740,31 +740,44 @@ describe('transaction edge cases', () => {
         const r = await db.execute('MATCH (p:Person) RETURN p.name')
         expect(r.length).toBe(1)
       } else {
-        // Commit won the race: the queued query must fail, not run auto-committed.
-        await expect(pending).rejects.toThrow(/no longer active/)
+        // Commit went first. A query that had not started yet must fail, not
+        // run auto-committed; one that had already finished ran inside the
+        // transaction and was committed with it. (The rollback test below shows
+        // that a query never runs after its transaction ended.)
+        const ran = await pending.then(
+          () => true,
+          (e) => {
+            expect(e.message).toMatch(/no longer active/)
+            return false
+          },
+        )
         const r = await db.execute('MATCH (p:Person) RETURN p.name')
-        expect(r.length).toBe(0)
+        expect(r.length).toBe(ran ? 1 : 0)
       }
       db.close()
     }
   })
 
   it('should refuse rollback while a query is running, then allow it', async () => {
-    const db = GrafeoDB.create()
-    const tx = db.beginTransaction()
-    const pending = tx.execute("INSERT (:Person {name: 'Jules'})")
-    try {
-      tx.rollback()
-    } catch (e) {
-      expect(e.message).toMatch(/still running/)
-      await pending
-      tx.rollback()
+    for (let i = 0; i < 20; i++) {
+      const db = GrafeoDB.create()
+      const tx = db.beginTransaction()
+      const pending = tx.execute("INSERT (:Person {name: 'Jules'})")
+      try {
+        tx.rollback()
+      } catch (e) {
+        expect(e.message).toMatch(/still running/)
+        await pending
+        tx.rollback()
+      }
+      // Whether the query ran before the rollback, was still running or had not
+      // started, nothing it wrote survives.
+      await pending.catch(() => {})
+      expect(tx.isActive).toBe(false)
+      const r = await db.execute('MATCH (p:Person) RETURN p.name')
+      expect(r.length).toBe(0)
+      db.close()
     }
-    await pending.catch(() => {})
-    expect(tx.isActive).toBe(false)
-    const r = await db.execute('MATCH (p:Person) RETURN p.name')
-    expect(r.length).toBe(0)
-    db.close()
   })
 })
 
@@ -1572,6 +1585,17 @@ describe('ID validation', () => {
   it('should reject negative edge ID', () => {
     expect(() => db.getEdge(-1)).toThrow(/Invalid edge ID/)
   })
+
+  it('should reject a fractional ID instead of truncating it', async () => {
+    expect(() => db.getNode(1.5)).toThrow(/Invalid node ID/)
+    expect(() => db.getEdge(0.5)).toThrow(/Invalid edge ID/)
+    const alix = db.createNode(['Person']).id
+    const gus = db.createNode(['Person']).id
+    await expect(
+      db.batchCreateEdges([{ src: alix + 0.9, dst: gus, type: 'KNOWS' }])
+    ).rejects.toThrow(/Invalid node ID/)
+    expect(db.edgeCount()).toBe(0)
+  })
 })
 
 // ── Concurrent database instances ───────────────────────────────────
@@ -1599,8 +1623,17 @@ describe('concurrent instances', () => {
 // -- Upserts -----------------------------------------------------------
 
 describe('upserts', () => {
+  let db
+
+  beforeEach(() => {
+    db = GrafeoDB.create()
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
   it('should create then update nodes and edges by key', async () => {
-    const db = GrafeoDB.create()
     const nodes = await db.upsertNodes(
       ['Graph', 'File'],
       [{ id: 'f1', size: 3 }, { size: 4 }, { id: 'f2' }, { id: 'f1', lang: 'rs' }]
@@ -1619,11 +1652,9 @@ describe('upserts', () => {
     await db.upsertNodes(['Graph', 'File'], [{ id: 'f1', size: 9 }], { replace: true })
     const file = (await db.execute("MATCH (n:File {id: 'f1'}) RETURN n.size, n.lang")).toArray()
     expect(file).toEqual([{ 'n.size': 9, 'n.lang': null }])
-    db.close()
   })
 
   it('should take edge options', async () => {
-    const db = GrafeoDB.create()
     await db.upsertNodes(['File'], [{ id: 'f1' }, { id: 'f2' }])
     const result = await db.upsertEdges('CALLS', [{ from: 'f1', to: 'f2', rid: 'c1' }], {
       key: 'rid',
@@ -1632,15 +1663,23 @@ describe('upserts', () => {
       dstField: 'to',
     })
     expect(result.created).toBe(1)
-    db.close()
   })
 })
 
 // -- Batch writes --------------------------------------------------------
 
 describe('batch writes', () => {
+  let db
+
+  beforeEach(() => {
+    db = GrafeoDB.create()
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
   it('should create nodes with several labels and edges with their own types', async () => {
-    const db = GrafeoDB.create()
     const [alix, gus, vincent] = await db.batchCreateNodesWithProps(
       ['Graph', 'Person'],
       [{ name: 'Alix' }, { name: 'Gus' }, { name: 'Vincent' }]
@@ -1659,11 +1698,9 @@ describe('batch writes', () => {
       { 'a.name': 'Alix', 'type(r)': 'KNOWS', 'r.since': 2020 },
       { 'a.name': 'Gus', 'type(r)': 'LIKES', 'r.since': null },
     ])
-    db.close()
   })
 
   it('should create no edge of a failing batch', async () => {
-    const db = GrafeoDB.create()
     const [alix, gus] = await db.batchCreateNodesWithProps('Person', [{}, {}])
     await expect(
       db.batchCreateEdges([
@@ -1672,7 +1709,6 @@ describe('batch writes', () => {
       ])
     ).rejects.toThrow(/does not exist/)
     expect(db.edgeCount()).toBe(0)
-    db.close()
   })
 })
 

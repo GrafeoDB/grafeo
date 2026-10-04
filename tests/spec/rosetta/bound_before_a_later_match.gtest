@@ -1,0 +1,305 @@
+# Rosetta: nodes and edges bound before a later MATCH
+#
+# A pattern that names an edge bound before matches that edge only: in a
+# later MATCH, through WITH, in a CALL subquery that imports it, and in a
+# path back to nodes a subquery imports. The first setup has two parallel
+# KNOWS edges Alix->Gus (w 1 and 4) and a LIKES loop on Mia (w 6), so a
+# check on the endpoints alone shows up as extra rows.
+#
+# Setup 1 (GQL, one statement): Alix, Gus, Vincent, Mia and Amsterdam. KNOWS
+# Alix->Gus (w 1), Gus->Vincent (w 2), Vincent->Alix (w 3), Alix->Gus (w 4);
+# LIVES_IN Alix->Amsterdam (w 5); LIKES Mia->Mia (w 6).
+#
+# The last section checks values carried through a later MATCH. Its setup
+# gives nodes and edges a property with the same name (`w`) and overlapping
+# IDs (nodes have 100 and up, edges 1 to 8; Jules and Mia have none), so a
+# node or edge read as the other entity shows in the value.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Nodes and edges bound before a later MATCH
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # A later pattern through a bound edge matches that edge
+  # ---------------------------------------------------------------------------
+
+  - name: later_match_through_a_bound_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH ()-[r]->() MATCH (x)-[r]->(y) RETURN r.w AS w, x.name AS x, y.name AS y"
+      cypher: "MATCH ()-[r]->() MATCH (x)-[r]->(y) RETURN r.w AS w, x.name AS x, y.name AS y"
+    expect:
+      rows:
+        - [1, Alix, Gus]
+        - [2, Gus, Vincent]
+        - [3, Vincent, Alix]
+        - [4, Alix, Gus]
+        - [5, Alix, Amsterdam]
+        - [6, Mia, Mia]
+
+  - name: bound_edge_between_bound_nodes_matches_once
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH (a)-[r]->(b) MATCH (a)-[r]->(b) RETURN r.w AS w"
+      cypher: "MATCH (a)-[r]->(b) MATCH (a)-[r]->(b) RETURN r.w AS w"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+        - [4]
+        - [5]
+        - [6]
+
+  - name: bound_edge_read_backwards
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH (a)-[r]->(b) MATCH (x)<-[r]-(y) RETURN r.w AS w, x.name AS x, y.name AS y"
+      cypher: "MATCH (a)-[r]->(b) MATCH (x)<-[r]-(y) RETURN r.w AS w, x.name AS x, y.name AS y"
+    expect:
+      rows:
+        - [1, Gus, Alix]
+        - [2, Vincent, Gus]
+        - [3, Alix, Vincent]
+        - [4, Gus, Alix]
+        - [5, Amsterdam, Alix]
+        - [6, Mia, Mia]
+
+  - name: bound_edge_backwards_between_its_own_ends_is_a_loop
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH (a)-[r]->(b) MATCH (a)<-[r]-(b) RETURN r.w AS w"
+      cypher: "MATCH (a)-[r]->(b) MATCH (a)<-[r]-(b) RETURN r.w AS w"
+    expect:
+      rows:
+        - [6]
+
+  - name: bound_edge_undirected
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH (a)-[r:KNOWS {w: 2}]->(b) MATCH (x)-[r]-(y) RETURN x.name AS x, y.name AS y"
+      cypher: "MATCH (a)-[r:KNOWS {w: 2}]->(b) MATCH (x)-[r]-(y) RETURN x.name AS x, y.name AS y"
+    expect:
+      rows:
+        - [Gus, Vincent]
+        - [Vincent, Gus]
+
+  - name: bound_edge_of_another_type_matches_nothing
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH ()-[r:KNOWS]->() MATCH ()-[r:LIVES_IN]->() RETURN count(*) AS n"
+      cypher: "MATCH ()-[r:KNOWS]->() MATCH ()-[r:LIVES_IN]->() RETURN count(*) AS n"
+    expect:
+      rows:
+        - [0]
+
+  - name: bound_edge_with_a_property_map
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH ()-[r]->() MATCH (x)-[r {w: 3}]->(y) RETURN x.name AS x, y.name AS y"
+      cypher: "MATCH ()-[r]->() MATCH (x)-[r {w: 3}]->(y) RETURN x.name AS x, y.name AS y"
+    expect:
+      rows:
+        - [Vincent, Alix]
+
+  - name: bound_edge_in_a_named_path
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH ()-[r:KNOWS]->() MATCH p = (x)-[r]->(y) RETURN r.w AS w, length(p) AS len"
+      cypher: "MATCH ()-[r:KNOWS]->() MATCH p = (x)-[r]->(y) RETURN r.w AS w, length(p) AS len"
+    expect:
+      rows:
+        - [1, 1]
+        - [2, 1]
+        - [3, 1]
+        - [4, 1]
+
+  - name: bound_edge_list_of_a_variable_length_pattern
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH ()-[r:KNOWS*2]->() MATCH (x)-[r:KNOWS*2]->(y) RETURN count(*) AS n"
+      cypher: "MATCH ()-[r:KNOWS*2]->() MATCH (x)-[r:KNOWS*2]->(y) RETURN count(*) AS n"
+    expect:
+      rows:
+        - [5]
+
+  - name: bound_edge_after_an_ordered_cut
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      cypher: "MATCH ()-[r]->() WITH r ORDER BY r.w LIMIT 2 MATCH (x)-[r]->(y) RETURN r.w AS w, x.name AS x, y.name AS y"
+    expect:
+      rows:
+        - [1, Alix, Gus]
+        - [2, Gus, Vincent]
+
+  # GQL only: openCypher matches each relationship at most once per pattern,
+  # so in Cypher this pattern has no match (Grafeo's Cypher does not apply that
+  # rule yet).
+  - name: same_edge_twice_in_a_path_is_a_loop
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    query: "MATCH (a)-[r]->(b)-[r]->(c) RETURN a.name AS a, b.name AS b, c.name AS c"
+    expect:
+      rows:
+        - [Mia, Mia, Mia]
+
+  - name: optional_match_through_a_bound_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH ()-[r]->() OPTIONAL MATCH (x)-[r:KNOWS]->(y) RETURN r.w AS w, y.name AS y"
+      cypher: "MATCH ()-[r]->() OPTIONAL MATCH (x)-[r:KNOWS]->(y) RETURN r.w AS w, y.name AS y"
+    expect:
+      rows:
+        - [1, Gus]
+        - [2, Vincent]
+        - [3, Alix]
+        - [4, Gus]
+        - [5, null]
+        - [6, null]
+
+  # ---------------------------------------------------------------------------
+  # CALL subqueries: imported edges and nodes stay bound
+  # ---------------------------------------------------------------------------
+
+  - name: subquery_matches_the_edge_it_imports
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH ()-[r]->() CALL { WITH r MATCH (x)-[r]->(y) RETURN y.name AS target } RETURN r.w AS w, target"
+      cypher: "MATCH ()-[r]->() CALL { WITH r MATCH (x)-[r]->(y) RETURN y.name AS target } RETURN r.w AS w, target"
+    expect:
+      rows:
+        - [1, Gus]
+        - [2, Vincent]
+        - [3, Alix]
+        - [4, Gus]
+        - [5, Amsterdam]
+        - [6, Mia]
+
+  - name: subquery_importing_everything_matches_the_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH ()-[r]->() CALL { WITH * MATCH (x)-[r]->(y) RETURN y.name AS target } RETURN r.w AS w, target"
+      cypher: "MATCH ()-[r]->() CALL { WITH * MATCH (x)-[r]->(y) RETURN y.name AS target } RETURN r.w AS w, target"
+    expect:
+      rows:
+        - [1, Gus]
+        - [2, Vincent]
+        - [3, Alix]
+        - [4, Gus]
+        - [5, Amsterdam]
+        - [6, Mia]
+
+  - name: bound_edge_after_a_subquery
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH ()-[r]->() CALL { RETURN 1 AS one } MATCH (x)-[r]->(y) RETURN count(*) AS n"
+      cypher: "MATCH ()-[r]->() CALL { RETURN 1 AS one } MATCH (x)-[r]->(y) RETURN count(*) AS n"
+    expect:
+      rows:
+        - [6]
+
+  - name: subquery_closes_a_cycle_on_the_nodes_it_imports
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH (a)-->(b) CALL { WITH a, b MATCH (b)-->(a) RETURN count(*) AS back } RETURN a.name AS a, b.name AS b, back"
+      cypher: "MATCH (a)-->(b) CALL { WITH a, b MATCH (b)-->(a) RETURN count(*) AS back } RETURN a.name AS a, b.name AS b, back"
+    expect:
+      rows:
+        - [Alix, Gus, 0]
+        - [Alix, Gus, 0]
+        - [Gus, Vincent, 0]
+        - [Vincent, Alix, 0]
+        - [Alix, Amsterdam, 0]
+        - [Mia, Mia, 1]
+
+  # ---------------------------------------------------------------------------
+  # Values carried through a later MATCH stay the node or edge they are
+  # ---------------------------------------------------------------------------
+
+  - name: node_property_after_a_later_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person) MATCH (c:City {name: 'Paris'}) RETURN a.name AS n, a.w AS w"
+      cypher: "MATCH (a:Person) MATCH (c:City {name: 'Paris'}) RETURN a.name AS n, a.w AS w"
+    expect:
+      rows:
+        - [Alix, 100]
+        - [Gus, 101]
+        - [Vincent, 103]
+        - [Jules, null]
+        - [Mia, null]
+
+  - name: node_property_after_with_and_a_later_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (a:Person) WITH a MATCH (c:City {name: 'Paris'}) RETURN a.name AS n, a.w AS w"
+      cypher: "MATCH (a:Person) WITH a MATCH (c:City {name: 'Paris'}) RETURN a.name AS n, a.w AS w"
+    expect:
+      rows:
+        - [Alix, 100]
+        - [Gus, 101]
+        - [Vincent, 103]
+        - [Jules, null]
+        - [Mia, null]
+
+  - name: edge_property_after_a_later_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH ()-[r:KNOWS]->() MATCH (c:City {name: 'Paris'}) RETURN r.since AS since, r.w AS w"
+      cypher: "MATCH ()-[r:KNOWS]->() MATCH (c:City {name: 'Paris'}) RETURN r.since AS since, r.w AS w"
+    expect:
+      rows:
+        - [2010, 1]
+        - [2012, 2]
+        - [2015, 3]
+        - [2020, 4]
+        - [2018, 5]
+
+  - name: edge_filter_after_a_later_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH ()-[r:KNOWS]->() MATCH (c:City {name: 'Paris'}) WHERE r.w > 2 RETURN r.w AS w"
+      cypher: "MATCH ()-[r:KNOWS]->() MATCH (c:City {name: 'Paris'}) WHERE r.w > 2 RETURN r.w AS w"
+    expect:
+      rows:
+        - [3]
+        - [4]
+        - [5]
+
+  - name: edge_property_after_a_later_path_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH ()-[r:KNOWS]->() MATCH p = (x:Person {name: 'Mia'})-[]->(y) RETURN r.w AS w, y.name AS y"
+      cypher: "MATCH ()-[r:KNOWS]->() MATCH p = (x:Person {name: 'Mia'})-[]->(y) RETURN r.w AS w, y.name AS y"
+    expect:
+      rows:
+        - [1, Paris]
+        - [2, Paris]
+        - [3, Paris]
+        - [4, Paris]
+        - [5, Paris]

@@ -65,7 +65,7 @@ RETURN friend.name
 
 ## Ordering Results
 
-Without `ORDER BY`, rows come in no particular order. The order can change between runs, builds and versions (parallel execution, compaction and planner changes all affect it), and so can which rows `LIMIT` keeps. When the order matters, say so with `ORDER BY`. To find code that relies on the order anyway, open the database with the `shuffle_unordered` option in tests (Python: `GrafeoDB(shuffle_unordered=True)`, Node.js: `GrafeoDB.create(path, { shuffleUnordered: true })`, Rust: `Config::with_shuffle_unordered(true)`): every result without `ORDER BY` then comes back in random order.
+Without `ORDER BY`, rows come in no particular order. The order can change between runs, builds and versions (parallel execution, compaction and planner changes all affect it), and so can which rows `LIMIT` keeps. When the order matters, say so with `ORDER BY`. To find code that relies on the order anyway, open the database with the `shuffle_unordered` option in tests (Python: `GrafeoDB(shuffle_unordered=True)`, Node.js: `GrafeoDB.create(path, { shuffleUnordered: true })`, Rust: `Config::with_shuffle_unordered(true)`): every result without `ORDER BY` then comes back in random order (a streamed result within each chunk, so the stream keeps its bounded memory).
 
 ```sql
 -- Order by property
@@ -92,6 +92,10 @@ MATCH (p:Person)
 RETURN p.name, p.age
 ORDER BY p.age DESC NULLS LAST
 ```
+
+Nulls sort last in ascending order and first in descending order, unless `NULLS FIRST` or `NULLS LAST` says otherwise, which holds in either direction.
+
+Values of different types in one sort key, such as a property that holds a number on some nodes and a string on others, follow one fixed order, the one openCypher defines: maps, lists, paths, temporal values (zoned datetimes, datetimes, dates, zoned times, times, durations), strings, booleans, numbers, then null. Integers and floats compare as numbers, with NaN after infinity. Lists compare element by element with a prefix first, and maps by size, then keys, then values. Grafeo's own types fit in as follows: vectors after paths, bytes before strings and counters before numbers.
 
 ## Limiting Results
 

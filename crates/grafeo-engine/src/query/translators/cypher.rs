@@ -4,9 +4,10 @@
 //! that can be optimized and executed.
 
 use super::common::{
-    build_left_join_with_predicates, check_branch_columns, combine_with_and, has_all_labels,
-    is_aggregate_function, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit,
-    wrap_return, wrap_skip, wrap_sort,
+    build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
+    combine_with_and, expand_subquery_return_star, has_all_labels, is_aggregate_function,
+    to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
+    wrap_sort,
 };
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
@@ -181,6 +182,19 @@ impl CypherTranslator {
     }
 
     fn translate_query(&self, query: &ast::Query) -> Result<LogicalPlan> {
+        // As in Neo4j, the rows of a CALL subquery that returns some are not
+        // the result of a query: a RETURN after it says what is.
+        if let Some(ast::Clause::CallSubquery { query: inner, .. }) = query.clauses.last()
+            && matches!(inner.clauses.last(), Some(ast::Clause::Return(_)))
+        {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                concat!(
+                    "Query cannot conclude with CALL (must be a RETURN clause, an update clause, ",
+                    "a unit subquery call, or a procedure call with no YIELD)"
+                ),
+            )));
+        }
         let mut plan: Option<LogicalOperator> = None;
 
         for clause in &query.clauses {
@@ -218,8 +232,8 @@ impl CypherTranslator {
             ast::Clause::Set(set_clause) => self.translate_set(set_clause, input),
             ast::Clause::Remove(remove_clause) => self.translate_remove(remove_clause, input),
             ast::Clause::Call(call) => self.translate_call_clause(call, input),
-            ast::Clause::CallSubquery(inner_query) => {
-                self.translate_call_subquery(inner_query, input)
+            ast::Clause::CallSubquery { query, scope } => {
+                self.translate_call_subquery(query, scope.as_deref(), input)
             }
             ast::Clause::ForEach(foreach) => self.translate_foreach(foreach, input),
             ast::Clause::LoadCsv(load_csv) => self.translate_load_csv(load_csv),
@@ -266,65 +280,125 @@ impl CypherTranslator {
 
     /// Translates `CALL { subquery }` to an Apply operator.
     ///
-    /// When the inner subquery starts with `WITH <vars>` and there is an outer
-    /// input, the WITH items are treated as variable imports from the outer scope.
-    /// The imported variable names are recorded in `ApplyOp.shared_variables` so
-    /// the planner can wire them through `ParameterState`.
+    /// The subquery sees the outer variables its variable scope clause names
+    /// (`CALL (a, b) { ... }`, all of them for `(*)`, none for `()`), or
+    /// without one, the variables its importing `WITH` names. It starts from a
+    /// `ParameterScan` of them, and they are recorded in
+    /// `ApplyOp.shared_variables` so the planner can wire them through
+    /// `ParameterState`.
     fn translate_call_subquery(
         &self,
         inner: &ast::Query,
+        scope: Option<&[String]>,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
-        // Detect importing WITH: if the first clause is WITH and we have outer input,
-        // extract the imported variable names and start the inner plan from a
-        // ParameterScan instead of Empty.
         let mut shared_variables = Vec::new();
-        let mut inner_plan: Option<LogicalOperator> = None;
         let mut clauses_iter = inner.clauses.iter();
 
-        if input.is_some()
-            && let Some(ast::Clause::With(with_clause)) = inner.clauses.first()
-        {
-            if with_clause.is_wildcard {
-                // WITH * imports all outer variables
-                shared_variables.push("*".to_string());
-            } else {
-                for item in &with_clause.items {
-                    if let ast::Expression::Variable(name) = &item.expression {
-                        let var_name = item.alias.as_deref().unwrap_or(name);
-                        shared_variables.push(var_name.to_string());
-                    }
+        match scope {
+            // After a scope clause, a WITH is an ordinary WITH. With no outer
+            // row, `(*)` imports nothing, and named variables are reported as
+            // undefined by the binder.
+            Some(names) => {
+                if input.is_some() || names.iter().any(|name| name != "*") {
+                    shared_variables = names.to_vec();
                 }
             }
-            if !shared_variables.is_empty() {
-                // Skip the importing WITH and start from a ParameterScan
-                clauses_iter.next();
-                inner_plan = Some(LogicalOperator::ParameterScan(ParameterScanOp {
-                    columns: shared_variables.clone(),
-                }));
+            // Without one, an importing WITH names what the subquery sees and
+            // is replaced by the ParameterScan.
+            None => {
+                if input.is_some()
+                    && let Some(ast::Clause::With(with_clause)) = inner.clauses.first()
+                    && let Some(imported) = self.importing_with(with_clause)?
+                {
+                    shared_variables = imported;
+                    clauses_iter.next();
+                }
             }
         }
+        let mut inner_plan = (!shared_variables.is_empty()).then(|| {
+            LogicalOperator::ParameterScan(ParameterScanOp {
+                columns: shared_variables.clone(),
+            })
+        });
 
         // Translate the remaining inner subquery clauses
         for clause in clauses_iter {
             inner_plan = Some(self.translate_clause(clause, inner_plan)?);
         }
-        let inner_plan = inner_plan.ok_or_else(|| {
+        let mut inner_plan = inner_plan.ok_or_else(|| {
             Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 "CALL subquery requires at least one clause",
             ))
         })?;
+        let outer_names = match &input {
+            Some(outer) => outer.bound_variables(None),
+            None => Some(HashSet::new()),
+        };
+        expand_subquery_return_star(&mut inner_plan, outer_names.as_ref())?;
 
-        match input {
-            Some(outer) => Ok(LogicalOperator::Apply(ApplyOp {
-                input: Box::new(outer),
-                subplan: Box::new(inner_plan),
-                shared_variables,
-                optional: false,
-            })),
-            None => Ok(inner_plan),
+        // A CALL that comes first runs once, on one empty row.
+        Ok(LogicalOperator::Apply(ApplyOp {
+            input: Box::new(input.unwrap_or(LogicalOperator::Empty)),
+            subplan: Box::new(inner_plan),
+            shared_variables,
+            optional: false,
+        }))
+    }
+
+    /// Reads the first `WITH` of a `CALL` subquery: the outer variables it
+    /// imports (`*` for `WITH *`), or `None` when it names no variable and is
+    /// an ordinary `WITH`. As in Neo4j, an importing `WITH` only lists
+    /// variables; an alias, an expression, `WHERE` or `DISTINCT` in it is an
+    /// error (a second `WITH` can do those).
+    fn importing_with(&self, with_clause: &ast::WithClause) -> Result<Option<Vec<String>>> {
+        let mut imported = Vec::new();
+        let mut names_variables = with_clause.is_wildcard;
+        let mut only_names = true;
+        if with_clause.is_wildcard {
+            imported.push("*".to_string());
         }
+        for item in &with_clause.items {
+            match &item.expression {
+                ast::Expression::Variable(name)
+                    if item.alias.as_ref().is_none_or(|alias| alias == name) =>
+                {
+                    imported.push(name.clone());
+                    names_variables = true;
+                }
+                expression => {
+                    only_names = false;
+                    let mut variables = HashSet::new();
+                    collect_expression_variables(
+                        &self.translate_expression(expression)?,
+                        &mut variables,
+                    );
+                    names_variables |= !variables.is_empty();
+                }
+            }
+        }
+        if !names_variables {
+            return Ok(None);
+        }
+        let not_allowed = if !only_names {
+            Some("Aliasing or expressions are not supported.")
+        } else if with_clause.where_clause.is_some() {
+            Some("WHERE is not allowed.")
+        } else if with_clause.distinct {
+            Some("DISTINCT is not allowed.")
+        } else {
+            None
+        };
+        if let Some(reason) = not_allowed {
+            const IMPORTING_WITH: &str =
+                "Importing WITH should consist only of simple references to outside variables.";
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!("{IMPORTING_WITH} {reason}"),
+            )));
+        }
+        Ok(Some(imported))
     }
 
     /// Translates `FOREACH (var IN list | clauses)` to Unwind + mutation pipeline.
@@ -800,6 +874,7 @@ impl CypherTranslator {
         };
 
         let expand = LogicalOperator::Expand(ExpandOp {
+            quantified: rel.length.is_some(),
             from_variable,
             to_variable: expand_target.clone(),
             edge_variable,
@@ -935,8 +1010,10 @@ impl CypherTranslator {
             .any(|item| contains_aggregate(&item.expression));
 
         let mut plan = if has_aggregates {
-            let (aggregates, group_by, post_return) =
+            let (mut aggregates, mut group_by, post_return) =
                 self.extract_aggregates_and_groups_from_items(&with_clause.items)?;
+            let input =
+                self.lift_aggregate_pattern_comprehensions(input, &mut aggregates, &mut group_by)?;
 
             let agg_op = LogicalOperator::Aggregate(AggregateOp {
                 group_by,
@@ -973,7 +1050,13 @@ impl CypherTranslator {
                 })
                 .collect::<Result<_>>()?;
 
-            // Rewrite pattern comprehensions into Apply + Aggregate(Collect)
+            // Rewrite pattern comprehensions into Apply + Aggregate(Collect):
+            // the ones inside an expression here, the item ones below.
+            let mut projections = projections;
+            let input = self.lift_nested_pattern_comprehensions(
+                input,
+                projections.iter_mut().map(|p| &mut p.expression),
+            )?;
             let has_pattern_comp = projections.iter().any(|p| {
                 matches!(
                     &p.expression,
@@ -1323,8 +1406,10 @@ impl CypherTranslator {
             };
             // With aliases (e.g. `n.city AS city`) the post-Return renames the
             // columns, which ORDER BY alias resolution and result naming need.
-            let (aggregates, group_by, post_return) =
+            let (mut aggregates, mut group_by, post_return) =
                 self.extract_aggregates_and_groups_from_items(items)?;
+            let input =
+                self.lift_aggregate_pattern_comprehensions(input, &mut aggregates, &mut group_by)?;
 
             // Register aggregate output column names so ORDER BY can
             // reference them. Group-by columns use expression_to_string
@@ -1386,7 +1471,13 @@ impl CypherTranslator {
                     .collect::<Result<_>>()?,
             };
 
-            // Rewrite pattern comprehensions into Apply + Aggregate(Collect)
+            // Rewrite pattern comprehensions into Apply + Aggregate(Collect):
+            // the ones inside an expression here, the item ones below.
+            let mut items = items;
+            let input = self.lift_nested_pattern_comprehensions(
+                input,
+                items.iter_mut().map(|item| &mut item.expression),
+            )?;
             let has_pattern_comp = items.iter().any(|item| {
                 matches!(
                     &item.expression,
@@ -2471,6 +2562,131 @@ impl CypherTranslator {
                 LogicalOperator::Filter(filter)
             }
             other => other,
+        }
+    }
+
+    /// Rewrites the pattern comprehensions in the arguments and group keys of
+    /// an aggregation into `Apply`s over its input (see
+    /// [`rewrite_pattern_comprehensions`](Self::rewrite_pattern_comprehensions)),
+    /// so `sum(size([(b)-->(c) | c]))` aggregates their lists.
+    fn lift_aggregate_pattern_comprehensions(
+        &self,
+        input: LogicalOperator,
+        aggregates: &mut [AggregateExpr],
+        group_by: &mut [LogicalExpression],
+    ) -> Result<LogicalOperator> {
+        let expressions = aggregates
+            .iter_mut()
+            .flat_map(|aggregate| {
+                [&mut aggregate.expression, &mut aggregate.expression2]
+                    .into_iter()
+                    .flatten()
+            })
+            .chain(group_by.iter_mut());
+        let mut lifted = Vec::new();
+        for expression in expressions {
+            self.take_pattern_comprehensions(expression, &mut lifted);
+        }
+        if lifted.is_empty() {
+            return Ok(input);
+        }
+        Ok(self.rewrite_pattern_comprehensions(input, lifted)?.0)
+    }
+
+    /// Rewrites the pattern comprehensions nested inside `expressions` (not
+    /// one that is a whole expression, which the item rewrite handles) into
+    /// `Apply`s over `input`.
+    fn lift_nested_pattern_comprehensions<'e>(
+        &self,
+        input: LogicalOperator,
+        expressions: impl Iterator<Item = &'e mut LogicalExpression>,
+    ) -> Result<LogicalOperator> {
+        let mut lifted = Vec::new();
+        for expression in expressions {
+            if !matches!(expression, LogicalExpression::PatternComprehension { .. }) {
+                self.take_pattern_comprehensions(expression, &mut lifted);
+            }
+        }
+        if lifted.is_empty() {
+            return Ok(input);
+        }
+        Ok(self.rewrite_pattern_comprehensions(input, lifted)?.0)
+    }
+
+    /// Replaces each pattern comprehension in `expression` with a variable of
+    /// its own and adds it to `lifted` as an item that collects into that
+    /// variable. Comprehension and predicate bodies are left alone: they can
+    /// read their own iteration variable.
+    fn take_pattern_comprehensions(
+        &self,
+        expression: &mut LogicalExpression,
+        lifted: &mut Vec<ReturnItem>,
+    ) {
+        match expression {
+            LogicalExpression::PatternComprehension { .. } => {
+                let alias = self.next_anon_var();
+                let comprehension =
+                    std::mem::replace(expression, LogicalExpression::Variable(alias.clone()));
+                lifted.push(ReturnItem {
+                    expression: comprehension,
+                    alias: Some(alias),
+                });
+            }
+            LogicalExpression::Binary { left, right, .. } => {
+                self.take_pattern_comprehensions(left, lifted);
+                self.take_pattern_comprehensions(right, lifted);
+            }
+            LogicalExpression::Unary { operand, .. } => {
+                self.take_pattern_comprehensions(operand, lifted);
+            }
+            LogicalExpression::FunctionCall { args, .. } | LogicalExpression::List(args) => {
+                for arg in args {
+                    self.take_pattern_comprehensions(arg, lifted);
+                }
+            }
+            LogicalExpression::Map(entries) => {
+                for (_, value) in entries {
+                    self.take_pattern_comprehensions(value, lifted);
+                }
+            }
+            LogicalExpression::IndexAccess { base, index } => {
+                self.take_pattern_comprehensions(base, lifted);
+                self.take_pattern_comprehensions(index, lifted);
+            }
+            LogicalExpression::MapAccess { base, .. } => {
+                self.take_pattern_comprehensions(base, lifted);
+            }
+            LogicalExpression::SliceAccess { base, start, end } => {
+                self.take_pattern_comprehensions(base, lifted);
+                for bound in [start, end].into_iter().flatten() {
+                    self.take_pattern_comprehensions(bound, lifted);
+                }
+            }
+            LogicalExpression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => {
+                if let Some(operand) = operand {
+                    self.take_pattern_comprehensions(operand, lifted);
+                }
+                for (condition, result) in when_clauses {
+                    self.take_pattern_comprehensions(condition, lifted);
+                    self.take_pattern_comprehensions(result, lifted);
+                }
+                if let Some(else_clause) = else_clause {
+                    self.take_pattern_comprehensions(else_clause, lifted);
+                }
+            }
+            LogicalExpression::ListComprehension { list_expr, .. }
+            | LogicalExpression::ListPredicate { list_expr, .. } => {
+                self.take_pattern_comprehensions(list_expr, lifted);
+            }
+            LogicalExpression::Reduce { initial, list, .. } => {
+                self.take_pattern_comprehensions(initial, lifted);
+                self.take_pattern_comprehensions(list, lifted);
+            }
+            _ => {}
         }
     }
 

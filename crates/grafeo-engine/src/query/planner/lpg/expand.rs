@@ -34,18 +34,19 @@ impl super::Planner {
         };
 
         // Check if this is a variable-length path
-        let is_variable_length =
-            expand.min_hops != 1 || expand.max_hops.is_none() || expand.max_hops != Some(1);
+        let is_variable_length = expand.quantified
+            || expand.min_hops != 1
+            || expand.max_hops.is_none()
+            || expand.max_hops != Some(1);
 
         // Use VariableLengthExpandOperator when multi-hop OR when a named path
         // needs path detail columns (length, nodes, edges)
         let needs_path_details = expand.path_alias.is_some();
-        // Translators name the edges they need internally with a leading `_`.
-        let binds_edge_list = is_variable_length
-            && expand
-                .edge_variable
-                .as_deref()
-                .is_some_and(|name| !name.starts_with('_'));
+        // A named edge variable of a variable-length pattern binds the list of
+        // the path's edges. The variable a translator adds for an anonymous
+        // edge with a property map gets one too: that map is checked over
+        // the path's edges, never on this column.
+        let binds_edge_list = is_variable_length && expand.edge_variable.is_some();
 
         let operator: Box<dyn Operator> = if is_variable_length || needs_path_details {
             // Use VariableLengthExpandOperator for multi-hop paths or named paths
@@ -85,8 +86,6 @@ impl super::Planner {
                     .with_path_length_output()
                     .with_path_detail_output();
             }
-            // A named edge variable of a variable-length pattern binds the
-            // list of the path's edges.
             if binds_edge_list {
                 expand_op = expand_op.with_edge_list_output();
             }

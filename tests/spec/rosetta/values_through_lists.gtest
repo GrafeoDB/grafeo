@@ -1,0 +1,159 @@
+# Rosetta: nodes and edges in lists, through collect, UNWIND and list functions
+#
+# A list of nodes or edges stays one: collect of a node or edge, the nodes and
+# relationships of a path, and UNWIND of such a list give nodes and edges
+# back, so a property read takes the right entity. The dataset gives nodes and
+# edges a property with the same name (`w`) and overlapping IDs (nodes have
+# 100 and up, edges 1 to 8; Jules, Mia and Berlin have none), so an entity
+# read as the other kind shows a value from the wrong range.
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Nodes and edges in lists
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # collect, then UNWIND or a list comprehension
+  # ---------------------------------------------------------------------------
+
+  - name: unwind_collected_nodes
+    variants:
+      gql: "MATCH (a:Person) WITH collect(a) AS people UNWIND people AS p RETURN p.name AS n, p.w AS w"
+      cypher: "MATCH (a:Person) WITH collect(a) AS people UNWIND people AS p RETURN p.name AS n, p.w AS w"
+    expect:
+      rows:
+        - [Alix, 100]
+        - [Gus, 101]
+        - [Vincent, 103]
+        - [Jules, null]
+        - [Mia, null]
+
+  - name: unwind_collected_edges
+    variants:
+      gql: "MATCH ()-[r:KNOWS]->() WITH collect(r) AS rs UNWIND rs AS e RETURN e.w AS w"
+      cypher: "MATCH ()-[r:KNOWS]->() WITH collect(r) AS rs UNWIND rs AS e RETURN e.w AS w"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+        - [4]
+        - [5]
+
+  - name: type_and_property_of_unwound_edges
+    variants:
+      gql: "MATCH ()-[r:LIVES_IN]->() WITH collect(r) AS rs UNWIND rs AS e RETURN type(e) AS t, e.w AS w"
+      cypher: "MATCH ()-[r:LIVES_IN]->() WITH collect(r) AS rs UNWIND rs AS e RETURN type(e) AS t, e.w AS w"
+    expect:
+      rows:
+        - [LIVES_IN, 6]
+        - [LIVES_IN, 7]
+        - [LIVES_IN, 8]
+
+  # Every KNOWS edge has a `w` below 10; read as nodes they would not.
+  - name: comprehension_over_collected_edges
+    variants:
+      gql: "MATCH ()-[r:KNOWS]->() WITH collect(r) AS rs RETURN size([x IN rs WHERE x.w < 10]) AS n"
+      cypher: "MATCH ()-[r:KNOWS]->() WITH collect(r) AS rs RETURN size([x IN rs WHERE x.w < 10]) AS n"
+    expect:
+      rows:
+        - [5]
+
+  # Jules and Mia have no `w`; read as edges they would.
+  - name: comprehension_over_collected_nodes
+    variants:
+      gql: "MATCH (a:Person) WITH collect(a) AS people RETURN size([x IN people WHERE x.w IS NULL]) AS n"
+      cypher: "MATCH (a:Person) WITH collect(a) AS people RETURN size([x IN people WHERE x.w IS NULL]) AS n"
+    expect:
+      rows:
+        - [2]
+
+  # The edge collected, unwound and matched again: Alix, Gus and Mia to the
+  # city each lives in.
+  - name: match_through_an_unwound_edge
+    variants:
+      gql: "MATCH ()-[r:LIVES_IN]->() WITH collect(r) AS rs UNWIND rs AS e MATCH (x)-[e]->(y) RETURN x.name AS x, y.name AS y"
+      cypher: "MATCH ()-[r:LIVES_IN]->() WITH collect(r) AS rs UNWIND rs AS e MATCH (x)-[e]->(y) RETURN x.name AS x, y.name AS y"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Berlin]
+        - [Mia, Paris]
+
+  # ---------------------------------------------------------------------------
+  # A property of one item of such a list
+  # ---------------------------------------------------------------------------
+
+  - name: property_of_one_collected_edge
+    variants:
+      gql: "MATCH ()-[r:KNOWS {w: 5}]->() WITH collect(r) AS rs RETURN rs[0].w AS w, rs[-1].since AS since"
+      cypher: "MATCH ()-[r:KNOWS {w: 5}]->() WITH collect(r) AS rs RETURN rs[0].w AS w, rs[-1].since AS since"
+    expect:
+      rows:
+        - [5, 2018]
+
+  # Jules has no `w`; read as the edge with the same ID, Jules would have 4.
+  - name: property_of_one_collected_node
+    variants:
+      gql: "MATCH (a:Person {name: 'Jules'}) WITH collect(a) AS people RETURN people[0].w AS w, people[0].name AS n"
+      cypher: "MATCH (a:Person {name: 'Jules'}) WITH collect(a) AS people RETURN people[0].w AS w, people[0].name AS n"
+    expect:
+      rows:
+        - [null, Jules]
+
+  # The first edge of each two-hop walk from Alix: to Gus (w 1) and to Jules (w 5).
+  - name: property_of_one_edge_of_a_variable_length_pattern
+    variants:
+      gql: "MATCH (:Person {name: 'Alix'})-[r:KNOWS]->{2}() RETURN r[0].w AS w"
+      cypher: "MATCH (:Person {name: 'Alix'})-[r:KNOWS*2]->() RETURN r[0].w AS w"
+    expect:
+      rows:
+        - [1]
+        - [5]
+
+  # ---------------------------------------------------------------------------
+  # The nodes and relationships of a path, and other lists computed per row
+  # ---------------------------------------------------------------------------
+
+  # Alix->Gus->Vincent (w 1, 2) and Alix->Jules->Mia (w 5, 4).
+  - name: unwind_relationships_of_paths
+    variants:
+      gql: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS*2]->() UNWIND relationships(p) AS e RETURN e.w AS w"
+      cypher: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS*2]->() UNWIND relationships(p) AS e RETURN e.w AS w"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [5]
+        - [4]
+
+  - name: unwind_nodes_of_a_path
+    variants:
+      gql: "MATCH p = (:Person {name: 'Jules'})-[:KNOWS]->() UNWIND nodes(p) AS n RETURN n.name AS n, n.w AS w"
+      cypher: "MATCH p = (:Person {name: 'Jules'})-[:KNOWS]->() UNWIND nodes(p) AS n RETURN n.name AS n, n.w AS w"
+    expect:
+      rows:
+        - [Jules, null]
+        - [Mia, null]
+
+  # A list built from each row: 1 for Alix (w 100), 1 and 2 for Gus (w 101),
+  # 1 to 4 for Vincent (w 103), none for Jules and Mia (no w, so no list).
+  - name: unwind_a_list_computed_per_row
+    variants:
+      gql: "MATCH (a:Person) UNWIND range(1, a.w - 99) AS i RETURN a.name AS a, i"
+      cypher: "MATCH (a:Person) UNWIND range(1, a.w - 99) AS i RETURN a.name AS a, i"
+    expect:
+      rows:
+        - [Alix, 1]
+        - [Gus, 1]
+        - [Gus, 2]
+        - [Vincent, 1]
+        - [Vincent, 2]
+        - [Vincent, 3]
+        - [Vincent, 4]

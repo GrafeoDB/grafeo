@@ -1,0 +1,506 @@
+# Rosetta: CALL subqueries
+#
+# A Cypher CALL subquery sees the outer variables its importing WITH names.
+# As in Neo4j, that WITH may only list them: a WHERE, DISTINCT, an alias or an
+# expression in it is an error (a second WITH can filter or rename), and so is
+# a name the outer query does not have. A first WITH that names no variable is
+# an ordinary WITH.
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): Alix (30),
+# Gus (25), Vincent (40), Jules (35) and Mia (28); KNOWS Alix->Gus,
+# Gus->Vincent, Vincent->Alix, Jules->Mia and Alix->Jules.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: CALL subqueries
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # The importing WITH (Cypher)
+  # ---------------------------------------------------------------------------
+
+  - name: importing_with_where_is_rejected
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH a WHERE a.age > 30 RETURN a.name AS m } RETURN m"
+    expect:
+      error: "Importing WITH should consist only of simple references to outside variables. WHERE is not allowed"
+
+  - name: importing_with_star_and_where_is_rejected
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH * WHERE a.age > 30 RETURN a.name AS m } RETURN m"
+    expect:
+      error: "Importing WITH should consist only of simple references to outside variables. WHERE is not allowed"
+
+  - name: importing_with_an_alias_is_rejected
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH a AS b RETURN b.name AS m } RETURN m"
+    expect:
+      error: "Importing WITH should consist only of simple references to outside variables. Aliasing or expressions are not supported"
+
+  - name: importing_with_an_expression_is_rejected
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH a, a.age + 1 AS next RETURN next } RETURN next"
+    expect:
+      error: "Importing WITH should consist only of simple references to outside variables. Aliasing or expressions are not supported"
+
+  - name: importing_with_distinct_is_rejected
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH DISTINCT a RETURN a.name AS m } RETURN m"
+    expect:
+      error: "Importing WITH should consist only of simple references to outside variables. DISTINCT is not allowed"
+
+  - name: importing_a_name_the_outer_query_lacks_is_rejected
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH b RETURN 1 AS one } RETURN one"
+    expect:
+      error: "Undefined variable 'b'"
+
+  - name: a_second_with_filters_the_imported_rows
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH a WITH a WHERE a.age > 30 RETURN a.name AS m } RETURN m"
+    expect:
+      rows:
+        - [Vincent]
+        - [Jules]
+
+  - name: a_second_with_renames_an_imported_variable
+    variants:
+      cypher: "MATCH (a:Person) WHERE a.age > 30 CALL { WITH a WITH a AS b RETURN b.name AS m } RETURN a.name AS a, m"
+    expect:
+      rows:
+        - [Vincent, Vincent]
+        - [Jules, Jules]
+
+  # The variable a list comprehension binds is its own, not an outer one: the
+  # WITH names no outer variable and is an ordinary WITH.
+  - name: a_first_with_of_a_comprehension_imports_nothing
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH [x IN [1, 2] | x * 10] AS xs RETURN xs } RETURN a.name AS a, xs"
+    expect:
+      rows:
+        - [Alix, "[10, 20]"]
+
+  - name: a_first_with_without_variables_imports_nothing
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH 1 AS x RETURN x } RETURN a.name AS a, x"
+    expect:
+      rows:
+        - [Alix, 1]
+
+  # ---------------------------------------------------------------------------
+  # What a CALL subquery returns: its nodes and edges stay nodes and edges, so
+  # a later MATCH, id() and equality see the same entity
+  # ---------------------------------------------------------------------------
+
+  - name: a_returned_node_starts_a_later_match
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+    expect:
+      rows:
+        - [Gus, Vincent]
+        - [Jules, Mia]
+
+  - name: a_returned_node_ends_a_later_match
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } MATCH (x:Person)-[:KNOWS]->(b) RETURN b.name AS b, x.name AS x"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } MATCH (x:Person)-[:KNOWS]->(b) RETURN b.name AS b, x.name AS x"
+    expect:
+      rows:
+        - [Gus, Alix]
+        - [Jules, Alix]
+
+  - name: a_returned_node_equals_a_matched_node
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } MATCH (y:Person) WHERE y = b RETURN y.name AS y"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } MATCH (y:Person) WHERE y = b RETURN y.name AS y"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  - name: a_returned_node_keeps_its_id
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b, id(b) AS inner } RETURN b.name AS b, id(b) = inner AS same"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b, id(b) AS inner } RETURN b.name AS b, id(b) = inner AS same"
+    expect:
+      rows:
+        - [Gus, true]
+        - [Jules, true]
+
+  - name: a_returned_node_through_a_with
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } WITH b MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b } WITH b MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+    expect:
+      rows:
+        - [Gus, Vincent]
+        - [Jules, Mia]
+
+  - name: a_distinct_returned_node_starts_a_later_match
+    variants:
+      gql: "MATCH (a:Person) CALL { WITH a MATCH (a)-[:LIVES_IN]->(c) RETURN DISTINCT c } MATCH (p:Person)-[:LIVES_IN]->(c) RETURN a.name AS a, p.name AS p"
+      cypher: "MATCH (a:Person) CALL { WITH a MATCH (a)-[:LIVES_IN]->(c) RETURN DISTINCT c } MATCH (p:Person)-[:LIVES_IN]->(c) RETURN a.name AS a, p.name AS p"
+    expect:
+      rows:
+        - [Alix, Alix]
+        - [Gus, Gus]
+        - [Mia, Mia]
+
+  - name: a_returned_edge_in_a_later_match
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[r:KNOWS]->() RETURN r } MATCH (x)-[r]->(z) RETURN x.name AS x, z.name AS z, r.w AS w"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[r:KNOWS]->() RETURN r } MATCH (x)-[r]->(z) RETURN x.name AS x, z.name AS z, r.w AS w"
+    expect:
+      rows:
+        - [Alix, Gus, 1]
+        - [Alix, Jules, 5]
+
+  - name: a_returned_edge_is_an_edge
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[r:KNOWS]->() RETURN r } RETURN type(r) AS t, r.w AS w"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[r:KNOWS]->() RETURN r } RETURN type(r) AS t, r.w AS w"
+    expect:
+      rows:
+        - [KNOWS, 1]
+        - [KNOWS, 5]
+
+  - name: collected_returned_nodes_start_a_later_match
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN collect(b) AS bs } UNWIND bs AS b MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN collect(b) AS bs } UNWIND bs AS b MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+    expect:
+      rows:
+        - [Gus, Vincent]
+        - [Jules, Mia]
+
+  - name: an_uncorrelated_call_returns_nodes
+    variants:
+      gql: "CALL { MATCH (c:City) RETURN c } MATCH (p:Person)-[:LIVES_IN]->(c) RETURN p.name AS p, c.name AS c"
+      cypher: "CALL { MATCH (c:City) RETURN c } MATCH (p:Person)-[:LIVES_IN]->(c) RETURN p.name AS p, c.name AS c"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Berlin]
+        - [Mia, Paris]
+
+  - name: an_uncorrelated_call_after_a_match_returns_nodes
+    variants:
+      gql: "MATCH (p:Person {name: 'Gus'}) CALL { MATCH (c:City) RETURN c } MATCH (p)-[:LIVES_IN]->(c) RETURN p.name AS p, c.name AS c"
+      cypher: "MATCH (p:Person {name: 'Gus'}) CALL { MATCH (c:City) RETURN c } MATCH (p)-[:LIVES_IN]->(c) RETURN p.name AS p, c.name AS c"
+    expect:
+      rows:
+        - [Gus, Berlin]
+
+  # ---------------------------------------------------------------------------
+  # GQL: a CALL subquery sees every variable of the outer row. In GQL and
+  # Cypher, CALL (a, b) limits that to a and b and CALL () to none (Cypher's
+  # CALL (*) imports all). A WITH in it is an ordinary WITH.
+  # ---------------------------------------------------------------------------
+
+  - name: gql_call_sees_an_outer_node
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  - name: gql_call_sees_an_outer_edge
+    variants:
+      gql: "MATCH ()-[r:KNOWS]->() CALL { MATCH (x)-[r]->(y) RETURN x.name AS xn } RETURN count(*) AS c"
+    expect:
+      rows:
+        - [5]
+
+  - name: gql_call_nested_sees_the_outermost_row
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn } RETURN bn"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  - name: gql_call_with_where_filters
+    variants:
+      gql: "MATCH (a:Person) CALL { WITH a WHERE a.age > 30 RETURN a.name AS m } RETURN m"
+    expect:
+      rows:
+        - [Vincent]
+        - [Jules]
+
+  - name: gql_call_with_renames
+    variants:
+      gql: "MATCH (a:Person WHERE a.age > 30) CALL { WITH a AS b RETURN b.name AS m } RETURN a.name AS a, m"
+    expect:
+      rows:
+        - [Vincent, Vincent]
+        - [Jules, Jules]
+
+  - name: gql_call_with_after_a_match
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) WITH b RETURN b.name AS bn } RETURN bn"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  - name: call_scope_clause
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  # c is not imported, so the subquery's c is any city.
+  - name: call_scope_clause_limits_what_the_subquery_sees
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}), (c:City {name: 'Paris'}) CALL (a) { MATCH (c:City) RETURN count(c) AS n } RETURN n"
+      cypher: "MATCH (a:Person {name: 'Alix'}), (c:City {name: 'Paris'}) CALL (a) { MATCH (c:City) RETURN count(c) AS n } RETURN n"
+    expect:
+      rows:
+        - [3]
+
+  # Nothing is imported: the subquery's a is any person who knows someone.
+  - name: call_empty_scope_clause
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL () { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN count(*) AS c"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL () { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN count(*) AS c"
+    expect:
+      rows:
+        - [5]
+
+  - name: gql_optional_call_scope_clause
+    variants:
+      gql: "MATCH (a:Person) OPTIONAL CALL (a) { MATCH (a)-[:LIVES_IN]->(c) RETURN c.name AS c } RETURN a.name AS a, c"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, null]
+        - [Jules, null]
+        - [Mia, Paris]
+
+  - name: call_scope_clause_naming_a_missing_variable
+    variants:
+      gql: "MATCH (a:Person) CALL (b) { RETURN 1 AS one } RETURN one"
+      cypher: "MATCH (a:Person) CALL (b) { RETURN 1 AS one } RETURN one"
+    expect:
+      error: "Undefined variable 'b'"
+
+  - name: cypher_call_scope_clause_imports_all
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (*) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS bn } RETURN bn"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  # After a scope clause a WITH is an ordinary WITH: its WHERE filters.
+  - name: cypher_call_scope_clause_then_an_ordinary_with
+    variants:
+      cypher: "MATCH (a:Person) CALL (a) { WITH a WHERE a.age > 30 RETURN a.name AS m } RETURN m"
+    expect:
+      rows:
+        - [Vincent]
+        - [Jules]
+
+  - name: cypher_call_with_an_empty_scope_clause_comes_first
+    variants:
+      cypher: "CALL () { MATCH (c:City) RETURN c } MATCH (p:Person)-[:LIVES_IN]->(c) RETURN p.name AS p, c.name AS c"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Berlin]
+        - [Mia, Paris]
+
+  # ---------------------------------------------------------------------------
+  # RETURN * in a CALL subquery returns the variables the subquery binds
+  # itself; the outer row's variables stay as they are
+  # ---------------------------------------------------------------------------
+
+  - name: return_star_returns_the_variables_of_the_subquery
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN * } RETURN a.name AS a, b.name AS b"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN * } RETURN a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Alix, Jules]
+
+  - name: return_star_with_an_implicit_scope
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) RETURN * } RETURN a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Alix, Jules]
+
+  - name: return_star_with_a_scope_clause
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[r:KNOWS]->(b) RETURN * } RETURN type(r) AS t, b.name AS b"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[r:KNOWS]->(b) RETURN * } RETURN type(r) AS t, b.name AS b"
+    expect:
+      rows:
+        - [KNOWS, Gus]
+        - [KNOWS, Jules]
+
+  # The later MATCH ends at the b the subquery returned, not at any node.
+  - name: a_node_return_star_returns_starts_a_later_match
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN * } MATCH (x:Person)-[:KNOWS]->(b) RETURN b.name AS b, x.name AS x"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN * } MATCH (x:Person)-[:KNOWS]->(b) RETURN b.name AS b, x.name AS x"
+    expect:
+      rows:
+        - [Gus, Alix]
+        - [Jules, Alix]
+
+  - name: return_star_from_a_call_that_comes_first
+    variants:
+      gql: "CALL { MATCH (c:City) RETURN * } RETURN c.name AS c"
+      cypher: "CALL { MATCH (c:City) RETURN * } RETURN c.name AS c"
+    expect:
+      rows:
+        - [Amsterdam]
+        - [Berlin]
+        - [Paris]
+
+  - name: return_star_from_a_nested_call
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { CALL { MATCH (a)-[:KNOWS]->(b) RETURN * } RETURN b.name AS bn } RETURN bn"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+
+  # A subquery that binds nothing new returns no column: each outer row once.
+  - name: return_star_of_nothing_new
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a RETURN * } RETURN a.name AS a"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a RETURN * } RETURN a.name AS a"
+    expect:
+      rows:
+        - [Alix]
+
+  # After a procedure call the outer row's variables are not known to the
+  # translator, so RETURN * cannot leave them out: the subquery names its
+  # columns instead.
+  - name: return_star_after_a_procedure_call
+    variants:
+      cypher: "CALL db.labels() YIELD label CALL { WITH label MATCH (p:Person) RETURN * } RETURN count(*) AS c"
+    expect:
+      error: "RETURN * in this CALL subquery cannot tell which variables it binds: return them by name"
+
+  # GQL only (Cypher takes no ORDER BY in a CALL subquery yet): the RETURN
+  # under an ORDER BY and LIMIT also passes on the node itself.
+  - name: a_returned_node_after_order_by_and_limit
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b ORDER BY b.name DESC LIMIT 1 } MATCH (b)-[:KNOWS]->(y) RETURN b.name AS b, y.name AS y"
+    expect:
+      rows:
+        - [Jules, Mia]
+
+  # The sort key reads a variable the RETURN leaves out (b.age).
+  - name: a_sort_key_the_return_leaves_out
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS n ORDER BY b.age LIMIT 1 } RETURN n"
+    expect:
+      rows:
+        - [Gus]
+
+  # The scope clause names a only: the outer b is not visible in the subquery.
+  - name: call_scope_clause_hides_other_outer_variables
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}), (b:City {name: 'Paris'}) CALL (a) { RETURN b.name AS bn } RETURN bn"
+      cypher: "MATCH (a:Person {name: 'Alix'}), (b:City {name: 'Paris'}) CALL (a) { RETURN b.name AS bn } RETURN bn"
+    expect:
+      error: "Undefined variable 'b'"
+
+  # An OPTIONAL MATCH that starts a scoped subquery keeps each outer row's own
+  # match (or none).
+  - name: an_optional_match_first_in_a_scoped_call
+    variants:
+      gql: "MATCH (a:Person) CALL (a) { OPTIONAL MATCH (a)-[:LIVES_IN]->(c) RETURN c.name AS c } RETURN a.name AS a, c"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, null]
+        - [Jules, null]
+        - [Mia, Paris]
+
+  # ---------------------------------------------------------------------------
+  # Scope rules (Neo4j): a subquery returns new names only, and the variables
+  # its scope clause imports stay visible after a WITH that leaves them out
+  # ---------------------------------------------------------------------------
+
+  - name: returning_an_outer_name_is_rejected
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { RETURN 1 AS a } RETURN a"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { RETURN 1 AS a } RETURN a"
+    expect:
+      error: "already declared outside the CALL subquery"
+
+  - name: returning_an_imported_variable_is_rejected
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { RETURN a } RETURN a.name AS n"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { RETURN a } RETURN a.name AS n"
+    expect:
+      error: "already declared outside the CALL subquery"
+
+  - name: an_imported_variable_stays_visible_after_a_with
+    skip: "a WITH in the subquery still ends the scope of an import: Undefined variable 'a'"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 1 AS x RETURN a.name AS n, x } RETURN n, x"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 1 AS x RETURN a.name AS n, x } RETURN n, x"
+    expect:
+      rows:
+        - [Alix, 1]
+
+  # The count over no match is still one row, with the imported a.
+  - name: an_imported_variable_stays_visible_after_an_aggregating_with
+    skip: "a WITH in the subquery still ends the scope of an import: Undefined variable 'a'"
+    variants:
+      gql: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN a.name AS n, k } RETURN n, k"
+      cypher: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN a.name AS n, k } RETURN n, k"
+    expect:
+      rows:
+        - [Alix, 2]
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Jules, 1]
+        - [Mia, 0]
+
+  # A variable of the subquery's own is out of scope after a WITH that leaves
+  # it out, as anywhere else.
+  - name: a_with_ends_the_scope_of_a_subquery_variable
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN b.name AS n, k } RETURN n, k"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN b.name AS n, k } RETURN n, k"
+    expect:
+      error: "Undefined variable 'b'"
+
+  # Carried through the WITH, the import stays readable.
+  - name: an_imported_variable_carried_through_a_with
+    variants:
+      gql: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH a, count(b) AS k RETURN a.name AS n, k } RETURN n, k"
+      cypher: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH a, count(b) AS k RETURN a.name AS n, k } RETURN n, k"
+    expect:
+      rows:
+        - [Alix, 2]
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Jules, 1]
+
+  - name: a_with_ends_the_scope_outside_a_subquery
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) WITH 1 AS x RETURN a.name AS n"
+      cypher: "MATCH (a:Person {name: 'Alix'}) WITH 1 AS x RETURN a.name AS n"
+    expect:
+      error: "Undefined variable 'a'"

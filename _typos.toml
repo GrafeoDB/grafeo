@@ -10,6 +10,9 @@ extend-exclude = [
     ".mypy_cache/",
     ".pytest_cache/",
     ".ruff_cache/",
+    # LDBC SNB test data, copied verbatim: generated text with truncated words, DBpedia names
+    "tests/spec/datasets/ldbc_snb_mini.setup",
+    "tests/spec/lpg/*/ldbc_snb_interactive.gtest",
 ]
 
 [default.extend-words]

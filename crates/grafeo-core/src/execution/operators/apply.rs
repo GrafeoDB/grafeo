@@ -14,6 +14,7 @@ use grafeo_common::types::{LogicalType, Value};
 
 use super::parameter_scan::ParameterState;
 use super::{DataChunk, Operator, OperatorResult};
+use crate::execution::chunk::ColumnTypes;
 use crate::execution::vector::ValueVector;
 
 /// Apply (lateral join) operator.
@@ -25,6 +26,9 @@ use crate::execution::vector::ValueVector;
 /// When `param_state` is set, outer row values for the specified column indices
 /// are injected into the shared [`ParameterState`] before each inner execution,
 /// allowing the inner plan's [`ParameterScanOperator`](super::ParameterScanOperator) to read them.
+///
+/// A row keeps the column types of the rows it combines (and the injected
+/// values those of their outer columns): a node or edge stays one.
 pub struct ApplyOperator {
     outer: Box<dyn Operator>,
     inner: Box<dyn Operator>,
@@ -58,6 +62,8 @@ enum ApplyState {
         outer_row: usize,
         /// Accumulated output rows (combined outer + inner).
         output: Vec<Vec<Value>>,
+        /// The column types of the inner chunks of these rows.
+        inner_types: ColumnTypes,
     },
     /// All outer input exhausted.
     Done,
@@ -141,14 +147,35 @@ impl ApplyOperator {
         values
     }
 
-    /// Builds a DataChunk from accumulated rows.
-    fn build_chunk(rows: &[Vec<Value>]) -> DataChunk {
+    /// The column types of output rows from `outer_chunk`: its own, then the
+    /// EXISTS flag's or the inner chunks' (see [`ColumnTypes`]).
+    fn output_types(
+        exists_flag: bool,
+        exists_mode: Option<bool>,
+        outer_chunk: &DataChunk,
+        inner_types: &ColumnTypes,
+    ) -> Vec<LogicalType> {
+        let mut types = outer_chunk.column_types();
+        if exists_flag {
+            types.push(LogicalType::Bool);
+        } else if exists_mode.is_none() {
+            types.extend_from_slice(inner_types.types());
+        }
+        types
+    }
+
+    /// Builds a DataChunk from accumulated rows, in `types` (a column past
+    /// them, from inner chunks never seen, is of any type).
+    fn build_chunk(rows: &[Vec<Value>], types: &[LogicalType]) -> DataChunk {
         if rows.is_empty() {
             return DataChunk::empty();
         }
         let num_cols = rows[0].len();
         let mut columns: Vec<ValueVector> = (0..num_cols)
-            .map(|_| ValueVector::with_capacity(LogicalType::Any, rows.len()))
+            .map(|i| {
+                let column_type = types.get(i).cloned().unwrap_or(LogicalType::Any);
+                ValueVector::with_capacity(column_type, rows.len())
+            })
             .collect();
 
         for row in rows {
@@ -172,6 +199,7 @@ impl Operator for ApplyOperator {
                             outer_chunk: chunk,
                             outer_row: 0,
                             output: Vec::new(),
+                            inner_types: ColumnTypes::default(),
                         };
                     }
                     None => {
@@ -183,20 +211,31 @@ impl Operator for ApplyOperator {
                     outer_chunk,
                     outer_row,
                     output,
+                    inner_types,
                 } => {
                     let selected: Vec<usize> = outer_chunk.selected_indices().collect();
                     while *outer_row < selected.len() {
                         let row = selected[*outer_row];
                         let outer_values = Self::extract_row(outer_chunk, row);
 
-                        // Inject outer values into the inner plan's parameter state
+                        // Inject outer values into the inner plan's parameter state,
+                        // with the types of the columns they come from
                         if let Some(ref param_state) = self.param_state {
                             let injected: Vec<Value> = self
                                 .param_col_indices
                                 .iter()
                                 .map(|&idx| outer_values.get(idx).cloned().unwrap_or(Value::Null))
                                 .collect();
-                            param_state.set_values(injected);
+                            let types: Vec<LogicalType> = self
+                                .param_col_indices
+                                .iter()
+                                .map(|&idx| {
+                                    outer_chunk
+                                        .column(idx)
+                                        .map_or(LogicalType::Any, |col| col.data_type().clone())
+                                })
+                                .collect();
+                            param_state.set_typed_values(injected, types);
                         }
 
                         // Reset and run inner plan for this outer row
@@ -218,6 +257,7 @@ impl Operator for ApplyOperator {
                         } else {
                             let pre_len = output.len();
                             while let Some(inner_chunk) = self.inner.next()? {
+                                inner_types.add(&inner_chunk);
                                 for inner_row in inner_chunk.selected_indices() {
                                     let inner_values = Self::extract_row(&inner_chunk, inner_row);
                                     let mut combined = outer_values.clone();
@@ -241,15 +281,28 @@ impl Operator for ApplyOperator {
 
                         // Flush when we have enough rows
                         if output.len() >= 1024 {
-                            let chunk = Self::build_chunk(output);
+                            let types = Self::output_types(
+                                self.exists_flag,
+                                self.exists_mode,
+                                outer_chunk,
+                                inner_types,
+                            );
+                            let chunk = Self::build_chunk(output, &types);
                             output.clear();
+                            *inner_types = ColumnTypes::default();
                             return Ok(Some(chunk));
                         }
                     }
 
                     // Finished this outer chunk; flush any remaining output
                     if !output.is_empty() {
-                        let chunk = Self::build_chunk(output);
+                        let types = Self::output_types(
+                            self.exists_flag,
+                            self.exists_mode,
+                            outer_chunk,
+                            inner_types,
+                        );
+                        let chunk = Self::build_chunk(output, &types);
                         output.clear();
                         self.state = ApplyState::Init;
                         return Ok(Some(chunk));
@@ -275,5 +328,92 @@ impl Operator for ApplyOperator {
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use grafeo_common::types::NodeId;
+
+    use super::super::ParameterScanOperator;
+    use super::*;
+    use crate::execution::chunk::DataChunkBuilder;
+
+    struct MockOperator {
+        chunks: Vec<DataChunk>,
+        position: usize,
+    }
+
+    impl Operator for MockOperator {
+        fn next(&mut self) -> OperatorResult {
+            let chunk = self.chunks.get(self.position).cloned();
+            self.position += 1;
+            Ok(chunk)
+        }
+
+        fn reset(&mut self) {
+            self.position = 0;
+        }
+
+        fn name(&self) -> &'static str {
+            "Mock"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// Outer rows with the nodes 101 and 102.
+    fn outer_nodes() -> Box<dyn Operator> {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node]);
+        for id in [101, 102] {
+            builder.column_mut(0).unwrap().push_node_id(NodeId::new(id));
+            builder.advance_row();
+        }
+        Box::new(MockOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        })
+    }
+
+    /// The inner plan reads the injected outer node as a node, and the joined
+    /// rows keep the column types of both sides.
+    #[test]
+    fn apply_keeps_the_column_types_of_outer_and_inner_rows() {
+        let state = Arc::new(ParameterState::new(vec!["a".to_string()]));
+        let inner = Box::new(ParameterScanOperator::new(Arc::clone(&state)));
+        let mut apply = ApplyOperator::new_correlated(outer_nodes(), inner, state, vec![0]);
+
+        let chunk = apply.next().unwrap().unwrap();
+        assert_eq!(chunk.column_types(), [LogicalType::Node, LogicalType::Node]);
+        let rows: Vec<(u64, u64)> = chunk
+            .selected_indices()
+            .map(|row| {
+                (
+                    chunk.column(0).unwrap().get_node_id(row).unwrap().as_u64(),
+                    chunk.column(1).unwrap().get_node_id(row).unwrap().as_u64(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, [(101, 101), (102, 102)]);
+        assert!(chunk.column(1).unwrap().get_edge_id(0).is_none());
+        assert!(apply.next().unwrap().is_none());
+    }
+
+    /// The EXISTS flag is a boolean column after the outer row's own types.
+    #[test]
+    fn an_exists_flag_follows_the_outer_types() {
+        let state = Arc::new(ParameterState::new(vec!["a".to_string()]));
+        let inner = Box::new(ParameterScanOperator::new(Arc::clone(&state)));
+        let mut apply =
+            ApplyOperator::new_correlated(outer_nodes(), inner, state, vec![0]).with_exists_flag();
+
+        let chunk = apply.next().unwrap().unwrap();
+        assert_eq!(chunk.column_types(), [LogicalType::Node, LogicalType::Bool]);
+        assert_eq!(
+            chunk.column(1).unwrap().get_value(0),
+            Some(Value::Bool(true))
+        );
     }
 }

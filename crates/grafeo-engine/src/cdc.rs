@@ -189,6 +189,24 @@ impl EntityId {
     }
 }
 
+/// A change event buffered until its transaction commits, with the graph it
+/// changed (`None` for the default graph). It reads as its event.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingEvent {
+    /// The graph the change is in, `None` for the default graph.
+    pub(crate) graph: Option<String>,
+    /// The change.
+    pub(crate) event: ChangeEvent,
+}
+
+impl std::ops::Deref for PendingEvent {
+    type Target = ChangeEvent;
+
+    fn deref(&self) -> &ChangeEvent {
+        &self.event
+    }
+}
+
 /// A recorded change event with before/after property snapshots, or an RDF
 /// triple insert/delete.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -744,13 +762,15 @@ fn triple_hash(subject: &str, predicate: &str, object: &str, graph: Option<&str>
 /// properties and labels one by one; without this, a consumer saw a create
 /// event without properties followed by one update per property.
 /// Changes to entities that existed before the transaction stay as they are.
-pub(crate) fn fold_into_creates(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
+/// Entity ids repeat across graphs, so the folding stays within one graph.
+pub(crate) fn fold_into_creates(events: Vec<PendingEvent>) -> Vec<ChangeEvent> {
     let mut folded: Vec<ChangeEvent> = Vec::with_capacity(events.len());
-    let mut created: HashMap<EntityId, usize> = HashMap::new();
-    for event in events {
-        let Some(&at) = created.get(&event.entity_id) else {
+    let mut created: HashMap<(Option<String>, EntityId), usize> = HashMap::new();
+    for PendingEvent { graph, event } in events {
+        let key = (graph, event.entity_id);
+        let Some(&at) = created.get(&key) else {
             if event.kind == ChangeKind::Create {
-                created.insert(event.entity_id, folded.len());
+                created.insert(key, folded.len());
             }
             folded.push(event);
             continue;

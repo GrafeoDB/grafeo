@@ -596,6 +596,7 @@ impl GremlinTranslator {
                 let target_var = self.var_gen.next();
 
                 plan = LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: var,
                     to_variable: target_var,
                     edge_variable: Some(edge_var.clone()),
@@ -650,6 +651,7 @@ impl GremlinTranslator {
                 let target_var = self.var_gen.next();
                 let edge_types = labels.clone();
                 let plan = LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: current_var.to_string(),
                     to_variable: target_var.clone(),
                     edge_variable: None,
@@ -667,6 +669,7 @@ impl GremlinTranslator {
                 let target_var = self.var_gen.next();
                 let edge_types = labels.clone();
                 let plan = LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: current_var.to_string(),
                     to_variable: target_var.clone(),
                     edge_variable: None,
@@ -684,6 +687,7 @@ impl GremlinTranslator {
                 let target_var = self.var_gen.next();
                 let edge_types = labels.clone();
                 let plan = LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: current_var.to_string(),
                     to_variable: target_var.clone(),
                     edge_variable: None,
@@ -702,6 +706,7 @@ impl GremlinTranslator {
                 let target_var = self.var_gen.next();
                 let edge_types = labels.clone();
                 let plan = LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: current_var.to_string(),
                     to_variable: target_var,
                     edge_variable: Some(edge_var.clone()),
@@ -720,6 +725,7 @@ impl GremlinTranslator {
                 let target_var = self.var_gen.next();
                 let edge_types = labels.clone();
                 let plan = LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: current_var.to_string(),
                     to_variable: target_var,
                     edge_variable: Some(edge_var.clone()),
@@ -738,6 +744,7 @@ impl GremlinTranslator {
                 let target_var = self.var_gen.next();
                 let edge_types = labels.clone();
                 let plan = LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: current_var.to_string(),
                     to_variable: target_var,
                     edge_variable: Some(edge_var.clone()),
@@ -1853,6 +1860,7 @@ impl GremlinTranslator {
 
                 let target_var = self.var_gen.next();
                 let plan = LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: current_var.to_string(),
                     to_variable: target_var.clone(),
                     edge_variable: None,
@@ -2273,6 +2281,7 @@ impl GremlinTranslator {
                     let target_var = self.var_gen.next();
                     // Create an existence subquery via Expand + count > 0
                     let expand = LogicalOperator::Expand(ExpandOp {
+                        quantified: false,
                         from_variable: current_var.to_string(),
                         to_variable: target_var,
                         edge_variable: None,

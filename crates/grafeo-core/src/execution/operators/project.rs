@@ -2,7 +2,7 @@
 
 use super::filter::{ExpressionPredicate, FilterExpression, SessionContext};
 use super::{Operator, OperatorError, OperatorResult};
-use crate::execution::DataChunk;
+use crate::execution::{DataChunk, ValueVector};
 use crate::graph::GraphStoreSearch;
 use crate::graph::lpg::{Edge, Node};
 use grafeo_common::types::{
@@ -203,6 +203,17 @@ impl Operator for ProjectOperator {
                         .column_mut(i)
                         .expect("column exists: index matches projection schema");
 
+                    // A copy the planner declared `Any` keeps the input's
+                    // type: node and edge IDs stay nodes and edges (in an
+                    // `Any` column an ID reads the properties of whichever
+                    // entity has it), and every value is copied as it is.
+                    if self.output_types[i] == LogicalType::Any {
+                        *output_col = ValueVector::with_capacity(
+                            input_col.data_type().clone(),
+                            input.row_count(),
+                        );
+                    }
+
                     // Copy selected rows
                     for row in input.selected_indices() {
                         if let Some(value) = input_col.get_value(row) {
@@ -342,12 +353,20 @@ impl Operator for ProjectOperator {
                         evaluator = evaluator.with_transaction_context(ep, tx_id);
                     }
 
+                    // A node or edge column holds ids: it takes a node or edge
+                    // map (the items of `nodes(p)`) by its id, and anything
+                    // that names no entity as null, never as entity 0.
+                    let entities = matches!(
+                        output_col.data_type(),
+                        LogicalType::Node | LogicalType::Edge
+                    );
                     for row in input.selected_indices() {
                         let value = evaluator.eval_at(&input, row).unwrap_or(Value::Null);
+                        let value = if entities { entity_id(value) } else { value };
                         output_col.push_value(value);
                     }
                 }
-                ProjectExpr::NodeResolve { column } => {
+                ProjectExpr::NodeResolve { column } | ProjectExpr::EdgeResolve { column } => {
                     let input_col = input
                         .column(*column)
                         .ok_or_else(|| OperatorError::ColumnNotFound(format!("Column {column}")))?;
@@ -357,54 +376,43 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution("Store required for node resolution".to_string())
+                        OperatorError::Execution("Store required for entity resolution".to_string())
                     })?;
 
+                    // The planner says by name whether the column holds nodes
+                    // or edges; a column typed by its rows says it per chunk,
+                    // which wins: the branches of a set operation may bind one
+                    // name to nodes in one branch and to edges in another.
+                    let edges = match input_col.data_type() {
+                        LogicalType::Edge => true,
+                        LogicalType::Node => false,
+                        _ => matches!(proj, ProjectExpr::EdgeResolve { .. }),
+                    };
                     let epoch = self.viewing_epoch;
                     let tx_id = self.transaction_id;
                     for row in input.selected_indices() {
-                        let value = if let Some(node_id) = input_col.get_node_id(row) {
-                            let node = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                store.get_node_versioned(node_id, ep, tx)
-                            } else if let Some(ep) = epoch {
-                                store.get_node_at_epoch(node_id, ep)
-                            } else {
-                                store.get_node(node_id)
-                            };
-                            node.map_or(Value::Null, |n| node_to_map(&n))
+                        let value = if edges {
+                            input_col.get_edge_id(row).map_or(Value::Null, |edge_id| {
+                                let edge = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
+                                    store.get_edge_versioned(edge_id, ep, tx)
+                                } else if let Some(ep) = epoch {
+                                    store.get_edge_at_epoch(edge_id, ep)
+                                } else {
+                                    store.get_edge(edge_id)
+                                };
+                                edge.map_or(Value::Null, |e| edge_to_map(&e))
+                            })
                         } else {
-                            Value::Null
-                        };
-                        output_col.push_value(value);
-                    }
-                }
-                ProjectExpr::EdgeResolve { column } => {
-                    let input_col = input
-                        .column(*column)
-                        .ok_or_else(|| OperatorError::ColumnNotFound(format!("Column {column}")))?;
-
-                    let output_col = output
-                        .column_mut(i)
-                        .expect("column exists: index matches projection schema");
-
-                    let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution("Store required for edge resolution".to_string())
-                    })?;
-
-                    let epoch = self.viewing_epoch;
-                    let tx_id = self.transaction_id;
-                    for row in input.selected_indices() {
-                        let value = if let Some(edge_id) = input_col.get_edge_id(row) {
-                            let edge = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                store.get_edge_versioned(edge_id, ep, tx)
-                            } else if let Some(ep) = epoch {
-                                store.get_edge_at_epoch(edge_id, ep)
-                            } else {
-                                store.get_edge(edge_id)
-                            };
-                            edge.map_or(Value::Null, |e| edge_to_map(&e))
-                        } else {
-                            Value::Null
+                            input_col.get_node_id(row).map_or(Value::Null, |node_id| {
+                                let node = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
+                                    store.get_node_versioned(node_id, ep, tx)
+                                } else if let Some(ep) = epoch {
+                                    store.get_node_at_epoch(node_id, ep)
+                                } else {
+                                    store.get_node(node_id)
+                                };
+                                node.map_or(Value::Null, |n| node_to_map(&n))
+                            })
                         };
                         output_col.push_value(value);
                     }
@@ -587,6 +595,19 @@ fn edge_to_map(edge: &Edge) -> Value {
     Value::Map(Arc::new(map))
 }
 
+/// The id a value gives a node or edge column: an id, the `_id` of an entity
+/// map, or null.
+fn entity_id(value: Value) -> Value {
+    match value {
+        Value::Int64(_) | Value::Null => value,
+        Value::Map(map) => match map.get(&PropertyKey::new("_id")) {
+            Some(id @ Value::Int64(_)) => id.clone(),
+            _ => Value::Null,
+        },
+        _ => Value::Null,
+    }
+}
+
 #[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
@@ -661,6 +682,49 @@ mod tests {
         // Check values are reordered
         assert_eq!(result.column(0).unwrap().get_int64(0), Some(100));
         assert_eq!(result.column(1).unwrap().get_int64(0), Some(1));
+    }
+
+    /// A copy declared `Any` keeps the input column's type, so node IDs stay
+    /// node IDs (in an `Any` column an ID reads whichever entity has it); a
+    /// declared type still applies.
+    #[test]
+    fn a_copy_declared_any_keeps_the_input_type() {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node, LogicalType::Int64]);
+        for id in 1..=3_u64 {
+            builder
+                .column_mut(0)
+                .unwrap()
+                .push_node_id(grafeo_common::types::NodeId::new(id));
+            builder
+                .column_mut(1)
+                .unwrap()
+                .push_int64(i64::try_from(id).unwrap() * 10);
+            builder.advance_row();
+        }
+        let mock_scan = MockScanOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        let mut project = ProjectOperator::new(
+            Box::new(mock_scan),
+            vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(1),
+            ],
+            vec![LogicalType::Any, LogicalType::Any, LogicalType::Float64],
+        );
+
+        let result = project.next().unwrap().unwrap();
+        let ids = result.column(0).unwrap();
+        assert_eq!(ids.data_type(), &LogicalType::Node);
+        assert_eq!(
+            ids.get_node_id(2),
+            Some(grafeo_common::types::NodeId::new(3))
+        );
+        assert_eq!(result.column(1).unwrap().data_type(), &LogicalType::Int64);
+        assert_eq!(result.column(1).unwrap().get_int64(0), Some(10));
+        assert_eq!(result.column(2).unwrap().data_type(), &LogicalType::Float64);
     }
 
     #[test]
@@ -797,6 +861,49 @@ mod tests {
         let project =
             ProjectOperator::select_columns(Box::new(mock_scan), vec![0], vec![LogicalType::Int64]);
         assert_eq!(project.name(), "Project");
+    }
+
+    /// A node or edge column takes an entity map by its `_id`; a value that
+    /// names no entity is null there, never entity 0.
+    #[test]
+    fn test_project_entity_values_into_entity_columns() {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+        builder.column_mut(0).unwrap().push_int64(1);
+        builder.advance_row();
+        let mock_scan = MockScanOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        let map = |entries: &[(&str, Value)]| {
+            Value::Map(Arc::new(
+                entries
+                    .iter()
+                    .map(|(key, value)| (PropertyKey::new(*key), value.clone()))
+                    .collect(),
+            ))
+        };
+        let expression = |value: Value| ProjectExpr::Expression {
+            expr: FilterExpression::Literal(value),
+            variable_columns: HashMap::new(),
+        };
+        let mut project = ProjectOperator::with_store(
+            Box::new(mock_scan),
+            vec![
+                expression(map(&[("_id", Value::Int64(7))])),
+                expression(map(&[("name", Value::from("Alix"))])),
+                expression(Value::from("Alix")),
+            ],
+            vec![LogicalType::Node, LogicalType::Node, LogicalType::Edge],
+            Arc::new(LpgStore::new().unwrap()),
+        );
+
+        let result = project.next().unwrap().unwrap();
+        assert_eq!(
+            result.column(0).unwrap().get_node_id(0),
+            Some(NodeId::new(7))
+        );
+        assert_eq!(result.column(1).unwrap().get_node_id(0), None);
+        assert_eq!(result.column(2).unwrap().get_edge_id(0), None);
     }
 
     #[test]

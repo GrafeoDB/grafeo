@@ -43,7 +43,9 @@
 //!    per outer row; the join form piggy-backs on the regular hash-join
 //!    infrastructure. The fast path in `expression::convert_expression`
 //!    keeps trivial single-hop EXISTS as inline predicates so small
-//!    queries stay scan-local.
+//!    queries stay scan-local; in WHERE only when the pattern starts from a
+//!    node of the row and shares no other variable with it, because the
+//!    join form matches every shared variable.
 //!
 //! 3. **EXISTS inside OR** (`filter::extract_exists_from_or`):
 //!    semi-joins filter rows and therefore compose incorrectly with the
@@ -101,6 +103,9 @@ mod mutation;
 mod project;
 mod scan;
 pub(crate) mod seek;
+mod subquery;
+
+pub(crate) use project::collect_vars;
 
 #[cfg(feature = "algos")]
 use crate::query::plan::CallProcedureOp;
@@ -124,17 +129,17 @@ use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::AdaptiveContext;
 use grafeo_core::execution::operators::{
     AddLabelOperator, AggregateExpr as PhysicalAggregateExpr, ApplyOperator, ConstraintValidator,
-    CreateEdgeOperator, CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator,
-    DistinctOperator, EmptyOperator, EntityKind, ExecutionPathMode, ExpandOperator, ExpandStep,
-    ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
-    FilterOperator, HashAggregateOperator, HashJoinOperator, HorizontalAggregateOperator,
+    CreateEdgeOperator, CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator, EmptyOperator,
+    EntityKind, EntityValue, ExecutionPathMode, ExpandOperator, ExpandStep, ExpressionPredicate,
+    FactorizedAggregate, FactorizedAggregateOperator, FilterExpression, FilterOperator,
+    HashAggregateOperator, HashJoinOperator, HorizontalAggregateOperator,
     JoinType as PhysicalJoinType, LazyFactorizedChainOperator, LeapfrogJoinOperator,
     LoadDataOperator, MapCollectOperator, MergeConfig, MergeOperator, MergeRelationshipConfig,
-    MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator, NullOrder, Operator,
+    MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator, Operator,
     ParameterScanOperator, ProjectExpr, ProjectOperator, PropertySource, RangeScanOperator,
     RemoveLabelOperator, ScanOperator, SetPropertyOperator, ShortestPathOperator,
     SimpleAggregateOperator, SortDirection, SortKey as PhysicalSortKey, SortOperator,
-    UnionOperator, UnwindOperator, VariableLengthExpandOperator,
+    UnwindOperator, VariableLengthExpandOperator,
 };
 use grafeo_core::graph::{Direction, GraphStoreMut, GraphStoreSearch};
 use std::collections::HashMap;
@@ -145,8 +150,8 @@ use crate::query::planner::common::{
     expression_to_string, output_column_name, resolved_column_name,
 };
 use crate::query::planner::{
-    PhysicalPlan, convert_aggregate_function, convert_binary_op, convert_filter_expression,
-    convert_unary_op, value_to_logical_type,
+    PhysicalPlan, convert_aggregate_function, convert_binary_op, convert_unary_op,
+    value_to_logical_type,
 };
 use crate::transaction::TransactionManager;
 
@@ -156,6 +161,35 @@ struct RangeBounds<'a> {
     max: Option<&'a Value>,
     min_inclusive: bool,
     max_inclusive: bool,
+}
+
+/// How the planned query's rows reach the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Delivery {
+    /// As one result, read in full before it is returned.
+    Collected,
+    /// As a stream, chunk by chunk, with bounded memory.
+    Streamed,
+}
+
+/// What the planner knows about named columns: which hold scalar values or
+/// records, edge IDs, lists of nodes or edges, or group lists.
+#[derive(Clone, Default)]
+struct ColumnKinds {
+    scalar: std::collections::HashSet<String>,
+    edge: std::collections::HashSet<String>,
+    entity_list: std::collections::HashMap<String, grafeo_core::execution::operators::EntityValue>,
+    group_list: std::collections::HashSet<String>,
+}
+
+impl ColumnKinds {
+    /// Adds what `other` knows.
+    fn add(&mut self, other: Self) {
+        self.scalar.extend(other.scalar);
+        self.edge.extend(other.edge);
+        self.entity_list.extend(other.entity_list);
+        self.group_list.extend(other.group_list);
+    }
 }
 
 /// Converts a logical plan to a physical operator tree for LPG stores.
@@ -172,10 +206,15 @@ pub struct Planner {
     pub(super) viewing_epoch: EpochId,
     /// Counter for generating unique anonymous edge column names.
     pub(super) anon_edge_counter: std::cell::Cell<u32>,
+    /// Counter for the column names of subqueries planned per row.
+    pub(super) subquery_counter: std::cell::Cell<u32>,
     /// Whether to use factorized execution for multi-hop queries.
     pub(super) factorized_execution: bool,
     /// Whether a plan without `ORDER BY` returns its rows in random order.
-    pub(super) shuffle_unordered: bool,
+    shuffle_unordered: bool,
+    /// Whether the rows are collected or streamed (a stream is shuffled per
+    /// chunk).
+    delivery: Delivery,
     /// Variables that hold scalar values (from UNWIND/FOR), not node/edge IDs.
     /// Used by plan_return to assign `LogicalType::Any` instead of `Node`.
     pub(super) scalar_columns: std::cell::RefCell<std::collections::HashSet<String>>,
@@ -246,8 +285,10 @@ impl Planner {
             transaction_id: None,
             viewing_epoch: epoch,
             anon_edge_counter: std::cell::Cell::new(0),
+            subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             shuffle_unordered: false,
+            delivery: Delivery::Collected,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -312,8 +353,10 @@ impl Planner {
             transaction_id,
             viewing_epoch,
             anon_edge_counter: std::cell::Cell::new(0),
+            subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             shuffle_unordered: false,
+            delivery: Delivery::Collected,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -372,6 +415,18 @@ impl Planner {
         Arc::clone(&self.write_counter)
     }
 
+    /// Counts the writes into `counter` instead of a counter of its own, so
+    /// the writes of a stored procedure's body count for the statement that
+    /// calls it.
+    #[must_use]
+    pub fn with_write_counter(
+        mut self,
+        counter: Arc<grafeo_core::execution::operators::WriteCounter>,
+    ) -> Self {
+        self.write_counter = counter;
+        self
+    }
+
     /// Returns the viewing epoch for this planner.
     #[must_use]
     pub fn viewing_epoch(&self) -> EpochId {
@@ -405,22 +460,30 @@ impl Planner {
         self
     }
 
+    /// Plans for a stream: with `shuffle_unordered`, the rows of each chunk
+    /// are shuffled on their own instead of the whole result, which would
+    /// have to be read before the first row.
+    #[must_use]
+    pub fn for_streaming(mut self) -> Self {
+        self.delivery = Delivery::Streamed;
+        self
+    }
+
     /// The root operator, behind a shuffle when the option is on and the
     /// plan does not order its rows.
     fn shuffled_root(
         &self,
         logical_plan: &LogicalPlan,
         operator: Box<dyn Operator>,
-        columns: &[String],
     ) -> Box<dyn Operator> {
-        if self.shuffle_unordered && !super::common::orders_rows(&logical_plan.root) {
-            let schema = self.derive_schema_from_columns(columns);
-            Box::new(grafeo_core::execution::operators::ShuffleOperator::new(
-                operator, schema,
-            ))
-        } else {
-            operator
+        use grafeo_core::execution::operators::ShuffleOperator;
+        if !self.shuffle_unordered || super::common::orders_rows(&logical_plan.root) {
+            return operator;
         }
+        Box::new(match self.delivery {
+            Delivery::Streamed => ShuffleOperator::per_chunk(operator),
+            Delivery::Collected => ShuffleOperator::new(operator),
+        })
     }
 
     /// Sets the constraint validator for schema enforcement during mutations.
@@ -456,6 +519,91 @@ impl Planner {
         self
     }
 
+    /// What the planner knows about named columns.
+    fn column_kinds(&self) -> ColumnKinds {
+        ColumnKinds {
+            scalar: self.scalar_columns.borrow().clone(),
+            edge: self.edge_columns.borrow().clone(),
+            entity_list: self.entity_list_columns.borrow().clone(),
+            group_list: self.group_list_variables.borrow().clone(),
+        }
+    }
+
+    /// What the named column holds when it holds nodes or edges, classified
+    /// the way RETURN classifies it: a node or edge list as registered, nothing
+    /// for a scalar, a path detail or a group list, an edge for an edge column
+    /// and otherwise a node.
+    pub(super) fn column_entity(&self, name: &str) -> Option<EntityValue> {
+        if let Some(kind) = self.entity_list_columns.borrow().get(name).copied() {
+            return Some(kind);
+        }
+        if name.starts_with("_path_")
+            || self.scalar_columns.borrow().contains(name)
+            || self.group_list_variables.borrow().contains(name)
+        {
+            return None;
+        }
+        Some(if self.edge_columns.borrow().contains(name) {
+            EntityValue::Edge
+        } else {
+            EntityValue::Node
+        })
+    }
+
+    /// Records that the named column holds `kind`: a node (the default), an
+    /// edge, a node or edge list, or a scalar value (`None`).
+    pub(super) fn set_column_entity(&self, name: &str, kind: Option<EntityValue>) {
+        let name = name.to_string();
+        self.scalar_columns.borrow_mut().remove(&name);
+        self.edge_columns.borrow_mut().remove(&name);
+        self.entity_list_columns.borrow_mut().remove(&name);
+        match kind {
+            Some(EntityValue::Node) => {}
+            Some(EntityValue::Edge) => {
+                self.edge_columns.borrow_mut().insert(name);
+            }
+            Some(list @ (EntityValue::Nodes | EntityValue::Edges)) => {
+                self.entity_list_columns.borrow_mut().insert(name, list);
+            }
+            _ => {
+                self.scalar_columns.borrow_mut().insert(name);
+            }
+        }
+    }
+
+    /// Replaces what the planner knows about named columns.
+    fn set_column_kinds(&self, kinds: ColumnKinds) {
+        *self.scalar_columns.borrow_mut() = kinds.scalar;
+        *self.edge_columns.borrow_mut() = kinds.edge;
+        *self.entity_list_columns.borrow_mut() = kinds.entity_list;
+        *self.group_list_variables.borrow_mut() = kinds.group_list;
+    }
+
+    /// Plans the branches of a set operation (UNION, EXCEPT, INTERSECT,
+    /// OTHERWISE), each from what the planner knew before the first: a branch
+    /// is a query of its own, so what one binds or returns under a name says
+    /// nothing about that name in the next (an edge `x` in one branch and a
+    /// node `x` in the other, or a returned record and a bound ID). After the
+    /// last branch the planner knows what any branch added, as the operators
+    /// above the set operation read the columns of every branch.
+    pub(super) fn plan_branches<'a>(
+        &self,
+        branches: impl IntoIterator<Item = &'a LogicalOperator>,
+    ) -> Result<Vec<(Box<dyn Operator>, Vec<String>)>> {
+        let before = self.column_kinds();
+        let mut after = ColumnKinds::default();
+        let mut planned = Vec::new();
+        for (index, branch) in branches.into_iter().enumerate() {
+            if index > 0 {
+                self.set_column_kinds(before.clone());
+            }
+            planned.push(self.plan_operator(branch)?);
+            after.add(self.column_kinds());
+        }
+        self.set_column_kinds(after);
+        Ok(planned)
+    }
+
     /// Generates an edge column name from an expand's edge variable (or an
     /// anonymous fallback) and registers it in `edge_columns` so downstream
     /// RETURN emits `EdgeResolve` instead of `NodeResolve`.
@@ -477,7 +625,8 @@ impl Planner {
     fn count_expand_chain(op: &LogicalOperator) -> (usize, &LogicalOperator) {
         match op {
             LogicalOperator::Expand(expand) => {
-                let is_single_hop = expand.min_hops == 1 && expand.max_hops == Some(1);
+                let is_single_hop =
+                    !expand.quantified && expand.min_hops == 1 && expand.max_hops == Some(1);
 
                 if is_single_hop {
                     let (inner_count, base) = Self::count_expand_chain(&expand.input);
@@ -498,7 +647,8 @@ impl Planner {
         let mut current = op;
 
         while let LogicalOperator::Expand(expand) = current {
-            let is_single_hop = expand.min_hops == 1 && expand.max_hops == Some(1);
+            let is_single_hop =
+                !expand.quantified && expand.min_hops == 1 && expand.max_hops == Some(1);
             if !is_single_hop {
                 break;
             }
@@ -519,7 +669,7 @@ impl Planner {
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
-        let operator = self.shuffled_root(logical_plan, operator, &columns);
+        let operator = self.shuffled_root(logical_plan, operator);
         Ok(PhysicalPlan {
             operator,
             columns,
@@ -568,7 +718,7 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan_adaptive(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
-        let operator = self.shuffled_root(logical_plan, operator, &columns);
+        let operator = self.shuffled_root(logical_plan, operator);
 
         let mut adaptive_context = AdaptiveContext::new();
         self.collect_cardinality_estimates(&logical_plan.root, &mut adaptive_context, 0);
@@ -878,6 +1028,8 @@ impl Planner {
                     load.field_terminator,
                     load.variable.clone(),
                 ));
+                // A loaded row is a value (a map or a list), not a node.
+                self.set_column_entity(&load.variable, None);
                 Ok((operator, vec![load.variable.clone()]))
             }
             LogicalOperator::Empty => Err(Error::Internal("Empty plan".to_string())),
@@ -1565,6 +1717,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -1611,6 +1764,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: Some("r".to_string()),
@@ -1784,18 +1938,20 @@ mod tests {
         let physical = planner.plan(&logical).unwrap();
         let root = physical.into_operator();
 
-        // Walk down: Limit → Sort → RangeScan, asserting at each step.
+        // Walk down: Limit → Sort → Project → RangeScan, asserting at each step.
         let limit_op = root
             .into_any()
             .downcast::<LimitOperator>()
             .expect("top operator is LimitOperator");
         let (after_limit, _cap) = limit_op.into_parts();
 
+        // The Sort also drops the sort-key column (`n_name`) it needed.
         let sort_op = after_limit
             .into_any()
             .downcast::<SortOperator>()
             .expect("operator under Limit must be Sort (Sort blocks pushdown)");
-        let (after_sort, _keys) = sort_op.into_parts();
+        assert_eq!(sort_op.output_width(), Some(1));
+        let (after_sort, _keys, _width) = sort_op.into_parts();
 
         // Sort wraps its input in a Project that materializes the sort
         // keys. The fold from Filter+NodeScan to RangeScan happens
@@ -2555,6 +2711,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -2797,6 +2954,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -2838,6 +2996,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -2881,6 +3040,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -2923,6 +3083,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -2989,6 +3150,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "b".to_string(),
                 to_variable: "c".to_string(),
                 edge_variable: None,
@@ -2997,6 +3159,7 @@ mod tests {
                 min_hops: 1,
                 max_hops: Some(1),
                 input: Box::new(LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: "a".to_string(),
                     to_variable: "b".to_string(),
                     edge_variable: None,
@@ -3108,7 +3271,7 @@ mod tests {
         MergeOp, MergeRelationshipOp, MultiWayJoinOp, OtherwiseOp, ParameterScanOp, RemoveLabelOp,
         SetPropertyOp, ShortestPathOp, TripleComponent, TripleScanOp, UnionOp, UnwindOp,
     };
-    use grafeo_core::execution::operators::{Operator, SessionContext};
+    use grafeo_core::execution::operators::SessionContext;
 
     fn full_store() -> Arc<LpgStore> {
         // Richer store so expand and shortest path tests have real data.
@@ -3523,6 +3686,7 @@ mod tests {
 
         // Register the edge column first via an outgoing expand, then DELETE r.
         let expand_op = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: Some("r".to_string()),
@@ -3693,6 +3857,7 @@ mod tests {
         let store = full_store();
         let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>);
         let ab = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,
@@ -3705,6 +3870,7 @@ mod tests {
             path_mode: PathMode::Walk,
         });
         let bc = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "b".to_string(),
             to_variable: "c".to_string(),
             edge_variable: None,
@@ -3717,6 +3883,7 @@ mod tests {
             path_mode: PathMode::Walk,
         });
         let ca = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "c".to_string(),
             to_variable: "a".to_string(),
             edge_variable: None,
@@ -3743,6 +3910,7 @@ mod tests {
         let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>);
 
         let path = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: Some("r".to_string()),
@@ -3815,6 +3983,7 @@ mod tests {
     fn test_count_expand_chain_variable_length_breaks_chain() {
         // A variable-length expand (not single-hop) should NOT count in the chain.
         let var_expand = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,
@@ -3836,6 +4005,7 @@ mod tests {
     #[test]
     fn test_static_result_operator_emits_rows_and_resets() {
         use grafeo_common::types::Value;
+        use grafeo_core::execution::operators::Operator;
         let rows = vec![
             vec![Value::Int64(1), Value::String("Vincent".into())],
             vec![Value::Int64(2), Value::String("Jules".into())],

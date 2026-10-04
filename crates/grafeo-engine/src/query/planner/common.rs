@@ -12,8 +12,8 @@ use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
     DistinctOperator, ExceptOperator, HashJoinOperator, IntersectOperator,
-    JoinType as PhysicalJoinType, LimitOperator, Operator, OtherwiseOperator, ProjectExpr,
-    ProjectOperator, SkipOperator, UnionOperator,
+    JoinType as PhysicalJoinType, LimitOperator, NullOrder, Operator, OtherwiseOperator,
+    ProjectExpr, ProjectOperator, SkipOperator, UnionOperator,
 };
 
 /// Builds a LIMIT physical operator.
@@ -21,9 +21,8 @@ pub(crate) fn build_limit(
     input: Box<dyn Operator>,
     columns: Vec<String>,
     count: usize,
-    schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator = Box::new(LimitOperator::new(input, count, schema));
+    let operator = Box::new(LimitOperator::new(input, count));
     (operator, columns)
 }
 
@@ -32,9 +31,8 @@ pub(crate) fn build_skip(
     input: Box<dyn Operator>,
     columns: Vec<String>,
     count: usize,
-    schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator = Box::new(SkipOperator::new(input, count, schema));
+    let operator = Box::new(SkipOperator::new(input, count));
     (operator, columns)
 }
 
@@ -45,7 +43,6 @@ pub(crate) fn build_distinct(
     input: Box<dyn Operator>,
     columns: Vec<String>,
     distinct_columns: Option<&[String]>,
-    schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
     let operator: Box<dyn Operator> = if let Some(dist_cols) = distinct_columns {
         let col_indices: Vec<usize> = dist_cols
@@ -53,12 +50,12 @@ pub(crate) fn build_distinct(
             .filter_map(|name| columns.iter().position(|c| c == name))
             .collect();
         if col_indices.is_empty() {
-            Box::new(DistinctOperator::new(input, schema))
+            Box::new(DistinctOperator::new(input))
         } else {
-            Box::new(DistinctOperator::on_columns(input, col_indices, schema))
+            Box::new(DistinctOperator::on_columns(input, col_indices))
         }
     } else {
-        Box::new(DistinctOperator::new(input, schema))
+        Box::new(DistinctOperator::new(input))
     };
     (operator, columns)
 }
@@ -84,9 +81,8 @@ pub(crate) fn build_except(
     right: Box<dyn Operator>,
     columns: Vec<String>,
     all: bool,
-    schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator = Box::new(ExceptOperator::new(left, right, all, schema));
+    let operator = Box::new(ExceptOperator::new(left, right, all));
     (operator, columns)
 }
 
@@ -96,9 +92,8 @@ pub(crate) fn build_intersect(
     right: Box<dyn Operator>,
     columns: Vec<String>,
     all: bool,
-    schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator = Box::new(IntersectOperator::new(left, right, all, schema));
+    let operator = Box::new(IntersectOperator::new(left, right, all));
     (operator, columns)
 }
 
@@ -423,6 +418,18 @@ pub(crate) fn resolve_expression_to_column(
                 "Cannot resolve expression to column{context}: {expr:?}"
             )),
         })
+}
+
+/// Where a sort key puts nulls: as its `NULLS FIRST` or `NULLS LAST` says,
+/// in either direction, and otherwise as the largest value (last ascending,
+/// first descending), as in openCypher.
+pub(crate) fn physical_null_order(key: &crate::query::plan::SortKey) -> NullOrder {
+    use crate::query::plan::{NullsOrdering, SortOrder};
+
+    match (key.nulls, key.order) {
+        (Some(NullsOrdering::First), _) | (None, SortOrder::Descending) => NullOrder::NullsFirst,
+        (Some(NullsOrdering::Last), _) | (None, SortOrder::Ascending) => NullOrder::NullsLast,
+    }
 }
 
 /// Whether a plan's rows come out in an order it defines: an `ORDER BY` at

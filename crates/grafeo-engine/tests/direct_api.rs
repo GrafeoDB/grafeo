@@ -376,6 +376,18 @@ fn a_direct_write_conflicts_with_an_open_transaction() {
     assert_eq!(city(alix), Some(Value::from("Paris")));
 }
 
+/// Runs `attempt` until it succeeds, yielding between tries: a write
+/// conflict that never clears fails the test instead of hanging it.
+fn until_done(mut attempt: impl FnMut() -> bool) {
+    for _ in 0..100_000 {
+        if attempt() {
+            return;
+        }
+        std::thread::yield_now();
+    }
+    panic!("a write conflict never cleared");
+}
+
 /// Direct writes from several threads next to transactions, all writing one
 /// shared node too: nothing hangs, every committed write lands, nothing of a
 /// rolled-back transaction remains, and a direct write that meets an open
@@ -392,7 +404,7 @@ fn direct_writes_and_transactions_run_side_by_side() {
             let db = &db;
             scope.spawn(move || {
                 for round in 0..ROUNDS {
-                    loop {
+                    until_done(|| {
                         let mut session = db.session();
                         session.begin_transaction().unwrap();
                         let kept = round % 3 != 0;
@@ -403,22 +415,23 @@ fn direct_writes_and_transactions_run_side_by_side() {
                             .is_ok();
                         if !kept {
                             session.rollback().unwrap();
-                            break;
+                            return true;
                         }
                         if wrote_hub && session.commit().is_ok() {
-                            break;
+                            return true;
                         }
                         let _ = session.rollback();
-                    }
+                        false
+                    });
                 }
             });
             scope.spawn(move || {
                 for _ in 0..ROUNDS {
                     db.create_node(&["Mark"]).unwrap();
-                    while db
-                        .set_node_property(hub, "by", Value::from(format!("direct {thread}")))
-                        .is_err()
-                    {}
+                    until_done(|| {
+                        db.set_node_property(hub, "by", Value::from(format!("direct {thread}")))
+                            .is_ok()
+                    });
                 }
             });
         }

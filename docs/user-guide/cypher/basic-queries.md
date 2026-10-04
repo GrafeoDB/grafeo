@@ -82,6 +82,10 @@ RETURN p.name, p.age
 ORDER BY p.age DESC, p.name ASC
 ```
 
+Nulls sort last in ascending order and first in descending order.
+
+Values of different types in one sort key, such as a property that holds a number on some nodes and a string on others, follow the openCypher order: maps, lists, paths, temporal values (zoned datetimes, datetimes, dates, zoned times, times, durations), strings, booleans, numbers, then null. Integers and floats compare as numbers, with NaN after infinity. Lists compare element by element with a prefix first, and maps by size, then keys, then values. Grafeo's own types fit in as follows: vectors after paths, bytes before strings and counters before numbers.
+
 ## Limiting Results
 
 ```cypher

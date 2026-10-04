@@ -35,40 +35,35 @@ fn convert_json_filters(
     Ok(Some(result))
 }
 
-/// Validate a JavaScript number as a safe node ID.
-///
-/// JavaScript numbers are f64, but entity IDs are u64. This rejects
-/// negative values, NaN, Infinity, and values beyond `Number.MAX_SAFE_INTEGER`.
+/// A JavaScript number as an unsigned 64-bit id: a whole number from 0 to
+/// `Number.MAX_SAFE_INTEGER`. Negative values, fractions (`1.9` is not node
+/// 1), NaN and Infinity give `None`.
+fn whole_id(value: f64) -> Option<u64> {
+    let whole = (0.0..=9_007_199_254_740_991.0).contains(&value) && value.fract() == 0.0;
+    // reason: a whole number in [0, 2^53-1] converts to u64 exactly
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    whole.then_some(value as u64)
+}
+
+/// Validate a JavaScript number as a node ID (see [`whole_id`]).
 fn validate_node_id(id: f64) -> Result<NodeId> {
-    if !(0.0..=9_007_199_254_740_991.0).contains(&id) {
-        return Err(NodeGrafeoError::InvalidArgument(format!("Invalid node ID: {id}")).into());
-    }
-    // reason: Range check above guarantees the value is in [0, 2^53-1], safe for u64
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Ok(NodeId(id as u64))
+    whole_id(id)
+        .map(NodeId)
+        .ok_or_else(|| NodeGrafeoError::InvalidArgument(format!("Invalid node ID: {id}")).into())
 }
 
-/// Validate a JavaScript number as a safe edge ID.
+/// Validate a JavaScript number as an edge ID (see [`whole_id`]).
 fn validate_edge_id(id: f64) -> Result<EdgeId> {
-    if !(0.0..=9_007_199_254_740_991.0).contains(&id) {
-        return Err(NodeGrafeoError::InvalidArgument(format!("Invalid edge ID: {id}")).into());
-    }
-    // reason: Range check above guarantees the value is in [0, 2^53-1], safe for u64
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Ok(EdgeId(id as u64))
+    whole_id(id)
+        .map(EdgeId)
+        .ok_or_else(|| NodeGrafeoError::InvalidArgument(format!("Invalid edge ID: {id}")).into())
 }
 
-/// Validate a JavaScript number as a non-negative epoch ID.
-///
-/// Rejects negative values, NaN, Infinity, and values beyond
-/// `Number.MAX_SAFE_INTEGER`. Epochs are unsigned 64-bit integers internally.
+/// Validate a JavaScript number as an epoch (see [`whole_id`]).
 fn validate_epoch(epoch: f64) -> Result<grafeo_common::types::EpochId> {
-    if !(0.0..=9_007_199_254_740_991.0).contains(&epoch) {
-        return Err(NodeGrafeoError::InvalidArgument(format!("Invalid epoch: {epoch}")).into());
-    }
-    // reason: Range check above guarantees the value is in [0, 2^53-1], safe for u64
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Ok(grafeo_common::types::EpochId::new(epoch as u64))
+    whole_id(epoch)
+        .map(grafeo_common::types::EpochId::new)
+        .ok_or_else(|| NodeGrafeoError::InvalidArgument(format!("Invalid epoch: {epoch}")).into())
 }
 
 /// Your connection to a Grafeo database.
@@ -1637,7 +1632,9 @@ fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::
     })
 }
 
-// After `JsGrafeoDB`: napi takes the class's JS name from the struct, so the
-// `impl` blocks of these modules must come after it.
+// After `JsGrafeoDB`: napi-derive records a struct's `js_name` when it expands
+// the struct and looks it up when it expands an `impl` block, falling back to
+// the Rust name when the struct has not expanded yet. Declared earlier, these
+// modules' methods would land on a class named after the Rust struct.
 mod batch;
 mod upsert;

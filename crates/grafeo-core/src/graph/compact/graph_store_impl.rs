@@ -269,6 +269,11 @@ impl GraphStore for CompactStore {
             .cloned()
     }
 
+    /// The store is immutable: no transaction has edges of its own in it.
+    fn edge_type_versioned(&self, id: EdgeId, _: EpochId, _: TransactionId) -> Option<ArcStr> {
+        self.edge_type(id)
+    }
+
     fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
         let key = PropertyKey::new(property);
         let mut results = Vec::new();

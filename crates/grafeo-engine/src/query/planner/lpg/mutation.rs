@@ -3,12 +3,12 @@
 use super::{
     AddLabelOp, AddLabelOperator, AntiJoinOp, Arc, CreateEdgeOp, CreateEdgeOperator, CreateNodeOp,
     CreateNodeOperator, DeleteEdgeOp, DeleteEdgeOperator, DeleteNodeOp, DeleteNodeOperator,
-    Direction, Error, ExpandDirection, ExpressionPredicate, FilterOperator, HashMap, LeftJoinOp,
-    LogicalExpression, LogicalOperator, LogicalType, MergeConfig, MergeOp, MergeOperator,
-    MergeRelationshipConfig, MergeRelationshipOp, MergeRelationshipOperator, Operator, ProjectExpr,
-    ProjectOperator, PropertySource, RemoveLabelOp, RemoveLabelOperator, Result, SetPropertyOp,
-    SetPropertyOperator, ShortestPathOp, ShortestPathOperator, UnaryOp, UnwindOp, UnwindOperator,
-    Value,
+    Direction, EntityValue, Error, ExpandDirection, ExpressionPredicate, FilterOperator, HashMap,
+    LeftJoinOp, LogicalExpression, LogicalOperator, LogicalType, MergeConfig, MergeOp,
+    MergeOperator, MergeRelationshipConfig, MergeRelationshipOp, MergeRelationshipOperator,
+    Operator, ProjectExpr, ProjectOperator, PropertySource, RemoveLabelOp, RemoveLabelOperator,
+    Result, SetPropertyOp, SetPropertyOperator, ShortestPathOp, ShortestPathOperator, UnaryOp,
+    UnwindOp, UnwindOperator, Value,
 };
 #[cfg(feature = "algos")]
 use super::{CallProcedureOp, StaticResultOperator};
@@ -276,6 +276,7 @@ impl super::Planner {
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Plan the input operator first
         // Handle Empty specially - use a single-row operator
+        let unwinds_a_constant = matches!(&*unwind.input, LogicalOperator::Empty);
         let (input_op, input_columns): (Box<dyn Operator>, Vec<String>) =
             if matches!(&*unwind.input, LogicalOperator::Empty) {
                 // For UNWIND without prior MATCH, create a single-row input
@@ -318,30 +319,21 @@ impl super::Planner {
                 self.plan_operator(&unwind.input)?
             };
 
-        // The UNWIND expression should be a list - we need to find/evaluate it
-        // Handle variable references, property access, and literal lists
-
-        // Find if the expression references an existing column that is itself a list
-        let list_col_idx = match &unwind.expression {
-            LogicalExpression::Variable(var) => input_columns.iter().position(|c| c == var),
-            LogicalExpression::List(_) | LogicalExpression::Literal(_) => {
-                // Literal list expression - needs to be added as a column
-                None
+        // The list is a column of the input (the one row of a constant list, or
+        // a variable), or an expression evaluated per row in a column of its
+        // own: a literal, a property, `range(1, n.k)`, `nodes(p)`, ...
+        let list_col_idx = if unwinds_a_constant {
+            Some(0)
+        } else {
+            match &unwind.expression {
+                LogicalExpression::Variable(var) => input_columns.iter().position(|c| c == var),
+                _ => None,
             }
-            _ => None,
         };
 
-        // When the expression needs runtime evaluation (property access, literal list, etc.),
-        // wrap input in a ProjectOperator that computes the list as an extra column.
         let (final_input_op, final_input_columns, col_idx) = if let Some(idx) = list_col_idx {
             (input_op, input_columns, idx)
-        } else if matches!(
-            &unwind.expression,
-            LogicalExpression::List(_)
-                | LogicalExpression::Literal(Value::List(_))
-                | LogicalExpression::Literal(Value::Vector(_))
-                | LogicalExpression::Property { .. }
-        ) {
+        } else {
             // Wrap input in a ProjectOperator that adds the list as an extra column
             let literal_list = self.convert_expression(&unwind.expression)?;
             let mut proj_exprs: Vec<ProjectExpr> =
@@ -371,24 +363,29 @@ impl super::Planner {
             let mut cols = input_columns;
             cols.push("__unwind_list__".to_string());
             (project_op, cols, list_col)
-        } else {
-            // Fallback: assume column 0 contains the list
-            (input_op, input_columns, 0)
         };
 
         // Build output columns: all input columns plus the new variable
         let mut columns = final_input_columns.clone();
         columns.push(unwind.variable.clone());
 
-        // Mark the UNWIND variable as scalar (not a node/edge ID) so that
-        // plan_return uses LogicalType::Any instead of Node for it.
-        self.scalar_columns
-            .borrow_mut()
-            .insert(unwind.variable.clone());
+        // The items of a node or edge list (a collected list, `nodes(p)`,
+        // `relationships(p)`, ...) are nodes or edges, so a property read takes
+        // the right entity; the items of any other list are values.
+        let item = match self.entity_value(&unwind.expression) {
+            Some(EntityValue::Nodes) => Some(EntityValue::Node),
+            Some(EntityValue::Edges) => Some(EntityValue::Edge),
+            _ => None,
+        };
 
         // Build output schema
         let mut output_schema = self.derive_schema_from_columns(&final_input_columns);
-        output_schema.push(LogicalType::Any); // The unwound element type is dynamic
+        output_schema.push(match item {
+            Some(EntityValue::Node) => LogicalType::Node,
+            Some(EntityValue::Edge) => LogicalType::Edge,
+            _ => LogicalType::Any,
+        });
+        self.set_column_entity(&unwind.variable, item);
 
         // Add ORDINALITY column (1-based index) if requested
         let emit_ordinality = unwind.ordinality_var.is_some();
@@ -848,6 +845,7 @@ impl super::Planner {
                 transaction_id: self.transaction_id,
                 viewing_epoch: self.viewing_epoch,
                 catalog: self.catalog.clone(),
+                write_counter: self.write_counter(),
             },
         ));
 

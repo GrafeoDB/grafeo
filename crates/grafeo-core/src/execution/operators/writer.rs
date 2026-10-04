@@ -240,6 +240,33 @@ impl GraphWriter {
         }
     }
 
+    /// Fails when this writer's transaction cannot see the node: one it
+    /// deleted earlier, or one that does not exist. A write to it would change
+    /// nothing anyone sees.
+    fn require_node(&self, id: NodeId) -> Result<(), OperatorError> {
+        if self.has_node(id) {
+            Ok(())
+        } else {
+            Err(OperatorError::Execution(format!(
+                "Node {} does not exist or has been deleted in this transaction",
+                id.as_u64()
+            )))
+        }
+    }
+
+    /// Fails when this writer's transaction cannot see the edge, like
+    /// [`require_node`](Self::require_node).
+    fn require_edge(&self, id: EdgeId) -> Result<(), OperatorError> {
+        if self.has_edge(id) {
+            Ok(())
+        } else {
+            Err(OperatorError::Execution(format!(
+                "Relationship {} does not exist or has been deleted in this transaction",
+                id.as_u64()
+            )))
+        }
+    }
+
     fn record(&self, entity: Entity) -> Result<(), OperatorError> {
         if let (Some(tracker), Some(transaction_id)) = (&self.write_tracker, self.transaction_id) {
             match entity {
@@ -318,13 +345,15 @@ impl GraphWriter {
     ///
     /// # Errors
     ///
-    /// Returns a write conflict or the first constraint violated.
+    /// Returns an error for a node the transaction deleted, a write conflict
+    /// or the first constraint violated.
     pub fn set_node_properties(
         &self,
         id: NodeId,
         assignments: &[(String, Value)],
         replace: bool,
     ) -> Result<(), OperatorError> {
+        self.require_node(id)?;
         self.record(Entity::Node(id))?;
         if let Some(validator) = &self.validator {
             let needs_node = replace
@@ -347,9 +376,10 @@ impl GraphWriter {
     ///
     /// # Errors
     ///
-    /// Returns a write conflict or the constraint the removal would violate
-    /// (`NOT NULL`, `NODE KEY`).
+    /// Returns an error for a node the transaction deleted, a write conflict
+    /// or the constraint the removal would violate (`NOT NULL`, `NODE KEY`).
     pub fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool, OperatorError> {
+        self.require_node(id)?;
         self.record(Entity::Node(id))?;
         let Some(node) = self.node(id) else {
             return Ok(false);
@@ -370,13 +400,14 @@ impl GraphWriter {
     }
 
     /// Adds labels to a node, after checking the node against the
-    /// constraints of the labels it gets. Returns how many were new (none for
-    /// a node that does not exist).
+    /// constraints of the labels it gets. Returns how many were new.
     ///
     /// # Errors
     ///
-    /// Returns a write conflict or the first constraint violated.
+    /// Returns an error for a node the transaction deleted, a write conflict
+    /// or the first constraint violated.
     pub fn add_labels(&self, id: NodeId, labels: &[String]) -> Result<usize, OperatorError> {
+        self.require_node(id)?;
         self.record(Entity::Node(id))?;
         let Some(node) = self.node(id) else {
             return Ok(0);
@@ -411,13 +442,14 @@ impl GraphWriter {
         Ok(added)
     }
 
-    /// Removes labels from a node. Returns how many it had (none for a node
-    /// that does not exist).
+    /// Removes labels from a node. Returns how many it had.
     ///
     /// # Errors
     ///
-    /// Returns a write conflict.
+    /// Returns an error for a node the transaction deleted, or a write
+    /// conflict.
     pub fn remove_labels(&self, id: NodeId, labels: &[String]) -> Result<usize, OperatorError> {
+        self.require_node(id)?;
         self.record(Entity::Node(id))?;
         if self.node(id).is_none() {
             return Ok(0);
@@ -532,13 +564,15 @@ impl GraphWriter {
     ///
     /// # Errors
     ///
-    /// Returns a write conflict or the first constraint violated.
+    /// Returns an error for an edge the transaction deleted, a write conflict
+    /// or the first constraint violated.
     pub fn set_edge_properties(
         &self,
         id: EdgeId,
         assignments: &[(String, Value)],
         replace: bool,
     ) -> Result<(), OperatorError> {
+        self.require_edge(id)?;
         self.record(Entity::Edge(id))?;
         if let Some(validator) = &self.validator
             && let Some(edge) = self.edge(id)
@@ -557,8 +591,10 @@ impl GraphWriter {
     ///
     /// # Errors
     ///
-    /// Returns a write conflict or the constraint the removal would violate.
+    /// Returns an error for an edge the transaction deleted, a write conflict
+    /// or the constraint the removal would violate.
     pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool, OperatorError> {
+        self.require_edge(id)?;
         self.record(Entity::Edge(id))?;
         let Some(edge) = self.edge(id) else {
             return Ok(false);
@@ -659,7 +695,9 @@ impl GraphWriter {
             .create_node_versioned(&label_refs, self.epoch(), self.transaction());
         self.record(Entity::Node(id))?;
         self.count(|c| &c.nodes_created, 1);
-        self.count(|c| &c.labels_added, labels.len());
+        // `(:A:A)` gives the node one label.
+        let distinct: std::collections::BTreeSet<&str> = label_refs.into_iter().collect();
+        self.count(|c| &c.labels_added, distinct.len());
         Ok(id)
     }
 

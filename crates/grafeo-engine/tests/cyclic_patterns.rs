@@ -78,3 +78,172 @@ fn a_triangle_of_comma_patterns_matches_each_triangle_once() {
         triangles()
     );
 }
+
+/// A path that returns to an earlier variable closes the cycle: it matches
+/// the rows of the same path ending in a fresh variable filtered to equal it.
+#[test]
+fn a_path_back_to_an_earlier_variable_closes_the_cycle() {
+    let db = cycles();
+
+    // The 2-cycle 1 <-> 2, from both ends.
+    assert_eq!(
+        rows(db.execute("MATCH (a)-[:K]->(b)-[:K]->(a) RETURN a.n, b.n")),
+        vec![vec![1, 2], vec![2, 1]]
+    );
+    assert_eq!(
+        rows(db.execute("MATCH (a)-[:K]->(b)-[:K]->(c)-[:K]->(a) RETURN a.n, b.n, c.n")),
+        triangles()
+    );
+    // The same cycle closed by a second MATCH.
+    assert_eq!(
+        rows(db.execute("MATCH (a)-[:K]->(b) MATCH (b)-[:K]->(a) RETURN a.n, b.n")),
+        vec![vec![1, 2], vec![2, 1]]
+    );
+    // Each form agrees with the fresh variable and an equality filter.
+    assert_eq!(
+        rows(
+            db.execute("MATCH (a)-[:K]->(b)-[:K]->(c)-[:K]->(d) WHERE d = a RETURN a.n, b.n, c.n")
+        ),
+        triangles()
+    );
+}
+
+/// A variable-length hop back to an earlier variable closes the cycle too:
+/// the same rows as ending in a fresh variable filtered to equal it.
+#[test]
+fn a_variable_length_path_back_to_an_earlier_variable_closes_the_cycle() {
+    let db = cycles();
+    let closed = rows(db.execute("MATCH (a)-[:K]->(b)-[:K]->{1,2}(a) RETURN a.n, b.n"));
+    // One hop back over the 2-cycle, two hops back around each triangle.
+    assert_eq!(
+        closed,
+        vec![
+            vec![1, 2],
+            vec![1, 2],
+            vec![2, 1],
+            vec![2, 3],
+            vec![2, 3],
+            vec![3, 1],
+            vec![3, 4],
+            vec![4, 2],
+        ]
+    );
+    assert_eq!(
+        closed,
+        rows(db.execute("MATCH (a)-[:K]->(b)-[:K]->{1,2}(d) WHERE d = a RETURN a.n, b.n"))
+    );
+}
+
+#[cfg(feature = "cypher")]
+#[test]
+fn a_cypher_path_back_to_an_earlier_variable_closes_the_cycle() {
+    let db = cycles();
+    assert_eq!(
+        rows(db.execute_cypher("MATCH (a)-[:K]->(b)-[:K]->(a) RETURN a.n, b.n")),
+        vec![vec![1, 2], vec![2, 1]]
+    );
+    assert_eq!(
+        rows(db.execute_cypher("MATCH (a)-[:K]->(b)-[:K]->(c)-[:K]->(a) RETURN a.n, b.n, c.n")),
+        triangles()
+    );
+}
+
+#[cfg(feature = "sql-pgq")]
+#[test]
+fn a_sql_pgq_path_back_to_an_earlier_variable_closes_the_cycle() {
+    let db = cycles();
+    assert_eq!(
+        rows(db.session().execute_sql(
+            "SELECT an, bn FROM GRAPH_TABLE (MATCH (a)-[:K]->(b)-[:K]->(a) COLUMNS (a.n AS an, b.n AS bn))"
+        )),
+        vec![vec![1, 2], vec![2, 1]]
+    );
+}
+
+/// A subquery that imports both ends, by name or with `WITH *`, closes the
+/// cycle on them: only the 2-cycle 1 <-> 2 has an edge back.
+#[test]
+fn a_subquery_closes_the_cycle_on_the_nodes_it_imports() {
+    let db = cycles();
+    for import in ["WITH a, b", "WITH *"] {
+        let query = format!(
+            "MATCH (a)-[:K]->(b) CALL {{ {import} MATCH (b)-[:K]->(a) RETURN count(*) AS back }} \
+             RETURN a.n, b.n, back"
+        );
+        let want = vec![
+            vec![1, 2, 1],
+            vec![2, 1, 1],
+            vec![2, 3, 0],
+            vec![3, 1, 0],
+            vec![3, 4, 0],
+            vec![4, 2, 0],
+        ];
+        assert_eq!(rows(db.execute(&query)), want, "GQL: {query}");
+        #[cfg(feature = "cypher")]
+        assert_eq!(rows(db.execute_cypher(&query)), want, "Cypher: {query}");
+    }
+}
+
+/// After `WITH b` the earlier `a` is out of scope: the second `MATCH` binds a
+/// new `a`, so every edge out of `b` counts, cycle or not.
+#[cfg(feature = "cypher")]
+#[test]
+fn a_variable_out_of_scope_is_bound_again() {
+    let db = cycles();
+    let query = "MATCH (a)-[:K]->(b) WITH b MATCH (b)-[:K]->(a) RETURN b.n, a.n";
+    assert_eq!(rows(db.execute(query)), rows(db.execute_cypher(query)));
+    assert_eq!(
+        rows(db.execute(query)),
+        vec![
+            vec![1, 2],
+            vec![1, 2],
+            vec![2, 1],
+            vec![2, 1],
+            vec![2, 3],
+            vec![2, 3],
+            vec![3, 1],
+            vec![3, 4],
+            vec![4, 2],
+        ]
+    );
+}
+
+/// A user variable spelled like the name the rewrite gives the closing node
+/// still closes its cycle.
+#[test]
+fn a_cycle_on_a_variable_named_like_an_internal_one_closes() {
+    let db = cycles();
+    assert_eq!(
+        rows(db.execute(
+            "MATCH (_cycle_end_0)-[:K]->(b)-[:K]->(_cycle_end_0) RETURN _cycle_end_0.n, b.n"
+        )),
+        vec![vec![1, 2], vec![2, 1]]
+    );
+}
+
+/// The closing node's name is not one that a later clause binds: that clause
+/// scans its own nodes, so each 2-cycle row pairs with all four nodes.
+#[test]
+fn a_later_variable_named_like_an_internal_one_binds_on_its_own() {
+    let db = cycles();
+    assert_eq!(
+        rows(db.execute("MATCH (a)-[:K]->(b)-[:K]->(a) MATCH (_cycle_end_0:P) RETURN count(*)")),
+        vec![vec![8]]
+    );
+}
+
+/// An anonymous node is a node of its own, also next to a user variable
+/// spelled like the names anonymous nodes get: every edge out of `_v0` counts.
+#[cfg(feature = "sql-pgq")]
+#[test]
+fn a_sql_pgq_anonymous_node_is_not_a_user_variable() {
+    let db = cycles();
+    assert_eq!(
+        rows(
+            db.session().execute_sql(
+                "SELECT n FROM GRAPH_TABLE (MATCH (_v0)-[:K]->() COLUMNS (_v0.n AS n))"
+            )
+        ),
+        vec![vec![1], vec![2], vec![2], vec![3], vec![3], vec![4]]
+    );
+}

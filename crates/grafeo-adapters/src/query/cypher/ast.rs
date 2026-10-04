@@ -83,8 +83,15 @@ pub enum Clause {
     Remove(RemoveClause),
     /// CALL procedure clause.
     Call(CallClause),
-    /// CALL { subquery } (inline subquery).
-    CallSubquery(Query),
+    /// CALL [(scope)] { subquery } (inline subquery).
+    CallSubquery {
+        /// The subquery.
+        query: Query,
+        /// The variable scope clause, `CALL (a, b) { ... }`: the outer
+        /// variables the subquery sees (`*` for all of them, none for `()`).
+        /// `None` without one, when its importing `WITH` names them.
+        scope: Option<Vec<String>>,
+    },
     /// FOREACH (variable IN list | update_clauses).
     ForEach(ForEachClause),
     /// LOAD CSV clause.

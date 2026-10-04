@@ -4,7 +4,7 @@
 //! and physical execution. Both GQL and Cypher queries are translated to this
 //! common representation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use grafeo_common::types::Value;
@@ -804,6 +804,132 @@ impl LogicalOperator {
 }
 
 impl LogicalOperator {
+    /// The variables the rows of this operator hold, or `None` for an
+    /// operator that is not modeled here (callers then leave its plan as it
+    /// is). A `WITH` (`Project`) holds only what it projects. `imports` is
+    /// what a subquery's `CALL { WITH * ... }` imports: the variables of the
+    /// row it runs for.
+    #[must_use]
+    pub(crate) fn bound_variables(
+        &self,
+        imports: Option<&HashSet<String>>,
+    ) -> Option<HashSet<String>> {
+        let mut bound = HashSet::new();
+        match self {
+            Self::Empty => {}
+            Self::NodeScan(scan) => {
+                if let Some(input) = &scan.input {
+                    bound = input.bound_variables(imports)?;
+                }
+                bound.insert(scan.variable.clone());
+            }
+            Self::EdgeScan(scan) => {
+                if let Some(input) = &scan.input {
+                    bound = input.bound_variables(imports)?;
+                }
+                bound.insert(scan.variable.clone());
+            }
+            Self::Expand(expand) => {
+                bound = expand.input.bound_variables(imports)?;
+                bound.insert(expand.to_variable.clone());
+                bound.extend(expand.edge_variable.iter().cloned());
+                bound.extend(expand.path_alias.iter().cloned());
+            }
+            Self::Filter(filter) => return filter.input.bound_variables(imports),
+            Self::Limit(limit) => return limit.input.bound_variables(imports),
+            Self::Skip(skip) => return skip.input.bound_variables(imports),
+            Self::Sort(sort) => return sort.input.bound_variables(imports),
+            Self::Distinct(distinct) => return distinct.input.bound_variables(imports),
+            Self::Project(project) => {
+                if project.pass_through_input {
+                    bound = project.input.bound_variables(imports)?;
+                }
+                for projection in &project.projections {
+                    match (&projection.alias, &projection.expression) {
+                        (Some(alias), _) => {
+                            bound.insert(alias.clone());
+                        }
+                        (None, LogicalExpression::Variable(name)) => {
+                            bound.insert(name.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Self::Aggregate(aggregate) => {
+                for key in &aggregate.group_by {
+                    if let LogicalExpression::Variable(name) = key {
+                        bound.insert(name.clone());
+                    }
+                }
+                bound.extend(aggregate.aggregates.iter().filter_map(|a| a.alias.clone()));
+            }
+            Self::Unwind(unwind) => {
+                bound = unwind.input.bound_variables(imports)?;
+                bound.insert(unwind.variable.clone());
+                bound.extend(unwind.ordinality_var.iter().cloned());
+                bound.extend(unwind.offset_var.iter().cloned());
+            }
+            Self::Bind(bind) => {
+                bound = bind.input.bound_variables(imports)?;
+                bound.insert(bind.variable.clone());
+            }
+            Self::Join(join) => {
+                bound = join.left.bound_variables(imports)?;
+                bound.extend(join.right.bound_variables(imports)?);
+            }
+            Self::LeftJoin(join) => {
+                bound = join.left.bound_variables(imports)?;
+                bound.extend(join.right.bound_variables(imports)?);
+            }
+            // A subquery starts from the variables it imports from the row it
+            // runs for: the ones its `WITH` names, or all of them for `WITH *`.
+            Self::ParameterScan(scan) => {
+                if scan.columns.iter().any(|column| column == "*") {
+                    return imports.cloned();
+                }
+                bound.extend(scan.columns.iter().cloned());
+            }
+            // `CALL { ... }` adds the columns its subquery returns to each row.
+            Self::Apply(apply) => {
+                bound = apply.input.bound_variables(imports)?;
+                apply.subplan.add_returned_variables(&mut bound)?;
+            }
+            _ => return None,
+        }
+        Some(bound)
+    }
+
+    /// Adds the variables a subquery's `RETURN` names, or returns `None` for a
+    /// `RETURN *` (the translators expand the one that ends a `CALL`
+    /// subquery, so one left here returns variables not known here).
+    fn add_returned_variables(&self, bound: &mut HashSet<String>) -> Option<()> {
+        match self {
+            Self::Return(ret) => {
+                for item in &ret.items {
+                    match (&item.alias, &item.expression) {
+                        (Some(alias), _) => {
+                            bound.insert(alias.clone());
+                        }
+                        (None, LogicalExpression::Variable(name)) if name == "*" => return None,
+                        (None, LogicalExpression::Variable(name)) => {
+                            bound.insert(name.clone());
+                        }
+                        _ => {}
+                    }
+                }
+                Some(())
+            }
+            Self::Sort(sort) => sort.input.add_returned_variables(bound),
+            Self::Limit(limit) => limit.input.add_returned_variables(bound),
+            Self::Skip(skip) => skip.input.add_returned_variables(bound),
+            Self::Distinct(distinct) => distinct.input.add_returned_variables(bound),
+            _ => Some(()),
+        }
+    }
+}
+
+impl LogicalOperator {
     /// Formats this operator tree as a human-readable plan for EXPLAIN output.
     pub fn explain_tree(&self) -> String {
         let mut output = String::new();
@@ -1199,6 +1325,7 @@ fn fmt_expr(expr: &LogicalExpression) -> String {
     match expr {
         LogicalExpression::Variable(name) => name.clone(),
         LogicalExpression::Property { variable, property } => format!("{variable}.{property}"),
+        LogicalExpression::MapAccess { base, key } => format!("{}.{key}", fmt_expr(base)),
         LogicalExpression::Literal(val) => format!("{val}"),
         LogicalExpression::Binary { left, op, right } => {
             format!("{} {op:?} {}", fmt_expr(left), fmt_expr(right))
@@ -1286,6 +1413,9 @@ pub struct ExpandOp {
     pub path_alias: Option<String>,
     /// Path traversal mode (WALK, TRAIL, SIMPLE, ACYCLIC).
     pub path_mode: PathMode,
+    /// Whether the pattern has a quantifier (`*1..1`, `{1,1}`): its edge
+    /// variable then binds the list of the path's edges, also for one hop.
+    pub quantified: bool,
 }
 
 /// Direction for edge expansion.
@@ -2900,6 +3030,7 @@ mod tests {
                     right: Box::new(LogicalExpression::Literal(Value::Int64(30))),
                 },
                 input: Box::new(LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: "a".into(),
                     to_variable: "b".into(),
                     edge_variable: None,
@@ -3602,6 +3733,7 @@ mod tests {
         assert_eq!(edge_scan_any.display_label(), "e:*");
 
         let expand = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".into(),
             to_variable: "b".into(),
             edge_variable: None,
@@ -3616,6 +3748,7 @@ mod tests {
         assert_eq!(expand.display_label(), "(a)->[:KNOWS]->(b)");
 
         let expand_in = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".into(),
             to_variable: "b".into(),
             edge_variable: None,
@@ -3630,6 +3763,7 @@ mod tests {
         assert_eq!(expand_in.display_label(), "(a)<-[:*]<-(b)");
 
         let expand_both = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".into(),
             to_variable: "b".into(),
             edge_variable: None,
@@ -4009,6 +4143,7 @@ mod tests {
     fn explain_tree_expand_variants() {
         let mk = |min, max, dir| {
             LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".into(),
                 to_variable: "b".into(),
                 edge_variable: None,
@@ -4503,6 +4638,15 @@ mod tests {
         };
         assert_eq!(fmt_expr(&p), "n.age");
 
+        let route = LogicalExpression::MapAccess {
+            base: Box::new(LogicalExpression::Property {
+                variable: "n".into(),
+                property: "meta".into(),
+            }),
+            key: "route".into(),
+        };
+        assert_eq!(fmt_expr(&route), "n.meta.route");
+
         let lit = LogicalExpression::Literal(Value::Int64(42));
         assert_eq!(fmt_expr(&lit), "42");
 
@@ -4586,5 +4730,41 @@ mod tests {
             .as_variable(),
             None
         );
+    }
+
+    /// A `CALL` adds the variables its subquery returns to the row. A
+    /// `RETURN *` left unexpanded returns variables not known here, so the
+    /// row's are not known either (the translators expand the one that ends a
+    /// `CALL` subquery).
+    #[test]
+    fn bound_variables_through_a_call_subquery() {
+        let scan = |variable: &str| {
+            LogicalOperator::NodeScan(NodeScanOp {
+                variable: variable.into(),
+                label: None,
+                input: None,
+            })
+        };
+        let item = |name: &str| ReturnItem {
+            expression: LogicalExpression::Variable(name.into()),
+            alias: None,
+        };
+        let call = |items: Vec<ReturnItem>| {
+            LogicalOperator::Apply(ApplyOp {
+                input: Box::new(scan("a")),
+                subplan: Box::new(LogicalOperator::Return(ReturnOp {
+                    items,
+                    distinct: false,
+                    input: Box::new(scan("b")),
+                })),
+                shared_variables: vec![],
+                optional: false,
+            })
+        };
+        assert_eq!(
+            call(vec![item("b")]).bound_variables(None),
+            Some(HashSet::from(["a".to_string(), "b".to_string()]))
+        );
+        assert_eq!(call(vec![item("*")]).bound_variables(None), None);
     }
 }

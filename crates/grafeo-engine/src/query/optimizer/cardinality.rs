@@ -1650,6 +1650,7 @@ mod tests {
         estimator.add_table_stats("Person", TableStats::new(100));
 
         let expand = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,
@@ -1677,6 +1678,7 @@ mod tests {
         estimator.add_table_stats("Person", TableStats::new(100));
 
         let expand = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,
@@ -1704,6 +1706,7 @@ mod tests {
         estimator.add_table_stats("Person", TableStats::new(100));
 
         let expand = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,
@@ -1977,6 +1980,7 @@ mod tests {
         estimator.set_avg_fanout(5.0);
 
         let expand = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,

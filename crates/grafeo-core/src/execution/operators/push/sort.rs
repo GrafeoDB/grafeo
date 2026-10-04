@@ -1,13 +1,12 @@
 //! Push-based sort operator (pipeline breaker).
 
-use crate::execution::chunk::DataChunk;
+use crate::execution::chunk::{ColumnTypes, DataChunk, DataChunkBuilder};
 use crate::execution::operators::OperatorError;
-use crate::execution::operators::value_utils::compare_values_total;
+use crate::execution::operators::value_utils::order_by;
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 #[cfg(feature = "spill")]
 use crate::execution::spill::{ExternalSort, SpillManager};
-use crate::execution::vector::ValueVector;
-use grafeo_common::types::Value;
+use grafeo_common::types::{LogicalType, Value};
 use std::cmp::Ordering;
 #[cfg(feature = "spill")]
 use std::sync::Arc;
@@ -22,7 +21,7 @@ pub enum SortDirection {
     Descending,
 }
 
-/// Null handling in sort.
+/// Where nulls go, in either sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NullOrder {
@@ -74,6 +73,10 @@ pub struct SortPushOperator {
     buffer: Vec<Vec<Value>>,
     /// Number of columns per row.
     num_columns: Option<usize>,
+    /// How many leading columns each output row keeps (all when `None`).
+    output_width: Option<usize>,
+    /// The input's column types: a node or edge column stays one.
+    column_types: ColumnTypes,
 }
 
 impl SortPushOperator {
@@ -83,6 +86,8 @@ impl SortPushOperator {
             keys,
             buffer: Vec::new(),
             num_columns: None,
+            output_width: None,
+            column_types: ColumnTypes::default(),
         }
     }
 
@@ -95,39 +100,62 @@ impl SortPushOperator {
     pub fn descending(column: usize) -> Self {
         Self::new(vec![SortKey::descending(column)])
     }
+
+    /// Returns only the first `width` columns of each row: the columns after
+    /// them hold sort keys the planner added to sort by (see
+    /// [`SortOperator::with_output_width`](crate::execution::operators::SortOperator::with_output_width)).
+    #[must_use]
+    pub fn with_output_width(mut self, width: usize) -> Self {
+        self.output_width = Some(width);
+        self
+    }
 }
 
 /// Compare two rows by sort keys.
 fn compare_rows(a: &[Value], b: &[Value], keys: &[SortKey]) -> Ordering {
     for key in keys {
-        let a_val = a.get(key.column);
-        let b_val = b.get(key.column);
-
-        let ordering = match (a_val, b_val) {
-            (Some(Value::Null), Some(Value::Null)) => Ordering::Equal,
-            (Some(Value::Null), _) => match key.null_order {
-                NullOrder::First => Ordering::Less,
-                NullOrder::Last => Ordering::Greater,
-            },
-            (_, Some(Value::Null)) => match key.null_order {
-                NullOrder::First => Ordering::Greater,
-                NullOrder::Last => Ordering::Less,
-            },
-            (Some(a), Some(b)) => compare_values_total(a, b),
-            _ => Ordering::Equal,
-        };
-
-        let ordering = match key.direction {
-            SortDirection::Ascending => ordering,
-            SortDirection::Descending => ordering.reverse(),
-        };
-
+        let ordering = order_by(
+            a.get(key.column),
+            b.get(key.column),
+            key.direction == SortDirection::Descending,
+            key.null_order == NullOrder::First,
+        );
         if ordering != Ordering::Equal {
             return ordering;
         }
     }
 
     Ordering::Equal
+}
+
+/// How many columns the output rows have: `width` when the sort drops
+/// trailing sort-key columns, otherwise all `num_cols`.
+fn output_width(num_cols: usize, width: Option<usize>) -> usize {
+    width.map_or(num_cols, |width| width.min(num_cols))
+}
+
+/// One chunk with the first `width` values of each sorted row, in columns of
+/// the input's types (a node or edge column stays one, see `ColumnTypes`).
+fn output_chunk(rows: &[Vec<Value>], column_types: &ColumnTypes, width: usize) -> DataChunk {
+    let types: Vec<LogicalType> = (0..width)
+        .map(|column| {
+            column_types
+                .types()
+                .get(column)
+                .cloned()
+                .unwrap_or(LogicalType::Any)
+        })
+        .collect();
+    let mut builder = DataChunkBuilder::with_capacity(&types, rows.len());
+    for row in rows {
+        for column in 0..width {
+            if let Some(out) = builder.column_mut(column) {
+                out.push_value(row.get(column).cloned().unwrap_or(Value::Null));
+            }
+        }
+        builder.advance_row();
+    }
+    builder.finish()
 }
 
 impl PushOperator for SortPushOperator {
@@ -140,6 +168,7 @@ impl PushOperator for SortPushOperator {
         if self.num_columns.is_none() {
             self.num_columns = Some(chunk.column_count());
         }
+        self.column_types.add(&chunk);
 
         let num_cols = chunk.column_count();
 
@@ -168,23 +197,15 @@ impl PushOperator for SortPushOperator {
         let keys = &self.keys;
         self.buffer.sort_by(|a, b| compare_rows(a, b, keys));
 
-        // Emit sorted rows in chunks
         let num_cols = self.num_columns.unwrap_or(0);
         if num_cols == 0 {
             return Ok(());
         }
-
-        // Build output chunk from sorted rows
-        let mut columns: Vec<ValueVector> = (0..num_cols).map(|_| ValueVector::new()).collect();
-
-        for row in &self.buffer {
-            for (col_idx, col) in columns.iter_mut().enumerate() {
-                let val = row.get(col_idx).cloned().unwrap_or(Value::Null);
-                col.push(val);
-            }
-        }
-
-        let chunk = DataChunk::new(columns);
+        let chunk = output_chunk(
+            &self.buffer,
+            &self.column_types,
+            output_width(num_cols, self.output_width),
+        );
         sink.consume(chunk)?;
 
         Ok(())
@@ -233,6 +254,10 @@ pub struct SpillableSortPushOperator {
     buffer: Vec<Vec<Value>>,
     /// Number of columns per row.
     num_columns: Option<usize>,
+    /// How many leading columns each output row keeps (all when `None`).
+    output_width: Option<usize>,
+    /// The input's column types: a node or edge column stays one.
+    column_types: ColumnTypes,
     /// Spill manager for file creation (used by row-count fallback mode).
     spill_manager: Option<Arc<SpillManager>>,
     /// External sort state (created when first spill occurs).
@@ -257,6 +282,8 @@ impl SpillableSortPushOperator {
             keys,
             buffer: Vec::new(),
             num_columns: None,
+            output_width: None,
+            column_types: ColumnTypes::default(),
             spill_manager: None,
             external_sort: None,
             spill_threshold: DEFAULT_SPILL_THRESHOLD,
@@ -272,6 +299,8 @@ impl SpillableSortPushOperator {
             keys,
             buffer: Vec::new(),
             num_columns: None,
+            output_width: None,
+            column_types: ColumnTypes::default(),
             spill_manager: Some(manager),
             external_sort: None,
             spill_threshold: threshold,
@@ -300,6 +329,8 @@ impl SpillableSortPushOperator {
             keys,
             buffer: Vec::new(),
             num_columns: None,
+            output_width: None,
+            column_types: ColumnTypes::default(),
             spill_manager: None,
             external_sort: None,
             spill_threshold: DEFAULT_SPILL_THRESHOLD,
@@ -330,6 +361,15 @@ impl SpillableSortPushOperator {
     /// Sets the spill threshold (row-count fallback mode).
     pub fn with_threshold(mut self, threshold: usize) -> Self {
         self.spill_threshold = threshold;
+        self
+    }
+
+    /// Returns only the first `width` columns of each row: the columns after
+    /// them hold sort keys the planner added to sort by (see
+    /// [`SortOperator::with_output_width`](crate::execution::operators::SortOperator::with_output_width)).
+    #[must_use]
+    pub fn with_output_width(mut self, width: usize) -> Self {
+        self.output_width = Some(width);
         self
     }
 
@@ -427,6 +467,7 @@ impl PushOperator for SpillableSortPushOperator {
         if self.num_columns.is_none() {
             self.num_columns = Some(chunk.column_count());
         }
+        self.column_types.add(&chunk);
 
         let num_cols = chunk.column_count();
 
@@ -483,18 +524,11 @@ impl PushOperator for SpillableSortPushOperator {
         if sorted_rows.is_empty() {
             return Ok(());
         }
-
-        // Build output chunk from sorted rows
-        let mut columns: Vec<ValueVector> = (0..num_cols).map(|_| ValueVector::new()).collect();
-
-        for row in &sorted_rows {
-            for (col_idx, col) in columns.iter_mut().enumerate() {
-                let val = row.get(col_idx).cloned().unwrap_or(Value::Null);
-                col.push(val);
-            }
-        }
-
-        let chunk = DataChunk::new(columns);
+        let chunk = output_chunk(
+            &sorted_rows,
+            &self.column_types,
+            output_width(num_cols, self.output_width),
+        );
         sink.consume(chunk)?;
 
         Ok(())
@@ -514,6 +548,7 @@ impl PushOperator for SpillableSortPushOperator {
 mod tests {
     use super::*;
     use crate::execution::sink::CollectorSink;
+    use crate::execution::vector::ValueVector;
 
     fn create_test_chunk(values: &[i64]) -> DataChunk {
         let v: Vec<Value> = values.iter().map(|&i| Value::Int64(i)).collect();
@@ -554,6 +589,167 @@ mod tests {
         assert_eq!(col.get_value(0), Some(Value::Int64(5)));
         assert_eq!(col.get_value(1), Some(Value::Int64(4)));
         assert_eq!(col.get_value(2), Some(Value::Int64(3)));
+    }
+
+    /// Two chunks of mixed values with nulls.
+    fn mixed_chunks() -> Vec<DataChunk> {
+        let first = [
+            Value::Int64(3),
+            Value::String("a".into()),
+            Value::Null,
+            Value::Float64(2.5),
+        ];
+        let second = [
+            Value::Bool(true),
+            Value::Null,
+            Value::Int64(1),
+            Value::List(vec![Value::Int64(1)].into()),
+        ];
+        vec![
+            DataChunk::new(vec![ValueVector::from_values(&first)]),
+            DataChunk::new(vec![ValueVector::from_values(&second)]),
+        ]
+    }
+
+    /// `ORDER BY x DESC NULLS LAST` over [`mixed_chunks`].
+    const MIXED_DESC_NULLS_LAST: [&str; 8] =
+        ["3", "2.5", "1", "true", "\"a\"", "[1]", "NULL", "NULL"];
+
+    fn first_column_texts(sink: CollectorSink) -> Vec<String> {
+        sink.into_chunks()
+            .iter()
+            .flat_map(|chunk| {
+                let column = chunk.column(0).unwrap();
+                (0..chunk.len())
+                    .map(|row| column.get_value(row).unwrap().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Values of different types sort in one order, and `NULLS LAST` holds
+    /// when descending.
+    #[test]
+    fn mixed_values_sort_in_one_order_with_nulls_last_descending() {
+        let key = SortKey {
+            column: 0,
+            direction: SortDirection::Descending,
+            null_order: NullOrder::Last,
+        };
+        let mut sort = SortPushOperator::new(vec![key]);
+        let mut sink = CollectorSink::new();
+        for chunk in mixed_chunks() {
+            sort.push(chunk, &mut sink).unwrap();
+        }
+        sort.finalize(&mut sink).unwrap();
+
+        assert_eq!(first_column_texts(sink), MIXED_DESC_NULLS_LAST);
+    }
+
+    /// Nodes 7, 8 and 9 with the sort keys 3, 1 and 2, in two chunks.
+    fn nodes_with_keys() -> Vec<DataChunk> {
+        use crate::execution::chunk::DataChunkBuilder;
+        use grafeo_common::types::{LogicalType, NodeId};
+
+        [vec![(7_u64, 3_i64), (8, 1)], vec![(9, 2)]]
+            .into_iter()
+            .map(|rows| {
+                let mut builder = DataChunkBuilder::new(&[LogicalType::Node, LogicalType::Int64]);
+                for (id, key) in rows {
+                    builder.column_mut(0).unwrap().push_node_id(NodeId::new(id));
+                    builder.column_mut(1).unwrap().push_int64(key);
+                    builder.advance_row();
+                }
+                builder.finish()
+            })
+            .collect()
+    }
+
+    /// The node IDs in `sink`, after checking that each chunk holds one
+    /// column and that it is a node column.
+    fn node_ids(sink: CollectorSink) -> Vec<u64> {
+        use grafeo_common::types::LogicalType;
+
+        let mut ids = Vec::new();
+        for chunk in sink.into_chunks() {
+            assert_eq!(chunk.column_count(), 1);
+            let nodes = chunk.column(0).unwrap();
+            assert_eq!(nodes.data_type(), &LogicalType::Node);
+            ids.extend(
+                chunk
+                    .selected_indices()
+                    .map(|row| nodes.get_node_id(row).unwrap().as_u64()),
+            );
+        }
+        ids
+    }
+
+    /// With an output width the rows keep only their leading columns, with
+    /// the types they came in with: the columns after them were sort keys.
+    #[test]
+    fn output_width_drops_the_sort_key_columns() {
+        let mut sort = SortPushOperator::new(vec![SortKey::ascending(1)]).with_output_width(1);
+        let mut sink = CollectorSink::new();
+        for chunk in nodes_with_keys() {
+            sort.push(chunk, &mut sink).unwrap();
+        }
+        sort.finalize(&mut sink).unwrap();
+
+        assert_eq!(node_ids(sink), [8, 9, 7]);
+    }
+
+    /// The same holds for the spillable sort, in memory and after its spilled
+    /// runs are merged.
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spillable_sort_keeps_the_output_width_and_types() {
+        use tempfile::TempDir;
+
+        let mut in_memory =
+            SpillableSortPushOperator::new(vec![SortKey::ascending(1)]).with_output_width(1);
+        let mut sink = CollectorSink::new();
+        for chunk in nodes_with_keys() {
+            in_memory.push(chunk, &mut sink).unwrap();
+        }
+        in_memory.finalize(&mut sink).unwrap();
+        assert_eq!(node_ids(sink), [8, 9, 7]);
+
+        let temp_dir = TempDir::new().unwrap();
+        let manager = Arc::new(SpillManager::new(temp_dir.path()).unwrap());
+        // A threshold of one row spills every chunk.
+        let mut spilled =
+            SpillableSortPushOperator::with_spilling(vec![SortKey::ascending(1)], manager, 1)
+                .with_output_width(1);
+        let mut sink = CollectorSink::new();
+        for chunk in nodes_with_keys() {
+            spilled.push(chunk, &mut sink).unwrap();
+        }
+        assert!(spilled.external_sort.is_some(), "the rows were spilled");
+        spilled.finalize(&mut sink).unwrap();
+        assert_eq!(node_ids(sink), [8, 9, 7]);
+    }
+
+    /// Spilled runs merge in the same order as an in-memory sort.
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spilled_runs_merge_mixed_values_in_the_same_order() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let manager = Arc::new(SpillManager::new(temp_dir.path()).unwrap());
+        let key = SortKey {
+            column: 0,
+            direction: SortDirection::Descending,
+            null_order: NullOrder::Last,
+        };
+        let mut sort = SpillableSortPushOperator::with_spilling(vec![key], manager, 3);
+        let mut sink = CollectorSink::new();
+        for chunk in mixed_chunks() {
+            sort.push(chunk, &mut sink).unwrap();
+        }
+        sort.finalize(&mut sink).unwrap();
+
+        assert_eq!(first_column_texts(sink), MIXED_DESC_NULLS_LAST);
     }
 
     #[test]

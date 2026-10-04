@@ -233,16 +233,24 @@ pub enum QueryClause {
     Delete(DeleteStatement),
     /// A SET clause.
     Set(SetClause),
+    /// A REMOVE clause.
+    Remove(RemoveClause),
     /// A MERGE clause.
     Merge(MergeClause),
     /// A LET clause (variable bindings).
     Let(Vec<(String, Expression)>),
+    /// A WITH clause: the clauses after it read the rows it passes on.
+    With(WithClause),
     /// An inline CALL { subquery } clause (optional = OPTIONAL CALL { ... }).
     InlineCall {
         /// The inner subquery.
         subquery: QueryStatement,
         /// Whether this is OPTIONAL CALL (left-join semantics).
         optional: bool,
+        /// The variable scope clause, `CALL (a, b) { ... }`: the outer
+        /// variables the subquery sees. `None` without one, when it sees all
+        /// of them.
+        scope: Option<Vec<String>>,
     },
     /// A CALL procedure clause within a query.
     CallProcedure(CallStatement),

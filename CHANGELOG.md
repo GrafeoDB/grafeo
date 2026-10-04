@@ -10,6 +10,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Breaking: the minimum Rust version is 1.99.0** (was 1.91.1).
 - **The deprecated profile names are removed in 0.8.0**, not 0.7.0: `embedded`, `browser`, `server` and `full` (deprecated since 0.5.35) moved with the renumbering above. Use the persona profiles (`lpg`, `rdf`, `analytics`, `ai`, `edge`, `enterprise`).
 - **Rust (`grafeo-engine`): `TransactionState::Committing`**: `TransactionManager::state` reports it while a commit is being completed, between its commit epoch and its WAL records.
+- **Rust (`grafeo-common`): the deprecated `TieredStore` trait is removed**: it was never implemented, and `Section` (`swap_to_mmap`, `reload_to_ram`) with `MemoryConsumer` covers the same lifecycle. `StorageTier` stays.
 
 ### Fixed
 

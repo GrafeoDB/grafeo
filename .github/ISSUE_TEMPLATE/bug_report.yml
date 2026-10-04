@@ -111,7 +111,7 @@ body:
     attributes:
       label: Version
       description: Grafeo version, where you installed it from, and your platform.
-      placeholder: "0.5.43, Python from PyPI, Linux x86_64"
+      placeholder: "0.5.44, Python from PyPI, Linux x86_64"
     validations:
       required: true
 

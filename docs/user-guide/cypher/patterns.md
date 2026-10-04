@@ -84,3 +84,7 @@ MATCH (p:Person)
 OPTIONAL MATCH (p)-[:HAS_PET]->(pet)
 RETURN p.name, pet.name
 ```
+
+A `WHERE` right after an `OPTIONAL MATCH` decides which matches count, also when it reads a variable bound
+before: a row none of whose matches pass it keeps `null`. An `OPTIONAL MATCH` can also start a query (no match
+gives one row of `null`s), and `EXISTS { }` and `COUNT { }` take `OPTIONAL MATCH` clauses.

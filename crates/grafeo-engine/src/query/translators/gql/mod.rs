@@ -9,11 +9,11 @@ mod pattern;
 use std::collections::{HashMap, HashSet};
 
 use super::common::{
-    build_left_join_with_predicates, check_branch_columns, combine_with_and,
-    expand_subquery_return_star, flatten_and_conjuncts, has_all_labels, is_aggregate_function,
-    is_binary_set_function, join_and_conjuncts, optional_join, references_any,
-    to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
-    wrap_sort,
+    build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
+    combine_with_and, expand_subquery_return_star, flatten_and_conjuncts, has_all_labels,
+    is_aggregate_function, is_binary_set_function, join_and_conjuncts, optional_join,
+    references_any, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
+    wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,
@@ -135,27 +135,22 @@ fn return_as_with(plan: LogicalOperator) -> LogicalOperator {
         }
         LogicalOperator::Sort(mut sort) => match *sort.input {
             LogicalOperator::Return(ret) if !ret.distinct => {
-                let aliases: Vec<(String, LogicalExpression)> = ret
-                    .items
-                    .iter()
-                    .filter_map(|item| {
-                        item.alias
-                            .as_ref()
-                            .map(|alias| (alias.clone(), item.expression.clone()))
-                    })
-                    .collect();
-                for key in &mut sort.keys {
-                    let expression = std::mem::replace(
-                        &mut key.expression,
-                        LogicalExpression::Literal(Value::Null),
-                    );
-                    key.expression = GqlTranslator::substitute_let_bindings(expression, &aliases);
+                match keys_before_return(&sort.keys, &ret) {
+                    Some(keys) => {
+                        sort.keys = keys;
+                        sort.input = ret.input;
+                        return_as_with(LogicalOperator::Return(ReturnOp {
+                            input: Box::new(LogicalOperator::Sort(sort)),
+                            ..ret
+                        }))
+                    }
+                    // A key reads an alias that cannot be replaced: order the
+                    // projected rows (the key then reads only what they hold).
+                    None => {
+                        sort.input = Box::new(return_as_with(LogicalOperator::Return(ret)));
+                        LogicalOperator::Sort(sort)
+                    }
                 }
-                sort.input = ret.input;
-                return_as_with(LogicalOperator::Return(ReturnOp {
-                    input: Box::new(LogicalOperator::Sort(sort)),
-                    ..ret
-                }))
             }
             input => {
                 sort.input = Box::new(return_as_with(input));
@@ -176,6 +171,42 @@ fn return_as_with(plan: LogicalOperator) -> LogicalOperator {
         }
         other => other,
     }
+}
+
+/// The sort `keys` of a `RETURN` rewritten to read the `RETURN`'s input: each
+/// alias replaced by its expression (a property of an alias that is a
+/// variable by that variable's property). `None` when a key still reads an
+/// alias, such as one inside a `CASE`, or a property of an alias that is not
+/// a variable.
+fn keys_before_return(keys: &[SortKey], ret: &ReturnOp) -> Option<Vec<SortKey>> {
+    let aliases: Vec<(String, LogicalExpression)> = ret
+        .items
+        .iter()
+        .filter_map(|item| {
+            item.alias
+                .as_ref()
+                .map(|alias| (alias.clone(), item.expression.clone()))
+        })
+        .collect();
+    let input_names = ret.input.bound_variables(None);
+    keys.iter()
+        .map(|key| {
+            let expression =
+                GqlTranslator::substitute_let_bindings(key.expression.clone(), &aliases);
+            let mut read = HashSet::new();
+            collect_expression_variables(&expression, &mut read);
+            let reads_an_alias = read.iter().any(|name| {
+                aliases.iter().any(|(alias, _)| alias == name)
+                    && input_names
+                        .as_ref()
+                        .is_none_or(|names| !names.contains(name))
+            });
+            (!reads_an_alias).then(|| SortKey {
+                expression,
+                ..key.clone()
+            })
+        })
+        .collect()
 }
 
 /// Combines two queries with a set operator, or with `NEXT` (the right one
@@ -1069,6 +1100,18 @@ impl GqlTranslator {
                 }
                 expr
             }
+            // A property of a binding that is a variable reads that
+            // variable's property.
+            LogicalExpression::Property {
+                ref variable,
+                ref property,
+            } => match bindings.iter().find(|(name, _)| name == variable) {
+                Some((_, LogicalExpression::Variable(target))) => LogicalExpression::Property {
+                    variable: target.clone(),
+                    property: property.clone(),
+                },
+                _ => expr,
+            },
             LogicalExpression::Binary { left, op, right } => LogicalExpression::Binary {
                 left: Box::new(Self::substitute_let_bindings(*left, bindings)),
                 op,

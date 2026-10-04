@@ -82,6 +82,25 @@ tests:
         - [Alix]
         - [Gus]
 
+  # ORDER BY a property of an alias: x is the node a.
+  - name: next_after_order_by_on_a_property_of_an_alias
+    query: "MATCH (a:Person) RETURN a AS x ORDER BY x.name LIMIT 2 NEXT RETURN x.name AS n"
+    expect:
+      ordered: true
+      rows:
+        - [Alix]
+        - [Gus]
+
+  # An alias inside a CASE key: Alix (30) and Vincent (35) first, then Gus (25).
+  - name: next_after_order_by_on_an_alias_in_an_expression
+    query: "MATCH (a:Person) RETURN a.name AS n, a.age AS age ORDER BY CASE WHEN age > 26 THEN 0 ELSE 1 END, n NEXT RETURN n"
+    expect:
+      ordered: true
+      rows:
+        - [Alix]
+        - [Vincent]
+        - [Gus]
+
   # Two KNOWS rows with the same company: RETURN DISTINCT * passes one on.
   - name: next_after_return_distinct_star
     query: "MATCH (a:Person)-[:KNOWS]->(b) MATCH (c:Company) WITH c RETURN DISTINCT * NEXT RETURN count(*) AS n"

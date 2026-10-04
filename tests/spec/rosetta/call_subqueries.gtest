@@ -661,3 +661,34 @@ tests:
     expect:
       rows:
         - [8]
+
+  # ---------------------------------------------------------------------------
+  # Writes in the subquery body: DELETE, REMOVE and MERGE (CREATE and SET
+  # already ran); the later MATCH reads what the subquery wrote
+  # ---------------------------------------------------------------------------
+
+  # Alix and Gus live outside Paris: two edges go, Mia's to Paris stays.
+  - name: delete_in_the_body
+    variants:
+      gql: "MATCH (p:Person) CALL (p) { MATCH (p)-[r:LIVES_IN]->(c:City) WHERE c.name <> 'Paris' DELETE r RETURN count(*) AS deleted } WITH sum(deleted) AS total MATCH ()-[r:LIVES_IN]->() RETURN total, count(r) AS remaining"
+      cypher: "MATCH (p:Person) CALL { WITH p MATCH (p)-[r:LIVES_IN]->(c:City) WHERE c.name <> 'Paris' DELETE r RETURN count(*) AS deleted } WITH sum(deleted) AS total MATCH ()-[r:LIVES_IN]->() RETURN total, count(r) AS remaining"
+    expect:
+      rows:
+        - [2, 1]
+
+  # Alix, Gus and Vincent have a w; afterwards nobody has.
+  - name: remove_in_the_body
+    variants:
+      gql: "MATCH (p:Person) CALL (p) { REMOVE p.w RETURN count(*) AS done } WITH sum(done) AS total MATCH (q:Person) RETURN total, count(q.w) AS left"
+      cypher: "MATCH (p:Person) CALL { WITH p REMOVE p.w RETURN count(*) AS done } WITH sum(done) AS total MATCH (q:Person) RETURN total, count(q.w) AS left"
+    expect:
+      rows:
+        - [5, 0]
+
+  # Alix already lives in Amsterdam: the MERGE matches that edge, adds none.
+  - name: merge_in_the_body
+    variants:
+      cypher: "MATCH (p:Person {name: 'Alix'}) CALL { WITH p MERGE (p)-[:LIVES_IN]->(c:City {name: 'Amsterdam'}) RETURN c.name AS city } WITH city MATCH (:Person {name: 'Alix'})-[r:LIVES_IN]->() RETURN city, count(r) AS edges"
+    expect:
+      rows:
+        - [Amsterdam, 1]

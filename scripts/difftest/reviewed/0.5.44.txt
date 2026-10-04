@@ -348,15 +348,15 @@ V6|gql c7df6dd70c A CALL subquery returns its nodes and edges as references, so 
 V7|cypher ddf6a6aac7 A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
 V7|gql ddf6a6aac7 A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
 V8|cypher 10f03920db A Cypher query no longer ends with a CALL subquery that returns rows, as in openCypher.
-W1|gql dead0bcfaf3 A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
+W1|gql ded0bcfaf3 A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
 W2|gql c3a135fc82 A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
 W3|gql c55eb136e9 A WITH in a GQL CALL subquery is an ordinary WITH, so its WHERE filters.
-W4|gql dead0bcfaf3 A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
+W4|gql ded0bcfaf3 A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
 W5|gql c3a135fc82 A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
 W6|gql 1f8ab4f00d A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
 W7|gql 36f86522fe A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
-X1|cypher dead0bcfaf3 Cypher CALL (a) { ... }, CALL (*) { ... } and CALL () { ... } parse.
-X2|cypher dead0bcfaf3 Cypher CALL (a) { ... }, CALL (*) { ... } and CALL () { ... } parse.
+X1|cypher ded0bcfaf3 Cypher CALL (a) { ... }, CALL (*) { ... } and CALL () { ... } parse.
+X2|cypher ded0bcfaf3 Cypher CALL (a) { ... }, CALL (*) { ... } and CALL () { ... } parse.
 X3|cypher c3a135fc82 Cypher CALL (a) { ... }, CALL (*) { ... } and CALL () { ... } parse.
 X4|cypher 1f8ab4f00d Cypher CALL (a) { ... }, CALL (*) { ... } and CALL () { ... } parse.
 X5|cypher c55eb136e9 Cypher CALL (a) { ... }, CALL (*) { ... } and CALL () { ... } parse.

@@ -623,7 +623,8 @@ impl Planner {
     fn count_expand_chain(op: &LogicalOperator) -> (usize, &LogicalOperator) {
         match op {
             LogicalOperator::Expand(expand) => {
-                let is_single_hop = expand.min_hops == 1 && expand.max_hops == Some(1);
+                let is_single_hop =
+                    !expand.quantified && expand.min_hops == 1 && expand.max_hops == Some(1);
 
                 if is_single_hop {
                     let (inner_count, base) = Self::count_expand_chain(&expand.input);
@@ -644,7 +645,8 @@ impl Planner {
         let mut current = op;
 
         while let LogicalOperator::Expand(expand) = current {
-            let is_single_hop = expand.min_hops == 1 && expand.max_hops == Some(1);
+            let is_single_hop =
+                !expand.quantified && expand.min_hops == 1 && expand.max_hops == Some(1);
             if !is_single_hop {
                 break;
             }
@@ -1713,6 +1715,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -1759,6 +1762,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: Some("r".to_string()),
@@ -2705,6 +2709,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -2947,6 +2952,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -2988,6 +2994,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -3031,6 +3038,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -3073,6 +3081,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -3139,6 +3148,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "b".to_string(),
                 to_variable: "c".to_string(),
                 edge_variable: None,
@@ -3147,6 +3157,7 @@ mod tests {
                 min_hops: 1,
                 max_hops: Some(1),
                 input: Box::new(LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: "a".to_string(),
                     to_variable: "b".to_string(),
                     edge_variable: None,
@@ -3673,6 +3684,7 @@ mod tests {
 
         // Register the edge column first via an outgoing expand, then DELETE r.
         let expand_op = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: Some("r".to_string()),
@@ -3843,6 +3855,7 @@ mod tests {
         let store = full_store();
         let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>);
         let ab = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,
@@ -3855,6 +3868,7 @@ mod tests {
             path_mode: PathMode::Walk,
         });
         let bc = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "b".to_string(),
             to_variable: "c".to_string(),
             edge_variable: None,
@@ -3867,6 +3881,7 @@ mod tests {
             path_mode: PathMode::Walk,
         });
         let ca = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "c".to_string(),
             to_variable: "a".to_string(),
             edge_variable: None,
@@ -3893,6 +3908,7 @@ mod tests {
         let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>);
 
         let path = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: Some("r".to_string()),
@@ -3965,6 +3981,7 @@ mod tests {
     fn test_count_expand_chain_variable_length_breaks_chain() {
         // A variable-length expand (not single-hop) should NOT count in the chain.
         let var_expand = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,

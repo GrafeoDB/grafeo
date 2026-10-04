@@ -1336,6 +1336,42 @@ impl ExpressionPredicate {
         }
     }
 
+    /// The properties of the node or edge the variable's column holds at
+    /// `row`. An edge column holds edges and a node column nodes; an untyped
+    /// column holding raw IDs holds a node when one has the ID, otherwise an
+    /// edge. `None` for a value that is neither.
+    fn element_properties(
+        &self,
+        variable: &str,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<Vec<(PropertyKey, Value)>> {
+        let column = chunk.column(*self.variable_columns.get(variable)?)?;
+        let node = || {
+            let node = self.resolve_node(column.get_node_id(row)?)?;
+            Some(
+                node.properties
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            )
+        };
+        let edge = || {
+            let edge = self.resolve_edge(column.get_edge_id(row)?)?;
+            Some(
+                edge.properties
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            )
+        };
+        match column.data_type() {
+            LogicalType::Edge => edge(),
+            LogicalType::Node => node(),
+            _ => node().or_else(edge),
+        }
+    }
+
     /// What one item taken from a list refers to: `list[i]`, `head(list)`
     /// and `last(list)` are nodes or edges when the items of `list` are.
     fn element_kind(&self, expr: &FilterExpression, chunk: &DataChunk) -> ItemKind {
@@ -2152,30 +2188,15 @@ impl ExpressionPredicate {
                 // keys(n) or keys(r) on a node or edge variable: the property
                 // keys from the store, sorted (as `properties` and map keys
                 // are), so their order does not depend on how they are stored
-                if let FilterExpression::Variable(var) = &args[0] {
-                    let col_idx = *self.variable_columns.get(var)?;
-                    let col = chunk.column(col_idx)?;
-                    let key_list = |mut keys: Vec<Value>| {
-                        keys.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-                        Some(Value::List(keys.into()))
-                    };
-                    if let Some(node_id) = col.get_node_id(row) {
-                        let node = self.resolve_node(node_id)?;
-                        return key_list(
-                            node.properties
-                                .iter()
-                                .map(|(k, _)| Value::String(k.as_str().into()))
-                                .collect(),
-                        );
-                    } else if let Some(edge_id) = col.get_edge_id(row) {
-                        let edge = self.resolve_edge(edge_id)?;
-                        return key_list(
-                            edge.properties
-                                .iter()
-                                .map(|(k, _)| Value::String(k.as_str().into()))
-                                .collect(),
-                        );
-                    }
+                if let FilterExpression::Variable(var) = &args[0]
+                    && let Some(properties) = self.element_properties(var, chunk, row)
+                {
+                    let mut keys: Vec<Value> = properties
+                        .into_iter()
+                        .map(|(k, _)| Value::String(k.as_str().into()))
+                        .collect();
+                    keys.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+                    return Some(Value::List(keys.into()));
                 }
                 // keys(map) on a map value
                 let val = self.eval_expr(&args[0], chunk, row)?;
@@ -2195,25 +2216,11 @@ impl ExpressionPredicate {
                     return None;
                 }
                 if let FilterExpression::Variable(var) = &args[0] {
-                    let col_idx = *self.variable_columns.get(var)?;
-                    let col = chunk.column(col_idx)?;
-                    if let Some(node_id) = col.get_node_id(row) {
-                        let node = self.resolve_node(node_id)?;
-                        let map: std::collections::BTreeMap<PropertyKey, Value> = node
-                            .properties
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        return Some(Value::Map(Arc::new(map)));
-                    } else if let Some(edge_id) = col.get_edge_id(row) {
-                        let edge = self.resolve_edge(edge_id)?;
-                        let map: std::collections::BTreeMap<PropertyKey, Value> = edge
-                            .properties
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        return Some(Value::Map(Arc::new(map)));
-                    }
+                    let map: std::collections::BTreeMap<PropertyKey, Value> = self
+                        .element_properties(var, chunk, row)?
+                        .into_iter()
+                        .collect();
+                    return Some(Value::Map(Arc::new(map)));
                 }
                 None
             }
@@ -2224,19 +2231,12 @@ impl ExpressionPredicate {
                     return None;
                 }
                 if let FilterExpression::Variable(var) = &args[0] {
-                    let col_idx = *self.variable_columns.get(var)?;
-                    let col = chunk.column(col_idx)?;
-                    if let Some(node_id) = col.get_node_id(row) {
-                        let node = self.resolve_node(node_id)?;
-                        let vals: Vec<Value> =
-                            node.properties.iter().map(|(_, v)| v.clone()).collect();
-                        return Some(Value::List(vals.into()));
-                    } else if let Some(edge_id) = col.get_edge_id(row) {
-                        let edge = self.resolve_edge(edge_id)?;
-                        let vals: Vec<Value> =
-                            edge.properties.iter().map(|(_, v)| v.clone()).collect();
-                        return Some(Value::List(vals.into()));
-                    }
+                    let values: Vec<Value> = self
+                        .element_properties(var, chunk, row)?
+                        .into_iter()
+                        .map(|(_, v)| v)
+                        .collect();
+                    return Some(Value::List(values.into()));
                 }
                 None
             }
@@ -6883,6 +6883,69 @@ mod text_fn_tests {
             !predicate.evaluate(&chunk, 1),
             "n2 should score 0 for 'rust database'"
         );
+    }
+
+    /// `keys()`, `properties()` and `property_values()` read the entity the
+    /// column holds: an edge column reads the edge even when a node has the
+    /// same ID, and an untyped column holding a raw ID reads the edge when no
+    /// node has that ID (it used to stop at the missing node).
+    #[test]
+    fn element_functions_read_the_entity_the_column_holds() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Person"]);
+        store.set_node_property(alix, "name", Value::from("Alix"));
+        let gus = store.create_node(&["Person"]);
+        // Edge 0 has the ID of node 0 (Alix); edge 2 has no node of its ID.
+        let first = store.create_edge(alix, gus, "KNOWS");
+        store.set_edge_property(first, "since", Value::Int64(2010));
+        store.create_edge(gus, alix, "KNOWS");
+        let third = store.create_edge(alix, alix, "KNOWS");
+        store.set_edge_property(third, "w", Value::Int64(3));
+
+        let eval = |column: ValueVector, function: &str| {
+            let predicate = ExpressionPredicate::new(
+                FilterExpression::FunctionCall {
+                    name: function.to_string(),
+                    args: vec![FilterExpression::Variable("r".to_string())],
+                },
+                HashMap::from([("r".to_string(), 0)]),
+                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            );
+            predicate.eval(&DataChunk::new(vec![column]), 0)
+        };
+        let keys = |names: &[&str]| {
+            Some(Value::List(
+                names
+                    .iter()
+                    .map(|name| Value::from(*name))
+                    .collect::<Vec<_>>()
+                    .into(),
+            ))
+        };
+
+        let mut typed = ValueVector::with_capacity(LogicalType::Edge, 1);
+        typed.push_edge_id(first);
+        assert_eq!(eval(typed.clone(), "keys"), keys(&["since"]));
+        assert_eq!(
+            eval(typed.clone(), "property_values"),
+            Some(Value::List(vec![Value::Int64(2010)].into()))
+        );
+        let Some(Value::Map(map)) = eval(typed, "properties") else {
+            panic!("expected a map");
+        };
+        assert_eq!(
+            map.get(&PropertyKey::new("since")),
+            Some(&Value::Int64(2010))
+        );
+        assert_eq!(map.len(), 1);
+
+        let mut untyped = ValueVector::with_capacity(LogicalType::Any, 1);
+        untyped.push_value(Value::Int64(i64::try_from(third.as_u64()).unwrap()));
+        assert_eq!(eval(untyped, "keys"), keys(&["w"]));
+
+        let mut node = ValueVector::with_capacity(LogicalType::Node, 1);
+        node.push_node_id(alix);
+        assert_eq!(eval(node, "keys"), keys(&["name"]));
     }
 
     #[test]

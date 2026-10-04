@@ -1525,7 +1525,8 @@ fn binding_kind(op: &LogicalOperator, variable: &str) -> Option<BindingKind> {
             }
             if expand.edge_variable.as_deref() == Some(variable) {
                 // A variable-length expand binds a list of edges.
-                let single_hop = expand.min_hops == 1 && expand.max_hops == Some(1);
+                let single_hop =
+                    !expand.quantified && expand.min_hops == 1 && expand.max_hops == Some(1);
                 return single_hop.then_some(BindingKind::Edge);
             }
             if expand.path_alias.as_deref() == Some(variable) {

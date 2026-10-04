@@ -845,6 +845,7 @@ impl GraphQLTranslator {
 
         // The field name is the edge type: preserve original case to match how edges are stored
         let mut plan = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: from_var.to_string(),
             to_variable: to_var.clone(),
             edge_variable: None,

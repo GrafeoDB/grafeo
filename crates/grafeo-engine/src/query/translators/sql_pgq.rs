@@ -682,6 +682,7 @@ impl SqlPgqTranslator {
         };
 
         let expand = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable,
             to_variable: to_variable.clone(),
             edge_variable,

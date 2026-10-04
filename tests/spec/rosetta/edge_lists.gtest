@@ -1,0 +1,84 @@
+# Rosetta: the edge list of a variable-length pattern
+#
+# A quantified edge pattern binds its variable to the list of the path's
+# edges, also when the quantifier allows one hop only (Cypher `*1`, `*1..1`,
+# GQL `{1,1}`): it used to bind a single edge there, so size(), head() and
+# list functions read null. An item taken from such a list stays an edge,
+# also through collect().
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): KNOWS
+# Alix->Gus (w 1), Gus->Vincent (w 2), Vincent->Alix (w 3), Jules->Mia (w 4)
+# and Alix->Jules (w 5).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: The edge list of a variable-length pattern
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  - name: a_one_hop_quantifier_binds_a_list
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS]->{1,1}(b) RETURN b.name AS b, size(rs) AS n"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS*1..1]->(b) RETURN b.name AS b, size(rs) AS n"
+    expect:
+      rows:
+        - [Gus, 1]
+        - [Jules, 1]
+
+  - name: a_single_hop_count_binds_a_list
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS*1]->(b) RETURN b.name AS b, size(rs) AS n"
+    expect:
+      rows:
+        - [Gus, 1]
+        - [Jules, 1]
+
+  - name: the_list_of_a_one_hop_quantifier_in_where
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS]->{1,1}(b) WHERE size(rs) = 1 RETURN b.name AS b"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS*1..1]->(b) WHERE size(rs) = 1 RETURN b.name AS b"
+    expect:
+      rows:
+        - [Jules]
+        - [Gus]
+
+  - name: the_list_of_a_one_hop_quantifier_through_with
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS]->{1,1}(b) WITH b, size(rs) AS n RETURN b.name AS b, n"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS*1..1]->(b) WITH b, size(rs) AS n RETURN b.name AS b, n"
+    expect:
+      rows:
+        - [Gus, 1]
+        - [Jules, 1]
+
+  - name: collected_first_edges_stay_edges
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS]->{1,2}(b) WITH collect(head(rs)) AS es UNWIND es AS e RETURN type(e) AS t, e.w AS w"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS*1..2]->(b) WITH collect(head(rs)) AS es UNWIND es AS e RETURN type(e) AS t, e.w AS w"
+    expect:
+      rows:
+        - [KNOWS, 1]
+        - [KNOWS, 1]
+        - [KNOWS, 5]
+        - [KNOWS, 5]
+
+  - name: collected_last_relationships_stay_edges
+    variants:
+      gql: "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->(b) WITH collect(last(relationships(p))) AS es UNWIND es AS e RETURN type(e) AS t, e.w AS w"
+      cypher: "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->(b) WITH collect(last(relationships(p))) AS es UNWIND es AS e RETURN type(e) AS t, e.w AS w"
+    expect:
+      rows:
+        - [KNOWS, 1]
+        - [KNOWS, 5]
+
+  - name: a_plain_edge_is_still_an_edge
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN type(r) AS t, r.w AS w"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN type(r) AS t, r.w AS w"
+    expect:
+      rows:
+        - [KNOWS, 1]
+        - [KNOWS, 5]

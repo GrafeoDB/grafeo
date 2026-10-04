@@ -230,8 +230,15 @@ impl super::Planner {
         // Add aggregate result columns
         for agg_expr in &agg.aggregates {
             let collected = match (agg_expr.function, &agg_expr.expression) {
-                (LogicalAggregateFunction::Collect, Some(LogicalExpression::Variable(name))) => {
-                    match self.column_entity(name) {
+                // The list of what `collect` gathers keeps its kind: a node or
+                // edge column, or an expression that yields one (`head(rs)`,
+                // `last(relationships(p))`).
+                (LogicalAggregateFunction::Collect, Some(expression)) => {
+                    let item = match expression {
+                        LogicalExpression::Variable(name) => self.column_entity(name),
+                        other => self.entity_value(other),
+                    };
+                    match item {
                         Some(EntityValue::Node) => Some(EntityValue::Nodes),
                         Some(EntityValue::Edge) => Some(EntityValue::Edges),
                         _ => None,

@@ -1603,6 +1603,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: Some("e".to_string()),
@@ -1645,6 +1646,7 @@ mod tests {
             }],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "undefined".to_string(), // not defined!
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -2525,6 +2527,7 @@ mod tests {
             }],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "x".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -4502,6 +4505,7 @@ mod tests {
         use crate::query::plan::{ExpandDirection, ExpandOp, PathMode};
 
         let plan = LogicalPlan::new(LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,

@@ -874,6 +874,7 @@ impl CypherTranslator {
         };
 
         let expand = LogicalOperator::Expand(ExpandOp {
+            quantified: rel.length.is_some(),
             from_variable,
             to_variable: expand_target.clone(),
             edge_variable,
@@ -1009,8 +1010,10 @@ impl CypherTranslator {
             .any(|item| contains_aggregate(&item.expression));
 
         let mut plan = if has_aggregates {
-            let (aggregates, group_by, post_return) =
+            let (mut aggregates, mut group_by, post_return) =
                 self.extract_aggregates_and_groups_from_items(&with_clause.items)?;
+            let input =
+                self.lift_aggregate_pattern_comprehensions(input, &mut aggregates, &mut group_by)?;
 
             let agg_op = LogicalOperator::Aggregate(AggregateOp {
                 group_by,
@@ -1047,7 +1050,13 @@ impl CypherTranslator {
                 })
                 .collect::<Result<_>>()?;
 
-            // Rewrite pattern comprehensions into Apply + Aggregate(Collect)
+            // Rewrite pattern comprehensions into Apply + Aggregate(Collect):
+            // the ones inside an expression here, the item ones below.
+            let mut projections = projections;
+            let input = self.lift_nested_pattern_comprehensions(
+                input,
+                projections.iter_mut().map(|p| &mut p.expression),
+            )?;
             let has_pattern_comp = projections.iter().any(|p| {
                 matches!(
                     &p.expression,
@@ -1397,8 +1406,10 @@ impl CypherTranslator {
             };
             // With aliases (e.g. `n.city AS city`) the post-Return renames the
             // columns, which ORDER BY alias resolution and result naming need.
-            let (aggregates, group_by, post_return) =
+            let (mut aggregates, mut group_by, post_return) =
                 self.extract_aggregates_and_groups_from_items(items)?;
+            let input =
+                self.lift_aggregate_pattern_comprehensions(input, &mut aggregates, &mut group_by)?;
 
             // Register aggregate output column names so ORDER BY can
             // reference them. Group-by columns use expression_to_string
@@ -1460,7 +1471,13 @@ impl CypherTranslator {
                     .collect::<Result<_>>()?,
             };
 
-            // Rewrite pattern comprehensions into Apply + Aggregate(Collect)
+            // Rewrite pattern comprehensions into Apply + Aggregate(Collect):
+            // the ones inside an expression here, the item ones below.
+            let mut items = items;
+            let input = self.lift_nested_pattern_comprehensions(
+                input,
+                items.iter_mut().map(|item| &mut item.expression),
+            )?;
             let has_pattern_comp = items.iter().any(|item| {
                 matches!(
                     &item.expression,
@@ -2545,6 +2562,131 @@ impl CypherTranslator {
                 LogicalOperator::Filter(filter)
             }
             other => other,
+        }
+    }
+
+    /// Rewrites the pattern comprehensions in the arguments and group keys of
+    /// an aggregation into `Apply`s over its input (see
+    /// [`rewrite_pattern_comprehensions`](Self::rewrite_pattern_comprehensions)),
+    /// so `sum(size([(b)-->(c) | c]))` aggregates their lists.
+    fn lift_aggregate_pattern_comprehensions(
+        &self,
+        input: LogicalOperator,
+        aggregates: &mut [AggregateExpr],
+        group_by: &mut [LogicalExpression],
+    ) -> Result<LogicalOperator> {
+        let expressions = aggregates
+            .iter_mut()
+            .flat_map(|aggregate| {
+                [&mut aggregate.expression, &mut aggregate.expression2]
+                    .into_iter()
+                    .flatten()
+            })
+            .chain(group_by.iter_mut());
+        let mut lifted = Vec::new();
+        for expression in expressions {
+            self.take_pattern_comprehensions(expression, &mut lifted);
+        }
+        if lifted.is_empty() {
+            return Ok(input);
+        }
+        Ok(self.rewrite_pattern_comprehensions(input, lifted)?.0)
+    }
+
+    /// Rewrites the pattern comprehensions nested inside `expressions` (not
+    /// one that is a whole expression, which the item rewrite handles) into
+    /// `Apply`s over `input`.
+    fn lift_nested_pattern_comprehensions<'e>(
+        &self,
+        input: LogicalOperator,
+        expressions: impl Iterator<Item = &'e mut LogicalExpression>,
+    ) -> Result<LogicalOperator> {
+        let mut lifted = Vec::new();
+        for expression in expressions {
+            if !matches!(expression, LogicalExpression::PatternComprehension { .. }) {
+                self.take_pattern_comprehensions(expression, &mut lifted);
+            }
+        }
+        if lifted.is_empty() {
+            return Ok(input);
+        }
+        Ok(self.rewrite_pattern_comprehensions(input, lifted)?.0)
+    }
+
+    /// Replaces each pattern comprehension in `expression` with a variable of
+    /// its own and adds it to `lifted` as an item that collects into that
+    /// variable. Comprehension and predicate bodies are left alone: they can
+    /// read their own iteration variable.
+    fn take_pattern_comprehensions(
+        &self,
+        expression: &mut LogicalExpression,
+        lifted: &mut Vec<ReturnItem>,
+    ) {
+        match expression {
+            LogicalExpression::PatternComprehension { .. } => {
+                let alias = self.next_anon_var();
+                let comprehension =
+                    std::mem::replace(expression, LogicalExpression::Variable(alias.clone()));
+                lifted.push(ReturnItem {
+                    expression: comprehension,
+                    alias: Some(alias),
+                });
+            }
+            LogicalExpression::Binary { left, right, .. } => {
+                self.take_pattern_comprehensions(left, lifted);
+                self.take_pattern_comprehensions(right, lifted);
+            }
+            LogicalExpression::Unary { operand, .. } => {
+                self.take_pattern_comprehensions(operand, lifted);
+            }
+            LogicalExpression::FunctionCall { args, .. } | LogicalExpression::List(args) => {
+                for arg in args {
+                    self.take_pattern_comprehensions(arg, lifted);
+                }
+            }
+            LogicalExpression::Map(entries) => {
+                for (_, value) in entries {
+                    self.take_pattern_comprehensions(value, lifted);
+                }
+            }
+            LogicalExpression::IndexAccess { base, index } => {
+                self.take_pattern_comprehensions(base, lifted);
+                self.take_pattern_comprehensions(index, lifted);
+            }
+            LogicalExpression::MapAccess { base, .. } => {
+                self.take_pattern_comprehensions(base, lifted);
+            }
+            LogicalExpression::SliceAccess { base, start, end } => {
+                self.take_pattern_comprehensions(base, lifted);
+                for bound in [start, end].into_iter().flatten() {
+                    self.take_pattern_comprehensions(bound, lifted);
+                }
+            }
+            LogicalExpression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => {
+                if let Some(operand) = operand {
+                    self.take_pattern_comprehensions(operand, lifted);
+                }
+                for (condition, result) in when_clauses {
+                    self.take_pattern_comprehensions(condition, lifted);
+                    self.take_pattern_comprehensions(result, lifted);
+                }
+                if let Some(else_clause) = else_clause {
+                    self.take_pattern_comprehensions(else_clause, lifted);
+                }
+            }
+            LogicalExpression::ListComprehension { list_expr, .. }
+            | LogicalExpression::ListPredicate { list_expr, .. } => {
+                self.take_pattern_comprehensions(list_expr, lifted);
+            }
+            LogicalExpression::Reduce { initial, list, .. } => {
+                self.take_pattern_comprehensions(initial, lifted);
+                self.take_pattern_comprehensions(list, lifted);
+            }
+            _ => {}
         }
     }
 

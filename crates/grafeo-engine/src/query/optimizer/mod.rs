@@ -1660,6 +1660,7 @@ mod tests {
                 },
                 pushdown_hint: None,
                 input: Box::new(LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: "a".to_string(),
                     to_variable: "b".to_string(),
                     edge_variable: None,
@@ -1718,6 +1719,7 @@ mod tests {
                 },
                 pushdown_hint: None,
                 input: Box::new(LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: "a".to_string(),
                     to_variable: "b".to_string(),
                     edge_variable: None,

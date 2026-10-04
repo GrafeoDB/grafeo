@@ -315,7 +315,7 @@ impl super::Planner {
                 if expand.min_hops != 1 || source.input.is_some() {
                     return Err(unsupported());
                 }
-                let one_edge = expand.max_hops == Some(1);
+                let one_edge = expand.max_hops == Some(1) && !expand.quantified;
                 // A path mode other than WALK (TRAIL, SIMPLE, ACYCLIC) limits the
                 // paths of a longer pattern, which the check does not; a single
                 // edge is expanded the same way in every mode.

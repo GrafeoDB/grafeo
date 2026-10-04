@@ -532,4 +532,14 @@ for case_id, query in [
 ]:
     case(case_id, query, GQL)
 
+# AA: one-hop quantifiers bind a list, collected list items stay edges, pattern comprehensions in aggregates
+for case_id, query, languages in [
+    ("AA1", "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS*1..1]->(b) RETURN b.name AS b, size(rs) AS n", CYPHER),
+    ("AA2", "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS]->{1,1}(b) RETURN b.name AS b, size(rs) AS n", GQL),
+    ("AA3", "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->(b) WITH collect(last(relationships(p))) AS es UNWIND es AS e RETURN e.w AS w", BOTH),
+    ("AA4", "MATCH (a:Person) RETURN sum(size([(a)-[:KNOWS]->(b) | b])) AS n", CYPHER),
+    ("AA5", "MATCH (a:Person) RETURN a.name AS a, size([(a)-[:KNOWS]->(b) | b]) AS n", CYPHER),
+]:
+    case(case_id, query, languages)
+
 # fmt: on

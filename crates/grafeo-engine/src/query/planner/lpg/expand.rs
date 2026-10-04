@@ -34,8 +34,10 @@ impl super::Planner {
         };
 
         // Check if this is a variable-length path
-        let is_variable_length =
-            expand.min_hops != 1 || expand.max_hops.is_none() || expand.max_hops != Some(1);
+        let is_variable_length = expand.quantified
+            || expand.min_hops != 1
+            || expand.max_hops.is_none()
+            || expand.max_hops != Some(1);
 
         // Use VariableLengthExpandOperator when multi-hop OR when a named path
         // needs path detail columns (length, nodes, edges)

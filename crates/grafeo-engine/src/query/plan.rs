@@ -1413,6 +1413,9 @@ pub struct ExpandOp {
     pub path_alias: Option<String>,
     /// Path traversal mode (WALK, TRAIL, SIMPLE, ACYCLIC).
     pub path_mode: PathMode,
+    /// Whether the pattern has a quantifier (`*1..1`, `{1,1}`): its edge
+    /// variable then binds the list of the path's edges, also for one hop.
+    pub quantified: bool,
 }
 
 /// Direction for edge expansion.
@@ -3027,6 +3030,7 @@ mod tests {
                     right: Box::new(LogicalExpression::Literal(Value::Int64(30))),
                 },
                 input: Box::new(LogicalOperator::Expand(ExpandOp {
+                    quantified: false,
                     from_variable: "a".into(),
                     to_variable: "b".into(),
                     edge_variable: None,
@@ -3729,6 +3733,7 @@ mod tests {
         assert_eq!(edge_scan_any.display_label(), "e:*");
 
         let expand = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".into(),
             to_variable: "b".into(),
             edge_variable: None,
@@ -3743,6 +3748,7 @@ mod tests {
         assert_eq!(expand.display_label(), "(a)->[:KNOWS]->(b)");
 
         let expand_in = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".into(),
             to_variable: "b".into(),
             edge_variable: None,
@@ -3757,6 +3763,7 @@ mod tests {
         assert_eq!(expand_in.display_label(), "(a)<-[:*]<-(b)");
 
         let expand_both = LogicalOperator::Expand(ExpandOp {
+            quantified: false,
             from_variable: "a".into(),
             to_variable: "b".into(),
             edge_variable: None,
@@ -4136,6 +4143,7 @@ mod tests {
     fn explain_tree_expand_variants() {
         let mk = |min, max, dir| {
             LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".into(),
                 to_variable: "b".into(),
                 edge_variable: None,

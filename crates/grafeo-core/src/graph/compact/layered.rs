@@ -1,6 +1,6 @@
 //! Two-layer graph store: read-only columnar base + mutable LPG overlay.
 //!
-//! `LayeredStore` coordinates reads between a [`CompactStore`](crate::graph::compact::CompactStore) (cold, columnar)
+//! `LayeredStore` coordinates reads between a [`CompactStore`] (cold, columnar)
 //! and an [`LpgStore`](crate::graph::lpg::LpgStore) (hot, HashMap-based). All writes go to the overlay.
 //! Reads check the overlay first and fall through to the compact base for
 //! unmodified entities.

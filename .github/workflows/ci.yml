@@ -490,11 +490,11 @@ jobs:
   miri:
     name: Miri UB Check
     runs-on: ubuntu-latest
-    # Pin nightly due to cargo regression in nightly-2026-02-12+
-    # See: https://github.com/rust-lang/miri/issues/4855
-    # Remove pin once rust-lang/cargo#16631 lands in nightly
+    # Pinned nightly, so a Miri change cannot break CI unannounced. Cargo refuses a
+    # toolchain older than `rust-version`, so the nightly's rustc must be at least
+    # the MSRV: bump this pin together with `rust-version` in Cargo.toml.
     env:
-      NIGHTLY: nightly-2026-02-11
+      NIGHTLY: nightly-2026-10-03
     steps:
       - uses: actions/checkout@v7
 

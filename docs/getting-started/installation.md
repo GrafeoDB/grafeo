@@ -194,7 +194,7 @@ grafeo = { version = "0.5", features = ["embed"] }
 | `enterprise` | All features | Full-featured deployments |
 
 !!! note "Deprecated profiles"
-    The old deployment-target profiles (`embedded`, `browser`, `server`, `full`) still work as aliases but are deprecated and scheduled for removal in 0.7.0. Migrate to persona profiles when convenient.
+    The old deployment-target profiles (`embedded`, `browser`, `server`, `full`) still work as aliases but are deprecated and scheduled for removal in 0.8.0. Migrate to persona profiles when convenient.
 
 #### Convenience Groups
 

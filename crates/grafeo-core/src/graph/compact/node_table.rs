@@ -6,7 +6,7 @@
 use grafeo_common::types::{NodeId, PropertyKey, Value};
 use grafeo_common::utils::hash::FxHashMap;
 
-use super::column::ColumnCodec;
+use super::column::CompactColumn;
 use super::id::encode_node_id;
 use super::schema::TableSchema;
 use super::zone_map::ZoneMap;
@@ -14,14 +14,14 @@ use super::zone_map::ZoneMap;
 /// Per-label columnar storage for nodes.
 ///
 /// All nodes sharing a label are stored in a single `NodeTable` with one
-/// [`ColumnCodec`] per property. Row offsets are combined with the table ID
+/// [`CompactColumn`] per property. Row offsets are combined with the table ID
 /// via [`encode_node_id`] to produce globally unique [`NodeId`] values.
 #[derive(Debug)]
 pub struct NodeTable {
     /// Schema describing the label, table ID, and column definitions.
     schema: TableSchema,
     /// Columns keyed by property name.
-    columns: FxHashMap<PropertyKey, ColumnCodec>,
+    columns: FxHashMap<PropertyKey, CompactColumn>,
     /// Per-column min/max statistics for predicate pushdown.
     zone_maps: FxHashMap<PropertyKey, ZoneMap>,
     /// Per-block min/max statistics, one entry per logical block in each
@@ -51,7 +51,7 @@ impl NodeTable {
     #[must_use]
     pub fn from_columns(
         schema: TableSchema,
-        columns: FxHashMap<PropertyKey, ColumnCodec>,
+        columns: FxHashMap<PropertyKey, CompactColumn>,
         zone_maps: FxHashMap<PropertyKey, ZoneMap>,
         len: usize,
     ) -> Self {
@@ -63,7 +63,7 @@ impl NodeTable {
     #[must_use]
     pub fn from_columns_with_block_stats(
         schema: TableSchema,
-        columns: FxHashMap<PropertyKey, ColumnCodec>,
+        columns: FxHashMap<PropertyKey, CompactColumn>,
         zone_maps: FxHashMap<PropertyKey, ZoneMap>,
         block_zone_maps: FxHashMap<PropertyKey, Vec<ZoneMap>>,
         len: usize,
@@ -141,7 +141,7 @@ impl NodeTable {
     ///
     /// This is primarily useful for foreign-key columns where the raw encoded ID
     /// is needed rather than the `Value::Int64` conversion. Returns `None` for
-    /// non-[`BitPacked`](ColumnCodec::BitPacked) columns or out-of-bounds offsets.
+    /// non-[`BitPacked`](super::column::ColumnCodec::BitPacked) columns or out-of-bounds offsets.
     #[must_use]
     pub fn get_raw_u64(&self, offset: usize, key: &PropertyKey) -> Option<u64> {
         self.columns.get(key)?.get_raw_u64(offset)
@@ -155,7 +155,7 @@ impl NodeTable {
 
     /// Returns the column codec for a property, if it exists.
     #[must_use]
-    pub fn column(&self, key: &PropertyKey) -> Option<&ColumnCodec> {
+    pub fn column(&self, key: &PropertyKey) -> Option<&CompactColumn> {
         self.columns.get(key)
     }
 
@@ -167,7 +167,7 @@ impl NodeTable {
 
     /// Returns all columns (for serialization).
     #[must_use]
-    pub fn columns(&self) -> &FxHashMap<PropertyKey, ColumnCodec> {
+    pub fn columns(&self) -> &FxHashMap<PropertyKey, CompactColumn> {
         &self.columns
     }
 
@@ -203,6 +203,7 @@ impl NodeTable {
 mod tests {
     use super::*;
     use crate::codec::BitPackedInts;
+    use crate::graph::compact::column::ColumnCodec;
     use crate::graph::compact::id::decode_node_id;
     use crate::graph::compact::schema::{ColumnDef, ColumnType};
 
@@ -224,11 +225,11 @@ mod tests {
         let mut columns = FxHashMap::default();
         columns.insert(
             PropertyKey::new("rating"),
-            ColumnCodec::BitPacked(BitPackedInts::pack(&ratings)),
+            ColumnCodec::BitPacked(BitPackedInts::pack(&ratings)).into(),
         );
         columns.insert(
             PropertyKey::new("count"),
-            ColumnCodec::BitPacked(BitPackedInts::pack(&counts)),
+            ColumnCodec::BitPacked(BitPackedInts::pack(&counts)).into(),
         );
 
         let mut zone_maps = FxHashMap::default();

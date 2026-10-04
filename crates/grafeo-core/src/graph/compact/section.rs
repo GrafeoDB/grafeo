@@ -13,7 +13,7 @@ use grafeo_common::utils::hash::FxHashMap;
 use parking_lot::RwLock;
 
 use super::CompactStore;
-use super::column::ColumnCodec;
+use super::column::{ColumnCodec, CompactColumn};
 use super::csr::CsrAdjacency;
 use super::node_table::NodeTable;
 use super::rel_table::RelTable;
@@ -25,9 +25,15 @@ use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
 /// Magic bytes identifying a CompactStore section.
 const MAGIC: [u8; 4] = *b"GCST";
 
-/// Current section format version. Phase 2c bumped this from 2 to 3 to
-/// embed per-block zone maps in the column index for skip pruning.
-const FORMAT_VERSION: u8 = 3;
+/// Current section format version: v3 plus, after each column body, which
+/// rows have a value (#542). Phase 2c bumped 2 to 3 to embed per-block zone
+/// maps in the column index for skip pruning.
+const FORMAT_VERSION: u8 = 4;
+
+/// v3 layout: per-block index with per-block stats, every row has a value.
+/// Retained as a read-only compat path; files written by 0.5.42 to 0.5.44
+/// carry this byte (their missing properties already hold empty values).
+const FORMAT_VERSION_V3: u8 = 3;
 
 /// v2 (Phase 2b) layout: per-block index + bodies, no per-block stats.
 /// Retained as a read-only compat path for one release.
@@ -139,7 +145,7 @@ impl CompactStoreSection {
                 } else {
                     buf.push(0);
                 }
-                write_codec(
+                write_column(
                     codec,
                     &mut buf,
                     version,
@@ -165,9 +171,14 @@ impl CompactStoreSection {
             write_len(&mut buf, properties.len())?;
             for (key, codec) in properties {
                 write_str(&mut buf, key.as_str())?;
-                // Edge property columns don't track per-block zone maps
-                // yet; v3 will compute them inline during write.
-                write_codec(codec, &mut buf, version, None)?;
+                // Edge property columns don't keep per-block zone maps; v3+
+                // computes them during write, from the column when some rows
+                // have no value (the codec alone would count their empty
+                // values).
+                let block_stats = codec
+                    .present()
+                    .map(|_| super::zone_map::compute_block_zone_maps(codec));
+                write_column(codec, &mut buf, version, block_stats.as_deref())?;
             }
         }
         // Continue building buf in `serialize()` epilogue.
@@ -231,6 +242,21 @@ fn write_codec(
     }
 }
 
+/// Writes a column: its codec body (see [`write_codec`]) and, from v4, which
+/// rows have a value.
+fn write_column(
+    column: &CompactColumn,
+    buf: &mut Vec<u8>,
+    version: u8,
+    block_stats_hint: Option<&[ZoneMap]>,
+) -> grafeo_common::utils::error::Result<()> {
+    write_codec(column.codec(), buf, version, block_stats_hint)?;
+    if version >= FORMAT_VERSION {
+        column.write_present(buf)?;
+    }
+    Ok(())
+}
+
 impl Section for CompactStoreSection {
     fn section_type(&self) -> SectionType {
         SectionType::CompactStore
@@ -287,11 +313,40 @@ fn read_codec(
         FORMAT_VERSION_V2 => ColumnCodec::read_from_v2(data, pos)
             .map(|c| (c, None))
             .map_err(|e| e.to_string()),
-        FORMAT_VERSION => ColumnCodec::read_from_v3(data, pos)
+        FORMAT_VERSION_V3 | FORMAT_VERSION => ColumnCodec::read_from_v3(data, pos)
             .map(|(c, stats)| (c, Some(stats)))
             .map_err(|e| e.to_string()),
         _ => Err(format!("unsupported CompactStore version {version}")),
     }
+}
+
+/// Reads a column: its codec body (see [`read_codec`]) and, from v4, which
+/// rows have a value. Before v4 every row has one.
+fn read_column(
+    data: &Bytes,
+    pos: &mut usize,
+    version: u8,
+) -> Result<(CompactColumn, Option<Vec<ZoneMap>>), String> {
+    let (codec, block_stats) = read_codec(data, pos, version)?;
+    let present = if version >= FORMAT_VERSION {
+        CompactColumn::read_present(data, pos).map_err(str::to_string)?
+    } else {
+        None
+    };
+    let column = match present {
+        Some(present) if present.len() == codec.len() => {
+            CompactColumn::with_present(codec, present)
+        }
+        Some(present) => {
+            return Err(format!(
+                "column presence has {} rows, the column {}",
+                present.len(),
+                codec.len()
+            ));
+        }
+        None => CompactColumn::new(codec),
+    };
+    Ok((column, block_stats))
 }
 
 fn deserialize_compact_store(data_bytes: &bytes::Bytes) -> Result<CompactStore, String> {
@@ -324,9 +379,16 @@ fn deserialize_compact_store(data_bytes: &bytes::Bytes) -> Result<CompactStore, 
     pos += 4;
     let version = data[pos];
     pos += 1;
-    if version != FORMAT_VERSION && version != FORMAT_VERSION_V2 && version != FORMAT_VERSION_V1 {
+    if ![
+        FORMAT_VERSION_V1,
+        FORMAT_VERSION_V2,
+        FORMAT_VERSION_V3,
+        FORMAT_VERSION,
+    ]
+    .contains(&version)
+    {
         return Err(format!(
-            "unsupported CompactStore section version {version} (supported: {FORMAT_VERSION_V1}, {FORMAT_VERSION_V2}, {FORMAT_VERSION})"
+            "unsupported CompactStore section version {version} (supported: {FORMAT_VERSION_V1} to {FORMAT_VERSION})"
         ));
     }
     let flags = data[pos];
@@ -346,7 +408,7 @@ fn deserialize_compact_store(data_bytes: &bytes::Bytes) -> Result<CompactStore, 
         let row_count = read_u32(data, &mut pos)? as usize;
         let num_cols = read_u32(data, &mut pos)? as usize;
 
-        let mut columns: FxHashMap<PropertyKey, ColumnCodec> = FxHashMap::default();
+        let mut columns: FxHashMap<PropertyKey, CompactColumn> = FxHashMap::default();
         let mut zone_maps: FxHashMap<PropertyKey, ZoneMap> = FxHashMap::default();
         let mut block_zone_maps: FxHashMap<PropertyKey, Vec<ZoneMap>> = FxHashMap::default();
         let mut col_defs = Vec::with_capacity(num_cols);
@@ -362,14 +424,14 @@ fn deserialize_compact_store(data_bytes: &bytes::Bytes) -> Result<CompactStore, 
                 zone_maps.insert(key.clone(), zm);
             }
 
-            let (codec, maybe_block_stats) =
-                read_codec(data_bytes, &mut pos, version).map_err(|e| format!("codec: {e}"))?;
+            let (column, maybe_block_stats) =
+                read_column(data_bytes, &mut pos, version).map_err(|e| format!("codec: {e}"))?;
             if let Some(stats) = maybe_block_stats {
                 block_zone_maps.insert(key.clone(), stats);
             }
-            let col_type = infer_column_type_from_codec(&codec);
+            let col_type = infer_column_type_from_codec(column.codec());
             col_defs.push(ColumnDef::new(&key_str, col_type));
-            columns.insert(key, codec);
+            columns.insert(key, column);
         }
 
         let schema = TableSchema::new(label.as_str(), table_id, col_defs);
@@ -409,16 +471,16 @@ fn deserialize_compact_store(data_bytes: &bytes::Bytes) -> Result<CompactStore, 
         };
 
         let num_props = read_u32(data, &mut pos)? as usize;
-        let mut properties: FxHashMap<PropertyKey, ColumnCodec> = FxHashMap::default();
+        let mut properties: FxHashMap<PropertyKey, CompactColumn> = FxHashMap::default();
         let mut prop_defs = Vec::with_capacity(num_props);
         for _ in 0..num_props {
             let key_str = read_string(data, &mut pos)?;
             let key = PropertyKey::new(&key_str);
-            let (codec, _block_stats) = read_codec(data_bytes, &mut pos, version)
+            let (column, _block_stats) = read_column(data_bytes, &mut pos, version)
                 .map_err(|e| format!("edge codec: {e}"))?;
-            let col_type = infer_column_type_from_codec(&codec);
+            let col_type = infer_column_type_from_codec(column.codec());
             prop_defs.push(ColumnDef::new(&key_str, col_type));
-            properties.insert(key, codec);
+            properties.insert(key, column);
         }
 
         let src_label = table_id_to_label
@@ -1147,6 +1209,79 @@ mod tests {
         assert_eq!(
             edge.properties.get(&PropertyKey::new("weight")),
             Some(&Value::Int64(5))
+        );
+    }
+
+    /// A store where one `:P` node and one `:R` edge lack properties that
+    /// the others have. Returns the store and the ids of the sparse node and
+    /// edge.
+    fn store_with_missing_properties() -> (LpgStore, NodeId, EdgeId) {
+        let store = LpgStore::new().unwrap();
+        let full = store.create_node(&["P"]);
+        let sparse = store.create_node(&["P"]);
+        store.set_node_property(full, "n", Value::Int64(1));
+        store.set_node_property(full, "u", Value::Int64(19));
+        store.set_node_property(full, "s", Value::from("Amsterdam"));
+        store.set_node_property(full, "b", Value::Bool(true));
+        store.set_node_property(sparse, "n", Value::Int64(2));
+        let full_edge = store.create_edge(full, sparse, "R");
+        store.set_edge_property(full_edge, "n", Value::Int64(1));
+        store.set_edge_property(full_edge, "w", Value::Int64(3));
+        let sparse_edge = store.create_edge(sparse, full, "R");
+        store.set_edge_property(sparse_edge, "n", Value::Int64(2));
+        (store, sparse, sparse_edge)
+    }
+
+    /// The current format keeps which rows have a value: after a round trip
+    /// the sparse node and edge still have no value for what they lack.
+    #[test]
+    fn missing_values_survive_a_round_trip() {
+        let (store, sparse, sparse_edge) = store_with_missing_properties();
+        let compact = from_graph_store_preserving_ids(&store).unwrap();
+        let bytes = CompactStoreSection::new(Arc::new(compact))
+            .serialize()
+            .unwrap();
+        let mut section = CompactStoreSection::empty();
+        section.deserialize(&bytes).unwrap();
+        let restored = section.store().unwrap();
+
+        for key in ["u", "s", "b"] {
+            assert_eq!(
+                restored.get_node_property(sparse, &PropertyKey::new(key)),
+                None,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            restored.get_node_property(sparse, &PropertyKey::new("n")),
+            Some(Value::Int64(2))
+        );
+        assert_eq!(
+            restored.get_edge_property(sparse_edge, &PropertyKey::new("w")),
+            None
+        );
+    }
+
+    /// A v3 section (0.5.44 and older) still loads. It records no missing
+    /// values, so a missing property reads the empty value stored for it.
+    #[test]
+    fn a_v3_section_still_loads() {
+        let (store, sparse, _) = store_with_missing_properties();
+        let compact = from_graph_store_preserving_ids(&store).unwrap();
+        let bytes = CompactStoreSection::new(Arc::new(compact))
+            .serialize_with_version(FORMAT_VERSION_V3)
+            .unwrap();
+        let mut section = CompactStoreSection::empty();
+        section.deserialize(&bytes).unwrap();
+        let restored = section.store().unwrap();
+
+        assert_eq!(
+            restored.get_node_property(sparse, &PropertyKey::new("n")),
+            Some(Value::Int64(2))
+        );
+        assert_eq!(
+            restored.get_node_property(sparse, &PropertyKey::new("u")),
+            Some(Value::Int64(0))
         );
     }
 }

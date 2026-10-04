@@ -13,6 +13,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ### Fixed
 
+- **`compact()` turned missing properties into empty values** ([#542](https://github.com/GrafeoDB/grafeo/issues/542)): a node or edge without a property that others with the same label or edge type have read `''`, `0`, `0.0` or `false` for it, `keys()` listed it, `IS NULL` did not match it and filters such as `= 0` did. Missing properties now stay missing, also after a reopen; databases compacted by 0.5.44 or older keep the values they stored.
 - **Writes during a commit could land in the middle of it** ([#548](https://github.com/GrafeoDB/grafeo/issues/548)): a direct write, or another transaction writing what the committing one wrote, could hide the committed value from point-in-time reads, remove it on rollback or mark an uncommitted value as committed; a transaction that began during a commit could miss it, and a query outside a transaction could see part of it; and after a crash, two commits could be replayed in the wrong order. A commit now completes before anything that comes after it.
 
 ## [0.5.44] - 2026-10-04

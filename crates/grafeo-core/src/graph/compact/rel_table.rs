@@ -7,7 +7,7 @@ use arcstr::ArcStr;
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::hash::FxHashMap;
 
-use super::column::ColumnCodec;
+use super::column::CompactColumn;
 use super::csr::CsrAdjacency;
 use super::id::{encode_edge_id, encode_node_id};
 use super::schema::EdgeSchema;
@@ -30,7 +30,7 @@ pub struct RelTable {
     /// position for each backward edge.
     bwd: Option<CsrAdjacency>,
     /// Edge properties, keyed by property name, parallel to forward CSR targets.
-    properties: FxHashMap<PropertyKey, ColumnCodec>,
+    properties: FxHashMap<PropertyKey, CompactColumn>,
     /// Table ID of the source node table.
     src_table_id: u16,
     /// Table ID of the destination node table.
@@ -48,7 +48,7 @@ impl RelTable {
         schema: EdgeSchema,
         fwd: CsrAdjacency,
         bwd: Option<CsrAdjacency>,
-        properties: FxHashMap<PropertyKey, ColumnCodec>,
+        properties: FxHashMap<PropertyKey, CompactColumn>,
         src_table_id: u16,
         dst_table_id: u16,
     ) -> Self {
@@ -220,7 +220,7 @@ impl RelTable {
 
     /// Returns edge property columns (for serialization).
     #[must_use]
-    pub fn properties(&self) -> &FxHashMap<PropertyKey, ColumnCodec> {
+    pub fn properties(&self) -> &FxHashMap<PropertyKey, CompactColumn> {
         &self.properties
     }
 

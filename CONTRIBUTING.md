@@ -10,7 +10,7 @@ cd grafeo
 cargo build --workspace
 ```
 
-You'll need **Rust 1.91.1+** and optionally **Python 3.12+** / **Node.js 20+** for the bindings.
+You'll need **Rust 1.99.0+** and optionally **Python 3.12+** / **Node.js 20+** for the bindings.
 
 ## Branching
 

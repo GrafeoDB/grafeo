@@ -15,6 +15,10 @@ extend-exclude = [
     "tests/spec/lpg/*/ldbc_snb_interactive.gtest",
 ]
 
+[default]
+# Result fingerprints in the differential test's reviewed lists are hex digests, not words
+extend-ignore-re = ['(?m)^[A-Z]+[0-9]+\|[a-z]+ [0-9a-f]{10} ']
+
 [default.extend-words]
 # "fof" = friend-of-friend (standard graph query pattern)
 fof = "fof"

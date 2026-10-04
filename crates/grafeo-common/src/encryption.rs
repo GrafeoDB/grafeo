@@ -7,8 +7,11 @@
 //! - **Data encryption keys (DEKs)**: derived deterministically from the ME via HKDF
 //!
 //! Each storage component (WAL, snapshots, vector pages, spill files) gets its own DEK
-//! derived from a unique context string and component ID. Nonces are counter-based
-//! (no randomness needed) because each component has a natural monotonic counter.
+//! derived from a unique context string and component ID. A component whose
+//! counter never repeats under one key can build its nonces with [`build_nonce`].
+//! Data whose location may be written more than once under one key, such as the
+//! chunks and directory blocks of a retried checkpoint, takes a [`random_nonce`]
+//! instead; the nonce is stored with the ciphertext, so readers need no counter.
 //!
 //! # Feature flag
 //!
@@ -320,6 +323,15 @@ pub fn unwrap_me(root_key: &[u8; KEY_SIZE], wrapped: &[u8]) -> Result<Zeroizing<
 // -------------------------------------------------------------------------
 // Nonce helpers
 // -------------------------------------------------------------------------
+
+/// A random nonce, for data whose location may be written more than once with
+/// one key (a retried checkpoint writes to the same offsets).
+#[must_use]
+pub fn random_nonce() -> [u8; NONCE_SIZE] {
+    let mut nonce = [0u8; NONCE_SIZE];
+    rand::rng().fill(&mut nonce);
+    nonce
+}
 
 /// Builds a 12-byte nonce from a 4-byte high part and an 8-byte low part.
 ///

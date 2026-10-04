@@ -9,5 +9,6 @@ pub mod section;
 
 pub use page_fetcher::{AccessHint, PageFetcher};
 pub use section::{
-    Section, SectionDirectoryEntry, SectionFlags, SectionMemoryConfig, SectionType, TierOverride,
+    ChunkKind, ChunkMeta, Section, SectionDirectoryEntry, SectionFlags, SectionMemoryConfig,
+    SectionSink, SectionSource, SectionType, TierOverride,
 };

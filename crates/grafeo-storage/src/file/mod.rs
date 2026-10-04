@@ -24,6 +24,7 @@
 pub mod format;
 pub mod header;
 pub mod manager;
+pub mod v3;
 
 pub use format::{DbHeader, FileHeader, MAGIC};
 pub use manager::GrafeoFileManager;

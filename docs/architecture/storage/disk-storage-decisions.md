@@ -97,5 +97,5 @@ The two-phase search keeps the quantized codes plus the rotation matrix and norm
 | D1 PageFetcher trait | Implemented | 0.5.42 |
 | D2 Packed Ring format | Planned | 0.5.45 |
 | D3 Paged HNSW | Planned | 0.5.45 |
-| D4 Per-block zone maps | Planned | 0.5.43 |
+| D4 Per-block zone maps | Planned | not scheduled |
 | D5 Insertion-order columns | Active default | (no change) |

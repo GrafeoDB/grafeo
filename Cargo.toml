@@ -20,7 +20,7 @@ members = [
 [workspace.package]
 version = "0.5.44"
 edition = "2024"
-rust-version = "1.91.1"
+rust-version = "1.99.0"
 license = "Apache-2.0"
 repository = "https://github.com/GrafeoDB/grafeo"
 authors = ["S.T. Grond"]

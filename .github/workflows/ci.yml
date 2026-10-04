@@ -421,7 +421,7 @@ jobs:
           - profile: enterprise
             features: "--features tracing"
             engine_features: "--features metrics,tracing,async-storage"
-          # Full: all features combined (deprecated in 0.6.0, replace with persona combos)
+          # Full: all features combined (`full` is a deprecated alias, removed in 0.8.0 per #468; use persona combos)
           - profile: full
             features: "--features lpg,languages,triple-store,algos,parallel,vector-index,text-index,hybrid-search,spill,mmap,regex,jsonl-import,parquet-import"
             engine_features: "--features full"

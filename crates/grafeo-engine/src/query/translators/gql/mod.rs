@@ -11,8 +11,9 @@ use std::collections::{HashMap, HashSet};
 use super::common::{
     build_left_join_with_predicates, check_branch_columns, combine_with_and,
     expand_subquery_return_star, flatten_and_conjuncts, has_all_labels, is_aggregate_function,
-    is_binary_set_function, join_and_conjuncts, references_any, to_aggregate_function,
-    wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
+    is_binary_set_function, join_and_conjuncts, optional_join, references_any,
+    to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
+    wrap_sort,
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,
@@ -85,8 +86,70 @@ struct GqlTranslator {
     call_scope: std::cell::RefCell<Option<HashSet<String>>>,
 }
 
+/// The rows a query passes to the one after `NEXT`: its final `RETURN` as a
+/// `WITH` (a projection), under its `ORDER BY`, `SKIP` and `LIMIT`. An
+/// unaliased item is a column named after it; `RETURN *` passes every column
+/// on. A plan that ends otherwise (an aggregation) passes its rows on as they
+/// are.
+fn return_as_with(plan: LogicalOperator) -> LogicalOperator {
+    match plan {
+        LogicalOperator::Return(ret) => {
+            if ret.items.iter().any(
+                |item| matches!(&item.expression, LogicalExpression::Variable(name) if name == "*"),
+            ) {
+                return *ret.input;
+            }
+            let projections = ret
+                .items
+                .into_iter()
+                .map(|item| {
+                    let alias = match (&item.alias, &item.expression) {
+                        (Some(alias), _) => Some(alias.clone()),
+                        (None, LogicalExpression::Variable(_)) => None,
+                        (None, expression) => Some(
+                            crate::query::planner::common::expression_to_string(expression),
+                        ),
+                    };
+                    Projection {
+                        expression: item.expression,
+                        alias,
+                    }
+                })
+                .collect();
+            let project = LogicalOperator::Project(ProjectOp {
+                projections,
+                input: ret.input,
+                pass_through_input: false,
+            });
+            if ret.distinct {
+                wrap_distinct(project)
+            } else {
+                project
+            }
+        }
+        LogicalOperator::Sort(mut sort) => {
+            sort.input = Box::new(return_as_with(*sort.input));
+            LogicalOperator::Sort(sort)
+        }
+        LogicalOperator::Skip(mut skip) => {
+            skip.input = Box::new(return_as_with(*skip.input));
+            LogicalOperator::Skip(skip)
+        }
+        LogicalOperator::Limit(mut limit) => {
+            limit.input = Box::new(return_as_with(*limit.input));
+            LogicalOperator::Limit(limit)
+        }
+        LogicalOperator::Distinct(mut distinct) => {
+            distinct.input = Box::new(return_as_with(*distinct.input));
+            LogicalOperator::Distinct(distinct)
+        }
+        other => other,
+    }
+}
+
 /// Combines two queries with a set operator, or with `NEXT` (the right one
-/// runs for each row of the left one).
+/// runs for each row of the left one; a right side that is a query reads the
+/// left one's rows instead, see `translate_composite_query`).
 fn combine_queries(
     op: ast::CompositeOp,
     left: LogicalOperator,
@@ -204,6 +267,14 @@ impl GqlTranslator {
         right: &ast::Statement,
     ) -> Result<LogicalPlan> {
         let left_plan = self.translate_statement(left)?;
+        // NEXT: the query after it reads the rows the one before returns, as
+        // a query reads the rows of a WITH.
+        if op == ast::CompositeOp::Next
+            && let ast::Statement::Query(right_query) = right
+        {
+            let input = return_as_with(left_plan.root);
+            return self.translate_query_from(right_query, input);
+        }
         let right_plan = self.translate_statement(right)?;
         Ok(LogicalPlan::new(combine_queries(
             op,
@@ -464,22 +535,14 @@ impl GqlTranslator {
                             // an implicit unit table so unmatched patterns produce
                             // a single row of NULLs instead of zero rows.
                             let match_plan = self.translate_match(match_clause)?;
-                            plan = LogicalOperator::LeftJoin(LeftJoinOp {
-                                left: Box::new(LogicalOperator::Empty),
-                                right: Box::new(match_plan),
-                                condition: None,
-                            });
+                            plan = optional_join(LogicalOperator::Empty, match_plan);
                         } else if matches!(plan, LogicalOperator::Empty) {
                             // No prior input: standard MATCH
                             plan = self.translate_match(match_clause)?;
                         } else if match_clause.optional {
                             // OPTIONAL MATCH: left join (prior vars on left, match on right)
                             let match_plan = self.translate_match(match_clause)?;
-                            plan = LogicalOperator::LeftJoin(LeftJoinOp {
-                                left: Box::new(plan),
-                                right: Box::new(match_plan),
-                                condition: None,
-                            });
+                            plan = optional_join(plan, match_plan);
                         } else {
                             // Non-optional MATCH after prior clauses (UNWIND, etc.)
                             // Pass current plan as input so the MATCH's NodeScan creates
@@ -628,19 +691,11 @@ impl GqlTranslator {
             for match_clause in &query.match_clauses {
                 let match_plan = self.translate_match(match_clause)?;
                 if matches!(plan, LogicalOperator::Empty) && match_clause.optional {
-                    plan = LogicalOperator::LeftJoin(LeftJoinOp {
-                        left: Box::new(LogicalOperator::Empty),
-                        right: Box::new(match_plan),
-                        condition: None,
-                    });
+                    plan = optional_join(LogicalOperator::Empty, match_plan);
                 } else if matches!(plan, LogicalOperator::Empty) {
                     plan = match_plan;
                 } else if match_clause.optional {
-                    plan = LogicalOperator::LeftJoin(LeftJoinOp {
-                        left: Box::new(plan),
-                        right: Box::new(match_plan),
-                        condition: None,
-                    });
+                    plan = optional_join(plan, match_plan);
                 } else {
                     plan = LogicalOperator::Join(JoinOp {
                         left: Box::new(plan),
@@ -896,7 +951,7 @@ impl GqlTranslator {
         } else {
             // Apply RETURN first (closest to input), then Sort wraps it.
             // This ensures RETURN aliases are visible to ORDER BY in the binder.
-            let mut return_items = if query.return_clause.is_wildcard {
+            let return_items = if query.return_clause.is_wildcard {
                 // RETURN *: emit a wildcard marker that the planner expands
                 vec![ReturnItem {
                     expression: LogicalExpression::Variable("*".into()),
@@ -915,27 +970,6 @@ impl GqlTranslator {
                     })
                     .collect::<Result<Vec<_>>>()?
             };
-
-            // Lift VALUE subqueries: wrap with Apply and replace expression
-            // with a Variable reference to the inner plan's output column.
-            for item in &mut return_items {
-                if let LogicalExpression::ValueSubquery(inner_plan) = &item.expression {
-                    // Determine the output column name from the inner plan's RETURN
-                    let col_name =
-                        Self::extract_return_column_name(inner_plan).unwrap_or_else(|| {
-                            item.alias.clone().unwrap_or_else(|| "__value".to_string())
-                        });
-
-                    plan = LogicalOperator::Apply(ApplyOp {
-                        input: Box::new(plan),
-                        subplan: inner_plan.clone(),
-                        shared_variables: vec![],
-                        optional: false,
-                    });
-
-                    item.expression = LogicalExpression::Variable(col_name);
-                }
-            }
 
             plan = wrap_return(plan, return_items, query.return_clause.distinct);
 
@@ -1464,8 +1498,7 @@ impl GqlTranslator {
         predicate: LogicalExpression,
     ) -> LogicalOperator {
         if let LogicalOperator::LeftJoin(left_join) = plan {
-            let (join, post_filter) =
-                build_left_join_with_predicates(*left_join.left, *left_join.right, Some(predicate));
+            let (join, post_filter) = build_left_join_with_predicates(left_join, Some(predicate));
             if let Some(pf) = post_filter {
                 wrap_filter(join, pf)
             } else {
@@ -1904,11 +1937,7 @@ impl GqlTranslator {
             // Each MATCH goes on from the ones before it, as in the outer
             // query, so a variable in two clauses is the same node or edge.
             plan = if match_clause.optional {
-                LogicalOperator::LeftJoin(LeftJoinOp {
-                    left: Box::new(plan),
-                    right: Box::new(self.translate_match(match_clause)?),
-                    condition: None,
-                })
+                optional_join(plan, self.translate_match(match_clause)?)
             } else if matches!(plan, LogicalOperator::Empty) {
                 self.translate_match(match_clause)?
             } else {
@@ -1956,32 +1985,6 @@ impl GqlTranslator {
             } if name.eq_ignore_ascii_case("count") && args.len() <= 1 => {
                 Some((args.first(), *distinct))
             }
-            _ => None,
-        }
-    }
-
-    /// Extracts the first output column name from a Return operator in a logical plan.
-    fn extract_return_column_name(plan: &LogicalOperator) -> Option<String> {
-        match plan {
-            LogicalOperator::Return(ret) => {
-                let item = ret.items.first()?;
-                if let Some(alias) = &item.alias {
-                    Some(alias.clone())
-                } else {
-                    // Derive name from expression
-                    match &item.expression {
-                        LogicalExpression::Variable(name) => Some(name.clone()),
-                        LogicalExpression::Property { variable, property } => {
-                            Some(format!("{variable}.{property}"))
-                        }
-                        _ => None,
-                    }
-                }
-            }
-            // Walk through wrapping operators to find the Return
-            LogicalOperator::Sort(s) => Self::extract_return_column_name(&s.input),
-            LogicalOperator::Limit(l) => Self::extract_return_column_name(&l.input),
-            LogicalOperator::Distinct(d) => Self::extract_return_column_name(&d.input),
             _ => None,
         }
     }

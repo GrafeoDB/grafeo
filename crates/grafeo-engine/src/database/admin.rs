@@ -466,7 +466,8 @@ impl super::GrafeoDB {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Returns the full change history for an entity (node or edge).
+    /// Returns the full change history for an entity (node or edge) of the
+    /// default graph (a session's `history` reads its current graph).
     ///
     /// Events are ordered chronologically by epoch.
     ///
@@ -481,7 +482,8 @@ impl super::GrafeoDB {
         Ok(self.cdc_log.history(entity_id.into()))
     }
 
-    /// Returns change events for an entity since the given epoch.
+    /// Returns change events for an entity of the default graph since the
+    /// given epoch.
     ///
     /// # Errors
     ///
@@ -495,7 +497,8 @@ impl super::GrafeoDB {
         Ok(self.cdc_log.history_since(entity_id.into(), since_epoch))
     }
 
-    /// Returns all change events across all entities in an epoch range.
+    /// Returns all change events across all entities and graphs in an epoch
+    /// range; each event names its graph.
     ///
     /// # Errors
     ///

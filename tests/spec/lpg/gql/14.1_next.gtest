@@ -1,0 +1,66 @@
+# GQL linear composition: NEXT
+#
+# The statement after NEXT reads the rows the one before it returns, as a
+# query reads the rows of a WITH; only the last statement's RETURN is the
+# result. NEXT used to run the second statement on its own, so it matched
+# from every node and read the first statement's columns as null.
+#
+# Dataset `social_network`: Alix (30), Gus (25) and Vincent (35); KNOWS
+# Alix->Gus and Gus->Vincent.
+
+meta:
+  language: gql
+  model: lpg
+  section: "14.1"
+  title: Linear composition (NEXT)
+  dataset: social_network
+
+tests:
+
+  - name: next_passes_a_node_on
+    query: "MATCH (a:Person {name: 'Alix'}) RETURN a NEXT MATCH (a)-[:KNOWS]->(b) RETURN b.name AS b"
+    expect:
+      rows:
+        - [Gus]
+
+  - name: next_passes_a_value_on
+    query: "MATCH (a:Person {name: 'Alix'}) RETURN a.age AS x NEXT RETURN x + 1 AS y"
+    expect:
+      rows:
+        - [31]
+
+  - name: the_result_is_the_last_return
+    query: "MATCH (a:Person) RETURN a.name AS n NEXT RETURN count(n) AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: next_after_an_aggregate
+    query: "MATCH (a:Person) RETURN count(a) AS c NEXT RETURN c * 2 AS d"
+    expect:
+      rows:
+        - [6]
+
+  - name: a_chain_of_next
+    query: "MATCH (a:Person {name: 'Alix'}) RETURN a NEXT MATCH (a)-[:KNOWS]->(b) RETURN b NEXT MATCH (b)-[:KNOWS]->(c) RETURN c.name AS c"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: next_after_order_by_and_limit
+    query: "MATCH (a:Person) RETURN a ORDER BY a.age DESC LIMIT 1 NEXT RETURN a.name AS n"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: next_after_return_distinct
+    query: "MATCH (a:Person)-[:KNOWS]->(b) RETURN DISTINCT 1 AS one NEXT RETURN count(*) AS c"
+    expect:
+      rows:
+        - [1]
+
+  # What the RETURN before NEXT leaves out is gone, as after a WITH.
+  - name: next_drops_what_the_return_leaves_out
+    query: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) RETURN b NEXT RETURN a.name AS n"
+    expect:
+      error: "Undefined variable 'a'"

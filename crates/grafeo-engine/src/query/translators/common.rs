@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::query::plan::{
     AggregateFunction, BinaryOp, CountExpr, DistinctOp, FilterOp, LeftJoinOp, LimitOp,
-    LogicalExpression, LogicalOperator, ReturnItem, ReturnOp, SkipOp, SortKey, SortOp, UnaryOp,
+    LogicalExpression, LogicalOperator, ReturnItem, ReturnOp, SkipOp, SortKey, SortOp,
 };
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
@@ -678,24 +678,131 @@ pub(crate) fn collect_operator_variables(op: &LogicalOperator, vars: &mut HashSe
     }
 }
 
+/// The left join of an OPTIONAL MATCH: `right` matched for each row of
+/// `left`, with nulls where it has no match. A filter in `right` that reads a
+/// variable only `left` binds (GQL's `(c WHERE c.age > a.age)`) is a condition
+/// of the join: it decides which matches count, so it moves there.
+pub(crate) fn optional_join(left: LogicalOperator, right: LogicalOperator) -> LogicalOperator {
+    let mut left_vars = HashSet::new();
+    collect_operator_variables(&left, &mut left_vars);
+    let mut right_vars = HashSet::new();
+    collect_operator_variables(&right, &mut right_vars);
+    let mut moved = Vec::new();
+    let right = take_left_reading_filters(right, &left_vars, &right_vars, &mut moved);
+    LogicalOperator::LeftJoin(LeftJoinOp {
+        left: Box::new(left),
+        right: Box::new(right),
+        condition: join_conjuncts(moved),
+    })
+}
+
+/// Removes from the filters of `plan` (down its pattern) the conjuncts that
+/// read a variable `left_vars` has and `right_vars` does not, adding them to
+/// `moved`.
+fn take_left_reading_filters(
+    plan: LogicalOperator,
+    left_vars: &HashSet<String>,
+    right_vars: &HashSet<String>,
+    moved: &mut Vec<LogicalExpression>,
+) -> LogicalOperator {
+    match plan {
+        LogicalOperator::Filter(mut filter) => {
+            let input = take_left_reading_filters(*filter.input, left_vars, right_vars, moved);
+            let mut kept = Vec::new();
+            for conjunct in split_and(filter.predicate) {
+                let mut read = HashSet::new();
+                collect_expression_variables(&conjunct, &mut read);
+                if read
+                    .iter()
+                    .any(|name| left_vars.contains(name) && !right_vars.contains(name))
+                {
+                    moved.push(conjunct);
+                } else {
+                    kept.push(conjunct);
+                }
+            }
+            match join_conjuncts(kept) {
+                Some(predicate) => {
+                    filter.predicate = predicate;
+                    filter.input = Box::new(input);
+                    LogicalOperator::Filter(filter)
+                }
+                None => input,
+            }
+        }
+        LogicalOperator::Expand(mut expand) => {
+            expand.input = Box::new(take_left_reading_filters(
+                *expand.input,
+                left_vars,
+                right_vars,
+                moved,
+            ));
+            LogicalOperator::Expand(expand)
+        }
+        LogicalOperator::NodeScan(mut scan) => {
+            scan.input = scan.input.map(|input| {
+                Box::new(take_left_reading_filters(
+                    *input, left_vars, right_vars, moved,
+                ))
+            });
+            LogicalOperator::NodeScan(scan)
+        }
+        other => other,
+    }
+}
+
+/// The conjuncts of `predicate` (`a AND b AND c` gives three).
+fn split_and(predicate: LogicalExpression) -> Vec<LogicalExpression> {
+    match predicate {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => {
+            let mut conjuncts = split_and(*left);
+            conjuncts.extend(split_and(*right));
+            conjuncts
+        }
+        other => vec![other],
+    }
+}
+
+/// The conjunction of `conjuncts`, `None` for none.
+fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
+    conjuncts
+        .into_iter()
+        .reduce(|acc, conjunct| LogicalExpression::Binary {
+            left: Box::new(acc),
+            op: BinaryOp::And,
+            right: Box::new(conjunct),
+        })
+}
+
 /// Builds a LeftJoin with properly classified WHERE predicates.
 ///
-/// Given a WHERE predicate that follows an OPTIONAL MATCH, this function:
+/// Given a WHERE predicate that follows an OPTIONAL MATCH (whose join is
+/// `left_join`), this function:
 /// 1. Collects variables from both sides
 /// 2. Classifies predicates into left-only, right-only, and cross-side
 /// 3. Pushes right-only predicates as a Filter on the right input
-/// 4. Stores cross-side predicates in `LeftJoinOp.condition`
+/// 4. Adds cross-side predicates to `LeftJoinOp.condition`, which decides
+///    which pairs of rows are matches (a left row without one keeps nulls)
 /// 5. Returns the LeftJoin and any remaining post-filters to apply above
 pub(crate) fn build_left_join_with_predicates(
-    left: LogicalOperator,
-    right: LogicalOperator,
+    left_join: LeftJoinOp,
     predicate: Option<LogicalExpression>,
 ) -> (LogicalOperator, Option<LogicalExpression>) {
+    let LeftJoinOp {
+        left,
+        right,
+        condition,
+    } = left_join;
+    let (left, right) = (*left, *right);
     let Some(predicate) = predicate else {
         let join = LogicalOperator::LeftJoin(LeftJoinOp {
             left: Box::new(left),
             right: Box::new(right),
-            condition: None,
+            condition,
         });
         return (join, None);
     };
@@ -725,61 +832,14 @@ pub(crate) fn build_left_join_with_predicates(
         wrap_filter(right, right_pred)
     };
 
-    // Build null-safe condition for cross-side predicates.
-    // For each cross predicate P referencing right-only variable R, wrap it as:
-    //   (R IS NULL) OR P
-    // This preserves NULL-padded rows (unmatched optional side) while evaluating P
-    // correctly when the right side matched.
-    let cross_condition = if classified.cross_filters.is_empty() {
-        None
-    } else {
-        // Collect all right-only variable names for the IS NULL sentinel.
-        let right_only_vars: Vec<String> = right_vars
-            .iter()
-            .filter(|v| !left_vars.contains(*v))
-            .cloned()
-            .collect();
-
-        let null_safe: Vec<LogicalExpression> = classified
-            .cross_filters
+    // The cross-side predicates join the condition the join had: together
+    // they decide which pairs of rows are matches.
+    let cross_condition = join_conjuncts(
+        condition
             .into_iter()
-            .map(|pred| {
-                // Pick the first right-only variable referenced in this predicate
-                // as the NULL sentinel. Falling back to the first right-only var
-                // overall is safe: if the right side produced no row, all right
-                // columns are NULL so any of them serves as the sentinel.
-                let mut pred_vars = HashSet::new();
-                collect_expression_variables(&pred, &mut pred_vars);
-                let sentinel = pred_vars
-                    .iter()
-                    .find(|v| right_vars.contains(*v) && !left_vars.contains(*v))
-                    .or_else(|| right_only_vars.first())
-                    .cloned()
-                    .unwrap_or_default();
-
-                let is_null = LogicalExpression::Unary {
-                    op: UnaryOp::IsNull,
-                    operand: Box::new(LogicalExpression::Variable(sentinel)),
-                };
-                LogicalExpression::Binary {
-                    left: Box::new(is_null),
-                    op: BinaryOp::Or,
-                    right: Box::new(pred),
-                }
-            })
-            .collect();
-
-        Some(
-            null_safe
-                .into_iter()
-                .reduce(|acc, expr| LogicalExpression::Binary {
-                    left: Box::new(acc),
-                    op: BinaryOp::And,
-                    right: Box::new(expr),
-                })
-                .expect("non-empty cross_filters"),
-        )
-    };
+            .chain(classified.cross_filters)
+            .collect(),
+    );
 
     let join = LogicalOperator::LeftJoin(LeftJoinOp {
         left: Box::new(left),

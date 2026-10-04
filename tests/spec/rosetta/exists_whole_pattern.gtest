@@ -136,7 +136,6 @@ tests:
   # whether the condition held (a failed match keeps a null row), so
   # `optional_match_conditions.gtest` checks the matches themselves.
   - name: count_with_an_optional_match_reading_earlier_variables
-    skip: "an OPTIONAL MATCH condition on an earlier variable is applied after the join (design decision pending)"
     setup:
       - "INSERT (alix:Person {name: 'Alix', age: 30}), (gus:Person {name: 'Gus', age: 25}), (vincent:Person {name: 'Vincent', age: 40}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(alix), (jules)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(jules)"
     variants:

@@ -588,4 +588,13 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages)
 
+# AF: GQL NEXT passes rows on; a VALUE subquery reads the outer row (read only: the fixtures are shared)
+for case_id, query in [
+    ("AF1", "MATCH (a:Person {name: 'Alix'}) RETURN a NEXT MATCH (a)-[:KNOWS]->(b) RETURN b.name AS b"),
+    ("AF2", "MATCH (a:Person {name: 'Alix'}) RETURN a.age AS x NEXT RETURN x + 1 AS y"),
+    ("AF3", "MATCH (p:Person) RETURN p.name AS p, VALUE { MATCH (p)-[:KNOWS]->(f) RETURN f.name ORDER BY f.name LIMIT 1 } AS first"),
+    ("AF4", "MATCH (p:Person) WHERE VALUE { MATCH (p)-[:KNOWS]->(f) RETURN f.name ORDER BY f.name LIMIT 1 } IS NOT NULL RETURN p.name AS p"),
+]:
+    case(case_id, query, GQL)
+
 # fmt: on

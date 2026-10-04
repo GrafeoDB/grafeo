@@ -110,3 +110,77 @@ tests:
     expect:
       rows:
         - [Alix, TechCorp, Amsterdam]
+
+  # ---------------------------------------------------------------------------
+  # VALUE subqueries read the outer row (they gave every row the same answer,
+  # or failed outside a RETURN item). Dataset: Alix (30), Gus (25), Vincent
+  # (40), Jules (35), Mia (28); KNOWS Alix->Gus, Gus->Vincent, Vincent->Alix,
+  # Jules->Mia, Alix->Jules.
+  # ---------------------------------------------------------------------------
+
+  - name: value_reads_the_outer_row
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    query: "MATCH (p:Person) RETURN p.name AS p, VALUE { MATCH (p)-[:KNOWS]->(f) RETURN f.name ORDER BY f.name LIMIT 1 } AS first"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Gus, Vincent]
+        - [Vincent, Alix]
+        - [Jules, Mia]
+        - [Mia, null]
+
+  - name: value_in_where
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    query: "MATCH (p:Person) WHERE VALUE { MATCH (p)-[:KNOWS]->(f) RETURN f.name ORDER BY f.name LIMIT 1 } = 'Gus' RETURN p.name AS p"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: value_in_with
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    query: "MATCH (p:Person) WITH p, VALUE { MATCH (p)-[:KNOWS]->(f) RETURN f.age ORDER BY f.age DESC LIMIT 1 } AS oldest RETURN p.name AS p, oldest"
+    expect:
+      rows:
+        - [Alix, 35]
+        - [Gus, 40]
+        - [Vincent, 30]
+        - [Jules, 28]
+        - [Mia, null]
+
+  - name: value_inside_a_function
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    query: "MATCH (p:Person) RETURN p.name AS p, upper(VALUE { MATCH (p)-[:KNOWS]->(f) RETURN f.name ORDER BY f.name LIMIT 1 }) AS first"
+    expect:
+      rows:
+        - [Alix, GUS]
+        - [Gus, VINCENT]
+        - [Vincent, ALIX]
+        - [Jules, MIA]
+        - [Mia, null]
+
+  - name: value_of_an_outer_variable_only
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    query: "MATCH (p:Person {name: 'Alix'}) RETURN VALUE { MATCH (p) RETURN p.age + 1 } AS next"
+    expect:
+      rows:
+        - [31]
+
+  - name: value_without_an_outer_row
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    query: "RETURN VALUE { MATCH (f:Person) RETURN f.name ORDER BY f.name LIMIT 1 } AS first"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: value_with_two_columns_is_rejected
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    query: "MATCH (p:Person) RETURN VALUE { MATCH (p)-[:KNOWS]->(f) RETURN f.name, f.age } AS v"
+    expect:
+      error: "A VALUE subquery returns one column"

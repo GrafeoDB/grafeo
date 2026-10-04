@@ -3,16 +3,17 @@
 use super::{
     AddLabelOp, AddLabelOperator, AntiJoinOp, Arc, CreateEdgeOp, CreateEdgeOperator, CreateNodeOp,
     CreateNodeOperator, DeleteEdgeOp, DeleteEdgeOperator, DeleteNodeOp, DeleteNodeOperator,
-    Direction, EntityValue, Error, ExpandDirection, ExpressionPredicate, FilterOperator, HashMap,
-    LeftJoinOp, LogicalExpression, LogicalOperator, LogicalType, MergeConfig, MergeOp,
-    MergeOperator, MergeRelationshipConfig, MergeRelationshipOp, MergeRelationshipOperator,
-    Operator, ProjectExpr, ProjectOperator, PropertySource, RemoveLabelOp, RemoveLabelOperator,
-    Result, SetPropertyOp, SetPropertyOperator, ShortestPathOp, ShortestPathOperator, UnaryOp,
-    UnwindOp, UnwindOperator, Value,
+    Direction, EntityValue, Error, ExpandDirection, ExpressionPredicate, HashMap, LeftJoinOp,
+    LogicalExpression, LogicalOperator, LogicalType, MergeConfig, MergeOp, MergeOperator,
+    MergeRelationshipConfig, MergeRelationshipOp, MergeRelationshipOperator, Operator, ProjectExpr,
+    ProjectOperator, PropertySource, RemoveLabelOp, RemoveLabelOperator, Result, SetPropertyOp,
+    SetPropertyOperator, ShortestPathOp, ShortestPathOperator, UnaryOp, UnwindOp, UnwindOperator,
+    Value,
 };
 #[cfg(feature = "algos")]
 use super::{CallProcedureOp, StaticResultOperator};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind};
+use grafeo_core::execution::operators::{JoinCondition, JoinedRowCondition};
 
 impl super::Planner {
     /// Plans a CREATE NODE operator.
@@ -221,6 +222,32 @@ impl super::Planner {
         let (right_op, right_columns) = self.plan_operator(&left_join.right)?;
         let left_types = self.derive_schema_from_columns(&left_columns);
         let right_types = self.derive_schema_from_columns(&right_columns);
+
+        // A condition that reads both sides (the WHERE of an OPTIONAL MATCH on a
+        // variable bound before it) decides which pairs are matches, so a left
+        // row none of whose pairs pass it keeps nulls. It reads the joined row:
+        // the left columns, then the right ones (a name both sides have reads
+        // the left one).
+        let residual = match &left_join.condition {
+            Some(condition) => {
+                let filter_expr = self.convert_expression(condition)?;
+                let mut variable_columns: HashMap<String, usize> = HashMap::new();
+                for (i, name) in left_columns.iter().chain(&right_columns).enumerate() {
+                    variable_columns.entry(name.clone()).or_insert(i);
+                }
+                let predicate = ExpressionPredicate::new(
+                    filter_expr,
+                    variable_columns,
+                    Arc::clone(&self.store),
+                )
+                .with_transaction_context(self.viewing_epoch, self.transaction_id)
+                .with_session_context(self.session_context.clone());
+                let condition: Box<dyn JoinCondition> =
+                    Box::new(JoinedRowCondition::new(Box::new(predicate)));
+                Some(condition)
+            }
+            None => None,
+        };
         let (join_op, join_columns, _join_types) = super::common::build_left_join(
             left_op,
             right_op,
@@ -228,26 +255,8 @@ impl super::Planner {
             &right_columns,
             &left_types,
             &right_types,
+            residual,
         );
-
-        // If the LeftJoin carries a cross-side condition (null-safe predicate),
-        // apply it as a Filter above the join. The condition already incorporates
-        // IS NULL guards so NULL-padded rows from unmatched optional sides pass through.
-        if let Some(condition) = &left_join.condition {
-            let filter_expr = self.convert_expression(condition)?;
-            let variable_columns: HashMap<String, usize> = join_columns
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-            let predicate =
-                ExpressionPredicate::new(filter_expr, variable_columns, Arc::clone(&self.store))
-                    .with_transaction_context(self.viewing_epoch, self.transaction_id)
-                    .with_session_context(self.session_context.clone());
-            let filter_op: Box<dyn Operator> =
-                Box::new(FilterOperator::new(join_op, Box::new(predicate)));
-            return Ok((filter_op, join_columns));
-        }
 
         Ok((join_op, join_columns))
     }

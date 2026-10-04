@@ -55,7 +55,7 @@ pub(crate) struct ImplicitWrites {
     wal: std::sync::OnceLock<Arc<crate::transaction::wal_buffer::WalBuffer>>,
     /// The CDC events of the running call, recorded at its epoch.
     #[cfg(feature = "cdc")]
-    cdc_events: Arc<parking_lot::Mutex<Vec<crate::cdc::PendingEvent>>>,
+    cdc_events: Arc<parking_lot::Mutex<Vec<crate::cdc::ChangeEvent>>>,
     /// Held while a direct call on a compacted database builds its WAL
     /// records from the state and writes them (see `log_compacted_write`).
     #[cfg(all(feature = "wal", feature = "compact-store"))]

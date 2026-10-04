@@ -22,7 +22,6 @@ tests:
   # Whom Alix's friends know that is older than Alix: Gus knows Vincent (40);
   # Jules knows only Mia (28), so Jules keeps a null.
   - name: a_trailing_where_reads_an_earlier_variable
-    skip: "an OPTIONAL MATCH condition on an earlier variable is applied after the join (design decision pending)"
     variants:
       gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c) WHERE c.age > a.age RETURN b.name AS b, c.name AS c"
       cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c) WHERE c.age > a.age RETURN b.name AS b, c.name AS c"
@@ -32,7 +31,6 @@ tests:
         - [Jules, null]
 
   - name: an_inline_where_reads_an_earlier_variable
-    skip: "an OPTIONAL MATCH condition on an earlier variable is applied after the join (design decision pending)"
     variants:
       gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c WHERE c.age > a.age) RETURN b.name AS b, c.name AS c"
     expect:
@@ -43,7 +41,6 @@ tests:
   # Per person: the rows of the optional part (one per friend, kept with a
   # null) and the matches that pass the condition.
   - name: the_condition_in_a_subquery
-    skip: "an OPTIONAL MATCH condition on an earlier variable is applied after the join (design decision pending)"
     variants:
       gql: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c) WHERE c.age > a.age RETURN count(*) AS rows, count(c) AS found } RETURN a.name AS a, rows, found"
       cypher: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c) WHERE c.age > a.age RETURN count(*) AS rows, count(c) AS found } RETURN a.name AS a, rows, found"

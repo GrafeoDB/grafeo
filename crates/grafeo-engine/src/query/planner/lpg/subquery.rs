@@ -13,10 +13,11 @@ use std::collections::HashSet;
 use super::{Arc, Error, LogicalExpression, LogicalOperator, Operator, Result, Value};
 use crate::query::plan::{
     AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, LimitOp, MapProjectionEntry,
-    ParameterScanOp, Projection, ReturnItem,
+    ParameterScanOp, ProjectOp, Projection, ReturnItem,
 };
 use crate::query::planner::common::output_column_name;
 use grafeo_common::types::LogicalType;
+use grafeo_common::utils::error::{QueryError, QueryErrorKind};
 use grafeo_core::execution::operators::{
     ApplyOperator, JoinType, NestedLoopJoinOperator, ParameterState,
 };
@@ -59,11 +60,6 @@ impl super::Planner {
             if self.edge_check_answers(subquery, Some(&columns)) {
                 return Ok(());
             }
-            let (subplan, exists) = match subquery {
-                LogicalExpression::ExistsSubquery(subplan) => (subplan.as_ref().clone(), true),
-                LogicalExpression::CountSubquery(subplan) => (subplan.as_ref().clone(), false),
-                _ => return Ok(()),
-            };
             let column = self.next_subquery_column(&columns);
             let outer = std::mem::replace(
                 &mut input,
@@ -71,6 +67,23 @@ impl super::Planner {
                     vec![],
                 )),
             );
+            if let LogicalExpression::ValueSubquery(subplan) = subquery {
+                input = self.plan_value_subquery(
+                    outer,
+                    &columns,
+                    subplan.as_ref().clone(),
+                    &column,
+                    input_writes,
+                )?;
+                columns.push(column.clone());
+                *subquery = LogicalExpression::Variable(column);
+                return Ok(());
+            }
+            let (subplan, exists) = match subquery {
+                LogicalExpression::ExistsSubquery(subplan) => (subplan.as_ref().clone(), true),
+                LogicalExpression::CountSubquery(subplan) => (subplan.as_ref().clone(), false),
+                _ => return Ok(()),
+            };
             input = self.plan_counted_subquery(
                 outer,
                 &columns,
@@ -171,6 +184,8 @@ impl super::Planner {
                     }
                 })
             }
+            // A VALUE subquery always runs as a subquery of its own.
+            LogicalExpression::ValueSubquery(_) => return false,
             _ => return true,
         };
         check.is_ok_and(|check| {
@@ -211,39 +226,7 @@ impl super::Planner {
         column: &str,
         input_writes: bool,
     ) -> Result<Box<dyn Operator>> {
-        // The outer variables the subquery uses: those it names, as far as
-        // they are columns of the row; all of them when the subquery has an
-        // operator whose names are not known here.
-        let shared: Vec<String> = match subplan_variables(&subplan) {
-            Some(names) => outer_columns
-                .iter()
-                .filter(|column| names.contains(*column))
-                .cloned()
-                .collect(),
-            None => outer_columns
-                .iter()
-                .filter(|column| !column.starts_with("__"))
-                .cloned()
-                .collect(),
-        };
-        let mut seeded = subplan;
-        if !shared.is_empty()
-            && !seed_with_parameters(
-                &mut seeded,
-                LogicalOperator::ParameterScan(ParameterScanOp {
-                    columns: shared.clone(),
-                }),
-            )
-        {
-            return Err(Error::Internal(
-                "Unsupported subquery: no pattern to start from the outer row".to_string(),
-            ));
-        }
-        // A pattern through a node or edge of the outer row matches that node
-        // or edge, as a later MATCH does: with the parameters at its start,
-        // the variables they bring are bound, and the cycle pass turns a
-        // pattern variable bound again into a check that it is the same.
-        let seeded = crate::query::optimizer::close_cycles(seeded);
+        let (seeded, shared) = seed_with_row(outer_columns, subplan)?;
         let counted_input = if exists {
             LogicalOperator::Limit(LimitOp {
                 count: 1.into(),
@@ -266,13 +249,77 @@ impl super::Planner {
             input: Box::new(counted_input),
             having: None,
         });
+        let added = AddedColumn {
+            name: column,
+            logical_type: LogicalType::Int64,
+            optional: false,
+        };
+        self.join_per_row(outer, outer_columns, &counted, shared, &added, input_writes)
+    }
 
+    /// Plans a `VALUE` subquery once per row of `outer`: the value of the one
+    /// column its first row returns, or null when it returns no row, added
+    /// as `column` (see [`Self::plan_counted_subquery`] for the rest).
+    fn plan_value_subquery(
+        &self,
+        outer: Box<dyn Operator>,
+        outer_columns: &[String],
+        subplan: LogicalOperator,
+        column: &str,
+        input_writes: bool,
+    ) -> Result<Box<dyn Operator>> {
+        let returned = returned_column(&subplan).ok_or_else(|| {
+            Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                "A VALUE subquery returns one column",
+            ))
+        })?;
+        let valued = LogicalOperator::Project(ProjectOp {
+            projections: vec![Projection {
+                expression: LogicalExpression::Variable(returned),
+                alias: Some(column.to_string()),
+            }],
+            input: Box::new(LogicalOperator::Limit(LimitOp {
+                count: 1.into(),
+                input: Box::new(subplan),
+            })),
+            pass_through_input: false,
+        });
+        let (seeded, shared) = seed_with_row(outer_columns, valued)?;
+        let added = AddedColumn {
+            name: column,
+            logical_type: LogicalType::Any,
+            optional: true,
+        };
+        self.join_per_row(outer, outer_columns, &seeded, shared, &added, input_writes)
+    }
+
+    /// Joins `inner`, which gives the `added` column and at most one row, to
+    /// each row of `outer`, with the `shared` columns of the row as its
+    /// parameters. With nothing shared it runs once; below a write
+    /// (`input_writes`) after all the rows are read, so it sees what they wrote.
+    fn join_per_row(
+        &self,
+        outer: Box<dyn Operator>,
+        outer_columns: &[String],
+        inner: &LogicalOperator,
+        shared: Vec<String>,
+        added: &AddedColumn<'_>,
+        input_writes: bool,
+    ) -> Result<Box<dyn Operator>> {
         if shared.is_empty() {
-            let (inner, _) = self.plan_operator(&counted)?;
-            self.scalar_columns.borrow_mut().insert(column.to_string());
+            let (inner, _) = self.plan_operator(inner)?;
+            self.scalar_columns
+                .borrow_mut()
+                .insert(added.name.to_string());
             let mut schema = self.derive_schema_from_columns(outer_columns);
-            schema.push(LogicalType::Int64);
-            let mut join = NestedLoopJoinOperator::new(outer, inner, None, JoinType::Cross, schema);
+            schema.push(added.logical_type.clone());
+            let join_type = if added.optional {
+                JoinType::Left
+            } else {
+                JoinType::Cross
+            };
+            let mut join = NestedLoopJoinOperator::new(outer, inner, None, join_type, schema);
             if input_writes {
                 join = join.with_left_first();
             }
@@ -289,25 +336,99 @@ impl super::Planner {
         let previous = self
             .correlated_param_state
             .replace(Some(Arc::clone(&state)));
-        let planned = self.plan_operator(&counted);
+        let planned = self.plan_operator(inner);
         *self.correlated_param_state.borrow_mut() = previous;
         let (inner, _) = planned?;
-        self.scalar_columns.borrow_mut().insert(column.to_string());
-        Ok(Box::new(ApplyOperator::new_correlated(
-            outer, inner, state, indices,
-        )))
+        self.scalar_columns
+            .borrow_mut()
+            .insert(added.name.to_string());
+        let apply = ApplyOperator::new_correlated(outer, inner, state, indices);
+        Ok(Box::new(if added.optional {
+            apply.with_optional(1)
+        } else {
+            apply
+        }))
     }
 }
 
-/// Calls `f` on every `EXISTS` and `COUNT` subquery in `expression`, outside
-/// the bodies of list comprehensions, list predicates and `reduce`, which
-/// read their item variable (not a column of the row).
+/// The column a subquery planned per row adds to each row.
+struct AddedColumn<'a> {
+    /// Its name.
+    name: &'a str,
+    /// Its type.
+    logical_type: LogicalType,
+    /// Whether a row the subquery gives no row keeps a null (`VALUE`); a
+    /// count always gives one.
+    optional: bool,
+}
+
+/// The outer variables `subplan` uses (those it names, as far as they are
+/// columns of the row; all of them when it has an operator whose names are
+/// not known here), and `subplan` seeded with them. A pattern through a node
+/// or edge of the outer row matches that node or edge, as a later MATCH does:
+/// with the parameters at its start, the variables they bring are bound, and
+/// the cycle pass turns a pattern variable bound again into a check that it
+/// is the same.
+fn seed_with_row(
+    outer_columns: &[String],
+    subplan: LogicalOperator,
+) -> Result<(LogicalOperator, Vec<String>)> {
+    let shared: Vec<String> = match subplan_variables(&subplan) {
+        Some(names) => outer_columns
+            .iter()
+            .filter(|column| names.contains(*column))
+            .cloned()
+            .collect(),
+        None => outer_columns
+            .iter()
+            .filter(|column| !column.starts_with("__"))
+            .cloned()
+            .collect(),
+    };
+    let mut seeded = subplan;
+    if !shared.is_empty()
+        && !seed_with_parameters(
+            &mut seeded,
+            LogicalOperator::ParameterScan(ParameterScanOp {
+                columns: shared.clone(),
+            }),
+        )
+    {
+        return Err(Error::Internal(
+            "Unsupported subquery: no pattern to start from the outer row".to_string(),
+        ));
+    }
+    Ok((crate::query::optimizer::close_cycles(seeded), shared))
+}
+
+/// The name of the one column a subquery's final `RETURN` gives (under its
+/// `ORDER BY`, `SKIP`, `LIMIT` and `DISTINCT`), or `None` for another plan
+/// or several columns.
+fn returned_column(plan: &LogicalOperator) -> Option<String> {
+    match plan {
+        LogicalOperator::Return(ret) => match ret.items.as_slice() {
+            [item] => Some(output_column_name(item.alias.as_deref(), &item.expression)),
+            _ => None,
+        },
+        LogicalOperator::Sort(op) => returned_column(&op.input),
+        LogicalOperator::Limit(op) => returned_column(&op.input),
+        LogicalOperator::Skip(op) => returned_column(&op.input),
+        LogicalOperator::Distinct(op) => returned_column(&op.input),
+        _ => None,
+    }
+}
+
+/// Calls `f` on every `EXISTS`, `COUNT` and `VALUE` subquery in `expression`,
+/// outside the bodies of list comprehensions, list predicates and `reduce`,
+/// which read their item variable (not a column of the row).
 fn visit_subqueries(
     expression: &mut LogicalExpression,
     f: &mut dyn FnMut(&mut LogicalExpression) -> Result<()>,
 ) -> Result<()> {
     match expression {
-        LogicalExpression::ExistsSubquery(_) | LogicalExpression::CountSubquery(_) => f(expression),
+        LogicalExpression::ExistsSubquery(_)
+        | LogicalExpression::CountSubquery(_)
+        | LogicalExpression::ValueSubquery(_) => f(expression),
         LogicalExpression::Binary { left, right, .. } => {
             visit_subqueries(left, f)?;
             visit_subqueries(right, f)
@@ -372,7 +493,6 @@ fn visit_subqueries(
         | LogicalExpression::Labels(_)
         | LogicalExpression::Type(_)
         | LogicalExpression::Id(_)
-        | LogicalExpression::ValueSubquery(_)
         | LogicalExpression::PatternComprehension { .. } => Ok(()),
     }
 }

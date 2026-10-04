@@ -252,8 +252,9 @@ impl MergeOperator {
         Ok(out)
     }
 
-    /// Tries to find a matching node with the given resolved properties.
-    fn find_matching_node(&self, resolved_match_props: &[(String, Value)]) -> Option<NodeId> {
+    /// The nodes that match the given resolved properties (every one, as in
+    /// openCypher, where MERGE binds each match).
+    fn find_matching_nodes(&self, resolved_match_props: &[(String, Value)]) -> Vec<NodeId> {
         // Use a property index when available to avoid a full label scan.
         // Null conditions are excluded from the index query and verified in the loop.
         let use_index = resolved_match_props
@@ -273,6 +274,7 @@ impl MergeOperator {
             self.writer.store().node_ids()
         };
 
+        let mut matches = Vec::new();
         for node_id in candidates {
             // Transactional creates write their version at `EpochId::PENDING`,
             // so the unversioned `get_node` (which checks visibility against
@@ -304,11 +306,11 @@ impl MergeOperator {
             });
 
             if has_all_props {
-                return Some(node_id);
+                matches.push(node_id);
             }
         }
 
-        None
+        matches
     }
 
     /// Merges match and ON CREATE property lists, with ON CREATE values
@@ -328,12 +330,13 @@ impl MergeOperator {
         merged
     }
 
-    /// Finds or creates a matching node for a single row, applying ON MATCH/ON CREATE.
+    /// Finds the matching nodes for a single row and applies ON MATCH to each,
+    /// or creates one and applies ON CREATE.
     fn merge_node_for_row(
         &mut self,
         chunk: Option<&DataChunk>,
         row: usize,
-    ) -> Result<NodeId, super::OperatorError> {
+    ) -> Result<Vec<NodeId>, super::OperatorError> {
         let store_ref: &dyn GraphStore = self.writer.store().as_ref();
         // Match properties cannot reference the MERGE variable (ISO §15.5),
         // so they resolve against the input chunk directly.
@@ -351,18 +354,21 @@ impl MergeOperator {
             },
         )?;
 
-        if let Some(existing_id) = self.find_matching_node(&resolved_match) {
-            // Resolve ON MATCH SET against an augmented row containing the
-            // matched node id, so `coalesce(n.x, 0)` can read the live value.
-            let resolved_on_match = self.resolve_action_properties(
-                &self.config.on_match_properties,
-                chunk,
-                row,
-                existing_id,
-            )?;
-            self.writer
-                .set_node_properties(existing_id, &resolved_on_match, false)?;
-            Ok(existing_id)
+        let matches = self.find_matching_nodes(&resolved_match);
+        if !matches.is_empty() {
+            for &existing_id in &matches {
+                // Resolve ON MATCH SET against an augmented row containing the
+                // matched node id, so `coalesce(n.x, 0)` can read the live value.
+                let resolved_on_match = self.resolve_action_properties(
+                    &self.config.on_match_properties,
+                    chunk,
+                    row,
+                    existing_id,
+                )?;
+                self.writer
+                    .set_node_properties(existing_id, &resolved_on_match, false)?;
+            }
+            Ok(matches)
         } else if Self::has_expression_source(&self.config.on_create_properties) {
             // ON CREATE expressions read the new node, so it is created from
             // the match properties first; the whole property set is checked
@@ -376,14 +382,17 @@ impl MergeOperator {
                         new_id,
                     )
                 })
+                .map(|created| vec![created])
         } else {
             // No runtime expressions: create with all properties at once.
             let resolved_on_create =
                 Self::resolve_properties(&self.config.on_create_properties, chunk, row, store_ref);
-            self.writer.create_node(
-                &self.config.labels,
-                Self::merge_node_props(&resolved_match, &resolved_on_create),
-            )
+            self.writer
+                .create_node(
+                    &self.config.labels,
+                    Self::merge_node_props(&resolved_match, &resolved_on_create),
+                )
+                .map(|created| vec![created])
         }
     }
 }
@@ -400,8 +409,8 @@ impl Operator for MergeOperator {
                     self.config.output_column,
                     LogicalType::Node,
                 );
-                let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
-
+                // A row comes out once per node it merges (every match).
+                let mut merged = Vec::with_capacity(chunk.row_count());
                 for row in chunk.selected_indices() {
                     // Reject NULL bound variables (e.g., from unmatched OPTIONAL MATCH)
                     if let Some(bound_col) = self.config.bound_variable_column {
@@ -418,8 +427,13 @@ impl Operator for MergeOperator {
                     }
 
                     // Merge the node per-row: resolve properties from this row
-                    let node_id = self.merge_node_for_row(Some(&chunk), row)?;
+                    for node_id in self.merge_node_for_row(Some(&chunk), row)? {
+                        merged.push((row, node_id));
+                    }
+                }
 
+                let mut builder = DataChunkBuilder::with_capacity(&types, merged.len().max(1));
+                for (row, node_id) in merged {
                     // Copy input columns to output
                     for col_idx in 0..chunk.column_count() {
                         if let (Some(src), Some(dst)) =
@@ -452,7 +466,7 @@ impl Operator for MergeOperator {
         }
         self.executed = true;
 
-        let node_id = self.merge_node_for_row(None, 0)?;
+        let node_ids = self.merge_node_for_row(None, 0)?;
 
         let types = output_types(
             None,
@@ -460,11 +474,13 @@ impl Operator for MergeOperator {
             self.config.output_column,
             LogicalType::Node,
         );
-        let mut builder = DataChunkBuilder::new(&types);
-        if let Some(dst) = builder.column_mut(self.config.output_column) {
-            dst.push_node_id(node_id);
+        let mut builder = DataChunkBuilder::with_capacity(&types, node_ids.len().max(1));
+        for node_id in node_ids {
+            if let Some(dst) = builder.column_mut(self.config.output_column) {
+                dst.push_node_id(node_id);
+            }
+            builder.advance_row();
         }
-        builder.advance_row();
 
         Ok(Some(builder.finish()))
     }
@@ -644,15 +660,17 @@ impl MergeRelationshipOperator {
         Ok(out)
     }
 
-    /// Tries to find a matching relationship between source and target.
-    fn find_matching_edge(
+    /// The relationships between source and target that match (every one,
+    /// as in openCypher, where MERGE binds each match).
+    fn find_matching_edges(
         &self,
         src: NodeId,
         dst: NodeId,
         resolved_match_props: &[(String, Value)],
-    ) -> Option<EdgeId> {
+    ) -> Vec<EdgeId> {
         use crate::graph::Direction;
 
+        let mut matches = Vec::new();
         for (target, edge_id) in self.writer.store().edges_from(src, Direction::Outgoing) {
             if target != dst {
                 continue;
@@ -684,12 +702,12 @@ impl MergeRelationshipOperator {
                 });
 
                 if has_all_props {
-                    return Some(edge_id);
+                    matches.push(edge_id);
                 }
             }
         }
 
-        None
+        matches
     }
 }
 
@@ -704,8 +722,8 @@ impl Operator for MergeRelationshipOperator {
                 self.config.edge_output_column,
                 LogicalType::Edge,
             );
-            let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
-
+            // A row comes out once per relationship it merges (every match).
+            let mut merged = Vec::with_capacity(chunk.row_count());
             for row in chunk.selected_indices() {
                 let src_val = chunk
                     .column(self.config.source_column)
@@ -744,49 +762,57 @@ impl Operator for MergeRelationshipOperator {
                     },
                 )?;
 
-                let edge_id = if let Some(existing) =
-                    self.find_matching_edge(src_val, dst_val, &resolved_match)
-                {
-                    let resolved_on_match = self.resolve_action_properties(
-                        &self.config.on_match_properties,
-                        &chunk,
-                        row,
-                        existing,
-                    )?;
-                    self.writer
-                        .set_edge_properties(existing, &resolved_on_match, false)?;
-                    existing
-                } else if MergeOperator::has_expression_source(&self.config.on_create_properties) {
-                    // ON CREATE expressions read the new edge: see MergeOperator.
-                    self.writer.create_edge_with(
-                        src_val,
-                        dst_val,
-                        &self.config.edge_type,
-                        resolved_match,
-                        |new_id| {
-                            self.resolve_action_properties(
-                                &self.config.on_create_properties,
-                                &chunk,
-                                row,
-                                new_id,
-                            )
-                        },
-                    )?
-                } else {
-                    let resolved_on_create = MergeOperator::resolve_properties(
-                        &self.config.on_create_properties,
-                        Some(&chunk),
-                        row,
-                        store_ref,
-                    );
-                    self.writer.create_edge(
-                        src_val,
-                        dst_val,
-                        &self.config.edge_type,
-                        MergeOperator::merge_node_props(&resolved_match, &resolved_on_create),
-                    )?
-                };
+                let matches = self.find_matching_edges(src_val, dst_val, &resolved_match);
+                if !matches.is_empty() {
+                    for &existing in &matches {
+                        let resolved_on_match = self.resolve_action_properties(
+                            &self.config.on_match_properties,
+                            &chunk,
+                            row,
+                            existing,
+                        )?;
+                        self.writer
+                            .set_edge_properties(existing, &resolved_on_match, false)?;
+                        merged.push((row, existing));
+                    }
+                    continue;
+                }
+                let edge_id =
+                    if MergeOperator::has_expression_source(&self.config.on_create_properties) {
+                        // ON CREATE expressions read the new edge: see MergeOperator.
+                        self.writer.create_edge_with(
+                            src_val,
+                            dst_val,
+                            &self.config.edge_type,
+                            resolved_match,
+                            |new_id| {
+                                self.resolve_action_properties(
+                                    &self.config.on_create_properties,
+                                    &chunk,
+                                    row,
+                                    new_id,
+                                )
+                            },
+                        )?
+                    } else {
+                        let resolved_on_create = MergeOperator::resolve_properties(
+                            &self.config.on_create_properties,
+                            Some(&chunk),
+                            row,
+                            store_ref,
+                        );
+                        self.writer.create_edge(
+                            src_val,
+                            dst_val,
+                            &self.config.edge_type,
+                            MergeOperator::merge_node_props(&resolved_match, &resolved_on_create),
+                        )?
+                    };
+                merged.push((row, edge_id));
+            }
 
+            let mut builder = DataChunkBuilder::with_capacity(&types, merged.len().max(1));
+            for (row, edge_id) in merged {
                 // Copy input columns to output, then add the edge column
                 for col_idx in 0..self.config.output_schema.len() {
                     if col_idx == self.config.edge_output_column {

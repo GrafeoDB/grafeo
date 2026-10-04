@@ -206,6 +206,12 @@ pub struct HashJoinOperator {
     probe_matched: Vec<bool>,
     /// For right/full outer joins: track which build rows were matched.
     build_matched: Vec<Vec<bool>>,
+    /// A condition on each pair of rows the keys match, beyond the keys (the
+    /// WHERE of an OPTIONAL MATCH that reads both sides): a pair that fails it
+    /// is no match, and a left row without one keeps nulls.
+    residual: Option<Box<dyn JoinCondition>>,
+    /// Whether a pair of the current probe row passed the residual condition.
+    current_probe_kept: bool,
     /// Whether we're in the emit unmatched phase (for outer joins).
     emitting_unmatched: bool,
     /// Current chunk index when emitting unmatched rows.
@@ -250,10 +256,21 @@ impl HashJoinOperator {
             current_matches: Vec::new(),
             probe_matched: Vec::new(),
             build_matched: Vec::new(),
+            residual: None,
+            current_probe_kept: false,
             emitting_unmatched: false,
             unmatched_chunk_idx: 0,
             unmatched_row_idx: 0,
         }
+    }
+
+    /// Adds a condition each pair of rows the keys match must also meet: a
+    /// pair that fails it is no match (so in a left join, a probe row none of
+    /// whose pairs pass it keeps nulls).
+    #[must_use]
+    pub fn with_residual(mut self, condition: Box<dyn JoinCondition>) -> Self {
+        self.residual = Some(condition);
+        self
     }
 
     /// Builds the hash table from the build side.
@@ -601,6 +618,7 @@ impl Operator for HashJoinOperator {
                         _ => {
                             self.current_matches =
                                 self.hash_table.get(&key).cloned().unwrap_or_default();
+                            self.current_probe_kept = false;
                         }
                     }
                 }
@@ -619,6 +637,14 @@ impl Operator for HashJoinOperator {
                         let (build_chunk_idx, build_row) =
                             self.current_matches[self.current_match_position];
                         let build_chunk = &self.build_chunks[build_chunk_idx];
+
+                        if let Some(residual) = &self.residual
+                            && !residual.evaluate(probe_chunk, probe_row, build_chunk, build_row)
+                        {
+                            self.current_match_position += 1;
+                            continue;
+                        }
+                        self.current_probe_kept = true;
 
                         // Mark as matched for outer joins
                         if matches!(self.join_type, JoinType::Left | JoinType::Full)
@@ -648,7 +674,14 @@ impl Operator for HashJoinOperator {
                         }
                     }
 
-                    // Done with this probe row
+                    // Done with this probe row: without a pair that passed the
+                    // residual condition, a left or full join keeps it with nulls.
+                    if self.residual.is_some()
+                        && !self.current_probe_kept
+                        && matches!(self.join_type, JoinType::Left | JoinType::Full)
+                    {
+                        self.produce_output_row(builder, probe_chunk, probe_row, None, None)?;
+                    }
                     self.current_probe_row += 1;
                     self.current_matches.clear();
                     self.current_match_position = 0;
@@ -685,6 +718,7 @@ impl Operator for HashJoinOperator {
         self.current_matches.clear();
         self.probe_matched.clear();
         self.build_matched.clear();
+        self.current_probe_kept = false;
         self.emitting_unmatched = false;
         self.unmatched_chunk_idx = 0;
         self.unmatched_row_idx = 0;
@@ -748,6 +782,44 @@ pub trait JoinCondition: Send + Sync {
         right_chunk: &DataChunk,
         right_row: usize,
     ) -> bool;
+}
+
+/// A condition given by a predicate over the joined row: the left row's
+/// columns, then the right row's, numbered as the predicate's variable
+/// columns number them.
+pub struct JoinedRowCondition {
+    predicate: Box<dyn super::filter::Predicate>,
+}
+
+impl JoinedRowCondition {
+    /// Creates the condition from a predicate over the joined row.
+    pub fn new(predicate: Box<dyn super::filter::Predicate>) -> Self {
+        Self { predicate }
+    }
+}
+
+impl JoinCondition for JoinedRowCondition {
+    fn evaluate(
+        &self,
+        left_chunk: &DataChunk,
+        left_row: usize,
+        right_chunk: &DataChunk,
+        right_row: usize,
+    ) -> bool {
+        let mut columns =
+            Vec::with_capacity(left_chunk.column_count() + right_chunk.column_count());
+        for (chunk, row) in [(left_chunk, left_row), (right_chunk, right_row)] {
+            for index in 0..chunk.column_count() {
+                let Some(source) = chunk.column(index) else {
+                    return false;
+                };
+                let mut column = ValueVector::with_capacity(source.data_type().clone(), 1);
+                source.copy_row_to(row, &mut column);
+                columns.push(column);
+            }
+        }
+        self.predicate.evaluate(&DataChunk::new(columns), 0)
+    }
 }
 
 /// A simple equality condition for nested loop joins.
@@ -1212,6 +1284,47 @@ mod tests {
         assert_eq!(results[0], (1, None)); // No match
         assert_eq!(results[1], (2, Some(2)));
         assert_eq!(results[2], (3, Some(3)));
+    }
+
+    /// A residual condition decides which key matches count: a left row none
+    /// of whose pairs pass it keeps nulls (once), the others keep the pairs
+    /// that pass. The condition reads the joined row: left columns, then right.
+    #[test]
+    fn test_hash_join_left_outer_with_a_residual() {
+        struct LeftIsNot2;
+        impl super::super::filter::Predicate for LeftIsNot2 {
+            fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
+                assert_eq!(
+                    chunk.column_count(),
+                    2,
+                    "the left column, then the right one"
+                );
+                chunk.column(0).unwrap().get_int64(row) != Some(2)
+            }
+        }
+
+        let left = MockOperator::new(vec![create_int_chunk(&[1, 2, 3])]);
+        let right = MockOperator::new(vec![create_int_chunk(&[1, 2, 2, 3])]);
+        let mut join = HashJoinOperator::new(
+            Box::new(left),
+            Box::new(right),
+            vec![0],
+            vec![0],
+            JoinType::Left,
+            vec![LogicalType::Int64, LogicalType::Int64],
+        )
+        .with_residual(Box::new(JoinedRowCondition::new(Box::new(LeftIsNot2))));
+
+        let mut results = Vec::new();
+        while let Some(chunk) = join.next().unwrap() {
+            for row in chunk.selected_indices() {
+                let left_val = chunk.column(0).unwrap().get_int64(row).unwrap();
+                let right_val = chunk.column(1).unwrap().get_int64(row);
+                results.push((left_val, right_val));
+            }
+        }
+        results.sort_by_key(|(l, _)| *l);
+        assert_eq!(results, [(1, Some(1)), (2, None), (3, Some(3))]);
     }
 
     #[test]

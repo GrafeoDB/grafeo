@@ -106,12 +106,13 @@ tests:
       columns: [p, r, c]
       count: 2
 
-  # Cypher only: GQL has no ORDER BY after WITH, and NEXT does not pass rows on
-  # yet.
+  # GQL has no ORDER BY after WITH; RETURN * ... NEXT passes the ordered rows
+  # on instead.
   - name: names_ordered_by_an_edge_property_through_with_star
     setup:
       - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:LIVES_IN {years: 5}]->(ams), (gus)-[:LIVES_IN {years: 3}]->(ber), (mia)-[:LIVES_IN {years: 1}]->(par)"
     variants:
+      gql: "MATCH (p:Person)-[r:LIVES_IN]->(c:City) RETURN * ORDER BY r.years LIMIT 2 NEXT RETURN p.name AS p, r.years AS years, c.name AS c"
       cypher: "MATCH (p:Person)-[r:LIVES_IN]->(c:City) WITH * ORDER BY r.years LIMIT 2 RETURN p.name AS p, r.years AS years, c.name AS c"
     expect:
       ordered: true

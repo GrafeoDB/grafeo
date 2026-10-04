@@ -21,7 +21,7 @@ use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut, GraphStoreSearch}
 use grafeo_core::statistics::Statistics;
 use parking_lot::Mutex;
 
-use crate::cdc::{CdcLog, ChangeEvent, ChangeKind, EntityId, PendingEvent};
+use crate::cdc::{CdcLog, ChangeEvent, ChangeKind, EntityId};
 
 /// A [`GraphStoreMut`] decorator that buffers CDC events for every mutation.
 ///
@@ -37,7 +37,7 @@ pub(crate) struct CdcGraphStore {
     inner: Arc<dyn GraphStoreMut>,
     cdc_log: Arc<CdcLog>,
     /// Buffered events for the current transaction.
-    pending_events: Arc<Mutex<Vec<PendingEvent>>>,
+    pending_events: Arc<Mutex<Vec<ChangeEvent>>>,
     /// Whether the events of non-versioned writes are buffered too, instead
     /// of being recorded as they happen.
     buffer_all: bool,
@@ -66,7 +66,7 @@ impl CdcGraphStore {
     pub fn wrap(
         inner: Arc<dyn GraphStoreMut>,
         cdc_log: Arc<CdcLog>,
-        pending_events: Arc<Mutex<Vec<PendingEvent>>>,
+        pending_events: Arc<Mutex<Vec<ChangeEvent>>>,
     ) -> Self {
         Self {
             inner,
@@ -92,7 +92,7 @@ impl CdcGraphStore {
     pub fn wrap_buffered(
         inner: Arc<dyn GraphStoreMut>,
         cdc_log: Arc<CdcLog>,
-        pending_events: Arc<Mutex<Vec<PendingEvent>>>,
+        pending_events: Arc<Mutex<Vec<ChangeEvent>>>,
     ) -> Self {
         Self {
             inner,
@@ -104,7 +104,7 @@ impl CdcGraphStore {
     }
 
     /// Returns a handle to the pending events buffer.
-    pub fn pending_events(&self) -> Arc<Mutex<Vec<PendingEvent>>> {
+    pub fn pending_events(&self) -> Arc<Mutex<Vec<ChangeEvent>>> {
         Arc::clone(&self.pending_events)
     }
 
@@ -115,18 +115,17 @@ impl CdcGraphStore {
     /// each transaction's events get the unique epoch from `fetch_add(1, SeqCst)`.
     fn buffer_event(&self, mut event: ChangeEvent) {
         event.epoch = EpochId::PENDING;
-        self.pending_events.lock().push(PendingEvent {
-            graph: self.graph.clone(),
-            event,
-        });
+        event.graph.clone_from(&self.graph);
+        self.pending_events.lock().push(event);
     }
 
     /// Records a CDC event directly (for non-versioned/auto-commit mutations),
     /// or buffers it when the store buffers every event.
-    fn record_directly(&self, event: ChangeEvent) {
+    fn record_directly(&self, mut event: ChangeEvent) {
         if self.buffer_all {
             self.buffer_event(event);
         } else {
+            event.graph.clone_from(&self.graph);
             self.cdc_log.record(event);
         }
     }
@@ -176,6 +175,7 @@ fn make_event(
 ) -> ChangeEvent {
     ChangeEvent {
         entity_id,
+        graph: None,
         kind,
         epoch,
         timestamp,
@@ -1094,7 +1094,7 @@ mod tests {
     fn wrap_shares_event_buffer() {
         let store = Arc::new(LpgStore::new().unwrap());
         let log = Arc::new(CdcLog::new());
-        let pending = Arc::new(Mutex::new(Vec::<PendingEvent>::new()));
+        let pending = Arc::new(Mutex::new(Vec::<ChangeEvent>::new()));
         let cdc = CdcGraphStore::wrap(
             Arc::clone(&store) as Arc<dyn GraphStoreMut>,
             Arc::clone(&log),
@@ -2172,7 +2172,7 @@ mod tests {
     fn wrap_routes_versioned_events_to_shared_buffer() {
         let inner = Arc::new(LpgStore::new().unwrap());
         let log = Arc::new(CdcLog::new());
-        let shared = Arc::new(Mutex::new(Vec::<PendingEvent>::new()));
+        let shared = Arc::new(Mutex::new(Vec::<ChangeEvent>::new()));
 
         let cdc = CdcGraphStore::wrap(Arc::clone(&inner) as Arc<dyn GraphStoreMut>, log, shared);
 
@@ -2189,7 +2189,7 @@ mod tests {
         let inner_a = Arc::new(LpgStore::new().unwrap());
         let inner_b = Arc::new(LpgStore::new().unwrap());
         let log = Arc::new(CdcLog::new());
-        let shared = Arc::new(Mutex::new(Vec::<PendingEvent>::new()));
+        let shared = Arc::new(Mutex::new(Vec::<ChangeEvent>::new()));
 
         let cdc_a = CdcGraphStore::wrap(
             Arc::clone(&inner_a) as Arc<dyn GraphStoreMut>,

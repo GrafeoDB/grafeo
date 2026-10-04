@@ -6,13 +6,13 @@
 use super::common::{
     build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
     combine_with_and, expand_subquery_return_star, has_all_labels, is_aggregate_function,
-    to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
-    wrap_sort,
+    optional_join, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
+    wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
     CountExpr, CreateEdgeOp, CreateNodeOp, DeleteEdgeOp, DeleteNodeOp, ExpandDirection, ExpandOp,
-    JoinCondition, JoinOp, JoinType, LeftJoinOp, ListPredicateKind, LoadDataFormat, LoadDataOp,
+    JoinCondition, JoinOp, JoinType, ListPredicateKind, LoadDataFormat, LoadDataOp,
     LogicalExpression, LogicalOperator, LogicalPlan, MapProjectionEntry, MergeOp,
     MergeRelationshipOp, NodeScanOp, ParameterScanOp, PathMode, ProcedureYield, ProjectOp,
     Projection, RemoveLabelOp, ReturnItem, SetPropertyOp, ShortestPathOp, SortKey, SortOrder,
@@ -608,11 +608,7 @@ impl CypherTranslator {
         // Build the right side with proper shared variable joins
         let right = self.translate_comma_patterns(&match_clause.patterns, None)?;
 
-        Ok(LogicalOperator::LeftJoin(LeftJoinOp {
-            left: Box::new(input),
-            right: Box::new(right),
-            condition: None,
-        }))
+        Ok(optional_join(input, right))
     }
 
     fn translate_pattern(
@@ -1024,8 +1020,7 @@ impl CypherTranslator {
         // predicate so right-side references become join conditions rather
         // than post-filters (which would incorrectly eliminate NULL rows).
         if let LogicalOperator::LeftJoin(left_join) = input {
-            let (join, post_filter) =
-                build_left_join_with_predicates(*left_join.left, *left_join.right, Some(predicate));
+            let (join, post_filter) = build_left_join_with_predicates(left_join, Some(predicate));
             if let Some(pf) = post_filter {
                 Ok(wrap_filter(join, pf))
             } else {

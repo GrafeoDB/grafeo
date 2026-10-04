@@ -201,10 +201,11 @@ fn edges_are_created_then_updated_between_existing_nodes() {
 }
 
 /// A row that names two edges with the same key between the same endpoints
-/// (written without an upsert) is written, not skipped: a row that comes back
-/// once per edge of one pair of endpoints names no ambiguous endpoint.
+/// (written without an upsert) updates both, as a MERGE binds every match; it
+/// comes back once per edge of one pair of endpoints, which names no
+/// ambiguous endpoint, so it is not skipped.
 #[test]
-fn duplicate_keyed_edges_are_written_not_skipped() {
+fn duplicate_keyed_edges_are_all_updated() {
     let db = GrafeoDB::new_in_memory();
     files(&db);
     db.execute(
@@ -225,9 +226,9 @@ fn duplicate_keyed_edges_are_written_not_skipped() {
         )
         .unwrap();
     assert_eq!(result, summary(0, 1, &[]));
-    assert!(
-        rows(&db, "MATCH ()-[r:USES]->() RETURN r.w").contains(&vec![Value::Int64(2)]),
-        "the row updates an edge"
+    assert_eq!(
+        rows(&db, "MATCH ()-[r:USES]->() RETURN r.w"),
+        [vec![Value::Int64(2)], vec![Value::Int64(2)]]
     );
 }
 

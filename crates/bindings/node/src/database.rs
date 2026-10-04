@@ -1619,6 +1619,7 @@ fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::
     serde_json::json!({
         "entity_id": event.entity_id.as_u64(),
         "entity_type": entity_type,
+        "graph": event.graph,
         "kind": kind,
         "epoch": event.epoch.0,
         "timestamp": event.timestamp,

@@ -11,7 +11,7 @@ use crate::query::plan::{
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
-    DistinctOperator, ExceptOperator, HashJoinOperator, IntersectOperator,
+    DistinctOperator, ExceptOperator, HashJoinOperator, IntersectOperator, JoinCondition,
     JoinType as PhysicalJoinType, LimitOperator, NullOrder, Operator, OtherwiseOperator,
     ProjectExpr, ProjectOperator, SkipOperator, UnionOperator,
 };
@@ -301,6 +301,7 @@ pub(crate) fn build_left_join(
     right_columns: &[String],
     left_types: &[LogicalType],
     right_types: &[LogicalType],
+    residual: Option<Box<dyn JoinCondition>>,
 ) -> (Box<dyn Operator>, Vec<String>, Vec<LogicalType>) {
     let (probe_keys, build_keys) = find_shared_join_keys(left_columns, right_columns);
 
@@ -310,14 +311,18 @@ pub(crate) fn build_left_join(
     let mut join_schema: Vec<LogicalType> = left_types.to_vec();
     join_schema.extend(right_types.iter().cloned());
 
-    let join_op: Box<dyn Operator> = Box::new(HashJoinOperator::new(
+    let mut hash_join = HashJoinOperator::new(
         left,
         right,
         probe_keys,
         build_keys,
         PhysicalJoinType::Left,
         join_schema.clone(),
-    ));
+    );
+    if let Some(residual) = residual {
+        hash_join = hash_join.with_residual(residual);
+    }
+    let join_op: Box<dyn Operator> = Box::new(hash_join);
 
     // Deduplicate: keep left columns, then only right columns not already on the left
     let left_set: std::collections::HashSet<&str> =
@@ -913,6 +918,7 @@ mod tests {
             &right_cols,
             &left_types,
             &right_types,
+            None,
         );
 
         assert_eq!(output_columns, vec!["s", "name", "age"]);

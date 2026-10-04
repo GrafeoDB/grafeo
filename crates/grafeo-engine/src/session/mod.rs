@@ -200,7 +200,7 @@ pub struct Session {
     /// Buffered CDC events for the current transaction.
     /// Flushed to `cdc_log` on commit, discarded on rollback.
     #[cfg(feature = "cdc")]
-    cdc_pending_events: Option<Arc<parking_lot::Mutex<Vec<crate::cdc::PendingEvent>>>>,
+    cdc_pending_events: Option<Arc<parking_lot::Mutex<Vec<crate::cdc::ChangeEvent>>>>,
     /// Current graph name (for multi-graph USE GRAPH support). None = default graph.
     current_graph: parking_lot::Mutex<Option<String>>,
     /// Current schema name (ISO/IEC 39075 Section 4.7.3: independent from session graph).
@@ -5692,7 +5692,8 @@ impl Session {
 
     // ── Change Data Capture ─────────────────────────────────────────────
 
-    /// Returns the full change history for an entity (node or edge).
+    /// Returns the full change history for an entity (node or edge) of the
+    /// session's current graph.
     ///
     /// # Errors
     ///
@@ -5703,10 +5704,13 @@ impl Session {
         entity_id: impl Into<crate::cdc::EntityId>,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
         self.require_permission(crate::auth::StatementKind::Read)?;
-        Ok(self.cdc_log.history(entity_id.into()))
+        Ok(self
+            .cdc_log
+            .history_in(self.active_graph_storage_key().as_deref(), entity_id.into()))
     }
 
-    /// Returns change events for an entity since the given epoch.
+    /// Returns change events for an entity of the session's current graph
+    /// since the given epoch.
     ///
     /// # Errors
     ///
@@ -5718,10 +5722,15 @@ impl Session {
         since_epoch: EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
         self.require_permission(crate::auth::StatementKind::Read)?;
-        Ok(self.cdc_log.history_since(entity_id.into(), since_epoch))
+        Ok(self.cdc_log.history_since_in(
+            self.active_graph_storage_key().as_deref(),
+            entity_id.into(),
+            since_epoch,
+        ))
     }
 
-    /// Returns all change events across all entities in an epoch range.
+    /// Returns all change events across all entities and graphs in an epoch
+    /// range; each event names its graph.
     ///
     /// # Errors
     ///

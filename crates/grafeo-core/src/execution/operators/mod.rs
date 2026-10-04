@@ -81,7 +81,8 @@ pub use filter::{
 };
 pub use horizontal_aggregate::{EntityKind, HorizontalAggregateOperator};
 pub use join::{
-    EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType, NestedLoopJoinOperator,
+    EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType, JoinedRowCondition,
+    NestedLoopJoinOperator,
 };
 pub use leapfrog_join::LeapfrogJoinOperator;
 pub use limit::{LimitOperator, LimitSkipOperator, SkipOperator};

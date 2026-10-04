@@ -24,7 +24,8 @@
 //! # Thread safety and ordering
 //!
 //! [`CdcLog`] is the authoritative in-memory store, a
-//! `RwLock<HbHashMap<EntityId, Vec<ChangeEvent>>>`. Readers (history
+//! `RwLock<HbHashMap<(graph, EntityId), Vec<ChangeEvent>>>` (entity ids
+//! repeat across graphs, so the graph is part of the key). Readers (history
 //! queries, retention probes) take the read lock; writers (commit-path
 //! recording) take the write lock. We use [`hashbrown`]'s `HashMap` for
 //! the Fx-hashed inner map, and [`parking_lot`]'s `RwLock` for cheap
@@ -189,30 +190,17 @@ impl EntityId {
     }
 }
 
-/// A change event buffered until its transaction commits, with the graph it
-/// changed (`None` for the default graph). It reads as its event.
-#[derive(Debug, Clone)]
-pub(crate) struct PendingEvent {
-    /// The graph the change is in, `None` for the default graph.
-    pub(crate) graph: Option<String>,
-    /// The change.
-    pub(crate) event: ChangeEvent,
-}
-
-impl std::ops::Deref for PendingEvent {
-    type Target = ChangeEvent;
-
-    fn deref(&self) -> &ChangeEvent {
-        &self.event
-    }
-}
-
 /// A recorded change event with before/after property snapshots, or an RDF
 /// triple insert/delete.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChangeEvent {
     /// The entity that was changed.
     pub entity_id: EntityId,
+    /// The graph the entity is in: its storage key (`name`, or `schema/name`
+    /// inside a schema), `None` for the default graph. Entity ids repeat
+    /// across graphs, so an id names an entity only together with this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<String>,
     /// The kind of change.
     pub kind: ChangeKind,
     /// MVCC epoch when the change occurred.
@@ -294,7 +282,7 @@ impl Default for CdcRetentionConfig {
 /// [#250]: https://github.com/GrafeoDB/grafeo/issues/250
 #[derive(Debug)]
 pub struct CdcLog {
-    events: RwLock<HbHashMap<EntityId, Vec<ChangeEvent>>>,
+    events: RwLock<HbHashMap<(Option<String>, EntityId), Vec<ChangeEvent>>>,
     clock: Arc<HlcClock>,
     retention: CdcRetentionConfig,
 }
@@ -336,7 +324,7 @@ impl CdcLog {
     pub fn record(&self, event: ChangeEvent) {
         self.events
             .write()
-            .entry(event.entity_id)
+            .entry((event.graph.clone(), event.entity_id))
             .or_default()
             .push(event);
     }
@@ -345,7 +333,10 @@ impl CdcLog {
     pub fn record_batch(&self, events: impl IntoIterator<Item = ChangeEvent>) {
         let mut guard = self.events.write();
         for event in events {
-            guard.entry(event.entity_id).or_default().push(event);
+            guard
+                .entry((event.graph.clone(), event.entity_id))
+                .or_default()
+                .push(event);
         }
     }
 
@@ -359,6 +350,7 @@ impl CdcLog {
     ) {
         self.record(ChangeEvent {
             entity_id: EntityId::Node(id),
+            graph: None,
             kind: ChangeKind::Create,
             epoch,
             timestamp: self.clock.now(),
@@ -388,6 +380,7 @@ impl CdcLog {
     ) {
         self.record(ChangeEvent {
             entity_id: EntityId::Edge(id),
+            graph: None,
             kind: ChangeKind::Create,
             epoch,
             timestamp: self.clock.now(),
@@ -420,6 +413,7 @@ impl CdcLog {
         let id = triple_hash(subject, predicate, object, graph);
         self.record(ChangeEvent {
             entity_id: EntityId::Triple(id),
+            graph: None,
             kind: ChangeKind::Create,
             epoch,
             timestamp: self.clock.now(),
@@ -451,6 +445,7 @@ impl CdcLog {
         let id = triple_hash(subject, predicate, object, graph);
         self.record(ChangeEvent {
             entity_id: EntityId::Triple(id),
+            graph: None,
             kind: ChangeKind::Delete,
             epoch,
             timestamp: self.clock.now(),
@@ -487,6 +482,7 @@ impl CdcLog {
 
         self.record(ChangeEvent {
             entity_id,
+            graph: None,
             kind: ChangeKind::Update,
             epoch,
             timestamp: self.clock.now(),
@@ -513,6 +509,7 @@ impl CdcLog {
     ) {
         self.record(ChangeEvent {
             entity_id,
+            graph: None,
             kind: ChangeKind::Delete,
             epoch,
             timestamp: self.clock.now(),
@@ -530,22 +527,43 @@ impl CdcLog {
         });
     }
 
-    /// Returns all change events for an entity, ordered by epoch.
+    /// Returns all change events for an entity of the default graph, ordered
+    /// by epoch.
     #[must_use]
     pub fn history(&self, entity_id: EntityId) -> Vec<ChangeEvent> {
+        self.history_in(None, entity_id)
+    }
+
+    /// Returns all change events for an entity of `graph` (its storage key,
+    /// `None` for the default graph), ordered by epoch.
+    #[must_use]
+    pub fn history_in(&self, graph: Option<&str>, entity_id: EntityId) -> Vec<ChangeEvent> {
         self.events
             .read()
-            .get(&entity_id)
+            .get(&(graph.map(str::to_string), entity_id))
             .cloned()
             .unwrap_or_default()
     }
 
-    /// Returns change events for an entity since the given epoch.
+    /// Returns change events for an entity of the default graph since the
+    /// given epoch.
     #[must_use]
     pub fn history_since(&self, entity_id: EntityId, since_epoch: EpochId) -> Vec<ChangeEvent> {
+        self.history_since_in(None, entity_id, since_epoch)
+    }
+
+    /// Returns change events for an entity of `graph` (`None` for the default
+    /// graph) since the given epoch.
+    #[must_use]
+    pub fn history_since_in(
+        &self,
+        graph: Option<&str>,
+        entity_id: EntityId,
+        since_epoch: EpochId,
+    ) -> Vec<ChangeEvent> {
         self.events
             .read()
-            .get(&entity_id)
+            .get(&(graph.map(str::to_string), entity_id))
             .map(|events| {
                 events
                     .iter()
@@ -556,7 +574,8 @@ impl CdcLog {
             .unwrap_or_default()
     }
 
-    /// Returns all change events across all entities in an epoch range.
+    /// Returns all change events across all entities and graphs in an epoch
+    /// range; each event names its graph.
     #[must_use]
     pub fn changes_between(&self, start_epoch: EpochId, end_epoch: EpochId) -> Vec<ChangeEvent> {
         let guard = self.events.read();
@@ -763,11 +782,11 @@ fn triple_hash(subject: &str, predicate: &str, object: &str, graph: Option<&str>
 /// event without properties followed by one update per property.
 /// Changes to entities that existed before the transaction stay as they are.
 /// Entity ids repeat across graphs, so the folding stays within one graph.
-pub(crate) fn fold_into_creates(events: Vec<PendingEvent>) -> Vec<ChangeEvent> {
+pub(crate) fn fold_into_creates(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
     let mut folded: Vec<ChangeEvent> = Vec::with_capacity(events.len());
     let mut created: HashMap<(Option<String>, EntityId), usize> = HashMap::new();
-    for PendingEvent { graph, event } in events {
-        let key = (graph, event.entity_id);
+    for event in events {
+        let key = (event.graph.clone(), event.entity_id);
         let Some(&at) = created.get(&key) else {
             if event.kind == ChangeKind::Create {
                 created.insert(key, folded.len());

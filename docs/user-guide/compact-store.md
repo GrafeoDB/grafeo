@@ -207,7 +207,7 @@ stores: vector/text scan and search now fall through both layers.
   same label or type have a property that a node or edge lacks, reading it on that node or edge
   gives the column's empty value (`''`, `0`, `0.0` or `false`) instead of null, `keys()` lists
   it and `IS NULL` does not match it. Give every entity the property before compacting, or avoid relying on its absence
-  ([#542](https://github.com/GrafeoDB/grafeo/issues/542), planned for 0.5.45).
+  ([#542](https://github.com/GrafeoDB/grafeo/issues/542), planned for 0.6.0).
 
 ## Feature Flag
 

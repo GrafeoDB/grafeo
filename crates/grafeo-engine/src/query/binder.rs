@@ -27,6 +27,29 @@ fn binding_error_with_hint(message: impl Into<String>, hint: impl Into<String>) 
     Error::Query(QueryError::new(QueryErrorKind::Semantic, message).with_hint(hint))
 }
 
+/// What a pattern binds a variable to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Element {
+    Node,
+    Edge,
+}
+
+/// Whether a variable holds a value of a known type that is not a node or an
+/// edge (`WITH 1 AS r`). A variable of unknown type may hold either.
+fn holds_a_value(info: &VariableInfo) -> bool {
+    !info.is_node
+        && !info.is_edge
+        && !matches!(
+            info.data_type,
+            LogicalType::Any
+                | LogicalType::Null
+                | LogicalType::Node
+                | LogicalType::Edge
+                | LogicalType::List(_)
+                | LogicalType::Path
+        )
+}
+
 /// Creates an "undefined variable" error with a suggestion if a similar variable exists.
 fn undefined_variable_error(variable: &str, context: &BindingContext, suffix: &str) -> Error {
     let candidates: Vec<String> = context.variable_names();
@@ -39,6 +62,48 @@ fn undefined_variable_error(variable: &str, context: &BindingContext, suffix: &s
         )
     } else {
         binding_error(format!("Undefined variable '{variable}'{suffix}"))
+    }
+}
+
+/// The parts of a subquery body joined by `UNION` (under the `DISTINCT` of
+/// a plain `UNION`), or `None` for a body of one part.
+fn union_parts(plan: &LogicalOperator) -> Option<&[LogicalOperator]> {
+    match plan {
+        LogicalOperator::Union(union) => Some(&union.inputs),
+        LogicalOperator::Distinct(distinct) => match distinct.input.as_ref() {
+            LogicalOperator::Union(union) => Some(&union.inputs),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The outer variables one part of a subquery imports: the columns of the
+/// parameter scan its plan starts from, none without one.
+fn leading_imports(plan: &LogicalOperator) -> Vec<String> {
+    match plan {
+        LogicalOperator::ParameterScan(scan) => scan.columns.clone(),
+        LogicalOperator::NodeScan(scan) => {
+            scan.input.as_deref().map_or_else(Vec::new, leading_imports)
+        }
+        LogicalOperator::EdgeScan(scan) => {
+            scan.input.as_deref().map_or_else(Vec::new, leading_imports)
+        }
+        LogicalOperator::Expand(op) => leading_imports(&op.input),
+        LogicalOperator::Filter(op) => leading_imports(&op.input),
+        LogicalOperator::Project(op) => leading_imports(&op.input),
+        LogicalOperator::Return(op) => leading_imports(&op.input),
+        LogicalOperator::Aggregate(op) => leading_imports(&op.input),
+        LogicalOperator::Limit(op) => leading_imports(&op.input),
+        LogicalOperator::Skip(op) => leading_imports(&op.input),
+        LogicalOperator::Sort(op) => leading_imports(&op.input),
+        LogicalOperator::Distinct(op) => leading_imports(&op.input),
+        LogicalOperator::Unwind(op) => leading_imports(&op.input),
+        LogicalOperator::Bind(op) => leading_imports(&op.input),
+        LogicalOperator::Join(join) => leading_imports(&join.left),
+        LogicalOperator::LeftJoin(join) => leading_imports(&join.left),
+        LogicalOperator::Apply(apply) => leading_imports(&apply.input),
+        _ => Vec::new(),
     }
 }
 
@@ -159,6 +224,10 @@ impl Binder {
             LogicalOperator::Return(ret) => self.bind_return(ret),
             LogicalOperator::Project(project) => {
                 self.bind_operator(&project.input)?;
+                // A projection that does not pass its input through (a WITH)
+                // ends the scope of what it leaves out: its rows hold only
+                // the projected columns.
+                let mut projected = (!project.pass_through_input).then(BindingContext::new);
                 for projection in &project.projections {
                     self.validate_expression(&projection.expression)?;
                     // Add the projection alias to the context (for WITH clause support)
@@ -169,16 +238,34 @@ impl Binder {
                         // or a Case that selects between node variables (used
                         // by optional() and union() translations).
                         let (is_node, is_edge) = self.infer_entity_status(&projection.expression);
-                        self.context.add_variable(
-                            alias.clone(),
-                            VariableInfo {
-                                name: alias.clone(),
-                                data_type,
-                                is_node,
-                                is_edge,
-                            },
+                        let info = VariableInfo {
+                            name: alias.clone(),
+                            data_type,
+                            is_node,
+                            is_edge,
+                        };
+                        if let Some(projected) = &mut projected {
+                            projected.add_variable(alias.clone(), info.clone());
+                        }
+                        self.context.add_variable(alias.clone(), info);
+                    } else if let Some(projected) = &mut projected {
+                        // An unaliased variable passes on as itself; any
+                        // other unaliased item is a column named after its
+                        // expression (`a.name`), which does not keep `a`.
+                        let name = crate::query::planner::common::expression_to_string(
+                            &projection.expression,
                         );
+                        let info = self.context.get(&name).cloned().unwrap_or(VariableInfo {
+                            name: name.clone(),
+                            data_type: LogicalType::Any,
+                            is_node: false,
+                            is_edge: false,
+                        });
+                        projected.add_variable(name, info);
                     }
+                }
+                if let Some(projected) = projected {
+                    self.context = projected;
                 }
                 Ok(())
             }
@@ -215,16 +302,7 @@ impl Binder {
                 if let Some(ref input) = scan.input {
                     self.bind_operator(input)?;
                 }
-                self.context.add_variable(
-                    scan.variable.clone(),
-                    VariableInfo {
-                        name: scan.variable.clone(),
-                        data_type: LogicalType::Edge,
-                        is_node: false,
-                        is_edge: true,
-                    },
-                );
-                Ok(())
+                self.bind_element(&scan.variable, Element::Edge)
             }
             LogicalOperator::Distinct(distinct) => self.bind_operator(&distinct.input),
             LogicalOperator::Join(join) => self.bind_join(join),
@@ -350,25 +428,15 @@ impl Binder {
 
             // RDF/SPARQL operators
             LogicalOperator::TripleScan(scan) => self.bind_triple_scan(scan),
-            LogicalOperator::Union(union) => {
-                for input in &union.inputs {
-                    self.bind_operator(input)?;
-                }
-                Ok(())
-            }
+            LogicalOperator::Union(union) => self.bind_branches(&union.inputs),
             LogicalOperator::LeftJoin(lj) => {
-                self.bind_operator(&lj.left)?;
-                self.bind_operator(&lj.right)?;
+                self.bind_join_inputs(&lj.left, &lj.right)?;
                 if let Some(ref cond) = lj.condition {
                     self.validate_expression(cond)?;
                 }
                 Ok(())
             }
-            LogicalOperator::AntiJoin(aj) => {
-                self.bind_operator(&aj.left)?;
-                self.bind_operator(&aj.right)?;
-                Ok(())
-            }
+            LogicalOperator::AntiJoin(aj) => self.bind_join_inputs(&aj.left, &aj.right),
             LogicalOperator::Bind(bind) => {
                 self.bind_operator(&bind.input)?;
                 self.validate_expression(&bind.expression)?;
@@ -601,19 +669,13 @@ impl Binder {
                 Ok(())
             }
             LogicalOperator::Except(except) => {
-                self.bind_operator(&except.left)?;
-                self.bind_operator(&except.right)?;
-                Ok(())
+                self.bind_branches([except.left.as_ref(), except.right.as_ref()])
             }
             LogicalOperator::Intersect(intersect) => {
-                self.bind_operator(&intersect.left)?;
-                self.bind_operator(&intersect.right)?;
-                Ok(())
+                self.bind_branches([intersect.left.as_ref(), intersect.right.as_ref()])
             }
             LogicalOperator::Otherwise(otherwise) => {
-                self.bind_operator(&otherwise.left)?;
-                self.bind_operator(&otherwise.right)?;
-                Ok(())
+                self.bind_branches([otherwise.left.as_ref(), otherwise.right.as_ref()])
             }
             LogicalOperator::Apply(apply) => {
                 // Snapshot context BEFORE binding the input, so we can detect
@@ -653,28 +715,66 @@ impl Binder {
                 let outer_names: HashSet<String> =
                     self.context.variable_names().iter().cloned().collect();
 
-                self.bind_operator(&apply.subplan)?;
+                // A name the subquery imports must be a variable of the outer
+                // query (`*` imports all of them).
+                if let Some(missing) = apply
+                    .shared_variables
+                    .iter()
+                    .find(|name| *name != "*" && !outer_names.contains(*name))
+                {
+                    return Err(undefined_variable_error(
+                        missing,
+                        &self.context,
+                        " imported into CALL",
+                    ));
+                }
 
-                // Remove internal-only variables added by the subplan (those that
-                // are not output columns). Prevents subplan internals from leaking
-                // into the outer query or sibling CALL blocks.
+                // A subquery sees the outer variables it imports: the ones its
+                // scope clause or importing `WITH` names (`CALL (a, b)`,
+                // `WITH a`), all of them for `*`, and none when it names none
+                // (`CALL () { ... }`, a Cypher `CALL { ... }` without an
+                // importing `WITH`): the planner then runs it without the
+                // outer row. It binds in a context of its own, so neither its
+                // internal variables nor a `WITH` in it that drops outer ones
+                // change the outer scope.
+                let imports_all = apply.shared_variables.iter().any(|name| name == "*");
+                let bound = match union_parts(&apply.subplan) {
+                    // Each part of a UNION imports its own outer variables (the
+                    // Apply imports all of them): the ones its scan starts from.
+                    Some(parts) if !imports_all => parts.iter().try_for_each(|part| {
+                        let part_context = self.imported(&leading_imports(part));
+                        let outer_context = std::mem::replace(&mut self.context, part_context);
+                        let bound = self.bind_operator(part);
+                        self.context = outer_context;
+                        bound
+                    }),
+                    _ => {
+                        let subplan_context = if imports_all {
+                            self.context.clone()
+                        } else {
+                            self.imported(&apply.shared_variables)
+                        };
+                        let outer_context = std::mem::replace(&mut self.context, subplan_context);
+                        let bound = self.bind_operator(&apply.subplan);
+                        self.context = outer_context;
+                        bound
+                    }
+                };
+                bound?;
+
+                // A subquery returns new variables only, as in openCypher: an
+                // outer one, imported or not, would be bound twice.
                 let mut subplan_output_ctx = BindingContext::new();
                 Self::register_subplan_columns(&apply.subplan, &mut subplan_output_ctx);
-                let subplan_output_names: HashSet<String> = subplan_output_ctx
+                if let Some(clash) = subplan_output_ctx
                     .variable_names()
-                    .iter()
-                    .cloned()
-                    .collect();
-
-                let to_remove: Vec<String> = self
-                    .context
-                    .variable_names()
-                    .iter()
-                    .filter(|n| !outer_names.contains(*n) && !subplan_output_names.contains(*n))
-                    .cloned()
-                    .collect();
-                for name in to_remove {
-                    self.context.remove_variable(&name);
+                    .into_iter()
+                    .find(|name| outer_names.contains(name))
+                {
+                    return Err(binding_error_with_hint(
+                        format!("Variable '{clash}' is already declared outside the CALL subquery"),
+                        "return it under a new name",
+                    ));
                 }
 
                 // Register output columns so downstream operators can reference them.
@@ -683,7 +783,9 @@ impl Binder {
             }
             LogicalOperator::MultiWayJoin(mwj) => {
                 for input in &mwj.inputs {
+                    let before = self.context.clone();
                     self.bind_operator(input)?;
+                    self.keep_join_scope(before);
                 }
                 for cond in &mwj.conditions {
                     self.validate_expression(&cond.left)?;
@@ -692,8 +794,13 @@ impl Binder {
                 Ok(())
             }
             LogicalOperator::ParameterScan(param_scan) => {
-                // Register parameter columns as variables (injected by outer Apply)
+                // Register parameter columns as variables (injected by outer
+                // Apply). A variable of the outer query keeps what it is, so a
+                // CALL subquery can match an imported edge as an edge.
                 for col in &param_scan.columns {
+                    if self.context.contains(col) {
+                        continue;
+                    }
                     self.context.add_variable(
                         col.clone(),
                         VariableInfo {
@@ -844,16 +951,77 @@ impl Binder {
         }
 
         // Add the scanned variable to scope
+        self.bind_element(&scan.variable, Element::Node)
+    }
+
+    /// Binds `name` to a node or an edge of a pattern. A name already bound
+    /// to the other kind, or to a value, is an error: matching it would
+    /// compare a node with an edge (or a number) and match by a coincidence
+    /// of IDs. A name bound to the same kind, or to something of unknown
+    /// kind (an UNWIND variable, a procedure result), is bound again.
+    fn bind_element(&mut self, name: &str, element: Element) -> Result<()> {
+        if let Some(info) = self.context.get(name) {
+            let conflict = match element {
+                Element::Node if info.is_edge => Some("is an edge, so it cannot also be a node"),
+                Element::Edge if info.is_node => Some("is a node, so it cannot also be an edge"),
+                Element::Node if holds_a_value(info) => {
+                    Some("holds a value, so it cannot be a node")
+                }
+                Element::Edge if holds_a_value(info) => {
+                    Some("holds a value, so it cannot be an edge")
+                }
+                _ => None,
+            };
+            if let Some(conflict) = conflict {
+                return Err(binding_error(format!("Variable '{name}' {conflict}")));
+            }
+        }
+        let is_edge = element == Element::Edge;
         self.context.add_variable(
-            scan.variable.clone(),
+            name.to_string(),
             VariableInfo {
-                name: scan.variable.clone(),
-                data_type: LogicalType::Node,
-                is_node: true,
-                is_edge: false,
+                name: name.to_string(),
+                data_type: if is_edge {
+                    LogicalType::Edge
+                } else {
+                    LogicalType::Node
+                },
+                is_node: !is_edge,
+                is_edge,
             },
         );
+        Ok(())
+    }
 
+    /// Binds the branches of a set operation, each in the scope the first one
+    /// started from: a branch is a query of its own, so a name may be a node
+    /// in one branch and an edge in the next. After the last branch the scope
+    /// has every name a branch bound; a name the branches bind differently is
+    /// of unknown kind.
+    fn bind_branches<'a>(
+        &mut self,
+        branches: impl IntoIterator<Item = &'a LogicalOperator>,
+    ) -> Result<()> {
+        let before = self.context.clone();
+        let mut after: IndexMap<String, VariableInfo> = IndexMap::new();
+        for branch in branches {
+            self.context = before.clone();
+            self.bind_operator(branch)?;
+            for (name, info) in &self.context.variables {
+                match after.get_mut(name) {
+                    Some(seen) if seen.is_node != info.is_node || seen.is_edge != info.is_edge => {
+                        seen.is_node = false;
+                        seen.is_edge = false;
+                        seen.data_type = LogicalType::Any;
+                    }
+                    Some(_) => {}
+                    None => {
+                        after.insert(name.clone(), info.clone());
+                    }
+                }
+            }
+        }
+        self.context = BindingContext { variables: after };
         Ok(())
     }
 
@@ -883,27 +1051,11 @@ impl Binder {
 
         // Add edge variable if present
         if let Some(ref edge_var) = expand.edge_variable {
-            self.context.add_variable(
-                edge_var.clone(),
-                VariableInfo {
-                    name: edge_var.clone(),
-                    data_type: LogicalType::Edge,
-                    is_node: false,
-                    is_edge: true,
-                },
-            );
+            self.bind_element(edge_var, Element::Edge)?;
         }
 
         // Add target variable
-        self.context.add_variable(
-            expand.to_variable.clone(),
-            VariableInfo {
-                name: expand.to_variable.clone(),
-                data_type: LogicalType::Node,
-                is_node: true,
-                is_edge: false,
-            },
-        );
+        self.bind_element(&expand.to_variable, Element::Node)?;
 
         // Add path variables for variable-length paths
         if let Some(ref path_alias) = expand.path_alias {
@@ -996,6 +1148,13 @@ impl Binder {
             }
             LogicalOperator::Sort(s) => Self::register_subplan_columns(&s.input, ctx),
             LogicalOperator::Limit(l) => Self::register_subplan_columns(&l.input, ctx),
+            LogicalOperator::Skip(s) => Self::register_subplan_columns(&s.input, ctx),
+            // The branches of a UNION return the same columns.
+            LogicalOperator::Union(u) => {
+                if let Some(first) = u.inputs.first() {
+                    Self::register_subplan_columns(first, ctx);
+                }
+            }
             LogicalOperator::Distinct(d) => Self::register_subplan_columns(&d.input, ctx),
             LogicalOperator::Aggregate(agg) => {
                 // Aggregate produces named output columns
@@ -1319,8 +1478,7 @@ impl Binder {
     /// Binds a join operator.
     fn bind_join(&mut self, join: &crate::query::plan::JoinOp) -> Result<()> {
         // Bind both sides of the join
-        self.bind_operator(&join.left)?;
-        self.bind_operator(&join.right)?;
+        self.bind_join_inputs(&join.left, &join.right)?;
 
         // Validate join conditions
         for condition in &join.conditions {
@@ -1329,6 +1487,39 @@ impl Binder {
         }
 
         Ok(())
+    }
+
+    /// The outer variables named in `names`, with what they are in the
+    /// current context.
+    fn imported(&self, names: &[String]) -> BindingContext {
+        let mut imported = BindingContext::new();
+        for name in names {
+            if let Some(info) = self.context.get(name) {
+                imported.add_variable(name.clone(), info.clone());
+            }
+        }
+        imported
+    }
+
+    /// Binds the two inputs of a join. The right one sees the left one's
+    /// variables, and the join's rows hold the columns of both, so a
+    /// projection inside the right input does not end the scope of the left
+    /// one's variables.
+    fn bind_join_inputs(&mut self, left: &LogicalOperator, right: &LogicalOperator) -> Result<()> {
+        self.bind_operator(left)?;
+        let after_left = self.context.clone();
+        self.bind_operator(right)?;
+        self.keep_join_scope(after_left);
+        Ok(())
+    }
+
+    /// Makes the context the variables of `before` followed by those bound
+    /// since, for an input that joins its rows to the ones `before` holds.
+    fn keep_join_scope(&mut self, before: BindingContext) {
+        let since = std::mem::replace(&mut self.context, before);
+        for (name, info) in since.variables {
+            self.context.add_variable(name, info);
+        }
     }
 
     /// Binds an aggregate operator.
@@ -1516,6 +1707,7 @@ mod tests {
             ],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "a".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: Some("e".to_string()),
@@ -1558,6 +1750,7 @@ mod tests {
             }],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "undefined".to_string(), // not defined!
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -1968,6 +2161,103 @@ mod tests {
         let mut binder = Binder::new();
         let result = binder.bind(&plan);
         assert!(result.is_err(), "WITH on undefined variable should fail");
+    }
+
+    /// `MATCH (n) WITH n.name AS name`, then a projection of `n` or `name`.
+    fn project_after_with(read: &str, pass_through_input: bool) -> LogicalPlan {
+        use crate::query::plan::{ProjectOp, Projection};
+
+        let with = LogicalOperator::Project(ProjectOp {
+            projections: vec![Projection {
+                expression: LogicalExpression::Property {
+                    variable: "n".to_string(),
+                    property: "name".to_string(),
+                },
+                alias: Some("name".to_string()),
+            }],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+            pass_through_input,
+        });
+        LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable(read.to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(with),
+        }))
+    }
+
+    #[test]
+    fn test_project_ends_the_scope_of_what_it_leaves_out() {
+        let error = Binder::new()
+            .bind(&project_after_with("n", false))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("Undefined variable 'n'"),
+            "{error}"
+        );
+        // A pass-through projection (GQL LET) keeps its input's variables.
+        let ctx = Binder::new().bind(&project_after_with("n", true)).unwrap();
+        assert!(ctx.contains("n") && ctx.contains("name"));
+    }
+
+    #[test]
+    fn test_an_unaliased_projection_passes_on_its_column_only() {
+        use crate::query::plan::{ProjectOp, Projection};
+
+        // The column of an unaliased `n.name` is named after it; `n` is gone.
+        let plan = LogicalPlan::new(LogicalOperator::Project(ProjectOp {
+            projections: vec![Projection {
+                expression: LogicalExpression::Property {
+                    variable: "n".to_string(),
+                    property: "name".to_string(),
+                },
+                alias: None,
+            }],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+            pass_through_input: false,
+        }));
+        let ctx = Binder::new().bind(&plan).unwrap();
+        assert_eq!(ctx.variable_names(), ["n.name"]);
+    }
+
+    #[test]
+    fn test_a_projection_in_a_join_input_keeps_the_other_side() {
+        use crate::query::plan::{JoinOp, JoinType, ProjectOp, Projection};
+
+        // The right input projects `b` away; the join's rows still hold `a`.
+        let scan = |variable: &str| {
+            LogicalOperator::NodeScan(NodeScanOp {
+                variable: variable.to_string(),
+                label: None,
+                input: None,
+            })
+        };
+        let right = LogicalOperator::Project(ProjectOp {
+            projections: vec![Projection {
+                expression: LogicalExpression::Variable("b".to_string()),
+                alias: Some("c".to_string()),
+            }],
+            input: Box::new(scan("b")),
+            pass_through_input: false,
+        });
+        let plan = LogicalPlan::new(LogicalOperator::Join(JoinOp {
+            left: Box::new(scan("a")),
+            right: Box::new(right),
+            join_type: JoinType::Cross,
+            conditions: vec![],
+        }));
+        let ctx = Binder::new().bind(&plan).unwrap();
+        assert_eq!(ctx.variable_names(), ["a", "c"]);
     }
 
     // --- UNWIND ---
@@ -2438,6 +2728,7 @@ mod tests {
             }],
             distinct: false,
             input: Box::new(LogicalOperator::Expand(ExpandOp {
+                quantified: false,
                 from_variable: "x".to_string(),
                 to_variable: "b".to_string(),
                 edge_variable: None,
@@ -4415,6 +4706,7 @@ mod tests {
         use crate::query::plan::{ExpandDirection, ExpandOp, PathMode};
 
         let plan = LogicalPlan::new(LogicalOperator::Expand(ExpandOp {
+            quantified: true,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,

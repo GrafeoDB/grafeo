@@ -88,12 +88,7 @@ fn bench_top_k_vs_sort_limit_time(c: &mut Criterion) {
         group.bench_function(format!("top_k/N={n}"), |b| {
             b.iter(|| {
                 let source = Box::new(VecSource::new(&values, 2048));
-                let mut op = TopKOperator::new(
-                    source,
-                    vec![SortKey::descending(0)],
-                    K,
-                    vec![LogicalType::Int64],
-                );
+                let mut op = TopKOperator::new(source, vec![SortKey::descending(0)], K);
                 black_box(drain(&mut op))
             });
         });
@@ -101,12 +96,8 @@ fn bench_top_k_vs_sort_limit_time(c: &mut Criterion) {
         group.bench_function(format!("sort_limit/N={n}"), |b| {
             b.iter(|| {
                 let source = Box::new(VecSource::new(&values, 2048));
-                let sort = Box::new(SortOperator::new(
-                    source,
-                    vec![SortKey::descending(0)],
-                    vec![LogicalType::Int64],
-                ));
-                let mut limit = LimitOperator::new(sort, K, vec![LogicalType::Int64]);
+                let sort = Box::new(SortOperator::new(source, vec![SortKey::descending(0)]));
+                let mut limit = LimitOperator::new(sort, K);
                 black_box(drain(&mut limit))
             });
         });
@@ -125,12 +116,7 @@ fn bench_top_k_drain(c: &mut Criterion) {
         group.bench_function(format!("N={n}"), |b| {
             b.iter(|| {
                 let source = Box::new(VecSource::new(&values, 2048));
-                let mut op = TopKOperator::new(
-                    source,
-                    vec![SortKey::descending(0)],
-                    K,
-                    vec![LogicalType::Int64],
-                );
+                let mut op = TopKOperator::new(source, vec![SortKey::descending(0)], K);
                 black_box(drain(&mut op))
             });
         });

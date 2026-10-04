@@ -1,0 +1,368 @@
+# Reviewed differences between 0.5.43 and 0.5.44: case key, fingerprint of the reviewed result, why it changed.
+A11|cypher b9ec8c9563 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A11|gql b9ec8c9563 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A12|cypher 84f42d9510 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A12|gql 84f42d9510 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A13|cypher bb20e37cb5 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A13|gql bb20e37cb5 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A16|cypher c614bee8b6 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A16|gql c614bee8b6 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A1|cypher ccffc715d4 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A1|gql ccffc715d4 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A2|cypher 8b1f46d48f Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A2|gql 8b1f46d48f Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A3|cypher 48a7411c57 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A3|gql 48a7411c57 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A4|cypher 58d0a75d29 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A4|gql 58d0a75d29 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A5|cypher 699776ae0e Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A5|gql 699776ae0e Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A7|cypher b9ec8c9563 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A7|gql b9ec8c9563 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A8|cypher 6b024f37c1 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+A8|gql 6b024f37c1 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482).
+AA1|cypher 685a587bd0 A one-hop quantifier binds a list, collected list items stay edges, pattern comprehensions run in aggregates.
+AA2|gql 685a587bd0 A one-hop quantifier binds a list, collected list items stay edges, pattern comprehensions run in aggregates.
+AA3|cypher b541c5a750 A one-hop quantifier binds a list, collected list items stay edges, pattern comprehensions run in aggregates.
+AA3|gql b541c5a750 A one-hop quantifier binds a list, collected list items stay edges, pattern comprehensions run in aggregates.
+AA4|cypher 01a4b3d404 A one-hop quantifier binds a list, collected list items stay edges, pattern comprehensions run in aggregates.
+AA5|cypher 50005e4e24 A one-hop quantifier binds a list, collected list items stay edges, pattern comprehensions run in aggregates.
+AA6|cypher 50005e4e24 A one-hop quantifier binds a list, collected list items stay edges, pattern comprehensions run in aggregates.
+AB1|cypher 9b36882444 A CALL subquery returns new names only; a variable a WITH left out is undefined, not an internal error.
+AB1|gql 9b36882444 A CALL subquery returns new names only; a variable a WITH left out is undefined, not an internal error.
+AB2|cypher 9b36882444 A CALL subquery returns new names only; a variable a WITH left out is undefined, not an internal error.
+AB2|gql 9b36882444 A CALL subquery returns new names only; a variable a WITH left out is undefined, not an internal error.
+AB3|cypher 03e47cc203 A CALL subquery returns new names only; a variable a WITH left out is undefined, not an internal error.
+AB3|gql 03e47cc203 A CALL subquery returns new names only; a variable a WITH left out is undefined, not an internal error.
+AB4|cypher 3586a5f788 A CALL subquery returns new names only; a variable a WITH left out is undefined, not an internal error.
+AB4|gql 3586a5f788 A CALL subquery returns new names only; a variable a WITH left out is undefined, not an internal error.
+AB5|cypher d2e17893c7 A CALL subquery returns new names only; a variable a WITH left out is undefined, not an internal error.
+AB5|gql d2e17893c7 A CALL subquery returns new names only; a variable a WITH left out is undefined, not an internal error.
+AC10|cypher b9df7ad121 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC10|gql b9df7ad121 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC11|cypher 3a8d2d4ee5 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC11|gql 3a8d2d4ee5 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC12|cypher 04731a809e Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC12|gql 04731a809e Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC13|gql 04731a809e Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC1|cypher d792156d95 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC1|gql d792156d95 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC2|cypher 0768243410 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC2|gql 0768243410 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC3|cypher d0974271e7 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC3|gql d0974271e7 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC4|cypher a0bf6fdfb0 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC4|gql a0bf6fdfb0 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC5|cypher 5ad92dde94 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC6|cypher 992960337a Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC7|cypher 50005e4e24 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC7|gql 50005e4e24 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AC8|cypher bfdc2047f3 Subquery bodies take ORDER BY, SKIP, LIMIT and UNION; OPTIONAL MATCH works first and in Cypher EXISTS/COUNT.
+AD1|cypher 03e47cc203 A subquery that imports nothing sees no outer variable (it read them as null).
+AD1|gql 03e47cc203 A subquery that imports nothing sees no outer variable (it read them as null).
+AD2|cypher 03e47cc203 A subquery that imports nothing sees no outer variable (it read them as null).
+AD3|cypher c84f662233 A subquery that imports nothing sees no outer variable (it read them as null).
+AD3|gql c84f662233 A subquery that imports nothing sees no outer variable (it read them as null).
+AE1|cypher 9932bc4932 A later pattern after a shortest path comes back to its nodes; a subquery sharing nothing with the row is answered.
+AE2|gql 9932bc4932 A later pattern after a shortest path comes back to its nodes; a subquery sharing nothing with the row is answered.
+AE3|cypher 60c8e9a85a A later pattern after a shortest path comes back to its nodes; a subquery sharing nothing with the row is answered.
+AE3|gql 60c8e9a85a A later pattern after a shortest path comes back to its nodes; a subquery sharing nothing with the row is answered.
+AE4|cypher 9fc1b556b3 A later pattern after a shortest path comes back to its nodes; a subquery sharing nothing with the row is answered.
+AE4|gql 9fc1b556b3 A later pattern after a shortest path comes back to its nodes; a subquery sharing nothing with the row is answered.
+AF1|gql 199032d8c1 GQL NEXT passes the rows on; a VALUE subquery reads the outer row (and runs in WHERE).
+AF2|gql 625b8e9fdb GQL NEXT passes the rows on; a VALUE subquery reads the outer row (and runs in WHERE).
+AF3|gql 5cb2de68c2 GQL NEXT passes the rows on; a VALUE subquery reads the outer row (and runs in WHERE).
+AF4|gql ab159b1cb9 GQL NEXT passes the rows on; a VALUE subquery reads the outer row (and runs in WHERE).
+B10|cypher 53d503c3db Dotted access on startNode(r) fails with a clearer message.
+B12|cypher 3023346a9b A node without w no longer returns the w of the edge with the same ID after WITH DISTINCT.
+B16|cypher 6d8ebdc593 Collected and unwound edges keep their kind: x.w reads the edge, not the node with the same ID.
+B6|gql 5d81268c40 An edge bound by LET is returned as an edge record, not 0.
+B8|cypher 22ea1c58b5 A later MATCH through an edge bound earlier matches only that edge.
+C13|cypher b62ffdb611 UNION in a Cypher CALL subquery runs (it failed to parse).
+C16|cypher cd3e8f944c Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C16|gql cd3e8f944c Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C18|cypher d06f568726 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C18|gql d06f568726 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C19|cypher 44a244f56a Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C19|gql 44a244f56a Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C20|gql cb687ca938 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C23|cypher b9ec8c9563 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C23|gql b9ec8c9563 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C24|cypher ae3aa57892 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C24|gql ae3aa57892 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C5|cypher 3111cdd764 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C5|gql 3111cdd764 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C7|cypher 107e84a816 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C7|gql 107e84a816 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C8|gql 0ed77be421 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+C9|gql c048d20456 Set operations: each branch is planned on its own, so later branches return nodes and edges as records and UNION, EXCEPT and INTERSECT compare records (#481, #482).
+D10|cypher 950b611aeb ORDER BY no longer adds its sort keys to the result as extra columns.
+D10|gql 950b611aeb ORDER BY no longer adds its sort keys to the result as extra columns.
+D16|cypher 0ce132321f ORDER BY no longer adds its sort keys to the result as extra columns.
+D16|gql 0ce132321f ORDER BY no longer adds its sort keys to the result as extra columns.
+D17|cypher 911c1f4d14 ORDER BY no longer adds its sort keys to the result as extra columns.
+D17|gql 911c1f4d14 ORDER BY no longer adds its sort keys to the result as extra columns.
+D18|cypher b03c11177d ORDER BY no longer adds its sort keys to the result as extra columns.
+D18|gql b03c11177d ORDER BY no longer adds its sort keys to the result as extra columns.
+D19|cypher d106acaafe ORDER BY no longer adds its sort keys to the result as extra columns.
+D19|gql d106acaafe ORDER BY no longer adds its sort keys to the result as extra columns.
+D1|cypher c51d3d1b0c ORDER BY no longer adds its sort keys to the result as extra columns.
+D1|gql c51d3d1b0c ORDER BY no longer adds its sort keys to the result as extra columns.
+D20|cypher 8033c6529b ORDER BY no longer adds its sort keys to the result as extra columns.
+D20|gql 8033c6529b ORDER BY no longer adds its sort keys to the result as extra columns.
+D22|cypher 953b72b25c ORDER BY no longer adds its sort keys to the result as extra columns.
+D22|gql 953b72b25c ORDER BY no longer adds its sort keys to the result as extra columns.
+D4|cypher bd1f72b4ad ORDER BY no longer adds its sort keys to the result as extra columns.
+D4|gql bd1f72b4ad ORDER BY no longer adds its sort keys to the result as extra columns.
+D5|cypher 950b611aeb ORDER BY no longer adds its sort keys to the result as extra columns.
+D5|gql 950b611aeb ORDER BY no longer adds its sort keys to the result as extra columns.
+D6|cypher b59d233609 ORDER BY no longer adds its sort keys to the result as extra columns.
+D6|gql b59d233609 ORDER BY no longer adds its sort keys to the result as extra columns.
+D8|cypher 05954ef876 ORDER BY no longer adds its sort keys to the result as extra columns.
+D8|gql 05954ef876 ORDER BY no longer adds its sort keys to the result as extra columns.
+E10|cypher 30cbbd107e A property read after WITH ... ORDER BY, SKIP, LIMIT or DISTINCT comes from the right node or edge (null where it has none).
+E11|cypher c80dcbfaab A property read after WITH ... ORDER BY, SKIP, LIMIT or DISTINCT comes from the right node or edge (null where it has none).
+E12|cypher f6e1c2ff61 A later MATCH through an edge bound earlier matches only that edge.
+E14|cypher e54417a92b A property read after WITH ... ORDER BY, SKIP, LIMIT or DISTINCT comes from the right node or edge (null where it has none).
+E15|cypher 90b8ce5686 keys() of an edge lists its keys instead of null.
+E3|cypher 39c4f76178 A property read after WITH ... ORDER BY, SKIP, LIMIT or DISTINCT comes from the right node or edge (null where it has none).
+E4|cypher 879f24a6f3 Properties after WITH ... ORDER BY come from the edge, not the node with the same ID.
+E5|cypher 1e2b9d7838 A property read after WITH ... ORDER BY, SKIP, LIMIT or DISTINCT comes from the right node or edge (null where it has none).
+E6|cypher bf61b6e064 A property read after WITH ... ORDER BY, SKIP, LIMIT or DISTINCT comes from the right node or edge (null where it has none).
+F11|cypher bba3b9ab66 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482). Also across row batches.
+F11|gql bba3b9ab66 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482). Also across row batches.
+F13|cypher f5d9a5f906 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482). Also across row batches.
+F13|gql f5d9a5f906 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482). Also across row batches.
+F4|cypher 9d561aa59d Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482). Also across row batches.
+F4|gql 9d561aa59d Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482). Also across row batches.
+F6|cypher c8bda6e6e3 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482). Also across row batches.
+F6|gql c8bda6e6e3 Edges returned after ORDER BY, SKIP, LIMIT or DISTINCT are edge records, not 0 (#482). Also across row batches.
+G1|cypher 099bb21d93 ORDER BY uses one total order, the openCypher one (maps, lists, strings, booleans, numbers, then null).
+G1|gql 099bb21d93 ORDER BY uses one total order, the openCypher one (maps, lists, strings, booleans, numbers, then null).
+G2|cypher cbcc57cba4 ORDER BY uses one total order, the openCypher one (maps, lists, strings, booleans, numbers, then null).
+G2|gql cbcc57cba4 ORDER BY uses one total order, the openCypher one (maps, lists, strings, booleans, numbers, then null).
+I1|cypher 84d111dabe RETURN * with ORDER BY works instead of failing with an internal error.
+I1|gql 84d111dabe RETURN * with ORDER BY works instead of failing with an internal error.
+I2|cypher 97b7747133 RETURN * with ORDER BY works instead of failing with an internal error.
+I2|gql 97b7747133 RETURN * with ORDER BY works instead of failing with an internal error.
+J2|cypher ddde428e93 An edge kept as a group key is returned as an edge record, not an ID.
+J2|gql ddde428e93 An edge kept as a group key is returned as an edge record, not an ID.
+K10|cypher 1564f1a991 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K10|gql 1564f1a991 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K11|cypher 5ca6923aa1 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K11|gql 5ca6923aa1 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K12|cypher 2fe3d07373 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K12|gql 2fe3d07373 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K15|cypher 97daaa6efb A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K15|gql 97daaa6efb A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K18|cypher 5df72cecce A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K18|gql 5df72cecce A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K1|cypher 3f9ac5693e A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K1|gql 3f9ac5693e A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K20|cypher e091683d87 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K20|gql e091683d87 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K21|cypher ce23c7ebe7 Properties after a later MATCH come from the right node: nodes without w no longer read an edge's w.
+K21|gql ce23c7ebe7 Properties after a later MATCH come from the right node: nodes without w no longer read an edge's w.
+K23|cypher 4495158f51 A later MATCH after WITH keeps the earlier variables (GQL failed with an internal error); a node without w reads null.
+K23|gql 4495158f51 A later MATCH after WITH keeps the earlier variables (GQL failed with an internal error); a node without w reads null.
+K25|cypher f7f2fcdc6e A later MATCH through an edge list bound earlier matches only that list.
+K25|gql f7f2fcdc6e A later MATCH through an edge list bound earlier matches only that list.
+K26|cypher b16b37e1c6 The same edge twice in one path can only be a loop.
+K26|gql b16b37e1c6 The same edge twice in one path can only be a loop.
+K2|cypher 52c4eb669a A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K2|gql 52c4eb669a A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K31|cypher f57d122a33 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K32|cypher df63ad5130 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K32|gql df63ad5130 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K3|cypher 4242b130f3 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K3|gql 4242b130f3 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K42|cypher 6dfc226ed5 An edge has no property i: r.i no longer reads the node with the same ID.
+K43|cypher a57749766d An edge has no property i: r.i no longer reads the node with the same ID.
+K4|cypher e32d209c71 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K4|gql e32d209c71 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K5|cypher b16b37e1c6 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K5|gql b16b37e1c6 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K6|cypher 3bd58d54a0 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K6|gql 3bd58d54a0 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K7|cypher 6bfbcda916 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K7|gql 6bfbcda916 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K8|cypher 6bfbcda916 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K8|gql 6bfbcda916 A later MATCH through a node or edge bound earlier matches only that node or edge, and properties after a later MATCH come from the right entity.
+K9|cypher ec5822ecd4 A path back to an earlier variable inside CALL ends at the node the variable holds.
+K9|gql ec5822ecd4 A path back to an earlier variable inside CALL ends at the node the variable holds.
+L10|cypher 714306f254 ORDER BY uses one total order, the openCypher one: values of different types, lists, NaN after infinity, and NULLS FIRST/LAST hold with DESC.
+L10|gql 714306f254 ORDER BY uses one total order, the openCypher one: values of different types, lists, NaN after infinity, and NULLS FIRST/LAST hold with DESC.
+L11|cypher 16d6e49e75 ORDER BY uses one total order, the openCypher one: values of different types, lists, NaN after infinity, and NULLS FIRST/LAST hold with DESC.
+L11|gql 16d6e49e75 ORDER BY uses one total order, the openCypher one: values of different types, lists, NaN after infinity, and NULLS FIRST/LAST hold with DESC.
+L18|cypher 91773d0d1d ORDER BY uses one total order, the openCypher one: values of different types, lists, NaN after infinity, and NULLS FIRST/LAST hold with DESC.
+L18|gql 91773d0d1d ORDER BY uses one total order, the openCypher one: values of different types, lists, NaN after infinity, and NULLS FIRST/LAST hold with DESC.
+L1|cypher 6f905cbea6 ORDER BY uses one total order, the openCypher one: values of different types, lists, NaN after infinity, and NULLS FIRST/LAST hold with DESC.
+L1|gql 6f905cbea6 ORDER BY uses one total order, the openCypher one: values of different types, lists, NaN after infinity, and NULLS FIRST/LAST hold with DESC.
+L2|cypher 7c7e33916a ORDER BY uses one total order, the openCypher one: values of different types, lists, NaN after infinity, and NULLS FIRST/LAST hold with DESC.
+L2|gql 7c7e33916a ORDER BY uses one total order, the openCypher one: values of different types, lists, NaN after infinity, and NULLS FIRST/LAST hold with DESC.
+L5|gql 16a470385a ORDER BY uses one total order, the openCypher one: values of different types, lists, NaN after infinity, and NULLS FIRST/LAST hold with DESC.
+L7|gql ad110d7c47 ORDER BY uses one total order, the openCypher one: values of different types, lists, NaN after infinity, and NULLS FIRST/LAST hold with DESC.
+M10|cypher c978f9d66f EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M10|gql c978f9d66f EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M11|cypher 63dce8b5af EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M11|gql 63dce8b5af EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M12|cypher 0b481da4be EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M12|gql 0b481da4be EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M13|cypher 26d63acab1 A null node makes EXISTS false and COUNT 0 instead of null.
+M13|gql 26d63acab1 A null node makes EXISTS false and COUNT 0 instead of null.
+M14|cypher 3a406ffcd0 A null node makes NOT EXISTS true, so the row is kept.
+M14|gql 3a406ffcd0 A null node makes NOT EXISTS true, so the row is kept.
+M16|cypher f32d41cf48 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M16|gql f32d41cf48 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M17|cypher acf4b125d3 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M17|gql acf4b125d3 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M19|cypher c5b55220d4 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M19|gql c5b55220d4 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M20|cypher 1235dca336 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M20|gql 1235dca336 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M21|cypher 2ece2d5589 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M21|gql 2ece2d5589 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M22|cypher 3e8c510773 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M22|gql 3e8c510773 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M23|cypher 2ece2d5589 A Cypher MATCH (b:City) after the edge checks that b is a City.
+M24|cypher e9e00f0208 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M2|cypher 1f8b9f073f EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M2|gql 1f8b9f073f EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M31|cypher 1f8b9f073f A pattern predicate in WHERE works (it failed before).
+M32|cypher 90d8956923 A negated pattern predicate in WHERE works (it failed before).
+M33|cypher 8442578b89 EXISTS uses the row's c, so each person only matches the city they live in.
+M33|gql 8442578b89 EXISTS uses the row's c, so each person only matches the city they live in.
+M36|cypher 1f8b9f073f COUNT compared in WHERE counts per row.
+M36|gql 1f8b9f073f COUNT compared in WHERE counts per row.
+M38|cypher 6354c87d40 NOT EXISTS uses both nodes of the row.
+M38|gql 6354c87d40 NOT EXISTS uses both nodes of the row.
+M39|cypher c9a189f776 COUNT and EXISTS in RETURN use the row's node.
+M39|gql c9a189f776 COUNT and EXISTS in RETURN use the row's node.
+M4|cypher 787943d3b5 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M4|gql 787943d3b5 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M5|cypher 045a78e29c EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M5|gql 045a78e29c EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M6|cypher d3a64ea3af EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M6|gql d3a64ea3af EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M7|cypher 41b584d5c4 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M7|gql 41b584d5c4 EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M9|cypher 0b481da4be EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+M9|gql 0b481da4be EXISTS and COUNT subqueries match their whole pattern and use the row's nodes and edges.
+N10|cypher 2226820635 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N10|gql 2226820635 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N11|cypher 306a927d66 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N11|gql 306a927d66 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N1|cypher 35438c1583 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N1|gql 35438c1583 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N2|cypher 21d44f5fc1 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N2|gql 21d44f5fc1 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N3|cypher 7fb15da67b Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N3|gql 7fb15da67b Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N4|cypher 5ca71023f9 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N4|gql 5ca71023f9 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N5|cypher 3512a005c2 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N5|gql 3512a005c2 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N6|cypher f9fd9544be Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N6|gql f9fd9544be Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N8|cypher 9a485dd7dd Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N8|gql 9a485dd7dd Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N9|cypher 3e43b2f052 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+N9|gql 3e43b2f052 Nodes and edges keep their type through OPTIONAL MATCH, EXISTS, CALL, UNWIND and grouping, so properties come from the right entity.
+O10|cypher 2ad8297ca6 Unwound edges keep their kind, so a later MATCH through them matches only those edges.
+O10|gql 2ad8297ca6 Unwound edges keep their kind, so a later MATCH through them matches only those edges.
+O11|cypher d3617ffdf5 An item of a collected edge list reads that edge's property.
+O11|gql d3617ffdf5 An item of a collected edge list reads that edge's property.
+O1|cypher 21e4702b26 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O1|gql 21e4702b26 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O2|cypher f9fd9544be Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O2|gql f9fd9544be Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O3|cypher 8c26362660 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O3|gql 8c26362660 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O4|cypher 01a4b3d404 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O4|gql 01a4b3d404 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O5|cypher 15ef32fd86 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O5|gql 15ef32fd86 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O6|cypher 5c84808b02 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O6|gql 5c84808b02 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O7|cypher 3eec7cfdf9 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O7|gql 3eec7cfdf9 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O8|cypher cbaff6f467 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O8|gql cbaff6f467 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O9|cypher ac62dd2342 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+O9|gql ac62dd2342 Lists of nodes and edges keep their kind through collect, grouping and UNWIND.
+P1|cypher 78bd9436fa keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P1|gql 78bd9436fa keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P2|cypher 01a4b3d404 keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P2|gql 01a4b3d404 keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P3|cypher ad20846bc2 keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P3|gql ad20846bc2 keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P4|cypher cbf0e2357c keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P4|gql cbf0e2357c keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P5|cypher b08d890fc3 keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P5|gql b08d890fc3 keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P6|cypher cd8909e056 keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P7|cypher cbf0e2357c keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P7|gql cbf0e2357c keys() of an edge lists its keys; a variable used as both a node and an edge is rejected.
+P8|cypher c3a135fc82 A CALL subquery can match an imported edge as an edge.
+P8|gql c3a135fc82 A CALL subquery can match an imported edge as an edge.
+Q1|cypher b4929f3bc0 EXISTS and COUNT subqueries tied to the outer row by a value are answered per row (#543).
+Q1|gql b4929f3bc0 EXISTS and COUNT subqueries tied to the outer row by a value are answered per row (#543).
+Q2|cypher d0a27b5194 EXISTS and COUNT subqueries tied to the outer row by a value are answered per row (#543).
+Q2|gql d0a27b5194 EXISTS and COUNT subqueries tied to the outer row by a value are answered per row (#543).
+Q3|cypher c6fcb6a64b EXISTS and COUNT subqueries tied to the outer row by a value are answered per row (#543).
+Q3|gql c6fcb6a64b EXISTS and COUNT subqueries tied to the outer row by a value are answered per row (#543).
+Q4|cypher 8dea950d1a EXISTS and COUNT subqueries tied to the outer row by a value are answered per row (#543).
+Q4|gql 8dea950d1a EXISTS and COUNT subqueries tied to the outer row by a value are answered per row (#543).
+Q5|cypher 0af437ca0d COUNT over a variable-length path counts every path, not only neighbors.
+Q5|gql 0af437ca0d COUNT over a variable-length path counts every path, not only neighbors.
+Q8|cypher f85f46c33e EXISTS and COUNT subqueries tied to the outer row by a value are answered per row (#543).
+Q8|gql f85f46c33e EXISTS and COUNT subqueries tied to the outer row by a value are answered per row (#543).
+R1|cypher d2dbc8421e EXISTS in WHERE tied to the outer row by a value is answered per row (#543).
+R2|cypher 353aa3ace4 EXISTS in WHERE tied to the outer row by a value is answered per row (#543).
+R4|cypher 51d167f03b EXISTS can compare an edge of the subquery with the row's edge.
+R4|gql 51d167f03b EXISTS can compare an edge of the subquery with the row's edge.
+R5|cypher 5ae5f14831 EXISTS in WHERE tied to the outer row by a value is answered per row (#543).
+R5|gql 5ae5f14831 EXISTS in WHERE tied to the outer row by a value is answered per row (#543).
+R6|cypher 642e7dcad0 A CALL subquery over two edges in a row runs again for each outer row.
+S1|gql 2afbd4bc03 GQL VALUE { ... RETURN count(x) } counts only rows where x is not null.
+S3|gql ca5f97075f GQL VALUE { ... RETURN count(x) } counts only rows where x is not null.
+T1|cypher 792313fb51 The MATCH clauses of a GQL subquery go on from each other.
+T1|gql 792313fb51 The MATCH clauses of a GQL subquery go on from each other.
+T2|cypher 1c193e7c9b The MATCH clauses of a GQL subquery go on from each other.
+T2|gql 1c193e7c9b The MATCH clauses of a GQL subquery go on from each other.
+T3|gql f905cfffa8 The MATCH clauses of a GQL subquery go on from each other.
+U1|cypher f5175a9387 A WHERE in a Cypher importing WITH is rejected, as in Neo4j (it was ignored).
+U2|cypher 2f98f94f97 An alias in a Cypher importing WITH is rejected, as in Neo4j (it imported the wrong value).
+V1|cypher d433a58f8c A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V1|gql d433a58f8c A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V2|cypher 0940d1f4d9 A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V2|gql 0940d1f4d9 A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V3|cypher 69dd0d0713 A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V3|gql 69dd0d0713 A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V4|cypher ff6d86a896 A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V4|gql ff6d86a896 A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V5|cypher 1a583cc22a A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V5|gql 1a583cc22a A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V6|cypher c7df6dd70c A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V6|gql c7df6dd70c A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V7|cypher ddf6a6aac7 A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V7|gql ddf6a6aac7 A CALL subquery returns its nodes and edges as references, so a later MATCH, equality, id() and type() see them.
+V8|cypher 10f03920db A Cypher query no longer ends with a CALL subquery that returns rows, as in openCypher.
+W1|gql ded0bcfaf3 A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
+W2|gql c3a135fc82 A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
+W3|gql c55eb136e9 A WITH in a GQL CALL subquery is an ordinary WITH, so its WHERE filters.
+W4|gql ded0bcfaf3 A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
+W5|gql c3a135fc82 A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
+W6|gql 1f8ab4f00d A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
+W7|gql 36f86522fe A GQL CALL subquery sees the outer row's variables; CALL (a) { ... } and CALL () { ... } parse.
+X1|cypher ded0bcfaf3 Cypher CALL (a) { ... }, CALL (*) { ... } and CALL () { ... } parse.
+X2|cypher ded0bcfaf3 Cypher CALL (a) { ... }, CALL (*) { ... } and CALL () { ... } parse.
+X3|cypher c3a135fc82 Cypher CALL (a) { ... }, CALL (*) { ... } and CALL () { ... } parse.
+X4|cypher 1f8ab4f00d Cypher CALL (a) { ... }, CALL (*) { ... } and CALL () { ... } parse.
+X5|cypher c55eb136e9 Cypher CALL (a) { ... }, CALL (*) { ... } and CALL () { ... } parse.
+Y1|cypher 51d167f03b RETURN * in a CALL subquery returns the variables the subquery binds.
+Y1|gql 51d167f03b RETURN * in a CALL subquery returns the variables the subquery binds.
+Y2|cypher 0940d1f4d9 RETURN * in a CALL subquery returns the variables the subquery binds.
+Y2|gql 0940d1f4d9 RETURN * in a CALL subquery returns the variables the subquery binds.
+Y4|gql ffe2a647a1 RETURN * in a CALL subquery returns the variables the subquery binds.
+Z1|gql 9e1cb3dfb1 A CALL subquery's RETURN under ORDER BY and LIMIT also returns references.

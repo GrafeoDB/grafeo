@@ -9,8 +9,9 @@ mod pattern;
 use std::collections::{HashMap, HashSet};
 
 use super::common::{
-    build_left_join_with_predicates, check_branch_columns, combine_with_and, flatten_and_conjuncts,
-    has_all_labels, is_aggregate_function, is_binary_set_function, join_and_conjuncts,
+    build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
+    combine_with_and, expand_subquery_return_star, flatten_and_conjuncts, has_all_labels,
+    is_aggregate_function, is_binary_set_function, join_and_conjuncts, optional_join,
     references_any, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
     wrap_skip, wrap_sort,
 };
@@ -20,8 +21,8 @@ use crate::query::plan::{
     ExpandDirection, ExpandOp, HorizontalAggregateOp, IntersectOp, JoinCondition, JoinOp, JoinType,
     LeftJoinOp, LoadDataFormat, LoadDataOp, LogicalExpression, LogicalOperator, LogicalPlan,
     MergeOp, MergeRelationshipOp, NodeScanOp, NullsOrdering, OtherwiseOp, ParameterScanOp,
-    PathMode, ProcedureYield, ProjectOp, Projection, RemoveLabelOp, ReturnItem, SetPropertyOp,
-    ShortestPathOp, SortKey, SortOrder, UnaryOp, UnionOp, UnwindOp,
+    PathMode, ProcedureYield, ProjectOp, Projection, RemoveLabelOp, ReturnItem, ReturnOp,
+    SetPropertyOp, ShortestPathOp, SortKey, SortOrder, UnaryOp, UnionOp, UnwindOp,
 };
 #[cfg(test)]
 use crate::query::plan::{FilterOp, LimitOp, SkipOp};
@@ -79,12 +80,199 @@ struct GqlTranslator {
     /// Edge variables from variable-length expand patterns (group-list variables).
     /// Maps edge variable name to the path alias used for `_path_edges_{alias}` lookup.
     group_list_variables: std::cell::RefCell<HashMap<String, String>>,
+    /// The variables of the row the `CALL` subquery being translated runs
+    /// for (`None` outside one, or when they are not known): what a nested
+    /// subquery's `RETURN *` leaves out.
+    call_scope: std::cell::RefCell<Option<HashSet<String>>>,
+}
+
+/// The rows a query passes to the one after `NEXT`: its final `RETURN` as a
+/// `WITH` (a projection), under its `ORDER BY`, `SKIP` and `LIMIT`. An
+/// unaliased item is a column named after it; `RETURN *` passes every column
+/// on. Without `DISTINCT` the rows are ordered before the projection, so an
+/// `ORDER BY` key can read what the `RETURN` leaves out (and reads an alias
+/// through its expression). A plan that ends otherwise (an aggregation)
+/// passes its rows on as they are.
+fn return_as_with(plan: LogicalOperator) -> LogicalOperator {
+    match plan {
+        LogicalOperator::Return(ret) => {
+            if ret.items.iter().any(
+                |item| matches!(&item.expression, LogicalExpression::Variable(name) if name == "*"),
+            ) {
+                return if ret.distinct {
+                    wrap_distinct(*ret.input)
+                } else {
+                    *ret.input
+                };
+            }
+            let projections = ret
+                .items
+                .into_iter()
+                .map(|item| {
+                    let alias = match (&item.alias, &item.expression) {
+                        (Some(alias), _) => Some(alias.clone()),
+                        (None, LogicalExpression::Variable(_)) => None,
+                        (None, expression) => Some(
+                            crate::query::planner::common::expression_to_string(expression),
+                        ),
+                    };
+                    Projection {
+                        expression: item.expression,
+                        alias,
+                    }
+                })
+                .collect();
+            let project = LogicalOperator::Project(ProjectOp {
+                projections,
+                input: ret.input,
+                pass_through_input: false,
+            });
+            if ret.distinct {
+                wrap_distinct(project)
+            } else {
+                project
+            }
+        }
+        LogicalOperator::Sort(mut sort) => match *sort.input {
+            LogicalOperator::Return(ret) if !ret.distinct => {
+                match keys_before_return(&sort.keys, &ret) {
+                    Some(keys) => {
+                        sort.keys = keys;
+                        sort.input = ret.input;
+                        return_as_with(LogicalOperator::Return(ReturnOp {
+                            input: Box::new(LogicalOperator::Sort(sort)),
+                            ..ret
+                        }))
+                    }
+                    // A key reads an alias that cannot be replaced: order the
+                    // projected rows (the key then reads only what they hold).
+                    None => {
+                        sort.input = Box::new(return_as_with(LogicalOperator::Return(ret)));
+                        LogicalOperator::Sort(sort)
+                    }
+                }
+            }
+            input => {
+                sort.input = Box::new(return_as_with(input));
+                LogicalOperator::Sort(sort)
+            }
+        },
+        LogicalOperator::Skip(mut skip) => {
+            skip.input = Box::new(return_as_with(*skip.input));
+            LogicalOperator::Skip(skip)
+        }
+        LogicalOperator::Limit(mut limit) => {
+            limit.input = Box::new(return_as_with(*limit.input));
+            LogicalOperator::Limit(limit)
+        }
+        LogicalOperator::Distinct(mut distinct) => {
+            distinct.input = Box::new(return_as_with(*distinct.input));
+            LogicalOperator::Distinct(distinct)
+        }
+        other => other,
+    }
+}
+
+/// The sort `keys` of a `RETURN` rewritten to read the `RETURN`'s input: each
+/// alias replaced by its expression (a property of an alias that is a
+/// variable by that variable's property). `None` when a key still reads an
+/// alias, such as one inside a `CASE`, or a property of an alias that is not
+/// a variable.
+fn keys_before_return(keys: &[SortKey], ret: &ReturnOp) -> Option<Vec<SortKey>> {
+    let aliases: Vec<(String, LogicalExpression)> = ret
+        .items
+        .iter()
+        .filter_map(|item| {
+            item.alias
+                .as_ref()
+                .map(|alias| (alias.clone(), item.expression.clone()))
+        })
+        .collect();
+    let input_names = ret.input.bound_variables(None);
+    keys.iter()
+        .map(|key| {
+            let expression =
+                GqlTranslator::substitute_let_bindings(key.expression.clone(), &aliases);
+            let mut read = HashSet::new();
+            collect_expression_variables(&expression, &mut read);
+            let reads_an_alias = read.iter().any(|name| {
+                aliases.iter().any(|(alias, _)| alias == name)
+                    && input_names
+                        .as_ref()
+                        .is_none_or(|names| !names.contains(name))
+            });
+            (!reads_an_alias).then(|| SortKey {
+                expression,
+                ..key.clone()
+            })
+        })
+        .collect()
+}
+
+/// Combines two queries with a set operator, or with `NEXT` (the right one
+/// runs for each row of the left one; a right side that is a query reads the
+/// left one's rows instead, see `translate_composite_query`).
+fn combine_queries(
+    op: ast::CompositeOp,
+    left: LogicalOperator,
+    right: LogicalOperator,
+) -> Result<LogicalOperator> {
+    Ok(match op {
+        ast::CompositeOp::Union | ast::CompositeOp::UnionAll => {
+            let inputs = vec![left, right];
+            check_branch_columns("UNION", &inputs)?;
+            let union_op = LogicalOperator::Union(UnionOp { inputs });
+            if op == ast::CompositeOp::UnionAll {
+                union_op
+            } else {
+                wrap_distinct(union_op)
+            }
+        }
+        ast::CompositeOp::Except | ast::CompositeOp::ExceptAll => {
+            let branches = [left, right];
+            check_branch_columns("EXCEPT", &branches)?;
+            let [left, right] = branches;
+            LogicalOperator::Except(ExceptOp {
+                left: Box::new(left),
+                right: Box::new(right),
+                all: matches!(op, ast::CompositeOp::ExceptAll),
+            })
+        }
+        ast::CompositeOp::Intersect | ast::CompositeOp::IntersectAll => {
+            let branches = [left, right];
+            check_branch_columns("INTERSECT", &branches)?;
+            let [left, right] = branches;
+            LogicalOperator::Intersect(IntersectOp {
+                left: Box::new(left),
+                right: Box::new(right),
+                all: matches!(op, ast::CompositeOp::IntersectAll),
+            })
+        }
+        ast::CompositeOp::Otherwise => {
+            let branches = [left, right];
+            check_branch_columns("OTHERWISE", &branches)?;
+            let [left, right] = branches;
+            LogicalOperator::Otherwise(OtherwiseOp {
+                left: Box::new(left),
+                right: Box::new(right),
+            })
+        }
+        // NEXT (linear composition): output of left feeds as input to right.
+        // Translate as Apply: for each row from left, execute right with bound variables.
+        ast::CompositeOp::Next => LogicalOperator::Apply(ApplyOp {
+            input: Box::new(left),
+            subplan: Box::new(right),
+            shared_variables: Vec::new(),
+            optional: false,
+        }),
+    })
 }
 
 impl GqlTranslator {
     fn new() -> Self {
         Self {
             group_list_variables: std::cell::RefCell::new(HashMap::new()),
+            call_scope: std::cell::RefCell::new(None),
         }
     }
 
@@ -141,64 +329,20 @@ impl GqlTranslator {
         right: &ast::Statement,
     ) -> Result<LogicalPlan> {
         let left_plan = self.translate_statement(left)?;
-        let right_plan = self.translate_statement(right)?;
-
-        match op {
-            ast::CompositeOp::Union | ast::CompositeOp::UnionAll => {
-                let inputs = vec![left_plan.root, right_plan.root];
-                check_branch_columns("UNION", &inputs)?;
-                let union_op = LogicalOperator::Union(UnionOp { inputs });
-                let root = if op == ast::CompositeOp::UnionAll {
-                    union_op
-                } else {
-                    wrap_distinct(union_op)
-                };
-                Ok(LogicalPlan::new(root))
-            }
-            ast::CompositeOp::Except | ast::CompositeOp::ExceptAll => {
-                let branches = [left_plan.root, right_plan.root];
-                check_branch_columns("EXCEPT", &branches)?;
-                let [left, right] = branches;
-                let root = LogicalOperator::Except(ExceptOp {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    all: matches!(op, ast::CompositeOp::ExceptAll),
-                });
-                Ok(LogicalPlan::new(root))
-            }
-            ast::CompositeOp::Intersect | ast::CompositeOp::IntersectAll => {
-                let branches = [left_plan.root, right_plan.root];
-                check_branch_columns("INTERSECT", &branches)?;
-                let [left, right] = branches;
-                let root = LogicalOperator::Intersect(IntersectOp {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    all: matches!(op, ast::CompositeOp::IntersectAll),
-                });
-                Ok(LogicalPlan::new(root))
-            }
-            ast::CompositeOp::Otherwise => {
-                let branches = [left_plan.root, right_plan.root];
-                check_branch_columns("OTHERWISE", &branches)?;
-                let [left, right] = branches;
-                let root = LogicalOperator::Otherwise(OtherwiseOp {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                });
-                Ok(LogicalPlan::new(root))
-            }
-            ast::CompositeOp::Next => {
-                // NEXT (linear composition): output of left feeds as input to right.
-                // Translate as Apply: for each row from left, execute right with bound variables.
-                let root = LogicalOperator::Apply(ApplyOp {
-                    input: Box::new(left_plan.root),
-                    subplan: Box::new(right_plan.root),
-                    shared_variables: Vec::new(),
-                    optional: false,
-                });
-                Ok(LogicalPlan::new(root))
-            }
+        // NEXT: the query after it reads the rows the one before returns, as
+        // a query reads the rows of a WITH.
+        if op == ast::CompositeOp::Next
+            && let ast::Statement::Query(right_query) = right
+        {
+            let input = return_as_with(left_plan.root);
+            return self.translate_query_from(right_query, input);
         }
+        let right_plan = self.translate_statement(right)?;
+        Ok(LogicalPlan::new(combine_queries(
+            op,
+            left_plan.root,
+            right_plan.root,
+        )?))
     }
 
     fn translate_call(&self, call: &ast::CallStatement) -> Result<LogicalPlan> {
@@ -408,7 +552,17 @@ impl GqlTranslator {
     }
 
     fn translate_query(&self, query: &ast::QueryStatement) -> Result<LogicalPlan> {
-        let mut plan = LogicalOperator::Empty;
+        self.translate_query_from(query, LogicalOperator::Empty)
+    }
+
+    /// Translates `query` on the rows of `input`: `Empty` for a query of its
+    /// own, the outer row's variables for a `CALL` subquery.
+    fn translate_query_from(
+        &self,
+        query: &ast::QueryStatement,
+        input: LogicalOperator,
+    ) -> Result<LogicalPlan> {
+        let mut plan = input;
         let mut where_applied = false;
 
         // Process clauses in source order for correct variable scoping.
@@ -424,7 +578,9 @@ impl GqlTranslator {
                         ast::QueryClause::Create(_)
                             | ast::QueryClause::Delete(_)
                             | ast::QueryClause::Set(_)
+                            | ast::QueryClause::Remove(_)
                             | ast::QueryClause::Merge(_)
+                            | ast::QueryClause::With(_)
                     )
                 {
                     if let Some(where_clause) = &query.where_clause {
@@ -441,22 +597,14 @@ impl GqlTranslator {
                             // an implicit unit table so unmatched patterns produce
                             // a single row of NULLs instead of zero rows.
                             let match_plan = self.translate_match(match_clause)?;
-                            plan = LogicalOperator::LeftJoin(LeftJoinOp {
-                                left: Box::new(LogicalOperator::Empty),
-                                right: Box::new(match_plan),
-                                condition: None,
-                            });
+                            plan = optional_join(LogicalOperator::Empty, match_plan);
                         } else if matches!(plan, LogicalOperator::Empty) {
                             // No prior input: standard MATCH
                             plan = self.translate_match(match_clause)?;
                         } else if match_clause.optional {
                             // OPTIONAL MATCH: left join (prior vars on left, match on right)
                             let match_plan = self.translate_match(match_clause)?;
-                            plan = LogicalOperator::LeftJoin(LeftJoinOp {
-                                left: Box::new(plan),
-                                right: Box::new(match_plan),
-                                condition: None,
-                            });
+                            plan = optional_join(plan, match_plan);
                         } else {
                             // Non-optional MATCH after prior clauses (UNWIND, etc.)
                             // Pass current plan as input so the MATCH's NodeScan creates
@@ -550,8 +698,25 @@ impl GqlTranslator {
                             pass_through_input: true,
                         });
                     }
-                    ast::QueryClause::InlineCall { subquery, optional } => {
-                        plan = self.translate_inline_call(subquery, plan, *optional)?;
+                    ast::QueryClause::Remove(remove_clause) => {
+                        plan = Self::apply_remove(plan, remove_clause);
+                    }
+                    ast::QueryClause::With(with_clause) => {
+                        plan = self.apply_with(plan, with_clause)?;
+                    }
+                    ast::QueryClause::InlineCall {
+                        subquery,
+                        combined,
+                        optional,
+                        scope,
+                    } => {
+                        plan = self.translate_inline_call(
+                            subquery,
+                            combined,
+                            plan,
+                            *optional,
+                            scope.as_deref(),
+                        )?;
                     }
                     ast::QueryClause::CallProcedure(call_stmt) => {
                         // CALL procedure(...) within a query context
@@ -588,19 +753,11 @@ impl GqlTranslator {
             for match_clause in &query.match_clauses {
                 let match_plan = self.translate_match(match_clause)?;
                 if matches!(plan, LogicalOperator::Empty) && match_clause.optional {
-                    plan = LogicalOperator::LeftJoin(LeftJoinOp {
-                        left: Box::new(LogicalOperator::Empty),
-                        right: Box::new(match_plan),
-                        condition: None,
-                    });
+                    plan = optional_join(LogicalOperator::Empty, match_plan);
                 } else if matches!(plan, LogicalOperator::Empty) {
                     plan = match_plan;
                 } else if match_clause.optional {
-                    plan = LogicalOperator::LeftJoin(LeftJoinOp {
-                        left: Box::new(plan),
-                        right: Box::new(match_plan),
-                        condition: None,
-                    });
+                    plan = optional_join(plan, match_plan);
                 } else {
                     plan = LogicalOperator::Join(JoinOp {
                         left: Box::new(plan),
@@ -679,144 +836,27 @@ impl GqlTranslator {
             }
         }
 
-        // REMOVE clauses (not yet in ordered_clauses, always process)
-        for remove_clause in &query.remove_clauses {
-            for label_op in &remove_clause.label_operations {
-                plan = LogicalOperator::RemoveLabel(RemoveLabelOp {
-                    variable: label_op.variable.clone(),
-                    labels: label_op.labels.clone(),
-                    input: Box::new(plan),
-                });
-            }
-            for (variable, property) in &remove_clause.property_removals {
-                plan = LogicalOperator::SetProperty(SetPropertyOp {
-                    variable: variable.clone(),
-                    properties: vec![(property.clone(), LogicalExpression::Literal(Value::Null))],
-                    replace: false,
-                    is_edge: false,
-                    input: Box::new(plan),
-                });
+        // REMOVE clauses not among the ordered clauses (statements built
+        // without them) apply here, after the rest.
+        if !query
+            .ordered_clauses
+            .iter()
+            .any(|clause| matches!(clause, ast::QueryClause::Remove(_)))
+        {
+            for remove_clause in &query.remove_clauses {
+                plan = Self::apply_remove(plan, remove_clause);
             }
         }
 
-        // Handle WITH clauses (projection for query chaining)
-        for with_clause in &query.with_clauses {
-            if !with_clause.is_wildcard {
-                // Check if WITH contains aggregate functions (e.g. WITH count(n) AS cnt)
-                let has_aggregates = with_clause
-                    .items
-                    .iter()
-                    .any(|item| contains_aggregate(&item.expression));
-
-                if has_aggregates {
-                    let (aggregates, auto_group_by, post_return) =
-                        self.extract_aggregates_and_groups(&with_clause.items, false)?;
-
-                    // Split the WHERE into HAVING (aggregate-referencing
-                    // conjuncts) and a post-aggregate filter (the rest).
-                    // This handles mixed predicates like
-                    // `WHERE a.name = 'Alix' AND cnt > 2` correctly.
-                    let aggregate_aliases: Vec<String> =
-                        aggregates.iter().filter_map(|a| a.alias.clone()).collect();
-                    let (having, post_agg_filter) =
-                        if let Some(where_clause) = &with_clause.where_clause {
-                            let pred = self.translate_expression(&where_clause.expression)?;
-                            let conjuncts = flatten_and_conjuncts(&pred);
-                            let (having_parts, filter_parts): (Vec<_>, Vec<_>) = conjuncts
-                                .into_iter()
-                                .partition(|c| references_any(c, &aggregate_aliases));
-                            (
-                                join_and_conjuncts(having_parts.into_iter().cloned().collect()),
-                                join_and_conjuncts(filter_parts.into_iter().cloned().collect()),
-                            )
-                        } else {
-                            (None, None)
-                        };
-
-                    plan = LogicalOperator::Aggregate(AggregateOp {
-                        group_by: auto_group_by,
-                        aggregates,
-                        input: Box::new(plan),
-                        having,
-                    });
-
-                    // Apply post-aggregate projection if aggregates were wrapped
-                    // in expressions (e.g. WITH count(n) + 1 AS cnt_plus_one)
-                    if let Some(post_items) = post_return {
-                        let post_projections: Vec<Projection> = post_items
-                            .into_iter()
-                            .map(|item| Projection {
-                                expression: item.expression,
-                                alias: item.alias,
-                            })
-                            .collect();
-                        plan = LogicalOperator::Project(ProjectOp {
-                            projections: post_projections,
-                            input: Box::new(plan),
-                            pass_through_input: false,
-                        });
-                    }
-
-                    // Apply non-aggregate WHERE conjuncts as a post-aggregate filter.
-                    if let Some(filter_pred) = post_agg_filter {
-                        plan = wrap_filter(plan, filter_pred);
-                    }
-                } else {
-                    let projections: Vec<Projection> = with_clause
-                        .items
-                        .iter()
-                        .map(|item| {
-                            Ok(Projection {
-                                expression: self.translate_expression(&item.expression)?,
-                                alias: item.alias.clone(),
-                            })
-                        })
-                        .collect::<Result<_>>()?;
-
-                    plan = LogicalOperator::Project(ProjectOp {
-                        projections,
-                        input: Box::new(plan),
-                        pass_through_input: false,
-                    });
-                }
-            }
-            // WITH * skips projection: all variables pass through unchanged
-
-            // Handle LET bindings attached to this WITH clause.
-            // LET adds new columns without replacing existing ones.
-            if !with_clause.let_bindings.is_empty() {
-                let mut let_projections = Vec::new();
-                for (name, expr) in &with_clause.let_bindings {
-                    let logical_expr = self.translate_expression(expr)?;
-                    let_projections.push(Projection {
-                        expression: logical_expr,
-                        alias: Some(name.clone()),
-                    });
-                }
-                plan = LogicalOperator::Project(ProjectOp {
-                    projections: let_projections,
-                    input: Box::new(plan),
-                    pass_through_input: true,
-                });
-            }
-
-            // Apply WHERE filter if present in WITH clause.
-            // For aggregate WITH clauses, the WHERE was already split into
-            // HAVING + post-aggregate filter above, so skip here.
-            if let Some(where_clause) = &with_clause.where_clause {
-                let has_agg = with_clause
-                    .items
-                    .iter()
-                    .any(|item| contains_aggregate(&item.expression));
-                if !has_agg {
-                    let predicate = self.translate_expression(&where_clause.expression)?;
-                    plan = wrap_filter(plan, predicate);
-                }
-            }
-
-            // Handle DISTINCT
-            if with_clause.distinct {
-                plan = wrap_distinct(plan);
+        // WITH clauses not among the ordered clauses (statements built
+        // without them) apply here, after the rest.
+        if !query
+            .ordered_clauses
+            .iter()
+            .any(|clause| matches!(clause, ast::QueryClause::With(_)))
+        {
+            for with_clause in &query.with_clauses {
+                plan = self.apply_with(plan, with_clause)?;
             }
         }
 
@@ -973,7 +1013,7 @@ impl GqlTranslator {
         } else {
             // Apply RETURN first (closest to input), then Sort wraps it.
             // This ensures RETURN aliases are visible to ORDER BY in the binder.
-            let mut return_items = if query.return_clause.is_wildcard {
+            let return_items = if query.return_clause.is_wildcard {
                 // RETURN *: emit a wildcard marker that the planner expands
                 vec![ReturnItem {
                     expression: LogicalExpression::Variable("*".into()),
@@ -992,27 +1032,6 @@ impl GqlTranslator {
                     })
                     .collect::<Result<Vec<_>>>()?
             };
-
-            // Lift VALUE subqueries: wrap with Apply and replace expression
-            // with a Variable reference to the inner plan's output column.
-            for item in &mut return_items {
-                if let LogicalExpression::ValueSubquery(inner_plan) = &item.expression {
-                    // Determine the output column name from the inner plan's RETURN
-                    let col_name =
-                        Self::extract_return_column_name(inner_plan).unwrap_or_else(|| {
-                            item.alias.clone().unwrap_or_else(|| "__value".to_string())
-                        });
-
-                    plan = LogicalOperator::Apply(ApplyOp {
-                        input: Box::new(plan),
-                        subplan: inner_plan.clone(),
-                        shared_variables: vec![],
-                        optional: false,
-                    });
-
-                    item.expression = LogicalExpression::Variable(col_name);
-                }
-            }
 
             plan = wrap_return(plan, return_items, query.return_clause.distinct);
 
@@ -1081,6 +1100,18 @@ impl GqlTranslator {
                 }
                 expr
             }
+            // A property of a binding that is a variable reads that
+            // variable's property.
+            LogicalExpression::Property {
+                ref variable,
+                ref property,
+            } => match bindings.iter().find(|(name, _)| name == variable) {
+                Some((_, LogicalExpression::Variable(target))) => LogicalExpression::Property {
+                    variable: target.clone(),
+                    property: property.clone(),
+                },
+                _ => expr,
+            },
             LogicalExpression::Binary { left, op, right } => LogicalExpression::Binary {
                 left: Box::new(Self::substitute_let_bindings(*left, bindings)),
                 op,
@@ -1313,173 +1344,217 @@ impl GqlTranslator {
         })
     }
 
-    /// as imports from the outer scope: a `ParameterScan` replaces `Empty` as
-    /// the inner plan root and `shared_variables` is populated so the planner
-    /// can wire them through `ParameterState`.
-    fn translate_inline_call(
-        &self,
-        subquery: &ast::QueryStatement,
-        outer: LogicalOperator,
-        optional: bool,
-    ) -> Result<LogicalOperator> {
-        let has_outer = !matches!(outer, LogicalOperator::Empty);
-
-        // Detect importing WITH: extract shared variable names and skip it.
-        let mut shared_variables = Vec::new();
-        let skip_with = if has_outer && !subquery.with_clauses.is_empty() {
-            let first_with = &subquery.with_clauses[0];
-            if first_with.is_wildcard {
-                shared_variables.push("*".to_string());
-                true
-            } else {
-                for item in &first_with.items {
-                    if let ast::Expression::Variable(name) = &item.expression {
-                        let var_name = item.alias.as_deref().unwrap_or(name);
-                        shared_variables.push(var_name.to_string());
-                    }
-                }
-                !shared_variables.is_empty()
-            }
-        } else {
-            false
-        };
-
-        // Build the inner plan: start from ParameterScan when importing variables.
-        let inner_plan = if skip_with && !shared_variables.is_empty() {
-            // Translate the subquery but override the first WITH clause:
-            // start from ParameterScan instead of Empty, skip the importing WITH.
-            let mut plan = LogicalOperator::ParameterScan(ParameterScanOp {
-                columns: shared_variables.clone(),
+    /// Applies a REMOVE clause to `plan`: its label removals, then its
+    /// property removals.
+    fn apply_remove(
+        mut plan: LogicalOperator,
+        remove_clause: &ast::RemoveClause,
+    ) -> LogicalOperator {
+        for label_op in &remove_clause.label_operations {
+            plan = LogicalOperator::RemoveLabel(RemoveLabelOp {
+                variable: label_op.variable.clone(),
+                labels: label_op.labels.clone(),
+                input: Box::new(plan),
             });
+        }
+        for (variable, property) in &remove_clause.property_removals {
+            plan = LogicalOperator::SetProperty(SetPropertyOp {
+                variable: variable.clone(),
+                properties: vec![(property.clone(), LogicalExpression::Literal(Value::Null))],
+                replace: false,
+                is_edge: false,
+                input: Box::new(plan),
+            });
+        }
+        plan
+    }
 
-            // Process MATCH clauses
-            for match_clause in &subquery.match_clauses {
-                if match_clause.optional {
-                    let match_plan = self.translate_match(match_clause)?;
-                    plan = LogicalOperator::LeftJoin(LeftJoinOp {
-                        left: Box::new(plan),
-                        right: Box::new(match_plan),
-                        condition: None,
-                    });
-                } else {
-                    let input = std::mem::replace(&mut plan, LogicalOperator::Empty);
-                    plan = self.translate_match_with_input(match_clause, Some(input))?;
-                }
+    /// Applies a WITH clause to `plan`: its projection (or aggregation), the
+    /// LET bindings attached to it, its WHERE and DISTINCT. The clauses after
+    /// it read the rows it passes on.
+    fn apply_with(
+        &self,
+        mut plan: LogicalOperator,
+        with_clause: &ast::WithClause,
+    ) -> Result<LogicalOperator> {
+        if !with_clause.is_wildcard {
+            if with_clause.items.iter().any(|item| {
+                item.alias.is_none() && !matches!(item.expression, ast::Expression::Variable(_))
+            }) {
+                return Err(super::common::unaliased_with_expression());
             }
 
-            // Apply WHERE filter
-            if let Some(where_clause) = &subquery.where_clause {
-                let predicate = self.translate_expression(&where_clause.expression)?;
-                plan = wrap_filter(plan, predicate);
-            }
+            // Check if WITH contains aggregate functions (e.g. WITH count(n) AS cnt)
+            let has_aggregates = with_clause
+                .items
+                .iter()
+                .any(|item| contains_aggregate(&item.expression));
 
-            // Process remaining WITH clauses (skip the first importing one)
-            for with_clause in subquery.with_clauses.iter().skip(1) {
-                if !with_clause.is_wildcard {
-                    let projections: Vec<Projection> = with_clause
-                        .items
-                        .iter()
-                        .map(|item| {
-                            Ok(Projection {
-                                expression: self.translate_expression(&item.expression)?,
-                                alias: item.alias.clone(),
-                            })
+            if has_aggregates {
+                let (aggregates, auto_group_by, post_return) =
+                    self.extract_aggregates_and_groups(&with_clause.items, false)?;
+
+                // Split the WHERE into HAVING (aggregate-referencing
+                // conjuncts) and a post-aggregate filter (the rest).
+                // This handles mixed predicates like
+                // `WHERE a.name = 'Alix' AND cnt > 2` correctly.
+                let aggregate_aliases: Vec<String> =
+                    aggregates.iter().filter_map(|a| a.alias.clone()).collect();
+                let (having, post_agg_filter) =
+                    if let Some(where_clause) = &with_clause.where_clause {
+                        let pred = self.translate_expression(&where_clause.expression)?;
+                        let conjuncts = flatten_and_conjuncts(&pred);
+                        let (having_parts, filter_parts): (Vec<_>, Vec<_>) = conjuncts
+                            .into_iter()
+                            .partition(|c| references_any(c, &aggregate_aliases));
+                        (
+                            join_and_conjuncts(having_parts.into_iter().cloned().collect()),
+                            join_and_conjuncts(filter_parts.into_iter().cloned().collect()),
+                        )
+                    } else {
+                        (None, None)
+                    };
+
+                plan = LogicalOperator::Aggregate(AggregateOp {
+                    group_by: auto_group_by,
+                    aggregates,
+                    input: Box::new(plan),
+                    having,
+                });
+
+                // Apply post-aggregate projection if aggregates were wrapped
+                // in expressions (e.g. WITH count(n) + 1 AS cnt_plus_one)
+                if let Some(post_items) = post_return {
+                    let post_projections: Vec<Projection> = post_items
+                        .into_iter()
+                        .map(|item| Projection {
+                            expression: item.expression,
+                            alias: item.alias,
                         })
-                        .collect::<Result<_>>()?;
+                        .collect();
                     plan = LogicalOperator::Project(ProjectOp {
-                        projections,
+                        projections: post_projections,
                         input: Box::new(plan),
                         pass_through_input: false,
                     });
                 }
-                // Handle LET bindings in inline call WITH clause
-                if !with_clause.let_bindings.is_empty() {
-                    let mut let_projections = Vec::new();
-                    for (name, expr) in &with_clause.let_bindings {
-                        let logical_expr = self.translate_expression(expr)?;
-                        let_projections.push(Projection {
-                            expression: logical_expr,
-                            alias: Some(name.clone()),
-                        });
-                    }
-                    plan = LogicalOperator::Project(ProjectOp {
-                        projections: let_projections,
-                        input: Box::new(plan),
-                        pass_through_input: true,
-                    });
-                }
-                if let Some(wc) = &with_clause.where_clause {
-                    let predicate = self.translate_expression(&wc.expression)?;
-                    plan = wrap_filter(plan, predicate);
-                }
-            }
 
-            // Translate RETURN clause
-            let has_aggregates = !subquery.return_clause.is_wildcard
-                && subquery
-                    .return_clause
-                    .items
-                    .iter()
-                    .any(|item| contains_aggregate(&item.expression));
-
-            if has_aggregates {
-                let (aggregates, auto_group_by, post_return) = self.extract_aggregates_and_groups(
-                    &subquery.return_clause.items,
-                    !subquery.return_clause.group_by.is_empty(),
-                )?;
-                let group_by = if subquery.return_clause.group_by.is_empty() {
-                    auto_group_by
-                } else {
-                    subquery
-                        .return_clause
-                        .group_by
-                        .iter()
-                        .map(|e| self.translate_expression(e))
-                        .collect::<Result<Vec<_>>>()?
-                };
-                let agg_op = LogicalOperator::Aggregate(AggregateOp {
-                    group_by,
-                    aggregates,
-                    input: Box::new(plan),
-                    having: None,
-                });
-                plan = if let Some(return_items) = post_return {
-                    wrap_return(agg_op, return_items, subquery.return_clause.distinct)
-                } else {
-                    agg_op
-                };
+                // Apply non-aggregate WHERE conjuncts as a post-aggregate filter.
+                if let Some(filter_pred) = post_agg_filter {
+                    plan = wrap_filter(plan, filter_pred);
+                }
             } else {
-                let return_items = subquery
-                    .return_clause
+                let projections: Vec<Projection> = with_clause
                     .items
                     .iter()
                     .map(|item| {
-                        Ok(ReturnItem {
+                        Ok(Projection {
                             expression: self.translate_expression(&item.expression)?,
                             alias: item.alias.clone(),
                         })
                     })
-                    .collect::<Result<Vec<_>>>()?;
-                plan = wrap_return(plan, return_items, subquery.return_clause.distinct);
-            }
-            plan
-        } else {
-            // No importing WITH: translate the entire subquery independently
-            self.translate_query(subquery)?.root
-        };
+                    .collect::<Result<_>>()?;
 
-        // Wire the inner plan to the outer plan
-        if has_outer {
-            Ok(LogicalOperator::Apply(ApplyOp {
-                input: Box::new(outer),
-                subplan: Box::new(inner_plan),
-                shared_variables,
-                optional,
-            }))
-        } else {
-            // No outer input: just use the inner plan directly
-            Ok(inner_plan)
+                plan = LogicalOperator::Project(ProjectOp {
+                    projections,
+                    input: Box::new(plan),
+                    pass_through_input: false,
+                });
+            }
         }
+        // WITH * skips projection: all variables pass through unchanged
+
+        // Handle LET bindings attached to this WITH clause.
+        // LET adds new columns without replacing existing ones.
+        if !with_clause.let_bindings.is_empty() {
+            let mut let_projections = Vec::new();
+            for (name, expr) in &with_clause.let_bindings {
+                let logical_expr = self.translate_expression(expr)?;
+                let_projections.push(Projection {
+                    expression: logical_expr,
+                    alias: Some(name.clone()),
+                });
+            }
+            plan = LogicalOperator::Project(ProjectOp {
+                projections: let_projections,
+                input: Box::new(plan),
+                pass_through_input: true,
+            });
+        }
+
+        // Apply WHERE filter if present in WITH clause.
+        // For aggregate WITH clauses, the WHERE was already split into
+        // HAVING + post-aggregate filter above, so skip here.
+        if let Some(where_clause) = &with_clause.where_clause {
+            let has_agg = with_clause
+                .items
+                .iter()
+                .any(|item| contains_aggregate(&item.expression));
+            if !has_agg {
+                let predicate = self.translate_expression(&where_clause.expression)?;
+                plan = wrap_filter(plan, predicate);
+            }
+        }
+
+        // Handle DISTINCT
+        if with_clause.distinct {
+            plan = wrap_distinct(plan);
+        }
+        Ok(plan)
+    }
+
+    /// Translates `CALL { subquery }` to an `Apply` that runs the subquery for
+    /// each row of `outer`. As in GQL, the subquery sees the outer row's
+    /// variables: all of them, or the ones its variable scope clause names
+    /// (`CALL (a, b) { ... }`; none for `CALL () { ... }`). It starts from a
+    /// `ParameterScan` of them, which the planner fills for each row through
+    /// `ParameterState`, so a `WITH` in it is an ordinary `WITH`.
+    fn translate_inline_call(
+        &self,
+        subquery: &ast::QueryStatement,
+        combined: &[(ast::CompositeOp, ast::QueryStatement)],
+        outer: LogicalOperator,
+        optional: bool,
+        scope: Option<&[String]>,
+    ) -> Result<LogicalOperator> {
+        // A CALL that comes first has no outer row to see: it runs once, on
+        // one empty row (`Empty`). A scope clause there names variables the
+        // binder reports as undefined.
+        let shared_variables: Vec<String> = match scope {
+            Some(names) => names.to_vec(),
+            None if matches!(outer, LogicalOperator::Empty) => Vec::new(),
+            None => vec!["*".to_string()],
+        };
+        let input = if shared_variables.is_empty() {
+            LogicalOperator::Empty
+        } else {
+            LogicalOperator::ParameterScan(ParameterScanOp {
+                columns: shared_variables.clone(),
+            })
+        };
+        // The outer row's variables: what a `RETURN *` of the subquery leaves
+        // out, and the scope of a CALL nested in it.
+        let outer_names = outer.bound_variables(self.call_scope.borrow().as_ref());
+        let enclosing = self.call_scope.replace(outer_names.clone());
+        // Each query combined in the body starts from the same outer row.
+        let translate_part = |part: &ast::QueryStatement| -> Result<LogicalOperator> {
+            let mut plan = self.translate_query_from(part, input.clone())?.root;
+            expand_subquery_return_star(&mut plan, outer_names.as_ref())?;
+            Ok(plan)
+        };
+        let inner = translate_part(subquery).and_then(|first| {
+            combined.iter().try_fold(first, |plan, (op, part)| {
+                combine_queries(*op, plan, translate_part(part)?)
+            })
+        });
+        self.call_scope.replace(enclosing);
+        let inner_plan = inner?;
+        Ok(LogicalOperator::Apply(ApplyOp {
+            input: Box::new(outer),
+            subplan: Box::new(inner_plan),
+            shared_variables,
+            optional,
+        }))
     }
 
     fn translate_match(&self, match_clause: &ast::MatchClause) -> Result<LogicalOperator> {
@@ -1497,8 +1572,7 @@ impl GqlTranslator {
         predicate: LogicalExpression,
     ) -> LogicalOperator {
         if let LogicalOperator::LeftJoin(left_join) = plan {
-            let (join, post_filter) =
-                build_left_join_with_predicates(*left_join.left, *left_join.right, Some(predicate));
+            let (join, post_filter) = build_left_join_with_predicates(left_join, Some(predicate));
             if let Some(pf) = post_filter {
                 wrap_filter(join, pf)
             } else {
@@ -1934,16 +2008,14 @@ impl GqlTranslator {
         let mut inner_defined = std::collections::HashSet::new();
         for match_clause in &query.match_clauses {
             Self::collect_pattern_variables(&match_clause.patterns, &mut inner_defined);
-            let match_plan = self.translate_match(match_clause)?;
-            plan = if matches!(plan, LogicalOperator::Empty) {
-                match_plan
+            // Each MATCH goes on from the ones before it, as in the outer
+            // query, so a variable in two clauses is the same node or edge.
+            plan = if match_clause.optional {
+                optional_join(plan, self.translate_match(match_clause)?)
+            } else if matches!(plan, LogicalOperator::Empty) {
+                self.translate_match(match_clause)?
             } else {
-                LogicalOperator::Join(JoinOp {
-                    left: Box::new(plan),
-                    right: Box::new(match_plan),
-                    join_type: JoinType::Cross,
-                    conditions: vec![],
-                })
+                self.translate_match_with_input(match_clause, Some(plan))?
             };
         }
 
@@ -1972,39 +2044,21 @@ impl GqlTranslator {
         Ok(plan)
     }
 
-    /// Returns true if the RETURN clause is a single count() aggregate.
-    fn is_count_aggregate_return(ret: &ast::ReturnClause) -> bool {
-        if ret.items.len() != 1 {
-            return false;
-        }
-        matches!(
-            &ret.items[0].expression,
-            ast::Expression::FunctionCall { name, .. } if name.eq_ignore_ascii_case("count")
-        )
-    }
-
-    /// Extracts the first output column name from a Return operator in a logical plan.
-    fn extract_return_column_name(plan: &LogicalOperator) -> Option<String> {
-        match plan {
-            LogicalOperator::Return(ret) => {
-                let item = ret.items.first()?;
-                if let Some(alias) = &item.alias {
-                    Some(alias.clone())
-                } else {
-                    // Derive name from expression
-                    match &item.expression {
-                        LogicalExpression::Variable(name) => Some(name.clone()),
-                        LogicalExpression::Property { variable, property } => {
-                            Some(format!("{variable}.{property}"))
-                        }
-                        _ => None,
-                    }
-                }
+    /// If the RETURN clause is a single `count()` aggregate of at most one
+    /// argument, returns that argument (`None` for `count(*)`) and whether it
+    /// is counted DISTINCT.
+    fn count_aggregate_return(ret: &ast::ReturnClause) -> Option<(Option<&ast::Expression>, bool)> {
+        let [item] = ret.items.as_slice() else {
+            return None;
+        };
+        match &item.expression {
+            ast::Expression::FunctionCall {
+                name,
+                args,
+                distinct,
+            } if name.eq_ignore_ascii_case("count") && args.len() <= 1 => {
+                Some((args.first(), *distinct))
             }
-            // Walk through wrapping operators to find the Return
-            LogicalOperator::Sort(s) => Self::extract_return_column_name(&s.input),
-            LogicalOperator::Limit(l) => Self::extract_return_column_name(&l.input),
-            LogicalOperator::Distinct(d) => Self::extract_return_column_name(&d.input),
             _ => None,
         }
     }

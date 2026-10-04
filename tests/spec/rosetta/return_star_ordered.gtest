@@ -1,0 +1,121 @@
+# Rosetta: RETURN * with ORDER BY, SKIP, LIMIT and DISTINCT
+#
+# RETURN * returns every variable in scope. ORDER BY may sort by one of them,
+# by a property of one or by an expression, and adds no column for it.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: RETURN * with ORDER BY, SKIP, LIMIT and DISTINCT
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: ordered_by_a_returned_variable
+    variants:
+      gql: "UNWIND [3, 1, 2] AS x RETURN * ORDER BY x"
+      cypher: "UNWIND [3, 1, 2] AS x RETURN * ORDER BY x"
+    expect:
+      ordered: true
+      columns: [x]
+      rows:
+        - [1]
+        - [2]
+        - [3]
+
+  - name: ordered_by_an_expression
+    variants:
+      gql: "UNWIND [3, 1, 2] AS x RETURN * ORDER BY -x"
+      cypher: "UNWIND [3, 1, 2] AS x RETURN * ORDER BY -x"
+    expect:
+      ordered: true
+      columns: [x]
+      rows:
+        - [3]
+        - [2]
+        - [1]
+
+  - name: ordered_by_a_property
+    variants:
+      gql: "UNWIND [{k: 2, v: 'b'}, {k: 1, v: 'a'}] AS m RETURN * ORDER BY m.k"
+      cypher: "UNWIND [{k: 2, v: 'b'}, {k: 1, v: 'a'}] AS m RETURN * ORDER BY m.k"
+    expect:
+      ordered: true
+      columns: [m]
+      rows:
+        - ["{k: 1, v: a}"]
+        - ["{k: 2, v: b}"]
+
+  - name: ordered_with_limit
+    variants:
+      gql: "UNWIND [3, 1, 2] AS x RETURN * ORDER BY x DESC LIMIT 2"
+      cypher: "UNWIND [3, 1, 2] AS x RETURN * ORDER BY x DESC LIMIT 2"
+    expect:
+      ordered: true
+      columns: [x]
+      rows:
+        - [3]
+        - [2]
+
+  - name: ordered_with_skip
+    variants:
+      gql: "UNWIND [3, 1, 2] AS x RETURN * ORDER BY x SKIP 1"
+      cypher: "UNWIND [3, 1, 2] AS x RETURN * ORDER BY x SKIP 1"
+    expect:
+      ordered: true
+      columns: [x]
+      rows:
+        - [2]
+        - [3]
+
+  - name: distinct_ordered
+    variants:
+      gql: "UNWIND [2, 1, 2, 3] AS x RETURN DISTINCT * ORDER BY x"
+      cypher: "UNWIND [2, 1, 2, 3] AS x RETURN DISTINCT * ORDER BY x"
+    expect:
+      ordered: true
+      columns: [x]
+      rows:
+        - [1]
+        - [2]
+        - [3]
+
+  - name: two_columns_ordered_by_one
+    variants:
+      gql: "UNWIND [3, 1, 2] AS x WITH x, x * 10 AS y RETURN * ORDER BY y DESC"
+      cypher: "UNWIND [3, 1, 2] AS x WITH x, x * 10 AS y RETURN * ORDER BY y DESC"
+    expect:
+      ordered: true
+      columns: [x, y]
+      rows:
+        - [3, 30]
+        - [2, 20]
+        - [1, 10]
+
+  # Nodes and edges print differently in each binding, so this case checks the
+  # columns and the count; the next one checks the order by name, and
+  # crates/grafeo-engine/tests/returned_entities.rs compares the entities.
+  - name: nodes_and_edges_ordered_by_an_edge_property
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:LIVES_IN {years: 5}]->(ams), (gus)-[:LIVES_IN {years: 3}]->(ber), (mia)-[:LIVES_IN {years: 1}]->(par)"
+    variants:
+      gql: "MATCH (p:Person)-[r:LIVES_IN]->(c:City) RETURN * ORDER BY r.years LIMIT 2"
+      cypher: "MATCH (p:Person)-[r:LIVES_IN]->(c:City) RETURN * ORDER BY r.years LIMIT 2"
+    expect:
+      columns: [p, r, c]
+      count: 2
+
+  # GQL has no ORDER BY after WITH; RETURN * ... NEXT passes the ordered rows
+  # on instead.
+  - name: names_ordered_by_an_edge_property_through_with_star
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:LIVES_IN {years: 5}]->(ams), (gus)-[:LIVES_IN {years: 3}]->(ber), (mia)-[:LIVES_IN {years: 1}]->(par)"
+    variants:
+      gql: "MATCH (p:Person)-[r:LIVES_IN]->(c:City) RETURN * ORDER BY r.years LIMIT 2 NEXT RETURN p.name AS p, r.years AS years, c.name AS c"
+      cypher: "MATCH (p:Person)-[r:LIVES_IN]->(c:City) WITH * ORDER BY r.years LIMIT 2 RETURN p.name AS p, r.years AS years, c.name AS c"
+    expect:
+      ordered: true
+      rows:
+        - [Mia, 1, Paris]
+        - [Gus, 3, Berlin]

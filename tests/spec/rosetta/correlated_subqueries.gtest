@@ -1,0 +1,451 @@
+# Rosetta: EXISTS and COUNT subqueries tied to the outer row
+#
+# A subquery may refer to the row it is evaluated for through a value (a
+# property map like {id: s.id}, an inner WHERE, a variable from UNWIND), not
+# only through a shared node or edge. Each row gets its own answer, in RETURN,
+# in WITH and in WHERE, also when identical rows come in.
+#
+# Most setups: (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'}).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: EXISTS and COUNT subqueries tied to the outer row
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # In RETURN and WITH
+  # ---------------------------------------------------------------------------
+
+  - name: return_exists_tied_by_a_property_map
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) RETURN s.id AS id, EXISTS { MATCH (x:Other {id: s.id}) } AS e"
+      cypher: "MATCH (s:File) RETURN s.id AS id, EXISTS { MATCH (x:Other {id: s.id}) } AS e"
+    expect:
+      rows:
+        - [f1, false]
+        - [f2, true]
+
+  - name: return_count_tied_by_a_property_map
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) RETURN s.id AS id, COUNT { MATCH (x {id: s.id}) } AS c"
+      cypher: "MATCH (s:File) RETURN s.id AS id, COUNT { MATCH (x {id: s.id}) } AS c"
+    expect:
+      rows:
+        - [f1, 1]
+        - [f2, 2]
+
+  - name: return_count_tied_by_an_inner_where
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) RETURN s.id AS id, COUNT { MATCH (x:Other) WHERE x.id = s.id } AS c"
+      cypher: "MATCH (s:File) RETURN s.id AS id, COUNT { MATCH (x:Other) WHERE x.id = s.id } AS c"
+    expect:
+      rows:
+        - [f1, 0]
+        - [f2, 1]
+
+  - name: return_count_tied_to_an_unwound_value
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "UNWIND ['f1', 'f2'] AS k RETURN k, COUNT { MATCH (x {id: k}) } AS c"
+      cypher: "UNWIND ['f1', 'f2'] AS k RETURN k, COUNT { MATCH (x {id: k}) } AS c"
+    expect:
+      rows:
+        - [f1, 1]
+        - [f2, 2]
+
+  - name: with_count_tied_by_a_property_map
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) WITH s, COUNT { MATCH (x {id: s.id}) } AS c RETURN s.id AS id, c"
+      cypher: "MATCH (s:File) WITH s, COUNT { MATCH (x {id: s.id}) } AS c RETURN s.id AS id, c"
+    expect:
+      rows:
+        - [f1, 1]
+        - [f2, 2]
+
+  - name: return_exists_inside_case
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) RETURN s.id AS id, CASE WHEN EXISTS { MATCH (x:Other {id: s.id}) } THEN 'shared' ELSE 'own' END AS k"
+      cypher: "MATCH (s:File) RETURN s.id AS id, CASE WHEN EXISTS { MATCH (x:Other {id: s.id}) } THEN 'shared' ELSE 'own' END AS k"
+    expect:
+      rows:
+        - [f1, own]
+        - [f2, shared]
+
+  # ---------------------------------------------------------------------------
+  # COUNT in WHERE
+  # ---------------------------------------------------------------------------
+
+  - name: where_count_tied_by_a_property_map
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) WHERE COUNT { MATCH (x {id: s.id}) } = 1 RETURN s.id AS id"
+      cypher: "MATCH (s:File) WHERE COUNT { MATCH (x {id: s.id}) } = 1 RETURN s.id AS id"
+    expect:
+      rows:
+        - [f1]
+
+  - name: where_count_tied_by_an_inner_where
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) WHERE COUNT { MATCH (x:Other) WHERE x.id = s.id } = 1 RETURN s.id AS id"
+      cypher: "MATCH (s:File) WHERE COUNT { MATCH (x:Other) WHERE x.id = s.id } = 1 RETURN s.id AS id"
+    expect:
+      rows:
+        - [f2]
+
+  - name: where_count_inside_or
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) WHERE s.id = 'none' OR COUNT { MATCH (x {id: s.id}) } > 1 RETURN s.id AS id"
+      cypher: "MATCH (s:File) WHERE s.id = 'none' OR COUNT { MATCH (x {id: s.id}) } > 1 RETURN s.id AS id"
+    expect:
+      rows:
+        - [f2]
+
+  # Gus comes in twice (once per KNOWS edge); each row has its own count, so
+  # both pass: two KNOWS edges, and two edges times three people.
+  - name: where_count_keeps_identical_rows_apart
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(:Person {name: 'Vincent'})"
+    variants:
+      gql: "MATCH (a:Person)-[:KNOWS]->(b) WITH a WHERE COUNT { MATCH (a)-[:KNOWS]->(x) } = 2 AND COUNT { MATCH (a)-[:KNOWS]->(x), (y:Person) } = 6 RETURN a.name AS n"
+      cypher: "MATCH (a:Person)-[:KNOWS]->(b) WITH a WHERE COUNT { MATCH (a)-[:KNOWS]->(x) } = 2 AND COUNT { MATCH (a)-[:KNOWS]->(x), (y:Person) } = 6 RETURN a.name AS n"
+    expect:
+      rows:
+        - [Gus]
+        - [Gus]
+
+  # ---------------------------------------------------------------------------
+  # A node or edge of the row, matched again inside the subquery
+  # ---------------------------------------------------------------------------
+
+  # Each row's own edge: once, and once per city.
+  - name: count_through_the_edge_of_the_row
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), (gus)-[:KNOWS]->(:Person {name: 'Vincent'}), (:City {name: 'Paris'}), (:City {name: 'Berlin'})"
+    variants:
+      gql: "MATCH (a)-[r:KNOWS]->(b) RETURN a.name AS a, COUNT { MATCH ()-[r]->() } AS one, COUNT { MATCH (x)-[r]->(y), (c:City) } AS two"
+      cypher: "MATCH (a)-[r:KNOWS]->(b) RETURN a.name AS a, COUNT { MATCH ()-[r]->() } AS one, COUNT { MATCH (x)-[r]->(y), (c:City) } AS two"
+    expect:
+      rows:
+        - [Alix, 1, 2]
+        - [Gus, 1, 2]
+
+  # Alix knows Gus only, so with both ends from the row the pattern holds for
+  # Gus alone (once per city).
+  - name: count_through_both_nodes_of_the_row
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), (gus)-[:KNOWS]->(:Person {name: 'Vincent'}), (:City {name: 'Paris'}), (:City {name: 'Berlin'})"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}), (b:Person) RETURN b.name AS b, COUNT { MATCH (a)-[:KNOWS]->(b), (c:City) } AS n"
+      cypher: "MATCH (a:Person {name: 'Alix'}), (b:Person) RETURN b.name AS b, COUNT { MATCH (a)-[:KNOWS]->(b), (c:City) } AS n"
+    expect:
+      rows:
+        - [Alix, 0]
+        - [Gus, 2]
+        - [Vincent, 0]
+
+  # ---------------------------------------------------------------------------
+  # EXISTS in WHERE
+  # ---------------------------------------------------------------------------
+
+  - name: where_exists_tied_by_a_property_map
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) WHERE EXISTS { MATCH (x:Other {id: s.id}) } RETURN s.id AS id"
+      cypher: "MATCH (s:File) WHERE EXISTS { MATCH (x:Other {id: s.id}) } RETURN s.id AS id"
+    expect:
+      rows:
+        - [f2]
+
+  - name: where_not_exists_tied_by_a_property_map
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) WHERE NOT EXISTS { MATCH (x:Other {id: s.id}) } RETURN s.id AS id"
+      cypher: "MATCH (s:File) WHERE NOT EXISTS { MATCH (x:Other {id: s.id}) } RETURN s.id AS id"
+    expect:
+      rows:
+        - [f1]
+
+  - name: where_exists_tied_by_an_inner_where
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) WHERE EXISTS { MATCH (x:Other) WHERE x.id = s.id } RETURN s.id AS id"
+      cypher: "MATCH (s:File) WHERE EXISTS { MATCH (x:Other) WHERE x.id = s.id } RETURN s.id AS id"
+    expect:
+      rows:
+        - [f2]
+
+  - name: where_exists_tied_by_a_value_next_to_another_condition
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) WHERE s.id <> 'none' AND EXISTS { MATCH (x:Other {id: s.id}) } RETURN s.id AS id"
+      cypher: "MATCH (s:File) WHERE s.id <> 'none' AND EXISTS { MATCH (x:Other {id: s.id}) } RETURN s.id AS id"
+    expect:
+      rows:
+        - [f2]
+
+  - name: where_exists_tied_by_a_value_inside_or
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:File {id: 'f3'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "MATCH (s:File) WHERE s.id = 'f1' OR EXISTS { MATCH (x:Other {id: s.id}) } RETURN s.id AS id"
+      cypher: "MATCH (s:File) WHERE s.id = 'f1' OR EXISTS { MATCH (x:Other {id: s.id}) } RETURN s.id AS id"
+    expect:
+      rows:
+        - [f1]
+        - [f2]
+
+  - name: where_exists_tied_to_an_unwound_value
+    setup:
+      - "INSERT (:File {id: 'f1'}), (:File {id: 'f2'}), (:Other {id: 'f2'})"
+    variants:
+      gql: "UNWIND ['f1', 'f2', 'f3'] AS k WITH k WHERE EXISTS { MATCH (x {id: k}) } RETURN k"
+      cypher: "UNWIND ['f1', 'f2', 'f3'] AS k WITH k WHERE EXISTS { MATCH (x {id: k}) } RETURN k"
+    expect:
+      rows:
+        - [f1]
+        - [f2]
+
+  # Gus comes in twice; an OR keeps both rows (it filters, it does not merge).
+  - name: where_exists_inside_or_keeps_identical_rows
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(:Person {name: 'Vincent'}), (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH (a:Person)-[:KNOWS]->(b) WITH a WHERE a.name = 'none' OR EXISTS { MATCH (a)-[:KNOWS]->(x), (c:City) } RETURN a.name AS n"
+      cypher: "MATCH (a:Person)-[:KNOWS]->(b) WITH a WHERE a.name = 'none' OR EXISTS { MATCH (a)-[:KNOWS]->(x), (c:City) } RETURN a.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Gus]
+
+  # An EXISTS with an inner WHERE, inside an AND within one OR branch.
+  - name: where_exists_inside_and_within_or
+    setup:
+      - "INSERT (:A {id: 'a', x: 1}), (b:B {id: 'b'})-[:R]->(:C {id: 'c'})"
+    variants:
+      gql: "MATCH (n) WHERE (n:A AND n.x = 1) OR (n:B AND EXISTS { MATCH (n)-[:R]->(m) WHERE m.id = 'c' }) RETURN n.id AS id"
+      cypher: "MATCH (n) WHERE (n:A AND n.x = 1) OR (n:B AND EXISTS { MATCH (n)-[:R]->(m) WHERE m.id = 'c' }) RETURN n.id AS id"
+    expect:
+      rows:
+        - [a]
+        - [b]
+
+  # The inner WHERE compares with the row's edge: Alix has another KNOWS edge
+  # for each of hers, Gus has only the one.
+  - name: where_exists_compares_with_the_edge_of_the_row
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (alix)-[:KNOWS]->(:Person {name: 'Vincent'}), (:Person {name: 'Mia'})<-[:KNOWS]-(:Person {name: 'Jules'})"
+    variants:
+      gql: "MATCH (a)-[r:KNOWS]->(b) WHERE EXISTS { MATCH (a)-[s:KNOWS]->(c) WHERE s <> r } RETURN a.name AS a, b.name AS b"
+      cypher: "MATCH (a)-[r:KNOWS]->(b) WHERE EXISTS { MATCH (a)-[s:KNOWS]->(c) WHERE s <> r } RETURN a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Alix, Vincent]
+
+  # ---------------------------------------------------------------------------
+  # A subquery over two edges in a row, run once per row
+  # ---------------------------------------------------------------------------
+
+  - name: return_exists_over_two_edges
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), (gus)-[:LIVES_IN]->(:City {name: 'Berlin'}), (:Person {name: 'Harm'})"
+    variants:
+      gql: "MATCH (n:Person) RETURN n.name AS n, EXISTS { MATCH (n)-[:KNOWS]->(m)-[:LIVES_IN]->(c:City) } AS e"
+      cypher: "MATCH (n:Person) RETURN n.name AS n, EXISTS { MATCH (n)-[:KNOWS]->(m)-[:LIVES_IN]->(c:City) } AS e"
+    expect:
+      rows:
+        - [Alix, true]
+        - [Gus, false]
+        - [Harm, false]
+
+  - name: where_exists_over_two_edges_inside_or
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), (gus)-[:LIVES_IN]->(:City {name: 'Berlin'}), (:Person {name: 'Harm'})"
+    variants:
+      gql: "MATCH (n:Person) WHERE n.name = 'Harm' OR EXISTS { MATCH (n)-[:KNOWS]->(m)-[:LIVES_IN]->(c:City) } RETURN n.name AS n"
+      cypher: "MATCH (n:Person) WHERE n.name = 'Harm' OR EXISTS { MATCH (n)-[:KNOWS]->(m)-[:LIVES_IN]->(c:City) } RETURN n.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Harm]
+
+  - name: return_count_over_two_edges
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), (gus)-[:LIVES_IN]->(:City {name: 'Berlin'}), (:Person {name: 'Harm'})"
+    variants:
+      gql: "MATCH (n:Person) RETURN n.name AS n, COUNT { MATCH (n)-[:KNOWS]->(m)-[:LIVES_IN]->(c) } AS c"
+      cypher: "MATCH (n:Person) RETURN n.name AS n, COUNT { MATCH (n)-[:KNOWS]->(m)-[:LIVES_IN]->(c) } AS c"
+    expect:
+      rows:
+        - [Alix, 1]
+        - [Gus, 0]
+        - [Harm, 0]
+
+  # Cypher only: GQL's CALL does not import outer variables yet.
+  - name: call_over_two_edges
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), (gus)-[:LIVES_IN]->(:City {name: 'Berlin'}), (vincent:Person {name: 'Vincent'})-[:KNOWS]->(alix)"
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH a MATCH (a)-[:KNOWS]->(m)-[:KNOWS]->(x) RETURN x.name AS x } RETURN a.name AS a, x"
+    expect:
+      rows:
+        - [Vincent, Gus]
+
+  # ---------------------------------------------------------------------------
+  # GQL VALUE subqueries that count (GQL only: VALUE is GQL)
+  # ---------------------------------------------------------------------------
+
+  # Alix knows Gus (age 25) and Vincent (no age), and likes Gus twice.
+  - name: value_count_of_a_property_skips_nulls
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus', age: 25}), (alix)-[:KNOWS]->(:Person {name: 'Vincent'}), (alix)-[:LIKES]->(gus), (alix)-[:LIKES]->(gus)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) RETURN VALUE { MATCH (a)-[:KNOWS]->(b) RETURN count(b.age) } AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: value_count_distinct
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus', age: 25}), (alix)-[:KNOWS]->(:Person {name: 'Vincent'}), (alix)-[:LIKES]->(gus), (alix)-[:LIKES]->(gus)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) RETURN VALUE { MATCH (a)-[:LIKES]->(b) RETURN count(DISTINCT b) } AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: value_count_distinct_property_skips_nulls_and_duplicates
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus', age: 25}), (alix)-[:KNOWS]->(:Person {name: 'Vincent'}), (alix)-[:KNOWS]->(:Person {name: 'Jules', age: 25})"
+    variants:
+      gql: "MATCH (a:Person) RETURN a.name AS n, VALUE { MATCH (a)-[:KNOWS]->(b) RETURN count(DISTINCT b.age) } AS c ORDER BY n"
+    expect:
+      ordered: true
+      rows:
+        - [Alix, 1]
+        - [Gus, 0]
+        - [Jules, 0]
+        - [Vincent, 0]
+
+  - name: value_count_of_all_matches
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus', age: 25}), (alix)-[:KNOWS]->(:Person {name: 'Vincent'}), (alix)-[:LIKES]->(gus), (alix)-[:LIKES]->(gus)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) RETURN VALUE { MATCH (a)-[:LIKES]->(b) RETURN count(*) } AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: value_count_of_a_property_in_where
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus', age: 25}), (alix)-[:KNOWS]->(:Person {name: 'Vincent'}), (alix)-[:LIKES]->(gus), (alix)-[:LIKES]->(gus)"
+    variants:
+      gql: "MATCH (a:Person) WHERE VALUE { MATCH (a)-[:KNOWS]->(b) RETURN count(b.age) } = 1 RETURN a.name AS n"
+    expect:
+      rows:
+        - [Alix]
+
+  # A variable named like the planner's own subquery columns keeps its value:
+  # the planner picks a name the row does not have.
+  - name: a_variable_named_like_a_subquery_column
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) LET __subquery_0 = 7 RETURN __subquery_0 AS mine, EXISTS { MATCH (a)-[:KNOWS]->(b), (c:City) } AS e"
+      cypher: "MATCH (a:Person {name: 'Alix'}) WITH a, 7 AS __subquery_0 RETURN __subquery_0 AS mine, EXISTS { MATCH (a)-[:KNOWS]->(b), (c:City) } AS e"
+    expect:
+      rows:
+        - [7, true]
+
+  # ---------------------------------------------------------------------------
+  # A subquery that shares nothing with the row has one answer for all rows
+  # ---------------------------------------------------------------------------
+
+  # Five KNOWS edges, the same for every city.
+  - name: a_count_that_shares_nothing_with_the_row
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (c:City) RETURN c.name AS c, COUNT { MATCH (x)-[:KNOWS]->(y) } AS n"
+      cypher: "MATCH (c:City) RETURN c.name AS c, COUNT { MATCH (x)-[:KNOWS]->(y) } AS n"
+    expect:
+      rows:
+        - [Amsterdam, 5]
+        - [Berlin, 5]
+        - [Paris, 5]
+
+  - name: an_exists_that_shares_nothing_with_the_row
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (c:City) RETURN c.name AS c, EXISTS { MATCH (x)-[:LIVES_IN]->(y:City {name: 'Paris'}) } AS e, EXISTS { MATCH (x)-[:LIVES_IN]->(y:City {name: 'Prague'}) } AS f"
+      cypher: "MATCH (c:City) RETURN c.name AS c, EXISTS { MATCH (x)-[:LIVES_IN]->(y:City {name: 'Paris'}) } AS e, EXISTS { MATCH (x)-[:LIVES_IN]->(y:City {name: 'Prague'}) } AS f"
+    expect:
+      rows:
+        - [Amsterdam, true, false]
+        - [Berlin, true, false]
+        - [Paris, true, false]
+
+  # The same in WITH, and on an empty graph part: no edge of the type.
+  - name: a_count_that_shares_nothing_in_with
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (c:City) WITH c, COUNT { MATCH (x)-[:LIKES]->(y) } AS n RETURN c.name AS c, n"
+      cypher: "MATCH (c:City) WITH c, COUNT { MATCH (x)-[:LIKES]->(y) } AS n RETURN c.name AS c, n"
+    expect:
+      rows:
+        - [Amsterdam, 0]
+        - [Berlin, 0]
+        - [Paris, 0]
+
+  # In WHERE too: one count for every city, combined with a row condition.
+  - name: a_count_that_shares_nothing_in_where
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (c:City) WHERE COUNT { MATCH (x)-[:KNOWS]->(y) } = 5 AND c.name <> 'Berlin' RETURN c.name AS c"
+      cypher: "MATCH (c:City) WHERE COUNT { MATCH (x)-[:KNOWS]->(y) } = 5 AND c.name <> 'Berlin' RETURN c.name AS c"
+    expect:
+      rows:
+        - [Amsterdam]
+        - [Paris]
+
+  # After a write in the same statement the subquery sees every row's write:
+  # three tags, one per city, counted on each row.
+  - name: a_count_that_shares_nothing_after_a_write
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH (c:City) INSERT (:Tag) RETURN c.name AS c, COUNT { MATCH (t:Tag) } AS n"
+      cypher: "MATCH (c:City) CREATE (:Tag) RETURN c.name AS c, COUNT { MATCH (t:Tag) } AS n"
+    expect:
+      rows:
+        - [Amsterdam, 3]
+        - [Berlin, 3]
+        - [Paris, 3]

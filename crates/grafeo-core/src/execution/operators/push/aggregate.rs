@@ -1,6 +1,6 @@
 //! Push-based aggregate operator (pipeline breaker).
 
-use crate::execution::chunk::DataChunk;
+use crate::execution::chunk::{ColumnTypes, DataChunk};
 use crate::execution::operators::OperatorError;
 use crate::execution::operators::accumulator::{AggregateExpr, AggregateFunction, AggregateState};
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
@@ -191,6 +191,23 @@ fn hash_value(value: &Value) -> u64 {
     hasher.finish()
 }
 
+/// The output columns: the group keys in their input columns' types (a node
+/// or edge stays one, see `ColumnTypes`), then one per aggregate.
+fn output_columns(
+    group_by: &[usize],
+    aggregates: usize,
+    input_types: &ColumnTypes,
+) -> Vec<ValueVector> {
+    group_by
+        .iter()
+        .map(|&column| match input_types.types().get(column) {
+            Some(column_type) => ValueVector::with_capacity(column_type.clone(), 0),
+            None => ValueVector::new(),
+        })
+        .chain((0..aggregates).map(|_| ValueVector::new()))
+        .collect()
+}
+
 /// Group state with key values and accumulators.
 #[derive(Clone)]
 struct GroupState {
@@ -211,6 +228,8 @@ pub struct AggregatePushOperator {
     groups: HashMap<GroupKey, GroupState>,
     /// Global accumulator (for no GROUP BY).
     global_state: Option<Vec<AggregateState>>,
+    /// The column types of the input chunks.
+    input_types: ColumnTypes,
 }
 
 impl AggregatePushOperator {
@@ -227,6 +246,7 @@ impl AggregatePushOperator {
             aggregates,
             groups: HashMap::new(),
             global_state,
+            input_types: ColumnTypes::default(),
         }
     }
 
@@ -241,6 +261,7 @@ impl PushOperator for AggregatePushOperator {
         if chunk.is_empty() {
             return Ok(true);
         }
+        self.input_types.add(&chunk);
 
         for row in chunk.selected_indices() {
             if self.group_by.is_empty() {
@@ -282,9 +303,7 @@ impl PushOperator for AggregatePushOperator {
     }
 
     fn finalize(&mut self, sink: &mut dyn Sink) -> Result<(), OperatorError> {
-        let num_output_cols = self.group_by.len() + self.aggregates.len();
-        let mut columns: Vec<ValueVector> =
-            (0..num_output_cols).map(|_| ValueVector::new()).collect();
+        let mut columns = output_columns(&self.group_by, self.aggregates.len(), &self.input_types);
 
         if self.group_by.is_empty() {
             // Global aggregation - single row output
@@ -603,6 +622,8 @@ pub struct SpillableAggregatePushOperator {
     spill_state: Option<std::sync::Arc<super::spill_state::OperatorSpillState>>,
     /// Running total of estimated group memory in bytes (incremental tracking).
     estimated_bytes: usize,
+    /// The column types of the input chunks.
+    input_types: ColumnTypes,
 }
 
 #[cfg(feature = "spill")]
@@ -627,6 +648,7 @@ impl SpillableAggregatePushOperator {
             memory_ctx: None,
             spill_state: None,
             estimated_bytes: 0,
+            input_types: ColumnTypes::default(),
         }
     }
 
@@ -662,6 +684,7 @@ impl SpillableAggregatePushOperator {
             memory_ctx: None,
             spill_state: None,
             estimated_bytes: 0,
+            input_types: ColumnTypes::default(),
         }
     }
 
@@ -709,6 +732,7 @@ impl SpillableAggregatePushOperator {
             memory_ctx: Some(ctx),
             spill_state: Some(state),
             estimated_bytes: 0,
+            input_types: ColumnTypes::default(),
         }
     }
 
@@ -816,6 +840,7 @@ impl PushOperator for SpillableAggregatePushOperator {
         if chunk.is_empty() {
             return Ok(true);
         }
+        self.input_types.add(&chunk);
 
         for row in chunk.selected_indices() {
             if self.group_by.is_empty() {
@@ -903,9 +928,7 @@ impl PushOperator for SpillableAggregatePushOperator {
     }
 
     fn finalize(&mut self, sink: &mut dyn Sink) -> Result<(), OperatorError> {
-        let num_output_cols = self.group_by.len() + self.aggregates.len();
-        let mut columns: Vec<ValueVector> =
-            (0..num_output_cols).map(|_| ValueVector::new()).collect();
+        let mut columns = output_columns(&self.group_by, self.aggregates.len(), &self.input_types);
 
         if self.group_by.is_empty() {
             // Global aggregation - single row output
@@ -987,6 +1010,45 @@ mod tests {
             ValueVector::from_values(&v1),
             ValueVector::from_values(&v2),
         ])
+    }
+
+    /// A node group key keeps its column type.
+    #[test]
+    fn group_keys_keep_their_column_types() {
+        use crate::execution::chunk::DataChunkBuilder;
+        use grafeo_common::types::{LogicalType, NodeId};
+
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node]);
+        for node in [101, 101, 102] {
+            builder
+                .column_mut(0)
+                .unwrap()
+                .push_node_id(NodeId::new(node));
+            builder.advance_row();
+        }
+        let mut agg = AggregatePushOperator::new(vec![0], vec![AggregateExpr::count_star()]);
+        let mut sink = CollectorSink::new();
+        agg.push(builder.finish(), &mut sink).unwrap();
+        agg.finalize(&mut sink).unwrap();
+
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.len(), 1);
+        let chunk = &chunks[0];
+        assert_eq!(chunk.column_types()[0], LogicalType::Node);
+        let mut groups: Vec<(u64, Option<Value>)> = chunk
+            .selected_indices()
+            .map(|row| {
+                (
+                    chunk.column(0).unwrap().get_node_id(row).unwrap().as_u64(),
+                    chunk.column(1).unwrap().get_value(row),
+                )
+            })
+            .collect();
+        groups.sort_by_key(|(node, _)| *node);
+        assert_eq!(
+            groups,
+            [(101, Some(Value::Int64(2))), (102, Some(Value::Int64(1)))]
+        );
     }
 
     #[test]

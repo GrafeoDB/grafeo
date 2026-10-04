@@ -21,8 +21,9 @@ use grafeo_common::types::Value;
 pub struct ParameterState {
     /// Column names for the injected parameters.
     pub columns: Vec<String>,
-    /// Current row values (set by Apply before each inner execution).
-    values: Mutex<Option<Vec<Value>>>,
+    /// Current row values and the types of the columns they come from (set by
+    /// Apply before each inner execution; no types: any).
+    values: Mutex<Option<(Vec<Value>, Vec<LogicalType>)>>,
 }
 
 impl ParameterState {
@@ -35,9 +36,17 @@ impl ParameterState {
         }
     }
 
-    /// Sets the current parameter values (called by the Apply operator).
+    /// Sets the current parameter values (called by the Apply operator), in
+    /// columns of any type.
     pub fn set_values(&self, values: Vec<Value>) {
-        *self.values.lock() = Some(values);
+        *self.values.lock() = Some((values, Vec::new()));
+    }
+
+    /// Sets the current parameter values with the types of the columns they
+    /// come from, so a node or edge of the outer row stays one in the inner
+    /// plan (in a column of any type an ID reads whichever entity has it).
+    pub fn set_typed_values(&self, values: Vec<Value>, types: Vec<LogicalType>) {
+        *self.values.lock() = Some((values, types));
     }
 
     /// Clears the current parameter values.
@@ -45,9 +54,11 @@ impl ParameterState {
         *self.values.lock() = None;
     }
 
-    /// Takes the current parameter values.
-    fn take_values(&self) -> Option<Vec<Value>> {
-        self.values.lock().take()
+    /// The current parameter values and their column types. They stay set:
+    /// every scan of the state reads them (each branch of a `UNION` in the
+    /// subquery starts from one, and a rescan after `reset` reads them again).
+    fn current_values(&self) -> Option<(Vec<Value>, Vec<LogicalType>)> {
+        self.values.lock().clone()
     }
 }
 
@@ -85,15 +96,18 @@ impl Operator for ParameterScanOperator {
         }
         self.emitted = true;
 
-        let Some(values) = self.state.take_values() else {
+        let Some((values, types)) = self.state.current_values() else {
             return Ok(None);
         };
 
-        // Build a single-row DataChunk with one column per parameter
+        // Build a single-row DataChunk with one column per parameter, in the
+        // type of the column it comes from.
         let columns: Vec<ValueVector> = values
             .into_iter()
-            .map(|val| {
-                let mut col = ValueVector::with_capacity(LogicalType::Any, 1);
+            .enumerate()
+            .map(|(i, val)| {
+                let column_type = types.get(i).cloned().unwrap_or(LogicalType::Any);
+                let mut col = ValueVector::with_capacity(column_type, 1);
                 col.push_value(val);
                 col
             })
@@ -158,6 +172,42 @@ mod tests {
         state.set_values(vec![Value::Int64(2)]);
         let chunk = op.next().unwrap().expect("should emit after reset");
         assert_eq!(chunk.column(0).unwrap().get_value(0), Some(Value::Int64(2)));
+    }
+
+    /// Typed values come out in the types of the columns they came from.
+    #[test]
+    fn typed_values_keep_their_column_types() {
+        let state = Arc::new(ParameterState::new(vec!["a".to_string(), "r".to_string()]));
+        let mut op = ParameterScanOperator::new(Arc::clone(&state));
+
+        state.set_typed_values(
+            vec![Value::Int64(3), Value::Int64(3)],
+            vec![LogicalType::Node, LogicalType::Edge],
+        );
+        let chunk = op.next().unwrap().expect("should emit a chunk");
+        assert_eq!(chunk.column_types(), [LogicalType::Node, LogicalType::Edge]);
+        assert_eq!(chunk.column(0).unwrap().get_node_id(0).unwrap().as_u64(), 3);
+        assert!(chunk.column(0).unwrap().get_edge_id(0).is_none());
+        assert_eq!(chunk.column(1).unwrap().get_edge_id(0).unwrap().as_u64(), 3);
+        assert!(chunk.column(1).unwrap().get_node_id(0).is_none());
+    }
+
+    /// Two scans of one state (the branches of a UNION) both read the row,
+    /// and so does a rescan after `reset` without new values.
+    #[test]
+    fn every_scan_of_the_state_reads_the_values() {
+        let state = Arc::new(ParameterState::new(vec!["x".to_string()]));
+        let mut first = ParameterScanOperator::new(Arc::clone(&state));
+        let mut second = ParameterScanOperator::new(Arc::clone(&state));
+        state.set_values(vec![Value::Int64(7)]);
+        for op in [&mut first, &mut second] {
+            let chunk = op.next().unwrap().expect("each scan emits the row");
+            assert_eq!(chunk.column(0).unwrap().get_value(0), Some(Value::Int64(7)));
+            assert!(op.next().unwrap().is_none());
+        }
+        first.reset();
+        let chunk = first.next().unwrap().expect("a rescan emits the row again");
+        assert_eq!(chunk.column(0).unwrap().get_value(0), Some(Value::Int64(7)));
     }
 
     #[test]

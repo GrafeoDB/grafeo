@@ -3,7 +3,7 @@
 use super::{
     AddLabelOp, AddLabelOperator, AntiJoinOp, Arc, CreateEdgeOp, CreateEdgeOperator, CreateNodeOp,
     CreateNodeOperator, DeleteEdgeOp, DeleteEdgeOperator, DeleteNodeOp, DeleteNodeOperator,
-    Direction, Error, ExpandDirection, ExpressionPredicate, FilterOperator, HashMap, LeftJoinOp,
+    Direction, EntityValue, Error, ExpandDirection, ExpressionPredicate, HashMap, LeftJoinOp,
     LogicalExpression, LogicalOperator, LogicalType, MergeConfig, MergeOp, MergeOperator,
     MergeRelationshipConfig, MergeRelationshipOp, MergeRelationshipOperator, Operator, ProjectExpr,
     ProjectOperator, PropertySource, RemoveLabelOp, RemoveLabelOperator, Result, SetPropertyOp,
@@ -13,6 +13,7 @@ use super::{
 #[cfg(feature = "algos")]
 use super::{CallProcedureOp, StaticResultOperator};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind};
+use grafeo_core::execution::operators::{JoinCondition, JoinedRowCondition};
 
 impl super::Planner {
     /// Plans a CREATE NODE operator.
@@ -221,6 +222,32 @@ impl super::Planner {
         let (right_op, right_columns) = self.plan_operator(&left_join.right)?;
         let left_types = self.derive_schema_from_columns(&left_columns);
         let right_types = self.derive_schema_from_columns(&right_columns);
+
+        // A condition that reads both sides (the WHERE of an OPTIONAL MATCH on a
+        // variable bound before it) decides which pairs are matches, so a left
+        // row none of whose pairs pass it keeps nulls. It reads the joined row:
+        // the left columns, then the right ones (a name both sides have reads
+        // the left one).
+        let residual = match &left_join.condition {
+            Some(condition) => {
+                let filter_expr = self.convert_expression(condition)?;
+                let mut variable_columns: HashMap<String, usize> = HashMap::new();
+                for (i, name) in left_columns.iter().chain(&right_columns).enumerate() {
+                    variable_columns.entry(name.clone()).or_insert(i);
+                }
+                let predicate = ExpressionPredicate::new(
+                    filter_expr,
+                    variable_columns,
+                    Arc::clone(&self.store),
+                )
+                .with_transaction_context(self.viewing_epoch, self.transaction_id)
+                .with_session_context(self.session_context.clone());
+                let condition: Box<dyn JoinCondition> =
+                    Box::new(JoinedRowCondition::new(Box::new(predicate)));
+                Some(condition)
+            }
+            None => None,
+        };
         let (join_op, join_columns, _join_types) = super::common::build_left_join(
             left_op,
             right_op,
@@ -228,26 +255,8 @@ impl super::Planner {
             &right_columns,
             &left_types,
             &right_types,
+            residual,
         );
-
-        // If the LeftJoin carries a cross-side condition (null-safe predicate),
-        // apply it as a Filter above the join. The condition already incorporates
-        // IS NULL guards so NULL-padded rows from unmatched optional sides pass through.
-        if let Some(condition) = &left_join.condition {
-            let filter_expr = self.convert_expression(condition)?;
-            let variable_columns: HashMap<String, usize> = join_columns
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-            let predicate =
-                ExpressionPredicate::new(filter_expr, variable_columns, Arc::clone(&self.store))
-                    .with_transaction_context(self.viewing_epoch, self.transaction_id)
-                    .with_session_context(self.session_context.clone());
-            let filter_op: Box<dyn Operator> =
-                Box::new(FilterOperator::new(join_op, Box::new(predicate)));
-            return Ok((filter_op, join_columns));
-        }
 
         Ok((join_op, join_columns))
     }
@@ -276,6 +285,7 @@ impl super::Planner {
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Plan the input operator first
         // Handle Empty specially - use a single-row operator
+        let unwinds_a_constant = matches!(&*unwind.input, LogicalOperator::Empty);
         let (input_op, input_columns): (Box<dyn Operator>, Vec<String>) =
             if matches!(&*unwind.input, LogicalOperator::Empty) {
                 // For UNWIND without prior MATCH, create a single-row input
@@ -318,30 +328,21 @@ impl super::Planner {
                 self.plan_operator(&unwind.input)?
             };
 
-        // The UNWIND expression should be a list - we need to find/evaluate it
-        // Handle variable references, property access, and literal lists
-
-        // Find if the expression references an existing column that is itself a list
-        let list_col_idx = match &unwind.expression {
-            LogicalExpression::Variable(var) => input_columns.iter().position(|c| c == var),
-            LogicalExpression::List(_) | LogicalExpression::Literal(_) => {
-                // Literal list expression - needs to be added as a column
-                None
+        // The list is a column of the input (the one row of a constant list, or
+        // a variable), or an expression evaluated per row in a column of its
+        // own: a literal, a property, `range(1, n.k)`, `nodes(p)`, ...
+        let list_col_idx = if unwinds_a_constant {
+            Some(0)
+        } else {
+            match &unwind.expression {
+                LogicalExpression::Variable(var) => input_columns.iter().position(|c| c == var),
+                _ => None,
             }
-            _ => None,
         };
 
-        // When the expression needs runtime evaluation (property access, literal list, etc.),
-        // wrap input in a ProjectOperator that computes the list as an extra column.
         let (final_input_op, final_input_columns, col_idx) = if let Some(idx) = list_col_idx {
             (input_op, input_columns, idx)
-        } else if matches!(
-            &unwind.expression,
-            LogicalExpression::List(_)
-                | LogicalExpression::Literal(Value::List(_))
-                | LogicalExpression::Literal(Value::Vector(_))
-                | LogicalExpression::Property { .. }
-        ) {
+        } else {
             // Wrap input in a ProjectOperator that adds the list as an extra column
             let literal_list = self.convert_expression(&unwind.expression)?;
             let mut proj_exprs: Vec<ProjectExpr> =
@@ -371,24 +372,29 @@ impl super::Planner {
             let mut cols = input_columns;
             cols.push("__unwind_list__".to_string());
             (project_op, cols, list_col)
-        } else {
-            // Fallback: assume column 0 contains the list
-            (input_op, input_columns, 0)
         };
 
         // Build output columns: all input columns plus the new variable
         let mut columns = final_input_columns.clone();
         columns.push(unwind.variable.clone());
 
-        // Mark the UNWIND variable as scalar (not a node/edge ID) so that
-        // plan_return uses LogicalType::Any instead of Node for it.
-        self.scalar_columns
-            .borrow_mut()
-            .insert(unwind.variable.clone());
+        // The items of a node or edge list (a collected list, `nodes(p)`,
+        // `relationships(p)`, ...) are nodes or edges, so a property read takes
+        // the right entity; the items of any other list are values.
+        let item = match self.entity_value(&unwind.expression) {
+            Some(EntityValue::Nodes) => Some(EntityValue::Node),
+            Some(EntityValue::Edges) => Some(EntityValue::Edge),
+            _ => None,
+        };
 
         // Build output schema
         let mut output_schema = self.derive_schema_from_columns(&final_input_columns);
-        output_schema.push(LogicalType::Any); // The unwound element type is dynamic
+        output_schema.push(match item {
+            Some(EntityValue::Node) => LogicalType::Node,
+            Some(EntityValue::Edge) => LogicalType::Edge,
+            _ => LogicalType::Any,
+        });
+        self.set_column_entity(&unwind.variable, item);
 
         // Add ORDINALITY column (1-based index) if requested
         let emit_ordinality = unwind.ordinality_var.is_some();
@@ -848,6 +854,7 @@ impl super::Planner {
                 transaction_id: self.transaction_id,
                 viewing_epoch: self.viewing_epoch,
                 catalog: self.catalog.clone(),
+                write_counter: self.write_counter(),
             },
         ));
 

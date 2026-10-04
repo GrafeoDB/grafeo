@@ -1464,9 +1464,11 @@ impl PyGrafeoDB {
     /// Each row names its endpoints in `src_field` and `dst_field` (the
     /// nodes whose `endpoint_key` has that value, with all of
     /// `endpoint_labels` when given) and holds the edge's `key`; every other
-    /// field is an edge property. A row whose endpoint does not exist, or
-    /// without the key, is skipped, never created. An edge is identified by
-    /// its endpoints, type and key. By default a row's properties are merged
+    /// field is an edge property. A row is skipped when it lacks the key,
+    /// `src_field` or `dst_field`, or when no node or more than one node has
+    /// its endpoint key; endpoints are never created. `key`, `src_field` and
+    /// `dst_field` must be different fields. An edge is identified by its
+    /// endpoints, type and key. By default a row's properties are merged
     /// into the edge's; with `replace=True` they become exactly the row's.
     /// A property index on `endpoint_key` makes the endpoint lookups fast.
     ///
@@ -4033,6 +4035,16 @@ fn change_event_to_dict(
     };
     map.insert("labels".to_string(), labels_py(&event.labels));
     map.insert("before_labels".to_string(), labels_py(&event.before_labels));
+    // The graph the entity is in (None for the default graph): entity ids
+    // repeat across graphs.
+    map.insert(
+        "graph".to_string(),
+        event
+            .graph
+            .clone()
+            .into_py_any(py)
+            .expect("str to Python conversion"),
+    );
     map.insert(
         "edge_type".to_string(),
         event

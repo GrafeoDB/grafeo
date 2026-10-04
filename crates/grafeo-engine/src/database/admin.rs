@@ -2,7 +2,10 @@
 
 use std::path::Path;
 
+use grafeo_common::types::ArcStr;
 use grafeo_common::utils::error::Result;
+use grafeo_common::utils::hash::FxHashMap;
+use grafeo_core::graph::Direction;
 
 impl super::GrafeoDB {
     // =========================================================================
@@ -24,19 +27,20 @@ impl super::GrafeoDB {
     /// Returns the number of distinct labels in the database.
     #[must_use]
     pub fn label_count(&self) -> usize {
-        self.lpg_store().label_count()
+        self.graph_store().all_labels().len()
     }
 
-    /// Returns the number of distinct property keys in the database.
+    /// Returns the number of distinct property keys in the database, of
+    /// nodes and edges together.
     #[must_use]
     pub fn property_key_count(&self) -> usize {
-        self.lpg_store().property_key_count()
+        self.graph_store().all_property_keys().len()
     }
 
     /// Returns the number of distinct edge types in the database.
     #[must_use]
     pub fn edge_type_count(&self) -> usize {
-        self.lpg_store().edge_type_count()
+        self.graph_store().all_edge_types().len()
     }
 
     // =========================================================================
@@ -209,9 +213,9 @@ impl super::GrafeoDB {
         crate::admin::DatabaseStats {
             node_count: self.graph_store().node_count(),
             edge_count: self.graph_store().edge_count(),
-            label_count: self.lpg_store().label_count(),
-            edge_type_count: self.lpg_store().edge_type_count(),
-            property_key_count: self.lpg_store().property_key_count(),
+            label_count: self.label_count(),
+            edge_type_count: self.edge_type_count(),
+            property_key_count: self.property_key_count(),
             index_count: self.catalog.index_count(),
             memory_bytes: self.memory_usage().total_bytes,
             disk_bytes,
@@ -245,27 +249,47 @@ impl super::GrafeoDB {
     /// For RDF mode, returns predicate and named graph information.
     #[must_use]
     pub fn schema(&self) -> crate::admin::SchemaInfo {
-        let labels = self
-            .lpg_store()
+        let store = self.graph_store();
+        // The label index holds every node with the label, also those of a
+        // transaction that has not committed: count the nodes that have the
+        // label at the current epoch.
+        let epoch = store.current_epoch();
+        let labels = store
             .all_labels()
             .into_iter()
             .map(|name| crate::admin::LabelInfo {
-                name: name.clone(),
-                count: self.lpg_store().nodes_with_label(&name).count(),
+                count: store
+                    .nodes_by_label(&name)
+                    .into_iter()
+                    .filter(|&id| {
+                        store
+                            .get_node_at_epoch(id, epoch)
+                            .is_some_and(|node| node.has_label(&name))
+                    })
+                    .count(),
+                name,
             })
             .collect();
 
-        let edge_types = self
-            .lpg_store()
+        // One pass over the edges counts every type.
+        let mut edges_per_type: FxHashMap<ArcStr, usize> = FxHashMap::default();
+        for node in store.node_ids() {
+            for (_, edge) in store.edges_from(node, Direction::Outgoing) {
+                if let Some(edge_type) = store.edge_type(edge) {
+                    *edges_per_type.entry(edge_type).or_default() += 1;
+                }
+            }
+        }
+        let edge_types = store
             .all_edge_types()
             .into_iter()
             .map(|name| crate::admin::EdgeTypeInfo {
-                name: name.clone(),
-                count: self.lpg_store().edges_with_type(&name).count(),
+                count: edges_per_type.get(name.as_str()).copied().unwrap_or(0),
+                name,
             })
             .collect();
 
-        let property_keys = self.lpg_store().all_property_keys();
+        let property_keys = store.all_property_keys();
 
         crate::admin::SchemaInfo::Lpg(crate::admin::LpgSchemaInfo {
             labels,
@@ -442,7 +466,8 @@ impl super::GrafeoDB {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Returns the full change history for an entity (node or edge).
+    /// Returns the full change history for an entity (node or edge) of the
+    /// default graph (a session's `history` reads its current graph).
     ///
     /// Events are ordered chronologically by epoch.
     ///
@@ -457,7 +482,8 @@ impl super::GrafeoDB {
         Ok(self.cdc_log.history(entity_id.into()))
     }
 
-    /// Returns change events for an entity since the given epoch.
+    /// Returns change events for an entity of the default graph since the
+    /// given epoch.
     ///
     /// # Errors
     ///
@@ -471,7 +497,8 @@ impl super::GrafeoDB {
         Ok(self.cdc_log.history_since(entity_id.into(), since_epoch))
     }
 
-    /// Returns all change events across all entities in an epoch range.
+    /// Returns all change events across all entities and graphs in an epoch
+    /// range; each event names its graph.
     ///
     /// # Errors
     ///

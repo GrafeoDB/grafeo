@@ -2,9 +2,14 @@
 
 use super::{
     ApplyOp, ApplyOperator, DistinctOp, Error, ExceptOp, HashJoinOperator, IntersectOp, JoinOp,
-    JoinType, LeapfrogJoinOperator, LogicalExpression, MultiWayJoinOp, Operator, OtherwiseOp,
-    PhysicalJoinType, ProjectExpr, ProjectOperator, Result, UnionOp, Value, common,
+    JoinType, LeapfrogJoinOperator, LogicalExpression, LogicalOperator, MultiWayJoinOp, Operator,
+    OtherwiseOp, ParameterScanOperator, PhysicalJoinType, ProjectExpr, ProjectOperator, Result,
+    UnionOp, Value, common,
 };
+use crate::query::plan::{
+    LimitOp, ParameterScanOp, ProjectOp, Projection, ReturnOp, SkipOp, SortKey, SortOp,
+};
+use grafeo_common::types::LogicalType;
 
 impl super::Planner {
     /// Plans a JOIN operator.
@@ -210,10 +215,7 @@ impl super::Planner {
     /// same width. User-written Cypher/GQL UNIONNs are checked for matching
     /// columns in the translators, so padding only applies to internal unions.
     pub(super) fn plan_union(&self, union: &UnionOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let mut planned = Vec::with_capacity(union.inputs.len());
-        for input in &union.inputs {
-            planned.push(self.plan_operator(input)?);
-        }
+        let planned = self.plan_branches(&union.inputs)?;
 
         // Pad narrower branches with NULL up to the widest branch.
         let mut unified_columns: Vec<String> = Vec::new();
@@ -264,12 +266,10 @@ impl super::Planner {
         distinct: &DistinctOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let (input_op, columns) = self.plan_operator(&distinct.input)?;
-        let schema = self.derive_schema_from_columns(&columns);
         Ok(common::build_distinct(
             input_op,
             columns,
             distinct.columns.as_deref(),
-            schema,
         ))
     }
 
@@ -278,12 +278,10 @@ impl super::Planner {
         &self,
         except: &ExceptOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (left_op, columns) = self.plan_operator(&except.left)?;
-        let (right_op, _) = self.plan_operator(&except.right)?;
-        let schema = self.derive_schema_from_columns(&columns);
-        Ok(common::build_except(
-            left_op, right_op, columns, except.all, schema,
-        ))
+        let mut planned = self.plan_branches([except.left.as_ref(), except.right.as_ref()])?;
+        let (right_op, _) = planned.pop().expect("two branches planned");
+        let (left_op, columns) = planned.pop().expect("two branches planned");
+        Ok(common::build_except(left_op, right_op, columns, except.all))
     }
 
     /// Plans an INTERSECT operator.
@@ -291,15 +289,15 @@ impl super::Planner {
         &self,
         intersect: &IntersectOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (left_op, columns) = self.plan_operator(&intersect.left)?;
-        let (right_op, _) = self.plan_operator(&intersect.right)?;
-        let schema = self.derive_schema_from_columns(&columns);
+        let mut planned =
+            self.plan_branches([intersect.left.as_ref(), intersect.right.as_ref()])?;
+        let (right_op, _) = planned.pop().expect("two branches planned");
+        let (left_op, columns) = planned.pop().expect("two branches planned");
         Ok(common::build_intersect(
             left_op,
             right_op,
             columns,
             intersect.all,
-            schema,
         ))
     }
 
@@ -308,9 +306,54 @@ impl super::Planner {
         &self,
         otherwise: &OtherwiseOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (left_op, columns) = self.plan_operator(&otherwise.left)?;
-        let (right_op, _) = self.plan_operator(&otherwise.right)?;
+        let mut planned =
+            self.plan_branches([otherwise.left.as_ref(), otherwise.right.as_ref()])?;
+        let (right_op, _) = planned.pop().expect("two branches planned");
+        let (left_op, columns) = planned.pop().expect("two branches planned");
         Ok(common::build_otherwise(left_op, right_op, columns))
+    }
+
+    /// Plans the scan that starts a correlated subquery from the outer row.
+    /// The state holds what the Apply imports (`*` expanded to the outer
+    /// columns in `plan_apply`); a scan that names some of them (a `UNION`
+    /// branch that imports less than another) passes on only those, so the
+    /// others stay free names in its plan.
+    pub(super) fn plan_parameter_scan(
+        &self,
+        scan: &ParameterScanOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let state = self
+            .correlated_param_state
+            .borrow()
+            .clone()
+            .ok_or_else(|| {
+                Error::Internal("ParameterScan without correlated Apply context".to_string())
+            })?;
+        let columns = state.columns.clone();
+        let operator: Box<dyn Operator> = Box::new(ParameterScanOperator::new(state));
+        if scan.columns.iter().any(|name| name == "*") || scan.columns == columns {
+            return Ok((operator, columns));
+        }
+        let projections = scan
+            .columns
+            .iter()
+            .map(|name| {
+                columns
+                    .iter()
+                    .position(|column| column == name)
+                    .map(ProjectExpr::Column)
+                    .ok_or_else(|| {
+                        Error::Internal(format!(
+                            "variable '{name}' is not imported by the enclosing Apply"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let types = vec![LogicalType::Any; projections.len()];
+        Ok((
+            Box::new(ProjectOperator::new(operator, projections, types)),
+            scan.columns.clone(),
+        ))
     }
 
     /// Plans an APPLY (lateral join) operator.
@@ -318,15 +361,30 @@ impl super::Planner {
     /// When `shared_variables` is non-empty, creates a correlated Apply that
     /// injects outer row values into the inner plan via [`ParameterState`].
     pub(super) fn plan_apply(&self, apply: &ApplyOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (outer_op, outer_columns) = self.plan_operator(&apply.input)?;
+        // A subquery that comes first runs once, on one empty row.
+        let (outer_op, outer_columns): (Box<dyn Operator>, Vec<String>) =
+            if matches!(apply.input.as_ref(), LogicalOperator::Empty) {
+                (
+                    Box::new(
+                        grafeo_core::execution::operators::single_row::SingleRowOperator::new(),
+                    ),
+                    Vec::new(),
+                )
+            } else {
+                self.plan_operator(&apply.input)?
+            };
+        let output = subquery_output(&apply.subplan);
+        let subplan = output.as_ref().unwrap_or(&apply.subplan);
 
         if apply.shared_variables.is_empty() {
             // Uncorrelated Apply
-            let (inner_op, inner_columns) = self.plan_operator(&apply.subplan)?;
-            // Inner subquery RETURN materializes values (PropertyAccess, NodeResolve,
-            // aggregates, etc.), so all its output columns are scalar.
-            for col in &inner_columns {
-                self.scalar_columns.borrow_mut().insert(col.clone());
+            let (inner_op, inner_columns) = self.plan_operator(subplan)?;
+            // Any other subquery materializes values (PropertyAccess,
+            // NodeResolve, aggregates, etc.), so its output columns are scalar.
+            if output.is_none() {
+                for col in &inner_columns {
+                    self.scalar_columns.borrow_mut().insert(col.clone());
+                }
             }
             let inner_col_count = inner_columns.len();
             let mut columns = outer_columns;
@@ -350,24 +408,35 @@ impl super::Planner {
             grafeo_core::execution::operators::ParameterState::new(shared_vars.clone()),
         );
 
-        // Find column indices for the shared variables in outer columns
+        // Find column indices for the shared variables in outer columns (the
+        // binder has checked that the outer query has them)
         let param_col_indices: Vec<usize> = shared_vars
             .iter()
-            .map(|var| outer_columns.iter().position(|c| c == var).unwrap_or(0))
-            .collect();
+            .map(|var| {
+                outer_columns.iter().position(|c| c == var).ok_or_else(|| {
+                    Error::Internal(format!(
+                        "variable '{var}' imported into CALL is not a column of the outer query"
+                    ))
+                })
+            })
+            .collect::<Result<_>>()?;
 
-        // Set the parameter state so the inner plan's ParameterScan can find it
-        *self.correlated_param_state.borrow_mut() = Some(std::sync::Arc::clone(&param_state));
+        // Set the parameter state so the inner plan's ParameterScan can find
+        // it; the state of an enclosing subquery comes back afterwards, for
+        // what is planned after this Apply inside that subquery.
+        let previous = self
+            .correlated_param_state
+            .replace(Some(std::sync::Arc::clone(&param_state)));
+        let planned = self.plan_operator(subplan);
+        *self.correlated_param_state.borrow_mut() = previous;
+        let (inner_op, inner_columns) = planned?;
 
-        let (inner_op, inner_columns) = self.plan_operator(&apply.subplan)?;
-
-        // Clear the parameter state after planning the inner operator
-        *self.correlated_param_state.borrow_mut() = None;
-
-        // Inner subquery RETURN materializes values, so register as scalar
+        // Any other subquery materializes values, so register them as scalar
         // to prevent the outer RETURN from misinterpreting them as node IDs.
-        for col in &inner_columns {
-            self.scalar_columns.borrow_mut().insert(col.clone());
+        if output.is_none() {
+            for col in &inner_columns {
+                self.scalar_columns.borrow_mut().insert(col.clone());
+            }
         }
 
         // Build correlated Apply
@@ -381,4 +450,98 @@ impl super::Planner {
         }
         Ok((Box::new(op), columns))
     }
+}
+
+/// The plan of a subquery whose `RETURN` passes its values on as `WITH` does:
+/// nodes and edges stay references, so the outer query can match from them,
+/// compare them and take their ids, and resolves them when it returns them.
+/// An `ORDER BY`, `SKIP`, `LIMIT` or `DISTINCT` after the `RETURN` stays on
+/// top. `None` when the subquery does not end in such a `RETURN`, or when its
+/// `ORDER BY` reads a variable the `RETURN` leaves out (only the `RETURN`'s
+/// own planning keeps those for the sort).
+fn subquery_output(subplan: &LogicalOperator) -> Option<LogicalOperator> {
+    match subplan {
+        LogicalOperator::Return(ret) => return_as_projection(ret),
+        LogicalOperator::Sort(sort) => {
+            if let LogicalOperator::Return(ret) = sort.input.as_ref()
+                && !sort_reads_only_returned(&sort.keys, ret)
+            {
+                return None;
+            }
+            Some(LogicalOperator::Sort(SortOp {
+                keys: sort.keys.clone(),
+                input: Box::new(subquery_output(&sort.input)?),
+            }))
+        }
+        LogicalOperator::Limit(limit) => Some(LogicalOperator::Limit(LimitOp {
+            count: limit.count.clone(),
+            input: Box::new(subquery_output(&limit.input)?),
+        })),
+        LogicalOperator::Skip(skip) => Some(LogicalOperator::Skip(SkipOp {
+            count: skip.count.clone(),
+            input: Box::new(subquery_output(&skip.input)?),
+        })),
+        LogicalOperator::Distinct(distinct) => Some(LogicalOperator::Distinct(DistinctOp {
+            input: Box::new(subquery_output(&distinct.input)?),
+            columns: distinct.columns.clone(),
+        })),
+        // A UNION of such subqueries passes on what each branch returns.
+        LogicalOperator::Union(union) => Some(LogicalOperator::Union(UnionOp {
+            inputs: union
+                .inputs
+                .iter()
+                .map(subquery_output)
+                .collect::<Option<_>>()?,
+        })),
+        _ => None,
+    }
+}
+
+/// Whether every variable the sort `keys` read is a column `ret` returns.
+fn sort_reads_only_returned(keys: &[SortKey], ret: &ReturnOp) -> bool {
+    let returned: Vec<&str> = ret
+        .items
+        .iter()
+        .filter_map(|item| match (&item.alias, &item.expression) {
+            (Some(alias), _) => Some(alias.as_str()),
+            (None, LogicalExpression::Variable(name)) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut read = Vec::new();
+    for key in keys {
+        super::project::collect_vars(&key.expression, &mut read);
+    }
+    read.iter().all(|name| returned.contains(&name.as_str()))
+}
+
+/// A `RETURN` as the projection that passes its values on.
+fn return_as_projection(ret: &ReturnOp) -> Option<LogicalOperator> {
+    if ret
+        .items
+        .iter()
+        .any(|item| matches!(&item.expression, LogicalExpression::Variable(name) if name == "*"))
+    {
+        return None;
+    }
+    let project = LogicalOperator::Project(ProjectOp {
+        projections: ret
+            .items
+            .iter()
+            .map(|item| Projection {
+                expression: item.expression.clone(),
+                alias: item.alias.clone(),
+            })
+            .collect(),
+        input: ret.input.clone(),
+        pass_through_input: false,
+    });
+    Some(if ret.distinct {
+        LogicalOperator::Distinct(DistinctOp {
+            input: Box::new(project),
+            columns: None,
+        })
+    } else {
+        project
+    })
 }

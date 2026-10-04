@@ -83,8 +83,20 @@ pub enum Clause {
     Remove(RemoveClause),
     /// CALL procedure clause.
     Call(CallClause),
-    /// CALL { subquery } (inline subquery).
-    CallSubquery(Query),
+    /// CALL [(scope)] { subquery } (inline subquery).
+    CallSubquery {
+        /// The subquery.
+        query: Query,
+        /// The variable scope clause, `CALL (a, b) { ... }`: the outer
+        /// variables the subquery sees (`*` for all of them, none for `()`).
+        /// `None` without one, when its importing `WITH` names them.
+        scope: Option<Vec<String>>,
+        /// Further subqueries joined to `query` by `UNION` (`UNION ALL` when
+        /// `union_all`), each with an importing `WITH` of its own.
+        unions: Vec<Query>,
+        /// Whether the `unions` are joined by `UNION ALL` (duplicates kept).
+        union_all: bool,
+    },
     /// FOREACH (variable IN list | update_clauses).
     ForEach(ForEachClause),
     /// LOAD CSV clause.

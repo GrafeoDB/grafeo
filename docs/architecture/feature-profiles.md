@@ -16,7 +16,7 @@ Since 0.5.35, profiles are named after *what you are building*, not *where it ru
 | Profile | Persona | What it enables |
 | --- | --- | --- |
 | `lpg` | Graph App Developer | Labeled property graph model, GQL, Cypher, Gremlin, SQL/PGQ, storage, regex |
-| `rdf` | Knowledge Engineer | RDF triple store, GQL, SPARQL, GraphQL, SHACL validation, storage, regex |
+| `rdf` | Knowledge Engineer | RDF triple store, GQL, SPARQL, GraphQL, SHACL validation, storage (with the LPG store it needs), regex |
 | `analytics` | Data Scientist | Graph algorithms, vector, text and hybrid search, JSON Lines and Parquet import |
 | `ai` | AI Memory / Agent Developer | Vector, text and hybrid search, change data capture |
 | `edge` | Frontend / Edge Developer | LPG model, GQL, lightweight regex (minimal, WASM-friendly) |
@@ -62,10 +62,10 @@ All labeled property graph query languages plus persistence. The default choice 
 ### RDF
 
 ```toml
-rdf = ["triple-store", "gql", "sparql", "graphql", "storage", "regex", "shacl"]
+rdf = ["triple-store", "grafeo-engine/lpg", "gql", "sparql", "graphql", "storage", "regex", "shacl"]
 ```
 
-RDF triple store with SPARQL, GraphQL, SHACL validation and persistence, for knowledge engineers working with ontologies and linked data. Add the `ring-index` atom for compact RDF indexing (it pulls in `succinct-indexes`).
+RDF triple store with SPARQL, GraphQL, SHACL validation and persistence, for knowledge engineers working with ontologies and linked data. Persistence needs the LPG store for now, so the profile includes it ([#544](https://github.com/GrafeoDB/grafeo/issues/544)): without it a database lost its triples on reopen. Add the `ring-index` atom for compact RDF indexing (it pulls in `succinct-indexes`).
 
 > **Note:** in the lower-level crates (`grafeo-core`, `grafeo-adapters`, `grafeo-engine`), `rdf` is a deprecated alias for the `triple-store` atom only. The profile above applies to the facade and binding crates.
 

@@ -47,8 +47,9 @@ pub struct UpsertSummary {
     pub created: u32,
     /// Rows that updated an existing node or edge.
     pub updated: u32,
-    /// Rows that were not written: without their key, or an edge row whose
-    /// endpoint does not exist.
+    /// Rows that were not written: without their key, edge rows without a
+    /// source or target field, and edge rows whose endpoint key matches no
+    /// node or more than one node.
     pub skipped: u32,
     /// The indices of the skipped rows, in order (at most 1,000).
     pub skipped_rows: Vec<u32>,
@@ -122,8 +123,10 @@ impl JsGrafeoDB {
     ///
     /// Each row names its endpoints in the source and target fields (`src`
     /// and `dst` by default) and holds the edge key; every other field is an
-    /// edge property. A row whose endpoint does not exist, or without the
-    /// key, is skipped, never created.
+    /// edge property. A row is skipped when it lacks the edge key, the
+    /// source field or the target field, or when no node or more than one
+    /// node has its endpoint key; endpoints are never created. The key and
+    /// the two endpoint fields must be different fields.
     #[napi(js_name = "upsertEdges")]
     pub async fn upsert_edges(
         &self,

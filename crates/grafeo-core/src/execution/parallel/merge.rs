@@ -4,6 +4,7 @@
 //! each worker produces partial results that must be merged into final output.
 
 use crate::execution::chunk::DataChunk;
+use crate::execution::operators::value_utils::order_by;
 use crate::execution::vector::ValueVector;
 use grafeo_common::types::Value;
 use std::cmp::Ordering;
@@ -199,7 +200,7 @@ pub struct SortKey {
     pub column: usize,
     /// Sort direction (ascending = true).
     pub ascending: bool,
-    /// Nulls first (true) or last (false).
+    /// Nulls first (true) or last (false), in either direction.
     pub nulls_first: bool,
 }
 
@@ -238,17 +239,12 @@ struct MergeEntry {
 impl MergeEntry {
     fn compare_to(&self, other: &Self) -> Ordering {
         for key in &self.keys {
-            let a = self.row.get(key.column);
-            let b = other.row.get(key.column);
-
-            let ordering = compare_values_for_sort(a, b, key.nulls_first);
-
-            let ordering = if key.ascending {
-                ordering
-            } else {
-                ordering.reverse()
-            };
-
+            let ordering = order_by(
+                self.row.get(key.column),
+                other.row.get(key.column),
+                !key.ascending,
+                key.nulls_first,
+            );
             if ordering != Ordering::Equal {
                 return ordering;
             }
@@ -275,40 +271,6 @@ impl Ord for MergeEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse for min-heap behavior (we want smallest first)
         other.compare_to(self)
-    }
-}
-
-fn compare_values_for_sort(a: Option<&Value>, b: Option<&Value>, nulls_first: bool) -> Ordering {
-    match (a, b) {
-        (None, None) | (Some(Value::Null), Some(Value::Null)) => Ordering::Equal,
-        (None, _) | (Some(Value::Null), _) => {
-            if nulls_first {
-                Ordering::Less
-            } else {
-                Ordering::Greater
-            }
-        }
-        (_, None) | (_, Some(Value::Null)) => {
-            if nulls_first {
-                Ordering::Greater
-            } else {
-                Ordering::Less
-            }
-        }
-        (Some(a), Some(b)) => compare_values(a, b),
-    }
-}
-
-fn compare_values(a: &Value, b: &Value) -> Ordering {
-    match (a, b) {
-        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-        (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
-        (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-        (Value::String(a), Value::String(b)) => a.cmp(b),
-        (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
-        (Value::Date(a), Value::Date(b)) => a.cmp(b),
-        (Value::Time(a), Value::Time(b)) => a.cmp(b),
-        _ => Ordering::Equal,
     }
 }
 
@@ -580,6 +542,45 @@ mod tests {
         assert_eq!(result[0][0], Value::Int64(8));
         assert_eq!(result[1][0], Value::Int64(7));
         assert_eq!(result[5][0], Value::Int64(1));
+    }
+
+    /// Runs of mixed values merge in the sort order: numbers before strings
+    /// when descending, and nulls last when the key says so.
+    #[test]
+    fn test_merge_sorted_runs_mixed_values_nulls_last_descending() {
+        let runs = vec![
+            vec![
+                vec![Value::Int64(3)],
+                vec![Value::String("b".into())],
+                vec![Value::Null],
+            ],
+            vec![
+                vec![Value::Float64(2.5)],
+                vec![Value::String("a".into())],
+                vec![Value::Null],
+            ],
+        ];
+        let keys = vec![SortKey {
+            column: 0,
+            ascending: false,
+            nulls_first: false,
+        }];
+
+        let result: Vec<Value> = merge_sorted_runs(runs, &keys)
+            .into_iter()
+            .map(|mut row| row.remove(0))
+            .collect();
+        assert_eq!(
+            result,
+            [
+                Value::Int64(3),
+                Value::Float64(2.5),
+                Value::String("b".into()),
+                Value::String("a".into()),
+                Value::Null,
+                Value::Null,
+            ]
+        );
     }
 
     #[test]

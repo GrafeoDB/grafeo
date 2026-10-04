@@ -41,6 +41,9 @@ pub(crate) struct CdcGraphStore {
     /// Whether the events of non-versioned writes are buffered too, instead
     /// of being recorded as they happen.
     buffer_all: bool,
+    /// The named graph this store writes to, `None` for the default graph:
+    /// the events it buffers carry it.
+    graph: Option<String>,
 }
 
 impl CdcGraphStore {
@@ -51,6 +54,7 @@ impl CdcGraphStore {
             cdc_log,
             pending_events: Arc::new(Mutex::new(Vec::new())),
             buffer_all: false,
+            graph: None,
         }
     }
 
@@ -69,7 +73,16 @@ impl CdcGraphStore {
             cdc_log,
             pending_events,
             buffer_all: false,
+            graph: None,
         }
+    }
+
+    /// The same store, for the named graph `graph`: the events it buffers
+    /// say so, so the commit folds them per graph.
+    #[must_use]
+    pub fn for_graph(mut self, graph: String) -> Self {
+        self.graph = Some(graph);
+        self
     }
 
     /// Wraps a store sharing an existing event buffer, and buffers the events
@@ -86,6 +99,7 @@ impl CdcGraphStore {
             cdc_log,
             pending_events,
             buffer_all: true,
+            graph: None,
         }
     }
 
@@ -101,15 +115,17 @@ impl CdcGraphStore {
     /// each transaction's events get the unique epoch from `fetch_add(1, SeqCst)`.
     fn buffer_event(&self, mut event: ChangeEvent) {
         event.epoch = EpochId::PENDING;
+        event.graph.clone_from(&self.graph);
         self.pending_events.lock().push(event);
     }
 
     /// Records a CDC event directly (for non-versioned/auto-commit mutations),
     /// or buffers it when the store buffers every event.
-    fn record_directly(&self, event: ChangeEvent) {
+    fn record_directly(&self, mut event: ChangeEvent) {
         if self.buffer_all {
             self.buffer_event(event);
         } else {
+            event.graph.clone_from(&self.graph);
             self.cdc_log.record(event);
         }
     }
@@ -159,6 +175,7 @@ fn make_event(
 ) -> ChangeEvent {
     ChangeEvent {
         entity_id,
+        graph: None,
         kind,
         epoch,
         timestamp,
@@ -345,6 +362,15 @@ impl GraphStore for CdcGraphStore {
 
     fn edge_type(&self, id: EdgeId) -> Option<ArcStr> {
         self.inner.edge_type(id)
+    }
+
+    fn edge_type_versioned(
+        &self,
+        id: EdgeId,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> Option<ArcStr> {
+        self.inner.edge_type_versioned(id, epoch, transaction_id)
     }
 
     fn has_property_index(&self, property: &str) -> bool {

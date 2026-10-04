@@ -105,6 +105,37 @@ fn merge_counts_only_what_it_creates() {
     );
 }
 
+/// A label written twice is one label, counted once.
+#[test]
+fn a_repeated_label_counts_once() {
+    let db = GrafeoDB::new_in_memory();
+    let c = counters(&db, "INSERT (:City:City {name: 'Paris'})");
+    assert_eq!((c.nodes_created, c.labels_added), (1, 1));
+    assert_eq!(
+        db.execute("MATCH (n:City) RETURN labels(n)")
+            .unwrap()
+            .rows()[0][0],
+        Value::List(vec![Value::from("City")].into())
+    );
+}
+
+/// Writes inside a stored procedure count for the statement that calls it.
+#[cfg(feature = "algos")]
+#[test]
+fn a_procedure_counts_its_writes() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute(
+        "CREATE PROCEDURE add_city(name STRING) RETURNS (n INTEGER) AS { \
+         INSERT (c:City {name: $name}) RETURN 1 AS n }",
+    )
+    .unwrap();
+    let c = counters(&db, "CALL add_city('Paris') YIELD n RETURN n");
+    assert_eq!(
+        (c.nodes_created, c.labels_added, c.properties_set),
+        (1, 1, 1)
+    );
+}
+
 #[test]
 fn reads_and_failed_checks_report_nothing() {
     let db = GrafeoDB::new_in_memory();

@@ -1092,6 +1092,7 @@ void main() {
                   setup: tc.setup,
                   expect: tc.expect,
                   tags: tc.tags,
+                  params: tc.params,
                 );
                 _runTestCase(db, variantTc, lang, meta.language);
               } finally {

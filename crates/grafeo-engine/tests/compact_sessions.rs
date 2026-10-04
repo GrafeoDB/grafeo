@@ -148,6 +148,103 @@ fn a_wal_directory_keeps_writes_after_compact() {
     db.close().unwrap();
 }
 
+/// Direct calls from several threads on a compacted database: the WAL ends
+/// with the state they left, so a reopen reads what memory held, never an
+/// older value that one call logged after another call's newer one.
+#[cfg(feature = "wal")]
+#[test]
+fn concurrent_writes_after_compact_replay_to_the_last_state() {
+    use grafeo_engine::config::StorageFormat;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = || {
+        Config::persistent(dir.path().join("db")).with_storage_format(StorageFormat::WalDirectory)
+    };
+    let values = |db: &GrafeoDB| {
+        db.execute("MATCH (c:Counter) RETURN id(c), c.v ORDER BY id(c)")
+            .unwrap()
+            .rows()
+            .to_vec()
+    };
+    let expected = {
+        let mut db = GrafeoDB::with_config(config()).unwrap();
+        db.execute("INSERT (:Seed)").unwrap();
+        db.compact().unwrap();
+        let counters: Vec<_> = (0..4)
+            .map(|_| {
+                db.create_node_with_props(&["Counter"], [("v", Value::Int64(0))])
+                    .unwrap()
+            })
+            .collect();
+        std::thread::scope(|scope| {
+            for thread in 0..8_i64 {
+                let (db, counters) = (&db, &counters);
+                scope.spawn(move || {
+                    for step in 0..200_i64 {
+                        let counter = counters[usize::try_from(step + thread).unwrap() % 4];
+                        let value = Value::Int64(thread * 1_000 + step);
+                        // Writes to one node conflict (each call is a
+                        // transaction here): retry, a bounded number of times.
+                        let mut attempts = 0;
+                        while let Err(error) = db.set_node_property(counter, "v", value.clone()) {
+                            attempts += 1;
+                            assert!(
+                                error.to_string().contains("conflict") && attempts < 10_000,
+                                "{error}"
+                            );
+                            std::thread::yield_now();
+                        }
+                    }
+                });
+            }
+        });
+        let expected = values(&db);
+        db.close().unwrap();
+        expected
+    };
+    let db = GrafeoDB::with_config(config()).unwrap();
+    assert_eq!(values(&db), expected);
+    db.close().unwrap();
+}
+
+/// Compacting again merges the overlay into a fresh base: inserts, updates
+/// and deletes since the first `compact()` stay, and the database stays
+/// writable. (The bindings have no `recompact()`; this is how they merge.)
+#[test]
+fn compacting_again_keeps_the_overlay_writes() {
+    let mut db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix', city: 'Paris'})-[:KNOWS]->(:Person {name: 'Gus', city: 'Berlin'})")
+        .unwrap();
+    db.compact().unwrap();
+    db.execute("INSERT (:Person {name: 'Vincent', city: 'Prague'})")
+        .unwrap();
+    db.execute("MATCH (p:Person {name: 'Alix'}) SET p.city = 'Amsterdam'")
+        .unwrap();
+    db.execute("MATCH (p:Person {name: 'Gus'}) DETACH DELETE p")
+        .unwrap();
+    let cities = |db: &GrafeoDB| {
+        db.execute("MATCH (p:Person) RETURN p.name, p.city ORDER BY p.name")
+            .unwrap()
+            .rows()
+            .to_vec()
+    };
+    let before = cities(&db);
+    assert_eq!(before.len(), 2);
+
+    db.compact().unwrap();
+    assert_eq!(cities(&db), before);
+    db.execute("INSERT (:Person {name: 'Mia', city: 'Barcelona'})")
+        .unwrap();
+    assert_eq!(
+        names(&db),
+        [
+            Value::from("Alix"),
+            Value::from("Mia"),
+            Value::from("Vincent")
+        ]
+    );
+}
+
 /// Direct calls and queries after `compact()` produce change events.
 #[cfg(feature = "cdc")]
 #[test]
@@ -206,4 +303,26 @@ fn the_selected_graph_holds_after_compact() {
 
     db.set_current_graph(None).unwrap();
     assert_eq!(names(&db), [Value::from("Alix")]);
+}
+
+/// `compact()` keeps a database opened read-only read-only: writes fail as
+/// before, and `close()` has nothing to write back.
+#[cfg(feature = "grafeo-file")]
+#[test]
+fn compact_keeps_a_read_only_database_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("people.grafeo");
+    {
+        let db = GrafeoDB::open(&path).unwrap();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.close().unwrap();
+    }
+
+    let mut db = GrafeoDB::open_read_only(&path).unwrap();
+    db.compact().unwrap();
+    assert!(db.is_read_only());
+    assert!(db.execute("INSERT (:Person {name: 'Gus'})").is_err());
+    assert!(db.create_node(&["Person"]).is_err());
+    assert_eq!(names(&db), [Value::from("Alix")]);
+    db.close().unwrap();
 }

@@ -9,10 +9,72 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::query::plan::{
     AggregateFunction, BinaryOp, CountExpr, DistinctOp, FilterOp, LeftJoinOp, LimitOp,
-    LogicalExpression, LogicalOperator, ReturnItem, ReturnOp, SkipOp, SortKey, SortOp, UnaryOp,
+    LogicalExpression, LogicalOperator, ReturnItem, ReturnOp, SkipOp, SortKey, SortOp,
 };
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
+
+/// Expands the `RETURN *` that ends a `CALL` subquery into the variables the
+/// subquery binds itself, in name order: the variables of the outer row
+/// (`outer`) stay where they are, and internal names (`_...`) are not
+/// returned. Fails when those variables are not known, so that the subquery
+/// names what it returns.
+pub(crate) fn expand_subquery_return_star(
+    subplan: &mut LogicalOperator,
+    outer: Option<&HashSet<String>>,
+) -> Result<()> {
+    let Some(ret) = final_return_mut(subplan) else {
+        return Ok(());
+    };
+    let [item] = ret.items.as_slice() else {
+        return Ok(());
+    };
+    if !matches!(&item.expression, LogicalExpression::Variable(name) if name == "*") {
+        return Ok(());
+    }
+    let (Some(outer), Some(bound)) = (outer, ret.input.bound_variables(outer)) else {
+        return Err(Error::Query(QueryError::new(
+            QueryErrorKind::Semantic,
+            "RETURN * in this CALL subquery cannot tell which variables it binds: return them by name",
+        )));
+    };
+    let mut names: Vec<String> = bound
+        .into_iter()
+        .filter(|name| !name.starts_with('_') && !outer.contains(name))
+        .collect();
+    names.sort();
+    ret.items = names
+        .into_iter()
+        .map(|name| ReturnItem {
+            expression: LogicalExpression::Variable(name),
+            alias: None,
+        })
+        .collect();
+    Ok(())
+}
+
+/// The `RETURN` that ends `plan`, under the `ORDER BY`, `SKIP`, `LIMIT` or
+/// `DISTINCT` that follow it.
+fn final_return_mut(plan: &mut LogicalOperator) -> Option<&mut ReturnOp> {
+    match plan {
+        LogicalOperator::Return(ret) => Some(ret),
+        LogicalOperator::Sort(op) => final_return_mut(&mut op.input),
+        LogicalOperator::Limit(op) => final_return_mut(&mut op.input),
+        LogicalOperator::Skip(op) => final_return_mut(&mut op.input),
+        LogicalOperator::Distinct(op) => final_return_mut(&mut op.input),
+        _ => None,
+    }
+}
+
+/// The error for a `WITH` item that is an expression without a name. As in
+/// openCypher, later clauses refer to what a `WITH` passes on by name, and a
+/// property read such as `n.name` does not keep `n`.
+pub(crate) fn unaliased_with_expression() -> Error {
+    Error::Query(QueryError::new(
+        QueryErrorKind::Semantic,
+        "Expression in WITH must be aliased (use AS)",
+    ))
+}
 
 /// Returns true if the function name is a recognized aggregate function.
 pub(crate) fn is_aggregate_function(name: &str) -> bool {
@@ -193,6 +255,7 @@ impl VarGen {
     }
 
     /// Returns the current counter value without incrementing.
+    #[cfg(any(feature = "gremlin", test))]
     pub fn current(&self) -> u32 {
         self.counter.load(Ordering::Relaxed)
     }
@@ -277,9 +340,8 @@ pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalEx
         return Err(Error::Query(QueryError::new(
             QueryErrorKind::Semantic,
             format!(
-                "{base} is not a map value, so .{key} cannot read from it: match a node or edge \
-                 with a variable and read its property, or bind a value with WITH ... AS m and \
-                 use m.{key}"
+                "{base} is not a map value, so .{key} cannot read from it: read .{key} of a node \
+                 or edge bound to a variable in the pattern, or of a map value"
             ),
         )));
     }
@@ -290,14 +352,15 @@ pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalEx
 }
 
 /// Whether an expression can evaluate to a map: a variable, a parameter, a
-/// property, a map literal, `properties(...)`, or a key or element of one of
-/// those (or of a list literal).
+/// property, a map literal or projection, `properties(...)`, or a key or
+/// element of one of those (or of a list literal).
 fn can_be_map(expr: &LogicalExpression) -> bool {
     match expr {
         LogicalExpression::Variable(_)
         | LogicalExpression::Parameter(_)
         | LogicalExpression::Property { .. }
         | LogicalExpression::Map(_)
+        | LogicalExpression::MapProjection { .. }
         | LogicalExpression::MapAccess { .. } => true,
         LogicalExpression::IndexAccess { base, .. } => {
             matches!(**base, LogicalExpression::List(_)) || can_be_map(base)
@@ -370,25 +433,34 @@ pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut 
                 collect_expression_variables(else_expr, vars);
             }
         }
+        // The variable a comprehension, list predicate or `reduce` binds is
+        // its own: only the other names its body uses come from outside.
         LogicalExpression::ListComprehension {
+            variable,
             list_expr,
             filter_expr,
             map_expr,
-            ..
         } => {
             collect_expression_variables(list_expr, vars);
+            let mut body = HashSet::new();
             if let Some(filter) = filter_expr {
-                collect_expression_variables(filter, vars);
+                collect_expression_variables(filter, &mut body);
             }
-            collect_expression_variables(map_expr, vars);
+            collect_expression_variables(map_expr, &mut body);
+            body.remove(variable);
+            vars.extend(body);
         }
         LogicalExpression::ListPredicate {
+            variable,
             list_expr,
             predicate,
             ..
         } => {
             collect_expression_variables(list_expr, vars);
-            collect_expression_variables(predicate, vars);
+            let mut body = HashSet::new();
+            collect_expression_variables(predicate, &mut body);
+            body.remove(variable);
+            vars.extend(body);
         }
         LogicalExpression::MapProjection { base, entries } => {
             vars.insert(base.clone());
@@ -399,14 +471,19 @@ pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut 
             }
         }
         LogicalExpression::Reduce {
+            accumulator,
             initial,
+            variable,
             list,
             expression,
-            ..
         } => {
             collect_expression_variables(initial, vars);
             collect_expression_variables(list, vars);
-            collect_expression_variables(expression, vars);
+            let mut body = HashSet::new();
+            collect_expression_variables(expression, &mut body);
+            body.remove(accumulator);
+            body.remove(variable);
+            vars.extend(body);
         }
         LogicalExpression::PatternComprehension { projection, .. } => {
             collect_expression_variables(projection, vars);
@@ -601,24 +678,144 @@ pub(crate) fn collect_operator_variables(op: &LogicalOperator, vars: &mut HashSe
     }
 }
 
+/// The left join of an OPTIONAL MATCH: `right` matched for each row of
+/// `left`, with nulls where it has no match. A filter in `right` that reads a
+/// variable only `left` binds (GQL's `(c WHERE c.age > a.age)`) is a condition
+/// of the join: it decides which matches count, so it moves there.
+pub(crate) fn optional_join(left: LogicalOperator, right: LogicalOperator) -> LogicalOperator {
+    let mut left_vars = HashSet::new();
+    collect_operator_variables(&left, &mut left_vars);
+    let mut right_vars = HashSet::new();
+    collect_operator_variables(&right, &mut right_vars);
+    let mut moved = Vec::new();
+    let right = take_left_reading_filters(right, &left_vars, &right_vars, &mut moved);
+    LogicalOperator::LeftJoin(LeftJoinOp {
+        left: Box::new(left),
+        right: Box::new(right),
+        condition: join_conjuncts(moved),
+    })
+}
+
+/// Removes from the filters of `plan` (down its pattern) the conjuncts that
+/// read a variable `left_vars` has and `right_vars` does not, adding them to
+/// `moved`.
+fn take_left_reading_filters(
+    plan: LogicalOperator,
+    left_vars: &HashSet<String>,
+    right_vars: &HashSet<String>,
+    moved: &mut Vec<LogicalExpression>,
+) -> LogicalOperator {
+    match plan {
+        LogicalOperator::Filter(mut filter) => {
+            let input = take_left_reading_filters(*filter.input, left_vars, right_vars, moved);
+            let mut kept = Vec::new();
+            for conjunct in split_and(filter.predicate) {
+                let mut read = HashSet::new();
+                collect_expression_variables(&conjunct, &mut read);
+                if read
+                    .iter()
+                    .any(|name| left_vars.contains(name) && !right_vars.contains(name))
+                {
+                    moved.push(conjunct);
+                } else {
+                    kept.push(conjunct);
+                }
+            }
+            match join_conjuncts(kept) {
+                Some(predicate) => {
+                    filter.predicate = predicate;
+                    filter.input = Box::new(input);
+                    LogicalOperator::Filter(filter)
+                }
+                None => input,
+            }
+        }
+        LogicalOperator::Expand(mut expand) => {
+            expand.input = Box::new(take_left_reading_filters(
+                *expand.input,
+                left_vars,
+                right_vars,
+                moved,
+            ));
+            LogicalOperator::Expand(expand)
+        }
+        LogicalOperator::NodeScan(mut scan) => {
+            scan.input = scan.input.map(|input| {
+                Box::new(take_left_reading_filters(
+                    *input, left_vars, right_vars, moved,
+                ))
+            });
+            LogicalOperator::NodeScan(scan)
+        }
+        // The patterns of a comma list each have their filters.
+        LogicalOperator::Join(mut join) => {
+            join.left = Box::new(take_left_reading_filters(
+                *join.left, left_vars, right_vars, moved,
+            ));
+            join.right = Box::new(take_left_reading_filters(
+                *join.right,
+                left_vars,
+                right_vars,
+                moved,
+            ));
+            LogicalOperator::Join(join)
+        }
+        other => other,
+    }
+}
+
+/// The conjuncts of `predicate` (`a AND b AND c` gives three).
+fn split_and(predicate: LogicalExpression) -> Vec<LogicalExpression> {
+    match predicate {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => {
+            let mut conjuncts = split_and(*left);
+            conjuncts.extend(split_and(*right));
+            conjuncts
+        }
+        other => vec![other],
+    }
+}
+
+/// The conjunction of `conjuncts`, `None` for none.
+fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
+    conjuncts
+        .into_iter()
+        .reduce(|acc, conjunct| LogicalExpression::Binary {
+            left: Box::new(acc),
+            op: BinaryOp::And,
+            right: Box::new(conjunct),
+        })
+}
+
 /// Builds a LeftJoin with properly classified WHERE predicates.
 ///
-/// Given a WHERE predicate that follows an OPTIONAL MATCH, this function:
+/// Given a WHERE predicate that follows an OPTIONAL MATCH (whose join is
+/// `left_join`), this function:
 /// 1. Collects variables from both sides
 /// 2. Classifies predicates into left-only, right-only, and cross-side
 /// 3. Pushes right-only predicates as a Filter on the right input
-/// 4. Stores cross-side predicates in `LeftJoinOp.condition`
+/// 4. Adds cross-side predicates to `LeftJoinOp.condition`, which decides
+///    which pairs of rows are matches (a left row without one keeps nulls)
 /// 5. Returns the LeftJoin and any remaining post-filters to apply above
 pub(crate) fn build_left_join_with_predicates(
-    left: LogicalOperator,
-    right: LogicalOperator,
+    left_join: LeftJoinOp,
     predicate: Option<LogicalExpression>,
 ) -> (LogicalOperator, Option<LogicalExpression>) {
+    let LeftJoinOp {
+        left,
+        right,
+        condition,
+    } = left_join;
+    let (left, right) = (*left, *right);
     let Some(predicate) = predicate else {
         let join = LogicalOperator::LeftJoin(LeftJoinOp {
             left: Box::new(left),
             right: Box::new(right),
-            condition: None,
+            condition,
         });
         return (join, None);
     };
@@ -648,61 +845,14 @@ pub(crate) fn build_left_join_with_predicates(
         wrap_filter(right, right_pred)
     };
 
-    // Build null-safe condition for cross-side predicates.
-    // For each cross predicate P referencing right-only variable R, wrap it as:
-    //   (R IS NULL) OR P
-    // This preserves NULL-padded rows (unmatched optional side) while evaluating P
-    // correctly when the right side matched.
-    let cross_condition = if classified.cross_filters.is_empty() {
-        None
-    } else {
-        // Collect all right-only variable names for the IS NULL sentinel.
-        let right_only_vars: Vec<String> = right_vars
-            .iter()
-            .filter(|v| !left_vars.contains(*v))
-            .cloned()
-            .collect();
-
-        let null_safe: Vec<LogicalExpression> = classified
-            .cross_filters
+    // The cross-side predicates join the condition the join had: together
+    // they decide which pairs of rows are matches.
+    let cross_condition = join_conjuncts(
+        condition
             .into_iter()
-            .map(|pred| {
-                // Pick the first right-only variable referenced in this predicate
-                // as the NULL sentinel. Falling back to the first right-only var
-                // overall is safe: if the right side produced no row, all right
-                // columns are NULL so any of them serves as the sentinel.
-                let mut pred_vars = HashSet::new();
-                collect_expression_variables(&pred, &mut pred_vars);
-                let sentinel = pred_vars
-                    .iter()
-                    .find(|v| right_vars.contains(*v) && !left_vars.contains(*v))
-                    .or_else(|| right_only_vars.first())
-                    .cloned()
-                    .unwrap_or_default();
-
-                let is_null = LogicalExpression::Unary {
-                    op: UnaryOp::IsNull,
-                    operand: Box::new(LogicalExpression::Variable(sentinel)),
-                };
-                LogicalExpression::Binary {
-                    left: Box::new(is_null),
-                    op: BinaryOp::Or,
-                    right: Box::new(pred),
-                }
-            })
-            .collect();
-
-        Some(
-            null_safe
-                .into_iter()
-                .reduce(|acc, expr| LogicalExpression::Binary {
-                    left: Box::new(acc),
-                    op: BinaryOp::And,
-                    right: Box::new(expr),
-                })
-                .expect("non-empty cross_filters"),
-        )
-    };
+            .chain(classified.cross_filters)
+            .collect(),
+    );
 
     let join = LogicalOperator::LeftJoin(LeftJoinOp {
         left: Box::new(left),

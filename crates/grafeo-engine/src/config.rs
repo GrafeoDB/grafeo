@@ -233,7 +233,9 @@ pub struct Config {
     ///
     /// Without `ORDER BY` the row order is unspecified: it can change between
     /// runs, builds and versions. This test option makes that visible, so
-    /// tests find code that relies on an order anyway. Default: `false`.
+    /// tests find code that relies on an order anyway. A streamed result is
+    /// shuffled within each chunk, so the stream keeps its bounded memory.
+    /// Default: `false`.
     pub shuffle_unordered: bool,
 
     /// WAL durability mode. Only used when `wal_enabled` is true.
@@ -527,8 +529,8 @@ impl Config {
         self
     }
 
-    /// Returns the rows of every query without `ORDER BY` in random order,
-    /// a test option that finds code relying on a row order that is
+    /// Sets whether queries without `ORDER BY` return their rows in random
+    /// order, a test option that finds code relying on a row order that is
     /// unspecified (see [`Config::shuffle_unordered`]).
     #[must_use]
     pub fn with_shuffle_unordered(mut self, shuffle: bool) -> Self {

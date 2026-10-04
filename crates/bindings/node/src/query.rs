@@ -150,38 +150,6 @@ impl QueryResult {
         )
     }
 
-    /// Returns the result as Arrow IPC stream bytes (Buffer).
-    ///
-    /// Use with the `apache-arrow` npm package:
-    /// ```js
-    /// import { tableFromIPC } from 'apache-arrow';
-    /// const table = tableFromIPC(result.toArrowIPC());
-    /// ```
-    #[cfg(feature = "arrow-export")]
-    #[napi(js_name = "toArrowIPC")]
-    pub fn to_arrow_ipc(&self) -> Result<napi::bindgen_prelude::Buffer> {
-        let col_types = vec![grafeo_common::LogicalType::Any; self.columns.len()];
-        let batch = grafeo_engine::database::arrow::query_result_to_record_batch(
-            &self.columns,
-            &col_types,
-            &self.rows,
-        )
-        .map_err(|e| {
-            napi::Error::new(
-                napi::Status::GenericFailure,
-                format!("Arrow export failed: {e}"),
-            )
-        })?;
-        let ipc_bytes = grafeo_engine::database::arrow::record_batch_to_ipc_stream(&batch)
-            .map_err(|e| {
-                napi::Error::new(
-                    napi::Status::GenericFailure,
-                    format!("Arrow IPC failed: {e}"),
-                )
-            })?;
-        Ok(ipc_bytes.into())
-    }
-
     /// Get all rows as an array of arrays (no column names).
     #[napi]
     pub fn rows(&self, env: Env) -> Result<Object<'_>> {
@@ -212,6 +180,43 @@ impl QueryResult {
             types::check_napi(unsafe { sys::napi_set_element(env_raw, arr, i as u32, row_arr) })?;
         }
         Ok(Object::from_raw(env_raw, arr))
+    }
+}
+
+// A separate block: napi-derive registers every method of a `#[napi]`
+// impl, so a method behind a cfg needs a block behind that cfg.
+#[cfg(feature = "arrow-export")]
+#[napi]
+impl QueryResult {
+    /// Returns the result as Arrow IPC stream bytes (Buffer).
+    ///
+    /// Use with the `apache-arrow` npm package:
+    /// ```js
+    /// import { tableFromIPC } from 'apache-arrow';
+    /// const table = tableFromIPC(result.toArrowIPC());
+    /// ```
+    #[napi(js_name = "toArrowIPC")]
+    pub fn to_arrow_ipc(&self) -> Result<napi::bindgen_prelude::Buffer> {
+        let col_types = vec![grafeo_common::LogicalType::Any; self.columns.len()];
+        let batch = grafeo_engine::database::arrow::query_result_to_record_batch(
+            &self.columns,
+            &col_types,
+            &self.rows,
+        )
+        .map_err(|e| {
+            napi::Error::new(
+                napi::Status::GenericFailure,
+                format!("Arrow export failed: {e}"),
+            )
+        })?;
+        let ipc_bytes = grafeo_engine::database::arrow::record_batch_to_ipc_stream(&batch)
+            .map_err(|e| {
+                napi::Error::new(
+                    napi::Status::GenericFailure,
+                    format!("Arrow IPC failed: {e}"),
+                )
+            })?;
+        Ok(ipc_bytes.into())
     }
 }
 

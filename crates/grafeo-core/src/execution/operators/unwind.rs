@@ -1,8 +1,8 @@
 //! Unwind operator for expanding lists into individual rows.
 
 use super::{Operator, OperatorResult};
-use crate::execution::chunk::{DataChunk, DataChunkBuilder};
-use grafeo_common::types::{LogicalType, Value};
+use crate::execution::chunk::{DataChunk, DataChunkBuilder, copied_column_types};
+use grafeo_common::types::{LogicalType, PropertyKey, Value};
 
 /// Unwind operator that expands a list column into individual rows.
 ///
@@ -139,11 +139,35 @@ impl UnwindOperator {
             .expect("current_list is Some: set before emit_row call");
         let element = list[self.current_list_idx].clone();
 
-        // Build output row: copy all columns from input + add the unwound element
-        let mut builder = DataChunkBuilder::new(&self.output_schema);
+        // The unwound element comes after the declared input columns, followed
+        // by any ordinality/offset columns.
+        let extra_cols = usize::from(self.emit_ordinality) + usize::from(self.emit_offset);
+        let element_col_idx = self.output_schema.len() - 1 - extra_cols;
+
+        // Build output row: copy the declared input columns + add the unwound
+        // element. The copied columns keep the input's types (a node or edge
+        // stays one, see `ColumnTypes`); the new ones have the declared types.
+        // The row is as wide as the declared schema.
+        let mut types = chunk.column_types();
+        types.truncate(element_col_idx);
+        let copied = types.len();
+        let mut types = copied_column_types(&types, &self.output_schema);
+        types.extend(self.output_schema.iter().skip(copied).cloned());
+        // An item of a node or edge list is an ID (a returned node or edge, a
+        // map with `_id`, stands for its ID) or null; any other item goes into
+        // a column of any value, so it is never read as a node or an edge.
+        let element = entity_item(element, &self.output_schema[element_col_idx]);
+        if matches!(
+            self.output_schema[element_col_idx],
+            LogicalType::Node | LogicalType::Edge
+        ) && !matches!(element, Value::Int64(_) | Value::Null)
+        {
+            types[element_col_idx] = LogicalType::Any;
+        }
+        let mut builder = DataChunkBuilder::new(&types);
 
         // Copy existing columns (except the list column which we're replacing)
-        for col_idx in 0..chunk.column_count() {
+        for col_idx in 0..copied {
             if col_idx == self.list_col_idx {
                 continue; // Skip the list column
             }
@@ -156,9 +180,6 @@ impl UnwindOperator {
         }
 
         // Add the unwound element column.
-        // It's at the end of the output schema, minus any ordinality/offset columns.
-        let extra_cols = usize::from(self.emit_ordinality) + usize::from(self.emit_offset);
-        let element_col_idx = self.output_schema.len() - 1 - extra_cols;
         if let Some(out_col) = builder.column_mut(element_col_idx) {
             out_col.push_value(element);
         }
@@ -217,6 +238,21 @@ impl Operator for UnwindOperator {
     }
 }
 
+/// The item of a node or edge list as the entity's ID: a map with `_id` (a
+/// node or edge a subquery returned) stands for that ID. Other items, and the
+/// items of other lists, stay as they are.
+fn entity_item(item: Value, item_type: &LogicalType) -> Value {
+    match (item_type, &item) {
+        (LogicalType::Node | LogicalType::Edge, Value::Map(map)) => {
+            match map.get(&PropertyKey::new("_id")) {
+                Some(id @ Value::Int64(_)) => id.clone(),
+                _ => item,
+            }
+        }
+        _ => item,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +286,148 @@ mod tests {
         fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
             self
         }
+    }
+
+    /// The input columns keep their types: a node stays a node.
+    #[test]
+    fn unwind_keeps_the_input_column_types() {
+        use grafeo_common::types::NodeId;
+
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node, LogicalType::Any]);
+        builder
+            .column_mut(0)
+            .unwrap()
+            .push_node_id(NodeId::new(101));
+        builder
+            .column_mut(1)
+            .unwrap()
+            .push_value(Value::List(vec![Value::Int64(1), Value::Int64(2)].into()));
+        builder.advance_row();
+        let child = MockOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        let mut unwind = UnwindOperator::new(
+            Box::new(child),
+            1,
+            "k".to_string(),
+            vec![LogicalType::Any, LogicalType::Any, LogicalType::Any],
+            false,
+            false,
+        );
+
+        let mut elements = Vec::new();
+        while let Some(chunk) = unwind.next().unwrap() {
+            assert_eq!(chunk.column_types()[0], LogicalType::Node);
+            assert_eq!(
+                chunk.column(0).unwrap().get_node_id(0).unwrap().as_u64(),
+                101
+            );
+            assert!(chunk.column(0).unwrap().get_edge_id(0).is_none());
+            elements.push(chunk.column(2).unwrap().get_value(0));
+        }
+        assert_eq!(elements, [Some(Value::Int64(1)), Some(Value::Int64(2))]);
+    }
+
+    /// The items of a node list go into a node column: IDs, a returned node (a
+    /// map with `_id`) as its ID, and null. Any other item goes into a column
+    /// of any value, so it is never read as a node.
+    #[test]
+    fn a_node_list_gives_nodes_and_other_items_stay_values() {
+        use grafeo_common::types::PropertyKey;
+        use std::collections::BTreeMap;
+
+        let returned_node = Value::Map(Arc::new(BTreeMap::from([(
+            PropertyKey::new("_id"),
+            Value::Int64(5),
+        )])));
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+        builder.column_mut(0).unwrap().push_value(Value::List(
+            vec![
+                Value::Int64(3),
+                returned_node,
+                Value::String("x".into()),
+                Value::Null,
+            ]
+            .into(),
+        ));
+        builder.advance_row();
+        let child = MockOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        let mut unwind = UnwindOperator::new(
+            Box::new(child),
+            0,
+            "n".to_string(),
+            vec![LogicalType::Node],
+            false,
+            false,
+        );
+
+        let mut items = Vec::new();
+        while let Some(chunk) = unwind.next().unwrap() {
+            let column = chunk.column(0).unwrap();
+            items.push((
+                column.data_type().clone(),
+                column.get_node_id(0).map(|id| id.as_u64()),
+                column.get_value(0),
+            ));
+        }
+        assert_eq!(items[0].0, LogicalType::Node);
+        assert_eq!(items[0].1, Some(3));
+        assert_eq!(items[1].0, LogicalType::Node);
+        assert_eq!(items[1].1, Some(5));
+        assert_eq!(items[2].0, LogicalType::Any);
+        assert_eq!(items[2].2, Some(Value::String("x".into())));
+        assert_eq!(items[3].0, LogicalType::Node);
+        assert_eq!(items[3].1, None);
+        assert_eq!(items.len(), 4);
+    }
+
+    /// The row is as wide as the declared schema: an input column past the
+    /// declared ones does not take the place of the unwound element.
+    #[test]
+    fn unwind_passes_on_only_the_declared_input_columns() {
+        let mut builder =
+            DataChunkBuilder::new(&[LogicalType::Int64, LogicalType::Any, LogicalType::Int64]);
+        builder.column_mut(0).unwrap().push_value(Value::Int64(7));
+        builder
+            .column_mut(1)
+            .unwrap()
+            .push_value(Value::List(vec![Value::Int64(1), Value::Int64(2)].into()));
+        builder.column_mut(2).unwrap().push_value(Value::Int64(99));
+        builder.advance_row();
+        let child = MockOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        // Declared: a column, the list and the element; the input's third
+        // column is not one of them.
+        let mut unwind = UnwindOperator::new(
+            Box::new(child),
+            1,
+            "k".to_string(),
+            vec![LogicalType::Int64, LogicalType::Any, LogicalType::Any],
+            false,
+            false,
+        );
+
+        let mut rows = Vec::new();
+        while let Some(chunk) = unwind.next().unwrap() {
+            assert_eq!(chunk.column_count(), 3);
+            rows.push((
+                chunk.column(0).unwrap().get_value(0),
+                chunk.column(2).unwrap().get_value(0),
+            ));
+        }
+        assert_eq!(
+            rows,
+            [
+                (Some(Value::Int64(7)), Some(Value::Int64(1))),
+                (Some(Value::Int64(7)), Some(Value::Int64(2)))
+            ]
+        );
     }
 
     #[test]

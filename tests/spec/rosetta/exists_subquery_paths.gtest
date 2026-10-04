@@ -1,0 +1,118 @@
+# Rosetta: EXISTS subqueries over paths
+#
+# An EXISTS subquery holds when its pattern matches at least once, with every
+# condition in it: the hop range of a variable-length edge, a label on the far
+# end of the path (not on each hop), and a label on the outer variable.
+#
+# Setup (GQL): top -[:CONTAINS]-> sub -[:CONTAINS]-> f, and lone -[:CONTAINS]-> f.
+# top, sub and lone are Graph:Directory (lone also Archive), f is Graph:File.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: EXISTS subqueries over paths
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: variable_length_path_to_a_labeled_end
+    setup:
+      - "INSERT (:Graph:Directory {id: 'top'})-[:CONTAINS]->(:Graph:Directory {id: 'sub'})-[:CONTAINS]->(:Graph:File {id: 'f'})"
+      - "MATCH (f:File) INSERT (:Graph:Directory:Archive {id: 'lone'})-[:CONTAINS]->(f)"
+    variants:
+      gql: "MATCH (n:Directory) WHERE EXISTS { MATCH (n)-[:CONTAINS]->{1,}(f:File) } RETURN n.id ORDER BY n.id"
+      cypher: "MATCH (n:Directory) WHERE EXISTS { MATCH (n)-[:CONTAINS*]->(f:File) } RETURN n.id ORDER BY n.id"
+    expect:
+      ordered: true
+      rows:
+        - [lone]
+        - [sub]
+        - [top]
+
+  - name: bounded_path_to_a_labeled_end
+    setup:
+      - "INSERT (:Graph:Directory {id: 'top'})-[:CONTAINS]->(:Graph:Directory {id: 'sub'})-[:CONTAINS]->(:Graph:File {id: 'f'})"
+      - "MATCH (f:File) INSERT (:Graph:Directory:Archive {id: 'lone'})-[:CONTAINS]->(f)"
+    variants:
+      gql: "MATCH (n:Directory) WHERE EXISTS { MATCH (n)-[]->{1,5}(:File) } RETURN n.id ORDER BY n.id"
+      cypher: "MATCH (n:Directory) WHERE EXISTS { MATCH (n)-[*1..5]->(:File) } RETURN n.id ORDER BY n.id"
+    expect:
+      ordered: true
+      rows:
+        - [lone]
+        - [sub]
+        - [top]
+
+  - name: path_with_a_minimum_of_two_hops
+    setup:
+      - "INSERT (:Graph:Directory {id: 'top'})-[:CONTAINS]->(:Graph:Directory {id: 'sub'})-[:CONTAINS]->(:Graph:File {id: 'f'})"
+      - "MATCH (f:File) INSERT (:Graph:Directory:Archive {id: 'lone'})-[:CONTAINS]->(f)"
+    variants:
+      gql: "MATCH (n:Directory) WHERE EXISTS { MATCH (n)-[:CONTAINS]->{2,3}() } RETURN n.id"
+      cypher: "MATCH (n:Directory) WHERE EXISTS { MATCH (n)-[:CONTAINS*2..3]->() } RETURN n.id"
+    expect:
+      rows:
+        - [top]
+
+  - name: not_exists_over_a_path
+    setup:
+      - "INSERT (:Graph:Directory {id: 'top'})-[:CONTAINS]->(:Graph:Directory {id: 'sub'})-[:CONTAINS]->(:Graph:File {id: 'f'})"
+      - "MATCH (f:File) INSERT (:Graph:Directory:Archive {id: 'lone'})-[:CONTAINS]->(f)"
+    variants:
+      gql: "MATCH (n:Directory) WHERE NOT EXISTS { MATCH (n)-[:CONTAINS]->{2,}(:File) } RETURN n.id ORDER BY n.id"
+      cypher: "MATCH (n:Directory) WHERE NOT EXISTS { MATCH (n)-[:CONTAINS*2..]->(:File) } RETURN n.id ORDER BY n.id"
+    expect:
+      ordered: true
+      rows:
+        - [lone]
+        - [sub]
+
+  - name: path_with_no_condition_on_its_end
+    setup:
+      - "INSERT (:Graph:Directory {id: 'top'})-[:CONTAINS]->(:Graph:Directory {id: 'sub'})-[:CONTAINS]->(:Graph:File {id: 'f'})"
+      - "MATCH (f:File) INSERT (:Graph:Directory:Archive {id: 'lone'})-[:CONTAINS]->(f)"
+    variants:
+      gql: "MATCH (n:Graph) WHERE EXISTS { MATCH (n)-[:CONTAINS]->{1,}() } RETURN n.id ORDER BY n.id"
+      cypher: "MATCH (n:Graph) WHERE EXISTS { MATCH (n)-[:CONTAINS*]->() } RETURN n.id ORDER BY n.id"
+    expect:
+      ordered: true
+      rows:
+        - [lone]
+        - [sub]
+        - [top]
+
+  - name: label_on_the_outer_variable
+    setup:
+      - "INSERT (:Graph:Directory {id: 'top'})-[:CONTAINS]->(:Graph:Directory {id: 'sub'})-[:CONTAINS]->(:Graph:File {id: 'f'})"
+      - "MATCH (f:File) INSERT (:Graph:Directory:Archive {id: 'lone'})-[:CONTAINS]->(f)"
+    variants:
+      gql: "MATCH (n:Directory) WHERE EXISTS { MATCH (n)-[:CONTAINS]->(m) WHERE n:Archive } RETURN n.id"
+      cypher: "MATCH (n:Directory) WHERE EXISTS { MATCH (n)-[:CONTAINS]->(m) WHERE n:Archive } RETURN n.id"
+    expect:
+      rows:
+        - [lone]
+
+  - name: label_on_the_outer_variable_in_the_pattern
+    setup:
+      - "INSERT (:Graph:Directory {id: 'top'})-[:CONTAINS]->(:Graph:Directory {id: 'sub'})-[:CONTAINS]->(:Graph:File {id: 'f'})"
+      - "MATCH (f:File) INSERT (:Graph:Directory:Archive {id: 'lone'})-[:CONTAINS]->(f)"
+    variants:
+      gql: "MATCH (n:Directory) WHERE EXISTS { MATCH (n:Archive)-[:CONTAINS]->() } RETURN n.id"
+      cypher: "MATCH (n:Directory) WHERE EXISTS { MATCH (n:Archive)-[:CONTAINS]->() } RETURN n.id"
+    expect:
+      rows:
+        - [lone]
+
+  - name: pattern_predicate_over_a_path
+    setup:
+      - "INSERT (:Graph:Directory {id: 'top'})-[:CONTAINS]->(:Graph:Directory {id: 'sub'})-[:CONTAINS]->(:Graph:File {id: 'f'})"
+      - "MATCH (f:File) INSERT (:Graph:Directory:Archive {id: 'lone'})-[:CONTAINS]->(f)"
+    variants:
+      cypher: "MATCH (n:Directory) WHERE (n)-[:CONTAINS*]->(:File) RETURN n.id ORDER BY n.id"
+    expect:
+      ordered: true
+      rows:
+        - [lone]
+        - [sub]
+        - [top]

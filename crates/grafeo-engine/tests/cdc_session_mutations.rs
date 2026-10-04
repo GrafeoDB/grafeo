@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{NodeId, Value};
 use grafeo_engine::cdc::{ChangeKind, EntityId};
 use grafeo_engine::{Config, GrafeoDB};
 
@@ -564,6 +564,102 @@ fn updates_to_a_node_created_in_the_same_transaction_fold_into_its_create() {
             ("age".to_string(), Value::Int64(31)),
             ("city".to_string(), Value::from("Amsterdam")),
         ]))
+    );
+}
+
+/// Every event names the graph its entity is in, and `history` reads the
+/// graph of the caller: the database the default graph, a session its current
+/// graph, though the two nodes may share an id.
+#[test]
+fn events_name_their_graph() {
+    let db = db();
+    db.create_graph("g").unwrap();
+    let session = db.session();
+    session.execute("INSERT (:InDefault {a: 1})").unwrap();
+    session.use_graph("g");
+    session.execute("INSERT (:InG {b: 1})").unwrap();
+
+    let id_of = |query: &str| -> u64 {
+        match session.execute(query).unwrap().rows()[0][0] {
+            Value::Int64(id) => u64::try_from(id).unwrap(),
+            ref other => panic!("expected an id, got {other:?}"),
+        }
+    };
+    let in_g = id_of("MATCH (n:InG) RETURN id(n)");
+    let in_g_history = session.history(NodeId::new(in_g)).unwrap();
+    assert_eq!(in_g_history.len(), 1, "{in_g_history:?}");
+    assert_eq!(in_g_history[0].graph.as_deref(), Some("g"));
+    assert_eq!(in_g_history[0].labels, Some(vec!["InG".to_string()]));
+
+    session.use_graph("default");
+    let in_default = id_of("MATCH (n:InDefault) RETURN id(n)");
+    for history in [
+        db.history(NodeId::new(in_default)).unwrap(),
+        session.history(NodeId::new(in_default)).unwrap(),
+    ] {
+        assert_eq!(history.len(), 1, "{history:?}");
+        assert_eq!(history[0].graph, None);
+        assert_eq!(history[0].labels, Some(vec!["InDefault".to_string()]));
+    }
+
+    let mut graphs: Vec<Option<String>> = db
+        .changes_between(
+            grafeo_common::types::EpochId::new(0),
+            grafeo_common::types::EpochId::new(u64::MAX),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|event| event.graph)
+        .collect();
+    graphs.sort();
+    assert_eq!(graphs, [None, Some("g".to_string())]);
+}
+
+/// The fold stays within one graph. A transaction creates a node in the
+/// default graph and one in a named graph, which number their nodes alike,
+/// and changes the second: each node gets its own create event, and only the
+/// second shows the change.
+#[test]
+fn creates_in_two_graphs_fold_separately() {
+    let db = db();
+    db.create_graph("g").unwrap();
+    let mut session = db.session();
+
+    session.begin_transaction().unwrap();
+    session.execute("INSERT (:InDefault {a: 1})").unwrap();
+    session.use_graph("g");
+    session.execute("INSERT (:InG {b: 1})").unwrap();
+    session.execute("MATCH (n:InG) SET n.c = 99").unwrap();
+    session.commit().unwrap();
+
+    let changes = db
+        .changes_between(
+            grafeo_common::types::EpochId::new(0),
+            grafeo_common::types::EpochId::new(u64::MAX),
+        )
+        .unwrap();
+    let creates: Vec<_> = changes
+        .iter()
+        .filter(|e| e.kind == ChangeKind::Create)
+        .map(|e| (e.labels.clone().unwrap_or_default(), e.after.clone()))
+        .collect();
+    assert_eq!(changes.len(), 2, "{changes:?}");
+    assert!(
+        creates.contains(&(
+            vec!["InDefault".to_string()],
+            Some(HashMap::from([("a".to_string(), Value::Int64(1))]))
+        )),
+        "{changes:?}"
+    );
+    assert!(
+        creates.contains(&(
+            vec!["InG".to_string()],
+            Some(HashMap::from([
+                ("b".to_string(), Value::Int64(1)),
+                ("c".to_string(), Value::Int64(99)),
+            ]))
+        )),
+        "{changes:?}"
     );
 }
 

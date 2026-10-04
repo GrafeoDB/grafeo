@@ -360,8 +360,10 @@ db.upsert_nodes(["Graph", "File"], [{"id": "f1", "size": 3}, {"id": "f2", "size"
 
 One edge of `edge_type` per row, between the nodes whose `endpoint_key` is the row's `src_field` and
 `dst_field` value (restricted to `endpoint_labels` when given). The edge is identified by its endpoints,
-type and `key`; every other field of the row is an edge property. A row whose endpoint does not exist, or
-without the key, is skipped, never created. A property index on `endpoint_key` makes the lookups fast.
+type and `key`; every other field of the row is an edge property. A row is skipped when it lacks the key,
+`src_field` or `dst_field`, or when no node or more than one node has its endpoint key; endpoints are never
+created. `key`, `src_field` and `dst_field` must be different fields. A property index on `endpoint_key`
+makes the lookups fast.
 
 ```python
 def upsert_edges(
@@ -379,6 +381,7 @@ def upsert_edges(
 
 ```python
 db.create_property_index("id")
+db.upsert_nodes(["File"], [{"id": "f1"}, {"id": "f2"}])
 db.upsert_edges("USES", [{"src": "f1", "dst": "f2", "id": "u1", "weight": 1}])
 # {'created': 1, 'updated': 0, 'skipped': 0, 'skipped_rows': []}
 ```
@@ -1061,7 +1064,7 @@ test_db = file_db.to_memory()  # safe copy for experiments, indexes included
 
 Converts the database to a layered [CompactStore](../../user-guide/compact-store.md) for faster queries: a columnar base with CSR adjacency, built from a snapshot of all nodes and edges, plus a mutable overlay. The original store is dropped to free memory.
 
-The database stays writable: new writes land in the overlay, and `recompact()` merges the overlay into a fresh base. Gives ~60x memory reduction and 100x+ traversal speedup for read-mostly workloads.
+The database stays writable: new writes land in the overlay, and calling `compact()` again merges them into a fresh base. Gives ~60x memory reduction and 100x+ traversal speedup for read-mostly workloads.
 
 ```python
 def compact(self) -> None

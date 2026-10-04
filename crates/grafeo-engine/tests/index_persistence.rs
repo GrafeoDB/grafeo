@@ -4,7 +4,7 @@
 //! names that `DROP INDEX` and `DROP CONSTRAINT` use.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test index_persistence
+//! cargo test -p grafeo-engine --all-features --test index_persistence
 //! ```
 
 #![cfg(all(feature = "lpg", feature = "gql"))]
@@ -90,6 +90,45 @@ fn reopening_a_file_keeps_indexes_and_constraints() {
         "a dropped index stays dropped"
     );
     assert!(db.has_property_index("id"));
+    db.close().unwrap();
+}
+
+/// 200 `Graph:File` nodes `n0`..`n199` in a chain of `T` edges, with a
+/// property index on `id`, written to a `.grafeo` file and reopened.
+#[cfg(feature = "grafeo-file")]
+fn reopened_chain(dir: &tempfile::TempDir) -> GrafeoDB {
+    let path = dir.path().join("chain.grafeo");
+    let db = GrafeoDB::open(&path).unwrap();
+    db.execute("UNWIND range(0, 199) AS i INSERT (:Graph:File {id: 'n' + toString(i), i: i})")
+        .unwrap();
+    db.execute("MATCH (a:File), (b:File) WHERE b.i = a.i + 1 INSERT (a)-[:T]->(b)")
+        .unwrap();
+    db.create_property_index("id");
+    db.close().unwrap();
+    GrafeoDB::open(&path).unwrap()
+}
+
+/// #459: on a reopened file a point lookup plus one hop seeks the property
+/// index, as in memory, instead of scanning every node (0.5.43 lost the index
+/// on reopen and scanned).
+#[cfg(feature = "grafeo-file")]
+#[test]
+fn a_point_lookup_on_a_reopened_file_seeks_the_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = reopened_chain(&dir);
+    assert!(db.has_property_index("id"));
+    for query in [
+        "MATCH (s {id: 'n10'})-[:T]->(d) RETURN d.id",
+        "MATCH (s:File {id: 'n10'})-[:T]->(d) RETURN d.id",
+    ] {
+        let profile = plan(&db.execute(&format!("PROFILE {query}")).unwrap());
+        assert!(profile.contains("NodeList (s.id Eq"), "{query}: {profile}");
+        assert_eq!(
+            db.execute(query).unwrap().rows(),
+            &[vec![Value::from("n11")]],
+            "{query}"
+        );
+    }
     db.close().unwrap();
 }
 

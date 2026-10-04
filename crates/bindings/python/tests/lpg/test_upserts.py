@@ -41,6 +41,23 @@ def test_edges_connect_existing_nodes_only(db):
     assert values(db, "MATCH ()-[r]->() RETURN type(r), r.id, r.w") == [["Graph:USES", "u1", 5]]
 
 
+def test_an_ambiguous_endpoint_skips_the_row(db):
+    db.upsert_nodes(["File"], [{"id": "f1"}, {"id": "f2"}, {"id": "f3"}])
+    db.execute("INSERT (:Other {id: 'f2'})")
+    result = db.upsert_edges(
+        "USES",
+        [
+            {"src": "f1", "dst": "f2", "id": "u1"},
+            {"src": "f3", "dst": "f1", "id": "u3"},
+            {"src": "f2", "dst": "f1", "id": "u2"},
+        ],
+    )
+    assert result == {"created": 1, "updated": 0, "skipped": 2, "skipped_rows": [0, 2]}
+    assert values(db, "MATCH (s)-[r]->(d) RETURN s.id, d.id, r.id") == [["f3", "f1", "u3"]]
+    with pytest.raises(Exception, match="different fields"):
+        db.upsert_edges("USES", [{"src": "f1", "dst": "f2"}], key="src")
+
+
 def test_edge_options(db):
     db.upsert_nodes(["File"], [{"id": "f1"}, {"id": "f2"}])
     db.execute("INSERT (:Other {id: 'f2'})")

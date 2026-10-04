@@ -102,6 +102,9 @@ WHERE friend_count > 5
 RETURN p.name, friend_count
 ```
 
+As in openCypher, an expression in `WITH` needs an alias (`WITH p.name AS name`), and a variable a `WITH` leaves
+out is not visible after it.
+
 ## UNWIND
 
 The `UNWIND` clause expands a list into rows:

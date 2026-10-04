@@ -21,7 +21,6 @@ use std::sync::Arc;
     all(feature = "compact-store", feature = "lpg")
 ))]
 use std::sync::Weak;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grafeo_common::memory::buffer::{MemoryConsumer, MemoryRegion, SpillError, priorities};
 use grafeo_common::storage::Section;
@@ -73,7 +72,8 @@ pub struct SectionConsumer {
     /// Directory where this consumer writes spill files. `None` disables spilling.
     spill_path: Option<PathBuf>,
     /// Counter for unique spill file names within `spill_path`.
-    file_counter: AtomicUsize,
+    #[cfg(feature = "wal")]
+    file_counter: std::sync::atomic::AtomicUsize,
     /// `true` after a successful `spill_to_dir`, cleared on reload. Drives
     /// `current_tier()` so introspection reports the actual state of
     /// sections that opted into the `swap_to_mmap` path.
@@ -130,7 +130,8 @@ impl SectionConsumer {
             },
             mmap_able: flags.mmap_able,
             spill_path,
-            file_counter: AtomicUsize::new(0),
+            #[cfg(feature = "wal")]
+            file_counter: std::sync::atomic::AtomicUsize::new(0),
             is_spilled: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -152,7 +153,9 @@ impl SectionConsumer {
             .serialize()
             .map_err(|e| SpillError::IoError(e.to_string()))?;
 
-        let id = self.file_counter.fetch_add(1, Ordering::Relaxed);
+        let id = self
+            .file_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let filename = format!("{:?}_{id}.spill", self.section.section_type());
         let path = spill_dir.join(filename);
 
@@ -858,6 +861,8 @@ mod tests {
         }
     }
 
+    // Spilling writes a file, which needs the `wal` feature's I/O.
+    #[cfg(feature = "wal")]
     #[test]
     fn alix_spill_writes_serialized_bytes_through_swap_to_mmap() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -913,6 +918,8 @@ mod tests {
         }
     }
 
+    // Spilling writes a file, which needs the `wal` feature's I/O.
+    #[cfg(feature = "wal")]
     #[test]
     fn jules_reload_calls_section_reload_to_ram() {
         let dir = tempfile::tempdir().expect("tempdir");

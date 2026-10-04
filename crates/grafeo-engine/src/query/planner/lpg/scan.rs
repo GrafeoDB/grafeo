@@ -66,13 +66,18 @@ impl super::Planner {
             input_columns.push(scan.variable.clone());
 
             // Use nested loop join to combine input rows with scanned nodes
-            let join_op = Box::new(NestedLoopJoinOperator::new(
+            let mut join_op = NestedLoopJoinOperator::new(
                 input_op,
                 scan_operator,
                 None, // No join condition (cross join)
                 PhysicalJoinType::Cross,
                 output_schema,
-            ));
+            );
+            // A scan after a write (`INSERT ... WITH ... MATCH`) sees the write.
+            if input.has_mutations() {
+                join_op = join_op.with_left_first();
+            }
+            let join_op = Box::new(join_op);
 
             Ok((join_op, input_columns))
         } else {

@@ -224,6 +224,9 @@ ON CREATE SET p.name = person.name, p.created = timestamp()
 ON MATCH SET p.lastSeen = timestamp()
 ```
 
+When the pattern matches more than one existing node or relationship, `MERGE` binds each of them, one row per
+match, and `ON MATCH` and a later `SET` apply to all of them.
+
 ## LOAD DATA (Multi-Format Import)
 
 Import data from external files directly in GQL:

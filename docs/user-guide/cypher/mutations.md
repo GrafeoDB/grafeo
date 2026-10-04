@@ -143,6 +143,9 @@ MERGE (a:Person {id: 1})-[r:KNOWS]->(b:Person {id: 2})
 SET r.weight = 0.5
 ```
 
+When the pattern matches more than one existing node or relationship, `MERGE` binds each of them, one row per
+match, and `ON MATCH` and a later `SET` apply to all of them.
+
 ## FOREACH
 
 Iterate over a list and execute mutations for each element:
@@ -163,7 +166,11 @@ FOREACH (person IN people |
 
 ## CALL Subqueries
 
-Run a subquery for each input row. Variables from the outer query are visible inside the block.
+Run a subquery for each input row. The subquery sees the outer variables its importing `WITH` lists, or the ones
+a variable scope clause names (`CALL (p) { ... }`, `CALL (*) { ... }` for all of them, `CALL () { ... }` for
+none). An importing `WITH` only lists variables: a `WHERE`, `DISTINCT`, alias or expression in it, or an
+`ORDER BY`, `SKIP` or `LIMIT` right after it, is an error (a second `WITH` can do those). A subquery returns new
+names only, so rename an imported variable to return it (`RETURN p AS person`).
 
 ```cypher
 -- Per-person friend count via subquery
@@ -185,6 +192,23 @@ CALL {
     RETURN count(*) AS deleted
 }
 RETURN p.name, deleted
+
+-- Each person's oldest friend, with a scope clause (a person who knows nobody is left out)
+MATCH (p:Person)
+CALL (p) {
+    MATCH (p)-[:KNOWS]->(friend)
+    RETURN friend.name AS oldest_friend ORDER BY friend.age DESC LIMIT 1
+}
+RETURN p.name, oldest_friend
+
+-- Parts joined by UNION, each with its own importing WITH
+MATCH (p:Person)
+CALL {
+    WITH p MATCH (p)-[:KNOWS]->(other) RETURN other.name AS contact
+    UNION
+    WITH p MATCH (other)-[:KNOWS]->(p) RETURN other.name AS contact
+}
+RETURN p.name, contact
 ```
 
 ## UNION

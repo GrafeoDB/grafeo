@@ -774,6 +774,15 @@ mod introspection {
         assert!(error.contains("does not exist"), "{error}");
         let error = session.execute("INSERT (:Person)").unwrap_err().to_string();
         assert!(error.contains("does not exist"), "{error}");
+        let error = session
+            .execute("EXPLAIN MATCH (n) RETURN n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not exist"), "{error}");
+        let Err(error) = session.execute_streaming("MATCH (n) RETURN n") else {
+            panic!("a stream of a graph that does not exist");
+        };
+        assert!(error.to_string().contains("does not exist"), "{error}");
 
         session.execute("SESSION RESET SCHEMA").unwrap();
         let result = session.execute("RETURN CURRENT_GRAPH AS g").unwrap();

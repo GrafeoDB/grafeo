@@ -1,0 +1,300 @@
+# Rosetta: ORDER BY over values of different types
+#
+# ORDER BY has one total order over every value, the one openCypher defines:
+# maps, lists, paths, temporal values, strings, booleans, numbers, then null.
+# Integers and floats compare as numbers, with NaN after infinity; lists
+# compare element by element and maps by size, keys and values. Nulls go
+# last ascending and first descending, unless NULLS FIRST or NULLS LAST (GQL)
+# says otherwise, in either direction.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: ORDER BY over values of different types
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # One order across types
+  # ---------------------------------------------------------------------------
+
+  - name: mixed_types_in_one_order
+    variants:
+      gql: "UNWIND [3, 'a', 2.5, true, null, [1], {k: 1}] AS x RETURN x ORDER BY x"
+      cypher: "UNWIND [3, 'a', 2.5, true, null, [1], {k: 1}] AS x RETURN x ORDER BY x"
+    expect:
+      ordered: true
+      rows:
+        - ["{k: 1}"]
+        - ["[1]"]
+        - [a]
+        - [true]
+        - [2.5]
+        - [3]
+        - [null]
+
+  - name: mixed_types_descending
+    variants:
+      gql: "UNWIND [3, 'a', 2.5, true, null, [1], {k: 1}] AS x RETURN x ORDER BY x DESC"
+      cypher: "UNWIND [3, 'a', 2.5, true, null, [1], {k: 1}] AS x RETURN x ORDER BY x DESC"
+    expect:
+      ordered: true
+      rows:
+        - [null]
+        - [3]
+        - [2.5]
+        - [true]
+        - [a]
+        - ["[1]"]
+        - ["{k: 1}"]
+
+  - name: the_order_does_not_depend_on_the_input_order
+    variants:
+      gql: "UNWIND [2.5, 'a', 3] AS x RETURN x ORDER BY x"
+      cypher: "UNWIND [2.5, 'a', 3] AS x RETURN x ORDER BY x"
+    expect:
+      ordered: true
+      rows:
+        - [a]
+        - [2.5]
+        - [3]
+
+  - name: the_order_does_not_depend_on_the_input_order_reversed
+    variants:
+      gql: "UNWIND [3, 'a', 2.5] AS x RETURN x ORDER BY x"
+      cypher: "UNWIND [3, 'a', 2.5] AS x RETURN x ORDER BY x"
+    expect:
+      ordered: true
+      rows:
+        - [a]
+        - [2.5]
+        - [3]
+
+  # Comparing values of different types (and NaN) as equal was not a total
+  # order: the sort failed on this input with "user-provided comparison
+  # function does not correctly implement a total order".
+  - name: mixed_values_with_nan_sort_without_failing
+    variants:
+      gql: "UNWIND [9, 0.0 / 0.0, false, 0.0 / 0.0, -3.8, 'e', -11, 19, -15, -2, -17, -8.2, 2, -13.5, -10, true, 18.5, 15, 6, -2, 'e'] AS x RETURN x ORDER BY x"
+      cypher: "UNWIND [9, 0.0 / 0.0, false, 0.0 / 0.0, -3.8, 'e', -11, 19, -15, -2, -17, -8.2, 2, -13.5, -10, true, 18.5, 15, 6, -2, 'e'] AS x RETURN x ORDER BY x"
+    expect:
+      ordered: true
+      rows:
+        - [e]
+        - [e]
+        - [false]
+        - [true]
+        - [-17]
+        - [-15]
+        - [-13.5]
+        - [-11]
+        - [-10]
+        - [-8.2]
+        - [-3.8]
+        - [-2]
+        - [-2]
+        - [2]
+        - [6]
+        - [9]
+        - [15]
+        - [18.5]
+        - [19]
+        - [NaN]
+        - [NaN]
+
+  - name: property_values_of_different_types
+    setup:
+      - "INSERT (:N {val: 1}), (:N {val: 'hello'}), (:N {val: true}), (:N {val: 2.5}), (:N)"
+    variants:
+      gql: "MATCH (n:N) RETURN n.val AS v ORDER BY v"
+      cypher: "MATCH (n:N) RETURN n.val AS v ORDER BY v"
+    expect:
+      ordered: true
+      rows:
+        - [hello]
+        - [true]
+        - [1]
+        - [2.5]
+        - [null]
+
+  # ---------------------------------------------------------------------------
+  # Within a type
+  # ---------------------------------------------------------------------------
+
+  - name: integers_and_floats_order_as_numbers
+    variants:
+      gql: "UNWIND [3, 2.5, -1, 2, 1.5, 0, -0.5] AS x RETURN x ORDER BY x"
+      cypher: "UNWIND [3, 2.5, -1, 2, 1.5, 0, -0.5] AS x RETURN x ORDER BY x"
+    expect:
+      ordered: true
+      rows:
+        - [-1]
+        - [-0.5]
+        - [0]
+        - [1.5]
+        - [2]
+        - [2.5]
+        - [3]
+
+  - name: nan_sorts_after_infinity
+    variants:
+      gql: "UNWIND [1, 0.0 / 0.0, -1, 1.0 / 0.0, -1.0 / 0.0] AS x RETURN x ORDER BY x"
+      cypher: "UNWIND [1, 0.0 / 0.0, -1, 1.0 / 0.0, -1.0 / 0.0] AS x RETURN x ORDER BY x"
+    expect:
+      ordered: true
+      rows:
+        - [-Infinity]
+        - [-1]
+        - [1]
+        - [Infinity]
+        - [NaN]
+
+  # Percentiles sort their values with the same number order. Sorting NaN as
+  # equal to everything made the sort fail on this input.
+  - name: percentiles_over_values_with_nan
+    variants:
+      gql: "UNWIND [0.0 / 0.0, 0.0 / 0.0, 0.0 / 0.0, 2, -9, -6, -2, 6, 4, -0.7, 9, 0.0 / 0.0, 1, 0.0 / 0.0, 0.0 / 0.0, -7, -5.2, -7.6, 0.0 / 0.0, 4.8, -7.2] AS x RETURN percentileDisc(x, 0.25) AS d, percentileCont(x, 0.25) AS c"
+      cypher: "UNWIND [0.0 / 0.0, 0.0 / 0.0, 0.0 / 0.0, 2, -9, -6, -2, 6, 4, -0.7, 9, 0.0 / 0.0, 1, 0.0 / 0.0, 0.0 / 0.0, -7, -5.2, -7.6, 0.0 / 0.0, 4.8, -7.2] AS x RETURN percentileDisc(x, 0.25) AS d, percentileCont(x, 0.25) AS c"
+    expect:
+      rows:
+        - [-5.2, -5.2]
+
+  - name: lists_order_element_by_element
+    variants:
+      gql: "UNWIND [[1, 2], [1], [1, null], [null], [], [0, 'z']] AS x RETURN x ORDER BY x"
+      cypher: "UNWIND [[1, 2], [1], [1, null], [null], [], [0, 'z']] AS x RETURN x ORDER BY x"
+    expect:
+      ordered: true
+      rows:
+        - ["[]"]
+        - ["[0, z]"]
+        - ["[1]"]
+        - ["[1, 2]"]
+        - ["[1, null]"]
+        - ["[null]"]
+
+  - name: maps_order_by_size_then_keys_then_values
+    variants:
+      gql: "UNWIND [{b: 1}, {a: 2}, {a: 1}, {a: 1, b: 1}] AS m RETURN m ORDER BY m"
+      cypher: "UNWIND [{b: 1}, {a: 2}, {a: 1}, {a: 1, b: 1}] AS m RETURN m ORDER BY m"
+    expect:
+      ordered: true
+      rows:
+        - ["{a: 1}"]
+        - ["{a: 2}"]
+        - ["{b: 1}"]
+        - ["{a: 1, b: 1}"]
+
+  # ---------------------------------------------------------------------------
+  # Many rows, across row batches (sort and top-K)
+  # ---------------------------------------------------------------------------
+
+  - name: mixed_values_across_row_batches_top_k
+    variants:
+      gql: "UNWIND range(1, 3000) AS i RETURN CASE WHEN i % 2 = 0 THEN i ELSE toString(i) END AS v ORDER BY v DESC LIMIT 3"
+      cypher: "UNWIND range(1, 3000) AS i RETURN CASE WHEN i % 2 = 0 THEN i ELSE toString(i) END AS v ORDER BY v DESC LIMIT 3"
+    expect:
+      ordered: true
+      rows:
+        - [3000]
+        - [2998]
+        - [2996]
+
+  - name: mixed_values_across_row_batches_sorted
+    variants:
+      gql: "UNWIND range(1, 3000) AS i RETURN CASE WHEN i % 2 = 0 THEN i ELSE toString(i) END AS v ORDER BY v SKIP 1500 LIMIT 2"
+      cypher: "UNWIND range(1, 3000) AS i RETURN CASE WHEN i % 2 = 0 THEN i ELSE toString(i) END AS v ORDER BY v SKIP 1500 LIMIT 2"
+    expect:
+      ordered: true
+      rows:
+        - [2]
+        - [4]
+
+  # ---------------------------------------------------------------------------
+  # Where nulls go
+  # ---------------------------------------------------------------------------
+
+  - name: nulls_last_by_default_ascending
+    variants:
+      gql: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x"
+      cypher: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x"
+    expect:
+      ordered: true
+      rows:
+        - [1]
+        - [2]
+        - [3]
+        - [null]
+
+  - name: nulls_first_by_default_descending
+    variants:
+      gql: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x DESC"
+      cypher: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x DESC"
+    expect:
+      ordered: true
+      rows:
+        - [null]
+        - [3]
+        - [2]
+        - [1]
+
+  - name: nulls_last_descending
+    query: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x DESC NULLS LAST"
+    expect:
+      ordered: true
+      rows:
+        - [3]
+        - [2]
+        - [1]
+        - [null]
+
+  - name: nulls_first_descending
+    query: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x DESC NULLS FIRST"
+    expect:
+      ordered: true
+      rows:
+        - [null]
+        - [3]
+        - [2]
+        - [1]
+
+  - name: nulls_first_ascending
+    query: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x ASC NULLS FIRST"
+    expect:
+      ordered: true
+      rows:
+        - [null]
+        - [1]
+        - [2]
+        - [3]
+
+  - name: nulls_last_descending_top_k
+    query: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x DESC NULLS LAST LIMIT 2"
+    expect:
+      ordered: true
+      rows:
+        - [3]
+        - [2]
+
+  - name: nulls_last_descending_on_a_property
+    setup:
+      - "INSERT (:T {x: 1}), (:T {x: 3}), (:T), (:T {x: 2})"
+    query: "MATCH (t:T) RETURN t.x AS x ORDER BY x DESC NULLS LAST"
+    expect:
+      ordered: true
+      rows:
+        - [3]
+        - [2]
+        - [1]
+        - [null]
+
+  - name: nulls_last_on_the_second_key_descending
+    query: "UNWIND [[1, null], [1, 2], [0, 5]] AS p RETURN p[0] AS a, p[1] AS b ORDER BY a DESC, b DESC NULLS LAST"
+    expect:
+      ordered: true
+      rows:
+        - [1, 2]
+        - [1, null]
+        - [0, 5]

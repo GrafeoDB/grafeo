@@ -38,7 +38,6 @@ tests:
       count: 7
 
   - name: pattern_comprehension_size
-    skip: "pattern comprehension size() evaluation"
     query: |
       MATCH (a:Actor)
       RETURN a.name, size([(a)-[:ACTED_IN]->(:Movie) | 1]) AS movie_count
@@ -46,13 +45,63 @@ tests:
     expect:
       ordered: true
       rows:
-        - [Beatrix, 3]
-        - [Gus, 2]
-        - [Vincent, 2]
         - [Alix, 2]
-        - [Jules, 2]
+        - [Beatrix, 2]
         - [Butch, 2]
+        - [Gus, 2]
+        - [Jules, 2]
         - [Mia, 2]
+        - [Vincent, 2]
+
+  # A pattern comprehension inside an aggregate, grouped and not.
+  - name: pattern_comprehension_inside_an_aggregate
+    query: |
+      MATCH (a:Actor)
+      RETURN sum(size([(a)-[:ACTED_IN]->(:Movie) | 1])) AS roles
+    expect:
+      rows:
+        - [14]
+
+  - name: pattern_comprehension_inside_a_grouped_aggregate
+    query: |
+      MATCH (a:Actor)
+      RETURN a.city AS city, sum(size([(a)-[:ACTED_IN]->(:Movie) | 1])) AS roles
+      ORDER BY city
+    expect:
+      ordered: true
+      rows:
+        - [Amsterdam, 4]
+        - [Barcelona, 2]
+        - [Berlin, 4]
+        - [Paris, 2]
+        - [Prague, 2]
+
+  - name: pattern_comprehension_inside_with
+    query: |
+      MATCH (a:Actor)
+      WITH a, size([(a)-[:ACTED_IN]->(:Movie) | 1]) AS n
+      WHERE n = 2
+      RETURN count(a) AS actors
+    expect:
+      rows:
+        - [7]
+
+  # A pattern comprehension as the value of a map projection entry.
+  - name: pattern_comprehension_in_a_map_projection
+    query: |
+      MATCH (a:Actor)
+      RETURN a.name AS name, size(a{.name, roles: [(a)-[:ACTED_IN]->(:Movie) | 1]}.roles) AS roles
+      ORDER BY name
+    expect:
+      ordered: true
+      rows:
+        - [Alix, 2]
+        - [Beatrix, 2]
+        - [Butch, 2]
+        - [Gus, 2]
+        - [Jules, 2]
+        - [Mia, 2]
+        - [Vincent, 2]
 
   - name: pattern_comprehension_with_property_extraction
     query: |

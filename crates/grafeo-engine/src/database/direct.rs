@@ -7,9 +7,11 @@
 //! with, and it writes as the system, stamped at its new epoch, which it
 //! publishes when done. Every check of a single call runs before it writes,
 //! so the call cannot half-apply; a batch writes as a private transaction
-//! instead, which is undone when a later row fails. While a transaction is
-//! open, the call runs as an implicit transaction of a session and is checked
-//! for conflicts with the open one.
+//! instead, which is undone when a later row fails. A call that fails still
+//! uses up its epoch: the stores take it before the write, to stamp what they
+//! record themselves, and it is not handed out twice. The gap it leaves holds
+//! no data. While a transaction is open, the call runs as an implicit
+//! transaction of a session and is checked for conflicts with the open one.
 //!
 //! This keeps a direct call close to the cost of the store write itself. Once
 //! transactions own their change set (#448), every direct call becomes an
@@ -19,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::execution::operators::{GraphWriter, OperatorError};
 use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
@@ -45,6 +47,7 @@ pub(crate) enum DirectTarget<'a> {
 
 /// Buffers the direct calls outside a transaction share. Only the call
 /// holding the transaction manager's idle gate uses them.
+#[cfg(any(feature = "wal", feature = "cdc"))]
 #[derive(Default)]
 pub(crate) struct ImplicitWrites {
     /// The WAL records of the running call, written as one group.
@@ -53,6 +56,10 @@ pub(crate) struct ImplicitWrites {
     /// The CDC events of the running call, recorded at its epoch.
     #[cfg(feature = "cdc")]
     cdc_events: Arc<parking_lot::Mutex<Vec<crate::cdc::ChangeEvent>>>,
+    /// Held while a direct call on a compacted database builds its WAL
+    /// records from the state and writes them (see `log_compacted_write`).
+    #[cfg(all(feature = "wal", feature = "compact-store"))]
+    compacted_log: parking_lot::Mutex<()>,
 }
 
 /// What a direct call changed. A compacted database's sessions write the
@@ -305,6 +312,11 @@ impl GrafeoDB {
 
     /// Writes the WAL records of a direct call that a compacted database's
     /// session made, from the state it left, as one group.
+    ///
+    /// Reading the state and writing the records happen under one lock, so
+    /// every call reads the state after all calls that logged before it: the
+    /// last group in the WAL holds the newest state, never an older one that
+    /// a call read before another call's commit and wrote after it.
     #[cfg(all(feature = "wal", feature = "compact-store"))]
     fn log_compacted_write(&self, target: DirectTarget<'_>, touched: Vec<Touched>) {
         use grafeo_storage::wal::WalRecord;
@@ -312,6 +324,7 @@ impl GrafeoDB {
         let (Some(_), Some(wal)) = (&self.layered_store, &self.wal) else {
             return;
         };
+        let _logging = self.implicit_writes.compacted_log.lock();
         let Ok(Some((graph_store, graph))) = self.direct_store(target) else {
             return;
         };
@@ -330,7 +343,7 @@ impl GrafeoDB {
         }
         if let Err(e) = buffer.flush(&[
             WalRecord::TransactionCommit {
-                transaction_id: TransactionId::SYSTEM,
+                transaction_id: grafeo_common::types::TransactionId::SYSTEM,
             },
             WalRecord::EpochAdvance {
                 epoch: self.transaction_manager.current_epoch(),
@@ -364,7 +377,7 @@ impl GrafeoDB {
             epoch
         };
 
-        let mut target: Arc<dyn GraphStoreMut> = Arc::clone(store) as Arc<dyn GraphStoreMut>;
+        let target: Arc<dyn GraphStoreMut> = Arc::clone(store) as Arc<dyn GraphStoreMut>;
         #[cfg(feature = "wal")]
         let wal = self.wal.as_ref().map(|wal| {
             Arc::clone(self.implicit_writes.wal.get_or_init(|| {
@@ -382,27 +395,32 @@ impl GrafeoDB {
         #[cfg(feature = "cdc")]
         self.implicit_writes.cdc_events.lock().clear();
         #[cfg(feature = "wal")]
-        if let Some(buffer) = &wal {
-            use super::wal_store::WalGraphStore;
-            target = Arc::new(match graph {
-                None => WalGraphStore::new(Arc::clone(store), Arc::clone(buffer)),
-                Some(name) => WalGraphStore::new_for_graph(
-                    Arc::clone(store),
-                    Arc::clone(buffer),
-                    name.to_string(),
-                ),
-            });
-        }
+        let target: Arc<dyn GraphStoreMut> = match &wal {
+            Some(buffer) => {
+                use super::wal_store::WalGraphStore;
+                Arc::new(match graph {
+                    None => WalGraphStore::new(Arc::clone(store), Arc::clone(buffer)),
+                    Some(name) => WalGraphStore::new_for_graph(
+                        Arc::clone(store),
+                        Arc::clone(buffer),
+                        name.to_string(),
+                    ),
+                })
+            }
+            None => target,
+        };
         #[cfg(not(feature = "wal"))]
         let _ = graph;
         #[cfg(feature = "cdc")]
-        if self.cdc_active() {
-            target = Arc::new(super::cdc_store::CdcGraphStore::wrap_buffered(
+        let target: Arc<dyn GraphStoreMut> = if self.cdc_active() {
+            Arc::new(super::cdc_store::CdcGraphStore::wrap_buffered(
                 target,
                 Arc::clone(&self.cdc_log),
                 Arc::clone(&self.implicit_writes.cdc_events),
-            ));
-        }
+            ))
+        } else {
+            target
+        };
 
         let validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
             .with_store(Arc::clone(store) as Arc<dyn GraphStoreSearch>)
@@ -459,7 +477,8 @@ impl GrafeoDB {
             use grafeo_storage::wal::WalRecord;
             if let Err(e) = buffer.flush(&[
                 WalRecord::TransactionCommit {
-                    transaction_id: transaction.unwrap_or(TransactionId::SYSTEM),
+                    transaction_id: transaction
+                        .unwrap_or(grafeo_common::types::TransactionId::SYSTEM),
                 },
                 WalRecord::EpochAdvance { epoch },
             ]) {
@@ -565,14 +584,28 @@ impl DirectCalls<'_> {
 
     pub(crate) fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
         self.write(
-            |writer| writer.remove_node_property(id, key),
+            // The direct API reports a missing node as `false`; a query that
+            // writes to one fails (see `GraphWriter`).
+            |writer| {
+                if writer.has_node(id) {
+                    writer.remove_node_property(id, key)
+                } else {
+                    Ok(false)
+                }
+            },
             |_| vec![Touched::NodeProperty(id, key.to_string())],
         )
     }
 
     pub(crate) fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
         self.write(
-            |writer| writer.remove_edge_property(id, key),
+            |writer| {
+                if writer.has_edge(id) {
+                    writer.remove_edge_property(id, key)
+                } else {
+                    Ok(false)
+                }
+            },
             |_| vec![Touched::EdgeProperty(id, key.to_string())],
         )
     }
@@ -702,6 +735,9 @@ pub(crate) fn add_node_label(
     id: NodeId,
     label: &str,
 ) -> std::result::Result<bool, OperatorError> {
+    if !writer.has_node(id) {
+        return Ok(false);
+    }
     Ok(writer.add_labels(id, &[label.to_string()])? == 1)
 }
 
@@ -711,6 +747,9 @@ pub(crate) fn remove_node_label(
     id: NodeId,
     label: &str,
 ) -> std::result::Result<bool, OperatorError> {
+    if !writer.has_node(id) {
+        return Ok(false);
+    }
     Ok(writer.remove_labels(id, &[label.to_string()])? == 1)
 }
 

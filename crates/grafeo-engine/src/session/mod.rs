@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "lpg")]
 use grafeo_common::grafeo_debug_span;
+use grafeo_common::grafeo_info_span;
 #[cfg(feature = "lpg")]
 use grafeo_common::types::{EdgeId, NodeId};
 use grafeo_common::types::{EpochId, PropertyKey, TransactionId, Value};
 use grafeo_common::utils::error::Result;
-use grafeo_common::{grafeo_info_span, grafeo_warn};
 #[cfg(feature = "lpg")]
 use grafeo_core::graph::Direction;
 #[cfg(feature = "lpg")]
@@ -114,6 +114,7 @@ pub(crate) struct SessionConfig {
     pub query_timeout: Option<Duration>,
     pub max_property_size: Option<usize>,
     /// Buffer manager for memory-aware query execution.
+    #[cfg(feature = "spill")]
     pub buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
     pub commit_counter: Arc<AtomicUsize>,
     pub gc_interval: usize,
@@ -183,6 +184,7 @@ pub struct Session {
     /// Maximum size in bytes for a single property value.
     max_property_size: Option<usize>,
     /// Buffer manager for memory-aware execution (spill decisions).
+    #[cfg(feature = "spill")]
     buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
     /// Shared commit counter for triggering auto-GC.
     commit_counter: Arc<AtomicUsize>,
@@ -311,6 +313,7 @@ impl Session {
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
+            #[cfg(feature = "spill")]
             buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
@@ -381,7 +384,7 @@ impl Session {
             && self.current_transaction.lock().is_none()
             && let Err(e) = wal.flush_implicit()
         {
-            grafeo_warn!("Session: failed to write WAL records: {}", e);
+            grafeo_common::grafeo_warn!("Session: failed to write WAL records: {}", e);
         }
     }
 
@@ -450,6 +453,7 @@ impl Session {
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
+            #[cfg(feature = "spill")]
             buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
@@ -580,7 +584,9 @@ impl Session {
                     }
                     named_store as Arc<dyn GraphStoreSearch>
                 }
-                None => Arc::clone(&self.graph_store),
+                // Dropped meanwhile: no data, never the default graph's (the
+                // graph check before a statement reports the drop).
+                None => Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStoreSearch>,
             },
             #[cfg(not(feature = "lpg"))]
             Some(_) => Arc::clone(&self.graph_store),
@@ -603,29 +609,38 @@ impl Session {
             #[cfg(feature = "lpg")]
             Some(name) => match self.store.graph(name) {
                 Some(named_store) => {
-                    let mut store: Arc<dyn GraphStoreMut> = Arc::clone(&named_store) as _;
+                    let store: Arc<dyn GraphStoreMut> = Arc::clone(&named_store) as _;
 
                     #[cfg(feature = "wal")]
-                    if let Some(wal) = &self.wal {
-                        store = Arc::new(crate::database::wal_store::WalGraphStore::new_for_graph(
-                            named_store,
-                            Arc::clone(wal),
-                            name.to_string(),
-                        ));
-                    }
+                    let store: Arc<dyn GraphStoreMut> = match &self.wal {
+                        Some(wal) => {
+                            Arc::new(crate::database::wal_store::WalGraphStore::new_for_graph(
+                                named_store,
+                                Arc::clone(wal),
+                                name.to_string(),
+                            ))
+                        }
+                        None => store,
+                    };
 
                     #[cfg(feature = "cdc")]
-                    if let Some(ref pending) = self.cdc_pending_events {
-                        store = Arc::new(crate::database::cdc_store::CdcGraphStore::wrap(
-                            store,
-                            Arc::clone(&self.cdc_log),
-                            Arc::clone(pending),
-                        ));
-                    }
+                    let store: Arc<dyn GraphStoreMut> = match &self.cdc_pending_events {
+                        Some(pending) => Arc::new(
+                            crate::database::cdc_store::CdcGraphStore::wrap(
+                                store,
+                                Arc::clone(&self.cdc_log),
+                                Arc::clone(pending),
+                            )
+                            .for_graph(name.to_string()),
+                        ),
+                        None => store,
+                    };
 
                     Some(store)
                 }
-                None => self.graph_store_mut.as_ref().map(Arc::clone),
+                // Dropped meanwhile: nothing to write to, never the default
+                // graph (see `store_for_key`).
+                None => None,
             },
             #[cfg(not(feature = "lpg"))]
             Some(_) => self.graph_store_mut.as_ref().map(Arc::clone),
@@ -1240,7 +1255,7 @@ impl Session {
         if let Some(ref wal) = self.wal
             && let Err(e) = wal.wal().log_batch(&records)
         {
-            grafeo_warn!("Failed to log schema change to WAL: {}", e);
+            grafeo_common::grafeo_warn!("Failed to log schema change to WAL: {}", e);
         }
     }
 
@@ -2858,7 +2873,7 @@ impl Session {
         // optimizer and planner see the values and no cached plan keeps them.
         let cache_key = CacheKey::with_graph(query, QueryLanguage::Gql, self.current_graph());
         let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
-        let logical_plan = match parsed {
+        let mut logical_plan = match parsed {
             Some(plan) => plan,
             None => match gql::translate_full(query)? {
                 gql::GqlTranslationResult::SessionCommand(cmd) => {
@@ -2905,6 +2920,7 @@ impl Session {
             ));
         }
 
+        let params = params_to_fill(&mut logical_plan, params)?;
         let optimized_plan = if let Some(params) = params {
             self.optimize_with_params(logical_plan, params)?
         } else if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
@@ -2931,6 +2947,8 @@ impl Session {
         // EXPLAIN: annotate pushdown hints and return the plan tree
         if optimized_plan.explain {
             use crate::query::processor::{annotate_pushdown_hints, explain_result};
+            #[cfg(feature = "lpg")]
+            self.check_graph_access(optimized_plan.root.has_mutations())?;
             let mut plan = optimized_plan;
             annotate_pushdown_hints(&mut plan.root, active.as_ref());
             return Ok(explain_result(&plan));
@@ -3142,6 +3160,7 @@ impl Session {
                 plan
             }
         };
+        self.check_graph_access(false)?;
 
         // Cache + bind + optimize (same path as execute).
         let cache_key = CacheKey::with_graph(query, QueryLanguage::Gql, self.current_graph());
@@ -3170,12 +3189,14 @@ impl Session {
         let active = self.active_store();
         let has_active_tx = self.current_transaction.lock().is_some();
         let (viewing_epoch, transaction_id) = self.get_transaction_context();
-        let planner = self.create_planner_for_store_with_read_only(
-            Arc::clone(&active),
-            viewing_epoch,
-            transaction_id,
-            !has_active_tx,
-        );
+        let planner = self
+            .create_planner_for_store_with_read_only(
+                Arc::clone(&active),
+                viewing_epoch,
+                transaction_id,
+                !has_active_tx,
+            )
+            .for_streaming();
         let physical_plan = planner.plan(&optimized_plan)?;
         let columns = physical_plan.columns.clone();
 
@@ -3364,7 +3385,7 @@ impl Session {
         // A parameterized statement reuses its parsed plan (see execute_gql).
         let cache_key = CacheKey::with_graph(query, QueryLanguage::Cypher, self.current_graph());
         let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
-        let logical_plan = match parsed {
+        let mut logical_plan = match parsed {
             Some(plan) => plan,
             // Schema DDL and SHOW commands run before the normal query path.
             None => match cypher::translate_full(query)? {
@@ -3406,6 +3427,7 @@ impl Session {
             },
         };
 
+        let params = params_to_fill(&mut logical_plan, params)?;
         let optimized_plan = if let Some(params) = params {
             self.optimize_with_params(logical_plan, params)?
         } else if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
@@ -3437,6 +3459,8 @@ impl Session {
         // EXPLAIN
         if optimized_plan.explain {
             use crate::query::processor::{annotate_pushdown_hints, explain_result};
+            #[cfg(feature = "lpg")]
+            self.check_graph_access(optimized_plan.root.has_mutations())?;
             let mut plan = optimized_plan;
             annotate_pushdown_hints(&mut plan.root, active.as_ref());
             return Ok(explain_result(&plan));
@@ -3535,13 +3559,19 @@ impl Session {
     /// ```
     #[cfg(feature = "gremlin")]
     pub fn execute_gremlin(&self, query: &str) -> Result<QueryResult> {
-        use crate::query::{binder::Binder, optimizer::Optimizer, translators::gremlin};
+        use crate::query::{
+            binder::Binder, optimizer::Optimizer, processor::substitute_params,
+            translators::gremlin,
+        };
 
         #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let logical_plan = gremlin::translate(query)?;
+        let mut logical_plan = gremlin::translate(query)?;
+
+        // No parameters are supplied, so one the query uses is missing.
+        substitute_params(&mut logical_plan, &std::collections::HashMap::new())?;
 
         // Semantic validation
         let mut binder = Binder::new();
@@ -3682,11 +3712,10 @@ impl Session {
 
         let mut logical_plan = graphql::translate(query)?;
 
-        // Substitute default parameter values from variable declarations
-        if !logical_plan.default_params.is_empty() {
-            let defaults = logical_plan.default_params.clone();
-            substitute_params(&mut logical_plan, &defaults)?;
-        }
+        // Substitute default parameter values from variable declarations; a
+        // variable without a default is missing.
+        let defaults = logical_plan.default_params.clone();
+        substitute_params(&mut logical_plan, &defaults)?;
 
         let mut binder = Binder::new();
         let _binding_context = binder.bind(&logical_plan)?;
@@ -3838,7 +3867,7 @@ impl Session {
         // A parameterized statement reuses its parsed plan (see execute_gql).
         let cache_key = CacheKey::with_graph(query, QueryLanguage::SqlPgq, self.current_graph());
         let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
-        let logical_plan = match parsed {
+        let mut logical_plan = match parsed {
             Some(plan) => plan,
             None => {
                 // Parse and translate (always needed to check for DDL)
@@ -3871,6 +3900,7 @@ impl Session {
             }
         };
 
+        let params = params_to_fill(&mut logical_plan, params)?;
         let optimized_plan = if let Some(params) = params {
             self.optimize_with_params(logical_plan, params)?
         } else if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
@@ -4095,7 +4125,7 @@ impl Session {
         if let Some(ref wal) = self.wal
             && let Err(e) = wal.flush_implicit()
         {
-            grafeo_warn!("Session: failed to write WAL records: {}", e);
+            grafeo_common::grafeo_warn!("Session: failed to write WAL records: {}", e);
         }
 
         let transaction_id = if let Some(level) = isolation_level {
@@ -4251,7 +4281,7 @@ impl Session {
                     epoch: commit_epoch,
                 },
             ]) {
-                grafeo_warn!("Failed to write transaction to WAL: {}", e);
+                grafeo_common::grafeo_warn!("Failed to write transaction to WAL: {}", e);
             }
         }
 
@@ -4688,8 +4718,7 @@ impl Session {
     where
         F: FnOnce() -> Result<T>,
     {
-        self.check_active_graph()?;
-        self.check_graph_grant(has_mutations)?;
+        self.check_graph_access(has_mutations)?;
         if has_mutations {
             self.check_writable()?;
         }
@@ -4721,6 +4750,62 @@ impl Session {
             #[cfg(feature = "wal")]
             self.flush_wal_outside_transaction();
             result
+        }
+    }
+
+    /// Runs `body`, which may run several statements, as one write: in a
+    /// transaction of its own when none is open (whatever the auto-commit
+    /// setting), otherwise inside the open one. An error undoes everything
+    /// `body` wrote; an open transaction goes on.
+    #[cfg(all(feature = "lpg", feature = "gql"))]
+    pub(crate) fn as_one_write<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
+        if self.current_transaction.lock().is_some() {
+            return self.with_auto_commit(true, body);
+        }
+        self.begin_transaction_inner(false, None)?;
+        match self.with_auto_commit(true, body) {
+            Ok(result) => {
+                self.commit_inner()?;
+                Ok(result)
+            }
+            Err(error) => {
+                // The body's error is the one to report, as in
+                // `with_auto_commit`.
+                let _ = self.rollback_inner();
+                Err(error)
+            }
+        }
+    }
+
+    /// Fails when the selected graph is gone or this identity has no grant
+    /// for it (see `check_active_graph` and `check_graph_grant`). Every
+    /// statement checks this in `with_auto_commit`; `EXPLAIN`, which shows a
+    /// plan without running it, and streamed queries check it themselves.
+    #[cfg(feature = "lpg")]
+    fn check_graph_access(&self, writes: bool) -> Result<()> {
+        self.check_active_graph()?;
+        if writes {
+            self.check_reads_the_present()?;
+        }
+        self.check_graph_grant(writes)
+    }
+
+    /// Fails while the session reads at an earlier epoch
+    /// ([`set_viewing_epoch`](Self::set_viewing_epoch), `execute_at_epoch`): a
+    /// write there would change the past.
+    fn check_reads_the_present(&self) -> Result<()> {
+        match *self.viewing_epoch_override.lock() {
+            Some(epoch) => Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::new(
+                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    format!(
+                        "cannot write while the session reads at an earlier epoch ({}): \
+                         clear the viewing epoch first",
+                        epoch.as_u64()
+                    ),
+                ),
+            )),
+            None => Ok(()),
         }
     }
 
@@ -5042,6 +5127,7 @@ impl Session {
     ) -> Result<T> {
         use grafeo_core::execution::operators::GraphWriter;
 
+        self.check_reads_the_present()?;
         self.with_auto_commit(true, || {
             let key = self.active_graph_storage_key();
             if self.current_transaction.lock().is_some() {
@@ -5606,7 +5692,8 @@ impl Session {
 
     // ── Change Data Capture ─────────────────────────────────────────────
 
-    /// Returns the full change history for an entity (node or edge).
+    /// Returns the full change history for an entity (node or edge) of the
+    /// session's current graph.
     ///
     /// # Errors
     ///
@@ -5617,10 +5704,13 @@ impl Session {
         entity_id: impl Into<crate::cdc::EntityId>,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
         self.require_permission(crate::auth::StatementKind::Read)?;
-        Ok(self.cdc_log.history(entity_id.into()))
+        Ok(self
+            .cdc_log
+            .history_in(self.active_graph_storage_key().as_deref(), entity_id.into()))
     }
 
-    /// Returns change events for an entity since the given epoch.
+    /// Returns change events for an entity of the session's current graph
+    /// since the given epoch.
     ///
     /// # Errors
     ///
@@ -5632,10 +5722,15 @@ impl Session {
         since_epoch: EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
         self.require_permission(crate::auth::StatementKind::Read)?;
-        Ok(self.cdc_log.history_since(entity_id.into(), since_epoch))
+        Ok(self.cdc_log.history_since_in(
+            self.active_graph_storage_key().as_deref(),
+            entity_id.into(),
+            since_epoch,
+        ))
     }
 
-    /// Returns all change events across all entities in an epoch range.
+    /// Returns all change events across all entities and graphs in an epoch
+    /// range; each event names its graph.
     ///
     /// # Errors
     ///
@@ -5670,6 +5765,33 @@ impl Drop for Session {
             reg.session_active
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+}
+
+/// The parameter values to fill into `plan`: `None` for an empty map when the
+/// plan has no defaults either, after checking that the plan names no
+/// parameter (it fails like any missing value). A statement without
+/// parameters then uses its cached plan, like the same call without a map.
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+fn params_to_fill<'a>(
+    plan: &mut crate::query::plan::LogicalPlan,
+    params: Option<&'a std::collections::HashMap<String, Value>>,
+) -> Result<Option<&'a std::collections::HashMap<String, Value>>> {
+    match params {
+        Some(values) if values.is_empty() && plan.default_params.is_empty() => {
+            crate::query::processor::substitute_params(plan, values)?;
+            Ok(None)
+        }
+        // An EXPLAIN without parameters shows the plan with them unresolved.
+        None if plan.explain && plan.default_params.is_empty() => Ok(None),
+        // No parameters: the plan's defaults fill what they can, and a
+        // parameter nobody supplied fails here, before planning.
+        None => {
+            let defaults = plan.default_params.clone();
+            crate::query::processor::substitute_params(plan, &defaults)?;
+            Ok(None)
+        }
+        other => Ok(other),
     }
 }
 
@@ -7139,5 +7261,22 @@ mod tests {
             assert_eq!(result.rows.len(), 1);
             assert_eq!(result.rows[0][0], Value::from("social"));
         }
+    }
+
+    /// A selected graph that was dropped meanwhile resolves to no data and no
+    /// writable store, never to the default graph's: a statement that passed
+    /// its graph check just before the drop must not read or write there.
+    #[cfg(feature = "lpg")]
+    #[test]
+    fn a_dropped_selected_graph_resolves_to_nothing() {
+        let db = GrafeoDB::new_in_memory();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.create_graph("model").unwrap();
+        let session = db.session();
+        session.use_graph("model");
+        assert!(db.drop_graph("model"));
+
+        assert_eq!(session.active_store().node_count(), 0);
+        assert!(session.active_write_store().is_none());
     }
 }

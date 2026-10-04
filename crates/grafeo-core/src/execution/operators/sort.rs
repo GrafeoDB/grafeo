@@ -5,12 +5,12 @@
 
 use std::cmp::Ordering;
 
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::Value;
 
-use super::value_utils::compare_values_with_nulls;
+use super::value_utils::compare_sort_values;
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
-use crate::execution::chunk::DataChunkBuilder;
+use crate::execution::chunk::{ColumnTypes, DataChunkBuilder};
 
 /// Sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +22,7 @@ pub enum SortDirection {
     Descending,
 }
 
-/// Null ordering.
+/// Where nulls go, in either sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NullOrder {
@@ -44,7 +44,7 @@ pub struct SortKey {
 }
 
 impl SortKey {
-    /// Creates a new sort key with ascending order.
+    /// Creates a new sort key with ascending order, nulls last.
     pub fn ascending(column: usize) -> Self {
         Self {
             column,
@@ -53,12 +53,13 @@ impl SortKey {
         }
     }
 
-    /// Creates a new sort key with descending order.
+    /// Creates a new sort key with descending order, nulls first: null sorts
+    /// as the largest value, as in openCypher.
     pub fn descending(column: usize) -> Self {
         Self {
             column,
             direction: SortDirection::Descending,
-            null_order: NullOrder::NullsLast,
+            null_order: NullOrder::NullsFirst,
         }
     }
 
@@ -80,14 +81,18 @@ struct SortRow {
 
 /// Sort operator.
 ///
-/// Materializes all input and sorts by the specified keys.
+/// Materializes all input and sorts by the specified keys. The rows keep
+/// their columns' types and values.
 pub struct SortOperator {
     /// Child operator.
     child: Box<dyn Operator>,
     /// Sort keys.
     sort_keys: Vec<SortKey>,
-    /// Output schema.
-    output_schema: Vec<LogicalType>,
+    /// The column types of the materialized chunks.
+    column_types: ColumnTypes,
+    /// How many leading columns the sort returns, when the trailing ones are
+    /// sort keys added only to sort by (see [`with_output_width`](Self::with_output_width)).
+    output_width: Option<usize>,
     /// Materialized chunks.
     chunks: Vec<DataChunk>,
     /// Sorted row references.
@@ -100,15 +105,12 @@ pub struct SortOperator {
 
 impl SortOperator {
     /// Creates a new sort operator.
-    pub fn new(
-        child: Box<dyn Operator>,
-        sort_keys: Vec<SortKey>,
-        output_schema: Vec<LogicalType>,
-    ) -> Self {
+    pub fn new(child: Box<dyn Operator>, sort_keys: Vec<SortKey>) -> Self {
         Self {
             child,
             sort_keys,
-            output_schema,
+            column_types: ColumnTypes::default(),
+            output_width: None,
             chunks: Vec::new(),
             sorted_rows: Vec::new(),
             sort_complete: false,
@@ -116,9 +118,26 @@ impl SortOperator {
         }
     }
 
-    /// Decomposes this operator into its child and sort keys for push-based conversion.
-    pub fn into_parts(self) -> (Box<dyn Operator>, Vec<SortKey>) {
-        (self.child, self.sort_keys)
+    /// Returns only the first `width` columns of each row: the columns after
+    /// them hold sort keys the planner added to sort by, such as `x.age` for
+    /// `RETURN a AS x ORDER BY x.age`, and are not part of the result.
+    #[must_use]
+    pub fn with_output_width(mut self, width: usize) -> Self {
+        self.output_width = Some(width);
+        self
+    }
+
+    /// How many leading columns each output row keeps, when the sort drops
+    /// trailing sort-key columns.
+    #[must_use]
+    pub fn output_width(&self) -> Option<usize> {
+        self.output_width
+    }
+
+    /// Decomposes this operator into its child, sort keys and output width for
+    /// push-based conversion.
+    pub fn into_parts(self) -> (Box<dyn Operator>, Vec<SortKey>, Option<usize>) {
+        (self.child, self.sort_keys, self.output_width)
     }
 
     /// Materializes and sorts the input.
@@ -132,6 +151,7 @@ impl SortOperator {
                     row_index: row_idx,
                 });
             }
+            self.column_types.add(&chunk);
             self.chunks.push(chunk);
         }
 
@@ -151,12 +171,12 @@ impl SortOperator {
                     .column(key.column)
                     .and_then(|c| c.get_value(b.row_index));
 
-                let cmp = compare_values_with_nulls(&val_a, &val_b, key.null_order);
-
-                let cmp = match key.direction {
-                    SortDirection::Ascending => cmp,
-                    SortDirection::Descending => cmp.reverse(),
-                };
+                let cmp = compare_sort_values(
+                    val_a.as_ref(),
+                    val_b.as_ref(),
+                    key.direction,
+                    key.null_order,
+                );
 
                 if cmp != Ordering::Equal {
                     return cmp;
@@ -180,14 +200,18 @@ impl Operator for SortOperator {
             return Ok(None);
         }
 
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);
+        let types = self.column_types.types();
+        let width = self
+            .output_width
+            .map_or(types.len(), |width| width.min(types.len()));
+        let mut builder = DataChunkBuilder::with_capacity(&types[..width], 2048);
 
         while self.output_position < self.sorted_rows.len() && !builder.is_full() {
             let row_ref = &self.sorted_rows[self.output_position];
             let source_chunk = &self.chunks[row_ref.chunk_index];
 
-            // Copy all columns
-            for col_idx in 0..source_chunk.column_count() {
+            // Copy the returned columns
+            for col_idx in 0..width.min(source_chunk.column_count()) {
                 if let (Some(src_col), Some(dst_col)) =
                     (source_chunk.column(col_idx), builder.column_mut(col_idx))
                 {
@@ -212,6 +236,7 @@ impl Operator for SortOperator {
 
     fn reset(&mut self) {
         self.child.reset();
+        self.column_types = ColumnTypes::default();
         self.chunks.clear();
         self.sorted_rows.clear();
         self.sort_complete = false;
@@ -231,6 +256,7 @@ impl Operator for SortOperator {
 mod tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
+    use grafeo_common::types::LogicalType;
 
     struct MockOperator {
         chunks: Vec<DataChunk>,
@@ -288,11 +314,7 @@ mod tests {
     fn test_sort_ascending() {
         let mock = MockOperator::new(vec![create_unsorted_chunk()]);
 
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64, LogicalType::String],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -319,15 +341,60 @@ mod tests {
         );
     }
 
+    /// Values of different types sort in one order (maps and lists, strings,
+    /// booleans, numbers), and nulls go where the key says, in either
+    /// direction: last ascending and first descending unless it says otherwise.
+    #[test]
+    fn mixed_values_sort_in_one_order_with_nulls_where_the_key_says() {
+        let input = || {
+            let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+            for value in [
+                Value::Int64(3),
+                Value::String("a".into()),
+                Value::Float64(2.5),
+                Value::Null,
+                Value::Bool(true),
+                Value::List(vec![Value::Int64(1)].into()),
+            ] {
+                builder.column_mut(0).unwrap().push_value(value);
+                builder.advance_row();
+            }
+            MockOperator::new(vec![builder.finish()])
+        };
+        let sorted = |key: SortKey| {
+            let mut sort = SortOperator::new(Box::new(input()), vec![key]);
+            let mut out = Vec::new();
+            while let Some(chunk) = sort.next().unwrap() {
+                for row in chunk.selected_indices() {
+                    out.push(chunk.column(0).unwrap().get_value(row).unwrap().to_string());
+                }
+            }
+            out
+        };
+
+        assert_eq!(
+            sorted(SortKey::ascending(0)),
+            ["[1]", "\"a\"", "true", "2.5", "3", "NULL"]
+        );
+        assert_eq!(
+            sorted(SortKey::descending(0)),
+            ["NULL", "3", "2.5", "true", "\"a\"", "[1]"]
+        );
+        assert_eq!(
+            sorted(SortKey::descending(0).with_null_order(NullOrder::NullsLast)),
+            ["3", "2.5", "true", "\"a\"", "[1]", "NULL"]
+        );
+        assert_eq!(
+            sorted(SortKey::ascending(0).with_null_order(NullOrder::NullsFirst)),
+            ["NULL", "[1]", "\"a\"", "true", "2.5", "3"]
+        );
+    }
+
     #[test]
     fn test_sort_descending() {
         let mock = MockOperator::new(vec![create_unsorted_chunk()]);
 
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::descending(0)],
-            vec![LogicalType::Int64, LogicalType::String],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::descending(0)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -344,11 +411,7 @@ mod tests {
     fn test_sort_by_string() {
         let mock = MockOperator::new(vec![create_unsorted_chunk()]);
 
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(1)], // Sort by string column
-            vec![LogicalType::Int64, LogicalType::String],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(1)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -378,11 +441,7 @@ mod tests {
     fn test_sort_empty_input() {
         let mock = MockOperator::new(vec![]);
 
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         assert!(sort.next().unwrap().is_none());
     }
@@ -397,11 +456,7 @@ mod tests {
         let chunk = builder.finish();
 
         let mock = MockOperator::new(vec![chunk]);
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -423,11 +478,7 @@ mod tests {
         let chunk = builder.finish();
 
         let mock = MockOperator::new(vec![chunk]);
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -454,7 +505,6 @@ mod tests {
         let mut sort = SortOperator::new(
             Box::new(mock),
             vec![SortKey::ascending(0), SortKey::ascending(1)],
-            vec![LogicalType::String, LogicalType::Int64],
         );
 
         let mut results = Vec::new();
@@ -500,11 +550,7 @@ mod tests {
         let chunk2 = b2.finish();
 
         let mock = MockOperator::new(vec![chunk1, chunk2]);
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -526,11 +572,7 @@ mod tests {
         let chunk = builder.finish();
 
         let mock = MockOperator::new(vec![chunk]);
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         let mut results = Vec::new();
         while let Some(chunk) = sort.next().unwrap() {
@@ -550,11 +592,7 @@ mod tests {
         let chunk = builder.finish();
 
         let mock = MockOperator::new(vec![chunk]);
-        let mut sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let mut sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
 
         let mut count = 0;
         while let Some(chunk) = sort.next().unwrap() {
@@ -569,22 +607,14 @@ mod tests {
     #[test]
     fn test_sort_name() {
         let mock = MockOperator::new(vec![]);
-        let sort = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let sort = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
         assert_eq!(sort.name(), "Sort");
     }
 
     #[test]
     fn test_sort_into_any() {
         let mock = MockOperator::new(vec![]);
-        let op = SortOperator::new(
-            Box::new(mock),
-            vec![SortKey::ascending(0)],
-            vec![LogicalType::Int64],
-        );
+        let op = SortOperator::new(Box::new(mock), vec![SortKey::ascending(0)]);
         let any = Box::new(op).into_any();
         assert!(any.downcast::<SortOperator>().is_ok());
     }
@@ -595,12 +625,41 @@ mod tests {
         let op = SortOperator::new(
             Box::new(mock),
             vec![SortKey::ascending(0), SortKey::descending(1)],
-            vec![LogicalType::Int64, LogicalType::String],
         );
-        let (mut child, sort_keys) = op.into_parts();
+        let (mut child, sort_keys, output_width) = op.into_parts();
+        assert_eq!(output_width, None);
         assert_eq!(sort_keys.len(), 2);
         assert_eq!(sort_keys[0].column, 0);
         assert_eq!(sort_keys[1].column, 1);
         assert!(child.next().unwrap().is_none());
+    }
+
+    /// A sort with an output width returns the leading columns only, in the
+    /// sorted order and with their types: the trailing ones were sort keys.
+    #[test]
+    fn output_width_drops_the_sort_key_columns() {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Edge, LogicalType::Int64]);
+        for (id, key) in [(7_u64, 3_i64), (8, 1), (9, 2)] {
+            builder
+                .column_mut(0)
+                .unwrap()
+                .push_edge_id(grafeo_common::types::EdgeId::new(id));
+            builder.column_mut(1).unwrap().push_int64(key);
+            builder.advance_row();
+        }
+        let mock = MockOperator::new(vec![builder.finish()]);
+        let mut sort =
+            SortOperator::new(Box::new(mock), vec![SortKey::ascending(1)]).with_output_width(1);
+        assert_eq!(sort.output_width(), Some(1));
+
+        let chunk = sort.next().unwrap().unwrap();
+        assert_eq!(chunk.column_count(), 1);
+        let edges = chunk.column(0).unwrap();
+        assert_eq!(edges.data_type(), &LogicalType::Edge);
+        let ids: Vec<u64> = chunk
+            .selected_indices()
+            .map(|row| edges.get_edge_id(row).unwrap().as_u64())
+            .collect();
+        assert_eq!(ids, [8, 9, 7]);
     }
 }

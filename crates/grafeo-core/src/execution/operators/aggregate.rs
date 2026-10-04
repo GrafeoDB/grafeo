@@ -17,7 +17,7 @@ use grafeo_common::types::{LogicalType, PropertyKey, Value};
 use super::accumulator::{AggregateExpr, AggregateFunction, HashableValue};
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
-use crate::execution::chunk::DataChunkBuilder;
+use crate::execution::chunk::{ColumnTypes, DataChunkBuilder, copied_column_type};
 
 /// State for a single aggregation computation.
 ///
@@ -493,7 +493,7 @@ impl AggregateState {
                     Value::Null
                 } else {
                     let mut sorted = values.clone();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    sorted.sort_by(|a, b| compare_floats(*a, *b));
                     // Index calculation per SQL standard: floor(p * (n - 1))
                     // reason: percentile index is bounded by sorted.len(), fits usize
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -507,7 +507,7 @@ impl AggregateState {
                     Value::Null
                 } else {
                     let mut sorted = values.clone();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    sorted.sort_by(|a, b| compare_floats(*a, *b));
                     // Linear interpolation per SQL standard
                     let rank = percentile * (sorted.len() - 1) as f64;
                     // reason: rank is bounded by sorted.len() - 1, fits usize
@@ -632,7 +632,7 @@ impl AggregateState {
     }
 }
 
-use super::value_utils::{compare_values, value_to_f64};
+use super::value_utils::{compare_floats, compare_values, value_to_f64};
 
 /// Converts a Value to its string representation for GROUP_CONCAT.
 fn agg_value_to_string(val: &Value) -> String {
@@ -746,7 +746,8 @@ impl GroupKey {
 
 /// Hash-based aggregate operator.
 ///
-/// Groups input by key columns and computes aggregations for each group.
+/// Groups input by key columns and computes aggregations for each group. A
+/// group key keeps its input column's type: a node or edge stays one.
 pub struct HashAggregateOperator {
     /// Child operator to read from.
     child: Box<dyn Operator>,
@@ -756,6 +757,8 @@ pub struct HashAggregateOperator {
     aggregates: Vec<AggregateExpr>,
     /// Output schema.
     output_schema: Vec<LogicalType>,
+    /// The column types of the input chunks.
+    input_types: ColumnTypes,
     /// Ordered map: group key -> aggregate states (IndexMap for deterministic iteration order).
     groups: IndexMap<GroupKey, Vec<AggregateState>>,
     /// Whether aggregation is complete.
@@ -783,10 +786,25 @@ impl HashAggregateOperator {
             group_columns,
             aggregates,
             output_schema,
+            input_types: ColumnTypes::default(),
             groups: IndexMap::new(),
             aggregation_complete: false,
             results: None,
         }
+    }
+
+    /// The output column types: the group keys' input types (see
+    /// [`ColumnTypes`]; declared before any input), then the aggregates'.
+    fn output_types(&self) -> Vec<LogicalType> {
+        let mut types = self.output_schema.clone();
+        for (i, &column) in self.group_columns.iter().enumerate() {
+            if let (Some(key_type), Some(input_type)) =
+                (types.get_mut(i), self.input_types.types().get(column))
+            {
+                *key_type = copied_column_type(input_type, Some(&*key_type));
+            }
+        }
+        types
     }
 
     /// Decomposes this operator for push-based conversion.
@@ -797,6 +815,7 @@ impl HashAggregateOperator {
     /// Performs the aggregation.
     fn aggregate(&mut self) -> Result<(), OperatorError> {
         while let Some(chunk) = self.child.next()? {
+            self.input_types.add(&chunk);
             for row in chunk.selected_indices() {
                 let key = GroupKey::from_row(&chunk, row, &self.group_columns);
 
@@ -905,11 +924,12 @@ impl Operator for HashAggregateOperator {
             return Ok(Some(builder.finish()));
         }
 
+        let types = self.output_types();
         let Some(results) = &mut self.results else {
             return Ok(None);
         };
 
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);
+        let mut builder = DataChunkBuilder::with_capacity(&types, 2048);
 
         for (key, states) in results.by_ref() {
             // Output group key columns
@@ -944,6 +964,7 @@ impl Operator for HashAggregateOperator {
 
     fn reset(&mut self) {
         self.child.reset();
+        self.input_types = ColumnTypes::default();
         self.groups.clear();
         self.aggregation_complete = false;
         self.results = None;
@@ -1141,6 +1162,47 @@ mod tests {
         fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
             self
         }
+    }
+
+    /// A node group key keeps its column type; the count its declared one.
+    #[test]
+    fn group_keys_keep_their_column_types() {
+        use grafeo_common::types::NodeId;
+
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node]);
+        for node in [101, 101, 102] {
+            builder
+                .column_mut(0)
+                .unwrap()
+                .push_node_id(NodeId::new(node));
+            builder.advance_row();
+        }
+        let mut aggregate = HashAggregateOperator::new(
+            Box::new(MockOperator::new(vec![builder.finish()])),
+            vec![0],
+            vec![AggregateExpr::count_star()],
+            vec![LogicalType::Any, LogicalType::Int64],
+        );
+
+        let chunk = aggregate.next().unwrap().unwrap();
+        assert_eq!(
+            chunk.column_types(),
+            [LogicalType::Node, LogicalType::Int64]
+        );
+        let mut groups: Vec<(u64, Option<Value>)> = chunk
+            .selected_indices()
+            .map(|row| {
+                (
+                    chunk.column(0).unwrap().get_node_id(row).unwrap().as_u64(),
+                    chunk.column(1).unwrap().get_value(row),
+                )
+            })
+            .collect();
+        groups.sort_by_key(|(node, _)| *node);
+        assert_eq!(
+            groups,
+            [(101, Some(Value::Int64(2))), (102, Some(Value::Int64(1)))]
+        );
     }
 
     fn create_test_chunk() -> DataChunk {
@@ -1560,6 +1622,35 @@ mod tests {
         // 100th percentile = maximum = 9
         let p100 = result.column(1).unwrap().get_float64(0).unwrap();
         assert!((p100 - 9.0).abs() < 0.01);
+    }
+
+    /// NaN sorts after every other number in percentiles too. Sorting it as
+    /// equal to everything was not a total order: the sort could panic.
+    #[test]
+    fn percentiles_sort_nan_last() {
+        let input = || {
+            let mut builder = DataChunkBuilder::new(&[LogicalType::Float64]);
+            for value in [3.0, f64::NAN, 1.0, 2.0, f64::NAN, 4.0, 0.5, 2.5] {
+                builder.column_mut(0).unwrap().push_float64(value);
+                builder.advance_row();
+            }
+            MockOperator::new(vec![builder.finish()])
+        };
+        let mut agg = SimpleAggregateOperator::new(
+            Box::new(input()),
+            vec![
+                AggregateExpr::percentile_disc(0, 0.5),
+                AggregateExpr::percentile_cont(0, 0.5),
+                AggregateExpr::percentile_disc(0, 1.0),
+            ],
+            vec![LogicalType::Float64; 3],
+        );
+
+        let result = agg.next().unwrap().unwrap();
+        // Sorted: [0.5, 1, 2, 2.5, 3, 4, NaN, NaN]; rank 0.5 * 7 = 3.5.
+        assert_eq!(result.column(0).unwrap().get_float64(0), Some(2.5));
+        assert_eq!(result.column(1).unwrap().get_float64(0), Some(2.75));
+        assert!(result.column(2).unwrap().get_float64(0).unwrap().is_nan());
     }
 
     #[test]

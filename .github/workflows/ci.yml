@@ -287,6 +287,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
+      # Every test binary of the debug build links the whole engine, which
+      # nearly fills an ubuntu runner's disk: remove preinstalled SDKs that
+      # this job does not use.
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
@@ -298,31 +308,38 @@ jobs:
       - name: Configure sccache
         uses: mozilla-actions/sccache-action@v0.0.11
 
+      # Crate sources only: archiving this job's target directory filled the
+      # runner's disk, and sccache keeps the compiled crates between runs.
       - name: Cache cargo registry
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-registry-
 
       # Full profile: --all-features tests every language parser, AI index,
       # RDF store, algorithms, CDC, and other optional modules together.
       # This catches integration issues across feature combinations.
       # Spec tests are excluded here as they run in the dedicated rust-spec job.
+      # Line tables keep file and line in backtraces at a fraction of the size
+      # of full debug info.
       - name: Run tests
         run: cargo nextest run --all-features --workspace --exclude grafeo-spec-tests
         env:
           RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
       # nextest does not run doc-tests, so run them separately
       - name: Run doc-tests
         run: cargo test --all-features --workspace --doc
         env:
           RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
   # Rust tests (release, ubuntu only)
   # Release-mode catches issues from inlining and overflow checks.
@@ -386,6 +403,8 @@ jobs:
           - profile: rdf
             features: "--features gql,sparql,graphql,triple-store,spill,mmap,regex"
             engine_features: "--features gql,sparql,graphql,triple-store,shacl,wal,grafeo-file,spill,mmap,regex"
+            # The facade's `rdf` profile on its own keeps its data across a reopen (#544).
+            facade_test: "--features rdf --test rdf_profile"
           # Analytics persona: Data Scientist (algorithms + search + bulk import)
           - profile: analytics
             features: "--features algos,vector-index,text-index,hybrid-search,jsonl-import,parquet-import"
@@ -453,6 +472,17 @@ jobs:
           -p grafeo-engine
           -p grafeo
           --no-default-features ${{ matrix.engine_features || matrix.features }}
+        env:
+          RUSTC_WRAPPER: sccache
+
+      # A facade test built with only the profile's features, for profiles
+      # whose behavior depends on what the profile itself enables.
+      - name: Test facade profile (${{ matrix.profile }})
+        if: matrix.facade_test
+        run: >
+          cargo test
+          -p grafeo
+          --no-default-features ${{ matrix.facade_test }}
         env:
           RUSTC_WRAPPER: sccache
 

@@ -605,8 +605,9 @@ pub struct ExpandStep {
 pub struct LazyFactorizedChainOperator {
     /// The graph store.
     store: Arc<dyn GraphStoreSearch>,
-    /// The source operator (filter, scan, etc).
-    source: Option<Box<dyn Operator>>,
+    /// The source operator (filter, scan, etc). It stays here, so a reset
+    /// can run the chain again.
+    source: Box<dyn Operator>,
     /// The expand steps to execute.
     steps: Vec<ExpandStep>,
     /// Transaction ID for MVCC visibility.
@@ -632,7 +633,7 @@ impl LazyFactorizedChainOperator {
     ) -> Self {
         Self {
             store,
-            source: Some(source),
+            source,
             steps,
             transaction_id: None,
             viewing_epoch: None,
@@ -666,13 +667,19 @@ impl LazyFactorizedChainOperator {
     /// factorized chunk without flattening, allowing O(n) aggregation instead
     /// of O(n²) or worse.
     fn execute_factorized(&mut self) -> Result<Option<FactorizedChunk>, OperatorError> {
-        let Some(source) = self.source.take() else {
+        // The chain expands the source's rows as one chunk; reading them here
+        // keeps the source, so a reset can run the chain again (a correlated
+        // subquery runs it once per outer row).
+        let Some(input) = FactorizedExpandChain::collect_all_batches(&mut *self.source)? else {
             return Ok(None);
         };
 
         // Build and execute the chain
-        let mut chain = FactorizedExpandChain::new(Arc::clone(&self.store), source)
-            .with_read_only(self.read_only);
+        let mut chain = FactorizedExpandChain::new(
+            Arc::clone(&self.store),
+            Box::new(SingleChunkOperator::new(input)),
+        )
+        .with_read_only(self.read_only);
 
         if let Some(epoch) = self.viewing_epoch {
             chain = chain.with_transaction_context(epoch, self.transaction_id);
@@ -734,10 +741,10 @@ impl Operator for LazyFactorizedChainOperator {
     }
 
     fn reset(&mut self) {
-        // Cannot reset - source has been consumed
+        self.source.reset();
         self.result = None;
         self.factorized_result = None;
-        self.executed = true;
+        self.executed = false;
     }
 
     fn name(&self) -> &'static str {
@@ -984,6 +991,41 @@ mod tests {
         let op = FactorizedExpandOperator::new(store.clone(), scan, 0, Direction::Outgoing, vec![]);
         let any = Box::new(op).into_any();
         assert!(any.downcast::<FactorizedExpandOperator>().is_ok());
+    }
+
+    /// After a reset the chain runs again, as a correlated subquery runs it
+    /// once per outer row: Alix knows Gus, who lives in Berlin, both times.
+    #[test]
+    fn lazy_chain_runs_again_after_a_reset() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let berlin = store.create_node(&["City"]);
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, berlin, "LIVES_IN");
+
+        let scan = Box::new(ScanOperator::with_label(store.clone(), "Person"));
+        let step = |edge_type: &str, source_column| ExpandStep {
+            source_column,
+            direction: Direction::Outgoing,
+            edge_types: vec![edge_type.to_string()],
+        };
+        let mut chain = LazyFactorizedChainOperator::new(
+            store.clone(),
+            scan,
+            vec![step("KNOWS", 0), step("LIVES_IN", 1)],
+        );
+        let rows = |chain: &mut LazyFactorizedChainOperator| {
+            let mut rows = 0;
+            while let Some(chunk) = chain.next().unwrap() {
+                rows += chunk.row_count();
+            }
+            rows
+        };
+
+        assert_eq!(rows(&mut chain), 1);
+        chain.reset();
+        assert_eq!(rows(&mut chain), 1);
     }
 
     #[test]

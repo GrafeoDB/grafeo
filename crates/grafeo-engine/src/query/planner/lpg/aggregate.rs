@@ -1,9 +1,9 @@
 //! Aggregate and factorized aggregate planning.
 
 use super::{
-    AggregateOp, Arc, Direction, Error, ExpandDirection, ExpandStep, ExpressionPredicate,
-    FactorizedAggregate, FactorizedAggregateOperator, FilterExpression, FilterOperator,
-    GraphStoreSearch, HashAggregateOperator, HashMap, LazyFactorizedChainOperator,
+    AggregateOp, Arc, Direction, EntityValue, Error, ExpandDirection, ExpandStep,
+    ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
+    FilterOperator, GraphStoreSearch, HashAggregateOperator, HashMap, LazyFactorizedChainOperator,
     LogicalAggregateFunction, LogicalExpression, LogicalType, Operator, PhysicalAggregateExpr,
     ProjectExpr, ProjectOperator, Result, SimpleAggregateOperator, convert_aggregate_function,
     expression_to_string, resolved_column_name,
@@ -208,18 +208,44 @@ impl super::Planner {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        // Build output schema and column names
+        // Build output schema and column names, and what each column holds: a
+        // group key that is a node or an edge (or a list of them) stays one,
+        // and so does the list `collect` makes of nodes or edges. Every other
+        // column holds values.
         let mut output_schema = Vec::new();
         let mut output_columns = Vec::new();
+        let mut output_entities = Vec::new();
 
         // Add group-by columns
         for expr in &agg.group_by {
-            output_schema.push(LogicalType::Any); // Group-by values can be any type
+            let entity = match expr {
+                LogicalExpression::Variable(name) => self.column_entity(name),
+                _ => None,
+            };
+            output_schema.push(entity_type(entity));
             output_columns.push(expression_to_string(expr));
+            output_entities.push(entity);
         }
 
         // Add aggregate result columns
         for agg_expr in &agg.aggregates {
+            let collected = match (agg_expr.function, &agg_expr.expression) {
+                // The list of what `collect` gathers keeps its kind: a node or
+                // edge column, or an expression that yields one (`head(rs)`,
+                // `last(relationships(p))`).
+                (LogicalAggregateFunction::Collect, Some(expression)) => {
+                    let item = match expression {
+                        LogicalExpression::Variable(name) => self.column_entity(name),
+                        other => self.entity_value(other),
+                    };
+                    match item {
+                        Some(EntityValue::Node) => Some(EntityValue::Nodes),
+                        Some(EntityValue::Edge) => Some(EntityValue::Edges),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
             let result_type = match agg_expr.function {
                 LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => {
                     LogicalType::Int64
@@ -232,7 +258,8 @@ impl super::Planner {
                     // to avoid type mismatch when pushing the finalized value.
                     LogicalType::Any
                 }
-                LogicalAggregateFunction::Collect => LogicalType::Any, // List type (using Any since List is a complex type)
+                // A list of nodes or edges, or of any values
+                LogicalAggregateFunction::Collect => entity_type(collected),
                 LogicalAggregateFunction::GroupConcat => LogicalType::String,
                 LogicalAggregateFunction::Sample => LogicalType::Any,
                 // Statistical functions return Float64
@@ -262,12 +289,11 @@ impl super::Planner {
                     crate::query::planner::common::aggregate_column_name(agg_expr)
                 }),
             );
+            output_entities.push(collected);
         }
 
-        // Register all aggregate output columns as scalar (group-by values and
-        // aggregate results are materialized scalar values, not entity references)
-        for col in &output_columns {
-            self.scalar_columns.borrow_mut().insert(col.clone());
+        for (column, entity) in output_columns.iter().zip(&output_entities) {
+            self.set_column_entity(column, *entity);
         }
 
         // Choose operator based on whether there are group-by columns
@@ -472,5 +498,17 @@ impl super::Planner {
         variable_columns: &HashMap<String, usize>,
     ) -> Result<usize> {
         crate::query::planner::common::resolve_expression_to_column(expr, variable_columns, "")
+    }
+}
+
+/// The declared type of a column that holds `entity`: a node, an edge, a list
+/// of them, or any value.
+fn entity_type(entity: Option<EntityValue>) -> LogicalType {
+    match entity {
+        Some(EntityValue::Node) => LogicalType::Node,
+        Some(EntityValue::Edge) => LogicalType::Edge,
+        Some(EntityValue::Nodes) => LogicalType::List(Box::new(LogicalType::Node)),
+        Some(EntityValue::Edges) => LogicalType::List(Box::new(LogicalType::Edge)),
+        _ => LogicalType::Any,
     }
 }

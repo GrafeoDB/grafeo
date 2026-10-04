@@ -41,16 +41,17 @@ impl DirectoryLock {
             .truncate(false)
             .open(&path)?;
 
-        {
-            let _no_child_start = child_process::lock_acquisition();
-            file.try_lock().map_err(|e| match e {
-                std::fs::TryLockError::WouldBlock => Error::Internal(format!(
-                    "database is locked by another process: {}",
-                    dir.display()
-                )),
-                std::fs::TryLockError::Error(e) => Error::Io(e),
-            })?;
-        }
+        child_process::take_lock(
+            || file.try_lock(),
+            |e| matches!(e, std::fs::TryLockError::WouldBlock),
+        )
+        .map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => Error::Internal(format!(
+                "database is locked by another process: {}",
+                dir.display()
+            )),
+            std::fs::TryLockError::Error(e) => Error::Io(e),
+        })?;
 
         Ok(Self { _file: file, path })
     }

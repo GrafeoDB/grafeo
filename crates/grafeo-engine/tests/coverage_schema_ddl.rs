@@ -6,6 +6,7 @@
 //! cargo test -p grafeo-engine --test coverage_schema_ddl
 //! ```
 
+use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
 // ---------------------------------------------------------------------------
@@ -205,6 +206,41 @@ fn test_create_and_drop_procedure() {
         )
         .unwrap();
     session.execute("DROP PROCEDURE get_adults").unwrap();
+}
+
+/// A pattern in a procedure body that comes back to a node it bound is a
+/// cycle there too: the body skipped that check (it is planned without the
+/// session's optimizer), so every path of three edges counted.
+#[test]
+fn test_procedure_body_closes_cycles() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute(
+            "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), \
+             (vincent:Person {name: 'Vincent'}), (jules:Person {name: 'Jules'}), \
+             (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), \
+             (vincent)-[:KNOWS]->(alix), (jules)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(jules)",
+        )
+        .unwrap();
+    session
+        .execute(
+            "CREATE PROCEDURE triangles() RETURNS (name STRING) AS { \
+             MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(a) RETURN a.name AS name }",
+        )
+        .unwrap();
+    let result = session
+        .execute("CALL triangles() YIELD name RETURN name ORDER BY name")
+        .unwrap();
+    let names: Vec<Value> = result.rows().iter().map(|row| row[0].clone()).collect();
+    assert_eq!(
+        names,
+        [
+            Value::from("Alix"),
+            Value::from("Gus"),
+            Value::from("Vincent")
+        ]
+    );
 }
 
 #[test]

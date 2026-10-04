@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use grafeo_common::types::{EpochId, TransactionId, Value};
 use grafeo_core::execution::DataChunk;
-use grafeo_core::execution::operators::{Operator, OperatorError, OperatorResult};
+use grafeo_core::execution::operators::{Operator, OperatorError, OperatorResult, WriteCounter};
 use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
 
 use crate::catalog::Catalog;
@@ -30,6 +30,8 @@ pub struct ProcedureContext {
     pub viewing_epoch: EpochId,
     /// Catalog for sub-planner resolution.
     pub catalog: Option<Arc<Catalog>>,
+    /// The calling statement's write counter: the body's writes count there.
+    pub write_counter: Arc<WriteCounter>,
 }
 
 /// An operator that executes a user-defined stored procedure.
@@ -61,6 +63,8 @@ pub struct UserProcedureOperator {
     viewing_epoch: EpochId,
     /// Catalog for sub-planner.
     catalog: Option<Arc<Catalog>>,
+    /// The calling statement's write counter.
+    write_counter: Arc<WriteCounter>,
     /// Buffered result rows from execution.
     result_rows: Option<Vec<Vec<Value>>>,
     /// Current row index into buffered results.
@@ -94,6 +98,7 @@ impl UserProcedureOperator {
             transaction_id: ctx.transaction_id,
             viewing_epoch: ctx.viewing_epoch,
             catalog: ctx.catalog,
+            write_counter: ctx.write_counter,
             result_rows: None,
             row_index: 0,
             output_columns,
@@ -111,9 +116,13 @@ impl UserProcedureOperator {
         }
 
         // Use the module-level translate function
-        let logical_plan = crate::query::translators::gql::translate(&body).map_err(|e| {
+        let mut logical_plan = crate::query::translators::gql::translate(&body).map_err(|e| {
             OperatorError::Execution(format!("Failed to translate procedure body: {e}"))
         })?;
+        // A pattern through a node or edge bound before is checked, as in a
+        // session's plan (the optimizer's first pass; the body skips the
+        // optimizer).
+        logical_plan.root = crate::query::optimizer::close_cycles(logical_plan.root);
 
         // Plan physical operators
         let planner = if let Some(ref tx_mgr) = self.transaction_manager {
@@ -134,7 +143,8 @@ impl UserProcedureOperator {
                 p = p.with_catalog(Arc::clone(cat));
             }
             p
-        };
+        }
+        .with_write_counter(Arc::clone(&self.write_counter));
 
         let physical = planner
             .plan(&logical_plan)

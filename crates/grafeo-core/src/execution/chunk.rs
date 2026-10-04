@@ -141,6 +141,15 @@ impl DataChunk {
         &self.columns
     }
 
+    /// Returns the types of the columns.
+    #[must_use]
+    pub fn column_types(&self) -> Vec<LogicalType> {
+        self.columns
+            .iter()
+            .map(|column| column.data_type().clone())
+            .collect()
+    }
+
     /// Returns the total number of rows (ignoring selection).
     #[must_use]
     pub fn total_row_count(&self) -> usize {
@@ -419,7 +428,8 @@ impl DataChunk {
 
     /// Returns a slice of this chunk.
     ///
-    /// Returns a new DataChunk containing rows [offset, offset + count).
+    /// Returns a new DataChunk containing the selected rows [offset, offset +
+    /// count). Each column keeps its type, so every value is copied as it is.
     #[must_use]
     pub fn slice(&self, offset: usize, count: usize) -> DataChunk {
         if offset >= self.len() || count == 0 {
@@ -430,7 +440,7 @@ impl DataChunk {
         let mut result_columns = Vec::with_capacity(self.columns.len());
 
         for col in &self.columns {
-            let mut new_col = ValueVector::new();
+            let mut new_col = ValueVector::with_capacity(col.data_type().clone(), actual_count);
             for i in offset..(offset + actual_count) {
                 let actual_idx = if let Some(sel) = &self.selection {
                     sel.get(i).unwrap_or(i)
@@ -458,6 +468,81 @@ impl DataChunk {
     pub fn num_columns(&self) -> usize {
         self.columns.len()
     }
+}
+
+/// The column types for rows taken from the chunks of one input.
+///
+/// A column keeps its type while every chunk with rows has that type there and
+/// becomes [`LogicalType::Any`] where they differ; a chunk without rows counts
+/// only until one with rows comes. Rows copied into columns of these types keep
+/// every value: a typed column stores a value of another type as that type's
+/// default (see [`ValueVector::push_value`]), so an operator that only reorders,
+/// cuts or deduplicates rows must not copy them by a declared schema.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ColumnTypes {
+    /// The types so far (none before the first chunk).
+    types: Option<Vec<LogicalType>>,
+    /// Whether they come from chunks with rows.
+    from_rows: bool,
+}
+
+impl ColumnTypes {
+    /// Takes the column types of `chunk` into account.
+    pub(crate) fn add(&mut self, chunk: &DataChunk) {
+        let has_rows = chunk.row_count() > 0;
+        match &mut self.types {
+            Some(types) if self.from_rows && has_rows => {
+                for (known, column) in types.iter_mut().zip(chunk.columns()) {
+                    if known != column.data_type() {
+                        *known = LogicalType::Any;
+                    }
+                }
+            }
+            // A chunk without rows says nothing about the values: its types
+            // count only while no other chunk gave any.
+            Some(_) if self.from_rows || !has_rows => {}
+            // The first chunk, or the first with rows after chunks without.
+            _ => {
+                self.types = Some(chunk.column_types());
+                self.from_rows = has_rows;
+            }
+        }
+    }
+
+    /// The column types of the chunks seen so far (none before the first).
+    pub(crate) fn types(&self) -> &[LogicalType] {
+        self.types.as_deref().unwrap_or(&[])
+    }
+}
+
+/// The type for a column copied from an input column of type `input`, which
+/// the planner declared as `declared`: the input's, so that every value is
+/// copied as it is, except where the input's is [`LogicalType::Any`] and the
+/// planner declared a node or edge: an ID whose kind the input lost is that
+/// entity again.
+pub(crate) fn copied_column_type(
+    input: &LogicalType,
+    declared: Option<&LogicalType>,
+) -> LogicalType {
+    match (input, declared) {
+        (LogicalType::Any, Some(entity @ (LogicalType::Node | LogicalType::Edge))) => {
+            entity.clone()
+        }
+        _ => input.clone(),
+    }
+}
+
+/// [`copied_column_type`] for each of the `input` types, declared as the
+/// `declared` types at the same positions.
+pub(crate) fn copied_column_types(
+    input: &[LogicalType],
+    declared: &[LogicalType],
+) -> Vec<LogicalType> {
+    input
+        .iter()
+        .enumerate()
+        .map(|(i, input_type)| copied_column_type(input_type, declared.get(i)))
+        .collect()
 }
 
 impl Clone for DataChunk {
@@ -538,6 +623,55 @@ impl DataChunkBuilder {
 mod tests {
     use super::*;
     use grafeo_common::types::Value;
+
+    /// Chunks without rows do not turn a node column into `Any`: their types
+    /// count only until a chunk with rows comes. Chunks with rows of different
+    /// types do.
+    #[test]
+    fn column_types_ignore_chunks_without_rows() {
+        let empty = || DataChunk::with_capacity(&[LogicalType::Any], 0);
+        let nodes = || {
+            let mut builder = DataChunkBuilder::new(&[LogicalType::Node]);
+            builder
+                .column_mut(0)
+                .unwrap()
+                .push_node_id(grafeo_common::types::NodeId::new(1));
+            builder.advance_row();
+            builder.finish()
+        };
+
+        let mut types = ColumnTypes::default();
+        types.add(&empty());
+        assert_eq!(types.types(), [LogicalType::Any]);
+        types.add(&nodes());
+        types.add(&empty());
+        assert_eq!(types.types(), [LogicalType::Node]);
+
+        let mut edges = DataChunkBuilder::new(&[LogicalType::Edge]);
+        edges
+            .column_mut(0)
+            .unwrap()
+            .push_edge_id(grafeo_common::types::EdgeId::new(1));
+        edges.advance_row();
+        types.add(&edges.finish());
+        assert_eq!(types.types(), [LogicalType::Any]);
+    }
+
+    /// A copied column keeps its input type; a declared node or edge only
+    /// gives an `Any` column back its entity kind, never a scalar type.
+    #[test]
+    fn copied_columns_keep_the_input_type_or_a_declared_entity() {
+        use LogicalType::{Any, Edge, Int64, Node};
+        let text = LogicalType::String;
+
+        assert_eq!(
+            copied_column_types(
+                &[Any, Any, Any, Node, Int64, text.clone(), Any],
+                &[Edge, Node, Int64, Edge, Any, Node],
+            ),
+            [Edge, Node, Any, Node, Int64, text, Any]
+        );
+    }
 
     #[test]
     fn test_chunk_creation() {

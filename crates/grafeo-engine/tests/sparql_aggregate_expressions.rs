@@ -106,6 +106,26 @@ mod sparql_aggregate_expression_tests {
         );
     }
 
+    /// A computed ORDER BY key is a column the sort adds to sort by: the
+    /// result keeps only the selected columns.
+    #[test]
+    fn sparql_order_by_expression_returns_only_the_selected_columns() {
+        let db = rdf_db();
+        insert_sample_triples(&db);
+
+        let qr = db
+            .execute_sparql("SELECT ?s WHERE { ?s <http://ex.org/name> ?o } ORDER BY DESC(STR(?s))")
+            .unwrap();
+        assert_eq!(qr.columns, vec!["s"]);
+        assert_eq!(qr.column_types.len(), 1, "types: {:?}", qr.column_types);
+        assert_eq!(qr.row_count(), 2);
+        assert!(
+            qr.rows().iter().all(|row| row.len() == 1),
+            "rows: {:?}",
+            qr.rows()
+        );
+    }
+
     // ---------------------------------------------------------------
     // Area 1: SPARQL translator projection with function expressions
     // ---------------------------------------------------------------

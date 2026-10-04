@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::Value;
 
 use super::{Operator, OperatorResult};
 use crate::execution::DataChunk;
@@ -56,25 +56,23 @@ impl RowKey {
 
 /// Distinct operator.
 ///
-/// Removes duplicate rows from the input. Can operate on all columns or a subset.
+/// Removes duplicate rows from the input. Can operate on all columns or a
+/// subset. The rows it keeps keep their columns' types and values.
 pub struct DistinctOperator {
     /// Child operator.
     child: Box<dyn Operator>,
     /// Columns to consider for uniqueness (None = all columns).
     distinct_columns: Option<Vec<usize>>,
-    /// Output schema.
-    output_schema: Vec<LogicalType>,
     /// Set of seen row keys.
     seen: HashSet<RowKey>,
 }
 
 impl DistinctOperator {
     /// Creates a new distinct operator that considers all columns.
-    pub fn new(child: Box<dyn Operator>, output_schema: Vec<LogicalType>) -> Self {
+    pub fn new(child: Box<dyn Operator>) -> Self {
         Self {
             child,
             distinct_columns: None,
-            output_schema,
             seen: HashSet::new(),
         }
     }
@@ -85,15 +83,10 @@ impl DistinctOperator {
     }
 
     /// Creates a distinct operator that considers only specified columns.
-    pub fn on_columns(
-        child: Box<dyn Operator>,
-        columns: Vec<usize>,
-        output_schema: Vec<LogicalType>,
-    ) -> Self {
+    pub fn on_columns(child: Box<dyn Operator>, columns: Vec<usize>) -> Self {
         Self {
             child,
             distinct_columns: Some(columns),
-            output_schema,
             seen: HashSet::new(),
         }
     }
@@ -106,7 +99,7 @@ impl Operator for DistinctOperator {
                 return Ok(None);
             };
 
-            let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);
+            let mut builder = DataChunkBuilder::with_capacity(&chunk.column_types(), 2048);
 
             for row in chunk.selected_indices() {
                 let key = match &self.distinct_columns {
@@ -160,6 +153,7 @@ impl Operator for DistinctOperator {
 mod tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
+    use grafeo_common::types::LogicalType;
 
     struct MockOperator {
         chunks: Vec<DataChunk>,
@@ -224,10 +218,7 @@ mod tests {
     fn test_distinct_all_columns() {
         let mock = MockOperator::new(vec![create_chunk_with_duplicates()]);
 
-        let mut distinct = DistinctOperator::new(
-            Box::new(mock),
-            vec![LogicalType::Int64, LogicalType::String],
-        );
+        let mut distinct = DistinctOperator::new(Box::new(mock));
 
         let mut results = Vec::new();
         while let Some(chunk) = distinct.next().unwrap() {
@@ -262,11 +253,7 @@ mod tests {
     fn test_distinct_single_column() {
         let mock = MockOperator::new(vec![create_chunk_with_duplicates()]);
 
-        let mut distinct = DistinctOperator::on_columns(
-            Box::new(mock),
-            vec![0], // Only consider first column
-            vec![LogicalType::Int64, LogicalType::String],
-        );
+        let mut distinct = DistinctOperator::on_columns(Box::new(mock), vec![0]);
 
         let mut results = Vec::new();
         while let Some(chunk) = distinct.next().unwrap() {
@@ -298,7 +285,7 @@ mod tests {
 
         let mock = MockOperator::new(vec![builder1.finish(), builder2.finish()]);
 
-        let mut distinct = DistinctOperator::new(Box::new(mock), vec![LogicalType::Int64]);
+        let mut distinct = DistinctOperator::new(Box::new(mock));
 
         let mut results = Vec::new();
         while let Some(chunk) = distinct.next().unwrap() {
@@ -316,7 +303,7 @@ mod tests {
     #[test]
     fn test_distinct_into_any() {
         let mock = MockOperator::new(vec![]);
-        let op = DistinctOperator::new(Box::new(mock), vec![LogicalType::Int64]);
+        let op = DistinctOperator::new(Box::new(mock));
         let any = Box::new(op).into_any();
         assert!(any.downcast::<DistinctOperator>().is_ok());
     }
@@ -324,11 +311,7 @@ mod tests {
     #[test]
     fn test_distinct_into_parts() {
         let mock = MockOperator::new(vec![]);
-        let op = DistinctOperator::on_columns(
-            Box::new(mock),
-            vec![0, 2],
-            vec![LogicalType::Int64, LogicalType::String, LogicalType::Int64],
-        );
+        let op = DistinctOperator::on_columns(Box::new(mock), vec![0, 2]);
         let (mut child, distinct_columns) = op.into_parts();
         assert_eq!(distinct_columns, Some(vec![0, 2]));
         assert!(child.next().unwrap().is_none());
@@ -337,7 +320,7 @@ mod tests {
     #[test]
     fn test_distinct_into_parts_all_columns() {
         let mock = MockOperator::new(vec![]);
-        let op = DistinctOperator::new(Box::new(mock), vec![LogicalType::Int64]);
+        let op = DistinctOperator::new(Box::new(mock));
         let (_child, distinct_columns) = op.into_parts();
         assert!(distinct_columns.is_none());
     }

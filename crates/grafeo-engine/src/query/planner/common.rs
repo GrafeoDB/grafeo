@@ -11,9 +11,9 @@ use crate::query::plan::{
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
-    DistinctOperator, ExceptOperator, HashJoinOperator, IntersectOperator,
-    JoinType as PhysicalJoinType, LimitOperator, Operator, OtherwiseOperator, ProjectExpr,
-    ProjectOperator, SkipOperator, UnionOperator,
+    DistinctOperator, ExceptOperator, HashJoinOperator, IntersectOperator, JoinCondition,
+    JoinType as PhysicalJoinType, LimitOperator, NullOrder, Operator, OtherwiseOperator,
+    ProjectExpr, ProjectOperator, SkipOperator, UnionOperator,
 };
 
 /// Builds a LIMIT physical operator.
@@ -21,9 +21,8 @@ pub(crate) fn build_limit(
     input: Box<dyn Operator>,
     columns: Vec<String>,
     count: usize,
-    schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator = Box::new(LimitOperator::new(input, count, schema));
+    let operator = Box::new(LimitOperator::new(input, count));
     (operator, columns)
 }
 
@@ -32,9 +31,8 @@ pub(crate) fn build_skip(
     input: Box<dyn Operator>,
     columns: Vec<String>,
     count: usize,
-    schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator = Box::new(SkipOperator::new(input, count, schema));
+    let operator = Box::new(SkipOperator::new(input, count));
     (operator, columns)
 }
 
@@ -45,7 +43,6 @@ pub(crate) fn build_distinct(
     input: Box<dyn Operator>,
     columns: Vec<String>,
     distinct_columns: Option<&[String]>,
-    schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
     let operator: Box<dyn Operator> = if let Some(dist_cols) = distinct_columns {
         let col_indices: Vec<usize> = dist_cols
@@ -53,12 +50,12 @@ pub(crate) fn build_distinct(
             .filter_map(|name| columns.iter().position(|c| c == name))
             .collect();
         if col_indices.is_empty() {
-            Box::new(DistinctOperator::new(input, schema))
+            Box::new(DistinctOperator::new(input))
         } else {
-            Box::new(DistinctOperator::on_columns(input, col_indices, schema))
+            Box::new(DistinctOperator::on_columns(input, col_indices))
         }
     } else {
-        Box::new(DistinctOperator::new(input, schema))
+        Box::new(DistinctOperator::new(input))
     };
     (operator, columns)
 }
@@ -84,9 +81,8 @@ pub(crate) fn build_except(
     right: Box<dyn Operator>,
     columns: Vec<String>,
     all: bool,
-    schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator = Box::new(ExceptOperator::new(left, right, all, schema));
+    let operator = Box::new(ExceptOperator::new(left, right, all));
     (operator, columns)
 }
 
@@ -96,9 +92,8 @@ pub(crate) fn build_intersect(
     right: Box<dyn Operator>,
     columns: Vec<String>,
     all: bool,
-    schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator = Box::new(IntersectOperator::new(left, right, all, schema));
+    let operator = Box::new(IntersectOperator::new(left, right, all));
     (operator, columns)
 }
 
@@ -306,6 +301,7 @@ pub(crate) fn build_left_join(
     right_columns: &[String],
     left_types: &[LogicalType],
     right_types: &[LogicalType],
+    residual: Option<Box<dyn JoinCondition>>,
 ) -> (Box<dyn Operator>, Vec<String>, Vec<LogicalType>) {
     let (probe_keys, build_keys) = find_shared_join_keys(left_columns, right_columns);
 
@@ -315,14 +311,18 @@ pub(crate) fn build_left_join(
     let mut join_schema: Vec<LogicalType> = left_types.to_vec();
     join_schema.extend(right_types.iter().cloned());
 
-    let join_op: Box<dyn Operator> = Box::new(HashJoinOperator::new(
+    let mut hash_join = HashJoinOperator::new(
         left,
         right,
         probe_keys,
         build_keys,
         PhysicalJoinType::Left,
         join_schema.clone(),
-    ));
+    );
+    if let Some(residual) = residual {
+        hash_join = hash_join.with_residual(residual);
+    }
+    let join_op: Box<dyn Operator> = Box::new(hash_join);
 
     // Deduplicate: keep left columns, then only right columns not already on the left
     let left_set: std::collections::HashSet<&str> =
@@ -423,6 +423,18 @@ pub(crate) fn resolve_expression_to_column(
                 "Cannot resolve expression to column{context}: {expr:?}"
             )),
         })
+}
+
+/// Where a sort key puts nulls: as its `NULLS FIRST` or `NULLS LAST` says,
+/// in either direction, and otherwise as the largest value (last ascending,
+/// first descending), as in openCypher.
+pub(crate) fn physical_null_order(key: &crate::query::plan::SortKey) -> NullOrder {
+    use crate::query::plan::{NullsOrdering, SortOrder};
+
+    match (key.nulls, key.order) {
+        (Some(NullsOrdering::First), _) | (None, SortOrder::Descending) => NullOrder::NullsFirst,
+        (Some(NullsOrdering::Last), _) | (None, SortOrder::Ascending) => NullOrder::NullsLast,
+    }
 }
 
 /// Whether a plan's rows come out in an order it defines: an `ORDER BY` at
@@ -906,6 +918,7 @@ mod tests {
             &right_cols,
             &left_types,
             &right_types,
+            None,
         );
 
         assert_eq!(output_columns, vec!["s", "name", "age"]);

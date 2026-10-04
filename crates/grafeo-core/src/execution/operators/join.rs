@@ -5,13 +5,13 @@
 //! - `NestedLoopJoinOperator`: General-purpose join for any condition
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use arcstr::ArcStr;
 use grafeo_common::types::{LogicalType, Value};
 
 use super::{Operator, OperatorError, OperatorResult};
-use crate::execution::chunk::DataChunkBuilder;
+use crate::execution::chunk::{ColumnTypes, DataChunkBuilder, copied_column_types};
 use crate::execution::{DataChunk, ValueVector};
 
 /// The type of join to perform.
@@ -167,7 +167,8 @@ impl HashKey {
 /// Hash join operator.
 ///
 /// Builds a hash table from the build side (right) and probes with the probe side (left).
-/// Efficient for equality joins on one or more columns.
+/// Efficient for equality joins on one or more columns. A row keeps the column
+/// types of the rows it joins: a node or edge stays one.
 pub struct HashJoinOperator {
     /// Left (probe) side operator.
     probe_side: Box<dyn Operator>,
@@ -179,8 +180,14 @@ pub struct HashJoinOperator {
     build_keys: Vec<usize>,
     /// Join type.
     join_type: JoinType,
-    /// Output schema (combined from both sides).
+    /// Output schema (combined from both sides). Used only for a side that has
+    /// no rows: the build side of a left join that matched nothing, the probe
+    /// side of the unmatched build rows of a right join.
     output_schema: Vec<LogicalType>,
+    /// The column types of the probe chunks read so far.
+    probe_types: ColumnTypes,
+    /// The column types of the materialized build side.
+    build_types: ColumnTypes,
     /// Hash table: key -> list of (chunk_index, row_index).
     hash_table: HashMap<HashKey, Vec<(usize, usize)>>,
     /// Materialized build side chunks.
@@ -199,6 +206,12 @@ pub struct HashJoinOperator {
     probe_matched: Vec<bool>,
     /// For right/full outer joins: track which build rows were matched.
     build_matched: Vec<Vec<bool>>,
+    /// A condition on each pair of rows the keys match, beyond the keys (the
+    /// WHERE of an OPTIONAL MATCH that reads both sides): a pair that fails it
+    /// is no match, and a left row without one keeps nulls.
+    residual: Option<Box<dyn JoinCondition>>,
+    /// Whether a pair of the current probe row passed the residual condition.
+    current_probe_kept: bool,
     /// Whether we're in the emit unmatched phase (for outer joins).
     emitting_unmatched: bool,
     /// Current chunk index when emitting unmatched rows.
@@ -232,6 +245,8 @@ impl HashJoinOperator {
             build_keys,
             join_type,
             output_schema,
+            probe_types: ColumnTypes::default(),
+            build_types: ColumnTypes::default(),
             hash_table: HashMap::new(),
             build_chunks: Vec::new(),
             build_complete: false,
@@ -241,10 +256,21 @@ impl HashJoinOperator {
             current_matches: Vec::new(),
             probe_matched: Vec::new(),
             build_matched: Vec::new(),
+            residual: None,
+            current_probe_kept: false,
             emitting_unmatched: false,
             unmatched_chunk_idx: 0,
             unmatched_row_idx: 0,
         }
+    }
+
+    /// Adds a condition each pair of rows the keys match must also meet: a
+    /// pair that fails it is no match (so in a left join, a probe row none of
+    /// whose pairs pass it keeps nulls).
+    #[must_use]
+    pub fn with_residual(mut self, condition: Box<dyn JoinCondition>) -> Self {
+        self.residual = Some(condition);
+        self
     }
 
     /// Builds the hash table from the build side.
@@ -277,11 +303,50 @@ impl HashJoinOperator {
                     .push((chunk_idx, row));
             }
 
+            self.build_types.add(&chunk);
             self.build_chunks.push(chunk);
         }
 
         self.build_complete = true;
         Ok(())
+    }
+
+    /// The column types of the rows joined from `probe_chunk`: its own, then
+    /// the build side's (only its own for a semi- or anti-join), so the copied
+    /// values keep their types (see [`ColumnTypes`]). The declared schema gives
+    /// the build side's types while it has no rows.
+    fn output_types(&self, probe_chunk: &DataChunk) -> Vec<LogicalType> {
+        let mut types = probe_chunk.column_types();
+        if matches!(self.join_type, JoinType::Semi | JoinType::Anti) {
+            return copied_column_types(&types, &self.output_schema);
+        }
+        if self.build_chunks.is_empty() {
+            types.extend(
+                self.output_schema
+                    .iter()
+                    .skip(probe_chunk.column_count())
+                    .cloned(),
+            );
+        } else {
+            types.extend_from_slice(self.build_types.types());
+        }
+        copied_column_types(&types, &self.output_schema)
+    }
+
+    /// The column types of the unmatched build rows of a right or full join:
+    /// the probe side's (declared while it had no rows), then the build side's.
+    fn unmatched_build_types(&self, probe_col_count: usize) -> Vec<LogicalType> {
+        let mut types = if self.probe_types.types().is_empty() {
+            self.output_schema
+                .iter()
+                .take(probe_col_count)
+                .cloned()
+                .collect()
+        } else {
+            self.probe_types.types().to_vec()
+        };
+        types.extend_from_slice(self.build_types.types());
+        copied_column_types(&types, &self.output_schema)
     }
 
     /// Extracts a hash key from a chunk row.
@@ -362,21 +427,23 @@ impl HashJoinOperator {
                 }
             }
             _ => {
-                // Emit nulls for build side (left outer join case)
-                if !self.build_chunks.is_empty() {
-                    let build_col_count = self.build_chunks[0].column_count();
-                    for col_idx in 0..build_col_count {
-                        let dst_col =
-                            builder
-                                .column_mut(probe_col_count + col_idx)
-                                .ok_or_else(|| {
-                                    OperatorError::ColumnNotFound(format!(
-                                        "output column {}",
-                                        probe_col_count + col_idx
-                                    ))
-                                })?;
-                        dst_col.push_value(Value::Null);
-                    }
+                // Emit nulls for build side (left outer join case), in every
+                // build column: the declared ones while the build side is empty
+                let build_col_count = self.build_chunks.first().map_or_else(
+                    || self.output_schema.len().saturating_sub(probe_col_count),
+                    DataChunk::column_count,
+                );
+                for col_idx in 0..build_col_count {
+                    let dst_col =
+                        builder
+                            .column_mut(probe_col_count + col_idx)
+                            .ok_or_else(|| {
+                                OperatorError::ColumnNotFound(format!(
+                                    "output column {}",
+                                    probe_col_count + col_idx
+                                ))
+                            })?;
+                    dst_col.push_value(Value::Null);
                 }
             }
         }
@@ -393,6 +460,7 @@ impl HashJoinOperator {
             if matches!(self.join_type, JoinType::Left | JoinType::Full) {
                 self.probe_matched = vec![false; c.row_count()];
             }
+            self.probe_types.add(c);
         }
         let has_chunk = chunk.is_some();
         self.current_probe_chunk = chunk;
@@ -406,14 +474,14 @@ impl HashJoinOperator {
             return Ok(None);
         }
 
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);
-
         // Determine probe column count from schema or first probe chunk
         let probe_col_count = if !self.build_chunks.is_empty() {
             self.output_schema.len() - self.build_chunks[0].column_count()
         } else {
             0
         };
+        let mut builder =
+            DataChunkBuilder::with_capacity(&self.unmatched_build_types(probe_col_count), 2048);
 
         while self.unmatched_chunk_idx < self.build_chunks.len() {
             let chunk = &self.build_chunks[self.unmatched_chunk_idx];
@@ -479,8 +547,9 @@ impl Operator for HashJoinOperator {
             return self.emit_unmatched_build();
         }
 
-        // Phase 2: Probe
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);
+        // Phase 2: Probe. Each returned chunk holds rows of one probe chunk,
+        // built in its column types.
+        let mut chunk_builder: Option<DataChunkBuilder> = None;
 
         loop {
             // Get current probe chunk or fetch new one
@@ -490,11 +559,8 @@ impl Operator for HashJoinOperator {
                     self.emitting_unmatched = true;
                     return self.emit_unmatched_build();
                 }
-                return if builder.row_count() > 0 {
-                    Ok(Some(builder.finish()))
-                } else {
-                    Ok(None)
-                };
+                // A probe chunk's rows are returned when the chunk ends.
+                return Ok(None);
             }
 
             // Invariant: current_probe_chunk is Some here - the guard at line 396 either
@@ -503,6 +569,9 @@ impl Operator for HashJoinOperator {
                 .current_probe_chunk
                 .as_ref()
                 .expect("probe chunk is Some: guard at line 396 ensures this");
+            let builder = chunk_builder.get_or_insert_with(|| {
+                DataChunkBuilder::with_capacity(&self.output_types(probe_chunk), 2048)
+            });
             let probe_rows: Vec<usize> = probe_chunk.selected_indices().collect();
 
             while self.current_probe_row < probe_rows.len() {
@@ -512,10 +581,25 @@ impl Operator for HashJoinOperator {
                 if self.current_matches.is_empty() && self.current_match_position == 0 {
                     let key = self.extract_key(probe_chunk, probe_row, &self.probe_keys)?;
 
-                    // Handle semi/anti joins differently
+                    // Handle semi/anti joins differently: a probe row has a match
+                    // when a pair with the same key passes the residual condition.
+                    let has_match = || {
+                        self.hash_table.get(&key).is_some_and(|candidates| {
+                            self.residual.as_ref().is_none_or(|residual| {
+                                candidates.iter().any(|&(chunk_idx, row)| {
+                                    residual.evaluate(
+                                        probe_chunk,
+                                        probe_row,
+                                        &self.build_chunks[chunk_idx],
+                                        row,
+                                    )
+                                })
+                            })
+                        })
+                    };
                     match self.join_type {
                         JoinType::Semi => {
-                            if self.hash_table.contains_key(&key) {
+                            if has_match() {
                                 // Emit probe row only
                                 for col_idx in 0..probe_chunk.column_count() {
                                     if let (Some(src_col), Some(dst_col)) =
@@ -531,7 +615,7 @@ impl Operator for HashJoinOperator {
                             continue;
                         }
                         JoinType::Anti => {
-                            if !self.hash_table.contains_key(&key) {
+                            if !has_match() {
                                 // Emit probe row only
                                 for col_idx in 0..probe_chunk.column_count() {
                                     if let (Some(src_col), Some(dst_col)) =
@@ -549,6 +633,7 @@ impl Operator for HashJoinOperator {
                         _ => {
                             self.current_matches =
                                 self.hash_table.get(&key).cloned().unwrap_or_default();
+                            self.current_probe_kept = false;
                         }
                     }
                 }
@@ -557,7 +642,7 @@ impl Operator for HashJoinOperator {
                 if self.current_matches.is_empty() {
                     // No matches - for left/full outer join, emit with nulls
                     if matches!(self.join_type, JoinType::Left | JoinType::Full) {
-                        self.produce_output_row(&mut builder, probe_chunk, probe_row, None, None)?;
+                        self.produce_output_row(builder, probe_chunk, probe_row, None, None)?;
                     }
                     self.current_probe_row += 1;
                     self.current_match_position = 0;
@@ -567,6 +652,14 @@ impl Operator for HashJoinOperator {
                         let (build_chunk_idx, build_row) =
                             self.current_matches[self.current_match_position];
                         let build_chunk = &self.build_chunks[build_chunk_idx];
+
+                        if let Some(residual) = &self.residual
+                            && !residual.evaluate(probe_chunk, probe_row, build_chunk, build_row)
+                        {
+                            self.current_match_position += 1;
+                            continue;
+                        }
+                        self.current_probe_kept = true;
 
                         // Mark as matched for outer joins
                         if matches!(self.join_type, JoinType::Left | JoinType::Full)
@@ -582,7 +675,7 @@ impl Operator for HashJoinOperator {
                         }
 
                         self.produce_output_row(
-                            &mut builder,
+                            builder,
                             probe_chunk,
                             probe_row,
                             Some(build_chunk),
@@ -592,18 +685,25 @@ impl Operator for HashJoinOperator {
                         self.current_match_position += 1;
 
                         if builder.is_full() {
-                            return Ok(Some(builder.finish()));
+                            return Ok(chunk_builder.take().map(DataChunkBuilder::finish));
                         }
                     }
 
-                    // Done with this probe row
+                    // Done with this probe row: without a pair that passed the
+                    // residual condition, a left or full join keeps it with nulls.
+                    if self.residual.is_some()
+                        && !self.current_probe_kept
+                        && matches!(self.join_type, JoinType::Left | JoinType::Full)
+                    {
+                        self.produce_output_row(builder, probe_chunk, probe_row, None, None)?;
+                    }
                     self.current_probe_row += 1;
                     self.current_matches.clear();
                     self.current_match_position = 0;
                 }
 
                 if builder.is_full() {
-                    return Ok(Some(builder.finish()));
+                    return Ok(chunk_builder.take().map(DataChunkBuilder::finish));
                 }
             }
 
@@ -611,8 +711,10 @@ impl Operator for HashJoinOperator {
             self.current_probe_chunk = None;
             self.current_probe_row = 0;
 
-            if builder.row_count() > 0 {
-                return Ok(Some(builder.finish()));
+            if let Some(done) = chunk_builder.take()
+                && done.row_count() > 0
+            {
+                return Ok(Some(done.finish()));
             }
         }
     }
@@ -620,6 +722,8 @@ impl Operator for HashJoinOperator {
     fn reset(&mut self) {
         self.probe_side.reset();
         self.build_side.reset();
+        self.probe_types = ColumnTypes::default();
+        self.build_types = ColumnTypes::default();
         self.hash_table.clear();
         self.build_chunks.clear();
         self.build_complete = false;
@@ -629,6 +733,7 @@ impl Operator for HashJoinOperator {
         self.current_matches.clear();
         self.probe_matched.clear();
         self.build_matched.clear();
+        self.current_probe_kept = false;
         self.emitting_unmatched = false;
         self.unmatched_chunk_idx = 0;
         self.unmatched_row_idx = 0;
@@ -646,7 +751,8 @@ impl Operator for HashJoinOperator {
 /// Nested loop join operator.
 ///
 /// Performs a cartesian product of both sides, filtering by the join condition.
-/// Less efficient than hash join but supports any join condition.
+/// Less efficient than hash join but supports any join condition. A row keeps
+/// the column types of the rows it joins: a node or edge stays one.
 pub struct NestedLoopJoinOperator {
     /// Left side operator.
     left: Box<dyn Operator>,
@@ -656,12 +762,19 @@ pub struct NestedLoopJoinOperator {
     condition: Option<Box<dyn JoinCondition>>,
     /// Join type.
     join_type: JoinType,
-    /// Output schema.
+    /// Output schema. Only its right-side part is used: for the right side's
+    /// columns of a left join when the right side has no rows.
     output_schema: Vec<LogicalType>,
+    /// The column types of the materialized right side.
+    right_types: ColumnTypes,
     /// Materialized right side chunks.
     right_chunks: Vec<DataChunk>,
     /// Whether the right side is materialized.
     right_materialized: bool,
+    /// Whether the whole left side is read before the right side.
+    left_first: bool,
+    /// The left side's chunks, when it is read first.
+    left_chunks: Option<VecDeque<DataChunk>>,
     /// Current left chunk.
     current_left_chunk: Option<DataChunk>,
     /// Current row in the left chunk.
@@ -684,6 +797,69 @@ pub trait JoinCondition: Send + Sync {
         right_chunk: &DataChunk,
         right_row: usize,
     ) -> bool;
+}
+
+/// A condition given by a predicate over the joined row: the left row's
+/// columns, then the right row's, numbered as the predicate's variable
+/// columns number them.
+pub struct JoinedRowCondition {
+    predicate: Box<dyn super::filter::Predicate>,
+    /// The joined row being checked, reused from pair to pair while the
+    /// column types stay the same.
+    scratch: parking_lot::Mutex<Option<DataChunk>>,
+}
+
+impl JoinedRowCondition {
+    /// Creates the condition from a predicate over the joined row.
+    pub fn new(predicate: Box<dyn super::filter::Predicate>) -> Self {
+        Self {
+            predicate,
+            scratch: parking_lot::Mutex::new(None),
+        }
+    }
+}
+
+impl JoinCondition for JoinedRowCondition {
+    fn evaluate(
+        &self,
+        left_chunk: &DataChunk,
+        left_row: usize,
+        right_chunk: &DataChunk,
+        right_row: usize,
+    ) -> bool {
+        let sources: Vec<(&ValueVector, usize)> =
+            [(left_chunk, left_row), (right_chunk, right_row)]
+                .into_iter()
+                .flat_map(|(chunk, row)| chunk.columns().iter().map(move |column| (column, row)))
+                .collect();
+        let mut scratch = self.scratch.lock();
+        let fits = scratch.as_ref().is_some_and(|joined| {
+            joined.column_count() == sources.len()
+                && joined
+                    .columns()
+                    .iter()
+                    .zip(&sources)
+                    .all(|(column, (source, _))| column.data_type() == source.data_type())
+        });
+        if !fits {
+            *scratch = Some(DataChunk::new(
+                sources
+                    .iter()
+                    .map(|(source, _)| ValueVector::with_capacity(source.data_type().clone(), 1))
+                    .collect(),
+            ));
+        }
+        let joined = scratch.as_mut().expect("the joined row was just built");
+        for (index, (source, row)) in sources.iter().enumerate() {
+            let column = joined
+                .column_mut(index)
+                .expect("the joined row has a column per source column");
+            column.clear();
+            source.copy_row_to(*row, column);
+        }
+        joined.set_count(1);
+        self.predicate.evaluate(joined, 0)
+    }
 }
 
 /// A simple equality condition for nested loop joins.
@@ -741,8 +917,11 @@ impl NestedLoopJoinOperator {
             condition,
             join_type,
             output_schema,
+            right_types: ColumnTypes::default(),
             right_chunks: Vec::new(),
             right_materialized: false,
+            left_first: false,
+            left_chunks: None,
             current_left_chunk: None,
             current_left_row: 0,
             current_right_chunk: 0,
@@ -751,13 +930,50 @@ impl NestedLoopJoinOperator {
         }
     }
 
+    /// Reads the whole left side before the right side, so that the right
+    /// side sees what the left side wrote: in `INSERT (:N) WITH 1 AS x
+    /// MATCH (n:N)` the scan of `n` runs after the insert.
+    #[must_use]
+    pub fn with_left_first(mut self) -> Self {
+        self.left_first = true;
+        self
+    }
+
+    /// The next left chunk, from the buffer when the left side was read first.
+    fn next_left(&mut self) -> OperatorResult {
+        match &mut self.left_chunks {
+            Some(chunks) => Ok(chunks.pop_front()),
+            None => self.left.next(),
+        }
+    }
+
     /// Materializes the right side.
     fn materialize_right(&mut self) -> Result<(), OperatorError> {
         while let Some(chunk) = self.right.next()? {
+            self.right_types.add(&chunk);
             self.right_chunks.push(chunk);
         }
         self.right_materialized = true;
         Ok(())
+    }
+
+    /// The column types of the rows joined from `left_chunk`: its own, then
+    /// the right side's, so the copied values keep their types (see
+    /// [`ColumnTypes`]). The declared schema gives the right side's types
+    /// while it has no rows.
+    fn output_types(&self, left_chunk: &DataChunk) -> Vec<LogicalType> {
+        let mut types = left_chunk.column_types();
+        if self.right_chunks.is_empty() {
+            types.extend(
+                self.output_schema
+                    .iter()
+                    .skip(left_chunk.column_count())
+                    .cloned(),
+            );
+        } else {
+            types.extend_from_slice(self.right_types.types());
+        }
+        copied_column_types(&types, &self.output_schema)
     }
 
     /// Produces an output row.
@@ -835,6 +1051,14 @@ impl NestedLoopJoinOperator {
 
 impl Operator for NestedLoopJoinOperator {
     fn next(&mut self) -> OperatorResult {
+        if self.left_first && self.left_chunks.is_none() {
+            let mut chunks = VecDeque::new();
+            while let Some(chunk) = self.left.next()? {
+                chunks.push_back(chunk);
+            }
+            self.left_chunks = Some(chunks);
+        }
+
         // Materialize right side
         if !self.right_materialized {
             self.materialize_right()?;
@@ -845,23 +1069,17 @@ impl Operator for NestedLoopJoinOperator {
             return Ok(None);
         }
 
-        let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 2048);
-
         loop {
             // Get current left chunk
             if self.current_left_chunk.is_none() {
-                self.current_left_chunk = self.left.next()?;
+                self.current_left_chunk = self.next_left()?;
                 self.current_left_row = 0;
                 self.current_right_chunk = 0;
                 self.current_right_row = 0;
 
                 if self.current_left_chunk.is_none() {
                     // No more left data
-                    return if builder.row_count() > 0 {
-                        Ok(Some(builder.finish()))
-                    } else {
-                        Ok(None)
-                    };
+                    return Ok(None);
                 }
             }
 
@@ -870,6 +1088,9 @@ impl Operator for NestedLoopJoinOperator {
                 .as_ref()
                 .expect("left chunk is Some: loaded in loop above");
             let left_rows: Vec<usize> = left_chunk.selected_indices().collect();
+            // Each returned chunk holds rows of one left chunk, built in its
+            // column types.
+            let mut builder = DataChunkBuilder::with_capacity(&self.output_types(left_chunk), 2048);
 
             // Calculate right column count for potential unmatched rows
             let right_col_count = if !self.right_chunks.is_empty() {
@@ -965,8 +1186,10 @@ impl Operator for NestedLoopJoinOperator {
     fn reset(&mut self) {
         self.left.reset();
         self.right.reset();
+        self.right_types = ColumnTypes::default();
         self.right_chunks.clear();
         self.right_materialized = false;
+        self.left_chunks = None;
         self.current_left_chunk = None;
         self.current_left_row = 0;
         self.current_right_chunk = 0;
@@ -1103,6 +1326,71 @@ mod tests {
         assert_eq!(results[2], (3, Some(3)));
     }
 
+    /// A residual condition decides which key matches count: a left row none
+    /// of whose pairs pass it keeps nulls (once), the others keep the pairs
+    /// that pass. The condition reads the joined row: left columns, then right.
+    #[test]
+    fn test_hash_join_left_outer_with_a_residual() {
+        struct LeftIsNot2;
+        impl super::super::filter::Predicate for LeftIsNot2 {
+            fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
+                assert_eq!(
+                    chunk.column_count(),
+                    2,
+                    "the left column, then the right one"
+                );
+                chunk.column(0).unwrap().get_int64(row) != Some(2)
+            }
+        }
+
+        let left = MockOperator::new(vec![create_int_chunk(&[1, 2, 3])]);
+        let right = MockOperator::new(vec![create_int_chunk(&[1, 2, 2, 3])]);
+        let mut join = HashJoinOperator::new(
+            Box::new(left),
+            Box::new(right),
+            vec![0],
+            vec![0],
+            JoinType::Left,
+            vec![LogicalType::Int64, LogicalType::Int64],
+        )
+        .with_residual(Box::new(JoinedRowCondition::new(Box::new(LeftIsNot2))));
+
+        let mut results = Vec::new();
+        while let Some(chunk) = join.next().unwrap() {
+            for row in chunk.selected_indices() {
+                let left_val = chunk.column(0).unwrap().get_int64(row).unwrap();
+                let right_val = chunk.column(1).unwrap().get_int64(row);
+                results.push((left_val, right_val));
+            }
+        }
+        results.sort_by_key(|(l, _)| *l);
+        assert_eq!(results, [(1, Some(1)), (2, None), (3, Some(3))]);
+
+        // A semi-join keeps the rows with a pair that passes it, an anti-join
+        // the others.
+        for (join_type, expected) in [(JoinType::Semi, vec![1, 3]), (JoinType::Anti, vec![2])] {
+            let left = MockOperator::new(vec![create_int_chunk(&[1, 2, 3])]);
+            let right = MockOperator::new(vec![create_int_chunk(&[1, 2, 2, 3])]);
+            let mut join = HashJoinOperator::new(
+                Box::new(left),
+                Box::new(right),
+                vec![0],
+                vec![0],
+                join_type,
+                vec![LogicalType::Int64],
+            )
+            .with_residual(Box::new(JoinedRowCondition::new(Box::new(LeftIsNot2))));
+            let mut kept = Vec::new();
+            while let Some(chunk) = join.next().unwrap() {
+                for row in chunk.selected_indices() {
+                    kept.push(chunk.column(0).unwrap().get_int64(row).unwrap());
+                }
+            }
+            kept.sort_unstable();
+            assert_eq!(kept, expected, "{join_type:?}");
+        }
+    }
+
     #[test]
     fn test_nested_loop_cross_join() {
         // Left: [1, 2]
@@ -1132,6 +1420,173 @@ mod tests {
 
         results.sort_unstable();
         assert_eq!(results, vec![(1, 10), (1, 20), (2, 10), (2, 20)]);
+    }
+
+    /// A cross join keeps the column types of both sides, whatever schema it
+    /// declares: an edge stays an edge, so its properties are not read from
+    /// the node with the same ID.
+    #[test]
+    fn a_cross_join_keeps_the_column_types() {
+        use grafeo_common::types::{EdgeId, NodeId};
+
+        let mut left = DataChunkBuilder::new(&[LogicalType::Edge, LogicalType::Node]);
+        for id in [3_u64, 5] {
+            left.column_mut(0).unwrap().push_edge_id(EdgeId::new(id));
+            left.column_mut(1)
+                .unwrap()
+                .push_node_id(NodeId::new(id + 100));
+            left.advance_row();
+        }
+        let mut right = DataChunkBuilder::new(&[LogicalType::Node]);
+        right.column_mut(0).unwrap().push_node_id(NodeId::new(7));
+        right.advance_row();
+
+        let mut join = NestedLoopJoinOperator::new(
+            Box::new(MockOperator::new(vec![left.finish()])),
+            Box::new(MockOperator::new(vec![right.finish()])),
+            None,
+            JoinType::Cross,
+            vec![LogicalType::Any, LogicalType::Any, LogicalType::Node],
+        );
+
+        let chunk = join.next().unwrap().unwrap();
+        assert_eq!(
+            chunk.column_types(),
+            [LogicalType::Edge, LogicalType::Node, LogicalType::Node]
+        );
+        let rows: Vec<(u64, u64, u64)> = chunk
+            .selected_indices()
+            .map(|row| {
+                (
+                    chunk.column(0).unwrap().get_edge_id(row).unwrap().as_u64(),
+                    chunk.column(1).unwrap().get_node_id(row).unwrap().as_u64(),
+                    chunk.column(2).unwrap().get_node_id(row).unwrap().as_u64(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, [(3, 103, 7), (5, 105, 7)]);
+        assert!(join.next().unwrap().is_none());
+    }
+
+    /// Probe rows (node, key) for keys 1 and 2, nodes 101 and 102.
+    fn node_probe_chunk() -> DataChunk {
+        use grafeo_common::types::NodeId;
+
+        let mut probe = DataChunkBuilder::new(&[LogicalType::Node, LogicalType::Int64]);
+        for key in [1_u64, 2] {
+            probe
+                .column_mut(0)
+                .unwrap()
+                .push_node_id(NodeId::new(key + 100));
+            probe
+                .column_mut(1)
+                .unwrap()
+                .push_int64(i64::try_from(key).unwrap());
+            probe.advance_row();
+        }
+        probe.finish()
+    }
+
+    /// A hash join keeps the column types of both sides (the declared schema
+    /// says `Any`): a node stays a node and an edge an edge.
+    #[test]
+    fn a_hash_join_keeps_the_column_types() {
+        use grafeo_common::types::EdgeId;
+
+        let mut build = DataChunkBuilder::new(&[LogicalType::Int64, LogicalType::Edge]);
+        build.column_mut(0).unwrap().push_int64(2);
+        build.column_mut(1).unwrap().push_edge_id(EdgeId::new(7));
+        build.advance_row();
+
+        let mut join = HashJoinOperator::new(
+            Box::new(MockOperator::new(vec![node_probe_chunk()])),
+            Box::new(MockOperator::new(vec![build.finish()])),
+            vec![1],
+            vec![0],
+            JoinType::Inner,
+            vec![LogicalType::Any; 4],
+        );
+
+        let chunk = join.next().unwrap().unwrap();
+        assert_eq!(
+            chunk.column_types(),
+            [
+                LogicalType::Node,
+                LogicalType::Int64,
+                LogicalType::Int64,
+                LogicalType::Edge
+            ]
+        );
+        assert_eq!(chunk.row_count(), 1);
+        assert_eq!(
+            chunk.column(0).unwrap().get_node_id(0).unwrap().as_u64(),
+            102
+        );
+        assert!(chunk.column(0).unwrap().get_edge_id(0).is_none());
+        assert_eq!(chunk.column(3).unwrap().get_edge_id(0).unwrap().as_u64(), 7);
+        assert!(chunk.column(3).unwrap().get_node_id(0).is_none());
+        assert!(join.next().unwrap().is_none());
+    }
+
+    /// A semi-join returns its probe rows in their own types.
+    #[test]
+    fn a_semi_join_keeps_the_probe_types() {
+        let mut build = DataChunkBuilder::new(&[LogicalType::Int64]);
+        build.column_mut(0).unwrap().push_int64(1);
+        build.advance_row();
+
+        let mut join = HashJoinOperator::new(
+            Box::new(MockOperator::new(vec![node_probe_chunk()])),
+            Box::new(MockOperator::new(vec![build.finish()])),
+            vec![1],
+            vec![0],
+            JoinType::Semi,
+            vec![LogicalType::Any; 2],
+        );
+
+        let chunk = join.next().unwrap().unwrap();
+        assert_eq!(
+            chunk.column_types(),
+            [LogicalType::Node, LogicalType::Int64]
+        );
+        assert_eq!(chunk.row_count(), 1);
+        assert_eq!(
+            chunk.column(0).unwrap().get_node_id(0).unwrap().as_u64(),
+            101
+        );
+    }
+
+    /// A left join with no build rows takes the build side's types from the
+    /// declared schema and the probe side's from its rows.
+    #[test]
+    fn a_left_join_without_build_rows_keeps_the_probe_types() {
+        let mut join = HashJoinOperator::new(
+            Box::new(MockOperator::new(vec![node_probe_chunk()])),
+            Box::new(MockOperator::new(vec![])),
+            vec![1],
+            vec![0],
+            JoinType::Left,
+            vec![
+                LogicalType::Any,
+                LogicalType::Any,
+                LogicalType::Int64,
+                LogicalType::Edge,
+            ],
+        );
+
+        let chunk = join.next().unwrap().unwrap();
+        assert_eq!(
+            chunk.column_types(),
+            [
+                LogicalType::Node,
+                LogicalType::Int64,
+                LogicalType::Int64,
+                LogicalType::Edge
+            ]
+        );
+        assert_eq!(chunk.row_count(), 2);
+        assert!(chunk.column(3).unwrap().is_null(0));
+        assert!(chunk.column(3).unwrap().is_null(1));
     }
 
     #[test]

@@ -1,0 +1,143 @@
+# Rosetta: an OPTIONAL MATCH condition that reads an earlier variable
+#
+# A condition on an OPTIONAL MATCH (a WHERE after it, or GQL's WHERE inside
+# the pattern) decides which matches the optional part keeps; a row none of
+# whose matches pass it keeps nulls. When the condition reads a variable bound
+# before the OPTIONAL MATCH (here `a`), the trailing WHERE dropped such rows,
+# and the inline GQL form read `a` as null and kept no match at all.
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): Alix (30),
+# Gus (25), Vincent (40), Jules (35) and Mia (28); KNOWS Alix->Gus,
+# Gus->Vincent, Vincent->Alix, Jules->Mia and Alix->Jules.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: OPTIONAL MATCH conditions on earlier variables
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  # Whom Alix's friends know that is older than Alix: Gus knows Vincent (40);
+  # Jules knows only Mia (28), so Jules keeps a null.
+  - name: a_trailing_where_reads_an_earlier_variable
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c) WHERE c.age > a.age RETURN b.name AS b, c.name AS c"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c) WHERE c.age > a.age RETURN b.name AS b, c.name AS c"
+    expect:
+      rows:
+        - [Gus, Vincent]
+        - [Jules, null]
+
+  - name: an_inline_where_reads_an_earlier_variable
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c WHERE c.age > a.age) RETURN b.name AS b, c.name AS c"
+    expect:
+      rows:
+        - [Gus, Vincent]
+        - [Jules, null]
+
+  # The condition sits in the second pattern of the OPTIONAL MATCH: Gus knows
+  # Vincent, who is older than Alix (and lives nowhere); Jules knows Mia, who
+  # is younger and lives in Paris.
+  - name: an_inline_where_in_a_second_pattern
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c), (c)-[:LIVES_IN]->(y WHERE c.age < a.age) RETURN b.name AS b, y.name AS y"
+    expect:
+      rows:
+        - [Gus, null]
+        - [Jules, Paris]
+
+  # Per person: the rows of the optional part (one per friend, kept with a
+  # null) and the matches that pass the condition.
+  - name: the_condition_in_a_subquery
+    variants:
+      gql: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c) WHERE c.age > a.age RETURN count(*) AS rows, count(c) AS found } RETURN a.name AS a, rows, found"
+      cypher: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c) WHERE c.age > a.age RETURN count(*) AS rows, count(c) AS found } RETURN a.name AS a, rows, found"
+    expect:
+      rows:
+        - [Alix, 2, 1]
+        - [Gus, 1, 1]
+        - [Vincent, 1, 0]
+        - [Jules, 1, 0]
+        - [Mia, 0, 0]
+
+  # A condition that reads only the optional part's own variables works.
+  - name: a_condition_on_the_optional_part_only
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c) WHERE c.age > 30 RETURN b.name AS b, c.name AS c"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c) WHERE c.age > 30 RETURN b.name AS b, c.name AS c"
+    expect:
+      rows:
+        - [Gus, Vincent]
+        - [Jules, null]
+
+  # ---------------------------------------------------------------------------
+  # An OPTIONAL MATCH that comes first: one row, with nulls when nothing matches
+  # ---------------------------------------------------------------------------
+
+  - name: a_leading_optional_match_without_a_match
+    variants:
+      gql: "OPTIONAL MATCH (x:Robot) RETURN x.name AS x"
+      cypher: "OPTIONAL MATCH (x:Robot) RETURN x.name AS x"
+    expect:
+      rows:
+        - [null]
+
+  - name: a_leading_optional_match_with_a_match
+    variants:
+      gql: "OPTIONAL MATCH (p:Person {name: 'Alix'}) RETURN p.name AS p"
+      cypher: "OPTIONAL MATCH (p:Person {name: 'Alix'}) RETURN p.name AS p"
+    expect:
+      rows:
+        - [Alix]
+
+  # In a subquery the OPTIONAL MATCH starts from the outer row: Mia knows
+  # nobody, so her optional part is one row with a null.
+  - name: a_value_subquery_that_starts_with_optional_match
+    variants:
+      gql: "MATCH (p:Person) RETURN p.name AS p, VALUE { OPTIONAL MATCH (p)-[:KNOWS]->(f) RETURN count(f) } AS friends"
+    expect:
+      rows:
+        - [Alix, 2]
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Jules, 1]
+        - [Mia, 0]
+
+  - name: a_count_subquery_that_starts_with_optional_match
+    variants:
+      gql: "MATCH (p:Person) RETURN p.name AS p, COUNT { OPTIONAL MATCH (p)-[:KNOWS]->(f) } AS n"
+      cypher: "MATCH (p:Person) RETURN p.name AS p, COUNT { OPTIONAL MATCH (p)-[:KNOWS]->(f) } AS n"
+    expect:
+      rows:
+        - [Alix, 2]
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Jules, 1]
+        - [Mia, 1]
+
+  - name: an_exists_subquery_that_starts_with_optional_match
+    variants:
+      gql: "MATCH (p:Person) WHERE EXISTS { OPTIONAL MATCH (p)-[:LIVES_IN]->(c) } RETURN p.name AS p"
+      cypher: "MATCH (p:Person) WHERE EXISTS { OPTIONAL MATCH (p)-[:LIVES_IN]->(c) } RETURN p.name AS p"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+        - [Jules]
+        - [Mia]
+
+  - name: a_call_subquery_that_starts_with_optional_match
+    variants:
+      gql: "MATCH (p:Person) CALL (p) { OPTIONAL MATCH (p)-[:LIVES_IN]->(c) RETURN c.name AS city } RETURN p.name AS p, city"
+      cypher: "MATCH (p:Person) CALL (p) { OPTIONAL MATCH (p)-[:LIVES_IN]->(c) RETURN c.name AS city } RETURN p.name AS p, city"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, null]
+        - [Jules, null]
+        - [Mia, Paris]

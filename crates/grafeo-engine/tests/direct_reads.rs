@@ -66,6 +66,107 @@ fn direct_reads_see_the_compacted_data() {
     assert!(validation.errors.is_empty(), "{:?}", validation.errors);
 }
 
+/// The schema views count the labels, edge types and property keys of the
+/// compacted data next to those written since.
+#[cfg(feature = "compact-store")]
+#[test]
+fn schema_views_see_the_compacted_data() {
+    use grafeo_engine::SchemaInfo;
+
+    let mut db = GrafeoDB::new_in_memory();
+    let alix = person(&db, "Alix");
+    let amsterdam = db
+        .create_node_with_props(&["City"], [("population", Value::Int64(921_000))])
+        .unwrap();
+    db.create_edge(alix, amsterdam, "LIVES_IN").unwrap();
+    db.compact().unwrap();
+    let gus = person(&db, "Gus");
+    db.create_edge_with_props(alix, gus, "KNOWS", [("since", Value::Int64(2020))])
+        .unwrap();
+
+    // Person and City, LIVES_IN and KNOWS, name, population and since.
+    assert_eq!(
+        (
+            db.label_count(),
+            db.edge_type_count(),
+            db.property_key_count()
+        ),
+        (2, 2, 3)
+    );
+    let stats = db.detailed_stats();
+    assert_eq!(
+        (
+            stats.label_count,
+            stats.edge_type_count,
+            stats.property_key_count
+        ),
+        (2, 2, 3)
+    );
+
+    let SchemaInfo::Lpg(schema) = db.schema() else {
+        panic!("expected an LPG schema");
+    };
+    let mut labels: Vec<_> = schema
+        .labels
+        .iter()
+        .map(|label| (label.name.as_str(), label.count))
+        .collect();
+    labels.sort_unstable();
+    assert_eq!(labels, [("City", 1), ("Person", 2)]);
+    let mut edge_types: Vec<_> = schema
+        .edge_types
+        .iter()
+        .map(|edge_type| (edge_type.name.as_str(), edge_type.count))
+        .collect();
+    edge_types.sort_unstable();
+    assert_eq!(edge_types, [("KNOWS", 1), ("LIVES_IN", 1)]);
+    let mut keys = schema.property_keys;
+    keys.sort_unstable();
+    assert_eq!(keys, ["name", "population", "since"]);
+}
+
+/// The schema and the counts show committed data only: an open
+/// transaction's node and edge appear once it commits, and never after it
+/// rolls back.
+#[test]
+fn schema_counts_committed_data_only() {
+    use grafeo_engine::SchemaInfo;
+
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        .unwrap();
+    let counts = |db: &GrafeoDB| {
+        let SchemaInfo::Lpg(schema) = db.schema() else {
+            panic!("expected an LPG schema");
+        };
+        let people = schema
+            .labels
+            .iter()
+            .find(|label| label.name == "Person")
+            .map_or(0, |label| label.count);
+        let knows = schema
+            .edge_types
+            .iter()
+            .find(|edge_type| edge_type.name == "KNOWS")
+            .map_or(0, |edge_type| edge_type.count);
+        let stats = db.detailed_stats();
+        (people, knows, stats.node_count, stats.edge_count)
+    };
+    let insert = "MATCH (a:Person {name: 'Alix'}) INSERT (a)-[:KNOWS]->(:Person {name: 'Django'})";
+
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.execute(insert).unwrap();
+    assert_eq!(counts(&db), (2, 1, 2, 1), "while the transaction is open");
+    session.rollback().unwrap();
+    assert_eq!(counts(&db), (2, 1, 2, 1), "after a rollback");
+
+    session.begin_transaction().unwrap();
+    session.execute(insert).unwrap();
+    session.commit().unwrap();
+    assert_eq!(counts(&db), (3, 2, 3, 2), "after the commit");
+}
+
 #[test]
 fn direct_reads_on_an_external_store() {
     let store = Arc::new(LpgStore::new().unwrap());
@@ -85,6 +186,14 @@ fn direct_reads_on_an_external_store() {
     assert_eq!(name(&db, alix), Some(Value::from("Alix")));
     assert_eq!(db.get_edge(knows).map(|edge| edge.dst), Some(gus));
     assert_eq!(db.get_node_labels(alix), Some(vec!["Person".to_string()]));
+    assert_eq!(
+        (
+            db.label_count(),
+            db.edge_type_count(),
+            db.property_key_count()
+        ),
+        (1, 1, 1)
+    );
     assert_eq!(
         db.graph("default")
             .unwrap()

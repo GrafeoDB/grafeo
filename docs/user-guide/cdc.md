@@ -74,6 +74,7 @@ Once CDC is enabled, every mutation records a `ChangeEvent` with:
 | Field           | Description                                                                 |
 |-----------------|-----------------------------------------------------------------------------|
 | `entity_id`     | Node or edge ID                                                             |
+| `graph`         | The graph the entity is in: its name (`schema/name` inside a schema, and `schema/__default__` for a schema's default graph); `None` for the default graph |
 | `kind`          | `Create`, `Update`, or `Delete`                                             |
 | `epoch`         | Commit epoch (monotonically increasing)                                     |
 | `timestamp`     | HLC timestamp (hybrid logical clock)                                        |
@@ -91,6 +92,11 @@ or removing a label is an `Update` event with `labels` and `before_labels`.
 A node or edge created in a transaction has one `Create` event that shows it as
 the transaction left it: property and label changes made later in the same
 transaction are part of that event rather than events of their own.
+
+Node and edge IDs repeat across named graphs, so an ID names an entity only
+together with its graph. `history` on the database reads the default graph, and
+on a session the session's current graph; `changes_between` returns the events
+of every graph, each with its `graph`.
 
 ### Per-entity history
 

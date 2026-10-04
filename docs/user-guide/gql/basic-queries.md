@@ -264,7 +264,7 @@ sees no outer variable. A subquery returns new names only: returning an outer va
 with `UNION`, `EXCEPT`, `INTERSECT` or `OTHERWISE`:
 
 ```sql
--- Each person's oldest friend
+-- Each person's oldest friend (a person who knows nobody is left out; OPTIONAL CALL keeps them)
 MATCH (p:Person)
 CALL (p) {
     MATCH (p)-[:KNOWS]->(friend)

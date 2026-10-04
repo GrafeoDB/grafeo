@@ -153,7 +153,8 @@ jobs:
 
           - [ ] Review changelog entry (add new API surface if applicable)
           - [ ] Verify tests pass in grafeo-web CI
-          - [ ] Merge when ready (release is created automatically)
+          - [ ] Merge when ready
+          - [ ] Create the release \`v${VERSION}\` by hand when ready (it publishes to npm)
           EOF
 
           gh pr create \

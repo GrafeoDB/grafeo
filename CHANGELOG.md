@@ -2,6 +2,8 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.5.45] - Unreleased
+
 ## [0.5.44] - 2026-10-04
 
 Durability and consistency release. Crash-safe checkpoints and WAL recovery, indexes and constraints that survive a reopen, schema checks on every write path, per-graph conflicts and grants, commit and rollback in O(changes), and fixes for shortest paths, variable-length edges, list comprehensions, subqueries, `OPTIONAL MATCH` and `MERGE`. Plus graph handles, upserts by key and write counters.

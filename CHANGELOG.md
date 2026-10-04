@@ -7,6 +7,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 ### Changed
 
 - **Versioning**: before 1.0, a release that changes the file format or breaks the stable surface (the `grafeo` crate, the bindings, the CLI) bumps the minor version, as Cargo and npm expect for `0.x`. This release, first planned as 0.5.45, is 0.6.0 for that reason. See [Versioning and Compatibility](https://grafeo.dev/versioning/).
+- **Breaking: the minimum Rust version is 1.99.0** (was 1.91.1).
 - **Rust (`grafeo-engine`): `TransactionState::Committing`**: `TransactionManager::state` reports it while a commit is being completed, between its commit epoch and its WAL records.
 
 ### Fixed

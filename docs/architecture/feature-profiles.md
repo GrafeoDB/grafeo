@@ -105,8 +105,8 @@ Production operations. In the engine this enables observability and the async st
 
 ## Deprecated Profile Names
 
-!!! warning "Deprecated, removed in 0.7.0"
-    The deployment-based names `embedded`, `browser`, `server` and `full` still work as aliases, but they are deprecated and will be removed in 0.7.0 ([#468](https://github.com/GrafeoDB/grafeo/issues/468)). Use the persona profiles in new projects.
+!!! warning "Deprecated, removed in 0.8.0"
+    The deployment-based names `embedded`, `browser`, `server` and `full` still work as aliases, but they are deprecated and will be removed in 0.8.0 ([#468](https://github.com/GrafeoDB/grafeo/issues/468)). Use the persona profiles in new projects.
 
 | Deprecated name | Use instead | Notes |
 | --- | --- | --- |

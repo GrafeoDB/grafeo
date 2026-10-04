@@ -231,7 +231,7 @@ fn a_failing_batch_creates_nothing() {
         assert!(
             db.find_nodes_by_property("id", &Value::from("a"))
                 .is_empty(),
-            "expected no nodes"
+            "with_index: {with_index}"
         );
 
         let created = db

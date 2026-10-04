@@ -57,4 +57,4 @@ Until 1.0, pin the minor version you test against. For example, to stay on 0.6:
 | npm | `"@grafeo-db/js": "^0.6.0"` | `>=0.6.0, <0.7.0` |
 | pip / uv | `grafeo~=0.6.0` | `>=0.6.0, <0.7` |
 
-For pip and uv, write all three parts: `grafeo~=0.6` accepts every version below 1.0.
+For pip and uv, write all three parts: `grafeo~=0.6` means `>=0.6, <1.0`, so it also accepts 0.7 and later.

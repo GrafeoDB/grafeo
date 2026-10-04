@@ -48,11 +48,22 @@ enum Moment {
     Stamped,
 }
 
+/// How long the commit waits for the work it started.
+#[derive(Clone, Copy)]
+enum Wait {
+    /// Until the work is done, for work that never waits for the commit: it
+    /// always runs in the middle of the commit.
+    UntilDone,
+    /// 300 ms, for work that should wait for the commit: if it does not, it
+    /// has that long to land in the middle of the commit.
+    Briefly,
+}
+
 /// Starts `work` on another thread from inside the next commit on this
-/// thread, at `moment`, and gives it time to finish there once it runs: work
-/// that does not wait for the commit runs in the middle of it.
+/// thread, at `moment`, and waits for it as `wait` says.
 fn during_next_commit_at<T: Send + 'static>(
     moment: Moment,
+    wait: Wait,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> DuringCommit<T> {
     let slot = Arc::new(Mutex::new(None));
@@ -71,7 +82,14 @@ fn during_next_commit_at<T: Send + 'static>(
         running
             .recv_timeout(Duration::from_secs(10))
             .expect("the worker did not start");
-        let _ = finished.recv_timeout(Duration::from_millis(300));
+        match wait {
+            Wait::UntilDone => finished
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the work did not finish during the commit"),
+            Wait::Briefly => {
+                let _ = finished.recv_timeout(Duration::from_millis(300));
+            }
+        }
         *handle_slot.lock().unwrap() = Some(handle);
     };
     match moment {
@@ -81,11 +99,12 @@ fn during_next_commit_at<T: Send + 'static>(
     DuringCommit(slot)
 }
 
-/// [`during_next_commit_at`] right after the commit epoch is assigned.
+/// [`during_next_commit_at`] right after the commit epoch is assigned, for
+/// work that should wait for the commit.
 fn during_next_commit<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> DuringCommit<T> {
-    during_next_commit_at(Moment::EpochAssigned, work)
+    during_next_commit_at(Moment::EpochAssigned, Wait::Briefly, work)
 }
 
 fn by(db: &GrafeoDB, node: NodeId) -> Option<Value> {
@@ -168,7 +187,7 @@ fn a_plain_read_does_not_see_a_commit_before_it_completes() {
     session.execute("INSERT (:Doc {id: 1})").unwrap();
     let read = {
         let db = Arc::clone(&db);
-        during_next_commit_at(Moment::Stamped, move || count(&db))
+        during_next_commit_at(Moment::Stamped, Wait::UntilDone, move || count(&db))
     };
     session.commit().unwrap();
 

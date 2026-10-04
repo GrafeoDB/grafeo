@@ -182,6 +182,10 @@ impl Binder {
             LogicalOperator::Return(ret) => self.bind_return(ret),
             LogicalOperator::Project(project) => {
                 self.bind_operator(&project.input)?;
+                // A projection that does not pass its input through (a WITH)
+                // ends the scope of what it leaves out: its rows hold only
+                // the projected columns.
+                let mut projected = (!project.pass_through_input).then(BindingContext::new);
                 for projection in &project.projections {
                     self.validate_expression(&projection.expression)?;
                     // Add the projection alias to the context (for WITH clause support)
@@ -192,16 +196,31 @@ impl Binder {
                         // or a Case that selects between node variables (used
                         // by optional() and union() translations).
                         let (is_node, is_edge) = self.infer_entity_status(&projection.expression);
-                        self.context.add_variable(
-                            alias.clone(),
-                            VariableInfo {
-                                name: alias.clone(),
-                                data_type,
-                                is_node,
-                                is_edge,
-                            },
-                        );
+                        let info = VariableInfo {
+                            name: alias.clone(),
+                            data_type,
+                            is_node,
+                            is_edge,
+                        };
+                        if let Some(projected) = &mut projected {
+                            projected.add_variable(alias.clone(), info.clone());
+                        }
+                        self.context.add_variable(alias.clone(), info);
+                    } else if let Some(projected) = &mut projected {
+                        // An unaliased item's column is named after its
+                        // expression (`a.name`), which later clauses read
+                        // through the variables in it.
+                        let mut read = Vec::new();
+                        crate::query::planner::lpg::collect_vars(&projection.expression, &mut read);
+                        for name in read {
+                            if let Some(info) = self.context.get(&name) {
+                                projected.add_variable(name, info.clone());
+                            }
+                        }
                     }
+                }
+                if let Some(projected) = projected {
+                    self.context = projected;
                 }
                 Ok(())
             }
@@ -366,18 +385,13 @@ impl Binder {
             LogicalOperator::TripleScan(scan) => self.bind_triple_scan(scan),
             LogicalOperator::Union(union) => self.bind_branches(&union.inputs),
             LogicalOperator::LeftJoin(lj) => {
-                self.bind_operator(&lj.left)?;
-                self.bind_operator(&lj.right)?;
+                self.bind_join_inputs(&lj.left, &lj.right)?;
                 if let Some(ref cond) = lj.condition {
                     self.validate_expression(cond)?;
                 }
                 Ok(())
             }
-            LogicalOperator::AntiJoin(aj) => {
-                self.bind_operator(&aj.left)?;
-                self.bind_operator(&aj.right)?;
-                Ok(())
-            }
+            LogicalOperator::AntiJoin(aj) => self.bind_join_inputs(&aj.left, &aj.right),
             LogicalOperator::Bind(bind) => {
                 self.bind_operator(&bind.input)?;
                 self.validate_expression(&bind.expression)?;
@@ -672,46 +686,40 @@ impl Binder {
 
                 // A subquery that names what it imports (`CALL (a, b)`, an
                 // importing `WITH a`) sees only those outer variables; `*`
-                // imports all of them.
+                // imports all of them. It binds in a context of its own, so
+                // neither its internal variables nor a `WITH` in it that
+                // drops outer ones change the outer scope.
                 let scoped = !apply.shared_variables.is_empty()
                     && !apply.shared_variables.iter().any(|name| name == "*");
-                let outer_context = if scoped {
+                let subplan_context = if scoped {
                     let mut imported = BindingContext::new();
                     for name in &apply.shared_variables {
                         if let Some(info) = self.context.get(name) {
                             imported.add_variable(name.clone(), info.clone());
                         }
                     }
-                    Some(std::mem::replace(&mut self.context, imported))
+                    imported
                 } else {
-                    None
+                    self.context.clone()
                 };
+                let outer_context = std::mem::replace(&mut self.context, subplan_context);
                 let bound = self.bind_operator(&apply.subplan);
-                if let Some(outer_context) = outer_context {
-                    self.context = outer_context;
-                }
+                self.context = outer_context;
                 bound?;
 
-                // Remove internal-only variables added by the subplan (those that
-                // are not output columns). Prevents subplan internals from leaking
-                // into the outer query or sibling CALL blocks.
+                // A subquery returns new variables only, as in openCypher: an
+                // outer one, imported or not, would be bound twice.
                 let mut subplan_output_ctx = BindingContext::new();
                 Self::register_subplan_columns(&apply.subplan, &mut subplan_output_ctx);
-                let subplan_output_names: HashSet<String> = subplan_output_ctx
+                if let Some(clash) = subplan_output_ctx
                     .variable_names()
-                    .iter()
-                    .cloned()
-                    .collect();
-
-                let to_remove: Vec<String> = self
-                    .context
-                    .variable_names()
-                    .iter()
-                    .filter(|n| !outer_names.contains(*n) && !subplan_output_names.contains(*n))
-                    .cloned()
-                    .collect();
-                for name in to_remove {
-                    self.context.remove_variable(&name);
+                    .into_iter()
+                    .find(|name| outer_names.contains(name))
+                {
+                    return Err(binding_error_with_hint(
+                        format!("Variable '{clash}' is already declared outside the CALL subquery"),
+                        "return it under a new name",
+                    ));
                 }
 
                 // Register output columns so downstream operators can reference them.
@@ -720,7 +728,9 @@ impl Binder {
             }
             LogicalOperator::MultiWayJoin(mwj) => {
                 for input in &mwj.inputs {
+                    let before = self.context.clone();
                     self.bind_operator(input)?;
+                    self.keep_join_scope(before);
                 }
                 for cond in &mwj.conditions {
                     self.validate_expression(&cond.left)?;
@@ -1406,8 +1416,7 @@ impl Binder {
     /// Binds a join operator.
     fn bind_join(&mut self, join: &crate::query::plan::JoinOp) -> Result<()> {
         // Bind both sides of the join
-        self.bind_operator(&join.left)?;
-        self.bind_operator(&join.right)?;
+        self.bind_join_inputs(&join.left, &join.right)?;
 
         // Validate join conditions
         for condition in &join.conditions {
@@ -1416,6 +1425,27 @@ impl Binder {
         }
 
         Ok(())
+    }
+
+    /// Binds the two inputs of a join. The right one sees the left one's
+    /// variables, and the join's rows hold the columns of both, so a
+    /// projection inside the right input does not end the scope of the left
+    /// one's variables.
+    fn bind_join_inputs(&mut self, left: &LogicalOperator, right: &LogicalOperator) -> Result<()> {
+        self.bind_operator(left)?;
+        let after_left = self.context.clone();
+        self.bind_operator(right)?;
+        self.keep_join_scope(after_left);
+        Ok(())
+    }
+
+    /// Makes the context the variables of `before` followed by those bound
+    /// since, for an input that joins its rows to the ones `before` holds.
+    fn keep_join_scope(&mut self, before: BindingContext) {
+        let since = std::mem::replace(&mut self.context, before);
+        for (name, info) in since.variables {
+            self.context.add_variable(name, info);
+        }
     }
 
     /// Binds an aggregate operator.
@@ -2057,6 +2087,79 @@ mod tests {
         let mut binder = Binder::new();
         let result = binder.bind(&plan);
         assert!(result.is_err(), "WITH on undefined variable should fail");
+    }
+
+    /// `MATCH (n) WITH n.name AS name`, then a projection of `n` or `name`.
+    fn project_after_with(read: &str, pass_through_input: bool) -> LogicalPlan {
+        use crate::query::plan::{ProjectOp, Projection};
+
+        let with = LogicalOperator::Project(ProjectOp {
+            projections: vec![Projection {
+                expression: LogicalExpression::Property {
+                    variable: "n".to_string(),
+                    property: "name".to_string(),
+                },
+                alias: Some("name".to_string()),
+            }],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+            pass_through_input,
+        });
+        LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable(read.to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(with),
+        }))
+    }
+
+    #[test]
+    fn test_project_ends_the_scope_of_what_it_leaves_out() {
+        let error = Binder::new()
+            .bind(&project_after_with("n", false))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("Undefined variable 'n'"),
+            "{error}"
+        );
+        // A pass-through projection (GQL LET) keeps its input's variables.
+        let ctx = Binder::new().bind(&project_after_with("n", true)).unwrap();
+        assert!(ctx.contains("n") && ctx.contains("name"));
+    }
+
+    #[test]
+    fn test_a_projection_in_a_join_input_keeps_the_other_side() {
+        use crate::query::plan::{JoinOp, JoinType, ProjectOp, Projection};
+
+        // The right input projects `b` away; the join's rows still hold `a`.
+        let scan = |variable: &str| {
+            LogicalOperator::NodeScan(NodeScanOp {
+                variable: variable.to_string(),
+                label: None,
+                input: None,
+            })
+        };
+        let right = LogicalOperator::Project(ProjectOp {
+            projections: vec![Projection {
+                expression: LogicalExpression::Variable("b".to_string()),
+                alias: Some("c".to_string()),
+            }],
+            input: Box::new(scan("b")),
+            pass_through_input: false,
+        });
+        let plan = LogicalPlan::new(LogicalOperator::Join(JoinOp {
+            left: Box::new(scan("a")),
+            right: Box::new(right),
+            join_type: JoinType::Cross,
+            conditions: vec![],
+        }));
+        let ctx = Binder::new().bind(&plan).unwrap();
+        assert_eq!(ctx.variable_names(), ["a", "c"]);
     }
 
     // --- UNWIND ---

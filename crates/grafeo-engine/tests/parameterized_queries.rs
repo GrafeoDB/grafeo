@@ -26,7 +26,8 @@ fn count(db: &GrafeoDB, label: &str) -> Value {
 
 /// A write that uses a parameter nobody supplied fails before it writes:
 /// it used to store the text "$e". Through `execute` (no parameter map at
-/// all), an empty map, and Cypher.
+/// all), an empty map, Cypher and GraphQL (a declared variable without a
+/// default).
 #[test]
 fn an_unsupplied_parameter_fails_before_writing() {
     let db = GrafeoDB::new_in_memory();
@@ -35,6 +36,8 @@ fn an_unsupplied_parameter_fails_before_writing() {
         db.execute_with_params("INSERT (:P {e: $e})", HashMap::new()),
         #[cfg(feature = "cypher")]
         db.execute_cypher("CREATE (:P {e: $e})"),
+        #[cfg(feature = "graphql")]
+        db.execute_graphql("mutation ($e: String) { createP(e: $e) { e } }"),
     ] {
         let error = result.unwrap_err().to_string();
         assert!(error.contains("Missing parameter: $e"), "{error}");
@@ -49,6 +52,27 @@ fn an_unsupplied_parameter_fails_before_writing() {
         .to_string();
     assert!(error.contains("Missing parameter: $e"), "{error}");
     assert_eq!(count(&db, "P"), Value::Int64(0));
+}
+
+/// Gremlin without a parameter map fails the same way where it reads a
+/// parameter (`has`); it used to reach the planner with the parameter unset.
+#[cfg(feature = "gremlin")]
+#[test]
+fn an_unsupplied_gremlin_parameter_is_missing() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    let error = db
+        .execute_gremlin("g.V().has('name', $name).values('name')")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Missing parameter: $name"), "{error}");
+    let result = db
+        .execute_gremlin_with_params(
+            "g.V().has('name', $name).values('name')",
+            params(&[("name", Value::from("Alix"))]),
+        )
+        .unwrap();
+    assert_eq!(result.rows(), [vec![Value::from("Alix")]]);
 }
 
 #[test]

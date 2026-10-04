@@ -105,6 +105,8 @@ mod scan;
 pub(crate) mod seek;
 mod subquery;
 
+pub(crate) use project::collect_vars;
+
 #[cfg(feature = "algos")]
 use crate::query::plan::CallProcedureOp;
 #[cfg(feature = "text-index")]

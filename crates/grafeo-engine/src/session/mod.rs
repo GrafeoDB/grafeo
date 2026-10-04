@@ -3559,13 +3559,19 @@ impl Session {
     /// ```
     #[cfg(feature = "gremlin")]
     pub fn execute_gremlin(&self, query: &str) -> Result<QueryResult> {
-        use crate::query::{binder::Binder, optimizer::Optimizer, translators::gremlin};
+        use crate::query::{
+            binder::Binder, optimizer::Optimizer, processor::substitute_params,
+            translators::gremlin,
+        };
 
         #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let logical_plan = gremlin::translate(query)?;
+        let mut logical_plan = gremlin::translate(query)?;
+
+        // No parameters are supplied, so one the query uses is missing.
+        substitute_params(&mut logical_plan, &std::collections::HashMap::new())?;
 
         // Semantic validation
         let mut binder = Binder::new();
@@ -3706,11 +3712,10 @@ impl Session {
 
         let mut logical_plan = graphql::translate(query)?;
 
-        // Substitute default parameter values from variable declarations
-        if !logical_plan.default_params.is_empty() {
-            let defaults = logical_plan.default_params.clone();
-            substitute_params(&mut logical_plan, &defaults)?;
-        }
+        // Substitute default parameter values from variable declarations; a
+        // variable without a default is missing.
+        let defaults = logical_plan.default_params.clone();
+        substitute_params(&mut logical_plan, &defaults)?;
 
         let mut binder = Binder::new();
         let _binding_context = binder.bind(&logical_plan)?;

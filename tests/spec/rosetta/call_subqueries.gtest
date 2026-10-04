@@ -434,3 +434,73 @@ tests:
         - [Vincent, null]
         - [Jules, null]
         - [Mia, Paris]
+
+  # ---------------------------------------------------------------------------
+  # Scope rules (Neo4j): a subquery returns new names only, and the variables
+  # its scope clause imports stay visible after a WITH that leaves them out
+  # ---------------------------------------------------------------------------
+
+  - name: returning_an_outer_name_is_rejected
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL { RETURN 1 AS a } RETURN a"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { RETURN 1 AS a } RETURN a"
+    expect:
+      error: "already declared outside the CALL subquery"
+
+  - name: returning_an_imported_variable_is_rejected
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { RETURN a } RETURN a.name AS n"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { RETURN a } RETURN a.name AS n"
+    expect:
+      error: "already declared outside the CALL subquery"
+
+  - name: an_imported_variable_stays_visible_after_a_with
+    skip: "a WITH in the subquery still ends the scope of an import: Undefined variable 'a'"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 1 AS x RETURN a.name AS n, x } RETURN n, x"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 1 AS x RETURN a.name AS n, x } RETURN n, x"
+    expect:
+      rows:
+        - [Alix, 1]
+
+  # The count over no match is still one row, with the imported a.
+  - name: an_imported_variable_stays_visible_after_an_aggregating_with
+    skip: "a WITH in the subquery still ends the scope of an import: Undefined variable 'a'"
+    variants:
+      gql: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN a.name AS n, k } RETURN n, k"
+      cypher: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN a.name AS n, k } RETURN n, k"
+    expect:
+      rows:
+        - [Alix, 2]
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Jules, 1]
+        - [Mia, 0]
+
+  # A variable of the subquery's own is out of scope after a WITH that leaves
+  # it out, as anywhere else.
+  - name: a_with_ends_the_scope_of_a_subquery_variable
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN b.name AS n, k } RETURN n, k"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN b.name AS n, k } RETURN n, k"
+    expect:
+      error: "Undefined variable 'b'"
+
+  # Carried through the WITH, the import stays readable.
+  - name: an_imported_variable_carried_through_a_with
+    variants:
+      gql: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH a, count(b) AS k RETURN a.name AS n, k } RETURN n, k"
+      cypher: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH a, count(b) AS k RETURN a.name AS n, k } RETURN n, k"
+    expect:
+      rows:
+        - [Alix, 2]
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Jules, 1]
+
+  - name: a_with_ends_the_scope_outside_a_subquery
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) WITH 1 AS x RETURN a.name AS n"
+      cypher: "MATCH (a:Person {name: 'Alix'}) WITH 1 AS x RETURN a.name AS n"
+    expect:
+      error: "Undefined variable 'a'"

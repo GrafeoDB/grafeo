@@ -542,4 +542,13 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages)
 
+# AB: a CALL subquery returns new names only; a WITH ends the scope of what it leaves out
+for case_id, query in [
+    ("AB1", "MATCH (a:Person {name: 'Alix'}) CALL { RETURN 1 AS a } RETURN a"),
+    ("AB2", "MATCH (a:Person {name: 'Alix'}) CALL (a) { RETURN a } RETURN a.name AS n"),
+    ("AB3", "MATCH (a:Person {name: 'Alix'}) WITH 1 AS x RETURN a.name AS n"),
+    ("AB4", "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH a, count(b) AS k RETURN a.name AS n, k } RETURN n, k"),
+]:
+    case(case_id, query, BOTH)
+
 # fmt: on

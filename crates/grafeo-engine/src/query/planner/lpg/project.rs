@@ -1508,8 +1508,9 @@ const OPAQUE_SUBQUERY_VARIABLE: &str = "\0subquery";
 /// Walks `expr` and pushes every referenced variable name into `out`. Used by
 /// `sort_needs_augmenting_projection` and `plan_sort`'s pre-return projection
 /// logic to determine whether ORDER BY references variables that the RETURN
-/// clause has dropped.
-pub(super) fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
+/// clause has dropped, and by the binder to keep the variables an unaliased
+/// `WITH` item reads.
+pub(crate) fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
     match expr {
         LogicalExpression::Variable(v)
         | LogicalExpression::Property { variable: v, .. }

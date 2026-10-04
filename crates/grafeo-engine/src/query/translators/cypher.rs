@@ -1003,6 +1003,12 @@ impl CypherTranslator {
             return Ok(plan);
         }
 
+        if with_clause.items.iter().any(|item| {
+            item.alias.is_none() && !matches!(item.expression, ast::Expression::Variable(_))
+        }) {
+            return Err(super::common::unaliased_with_expression());
+        }
+
         // Check if WITH contains aggregate functions (e.g. WITH collect(n) AS people)
         let has_aggregates = with_clause
             .items
@@ -2685,6 +2691,13 @@ impl CypherTranslator {
             LogicalExpression::Reduce { initial, list, .. } => {
                 self.take_pattern_comprehensions(initial, lifted);
                 self.take_pattern_comprehensions(list, lifted);
+            }
+            LogicalExpression::MapProjection { entries, .. } => {
+                for entry in entries {
+                    if let MapProjectionEntry::LiteralEntry(_, value) = entry {
+                        self.take_pattern_comprehensions(value, lifted);
+                    }
+                }
             }
             _ => {}
         }

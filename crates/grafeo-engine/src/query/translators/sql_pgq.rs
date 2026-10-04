@@ -666,7 +666,9 @@ impl SqlPgqTranslator {
             ast::EdgeDirection::Undirected => ExpandDirection::Both,
         };
 
-        let (min_hops, max_hops) = if edge.min_hops.is_some() || edge.max_hops.is_some() {
+        // A quantified edge (`*1..1` too) binds the list of the path's edges.
+        let quantified = edge.min_hops.is_some() || edge.max_hops.is_some();
+        let (min_hops, max_hops) = if quantified {
             (edge.min_hops.unwrap_or(1), edge.max_hops)
         } else {
             (1, Some(1))
@@ -674,7 +676,7 @@ impl SqlPgqTranslator {
 
         // Set path_alias for variable-length patterns so path functions work
         let is_variable_length =
-            min_hops != 1 || max_hops.is_none() || max_hops.is_some_and(|m| m != 1);
+            quantified || min_hops != 1 || max_hops.is_none() || max_hops.is_some_and(|m| m != 1);
         let path_alias = if is_variable_length {
             edge_variable.clone()
         } else {
@@ -682,7 +684,7 @@ impl SqlPgqTranslator {
         };
 
         let expand = LogicalOperator::Expand(ExpandOp {
-            quantified: false,
+            quantified,
             from_variable,
             to_variable: to_variable.clone(),
             edge_variable,

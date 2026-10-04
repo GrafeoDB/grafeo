@@ -6,7 +6,8 @@ use crate::graph::Direction;
 use crate::graph::GraphStoreSearch;
 use crate::graph::lpg::{Edge, Node};
 use grafeo_common::types::{
-    EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyKey, TransactionId, Value,
+    EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyKey, PropertyMap, TransactionId,
+    Value,
 };
 #[cfg(feature = "regex")]
 use regex::Regex;
@@ -1337,34 +1338,19 @@ impl ExpressionPredicate {
     }
 
     /// The properties of the node or edge the variable's column holds at
-    /// `row`. An edge column holds edges and a node column nodes; an untyped
-    /// column holding raw IDs holds a node when one has the ID, otherwise an
-    /// edge. `None` for a value that is neither.
+    /// `row`, taken from the entity the store resolves (no copy). An edge
+    /// column holds edges and a node column nodes; an untyped column holding
+    /// raw IDs holds a node when one has the ID, otherwise an edge. `None` for
+    /// a value that is neither.
     fn element_properties(
         &self,
         variable: &str,
         chunk: &DataChunk,
         row: usize,
-    ) -> Option<Vec<(PropertyKey, Value)>> {
+    ) -> Option<PropertyMap> {
         let column = chunk.column(*self.variable_columns.get(variable)?)?;
-        let node = || {
-            let node = self.resolve_node(column.get_node_id(row)?)?;
-            Some(
-                node.properties
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            )
-        };
-        let edge = || {
-            let edge = self.resolve_edge(column.get_edge_id(row)?)?;
-            Some(
-                edge.properties
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            )
-        };
+        let node = || Some(self.resolve_node(column.get_node_id(row)?)?.properties);
+        let edge = || Some(self.resolve_edge(column.get_edge_id(row)?)?.properties);
         match column.data_type() {
             LogicalType::Edge => edge(),
             LogicalType::Node => node(),

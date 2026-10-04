@@ -207,16 +207,19 @@ impl Binder {
                         }
                         self.context.add_variable(alias.clone(), info);
                     } else if let Some(projected) = &mut projected {
-                        // An unaliased item's column is named after its
-                        // expression (`a.name`), which later clauses read
-                        // through the variables in it.
-                        let mut read = Vec::new();
-                        crate::query::planner::lpg::collect_vars(&projection.expression, &mut read);
-                        for name in read {
-                            if let Some(info) = self.context.get(&name) {
-                                projected.add_variable(name, info.clone());
-                            }
-                        }
+                        // An unaliased variable passes on as itself; any
+                        // other unaliased item is a column named after its
+                        // expression (`a.name`), which does not keep `a`.
+                        let name = crate::query::planner::common::expression_to_string(
+                            &projection.expression,
+                        );
+                        let info = self.context.get(&name).cloned().unwrap_or(VariableInfo {
+                            name: name.clone(),
+                            data_type: LogicalType::Any,
+                            is_node: false,
+                            is_edge: false,
+                        });
+                        projected.add_variable(name, info);
                     }
                 }
                 if let Some(projected) = projected {
@@ -2130,6 +2133,30 @@ mod tests {
         // A pass-through projection (GQL LET) keeps its input's variables.
         let ctx = Binder::new().bind(&project_after_with("n", true)).unwrap();
         assert!(ctx.contains("n") && ctx.contains("name"));
+    }
+
+    #[test]
+    fn test_an_unaliased_projection_passes_on_its_column_only() {
+        use crate::query::plan::{ProjectOp, Projection};
+
+        // The column of an unaliased `n.name` is named after it; `n` is gone.
+        let plan = LogicalPlan::new(LogicalOperator::Project(ProjectOp {
+            projections: vec![Projection {
+                expression: LogicalExpression::Property {
+                    variable: "n".to_string(),
+                    property: "name".to_string(),
+                },
+                alias: None,
+            }],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+            pass_through_input: false,
+        }));
+        let ctx = Binder::new().bind(&plan).unwrap();
+        assert_eq!(ctx.variable_names(), ["n.name"]);
     }
 
     #[test]
@@ -4608,7 +4635,7 @@ mod tests {
         use crate::query::plan::{ExpandDirection, ExpandOp, PathMode};
 
         let plan = LogicalPlan::new(LogicalOperator::Expand(ExpandOp {
-            quantified: false,
+            quantified: true,
             from_variable: "a".to_string(),
             to_variable: "b".to_string(),
             edge_variable: None,

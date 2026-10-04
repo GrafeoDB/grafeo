@@ -539,6 +539,7 @@ for case_id, query, languages in [
     ("AA3", "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->(b) WITH collect(last(relationships(p))) AS es UNWIND es AS e RETURN e.w AS w", BOTH),
     ("AA4", "MATCH (a:Person) RETURN sum(size([(a)-[:KNOWS]->(b) | b])) AS n", CYPHER),
     ("AA5", "MATCH (a:Person) RETURN a.name AS a, size([(a)-[:KNOWS]->(b) | b]) AS n", CYPHER),
+    ("AA6", "MATCH (a:Person) RETURN a.name AS a, size(a{.name, knows: [(a)-[:KNOWS]->(b) | b]}.knows) AS n", CYPHER),
 ]:
     case(case_id, query, languages)
 
@@ -548,6 +549,7 @@ for case_id, query in [
     ("AB2", "MATCH (a:Person {name: 'Alix'}) CALL (a) { RETURN a } RETURN a.name AS n"),
     ("AB3", "MATCH (a:Person {name: 'Alix'}) WITH 1 AS x RETURN a.name AS n"),
     ("AB4", "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH a, count(b) AS k RETURN a.name AS n, k } RETURN n, k"),
+    ("AB5", "MATCH (a:Person {name: 'Alix'}) WITH a.name RETURN a.name"),
 ]:
     case(case_id, query, BOTH)
 

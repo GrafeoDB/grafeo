@@ -54,27 +54,6 @@ fn an_unsupplied_parameter_fails_before_writing() {
     assert_eq!(count(&db, "P"), Value::Int64(0));
 }
 
-/// Gremlin without a parameter map fails the same way where it reads a
-/// parameter (`has`); it used to reach the planner with the parameter unset.
-#[cfg(feature = "gremlin")]
-#[test]
-fn an_unsupplied_gremlin_parameter_is_missing() {
-    let db = GrafeoDB::new_in_memory();
-    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
-    let error = db
-        .execute_gremlin("g.V().has('name', $name).values('name')")
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("Missing parameter: $name"), "{error}");
-    let result = db
-        .execute_gremlin_with_params(
-            "g.V().has('name', $name).values('name')",
-            params(&[("name", Value::from("Alix"))]),
-        )
-        .unwrap();
-    assert_eq!(result.rows(), [vec![Value::from("Alix")]]);
-}
-
 #[test]
 fn constraints_hold_for_parameterized_writes() {
     let db = GrafeoDB::new_in_memory();

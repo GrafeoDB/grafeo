@@ -66,6 +66,16 @@ fn final_return_mut(plan: &mut LogicalOperator) -> Option<&mut ReturnOp> {
     }
 }
 
+/// The error for a `WITH` item that is an expression without a name. As in
+/// openCypher, later clauses refer to what a `WITH` passes on by name, and a
+/// property read such as `n.name` does not keep `n`.
+pub(crate) fn unaliased_with_expression() -> Error {
+    Error::Query(QueryError::new(
+        QueryErrorKind::Semantic,
+        "Expression in WITH must be aliased (use AS)",
+    ))
+}
+
 /// Returns true if the function name is a recognized aggregate function.
 pub(crate) fn is_aggregate_function(name: &str) -> bool {
     matches!(

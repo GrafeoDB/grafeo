@@ -504,3 +504,20 @@ tests:
       cypher: "MATCH (a:Person {name: 'Alix'}) WITH 1 AS x RETURN a.name AS n"
     expect:
       error: "Undefined variable 'a'"
+
+  # As in openCypher, an expression a WITH passes on needs a name: `n.name`
+  # does not keep `n`, so nothing later could read it.
+  - name: an_unaliased_expression_in_with_is_rejected
+    variants:
+      gql: "MATCH (n:Person {name: 'Alix'}) WITH n.name RETURN n.name"
+      cypher: "MATCH (n:Person {name: 'Alix'}) WITH n.name RETURN n.name"
+    expect:
+      error: "Expression in WITH must be aliased (use AS)"
+
+  - name: an_aliased_expression_in_with
+    variants:
+      gql: "MATCH (n:Person {name: 'Alix'}) WITH n.name AS name, n RETURN name, n.age AS age"
+      cypher: "MATCH (n:Person {name: 'Alix'}) WITH n.name AS name, n RETURN name, n.age AS age"
+    expect:
+      rows:
+        - [Alix, 30]

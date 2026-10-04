@@ -86,6 +86,23 @@ tests:
       rows:
         - [7]
 
+  # A pattern comprehension as the value of a map projection entry.
+  - name: pattern_comprehension_in_a_map_projection
+    query: |
+      MATCH (a:Actor)
+      RETURN a.name AS name, size(a{.name, roles: [(a)-[:ACTED_IN]->(:Movie) | 1]}.roles) AS roles
+      ORDER BY name
+    expect:
+      ordered: true
+      rows:
+        - [Alix, 2]
+        - [Beatrix, 2]
+        - [Butch, 2]
+        - [Gus, 2]
+        - [Jules, 2]
+        - [Mia, 2]
+        - [Vincent, 2]
+
   - name: pattern_comprehension_with_property_extraction
     query: |
       MATCH (d:Director)

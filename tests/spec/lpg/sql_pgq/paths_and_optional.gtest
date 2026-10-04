@@ -40,6 +40,19 @@ tests:
         - [Alix, Gus]
         - [Gus, Vincent]
 
+  # The edge variable of a quantified pattern is the list of the path's
+  # edges, also for one hop.
+  - name: variable_length_1_to_1_binds_a_list
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (src:Person)-[p:KNOWS*1..1]->(dst:Person)
+        COLUMNS (src.name AS source, size(p) AS edges, LENGTH(p) AS hops)
+      )
+    expect:
+      rows:
+        - [Alix, 1, 1]
+        - [Gus, 1, 1]
+
   - name: variable_length_exactly_2
     query: |
       SELECT * FROM GRAPH_TABLE (

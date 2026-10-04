@@ -1019,6 +1019,24 @@ fn test_parameterized_query() {
     assert_eq!(result.row_count(), 1);
 }
 
+/// Without a parameter map, a parameter the query reads is missing; it used
+/// to reach the planner unset.
+#[test]
+fn test_unsupplied_parameter_is_missing() {
+    let db = create_social_network();
+    let error = db
+        .execute_gremlin("g.V().has('name', $name).values('name')")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Missing parameter: $name"), "{error}");
+    let mut params = std::collections::HashMap::new();
+    params.insert("name".to_string(), Value::String("Alix".into()));
+    let result = db
+        .execute_gremlin_with_params("g.V().has('name', $name).values('name')", params)
+        .unwrap();
+    assert_eq!(result.rows(), [vec![Value::String("Alix".into())]]);
+}
+
 // ============================================================================
 // Step-Level and() Filter
 // ============================================================================

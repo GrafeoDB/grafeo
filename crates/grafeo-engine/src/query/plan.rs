@@ -969,7 +969,7 @@ impl LogicalOperator {
                     ExpandDirection::Both => "--",
                 };
                 let hops = match (op.min_hops, op.max_hops) {
-                    (1, Some(1)) => String::new(),
+                    (1, Some(1)) if !op.quantified => String::new(),
                     (min, Some(max)) if min == max => format!("*{min}"),
                     (min, Some(max)) => format!("*{min}..{max}"),
                     (min, None) => format!("*{min}.."),
@@ -4141,9 +4141,9 @@ mod tests {
 
     #[test]
     fn explain_tree_expand_variants() {
-        let mk = |min, max, dir| {
+        let mk_quantified = |min, max, dir, quantified| {
             LogicalOperator::Expand(ExpandOp {
-                quantified: false,
+                quantified,
                 from_variable: "a".into(),
                 to_variable: "b".into(),
                 edge_variable: None,
@@ -4157,9 +4157,13 @@ mod tests {
             })
             .explain_tree()
         };
+        let mk = |min, max, dir| mk_quantified(min, max, dir, min != 1 || max != Some(1));
 
         let s = mk(1, Some(1), ExpandDirection::Outgoing);
         assert!(s.contains("(a)->[:KNOWS]->(b)"));
+        // A quantified one hop binds a list of edges, so it shows its quantifier.
+        let s = mk_quantified(1, Some(1), ExpandDirection::Outgoing, true);
+        assert!(s.contains("(a)->[:KNOWS*1]->(b)"), "{s}");
         let s = mk(2, Some(2), ExpandDirection::Incoming);
         assert!(s.contains("*2"));
         assert!(s.contains("<-"));

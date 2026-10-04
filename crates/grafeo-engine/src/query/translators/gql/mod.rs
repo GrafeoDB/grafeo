@@ -1262,6 +1262,12 @@ impl GqlTranslator {
         with_clause: &ast::WithClause,
     ) -> Result<LogicalOperator> {
         if !with_clause.is_wildcard {
+            if with_clause.items.iter().any(|item| {
+                item.alias.is_none() && !matches!(item.expression, ast::Expression::Variable(_))
+            }) {
+                return Err(super::common::unaliased_with_expression());
+            }
+
             // Check if WITH contains aggregate functions (e.g. WITH count(n) AS cnt)
             let has_aggregates = with_clause
                 .items

@@ -411,4 +411,5 @@ nav:
       - anywidget-vector: ecosystem/anywidget-vector.md
       - anywidget-graph: ecosystem/anywidget-graph.md
       - Performance Baselines: ecosystem/performance.md
+    - Versioning: versioning.md
     - Roadmap: roadmap.md

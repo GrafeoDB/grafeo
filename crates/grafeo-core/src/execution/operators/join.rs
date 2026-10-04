@@ -581,10 +581,25 @@ impl Operator for HashJoinOperator {
                 if self.current_matches.is_empty() && self.current_match_position == 0 {
                     let key = self.extract_key(probe_chunk, probe_row, &self.probe_keys)?;
 
-                    // Handle semi/anti joins differently
+                    // Handle semi/anti joins differently: a probe row has a match
+                    // when a pair with the same key passes the residual condition.
+                    let has_match = || {
+                        self.hash_table.get(&key).is_some_and(|candidates| {
+                            self.residual.as_ref().is_none_or(|residual| {
+                                candidates.iter().any(|&(chunk_idx, row)| {
+                                    residual.evaluate(
+                                        probe_chunk,
+                                        probe_row,
+                                        &self.build_chunks[chunk_idx],
+                                        row,
+                                    )
+                                })
+                            })
+                        })
+                    };
                     match self.join_type {
                         JoinType::Semi => {
-                            if self.hash_table.contains_key(&key) {
+                            if has_match() {
                                 // Emit probe row only
                                 for col_idx in 0..probe_chunk.column_count() {
                                     if let (Some(src_col), Some(dst_col)) =
@@ -600,7 +615,7 @@ impl Operator for HashJoinOperator {
                             continue;
                         }
                         JoinType::Anti => {
-                            if !self.hash_table.contains_key(&key) {
+                            if !has_match() {
                                 // Emit probe row only
                                 for col_idx in 0..probe_chunk.column_count() {
                                     if let (Some(src_col), Some(dst_col)) =
@@ -789,12 +804,18 @@ pub trait JoinCondition: Send + Sync {
 /// columns number them.
 pub struct JoinedRowCondition {
     predicate: Box<dyn super::filter::Predicate>,
+    /// The joined row being checked, reused from pair to pair while the
+    /// column types stay the same.
+    scratch: parking_lot::Mutex<Option<DataChunk>>,
 }
 
 impl JoinedRowCondition {
     /// Creates the condition from a predicate over the joined row.
     pub fn new(predicate: Box<dyn super::filter::Predicate>) -> Self {
-        Self { predicate }
+        Self {
+            predicate,
+            scratch: parking_lot::Mutex::new(None),
+        }
     }
 }
 
@@ -806,19 +827,38 @@ impl JoinCondition for JoinedRowCondition {
         right_chunk: &DataChunk,
         right_row: usize,
     ) -> bool {
-        let mut columns =
-            Vec::with_capacity(left_chunk.column_count() + right_chunk.column_count());
-        for (chunk, row) in [(left_chunk, left_row), (right_chunk, right_row)] {
-            for index in 0..chunk.column_count() {
-                let Some(source) = chunk.column(index) else {
-                    return false;
-                };
-                let mut column = ValueVector::with_capacity(source.data_type().clone(), 1);
-                source.copy_row_to(row, &mut column);
-                columns.push(column);
-            }
+        let sources: Vec<(&ValueVector, usize)> =
+            [(left_chunk, left_row), (right_chunk, right_row)]
+                .into_iter()
+                .flat_map(|(chunk, row)| chunk.columns().iter().map(move |column| (column, row)))
+                .collect();
+        let mut scratch = self.scratch.lock();
+        let fits = scratch.as_ref().is_some_and(|joined| {
+            joined.column_count() == sources.len()
+                && joined
+                    .columns()
+                    .iter()
+                    .zip(&sources)
+                    .all(|(column, (source, _))| column.data_type() == source.data_type())
+        });
+        if !fits {
+            *scratch = Some(DataChunk::new(
+                sources
+                    .iter()
+                    .map(|(source, _)| ValueVector::with_capacity(source.data_type().clone(), 1))
+                    .collect(),
+            ));
         }
-        self.predicate.evaluate(&DataChunk::new(columns), 0)
+        let joined = scratch.as_mut().expect("the joined row was just built");
+        for (index, (source, row)) in sources.iter().enumerate() {
+            let column = joined
+                .column_mut(index)
+                .expect("the joined row has a column per source column");
+            column.clear();
+            source.copy_row_to(*row, column);
+        }
+        joined.set_count(1);
+        self.predicate.evaluate(joined, 0)
     }
 }
 
@@ -1325,6 +1365,30 @@ mod tests {
         }
         results.sort_by_key(|(l, _)| *l);
         assert_eq!(results, [(1, Some(1)), (2, None), (3, Some(3))]);
+
+        // A semi-join keeps the rows with a pair that passes it, an anti-join
+        // the others.
+        for (join_type, expected) in [(JoinType::Semi, vec![1, 3]), (JoinType::Anti, vec![2])] {
+            let left = MockOperator::new(vec![create_int_chunk(&[1, 2, 3])]);
+            let right = MockOperator::new(vec![create_int_chunk(&[1, 2, 2, 3])]);
+            let mut join = HashJoinOperator::new(
+                Box::new(left),
+                Box::new(right),
+                vec![0],
+                vec![0],
+                join_type,
+                vec![LogicalType::Int64],
+            )
+            .with_residual(Box::new(JoinedRowCondition::new(Box::new(LeftIsNot2))));
+            let mut kept = Vec::new();
+            while let Some(chunk) = join.next().unwrap() {
+                for row in chunk.selected_indices() {
+                    kept.push(chunk.column(0).unwrap().get_int64(row).unwrap());
+                }
+            }
+            kept.sort_unstable();
+            assert_eq!(kept, expected, "{join_type:?}");
+        }
     }
 
     #[test]

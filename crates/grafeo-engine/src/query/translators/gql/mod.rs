@@ -21,8 +21,8 @@ use crate::query::plan::{
     ExpandDirection, ExpandOp, HorizontalAggregateOp, IntersectOp, JoinCondition, JoinOp, JoinType,
     LeftJoinOp, LoadDataFormat, LoadDataOp, LogicalExpression, LogicalOperator, LogicalPlan,
     MergeOp, MergeRelationshipOp, NodeScanOp, NullsOrdering, OtherwiseOp, ParameterScanOp,
-    PathMode, ProcedureYield, ProjectOp, Projection, RemoveLabelOp, ReturnItem, SetPropertyOp,
-    ShortestPathOp, SortKey, SortOrder, UnaryOp, UnionOp, UnwindOp,
+    PathMode, ProcedureYield, ProjectOp, Projection, RemoveLabelOp, ReturnItem, ReturnOp,
+    SetPropertyOp, ShortestPathOp, SortKey, SortOrder, UnaryOp, UnionOp, UnwindOp,
 };
 #[cfg(test)]
 use crate::query::plan::{FilterOp, LimitOp, SkipOp};
@@ -89,15 +89,21 @@ struct GqlTranslator {
 /// The rows a query passes to the one after `NEXT`: its final `RETURN` as a
 /// `WITH` (a projection), under its `ORDER BY`, `SKIP` and `LIMIT`. An
 /// unaliased item is a column named after it; `RETURN *` passes every column
-/// on. A plan that ends otherwise (an aggregation) passes its rows on as they
-/// are.
+/// on. Without `DISTINCT` the rows are ordered before the projection, so an
+/// `ORDER BY` key can read what the `RETURN` leaves out (and reads an alias
+/// through its expression). A plan that ends otherwise (an aggregation)
+/// passes its rows on as they are.
 fn return_as_with(plan: LogicalOperator) -> LogicalOperator {
     match plan {
         LogicalOperator::Return(ret) => {
             if ret.items.iter().any(
                 |item| matches!(&item.expression, LogicalExpression::Variable(name) if name == "*"),
             ) {
-                return *ret.input;
+                return if ret.distinct {
+                    wrap_distinct(*ret.input)
+                } else {
+                    *ret.input
+                };
             }
             let projections = ret
                 .items
@@ -127,10 +133,35 @@ fn return_as_with(plan: LogicalOperator) -> LogicalOperator {
                 project
             }
         }
-        LogicalOperator::Sort(mut sort) => {
-            sort.input = Box::new(return_as_with(*sort.input));
-            LogicalOperator::Sort(sort)
-        }
+        LogicalOperator::Sort(mut sort) => match *sort.input {
+            LogicalOperator::Return(ret) if !ret.distinct => {
+                let aliases: Vec<(String, LogicalExpression)> = ret
+                    .items
+                    .iter()
+                    .filter_map(|item| {
+                        item.alias
+                            .as_ref()
+                            .map(|alias| (alias.clone(), item.expression.clone()))
+                    })
+                    .collect();
+                for key in &mut sort.keys {
+                    let expression = std::mem::replace(
+                        &mut key.expression,
+                        LogicalExpression::Literal(Value::Null),
+                    );
+                    key.expression = GqlTranslator::substitute_let_bindings(expression, &aliases);
+                }
+                sort.input = ret.input;
+                return_as_with(LogicalOperator::Return(ReturnOp {
+                    input: Box::new(LogicalOperator::Sort(sort)),
+                    ..ret
+                }))
+            }
+            input => {
+                sort.input = Box::new(return_as_with(input));
+                LogicalOperator::Sort(sort)
+            }
+        },
         LogicalOperator::Skip(mut skip) => {
             skip.input = Box::new(return_as_with(*skip.input));
             LogicalOperator::Skip(skip)

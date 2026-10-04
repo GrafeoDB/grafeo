@@ -74,7 +74,7 @@ Once CDC is enabled, every mutation records a `ChangeEvent` with:
 | Field           | Description                                                                 |
 |-----------------|-----------------------------------------------------------------------------|
 | `entity_id`     | Node or edge ID                                                             |
-| `graph`         | The named graph the entity is in; `None` for the default graph              |
+| `graph`         | The graph the entity is in: its name (`schema/name` inside a schema, and `schema/__default__` for a schema's default graph); `None` for the default graph |
 | `kind`          | `Create`, `Update`, or `Delete`                                             |
 | `epoch`         | Commit epoch (monotonically increasing)                                     |
 | `timestamp`     | HLC timestamp (hybrid logical clock)                                        |

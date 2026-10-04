@@ -747,6 +747,19 @@ fn take_left_reading_filters(
             });
             LogicalOperator::NodeScan(scan)
         }
+        // The patterns of a comma list each have their filters.
+        LogicalOperator::Join(mut join) => {
+            join.left = Box::new(take_left_reading_filters(
+                *join.left, left_vars, right_vars, moved,
+            ));
+            join.right = Box::new(take_left_reading_filters(
+                *join.right,
+                left_vars,
+                right_vars,
+                moved,
+            ));
+            LogicalOperator::Join(join)
+        }
         other => other,
     }
 }

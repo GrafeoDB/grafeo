@@ -402,10 +402,17 @@ fn seed_with_row(
 }
 
 /// The name of the one column a subquery's final `RETURN` gives (under its
-/// `ORDER BY`, `SKIP`, `LIMIT` and `DISTINCT`), or `None` for another plan
-/// or several columns.
+/// `ORDER BY`, `SKIP`, `LIMIT` and `DISTINCT`, and in every part of a
+/// `UNION`), or `None` for another plan or several columns.
 fn returned_column(plan: &LogicalOperator) -> Option<String> {
     match plan {
+        LogicalOperator::Union(union) => {
+            let mut names = union.inputs.iter().map(returned_column);
+            let first = names.next()??;
+            names
+                .all(|name| name.as_ref() == Some(&first))
+                .then_some(first)
+        }
         LogicalOperator::Return(ret) => match ret.items.as_slice() {
             [item] => Some(output_column_name(item.alias.as_deref(), &item.expression)),
             _ => None,
@@ -889,6 +896,32 @@ mod tests {
         };
         assert!(reads_outer_values(&grouped_by("k")));
         assert!(!reads_outer_values(&grouped_by("p")));
+    }
+
+    /// A VALUE subquery returns the one column of its RETURN, also through
+    /// ordering and in every part of a UNION (which must agree).
+    #[test]
+    fn the_returned_column_of_a_value_subquery() {
+        use crate::query::plan::{ReturnOp, UnionOp};
+
+        let returning = |alias: &str| {
+            LogicalOperator::Return(ReturnOp {
+                items: vec![ReturnItem {
+                    expression: LogicalExpression::Variable("f".into()),
+                    alias: Some(alias.into()),
+                }],
+                distinct: false,
+                input: Box::new(LogicalOperator::Empty),
+            })
+        };
+        let union = |a: &str, b: &str| {
+            LogicalOperator::Union(UnionOp {
+                inputs: vec![returning(a), returning(b)],
+            })
+        };
+        assert_eq!(returned_column(&returning("n")), Some("n".to_string()));
+        assert_eq!(returned_column(&union("n", "n")), Some("n".to_string()));
+        assert_eq!(returned_column(&union("n", "m")), None);
     }
 
     /// A subquery that starts with OPTIONAL MATCH runs per row (its row of

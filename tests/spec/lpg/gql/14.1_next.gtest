@@ -64,3 +64,27 @@ tests:
     query: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) RETURN b NEXT RETURN a.name AS n"
     expect:
       error: "Undefined variable 'a'"
+
+  # ORDER BY a value the RETURN leaves out (a.age) still orders the rows passed on.
+  - name: next_after_order_by_on_a_column_not_returned
+    query: "MATCH (a:Person) RETURN a.name AS n ORDER BY a.age DESC LIMIT 2 NEXT RETURN n"
+    expect:
+      ordered: true
+      rows:
+        - [Vincent]
+        - [Alix]
+
+  - name: next_after_order_by_on_an_alias
+    query: "MATCH (a:Person) RETURN a.name AS n ORDER BY n LIMIT 2 NEXT RETURN n"
+    expect:
+      ordered: true
+      rows:
+        - [Alix]
+        - [Gus]
+
+  # Two KNOWS rows with the same company: RETURN DISTINCT * passes one on.
+  - name: next_after_return_distinct_star
+    query: "MATCH (a:Person)-[:KNOWS]->(b) MATCH (c:Company) WITH c RETURN DISTINCT * NEXT RETURN count(*) AS n"
+    expect:
+      rows:
+        - [1]

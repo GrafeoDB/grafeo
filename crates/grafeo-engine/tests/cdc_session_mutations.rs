@@ -567,10 +567,6 @@ fn updates_to_a_node_created_in_the_same_transaction_fold_into_its_create() {
     );
 }
 
-/// The fold stays within one graph. A transaction creates a node in the
-/// default graph and one in a named graph, which number their nodes alike,
-/// and changes the second: each node gets its own create event, and only the
-/// second shows the change.
 /// Every event names the graph its entity is in, and `history` reads the
 /// graph of the caller: the database the default graph, a session its current
 /// graph, though the two nodes may share an id.
@@ -619,6 +615,10 @@ fn events_name_their_graph() {
     assert_eq!(graphs, [None, Some("g".to_string())]);
 }
 
+/// The fold stays within one graph. A transaction creates a node in the
+/// default graph and one in a named graph, which number their nodes alike,
+/// and changes the second: each node gets its own create event, and only the
+/// second shows the change.
 #[test]
 fn creates_in_two_graphs_fold_separately() {
     let db = db();

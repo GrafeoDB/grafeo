@@ -8,11 +8,12 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 - **Versioning**: before 1.0, a release that changes the file format or breaks the stable surface (the `grafeo` crate, the bindings, the CLI) bumps the minor version, as Cargo and npm expect for `0.x`. This release, first planned as 0.5.45, is 0.6.0 for that reason. See [Versioning and Compatibility](https://grafeo.dev/versioning/).
 - **Breaking: the minimum Rust version is 1.99.0** (was 1.91.1).
+- **The deprecated profile names are removed in 0.8.0**, not 0.7.0: `embedded`, `browser`, `server` and `full` (deprecated since 0.5.35) moved with the renumbering above. Use the persona profiles (`lpg`, `rdf`, `analytics`, `ai`, `edge`, `enterprise`).
 - **Rust (`grafeo-engine`): `TransactionState::Committing`**: `TransactionManager::state` reports it while a commit is being completed, between its commit epoch and its WAL records.
 
 ### Fixed
 
-- **Writes during a commit could land in the middle of it** ([#548](https://github.com/GrafeoDB/grafeo/issues/548)): a direct write, or another transaction writing what the committing one wrote, could hide the committed value from point-in-time reads, remove it on rollback or mark an uncommitted value as committed; a transaction that began during a commit could miss it; and after a crash, two commits could be replayed in the wrong order. A commit now completes before anything that comes after it.
+- **Writes during a commit could land in the middle of it** ([#548](https://github.com/GrafeoDB/grafeo/issues/548)): a direct write, or another transaction writing what the committing one wrote, could hide the committed value from point-in-time reads, remove it on rollback or mark an uncommitted value as committed; a transaction that began during a commit could miss it, and a query outside a transaction could see part of it; and after a crash, two commits could be replayed in the wrong order. A commit now completes before anything that comes after it.
 
 ## [0.5.44] - 2026-10-04
 

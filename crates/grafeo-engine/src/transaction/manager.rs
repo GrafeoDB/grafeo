@@ -173,8 +173,13 @@ impl TransactionInfo {
 pub struct TransactionManager {
     /// Next transaction ID.
     next_transaction_id: AtomicU64,
-    /// Current epoch.
-    current_epoch: AtomicU64,
+    /// The last epoch handed out: a commit takes the next one in
+    /// [`start_commit`](Self::start_commit).
+    assigned_epoch: AtomicU64,
+    /// The last epoch whose commit is complete, the one readers see
+    /// ([`current_epoch`](Self::current_epoch)). It trails `assigned_epoch`
+    /// while a commit is being written, so no snapshot holds part of one.
+    published_epoch: AtomicU64,
     /// Number of currently active transactions (for fast-path conflict skip).
     active_count: AtomicU64,
     /// Active transactions.
@@ -193,18 +198,25 @@ pub struct TransactionManager {
     commit_lock: Mutex<()>,
 }
 
-/// A commit in progress, from [`TransactionManager::start_commit`] until it
-/// is dropped. Until then the transaction is [`TransactionState::Committing`]:
-/// it still counts as open, so no write outside a transaction can start (see
-/// [`TransactionManager::idle_gate`]), its writes still conflict with other
-/// transactions' writes, and no other commit and no
-/// [`begin`](TransactionManager::begin) can run. Drop it once the commit's
-/// versions, events and WAL records are written.
-#[must_use = "the commit is complete when the guard is dropped"]
+/// A commit in progress, from [`TransactionManager::start_commit`] until
+/// [`complete`](Self::complete). Until then the transaction is
+/// [`TransactionState::Committing`]: it still counts as open, so no write
+/// outside a transaction can start (see [`TransactionManager::idle_gate`]),
+/// its writes still conflict with other transactions' writes, readers do not
+/// see its epoch yet, and no other commit and no
+/// [`begin`](TransactionManager::begin) can run. Complete it once the
+/// commit's versions, events and WAL records are written.
+///
+/// A guard dropped without `complete` (only when the commit code panics) does
+/// not report the transaction as committed: it stays `Committing`, so its
+/// half-written entities stay locked against other writers, and only the
+/// commit lock is released.
+#[must_use = "a commit is complete only after `complete()`"]
 pub(crate) struct CommitGuard<'a> {
     manager: &'a TransactionManager,
     transaction_id: TransactionId,
     epoch: EpochId,
+    completed: bool,
     _commit: MutexGuard<'a, ()>,
 }
 
@@ -213,10 +225,24 @@ impl CommitGuard<'_> {
     pub(crate) fn epoch(&self) -> EpochId {
         self.epoch
     }
+
+    /// Completes the commit: the transaction is committed, readers see its
+    /// epoch, and what waited for it can run.
+    pub(crate) fn complete(mut self) {
+        self.completed = true;
+    }
 }
 
 impl Drop for CommitGuard<'_> {
     fn drop(&mut self) {
+        if !self.completed {
+            grafeo_common::grafeo_error!(
+                "commit of transaction {:?} at epoch {:?} did not complete; its writes stay locked",
+                self.transaction_id,
+                self.epoch
+            );
+            return;
+        }
         if let Some(info) = self
             .manager
             .transactions
@@ -225,6 +251,13 @@ impl Drop for CommitGuard<'_> {
         {
             info.state = TransactionState::Committed;
         }
+        // Commits complete one at a time and in epoch order (the commit
+        // lock), so the published epoch only moves forward. It is published
+        // before the count drops, so a write outside a transaction that finds
+        // no transaction open also finds this commit published.
+        self.manager
+            .published_epoch
+            .fetch_max(self.epoch.as_u64(), Ordering::Release);
         // Release pairs with the acquire in `idle_gate`: a write outside a
         // transaction sees everything the commit wrote.
         self.manager.active_count.fetch_sub(1, Ordering::Release);
@@ -240,7 +273,8 @@ impl TransactionManager {
             // Start at 2 to avoid collision with TransactionId::SYSTEM (which is 1)
             // TransactionId::INVALID = u64::MAX, TransactionId::SYSTEM = 1, user transactions start at 2
             next_transaction_id: AtomicU64::new(2),
-            current_epoch: AtomicU64::new(0),
+            assigned_epoch: AtomicU64::new(0),
+            published_epoch: AtomicU64::new(0),
             active_count: AtomicU64::new(0),
             transactions: RwLock::new(FxHashMap::default()),
             committed_epochs: RwLock::new(FxHashMap::default()),
@@ -263,7 +297,7 @@ impl TransactionManager {
         let _commit = self.commit_lock.lock();
         let transaction_id =
             TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed));
-        let epoch = EpochId::new(self.current_epoch.load(Ordering::Acquire));
+        let epoch = self.current_epoch();
 
         let info = TransactionInfo::new(epoch, isolation_level);
         self.transactions.write().insert(transaction_id, info);
@@ -394,7 +428,10 @@ impl TransactionManager {
     /// - There's a write-write conflict with another committed transaction
     /// - (Serializable only) There's a read-write conflict (SSI violation)
     pub fn commit(&self, transaction_id: TransactionId) -> Result<EpochId> {
-        Ok(self.start_commit(transaction_id)?.epoch())
+        let commit = self.start_commit(transaction_id)?;
+        let epoch = commit.epoch();
+        commit.complete();
+        Ok(epoch)
     }
 
     /// Commits a transaction like [`commit`](Self::commit), but completes the
@@ -431,7 +468,7 @@ impl TransactionManager {
         // moved since, there is nothing to check. (Commits hold the
         // `transactions` lock, so none can happen during the checks.)
         let others_committed =
-            self.current_epoch.load(Ordering::Acquire) > our_start_epoch.as_u64();
+            self.assigned_epoch.load(Ordering::Acquire) > our_start_epoch.as_u64();
 
         // Check for write-write conflicts with transactions that committed
         // after our snapshot (i.e., concurrent writers to the same entities).
@@ -488,7 +525,7 @@ impl TransactionManager {
 
         // Commit successful: advance epoch atomically.
         // SeqCst ensures all threads see commits in a consistent total order.
-        let commit_epoch = EpochId::new(self.current_epoch.fetch_add(1, Ordering::SeqCst) + 1);
+        let commit_epoch = EpochId::new(self.assigned_epoch.fetch_add(1, Ordering::SeqCst) + 1);
 
         // Update state and record commit epoch atomically (both write locks
         // held). The transaction stays counted as active until the guard is
@@ -502,6 +539,7 @@ impl TransactionManager {
             manager: self,
             transaction_id,
             epoch: commit_epoch,
+            completed: false,
             _commit: commit_lock,
         })
     }
@@ -598,18 +636,23 @@ impl TransactionManager {
             .map(|info| info.start_epoch)
     }
 
-    /// Returns the current epoch.
+    /// Returns the current epoch: the last one whose commit is complete, so a
+    /// snapshot at this epoch never holds part of a commit.
     #[must_use]
     pub fn current_epoch(&self) -> EpochId {
-        EpochId::new(self.current_epoch.load(Ordering::Acquire))
+        EpochId::new(self.published_epoch.load(Ordering::Acquire))
     }
 
     /// Synchronizes the epoch counter to at least the given value.
     ///
     /// Used after snapshot import and WAL recovery to align the
-    /// TransactionManager epoch with the store epoch.
+    /// TransactionManager epoch with the store epoch, and by a write outside
+    /// any transaction (which runs while no commit is in progress) to publish
+    /// its epoch.
     pub fn sync_epoch(&self, epoch: EpochId) {
-        self.current_epoch
+        self.assigned_epoch
+            .fetch_max(epoch.as_u64(), Ordering::SeqCst);
+        self.published_epoch
             .fetch_max(epoch.as_u64(), Ordering::SeqCst);
     }
 
@@ -1406,7 +1449,7 @@ mod tests {
             "a write outside a transaction waits for the commit"
         );
 
-        drop(commit);
+        commit.complete();
         assert_eq!(mgr.state(tx), Some(TransactionState::Committed));
         assert!(mgr.idle_gate().is_some());
         let next = mgr.begin();
@@ -1436,10 +1479,54 @@ mod tests {
                     .is_err(),
                 "begin returned while the commit was in progress"
             );
-            drop(commit);
+            commit.complete();
             let late = late.join().unwrap();
             assert_eq!(mgr.start_epoch(late), Some(epoch));
         });
+    }
+
+    /// Readers see a commit's epoch only once the commit is complete, so a
+    /// snapshot never holds part of a commit.
+    #[test]
+    fn a_commit_publishes_its_epoch_when_complete() {
+        let mgr = TransactionManager::new();
+        let before = mgr.current_epoch();
+        let tx = mgr.begin();
+        let commit = mgr.start_commit(tx).unwrap();
+        let epoch = commit.epoch();
+        assert!(epoch > before);
+        assert_eq!(mgr.current_epoch(), before);
+
+        commit.complete();
+        assert_eq!(mgr.current_epoch(), epoch);
+    }
+
+    /// A commit that does not complete (its code panicked between the commit
+    /// decision and `complete`) is not reported as committed and does not
+    /// publish its epoch: its writes stay locked against other transactions,
+    /// and the commit lock is released, so the database keeps working.
+    #[test]
+    fn a_commit_that_does_not_complete_keeps_its_writes_locked() {
+        let mgr = TransactionManager::new();
+        let before = mgr.current_epoch();
+        let tx = mgr.begin();
+        let other = mgr.begin();
+        mgr.record_write(tx, NodeId::new(1)).unwrap();
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _commit = mgr.start_commit(tx).unwrap();
+            panic!("stamping failed");
+        }));
+        assert!(unwound.is_err());
+
+        assert_eq!(mgr.state(tx), Some(TransactionState::Committing));
+        assert_eq!(mgr.current_epoch(), before);
+        assert!(matches!(
+            mgr.record_write(other, NodeId::new(1)),
+            Err(Error::Transaction(TransactionError::WriteConflict(_)))
+        ));
+        let next = mgr.begin();
+        assert_eq!(mgr.start_epoch(next), Some(before));
     }
 
     /// `commit` completes at once: nothing waits for it afterwards.

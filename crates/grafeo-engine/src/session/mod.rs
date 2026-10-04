@@ -4213,10 +4213,11 @@ impl Session {
         // track_graph_touch() for this transaction (it checks current_transaction
         // first), so this is safe.
         let touched = std::mem::take(&mut *self.touched_graphs.lock());
-        // Until `commit` is dropped, the commit holds its writes and no other
-        // commit, transaction start or write outside a transaction can run:
-        // the versions, events and WAL records below are complete before
-        // anything that comes after the commit (#548).
+        // Until `commit.complete()`, the commit holds its writes, readers do
+        // not see its epoch, and no other commit, transaction start or write
+        // outside a transaction can run: the versions, events and WAL records
+        // below are complete before anything that comes after the commit
+        // (#548).
         let commit = match self.transaction_manager.start_commit(transaction_id) {
             Ok(commit) => commit,
             Err(e) => {
@@ -4250,10 +4251,6 @@ impl Session {
             let store = self.resolve_store(graph_name);
             store.finalize_version_epochs(transaction_id, commit_epoch);
         }
-        // The database has one epoch: the root store follows every commit,
-        // also one that only touched named graphs (a checkpoint saves the
-        // root's epoch for all of them).
-        self.store.sync_epoch(commit_epoch);
 
         // Commit succeeded: discard undo logs (make changes permanent)
         #[cfg(feature = "triple-store")]
@@ -4296,19 +4293,24 @@ impl Session {
             }
         }
 
-        // Sync epoch for all touched graphs so that convenience lookups
-        // (edge_type, get_edge, get_node) can see versions at the latest epoch.
-        let current_epoch = self.transaction_manager.current_epoch();
+        // The stores' epochs move last, so store-level lookups (edge_type,
+        // get_edge, get_node) see the commit only once it is written. The
+        // database has one epoch: the root store follows every commit, also
+        // one that only touched named graphs (a checkpoint saves the root's
+        // epoch for all of them).
+        self.store.sync_epoch(commit_epoch);
         for graph_name in &touched {
             let store = self.resolve_store(graph_name);
-            store.sync_epoch(current_epoch);
+            store.sync_epoch(commit_epoch);
         }
-        drop(commit);
 
-        // Reset read-only flag and clear savepoints.
-        // touched_graphs was already emptied by mem::take above.
+        // Reset read-only flag and clear savepoints before completing the
+        // commit: a transaction this session begins next waits for the commit
+        // and sets its own flag after it. touched_graphs was already emptied
+        // by mem::take above.
         *self.read_only_tx.lock() = self.db_read_only;
         self.savepoints.lock().clear();
+        commit.complete();
 
         // Auto-GC: periodically prune old MVCC versions
         if self.gc_interval > 0 {

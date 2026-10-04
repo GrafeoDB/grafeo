@@ -1,7 +1,7 @@
 # Rosetta: a write to a node or edge deleted earlier in the statement fails
 #
 # SET, REMOVE and label changes on a node or edge the statement (or its
-# transaction) deleted before fail with an error, as in Neo4j, instead of
+# transaction) deleted before fail with an error, as in openCypher, instead of
 # writing to an entity nobody sees. With a node type defined, the write used to
 # skip the type's checks as well.
 #

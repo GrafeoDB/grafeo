@@ -245,6 +245,9 @@ pub enum QueryClause {
     InlineCall {
         /// The inner subquery.
         subquery: QueryStatement,
+        /// Further subqueries combined with `subquery`, left to right, by
+        /// `UNION`, `EXCEPT`, `INTERSECT` or `OTHERWISE` (never `NEXT`).
+        combined: Vec<(CompositeOp, QueryStatement)>,
         /// Whether this is OPTIONAL CALL (left-join semantics).
         optional: bool,
         /// The variable scope clause, `CALL (a, b) { ... }`: the outer

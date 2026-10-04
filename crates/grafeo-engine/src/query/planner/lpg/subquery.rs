@@ -16,17 +16,26 @@ use crate::query::plan::{
     ParameterScanOp, Projection, ReturnItem,
 };
 use crate::query::planner::common::output_column_name;
-use grafeo_core::execution::operators::{ApplyOperator, ParameterState};
+use grafeo_common::types::LogicalType;
+use grafeo_core::execution::operators::{
+    ApplyOperator, JoinType, NestedLoopJoinOperator, ParameterState,
+};
 
 impl super::Planner {
     /// Whether `expression` has an `EXISTS` or `COUNT` subquery that the edge
     /// check cannot answer (outside a list comprehension, list predicate or
-    /// `reduce`, whose subqueries read the item variable).
-    pub(super) fn has_subquery_to_lift(&self, expression: &LogicalExpression) -> bool {
+    /// `reduce`, whose subqueries read the item variable). With the row's
+    /// `columns`, also one that shares no variable with the row (see
+    /// [`Self::edge_check_answers`]).
+    pub(super) fn has_subquery_to_lift(
+        &self,
+        expression: &LogicalExpression,
+        columns: Option<&[String]>,
+    ) -> bool {
         let mut expression = expression.clone();
         let mut found = false;
         let _ = visit_subqueries(&mut expression, &mut |subquery| {
-            found |= !self.edge_check_answers(subquery);
+            found |= !self.edge_check_answers(subquery, columns);
             Ok(())
         });
         found
@@ -36,16 +45,18 @@ impl super::Planner {
     /// check cannot answer as a correlated `Apply` over `input`, which adds a
     /// column with its count. Returns the expression with each such subquery
     /// replaced by a read of that column (`> 0` for `EXISTS`), and the input
-    /// and columns with the new ones.
+    /// and columns with the new ones. `input_writes`: whether the input's
+    /// plan writes (see [`Self::plan_counted_subquery`]).
     pub(super) fn lift_subqueries(
         &self,
         expression: &LogicalExpression,
         mut input: Box<dyn Operator>,
         mut columns: Vec<String>,
+        input_writes: bool,
     ) -> Result<(LogicalExpression, Box<dyn Operator>, Vec<String>)> {
         let mut expression = expression.clone();
         visit_subqueries(&mut expression, &mut |subquery| {
-            if self.edge_check_answers(subquery) {
+            if self.edge_check_answers(subquery, Some(&columns)) {
                 return Ok(());
             }
             let (subplan, exists) = match subquery {
@@ -60,7 +71,14 @@ impl super::Planner {
                     vec![],
                 )),
             );
-            input = self.plan_counted_subquery(outer, &columns, subplan, exists, &column)?;
+            input = self.plan_counted_subquery(
+                outer,
+                &columns,
+                subplan,
+                exists,
+                &column,
+                input_writes,
+            )?;
             columns.push(column.clone());
             let count = LogicalExpression::Variable(column);
             *subquery = if exists {
@@ -84,10 +102,11 @@ impl super::Planner {
         items: &[ReturnItem],
         mut input: Box<dyn Operator>,
         mut columns: Vec<String>,
+        input_writes: bool,
     ) -> Result<(Option<Vec<ReturnItem>>, Box<dyn Operator>, Vec<String>)> {
         if !items
             .iter()
-            .any(|item| self.has_subquery_to_lift(&item.expression))
+            .any(|item| self.has_subquery_to_lift(&item.expression, Some(&columns)))
         {
             return Ok((None, input, columns));
         }
@@ -95,7 +114,7 @@ impl super::Planner {
         for item in items {
             let alias = Some(output_column_name(item.alias.as_deref(), &item.expression));
             let (expression, lifted_input, lifted_columns) =
-                self.lift_subqueries(&item.expression, input, columns)?;
+                self.lift_subqueries(&item.expression, input, columns, input_writes)?;
             input = lifted_input;
             columns = lifted_columns;
             lifted.push(ReturnItem { expression, alias });
@@ -111,10 +130,11 @@ impl super::Planner {
         projections: &[Projection],
         mut input: Box<dyn Operator>,
         mut columns: Vec<String>,
+        input_writes: bool,
     ) -> Result<(Option<Vec<Projection>>, Box<dyn Operator>, Vec<String>)> {
         if !projections
             .iter()
-            .any(|projection| self.has_subquery_to_lift(&projection.expression))
+            .any(|projection| self.has_subquery_to_lift(&projection.expression, Some(&columns)))
         {
             return Ok((None, input, columns));
         }
@@ -125,7 +145,7 @@ impl super::Planner {
                 &projection.expression,
             ));
             let (expression, lifted_input, lifted_columns) =
-                self.lift_subqueries(&projection.expression, input, columns)?;
+                self.lift_subqueries(&projection.expression, input, columns, input_writes)?;
             input = lifted_input;
             columns = lifted_columns;
             lifted.push(Projection { expression, alias });
@@ -136,16 +156,32 @@ impl super::Planner {
     /// Whether the edge check answers this `EXISTS` or `COUNT` subquery: one
     /// edge (or, for `EXISTS`, one path of one edge type) from a node, which
     /// `extract_exists_pattern` recognizes. `COUNT` counts single edges only.
-    fn edge_check_answers(&self, subquery: &LogicalExpression) -> bool {
-        match subquery {
-            LogicalExpression::ExistsSubquery(subplan) => {
-                self.extract_exists_pattern(subplan).is_ok()
+    /// With the row's `columns`, the pattern must also share a node or edge
+    /// with the row: one that shares none has one answer for all rows, which
+    /// the edge check would find again for each row by walking every edge.
+    fn edge_check_answers(&self, subquery: &LogicalExpression, columns: Option<&[String]>) -> bool {
+        let check = match subquery {
+            LogicalExpression::ExistsSubquery(subplan) => self.extract_exists_pattern(subplan),
+            LogicalExpression::CountSubquery(subplan) => {
+                self.extract_exists_pattern(subplan).and_then(|check| {
+                    if check.one_edge {
+                        Ok(check)
+                    } else {
+                        Err(Error::Internal("COUNT over more than one edge".to_string()))
+                    }
+                })
             }
-            LogicalExpression::CountSubquery(subplan) => self
-                .extract_exists_pattern(subplan)
-                .is_ok_and(|check| check.one_edge),
-            _ => true,
-        }
+            _ => return true,
+        };
+        check.is_ok_and(|check| {
+            columns.is_none_or(|columns| {
+                columns.iter().any(|column| {
+                    *column == check.start_var
+                        || *column == check.end_var
+                        || check.edge_var.as_ref() == Some(column)
+                })
+            })
+        })
     }
 
     /// A name for the column of a lifted subquery, unique in the query and
@@ -163,6 +199,9 @@ impl super::Planner {
 
     /// Plans `subplan` once per row of `outer`, counting its rows (up to one
     /// when `exists`), as a correlated `Apply` that adds the count as `column`.
+    /// A subquery that shares nothing with the row is counted once and joined
+    /// to every row; below a write (`input_writes`) after all the rows are read,
+    /// so the count sees what they wrote.
     fn plan_counted_subquery(
         &self,
         outer: Box<dyn Operator>,
@@ -170,6 +209,7 @@ impl super::Planner {
         subplan: LogicalOperator,
         exists: bool,
         column: &str,
+        input_writes: bool,
     ) -> Result<Box<dyn Operator>> {
         // The outer variables the subquery uses: those it names, as far as
         // they are columns of the row; all of them when the subquery has an
@@ -230,7 +270,13 @@ impl super::Planner {
         if shared.is_empty() {
             let (inner, _) = self.plan_operator(&counted)?;
             self.scalar_columns.borrow_mut().insert(column.to_string());
-            return Ok(Box::new(ApplyOperator::new(outer, inner)));
+            let mut schema = self.derive_schema_from_columns(outer_columns);
+            schema.push(LogicalType::Int64);
+            let mut join = NestedLoopJoinOperator::new(outer, inner, None, JoinType::Cross, schema);
+            if input_writes {
+                join = join.with_left_first();
+            }
+            return Ok(Box::new(join));
         }
 
         let state = Arc::new(ParameterState::new(shared.clone()));
@@ -352,7 +398,9 @@ fn seed_with_parameters(plan: &mut LogicalOperator, parameters: LogicalOperator)
         return seed_with_parameters(plan, parameters);
     }
     match plan {
-        LogicalOperator::ParameterScan(_) => {
+        // The one empty row a subquery that starts with OPTIONAL MATCH
+        // starts from becomes the outer row.
+        LogicalOperator::ParameterScan(_) | LogicalOperator::Empty => {
             *plan = parameters;
             true
         }
@@ -404,14 +452,42 @@ fn seed_with_parameters(plan: &mut LogicalOperator, parameters: LogicalOperator)
 /// that its patterns do not bind (`{id: s.id}`, `WHERE x.id = s.id`, an
 /// `UNWIND` variable, a parameter scan of outer variables). Such a subquery
 /// runs per row; one tied to the row by shared pattern variables alone can be
-/// a semi-join on them.
+/// a semi-join on them. One that starts with OPTIONAL MATCH is not tied by
+/// its patterns (its row of nulls binds none of them), so it runs per row too.
 pub(super) fn reads_outer_values(subplan: &LogicalOperator) -> bool {
+    if starts_with_optional_match(subplan) {
+        return true;
+    }
     let Some(used) = subplan_variables(subplan) else {
         return true;
     };
     let mut bound = HashSet::new();
     bound_names(subplan, &mut bound);
     used.iter().any(|name| !bound.contains(name))
+}
+
+/// Whether `plan` starts with an OPTIONAL MATCH: a left join of one empty row.
+fn starts_with_optional_match(plan: &LogicalOperator) -> bool {
+    match plan {
+        LogicalOperator::LeftJoin(join) => {
+            matches!(join.left.as_ref(), LogicalOperator::Empty)
+                || starts_with_optional_match(&join.left)
+        }
+        LogicalOperator::Join(join) => starts_with_optional_match(&join.left),
+        LogicalOperator::Filter(op) => starts_with_optional_match(&op.input),
+        LogicalOperator::Project(op) => starts_with_optional_match(&op.input),
+        LogicalOperator::Return(op) => starts_with_optional_match(&op.input),
+        LogicalOperator::Aggregate(op) => starts_with_optional_match(&op.input),
+        LogicalOperator::Limit(op) => starts_with_optional_match(&op.input),
+        LogicalOperator::Skip(op) => starts_with_optional_match(&op.input),
+        LogicalOperator::Sort(op) => starts_with_optional_match(&op.input),
+        LogicalOperator::Distinct(op) => starts_with_optional_match(&op.input),
+        LogicalOperator::Expand(op) => starts_with_optional_match(&op.input),
+        LogicalOperator::NodeScan(op) => {
+            op.input.as_deref().is_some_and(starts_with_optional_match)
+        }
+        _ => false,
+    }
 }
 
 /// The names `plan` binds itself: its pattern variables, projection and

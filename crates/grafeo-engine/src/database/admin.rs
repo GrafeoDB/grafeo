@@ -250,11 +250,23 @@ impl super::GrafeoDB {
     #[must_use]
     pub fn schema(&self) -> crate::admin::SchemaInfo {
         let store = self.graph_store();
+        // The label index holds every node with the label, also those of a
+        // transaction that has not committed: count the nodes that have the
+        // label at the current epoch.
+        let epoch = store.current_epoch();
         let labels = store
             .all_labels()
             .into_iter()
             .map(|name| crate::admin::LabelInfo {
-                count: store.nodes_by_label_count(&name),
+                count: store
+                    .nodes_by_label(&name)
+                    .into_iter()
+                    .filter(|&id| {
+                        store
+                            .get_node_at_epoch(id, epoch)
+                            .is_some_and(|node| node.has_label(&name))
+                    })
+                    .count(),
                 name,
             })
             .collect();

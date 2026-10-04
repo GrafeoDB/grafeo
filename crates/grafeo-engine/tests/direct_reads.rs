@@ -125,6 +125,48 @@ fn schema_views_see_the_compacted_data() {
     assert_eq!(keys, ["name", "population", "since"]);
 }
 
+/// The schema and the counts show committed data only: an open
+/// transaction's node and edge appear once it commits, and never after it
+/// rolls back.
+#[test]
+fn schema_counts_committed_data_only() {
+    use grafeo_engine::SchemaInfo;
+
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        .unwrap();
+    let counts = |db: &GrafeoDB| {
+        let SchemaInfo::Lpg(schema) = db.schema() else {
+            panic!("expected an LPG schema");
+        };
+        let people = schema
+            .labels
+            .iter()
+            .find(|label| label.name == "Person")
+            .map_or(0, |label| label.count);
+        let knows = schema
+            .edge_types
+            .iter()
+            .find(|edge_type| edge_type.name == "KNOWS")
+            .map_or(0, |edge_type| edge_type.count);
+        let stats = db.detailed_stats();
+        (people, knows, stats.node_count, stats.edge_count)
+    };
+    let insert = "MATCH (a:Person {name: 'Alix'}) INSERT (a)-[:KNOWS]->(:Person {name: 'Django'})";
+
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.execute(insert).unwrap();
+    assert_eq!(counts(&db), (2, 1, 2, 1), "while the transaction is open");
+    session.rollback().unwrap();
+    assert_eq!(counts(&db), (2, 1, 2, 1), "after a rollback");
+
+    session.begin_transaction().unwrap();
+    session.execute(insert).unwrap();
+    session.commit().unwrap();
+    assert_eq!(counts(&db), (3, 2, 3, 2), "after the commit");
+}
+
 #[test]
 fn direct_reads_on_an_external_store() {
     let store = Arc::new(LpgStore::new().unwrap());

@@ -804,11 +804,13 @@ impl LogicalOperator {
 }
 
 impl LogicalOperator {
-    /// The variables the rows of this operator hold, or `None` for an
-    /// operator that is not modeled here (callers then leave its plan as it
-    /// is). A `WITH` (`Project`) holds only what it projects. `imports` is
-    /// what a subquery's `CALL { WITH * ... }` imports: the variables of the
-    /// row it runs for.
+    /// The variables the rows of this operator hold, or `None` when they are
+    /// not known here (a procedure without `YIELD`, a `RETURN *` of a
+    /// subquery, RDF and graph management plans): callers then leave its plan
+    /// as it is. A `WITH` (`Project`) holds only what it projects. `imports`
+    /// is what a subquery's `CALL { WITH * ... }` imports: the variables of
+    /// the row it runs for. Every operator has an arm, so a new one says what
+    /// it binds before it compiles.
     #[must_use]
     pub(crate) fn bound_variables(
         &self,
@@ -895,7 +897,109 @@ impl LogicalOperator {
                 bound = apply.input.bound_variables(imports)?;
                 apply.subplan.add_returned_variables(&mut bound)?;
             }
-            _ => return None,
+            Self::Return(ret) => {
+                for item in &ret.items {
+                    match (&item.alias, &item.expression) {
+                        (Some(alias), _) => {
+                            bound.insert(alias.clone());
+                        }
+                        (None, LogicalExpression::Variable(name)) if name == "*" => {
+                            return ret.input.bound_variables(imports);
+                        }
+                        (None, LogicalExpression::Variable(name)) => {
+                            bound.insert(name.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // A write passes its input's rows on, with what it creates.
+            Self::CreateNode(create) => {
+                if let Some(input) = &create.input {
+                    bound = input.bound_variables(imports)?;
+                }
+                bound.insert(create.variable.clone());
+            }
+            Self::CreateEdge(create) => {
+                bound = create.input.bound_variables(imports)?;
+                bound.extend(create.variable.iter().cloned());
+            }
+            Self::Merge(merge) => {
+                bound = merge.input.bound_variables(imports)?;
+                bound.insert(merge.variable.clone());
+            }
+            Self::MergeRelationship(merge) => {
+                bound = merge.input.bound_variables(imports)?;
+                bound.insert(merge.variable.clone());
+            }
+            Self::DeleteNode(op) => return op.input.bound_variables(imports),
+            Self::DeleteEdge(op) => return op.input.bound_variables(imports),
+            Self::SetProperty(op) => return op.input.bound_variables(imports),
+            Self::AddLabel(op) => return op.input.bound_variables(imports),
+            Self::RemoveLabel(op) => return op.input.bound_variables(imports),
+            Self::ShortestPath(path) => {
+                bound = path.input.bound_variables(imports)?;
+                bound.insert(path.path_alias.clone());
+            }
+            Self::MapCollect(collect) => {
+                bound.insert(collect.alias.clone());
+            }
+            Self::HorizontalAggregate(aggregate) => {
+                bound = aggregate.input.bound_variables(imports)?;
+                bound.insert(aggregate.alias.clone());
+            }
+            Self::VectorScan(scan) => {
+                if let Some(input) = &scan.input {
+                    bound = input.bound_variables(imports)?;
+                }
+                bound.insert(scan.variable.clone());
+            }
+            Self::VectorJoin(join) => {
+                bound = join.input.bound_variables(imports)?;
+                bound.insert(join.right_variable.clone());
+                bound.extend(join.score_variable.iter().cloned());
+            }
+            Self::TextScan(scan) => {
+                bound.insert(scan.variable.clone());
+                bound.extend(scan.score_column.iter().cloned());
+            }
+            Self::LoadData(load) => {
+                bound.insert(load.variable.clone());
+            }
+            Self::CallProcedure(call) => {
+                let yields = call.yield_items.as_ref()?;
+                bound.extend(yields.iter().map(|item| {
+                    item.alias
+                        .clone()
+                        .unwrap_or_else(|| item.field_name.clone())
+                }));
+            }
+            // The rows of a filtering join are the left side's; those of a
+            // set operation have the columns of every branch.
+            Self::AntiJoin(join) => return join.left.bound_variables(imports),
+            Self::Except(op) => return op.left.bound_variables(imports),
+            Self::Intersect(op) => return op.left.bound_variables(imports),
+            Self::Otherwise(op) => return op.left.bound_variables(imports),
+            Self::Union(union) => return union.inputs.first()?.bound_variables(imports),
+            Self::MultiWayJoin(join) => {
+                for input in &join.inputs {
+                    bound.extend(input.bound_variables(imports)?);
+                }
+            }
+            // RDF and graph management plans have no node patterns to close.
+            Self::TripleScan(_)
+            | Self::Construct(_)
+            | Self::InsertTriple(_)
+            | Self::DeleteTriple(_)
+            | Self::Modify(_)
+            | Self::ClearGraph(_)
+            | Self::CreateGraph(_)
+            | Self::DropGraph(_)
+            | Self::LoadGraph(_)
+            | Self::CopyGraph(_)
+            | Self::MoveGraph(_)
+            | Self::AddGraph(_)
+            | Self::CreatePropertyGraph(_) => return None,
         }
         Some(bound)
     }
@@ -924,6 +1028,11 @@ impl LogicalOperator {
             Self::Limit(limit) => limit.input.add_returned_variables(bound),
             Self::Skip(skip) => skip.input.add_returned_variables(bound),
             Self::Distinct(distinct) => distinct.input.add_returned_variables(bound),
+            // The branches of a UNION return the same names.
+            Self::Union(union) => union
+                .inputs
+                .first()
+                .map_or(Some(()), |first| first.add_returned_variables(bound)),
             _ => Some(()),
         }
     }

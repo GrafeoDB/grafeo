@@ -81,7 +81,7 @@ impl super::Planner {
 
         // EXISTS and COUNT subqueries the edge check cannot answer run per row
         // of the input (see `subquery.rs`).
-        if self.has_subquery_to_lift(&filter.predicate) {
+        if self.has_subquery_to_lift(&filter.predicate, None) {
             return self.plan_filter_with_subqueries(filter);
         }
 
@@ -181,7 +181,7 @@ impl super::Planner {
         split_conjuncts(&filter.predicate, &mut conjuncts);
         let (with_subqueries, plain): (Vec<_>, Vec<_>) = conjuncts
             .into_iter()
-            .partition(|conjunct| self.has_subquery_to_lift(conjunct));
+            .partition(|conjunct| self.has_subquery_to_lift(conjunct, None));
         let (input_op, columns) = match join_conjuncts(plain) {
             Some(predicate) => self.plan_filter(&FilterOp {
                 predicate,
@@ -192,7 +192,7 @@ impl super::Planner {
         };
         let predicate = join_conjuncts(with_subqueries)
             .ok_or_else(|| Error::Internal("filter without a subquery to lift".to_string()))?;
-        self.filter_rest(input_op, columns, &predicate)
+        self.filter_rest(input_op, columns, &predicate, filter.input.has_mutations())
     }
 
     /// Filters `input` by `predicate`, whose `EXISTS` and `COUNT` subqueries
@@ -202,8 +202,10 @@ impl super::Planner {
         input: Box<dyn Operator>,
         columns: Vec<String>,
         predicate: &LogicalExpression,
+        input_writes: bool,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (predicate, input, columns) = self.lift_subqueries(predicate, input, columns)?;
+        let (predicate, input, columns) =
+            self.lift_subqueries(predicate, input, columns, input_writes)?;
         let variable_columns: HashMap<String, usize> = columns
             .iter()
             .enumerate()
@@ -383,6 +385,7 @@ impl super::Planner {
         is_negated: bool,
         remaining_predicate: Option<LogicalExpression>,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let input_writes = outer_input.has_mutations();
         let (left_op, left_columns) = self.plan_operator(outer_input)?;
         let (right_op, right_columns) = self.plan_operator(subquery)?;
 
@@ -430,10 +433,11 @@ impl super::Planner {
                     nested_sub,
                     nested_neg,
                     nested_rest,
+                    input_writes,
                 );
             }
 
-            return self.filter_rest(join_op, output_columns, remaining);
+            return self.filter_rest(join_op, output_columns, remaining, input_writes);
         }
 
         Ok((join_op, output_columns))
@@ -450,6 +454,7 @@ impl super::Planner {
         subquery: &LogicalOperator,
         is_negated: bool,
         remaining_predicate: Option<LogicalExpression>,
+        input_writes: bool,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let (right_op, right_columns) = self.plan_operator(subquery)?;
 
@@ -492,10 +497,11 @@ impl super::Planner {
                     nested_sub,
                     nested_neg,
                     nested_rest,
+                    input_writes,
                 );
             }
 
-            return self.filter_rest(join_op, output_columns, remaining);
+            return self.filter_rest(join_op, output_columns, remaining, input_writes);
         }
 
         Ok((join_op, output_columns))

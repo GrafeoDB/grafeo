@@ -169,16 +169,17 @@ fn upsert_edges(
                (d{endpoint_labels} {{{endpoint_key}: item.dst}}) \
          MERGE (s)-[r:{edge_type} {{{key}: item.props.{key}}}]->(d) \
          SET r {set} item.props \
-         RETURN item.i",
+         RETURN item.i, id(s), id(d)",
         endpoint_key = quote(&options.endpoint_key),
         edge_type = quote(edge_type),
         key = quote(&options.key),
     );
 
     // A row whose endpoint key more than one node has matches one pair of
-    // endpoints per node and comes back once per pair. Such an attempt is
-    // undone and the call runs again without those rows, so they write
-    // nothing; each attempt drops at least one row.
+    // endpoints per node and comes back once per pair (a row can also come
+    // back once per edge of an existing pair, which is not ambiguous). Such
+    // an attempt is undone and the call runs again without those rows, so
+    // they write nothing; each attempt drops at least one row.
     let result = loop {
         if items.is_empty() {
             return Ok(summary(total, &BTreeSet::new(), 0));
@@ -193,7 +194,7 @@ fn upsert_edges(
                 &query,
                 HashMap::from([("rows".to_string(), Value::List(rows.into()))]),
             )?;
-            ambiguous = repeated_rows(&result);
+            ambiguous = rows_with_several_endpoint_pairs(&result);
             if ambiguous.is_empty() {
                 Ok(result)
             } else {
@@ -219,11 +220,22 @@ fn returned_rows(result: &QueryResult) -> impl Iterator<Item = usize> + '_ {
     })
 }
 
-/// The row indices the upsert statement returned more than once.
-fn repeated_rows(result: &QueryResult) -> BTreeSet<usize> {
-    let mut seen = BTreeSet::new();
-    returned_rows(result)
-        .filter(|index| !seen.insert(*index))
+/// The row indices the edge upsert statement returned with more than one
+/// pair of endpoints (its second and third columns).
+fn rows_with_several_endpoint_pairs(result: &QueryResult) -> BTreeSet<usize> {
+    let mut pairs: HashMap<usize, BTreeSet<(i64, i64)>> = HashMap::new();
+    for row in result.rows() {
+        if let (Some(Value::Int64(index)), Some(Value::Int64(source)), Some(Value::Int64(target))) =
+            (row.first(), row.get(1), row.get(2))
+            && let Ok(index) = usize::try_from(*index)
+        {
+            pairs.entry(index).or_default().insert((*source, *target));
+        }
+    }
+    pairs
+        .into_iter()
+        .filter(|(_, endpoints)| endpoints.len() > 1)
+        .map(|(index, _)| index)
         .collect()
 }
 

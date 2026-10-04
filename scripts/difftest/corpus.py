@@ -553,4 +553,39 @@ for case_id, query in [
 ]:
     case(case_id, query, BOTH)
 
+# AC: subquery bodies: ORDER BY, SKIP, LIMIT and UNION in CALL; OPTIONAL MATCH in and before subqueries
+for case_id, query, languages in [
+    ("AC1", "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS f ORDER BY b.age DESC LIMIT 1 } RETURN a.name AS a, f", BOTH),
+    ("AC2", "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS f ORDER BY f SKIP 1 } RETURN a.name AS a, f", BOTH),
+    ("AC3", "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS x UNION MATCH (b)-[:KNOWS]->(a) RETURN b.name AS x } RETURN x", BOTH),
+    ("AC4", "MATCH (a:Person {name: 'Alix'}) CALL (a) { RETURN a.name AS x UNION ALL RETURN a.name AS x } RETURN x", BOTH),
+    ("AC5", "MATCH (a:Person) CALL { WITH a ORDER BY a.age MATCH (a)-[:KNOWS]->(b) RETURN b.name AS f } RETURN f", CYPHER),
+    ("AC6", "RETURN 1 AS x UNION ALL RETURN 1 AS x UNION RETURN 1 AS x", CYPHER),
+    ("AC7", "MATCH (a:Person) RETURN a.name AS a, COUNT { MATCH (a)-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:LIVES_IN]->(c) } AS n", BOTH),
+    ("AC8", "OPTIONAL MATCH (x:Robot) RETURN x.name AS x", BOTH),
+    ("AC9", "MATCH (p:Person) RETURN p.name AS p, VALUE { OPTIONAL MATCH (p)-[:KNOWS]->(f) RETURN count(f) } AS friends", GQL),
+    ("AC10", "MATCH (p:Person) RETURN p.name AS p, COUNT { OPTIONAL MATCH (p)-[:KNOWS]->(f) } AS n", BOTH),
+    ("AC11", "MATCH (p:Person) WHERE EXISTS { OPTIONAL MATCH (p)-[:LIVES_IN]->(c) } RETURN p.name AS p", BOTH),
+    ("AC12", "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c) WHERE c.age > a.age RETURN b.name AS b, c.name AS c", BOTH),
+    ("AC13", "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:KNOWS]->(c WHERE c.age > a.age) RETURN b.name AS b, c.name AS c", GQL),
+]:
+    case(case_id, query, languages)
+
+# AD: a subquery that imports nothing sees no outer variable
+for case_id, query, languages in [
+    ("AD1", "MATCH (a:Person) CALL () { MATCH (b:Person) WHERE b.age > a.age RETURN count(b) AS c } RETURN a.name AS a, c", BOTH),
+    ("AD2", "MATCH (a:Person) CALL { MATCH (b:Person) WHERE b.age > a.age RETURN count(b) AS c } RETURN a.name AS a, c", CYPHER),
+    ("AD3", "UNWIND [1] AS a CALL () { MATCH (a) RETURN a AS x } RETURN count(x) AS n", BOTH),
+]:
+    case(case_id, query, languages)
+
+# AE: a later pattern back to a variable bound before a shortest path, and subqueries that share nothing
+for case_id, query, languages in [
+    ("AE1", "MATCH p = shortestPath((a:Person {name: 'Gus'})-[:KNOWS*]->(b:Person {name: 'Alix'})) MATCH (b)-[:KNOWS]->(c)-[:KNOWS]->(a) RETURN c.name AS c", CYPHER),
+    ("AE2", "MATCH p = ANY SHORTEST (a:Person {name: 'Gus'})-[:KNOWS]->+(b:Person {name: 'Alix'}) MATCH (b)-[:KNOWS]->(c)-[:KNOWS]->(a) RETURN c.name AS c", GQL),
+    ("AE3", "MATCH (c:City) RETURN c.name AS c, COUNT { MATCH (x)-[:KNOWS]->(y) } AS n", BOTH),
+    ("AE4", "MATCH (c:City) RETURN c.name AS c, EXISTS { MATCH (x)-[:LIVES_IN]->(y:City {name: 'Paris'}) } AS e", BOTH),
+]:
+    case(case_id, query, languages)
+
 # fmt: on

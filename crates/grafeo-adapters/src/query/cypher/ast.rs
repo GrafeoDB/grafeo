@@ -91,6 +91,11 @@ pub enum Clause {
         /// variables the subquery sees (`*` for all of them, none for `()`).
         /// `None` without one, when its importing `WITH` names them.
         scope: Option<Vec<String>>,
+        /// Further subqueries joined to `query` by `UNION` (`UNION ALL` when
+        /// `union_all`), each with an importing `WITH` of its own.
+        unions: Vec<Query>,
+        /// Whether the `unions` are joined by `UNION ALL` (duplicates kept).
+        union_all: bool,
     },
     /// FOREACH (variable IN list | update_clauses).
     ForEach(ForEachClause),

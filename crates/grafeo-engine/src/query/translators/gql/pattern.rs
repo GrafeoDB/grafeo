@@ -518,10 +518,10 @@ impl GqlTranslator {
             let (min_hops, max_hops) = edge_hop_bounds(edge);
 
             // A quantifier (`{1,1}` too) makes the edge variable a group
-            // variable: the list of the path's edges.
+            // variable: the list of the path's edges. An edge without one is a
+            // single hop, so the quantified edges are the variable-length ones.
             let quantified = edge.min_hops.is_some() || edge.max_hops.is_some();
-            let is_variable_length =
-                quantified || min_hops != 1 || max_hops.is_none() || max_hops != Some(1);
+            let is_variable_length = quantified;
 
             // For variable-length edges with a named edge variable, auto-generate
             // a path alias if none exists, so path detail columns are available

@@ -674,10 +674,9 @@ impl SqlPgqTranslator {
             (1, Some(1))
         };
 
-        // Set path_alias for variable-length patterns so path functions work
-        let is_variable_length =
-            quantified || min_hops != 1 || max_hops.is_none() || max_hops.is_some_and(|m| m != 1);
-        let path_alias = if is_variable_length {
+        // Set path_alias for variable-length patterns so path functions work:
+        // the quantified ones (an edge without a quantifier is a single hop).
+        let path_alias = if quantified {
             edge_variable.clone()
         } else {
             None

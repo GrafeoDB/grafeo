@@ -303,3 +303,29 @@ tests:
         - [3, Paris]
         - [4, Paris]
         - [5, Paris]
+
+  # ---------------------------------------------------------------------------
+  # A later pattern after a shortest path comes back to the nodes it bound
+  # ---------------------------------------------------------------------------
+
+  # Nobody Alix knows knows Gus, so no two KNOWS edges lead from Alix back to
+  # the path's Gus (the last hop used to bind a new `a`: Gus and Jules).
+  - name: a_later_pattern_back_to_a_shortest_path_end
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:Person {name: 'Gus'})-[:KNOWS]->+(b:Person {name: 'Alix'}) MATCH (b)-[:KNOWS]->(c)-[:KNOWS]->(a) RETURN c.name AS c"
+      cypher: "MATCH p = shortestPath((a:Person {name: 'Gus'})-[:KNOWS*]->(b:Person {name: 'Alix'})) MATCH (b)-[:KNOWS]->(c)-[:KNOWS]->(a) RETURN c.name AS c"
+    expect:
+      empty: true
+
+  # One edge back to the path's start does exist: Alix knows Gus.
+  - name: a_later_edge_back_to_a_shortest_path_start
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', age: 30, w: 100}), (gus:Person {name: 'Gus', age: 25, w: 101}), (vincent:Person {name: 'Vincent', age: 40, w: 103}), (jules:Person {name: 'Jules', age: 35}), (mia:Person {name: 'Mia', age: 28}), (ams:City {name: 'Amsterdam', w: 104}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris', w: 105}), (alix)-[:KNOWS {since: 2010, w: 1}]->(gus), (gus)-[:KNOWS {since: 2012, w: 2}]->(vincent), (vincent)-[:KNOWS {since: 2015, w: 3}]->(alix), (jules)-[:KNOWS {since: 2020, w: 4}]->(mia), (alix)-[:KNOWS {since: 2018, w: 5}]->(jules), (alix)-[:LIVES_IN {years: 5, w: 6}]->(ams), (gus)-[:LIVES_IN {years: 3, w: 7}]->(ber), (mia)-[:LIVES_IN {years: 1, w: 8}]->(par)"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:Person {name: 'Gus'})-[:KNOWS]->+(b:Person {name: 'Alix'}) MATCH (b)-[r:KNOWS]->(a) RETURN r.w AS w"
+      cypher: "MATCH p = shortestPath((a:Person {name: 'Gus'})-[:KNOWS*]->(b:Person {name: 'Alix'})) MATCH (b)-[r:KNOWS]->(a) RETURN r.w AS w"
+    expect:
+      rows:
+        - [1]

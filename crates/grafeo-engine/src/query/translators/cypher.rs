@@ -185,7 +185,10 @@ impl CypherTranslator {
         // As in Neo4j, the rows of a CALL subquery that returns some are not
         // the result of a query: a RETURN after it says what is.
         if let Some(ast::Clause::CallSubquery { query: inner, .. }) = query.clauses.last()
-            && matches!(inner.clauses.last(), Some(ast::Clause::Return(_)))
+            && inner
+                .clauses
+                .iter()
+                .any(|clause| matches!(clause, ast::Clause::Return(_)))
         {
             return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
@@ -232,9 +235,12 @@ impl CypherTranslator {
             ast::Clause::Set(set_clause) => self.translate_set(set_clause, input),
             ast::Clause::Remove(remove_clause) => self.translate_remove(remove_clause, input),
             ast::Clause::Call(call) => self.translate_call_clause(call, input),
-            ast::Clause::CallSubquery { query, scope } => {
-                self.translate_call_subquery(query, scope.as_deref(), input)
-            }
+            ast::Clause::CallSubquery {
+                query,
+                scope,
+                unions,
+                union_all,
+            } => self.translate_call_subquery(query, unions, *union_all, scope.as_deref(), input),
             ast::Clause::ForEach(foreach) => self.translate_foreach(foreach, input),
             ast::Clause::LoadCsv(load_csv) => self.translate_load_csv(load_csv),
         }
@@ -285,13 +291,69 @@ impl CypherTranslator {
     /// without one, the variables its importing `WITH` names. It starts from a
     /// `ParameterScan` of them, and they are recorded in
     /// `ApplyOp.shared_variables` so the planner can wire them through
-    /// `ParameterState`.
+    /// `ParameterState`. Parts joined by `UNION` each import their own; the
+    /// Apply imports all of them, and each part's scan names its own.
     fn translate_call_subquery(
         &self,
         inner: &ast::Query,
+        unions: &[ast::Query],
+        union_all: bool,
         scope: Option<&[String]>,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
+        let outer_names = match &input {
+            Some(outer) => outer.bound_variables(None),
+            None => Some(HashSet::new()),
+        };
+        let mut shared_variables: Vec<String> = Vec::new();
+        let mut parts = Vec::with_capacity(1 + unions.len());
+        for part in std::iter::once(inner).chain(unions) {
+            let (plan, imported) = self.translate_call_subquery_part(
+                part,
+                scope,
+                input.is_some(),
+                outer_names.as_ref(),
+            )?;
+            for name in imported {
+                if !shared_variables.contains(&name) {
+                    shared_variables.push(name);
+                }
+            }
+            parts.push(plan);
+        }
+        if shared_variables.iter().any(|name| name == "*") {
+            shared_variables = vec!["*".to_string()];
+        }
+        let subplan = if parts.len() == 1 {
+            parts.remove(0)
+        } else {
+            check_branch_columns("UNION", &parts)?;
+            let union = LogicalOperator::Union(UnionOp { inputs: parts });
+            if union_all {
+                union
+            } else {
+                wrap_distinct(union)
+            }
+        };
+
+        // A CALL that comes first runs once, on one empty row.
+        Ok(LogicalOperator::Apply(ApplyOp {
+            input: Box::new(input.unwrap_or(LogicalOperator::Empty)),
+            subplan: Box::new(subplan),
+            shared_variables,
+            optional: false,
+        }))
+    }
+
+    /// Translates one part of a `CALL` subquery (the whole body, or one side
+    /// of a `UNION` in it): its plan and the outer variables it imports.
+    fn translate_call_subquery_part(
+        &self,
+        inner: &ast::Query,
+        scope: Option<&[String]>,
+        has_input: bool,
+        outer_names: Option<&HashSet<String>>,
+    ) -> Result<(LogicalOperator, Vec<String>)> {
         let mut shared_variables = Vec::new();
         let mut clauses_iter = inner.clauses.iter();
 
@@ -300,16 +362,17 @@ impl CypherTranslator {
             // row, `(*)` imports nothing, and named variables are reported as
             // undefined by the binder.
             Some(names) => {
-                if input.is_some() || names.iter().any(|name| name != "*") {
+                if has_input || names.iter().any(|name| name != "*") {
                     shared_variables = names.to_vec();
                 }
             }
             // Without one, an importing WITH names what the subquery sees and
             // is replaced by the ParameterScan.
             None => {
-                if input.is_some()
+                if has_input
                     && let Some(ast::Clause::With(with_clause)) = inner.clauses.first()
-                    && let Some(imported) = self.importing_with(with_clause)?
+                    && let Some(imported) =
+                        self.importing_with(with_clause, inner.clauses.get(1))?
                 {
                     shared_variables = imported;
                     clauses_iter.next();
@@ -332,27 +395,21 @@ impl CypherTranslator {
                 "CALL subquery requires at least one clause",
             ))
         })?;
-        let outer_names = match &input {
-            Some(outer) => outer.bound_variables(None),
-            None => Some(HashSet::new()),
-        };
-        expand_subquery_return_star(&mut inner_plan, outer_names.as_ref())?;
-
-        // A CALL that comes first runs once, on one empty row.
-        Ok(LogicalOperator::Apply(ApplyOp {
-            input: Box::new(input.unwrap_or(LogicalOperator::Empty)),
-            subplan: Box::new(inner_plan),
-            shared_variables,
-            optional: false,
-        }))
+        expand_subquery_return_star(&mut inner_plan, outer_names)?;
+        Ok((inner_plan, shared_variables))
     }
 
     /// Reads the first `WITH` of a `CALL` subquery: the outer variables it
     /// imports (`*` for `WITH *`), or `None` when it names no variable and is
-    /// an ordinary `WITH`. As in Neo4j, an importing `WITH` only lists
-    /// variables; an alias, an expression, `WHERE` or `DISTINCT` in it is an
-    /// error (a second `WITH` can do those).
-    fn importing_with(&self, with_clause: &ast::WithClause) -> Result<Option<Vec<String>>> {
+    /// an ordinary `WITH`. As in openCypher, an importing `WITH` only lists
+    /// variables; an alias, an expression, `WHERE`, `DISTINCT`, or an
+    /// `ORDER BY`, `SKIP` or `LIMIT` after it (the `next` clause) is an error
+    /// (a second `WITH` can do those).
+    fn importing_with(
+        &self,
+        with_clause: &ast::WithClause,
+        next: Option<&ast::Clause>,
+    ) -> Result<Option<Vec<String>>> {
         let mut imported = Vec::new();
         let mut names_variables = with_clause.is_wildcard;
         let mut only_names = true;
@@ -388,7 +445,12 @@ impl CypherTranslator {
         } else if with_clause.distinct {
             Some("DISTINCT is not allowed.")
         } else {
-            None
+            match next {
+                Some(ast::Clause::OrderBy(_)) => Some("ORDER BY is not allowed."),
+                Some(ast::Clause::Skip(_)) => Some("SKIP is not allowed."),
+                Some(ast::Clause::Limit(_)) => Some("LIMIT is not allowed."),
+                _ => None,
+            }
         };
         if let Some(reason) = not_allowed {
             const IMPORTING_WITH: &str =
@@ -539,13 +601,9 @@ impl CypherTranslator {
         match_clause: &ast::MatchClause,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
-        // OPTIONAL MATCH uses LEFT JOIN semantics
-        let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "OPTIONAL MATCH requires input",
-            ))
-        })?;
+        // OPTIONAL MATCH uses LEFT JOIN semantics; one that comes first
+        // joins one empty row, so no match is one row of nulls.
+        let input = input.unwrap_or(LogicalOperator::Empty);
 
         // Build the right side with proper shared variable joins
         let right = self.translate_comma_patterns(&match_clause.patterns, None)?;
@@ -2396,7 +2454,8 @@ impl CypherTranslator {
         }
     }
 
-    /// Translates the inner query of an EXISTS subquery to a `LogicalOperator`.
+    /// Translates the inner query of an EXISTS or COUNT subquery to a
+    /// `LogicalOperator`.
     fn translate_exists_subquery(&self, query: &ast::Query) -> Result<LogicalOperator> {
         let mut plan: Option<LogicalOperator> = None;
 
@@ -2405,13 +2464,16 @@ impl CypherTranslator {
                 ast::Clause::Match(m) => {
                     plan = Some(self.translate_match(m, plan)?);
                 }
+                ast::Clause::OptionalMatch(m) => {
+                    plan = Some(self.translate_optional_match(m, plan)?);
+                }
                 ast::Clause::Where(w) => {
                     plan = Some(self.translate_where(w, plan)?);
                 }
                 _ => {
                     return Err(Error::Query(QueryError::new(
                         QueryErrorKind::Semantic,
-                        "EXISTS subquery only supports MATCH and WHERE clauses",
+                        "EXISTS and COUNT subqueries only support MATCH, OPTIONAL MATCH and WHERE clauses",
                     )));
                 }
             }

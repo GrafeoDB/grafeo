@@ -687,14 +687,17 @@ impl Binder {
                     ));
                 }
 
-                // A subquery that names what it imports (`CALL (a, b)`, an
-                // importing `WITH a`) sees only those outer variables; `*`
-                // imports all of them. It binds in a context of its own, so
-                // neither its internal variables nor a `WITH` in it that
-                // drops outer ones change the outer scope.
-                let scoped = !apply.shared_variables.is_empty()
-                    && !apply.shared_variables.iter().any(|name| name == "*");
-                let subplan_context = if scoped {
+                // A subquery sees the outer variables it imports: the ones its
+                // scope clause or importing `WITH` names (`CALL (a, b)`,
+                // `WITH a`), all of them for `*`, and none when it names none
+                // (`CALL () { ... }`, a Cypher `CALL { ... }` without an
+                // importing `WITH`): the planner then runs it without the
+                // outer row. It binds in a context of its own, so neither its
+                // internal variables nor a `WITH` in it that drops outer ones
+                // change the outer scope.
+                let subplan_context = if apply.shared_variables.iter().any(|name| name == "*") {
+                    self.context.clone()
+                } else {
                     let mut imported = BindingContext::new();
                     for name in &apply.shared_variables {
                         if let Some(info) = self.context.get(name) {
@@ -702,8 +705,6 @@ impl Binder {
                         }
                     }
                     imported
-                } else {
-                    self.context.clone()
                 };
                 let outer_context = std::mem::replace(&mut self.context, subplan_context);
                 let bound = self.bind_operator(&apply.subplan);
@@ -1096,6 +1097,13 @@ impl Binder {
             }
             LogicalOperator::Sort(s) => Self::register_subplan_columns(&s.input, ctx),
             LogicalOperator::Limit(l) => Self::register_subplan_columns(&l.input, ctx),
+            LogicalOperator::Skip(s) => Self::register_subplan_columns(&s.input, ctx),
+            // The branches of a UNION return the same columns.
+            LogicalOperator::Union(u) => {
+                if let Some(first) = u.inputs.first() {
+                    Self::register_subplan_columns(first, ctx);
+                }
+            }
             LogicalOperator::Distinct(d) => Self::register_subplan_columns(&d.input, ctx),
             LogicalOperator::Aggregate(agg) => {
                 // Aggregate produces named output columns

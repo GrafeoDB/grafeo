@@ -116,9 +116,13 @@ impl UserProcedureOperator {
         }
 
         // Use the module-level translate function
-        let logical_plan = crate::query::translators::gql::translate(&body).map_err(|e| {
+        let mut logical_plan = crate::query::translators::gql::translate(&body).map_err(|e| {
             OperatorError::Execution(format!("Failed to translate procedure body: {e}"))
         })?;
+        // A pattern through a node or edge bound before is checked, as in a
+        // session's plan (the optimizer's first pass; the body skips the
+        // optimizer).
+        logical_plan.root = crate::query::optimizer::close_cycles(logical_plan.root);
 
         // Plan physical operators
         let planner = if let Some(ref tx_mgr) = self.transaction_manager {

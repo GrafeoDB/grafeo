@@ -85,6 +85,64 @@ struct GqlTranslator {
     call_scope: std::cell::RefCell<Option<HashSet<String>>>,
 }
 
+/// Combines two queries with a set operator, or with `NEXT` (the right one
+/// runs for each row of the left one).
+fn combine_queries(
+    op: ast::CompositeOp,
+    left: LogicalOperator,
+    right: LogicalOperator,
+) -> Result<LogicalOperator> {
+    Ok(match op {
+        ast::CompositeOp::Union | ast::CompositeOp::UnionAll => {
+            let inputs = vec![left, right];
+            check_branch_columns("UNION", &inputs)?;
+            let union_op = LogicalOperator::Union(UnionOp { inputs });
+            if op == ast::CompositeOp::UnionAll {
+                union_op
+            } else {
+                wrap_distinct(union_op)
+            }
+        }
+        ast::CompositeOp::Except | ast::CompositeOp::ExceptAll => {
+            let branches = [left, right];
+            check_branch_columns("EXCEPT", &branches)?;
+            let [left, right] = branches;
+            LogicalOperator::Except(ExceptOp {
+                left: Box::new(left),
+                right: Box::new(right),
+                all: matches!(op, ast::CompositeOp::ExceptAll),
+            })
+        }
+        ast::CompositeOp::Intersect | ast::CompositeOp::IntersectAll => {
+            let branches = [left, right];
+            check_branch_columns("INTERSECT", &branches)?;
+            let [left, right] = branches;
+            LogicalOperator::Intersect(IntersectOp {
+                left: Box::new(left),
+                right: Box::new(right),
+                all: matches!(op, ast::CompositeOp::IntersectAll),
+            })
+        }
+        ast::CompositeOp::Otherwise => {
+            let branches = [left, right];
+            check_branch_columns("OTHERWISE", &branches)?;
+            let [left, right] = branches;
+            LogicalOperator::Otherwise(OtherwiseOp {
+                left: Box::new(left),
+                right: Box::new(right),
+            })
+        }
+        // NEXT (linear composition): output of left feeds as input to right.
+        // Translate as Apply: for each row from left, execute right with bound variables.
+        ast::CompositeOp::Next => LogicalOperator::Apply(ApplyOp {
+            input: Box::new(left),
+            subplan: Box::new(right),
+            shared_variables: Vec::new(),
+            optional: false,
+        }),
+    })
+}
+
 impl GqlTranslator {
     fn new() -> Self {
         Self {
@@ -147,63 +205,11 @@ impl GqlTranslator {
     ) -> Result<LogicalPlan> {
         let left_plan = self.translate_statement(left)?;
         let right_plan = self.translate_statement(right)?;
-
-        match op {
-            ast::CompositeOp::Union | ast::CompositeOp::UnionAll => {
-                let inputs = vec![left_plan.root, right_plan.root];
-                check_branch_columns("UNION", &inputs)?;
-                let union_op = LogicalOperator::Union(UnionOp { inputs });
-                let root = if op == ast::CompositeOp::UnionAll {
-                    union_op
-                } else {
-                    wrap_distinct(union_op)
-                };
-                Ok(LogicalPlan::new(root))
-            }
-            ast::CompositeOp::Except | ast::CompositeOp::ExceptAll => {
-                let branches = [left_plan.root, right_plan.root];
-                check_branch_columns("EXCEPT", &branches)?;
-                let [left, right] = branches;
-                let root = LogicalOperator::Except(ExceptOp {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    all: matches!(op, ast::CompositeOp::ExceptAll),
-                });
-                Ok(LogicalPlan::new(root))
-            }
-            ast::CompositeOp::Intersect | ast::CompositeOp::IntersectAll => {
-                let branches = [left_plan.root, right_plan.root];
-                check_branch_columns("INTERSECT", &branches)?;
-                let [left, right] = branches;
-                let root = LogicalOperator::Intersect(IntersectOp {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    all: matches!(op, ast::CompositeOp::IntersectAll),
-                });
-                Ok(LogicalPlan::new(root))
-            }
-            ast::CompositeOp::Otherwise => {
-                let branches = [left_plan.root, right_plan.root];
-                check_branch_columns("OTHERWISE", &branches)?;
-                let [left, right] = branches;
-                let root = LogicalOperator::Otherwise(OtherwiseOp {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                });
-                Ok(LogicalPlan::new(root))
-            }
-            ast::CompositeOp::Next => {
-                // NEXT (linear composition): output of left feeds as input to right.
-                // Translate as Apply: for each row from left, execute right with bound variables.
-                let root = LogicalOperator::Apply(ApplyOp {
-                    input: Box::new(left_plan.root),
-                    subplan: Box::new(right_plan.root),
-                    shared_variables: Vec::new(),
-                    optional: false,
-                });
-                Ok(LogicalPlan::new(root))
-            }
-        }
+        Ok(LogicalPlan::new(combine_queries(
+            op,
+            left_plan.root,
+            right_plan.root,
+        )?))
     }
 
     fn translate_call(&self, call: &ast::CallStatement) -> Result<LogicalPlan> {
@@ -575,11 +581,13 @@ impl GqlTranslator {
                     }
                     ast::QueryClause::InlineCall {
                         subquery,
+                        combined,
                         optional,
                         scope,
                     } => {
                         plan = self.translate_inline_call(
                             subquery,
+                            combined,
                             plan,
                             *optional,
                             scope.as_deref(),
@@ -1396,6 +1404,7 @@ impl GqlTranslator {
     fn translate_inline_call(
         &self,
         subquery: &ast::QueryStatement,
+        combined: &[(ast::CompositeOp, ast::QueryStatement)],
         outer: LogicalOperator,
         optional: bool,
         scope: Option<&[String]>,
@@ -1419,10 +1428,19 @@ impl GqlTranslator {
         // out, and the scope of a CALL nested in it.
         let outer_names = outer.bound_variables(self.call_scope.borrow().as_ref());
         let enclosing = self.call_scope.replace(outer_names.clone());
-        let inner = self.translate_query_from(subquery, input);
+        // Each query combined in the body starts from the same outer row.
+        let translate_part = |part: &ast::QueryStatement| -> Result<LogicalOperator> {
+            let mut plan = self.translate_query_from(part, input.clone())?.root;
+            expand_subquery_return_star(&mut plan, outer_names.as_ref())?;
+            Ok(plan)
+        };
+        let inner = translate_part(subquery).and_then(|first| {
+            combined.iter().try_fold(first, |plan, (op, part)| {
+                combine_queries(*op, plan, translate_part(part)?)
+            })
+        });
         self.call_scope.replace(enclosing);
-        let mut inner_plan = inner?.root;
-        expand_subquery_return_star(&mut inner_plan, outer_names.as_ref())?;
+        let inner_plan = inner?;
         Ok(LogicalOperator::Apply(ApplyOp {
             input: Box::new(outer),
             subplan: Box::new(inner_plan),

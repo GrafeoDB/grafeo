@@ -148,14 +148,10 @@ impl<'a> Parser<'a> {
             return Err(self.error("UNION requires query statements"));
         };
         let mut queries = vec![first_query];
-        let mut is_all = false;
+        let mut union_all = None;
 
         while self.current.kind == TokenKind::Union {
-            self.advance(); // consume UNION
-            is_all = self.current.kind == TokenKind::All;
-            if is_all {
-                self.advance(); // consume ALL
-            }
+            self.parse_union_keyword(&mut union_all)?;
             let next_stmt = self.parse_statement()?;
             match next_stmt {
                 Statement::Query(q) => queries.push(q),
@@ -167,8 +163,24 @@ impl<'a> Parser<'a> {
 
         Ok(Statement::Union {
             queries,
-            all: is_all,
+            all: union_all.unwrap_or(false),
         })
+    }
+
+    /// Consumes `UNION` or `UNION ALL`. As in openCypher, one chain of
+    /// queries uses one of them: `union_all` holds the kind seen so far, and
+    /// a different one is an error.
+    fn parse_union_keyword(&mut self, union_all: &mut Option<bool>) -> Result<()> {
+        self.expect(TokenKind::Union)?;
+        let all = self.current.kind == TokenKind::All;
+        if all {
+            self.advance(); // consume ALL
+        }
+        if union_all.is_some_and(|seen| seen != all) {
+            return Err(self.error("Invalid combination of UNION and UNION ALL"));
+        }
+        *union_all = Some(all);
+        Ok(())
     }
 
     fn parse_statement(&mut self) -> Result<Statement> {
@@ -224,24 +236,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     clauses.push(Clause::Limit(self.parse_expression()?));
                 }
-                TokenKind::Call => {
-                    // CALL [(scope)] { subquery } vs CALL procedure(...): a
-                    // procedure name comes before any `(`
-                    if matches!(self.peek_kind(), TokenKind::LBrace | TokenKind::LParen) {
-                        self.advance(); // consume CALL
-                        let scope = if self.current.kind == TokenKind::LParen {
-                            Some(self.parse_call_scope()?)
-                        } else {
-                            None
-                        };
-                        self.expect(TokenKind::LBrace)?;
-                        let query = self.parse_subquery_body()?;
-                        self.expect(TokenKind::RBrace)?;
-                        clauses.push(Clause::CallSubquery { query, scope });
-                    } else {
-                        clauses.push(Clause::Call(self.parse_call_clause()?));
-                    }
-                }
+                TokenKind::Call => clauses.push(self.parse_call()?),
                 _ => {
                     // FOREACH and LOAD are contextual keywords (not reserved)
                     if self.can_be_identifier()
@@ -265,6 +260,37 @@ impl<'a> Parser<'a> {
             clauses,
             span: None,
         }))
+    }
+
+    /// Parses `CALL [(scope)] { subquery [UNION [ALL] subquery]* }` or a
+    /// procedure call: a procedure name comes before any `(`.
+    fn parse_call(&mut self) -> Result<Clause> {
+        if !matches!(self.peek_kind(), TokenKind::LBrace | TokenKind::LParen) {
+            return Ok(Clause::Call(self.parse_call_clause()?));
+        }
+        self.advance(); // consume CALL
+        let scope = if self.current.kind == TokenKind::LParen {
+            Some(self.parse_call_scope()?)
+        } else {
+            None
+        };
+        self.expect(TokenKind::LBrace)?;
+        self.enter_nesting()?;
+        let query = self.parse_subquery_body()?;
+        let mut unions = Vec::new();
+        let mut union_all = None;
+        while self.current.kind == TokenKind::Union {
+            self.parse_union_keyword(&mut union_all)?;
+            unions.push(self.parse_subquery_body()?);
+        }
+        self.exit_nesting();
+        self.expect(TokenKind::RBrace)?;
+        Ok(Clause::CallSubquery {
+            query,
+            scope,
+            unions,
+            union_all: union_all.unwrap_or(false),
+        })
     }
 
     /// Parses a CALL clause: `CALL name.space(args) [YIELD field [AS alias], ...]`.
@@ -448,6 +474,18 @@ impl<'a> Parser<'a> {
                 TokenKind::Set => {
                     clauses.push(Clause::Set(self.parse_set_clause()?));
                 }
+                TokenKind::Order => {
+                    clauses.push(Clause::OrderBy(self.parse_order_by_clause()?));
+                }
+                TokenKind::Skip => {
+                    self.advance();
+                    clauses.push(Clause::Skip(self.parse_expression()?));
+                }
+                TokenKind::Limit => {
+                    self.advance();
+                    clauses.push(Clause::Limit(self.parse_expression()?));
+                }
+                TokenKind::Call => clauses.push(self.parse_call()?),
                 _ => break,
             }
         }
@@ -485,13 +523,21 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Parses the inner query of an EXISTS subquery.
-    /// Accepts one or more MATCH clauses and an optional WHERE clause.
+    /// Parses the inner query of an EXISTS or COUNT subquery: MATCH and
+    /// OPTIONAL MATCH clauses and an optional WHERE.
     fn parse_exists_inner_query(&mut self) -> Result<Query> {
         let mut clauses = Vec::new();
 
-        while self.current.kind == TokenKind::Match || self.current.kind == TokenKind::Optional {
-            clauses.push(Clause::Match(self.parse_match_clause()?));
+        loop {
+            match self.current.kind {
+                TokenKind::Match => clauses.push(Clause::Match(self.parse_match_clause()?)),
+                TokenKind::Optional => {
+                    self.advance();
+                    self.expect(TokenKind::Match)?;
+                    clauses.push(Clause::OptionalMatch(self.parse_match_clause_body()?));
+                }
+                _ => break,
+            }
         }
 
         // Bare pattern form: EXISTS { (a)-[r]->(b) WHERE ... }
@@ -4307,5 +4353,66 @@ mod tests {
             panic!("expected a query");
         };
         assert!(matches!(procedure.clauses[0], Clause::Call(_)));
+    }
+
+    /// A CALL subquery body takes ORDER BY, SKIP and LIMIT after its RETURN,
+    /// and parts joined by UNION or UNION ALL (one kind per chain).
+    #[test]
+    fn test_call_subquery_body_paging_and_union() {
+        let call_of = |query: &str| {
+            let Statement::Query(statement) = parse_ok(query) else {
+                panic!("expected a query: {query}");
+            };
+            statement
+                .clauses
+                .into_iter()
+                .find_map(|clause| match clause {
+                    Clause::CallSubquery {
+                        query,
+                        unions,
+                        union_all,
+                        ..
+                    } => Some((query, unions, union_all)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected a CALL subquery: {query}"))
+        };
+        let (body, unions, _) = call_of(
+            "MATCH (a) CALL (a) { MATCH (a)-->(b) RETURN b ORDER BY b.x DESC SKIP 1 LIMIT 2 } RETURN b",
+        );
+        assert!(unions.is_empty());
+        assert!(matches!(
+            body.clauses[..],
+            [
+                Clause::Match(_),
+                Clause::Return(_),
+                Clause::OrderBy(_),
+                Clause::Skip(_),
+                Clause::Limit(_)
+            ]
+        ));
+        let (_, unions, union_all) =
+            call_of("CALL { RETURN 1 AS x UNION RETURN 2 AS x UNION RETURN 3 AS x } RETURN x");
+        assert_eq!((unions.len(), union_all), (2, false));
+        let (_, unions, union_all) =
+            call_of("CALL { RETURN 1 AS x UNION ALL RETURN 1 AS x } RETURN x");
+        assert_eq!((unions.len(), union_all), (1, true));
+        parse_err("CALL { RETURN 1 AS x UNION RETURN 2 AS x UNION ALL RETURN 3 AS x } RETURN x");
+        parse_err("RETURN 1 AS x UNION ALL RETURN 2 AS x UNION RETURN 3 AS x");
+    }
+
+    /// EXISTS and COUNT subqueries take OPTIONAL MATCH clauses.
+    #[test]
+    fn test_exists_and_count_take_optional_match() {
+        for query in [
+            "MATCH (a) WHERE EXISTS { MATCH (a)-->(b) OPTIONAL MATCH (b)-->(c) } RETURN a",
+            "MATCH (a) RETURN COUNT { MATCH (a)-->(b) OPTIONAL MATCH (b)-->(c) WHERE c.x > 1 } AS n",
+        ] {
+            let Statement::Query(statement) = parse_ok(query) else {
+                panic!("expected a query: {query}");
+            };
+            let text = format!("{statement:?}");
+            assert!(text.contains("OptionalMatch"), "{query}: {text}");
+        }
     }
 }

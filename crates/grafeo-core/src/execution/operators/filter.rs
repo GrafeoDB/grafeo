@@ -2216,12 +2216,15 @@ impl ExpressionPredicate {
                 if args.len() != 1 {
                     return None;
                 }
+                // In key order, so they line up with keys(n) (a store keeps
+                // properties in no particular order).
                 if let FilterExpression::Variable(var) = &args[0] {
-                    let values: Vec<Value> = self
+                    let mut properties: Vec<(PropertyKey, Value)> = self
                         .element_properties(var, chunk, row)?
                         .into_iter()
-                        .map(|(_, v)| v)
                         .collect();
+                    properties.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+                    let values: Vec<Value> = properties.into_iter().map(|(_, v)| v).collect();
                     return Some(Value::List(values.into()));
                 }
                 None
@@ -6875,6 +6878,42 @@ mod text_fn_tests {
     /// column holds: an edge column reads the edge even when a node has the
     /// same ID, and an untyped column holding a raw ID reads the edge when no
     /// node has that ID (it used to stop at the missing node).
+    /// `property_values(n)` lists the values in key order, as `keys(n)` lists
+    /// the keys.
+    #[test]
+    fn property_values_line_up_with_keys() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Person"]);
+        // Set in an order other than the key order.
+        store.set_node_property(alix, "name", Value::from("Alix"));
+        store.set_node_property(alix, "age", Value::Int64(30));
+        let eval = |function: &str| {
+            let mut column = ValueVector::with_capacity(LogicalType::Node, 1);
+            column.push_node_id(alix);
+            ExpressionPredicate::new(
+                FilterExpression::FunctionCall {
+                    name: function.to_string(),
+                    args: vec![FilterExpression::Variable("n".to_string())],
+                },
+                HashMap::from([("n".to_string(), 0)]),
+                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            )
+            .eval(&DataChunk::new(vec![column]), 0)
+        };
+        assert_eq!(
+            eval("keys"),
+            Some(Value::List(
+                vec![Value::from("age"), Value::from("name")].into()
+            ))
+        );
+        assert_eq!(
+            eval("property_values"),
+            Some(Value::List(
+                vec![Value::Int64(30), Value::from("Alix")].into()
+            ))
+        );
+    }
+
     #[test]
     fn element_functions_read_the_entity_the_column_holds() {
         let store = Arc::new(LpgStore::new().unwrap());

@@ -33,11 +33,11 @@ impl super::Planner {
             ExpandDirection::Both => Direction::Both,
         };
 
-        // Check if this is a variable-length path
-        let is_variable_length = expand.quantified
-            || expand.min_hops != 1
-            || expand.max_hops.is_none()
-            || expand.max_hops != Some(1);
+        // Check if this is a variable-length path. The GQL, Cypher and SQL/PGQ
+        // translators set `quantified` for one; other plans (Gremlin, built
+        // in code) only set hop bounds, so those count too.
+        let is_variable_length =
+            expand.quantified || expand.min_hops != 1 || expand.max_hops != Some(1);
 
         // Use VariableLengthExpandOperator when multi-hop OR when a named path
         // needs path detail columns (length, nodes, edges)

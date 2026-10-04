@@ -1000,22 +1000,7 @@ impl Planner {
             LogicalOperator::CallProcedure(_) => Err(Error::Internal(
                 "CALL procedures require the 'algos' feature".to_string(),
             )),
-            LogicalOperator::ParameterScan(_param_scan) => {
-                let state = self
-                    .correlated_param_state
-                    .borrow()
-                    .clone()
-                    .ok_or_else(|| {
-                        Error::Internal(
-                            "ParameterScan without correlated Apply context".to_string(),
-                        )
-                    })?;
-                // Use the actual column names from the ParameterState (which may
-                // have been expanded from "*" to real variable names in plan_apply)
-                let columns = state.columns.clone();
-                let operator: Box<dyn Operator> = Box::new(ParameterScanOperator::new(state));
-                Ok((operator, columns))
-            }
+            LogicalOperator::ParameterScan(param_scan) => self.plan_parameter_scan(param_scan),
             LogicalOperator::MultiWayJoin(mwj) => self.plan_multi_way_join(mwj),
             LogicalOperator::HorizontalAggregate(ha) => self.plan_horizontal_aggregate(ha),
             LogicalOperator::LoadData(load) => {

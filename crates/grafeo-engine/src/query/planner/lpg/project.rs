@@ -57,7 +57,7 @@ impl super::Planner {
         // EXISTS and COUNT subqueries the edge check cannot answer run per row
         // first (see `subquery.rs`); the items read their counts.
         let (lifted_items, input_op, input_columns) =
-            self.lift_return_items(items, input_op, input_columns)?;
+            self.lift_return_items(items, input_op, input_columns, ret.input.has_mutations())?;
         let items = lifted_items.as_deref().unwrap_or(items);
 
         // Build variable to column index mapping
@@ -398,8 +398,12 @@ impl super::Planner {
             };
         // EXISTS and COUNT subqueries the edge check cannot answer run per row
         // first (see `subquery.rs`); the projections read their counts.
-        let (lifted_projections, input_op, input_columns) =
-            self.lift_projections(&project.projections, input_op, input_columns)?;
+        let (lifted_projections, input_op, input_columns) = self.lift_projections(
+            &project.projections,
+            input_op,
+            input_columns,
+            project.input.has_mutations(),
+        )?;
         let project_projections = lifted_projections
             .as_deref()
             .unwrap_or(&project.projections);

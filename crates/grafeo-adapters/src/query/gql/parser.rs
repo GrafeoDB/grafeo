@@ -302,56 +302,7 @@ impl<'a> Parser<'a> {
         }
 
         // Check for composite query operators (UNION, EXCEPT, INTERSECT, OTHERWISE)
-        while matches!(
-            self.current.kind,
-            TokenKind::Union | TokenKind::Except | TokenKind::Intersect | TokenKind::Otherwise
-        ) {
-            let op = match self.current.kind {
-                TokenKind::Union => {
-                    self.advance();
-                    if self.current.kind == TokenKind::All {
-                        self.advance();
-                        CompositeOp::UnionAll
-                    } else {
-                        // UNION DISTINCT is explicit form of the default
-                        if self.current.kind == TokenKind::Distinct {
-                            self.advance();
-                        }
-                        CompositeOp::Union
-                    }
-                }
-                TokenKind::Except => {
-                    self.advance();
-                    if self.current.kind == TokenKind::All {
-                        self.advance();
-                        CompositeOp::ExceptAll
-                    } else {
-                        // EXCEPT DISTINCT is explicit form of the default
-                        if self.current.kind == TokenKind::Distinct {
-                            self.advance();
-                        }
-                        CompositeOp::Except
-                    }
-                }
-                TokenKind::Intersect => {
-                    self.advance();
-                    if self.current.kind == TokenKind::All {
-                        self.advance();
-                        CompositeOp::IntersectAll
-                    } else {
-                        // INTERSECT DISTINCT is explicit form of the default
-                        if self.current.kind == TokenKind::Distinct {
-                            self.advance();
-                        }
-                        CompositeOp::Intersect
-                    }
-                }
-                TokenKind::Otherwise => {
-                    self.advance();
-                    CompositeOp::Otherwise
-                }
-                _ => unreachable!(),
-            };
+        while let Some(op) = self.parse_composite_op() {
             let right = self.parse_single_statement()?;
             left = Statement::CompositeQuery {
                 left: Box::new(left),
@@ -361,6 +312,32 @@ impl<'a> Parser<'a> {
         }
 
         Ok(left)
+    }
+
+    /// Consumes a set operator between two queries (`UNION [ALL | DISTINCT]`,
+    /// `EXCEPT ...`, `INTERSECT ...`, `OTHERWISE`), or returns `None` when
+    /// the current token starts none.
+    fn parse_composite_op(&mut self) -> Option<CompositeOp> {
+        let (distinct, all) = match self.current.kind {
+            TokenKind::Union => (CompositeOp::Union, CompositeOp::UnionAll),
+            TokenKind::Except => (CompositeOp::Except, CompositeOp::ExceptAll),
+            TokenKind::Intersect => (CompositeOp::Intersect, CompositeOp::IntersectAll),
+            TokenKind::Otherwise => {
+                self.advance();
+                return Some(CompositeOp::Otherwise);
+            }
+            _ => return None,
+        };
+        self.advance();
+        if self.current.kind == TokenKind::All {
+            self.advance();
+            return Some(all);
+        }
+        // DISTINCT is the explicit form of the default
+        if self.current.kind == TokenKind::Distinct {
+            self.advance();
+        }
+        Some(distinct)
     }
 
     fn parse_single_statement(&mut self) -> Result<Statement> {
@@ -554,12 +531,13 @@ impl<'a> Parser<'a> {
 
     /// Parses an inline CALL { subquery } and its variable scope clause, if
     /// any: `CALL (a, b) { ... }` sees the outer variables `a` and `b`,
-    /// `CALL () { ... }` none, and `CALL { ... }` all of them.
+    /// `CALL () { ... }` none, and `CALL { ... }` all of them. The body may
+    /// combine queries with `UNION`, `EXCEPT`, `INTERSECT` or `OTHERWISE`.
     ///
     /// ```text
-    /// CALL [( [var [, var]*] )] { query_body RETURN ... }
+    /// CALL [( [var [, var]*] )] { query_body RETURN ... [UNION ...] }
     /// ```
-    fn parse_inline_call(&mut self) -> Result<(Option<Vec<String>>, QueryStatement)> {
+    fn parse_inline_call(&mut self, optional: bool) -> Result<QueryClause> {
         self.expect(TokenKind::Call)?;
         let scope = if self.current.kind == TokenKind::LParen {
             self.advance();
@@ -585,10 +563,19 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LBrace)?;
 
         // Parse the inner query body (MATCH ... RETURN ...)
-        let inner = self.parse_query()?;
+        let subquery = self.parse_query()?;
+        let mut combined = Vec::new();
+        while let Some(op) = self.parse_composite_op() {
+            combined.push((op, self.parse_query()?));
+        }
 
         self.expect(TokenKind::RBrace)?;
-        Ok((scope, inner))
+        Ok(QueryClause::InlineCall {
+            subquery,
+            combined,
+            optional,
+            scope,
+        })
     }
 
     /// Parses a YIELD item list: `field [AS alias] { , field [AS alias] }`.
@@ -676,12 +663,7 @@ impl<'a> Parser<'a> {
                         self.advance(); // consume OPTIONAL
                         if matches!(self.peek_kind(), TokenKind::LBrace | TokenKind::LParen) {
                             // OPTIONAL CALL [(scope)] { subquery }
-                            let (scope, subquery) = self.parse_inline_call()?;
-                            ordered_clauses.push(QueryClause::InlineCall {
-                                subquery,
-                                optional: true,
-                                scope,
-                            });
+                            ordered_clauses.push(self.parse_inline_call(true)?);
                         } else {
                             // OPTIONAL CALL procedure(...)
                             let call = self.parse_call_statement()?;
@@ -727,12 +709,7 @@ impl<'a> Parser<'a> {
                     // CALL [(scope)] { subquery } (inline) or CALL procedure(...)
                     // (within query): a procedure name comes before any `(`
                     if matches!(self.peek_kind(), TokenKind::LBrace | TokenKind::LParen) {
-                        let (scope, subquery) = self.parse_inline_call()?;
-                        ordered_clauses.push(QueryClause::InlineCall {
-                            subquery,
-                            optional: false,
-                            scope,
-                        });
+                        ordered_clauses.push(self.parse_inline_call(false)?);
                     } else {
                         let call = self.parse_call_statement()?;
                         ordered_clauses.push(QueryClause::CallProcedure(call));
@@ -11191,6 +11168,37 @@ mod tests {
             result.is_ok(),
             "CREATE GRAPH IF NOT EXISTS must parse: {:?}",
             result.err()
+        );
+    }
+
+    /// An inline CALL body combines queries with set operators, left to right.
+    #[test]
+    fn test_parse_inline_call_combined_body() {
+        let combined_of = |query: &str| {
+            let Statement::Query(statement) = Parser::new(query).parse().unwrap() else {
+                panic!("expected a query: {query}");
+            };
+            statement
+                .ordered_clauses
+                .into_iter()
+                .find_map(|clause| match clause {
+                    QueryClause::InlineCall { combined, .. } => {
+                        Some(combined.into_iter().map(|(op, _)| op).collect::<Vec<_>>())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected an inline CALL: {query}"))
+        };
+        assert_eq!(combined_of("CALL { RETURN 1 AS x } RETURN x"), []);
+        assert_eq!(
+            combined_of(
+                "MATCH (a) CALL (a) { RETURN 1 AS x UNION ALL RETURN 2 AS x EXCEPT RETURN 3 AS x } RETURN x"
+            ),
+            [CompositeOp::UnionAll, CompositeOp::Except]
+        );
+        assert_eq!(
+            combined_of("CALL { RETURN 1 AS x UNION DISTINCT RETURN 1 AS x } RETURN x"),
+            [CompositeOp::Union]
         );
     }
 

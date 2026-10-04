@@ -3,9 +3,13 @@
 use super::{
     ApplyOp, ApplyOperator, DistinctOp, Error, ExceptOp, HashJoinOperator, IntersectOp, JoinOp,
     JoinType, LeapfrogJoinOperator, LogicalExpression, LogicalOperator, MultiWayJoinOp, Operator,
-    OtherwiseOp, PhysicalJoinType, ProjectExpr, ProjectOperator, Result, UnionOp, Value, common,
+    OtherwiseOp, ParameterScanOperator, PhysicalJoinType, ProjectExpr, ProjectOperator, Result,
+    UnionOp, Value, common,
 };
-use crate::query::plan::{LimitOp, ProjectOp, Projection, ReturnOp, SkipOp, SortKey, SortOp};
+use crate::query::plan::{
+    LimitOp, ParameterScanOp, ProjectOp, Projection, ReturnOp, SkipOp, SortKey, SortOp,
+};
+use grafeo_common::types::LogicalType;
 
 impl super::Planner {
     /// Plans a JOIN operator.
@@ -309,6 +313,49 @@ impl super::Planner {
         Ok(common::build_otherwise(left_op, right_op, columns))
     }
 
+    /// Plans the scan that starts a correlated subquery from the outer row.
+    /// The state holds what the Apply imports (`*` expanded to the outer
+    /// columns in `plan_apply`); a scan that names some of them (a `UNION`
+    /// branch that imports less than another) passes on only those, so the
+    /// others stay free names in its plan.
+    pub(super) fn plan_parameter_scan(
+        &self,
+        scan: &ParameterScanOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let state = self
+            .correlated_param_state
+            .borrow()
+            .clone()
+            .ok_or_else(|| {
+                Error::Internal("ParameterScan without correlated Apply context".to_string())
+            })?;
+        let columns = state.columns.clone();
+        let operator: Box<dyn Operator> = Box::new(ParameterScanOperator::new(state));
+        if scan.columns.iter().any(|name| name == "*") || scan.columns == columns {
+            return Ok((operator, columns));
+        }
+        let projections = scan
+            .columns
+            .iter()
+            .map(|name| {
+                columns
+                    .iter()
+                    .position(|column| column == name)
+                    .map(ProjectExpr::Column)
+                    .ok_or_else(|| {
+                        Error::Internal(format!(
+                            "variable '{name}' is not imported by the enclosing Apply"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let types = vec![LogicalType::Any; projections.len()];
+        Ok((
+            Box::new(ProjectOperator::new(operator, projections, types)),
+            scan.columns.clone(),
+        ))
+    }
+
     /// Plans an APPLY (lateral join) operator.
     ///
     /// When `shared_variables` is non-empty, creates a correlated Apply that
@@ -374,13 +421,15 @@ impl super::Planner {
             })
             .collect::<Result<_>>()?;
 
-        // Set the parameter state so the inner plan's ParameterScan can find it
-        *self.correlated_param_state.borrow_mut() = Some(std::sync::Arc::clone(&param_state));
-
-        let (inner_op, inner_columns) = self.plan_operator(subplan)?;
-
-        // Clear the parameter state after planning the inner operator
-        *self.correlated_param_state.borrow_mut() = None;
+        // Set the parameter state so the inner plan's ParameterScan can find
+        // it; the state of an enclosing subquery comes back afterwards, for
+        // what is planned after this Apply inside that subquery.
+        let previous = self
+            .correlated_param_state
+            .replace(Some(std::sync::Arc::clone(&param_state)));
+        let planned = self.plan_operator(subplan);
+        *self.correlated_param_state.borrow_mut() = previous;
+        let (inner_op, inner_columns) = planned?;
 
         // Any other subquery materializes values, so register them as scalar
         // to prevent the outer RETURN from misinterpreting them as node IDs.
@@ -435,6 +484,14 @@ fn subquery_output(subplan: &LogicalOperator) -> Option<LogicalOperator> {
         LogicalOperator::Distinct(distinct) => Some(LogicalOperator::Distinct(DistinctOp {
             input: Box::new(subquery_output(&distinct.input)?),
             columns: distinct.columns.clone(),
+        })),
+        // A UNION of such subqueries passes on what each branch returns.
+        LogicalOperator::Union(union) => Some(LogicalOperator::Union(UnionOp {
+            inputs: union
+                .inputs
+                .iter()
+                .map(subquery_output)
+                .collect::<Option<_>>()?,
         })),
         _ => None,
     }

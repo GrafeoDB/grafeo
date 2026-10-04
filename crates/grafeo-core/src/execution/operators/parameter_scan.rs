@@ -54,9 +54,11 @@ impl ParameterState {
         *self.values.lock() = None;
     }
 
-    /// Takes the current parameter values and their column types.
-    fn take_values(&self) -> Option<(Vec<Value>, Vec<LogicalType>)> {
-        self.values.lock().take()
+    /// The current parameter values and their column types. They stay set:
+    /// every scan of the state reads them (each branch of a `UNION` in the
+    /// subquery starts from one, and a rescan after `reset` reads them again).
+    fn current_values(&self) -> Option<(Vec<Value>, Vec<LogicalType>)> {
+        self.values.lock().clone()
     }
 }
 
@@ -94,7 +96,7 @@ impl Operator for ParameterScanOperator {
         }
         self.emitted = true;
 
-        let Some((values, types)) = self.state.take_values() else {
+        let Some((values, types)) = self.state.current_values() else {
             return Ok(None);
         };
 
@@ -188,6 +190,24 @@ mod tests {
         assert!(chunk.column(0).unwrap().get_edge_id(0).is_none());
         assert_eq!(chunk.column(1).unwrap().get_edge_id(0).unwrap().as_u64(), 3);
         assert!(chunk.column(1).unwrap().get_node_id(0).is_none());
+    }
+
+    /// Two scans of one state (the branches of a UNION) both read the row,
+    /// and so does a rescan after `reset` without new values.
+    #[test]
+    fn every_scan_of_the_state_reads_the_values() {
+        let state = Arc::new(ParameterState::new(vec!["x".to_string()]));
+        let mut first = ParameterScanOperator::new(Arc::clone(&state));
+        let mut second = ParameterScanOperator::new(Arc::clone(&state));
+        state.set_values(vec![Value::Int64(7)]);
+        for op in [&mut first, &mut second] {
+            let chunk = op.next().unwrap().expect("each scan emits the row");
+            assert_eq!(chunk.column(0).unwrap().get_value(0), Some(Value::Int64(7)));
+            assert!(op.next().unwrap().is_none());
+        }
+        first.reset();
+        let chunk = first.next().unwrap().expect("a rescan emits the row again");
+        assert_eq!(chunk.column(0).unwrap().get_value(0), Some(Value::Int64(7)));
     }
 
     #[test]

@@ -84,10 +84,11 @@ jobs:
         with:
           node-version: '22'
 
+      # From grafeo-web's lockfile: resolving the whole tree afresh picks up
+      # whatever was published since (vitest 5 crashed npm's peer resolution),
+      # and the steps below change only the two wasm packages in it.
       - name: Install dependencies
-        run: |
-          rm -f package-lock.json
-          npm install
+        run: npm ci
 
       - name: Bump package.json version
         run: |

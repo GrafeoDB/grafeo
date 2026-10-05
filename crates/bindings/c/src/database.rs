@@ -229,10 +229,11 @@ pub extern "C" fn grafeo_open_read_only(path: *const c_char) -> *mut GrafeoDatab
 
 /// Open or create a persistent database at `path` using single-file format.
 ///
-/// Since 0.6 every database is a single file, whatever the extension of
-/// `path`, so this is the same as [`grafeo_open`]. At rest only the file
-/// exists; a sidecar `<path>.wal/` directory is used during operation and
-/// removed automatically on close.
+/// Deprecated since 0.6.0 and removed in 0.7.0: use [`grafeo_open`]. Since
+/// 0.6 every database is a single file, whatever the extension of `path`, so
+/// this is the same as [`grafeo_open`]. At rest only the file exists; a
+/// sidecar `<path>.wal/` directory is used during operation and removed
+/// automatically on close.
 ///
 /// Returns an opaque pointer, or null on error (check `grafeo_last_error()`).
 #[unsafe(no_mangle)]

@@ -68,7 +68,7 @@ gcc -o example example.c -lgrafeo_c -L/path/to/target/release
 GrafeoDatabase* grafeo_open_memory(void);                   /* in-memory */
 GrafeoDatabase* grafeo_open(const char* path);              /* persistent (a single file) */
 GrafeoDatabase* grafeo_open_read_only(const char* path);    /* read-only */
-GrafeoDatabase* grafeo_open_single_file(const char* path);  /* same as grafeo_open */
+GrafeoDatabase* grafeo_open_single_file(const char* path);  /* deprecated: same as grafeo_open, removed in 0.7.0 */
 GrafeoStatus    grafeo_close(GrafeoDatabase* db);           /* flush and close */
 void            grafeo_free_database(GrafeoDatabase* db);   /* free handle */
 const char*     grafeo_version(void);                       /* library version */

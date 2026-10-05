@@ -25,10 +25,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial nint grafeo_open_read_only(string path);
 
-    /// <summary>Open or create a single-file database (no WAL sidecar). Returns null on error.</summary>
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial nint grafeo_open_single_file(string path);
-
     /// <summary>Close the database, flushing pending writes. Returns status code.</summary>
     [LibraryImport(LibName)]
     internal static partial int grafeo_close(nint db);

@@ -57,7 +57,7 @@ void main() {
 |--------|-------------|
 | `GrafeoDB.memory()` | Open an in-memory database |
 | `GrafeoDB.open(path)` | Open or create a persistent database (a single file) |
-| `GrafeoDB.openSingleFile(path)` | Same as `open(path)` |
+| `GrafeoDB.openSingleFile(path)` | Deprecated: same as `open(path)`, removed in 0.7.0 |
 | `GrafeoDB.openReadOnly(path)` | Open an existing database in read-only mode |
 | `GrafeoDB.version()` | Get the library version string |
 | `execute(query)` | Execute a GQL query |

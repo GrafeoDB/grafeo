@@ -73,20 +73,11 @@ func Open(path string) (*Database, error) {
 // OpenSingleFile opens or creates a persistent database at the given path,
 // as Open does: since 0.6 every database is a single file, whatever the
 // extension of its path.
+//
+// Deprecated: use Open, which does the same since 0.6.0. OpenSingleFile is
+// removed in 0.7.0.
 func OpenSingleFile(path string) (*Database, error) {
-	cPath := C.CString(path)
-	defer C.free(unsafe.Pointer(cPath))
-	runtime.LockOSThread()
-	h := C.grafeo_open_single_file(cPath)
-	if h == nil {
-		err := lastError()
-		runtime.UnlockOSThread()
-		return nil, err
-	}
-	runtime.UnlockOSThread()
-	db := &Database{handle: h}
-	runtime.SetFinalizer(db, (*Database).free)
-	return db, nil
+	return Open(path)
 }
 
 // Close flushes any pending writes and releases the database handle.

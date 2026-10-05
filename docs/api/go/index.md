@@ -54,7 +54,7 @@ func main() {
 ```go
 db, err := grafeo.OpenInMemory()                // in-memory
 db, err := grafeo.Open("./path")                // persistent (a single file)
-db, err := grafeo.OpenSingleFile("./data.grafeo") // same as Open
+db, err := grafeo.OpenSingleFile("./data.grafeo") // deprecated: same as Open, removed in 0.7.0
 defer db.Close()
 
 db.NodeCount()   // number of nodes

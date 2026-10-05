@@ -33,6 +33,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 ### Deprecated
 
 - **Rust (`grafeo-engine`): `StorageFormat::WalDirectory`**, removed in 0.7.0. It opens an existing 0.5.x WAL directory by migrating it, and fails at a new path, where `StorageFormat::Auto` (the default) creates a single file. `Auto` and `SingleFile` now only decide what a new path becomes: an existing path opens as what it holds.
+- **C, Go and Dart: `grafeo_open_single_file`, `OpenSingleFile` and `GrafeoDB.openSingleFile`**, removed in 0.7.0: since every database is a single file, they do the same as `grafeo_open`, `Open` and `GrafeoDB.open`. Compilers and analyzers warn on their use.
 
 ## [0.5.44] - 2026-10-04
 

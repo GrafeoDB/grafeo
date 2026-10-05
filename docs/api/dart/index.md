@@ -87,17 +87,17 @@ final db = GrafeoDB.open('/tmp/my_graph.db');
 
 #### GrafeoDB.openSingleFile()
 
-Open or create a persistent database at the given path (a single file). All data
-is stored in one file with a sidecar WAL for crash safety. Since 0.6 every
-database is a single file, whatever the extension of its path, so this is the
-same as `open()`.
+Deprecated since 0.6.0 and removed in 0.7.0: use `open()`. Opens or creates a
+persistent database at the given path (a single file), with a sidecar WAL for
+crash safety. Since 0.6 every database is a single file, whatever the extension
+of its path, so this is the same as `open()`.
 
 ```dart
 static GrafeoDB openSingleFile(String path, {String? libraryPath})
 ```
 
 ```dart
-final db = GrafeoDB.openSingleFile('/home/user/my_graph.grafeo');
+final db = GrafeoDB.open('/home/user/my_graph.grafeo');
 ```
 
 #### GrafeoDB.openReadOnly()

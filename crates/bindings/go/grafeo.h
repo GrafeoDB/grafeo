@@ -61,11 +61,21 @@ typedef struct GrafeoStream      GrafeoStream;
 const char* grafeo_last_error(void);
 void        grafeo_clear_error(void);
 
+/* Marks a function that a later release removes; compilers warn on its use. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define GRAFEO_DEPRECATED(message) __attribute__((deprecated(message)))
+#elif defined(_MSC_VER)
+#  define GRAFEO_DEPRECATED(message) __declspec(deprecated(message))
+#else
+#  define GRAFEO_DEPRECATED(message)
+#endif
+
 /* ---- Lifecycle ----------------------------------------------------------- */
 
 GrafeoDatabase* grafeo_open_memory(void);
 GrafeoDatabase* grafeo_open(const char* path);
 GrafeoDatabase* grafeo_open_read_only(const char* path);
+GRAFEO_DEPRECATED("same as grafeo_open since 0.6.0; removed in 0.7.0")
 GrafeoDatabase* grafeo_open_single_file(const char* path);
 GrafeoStatus    grafeo_close(GrafeoDatabase* db);
 void            grafeo_free_database(GrafeoDatabase* db);

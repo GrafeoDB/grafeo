@@ -72,18 +72,10 @@ class GrafeoDB implements Finalizable {
   /// similar to DuckDB's `.duckdb` format. Since 0.6 every database is a
   /// single file, whatever the extension of its path, so this is the same
   /// as [open].
-  static GrafeoDB openSingleFile(String path, {String? libraryPath}) {
-    final lib = loadNativeLibrary(libraryPath);
-    final bindings = GrafeoBindings(lib);
-    final pathPtr = path.toNativeUtf8(allocator: malloc);
-    try {
-      final ptr = bindings.grafeoOpenSingleFile(pathPtr);
-      if (ptr == nullptr) throwLastError(bindings);
-      return GrafeoDB._(ptr, bindings);
-    } finally {
-      malloc.free(pathPtr);
-    }
-  }
+  @Deprecated('Use GrafeoDB.open, which does the same since 0.6.0; '
+      'openSingleFile is removed in 0.7.0')
+  static GrafeoDB openSingleFile(String path, {String? libraryPath}) =>
+      open(path, libraryPath: libraryPath);
 
   /// Open an existing database at [path] in read-only mode.
   ///

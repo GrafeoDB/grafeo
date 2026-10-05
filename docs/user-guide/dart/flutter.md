@@ -103,7 +103,7 @@ Track progress in the [Grafeo roadmap](https://grafeo.dev/roadmap/).
 If the native library is not in the default search path, pass an explicit path:
 
 ```dart
-final db = GrafeoDB.openSingleFile(
+final db = GrafeoDB.open(
   dbPath,
   libraryPath: '/opt/grafeo/lib/libgrafeo_c.so',
 );

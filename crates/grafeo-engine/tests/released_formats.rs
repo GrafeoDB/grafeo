@@ -7,10 +7,11 @@
 //! not read it yet (and the issue that will).
 //!
 //! Every check runs twice: on a read-write open of every fixture, and on a read-only open
-//! of the single-file layouts, which reads the 0.5.x file (and its sidecar WAL) in place
-//! and must leave every byte of it as it was. A read-write open of a single-file layout
-//! first migrates it to the 0.6 format and keeps the 0.5.x files as `<name>.pre-0.6`
-//! (and `<name>.pre-0.6.wal/`), so its checks read the migrated file.
+//! of every fixture, which reads the 0.5.x database (its file and sidecar WAL, or the WAL
+//! of its directory) in place and must leave every byte of it as it was. A read-write
+//! open first migrates the database to a single file in the 0.6 format at the same path
+//! and keeps the 0.5.x files as `<name>.pre-0.6` (a file with `<name>.pre-0.6.wal/`, or
+//! the whole directory), so its checks read the migrated file.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test released_formats
@@ -32,6 +33,7 @@ use std::path::{Path, PathBuf};
 use grafeo_common::types::{Date, Duration, NodeId, PropertyKey, Value, ZonedDatetime};
 use grafeo_engine::GrafeoDB;
 use grafeo_storage::file::detect::{OnDisk, detect};
+use grafeo_storage::lock::DirectoryLock;
 
 /// How the release left the database on disk.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -91,10 +93,10 @@ impl Fixture {
         format!("{}/{}", self.version, self.file_name())
     }
 
-    /// Whether the release wrote a single `.grafeo` file (with its sidecar WAL for
-    /// `unflushed.grafeo`), which a read-only open can read.
-    fn is_single_file(self) -> bool {
-        self.layout != Layout::Directory
+    /// Whether the release wrote a WAL directory (`directory/`), not a single `.grafeo`
+    /// file (with its sidecar WAL for `unflushed.grafeo`).
+    fn is_directory(self) -> bool {
+        self.layout == Layout::Directory
     }
 
     /// The directory of the release's fixtures.
@@ -122,8 +124,8 @@ impl Fixture {
         dir
     }
 
-    /// Opens a copy for reading and writing, which migrates a single file to the 0.6
-    /// format first.
+    /// Opens a copy for reading and writing, which migrates it to a single file in the
+    /// 0.6 format first.
     fn open(self) -> (tempfile::TempDir, GrafeoDB) {
         let dir = self.copy();
         let db = GrafeoDB::open(dir.path().join(self.file_name()))
@@ -235,18 +237,16 @@ fn read_write(check: fn(Fixture, &GrafeoDB)) {
     });
 }
 
-/// Runs `check` on a read-only open of every single-file fixture, and checks that the
-/// open wrote nothing: afterwards every file of the copy holds the same bytes, and no
-/// file or directory came or went.
+/// Runs `check` on a read-only open of every fixture (0.5.44 refused read-only opens of
+/// WAL directories; 0.6 reads them in place), and checks that the open wrote nothing:
+/// afterwards every file of the copy holds the same bytes, and no file or directory
+/// came or went.
 ///
 /// Queries create their spill directory `<name>.spill` next to a database with a path
 /// (each query removes its own subdirectory again). That scratch space is not part of
 /// the database, so the comparison leaves it out.
 fn read_only(check: fn(Fixture, &GrafeoDB)) {
-    let single_files = FIXTURES
-        .into_iter()
-        .filter(|fixture| fixture.is_single_file());
-    each(single_files, |fixture| {
+    each(FIXTURES, |fixture| {
         let name = fixture.name();
         let dir = fixture.copy();
         let spill = PathBuf::from(format!("{}.spill", fixture.file_name()));
@@ -279,11 +279,12 @@ fn read_only(check: fn(Fixture, &GrafeoDB)) {
     });
 }
 
-/// `open_in_memory` of a 0.5.x file reads it as a read-only open does (its sidecar WAL
-/// replayed) and changes nothing on disk: no migration, no kept copy, no lock file. Every
-/// check runs on its own in-memory copy, which takes writes.
+/// `open_in_memory` of a 0.5.x database reads it as a read-only open does (the sidecar
+/// WAL of a file replayed, the WAL of a directory replayed) and changes nothing on disk:
+/// no migration, no kept copy, no lock file. Every check runs on its own in-memory copy,
+/// which takes writes.
 #[test]
-fn open_in_memory_reads_a_0_5_file_without_changing_it() {
+fn open_in_memory_reads_a_0_5_database_without_changing_it() {
     let checks: [fn(Fixture, &GrafeoDB); 6] = [
         check_default_graph,
         check_named_graphs,
@@ -292,10 +293,7 @@ fn open_in_memory_reads_a_0_5_file_without_changing_it() {
         check_schema,
         check_indexes,
     ];
-    let single_files = FIXTURES
-        .into_iter()
-        .filter(|fixture| fixture.is_single_file());
-    each(single_files, |fixture| {
+    each(FIXTURES, |fixture| {
         let name = fixture.name();
         let dir = fixture.copy();
         let path = dir.path().join(fixture.file_name());
@@ -356,26 +354,33 @@ fn names(db: &GrafeoDB, query: &str) -> Vec<String> {
     names
 }
 
-/// A read-only open of a 0.5.x file reads it into memory and holds no lock once it is
-/// loaded: while the database is open, another handle locks the file exclusively.
+/// A read-only open of a 0.5.x database reads it into memory and holds no lock once it
+/// is loaded: while the database is open, another handle locks the file exclusively, or
+/// takes the `LOCK` of the directory as a 0.5.44 writer does.
 #[test]
-fn a_0_5_file_opened_read_only_is_not_locked_once_loaded() {
-    let single_files = FIXTURES
-        .into_iter()
-        .filter(|fixture| fixture.is_single_file());
-    each(single_files, |fixture| {
+fn a_0_5_database_opened_read_only_is_not_locked_once_loaded() {
+    each(FIXTURES, |fixture| {
         let name = fixture.name();
         let dir = fixture.copy();
         let path = dir.path().join(fixture.file_name());
         let db = GrafeoDB::open_read_only(&path)
             .unwrap_or_else(|error| panic!("{name}: read-only: {error}"));
 
-        let file = std::fs::File::open(&path).unwrap();
-        assert!(
-            file.try_lock().is_ok(),
-            "{name}: the file is locked while the read-only database is open"
-        );
-        file.unlock().unwrap();
+        if fixture.is_directory() {
+            let writer = DirectoryLock::acquire(&path);
+            assert!(
+                writer.is_ok(),
+                "{name}: the directory is locked while the read-only database is open: {:?}",
+                writer.err()
+            );
+        } else {
+            let file = std::fs::File::open(&path).unwrap();
+            assert!(
+                file.try_lock().is_ok(),
+                "{name}: the file is locked while the read-only database is open"
+            );
+            file.unlock().unwrap();
+        }
         assert!(db.node_count() > 0, "{name}: the database holds the data");
         db.close().unwrap();
     });
@@ -388,16 +393,15 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// A read-write open of a 0.5.x file migrates it to the 0.6 format and keeps the old
-/// database next to it, byte for byte: the file as `<name>.pre-0.6` and its sidecar WAL
-/// as `<name>.pre-0.6.wal/`. Nothing of the migration is left behind, and a second
-/// read-write open finds a 0.6 file and changes nothing but the database file.
+/// A read-write open of a 0.5.x database migrates it to a single file in the 0.6 format
+/// at the same path, and keeps the old database next to it, byte for byte: a file as
+/// `<name>.pre-0.6` and its sidecar WAL as `<name>.pre-0.6.wal/`, a WAL directory as
+/// the directory `<name>.pre-0.6/` (its `wal/` files, and its `LOCK` where 0.5.44 left
+/// one). Nothing of the migration is left behind, and a second read-write open finds a
+/// 0.6 file and changes nothing but the database file.
 #[test]
-fn a_read_write_open_migrates_a_0_5_file_and_keeps_the_old_one() {
-    let single_files = FIXTURES
-        .into_iter()
-        .filter(|fixture| fixture.is_single_file());
-    each(single_files, |fixture| {
+fn a_read_write_open_migrates_a_0_5_database_and_keeps_the_old_one() {
+    each(FIXTURES, |fixture| {
         let name = fixture.name();
         let dir = fixture.copy();
         let path = dir.path().join(fixture.file_name());
@@ -409,16 +413,31 @@ fn a_read_write_open_migrates_a_0_5_file_and_keeps_the_old_one() {
         db.close().unwrap();
         drop(db);
 
+        assert!(path.is_file(), "{name}: the database is a single file");
         assert_eq!(
             detect(&path).unwrap(),
             OnDisk::Current,
             "{name}: the database file is in the 0.6 format"
         );
-        assert!(
-            std::fs::read(with_suffix(&path, ".pre-0.6")).unwrap()
-                == std::fs::read(&original).unwrap(),
-            "{name}: <name>.pre-0.6 holds the bytes of the 0.5.x file"
-        );
+        let kept = with_suffix(&path, ".pre-0.6");
+        if fixture.is_directory() {
+            assert!(
+                kept.is_dir(),
+                "{name}: the 0.5.x directory is kept as <name>.pre-0.6/"
+            );
+            assert!(
+                files(&kept) == files(&original),
+                "{name}: <name>.pre-0.6/ holds the files of the 0.5.x directory: kept {:?}, \
+                 original {:?}",
+                files(&kept).keys().collect::<Vec<_>>(),
+                files(&original).keys().collect::<Vec<_>>()
+            );
+        } else {
+            assert!(
+                std::fs::read(&kept).unwrap() == std::fs::read(&original).unwrap(),
+                "{name}: <name>.pre-0.6 holds the bytes of the 0.5.x file"
+            );
+        }
         let kept_wal = with_suffix(&path, ".pre-0.6.wal");
         if original_wal.exists() {
             assert!(
@@ -591,19 +610,38 @@ fn check_named_graphs(fixture: Fixture, db: &GrafeoDB) {
         "{name}: museums"
     );
 
-    if fixture.replays_into_a_named_graph() {
-        return;
-    }
     let trips = db.graph("trips").unwrap();
+    let expected_trips = if fixture.replays_into_a_named_graph() {
+        // Everything 0.5.43 wrote after its first switch to `trips` is replayed
+        // into it. The second session's changes address nodes by id, so Gus's
+        // `Manager` label lands on Prague, the node with his id in `trips`.
+        vec![
+            vec![strings(&["Person"]), Value::from("Mia"), Value::Null],
+            vec![strings(&["City"]), Value::from("Paris"), Value::from("FR")],
+            vec![
+                strings(&["City", "Manager"]),
+                Value::from("Prague"),
+                Value::from("CZ"),
+            ],
+            vec![
+                strings(&["Museum"]),
+                Value::from("Rijksmuseum"),
+                Value::Null,
+            ],
+            vec![strings(&["Document"]), Value::Null, Value::Null],
+        ]
+    } else {
+        vec![
+            vec![strings(&["City"]), Value::from("Paris"), Value::from("FR")],
+            vec![strings(&["City"]), Value::from("Prague"), Value::from("CZ")],
+        ]
+    };
     assert_eq!(
         trips
             .execute("MATCH (c) RETURN labels(c), c.name, c.country ORDER BY c.name")
             .unwrap()
             .rows(),
-        [
-            vec![strings(&["City"]), Value::from("Paris"), Value::from("FR")],
-            vec![strings(&["City"]), Value::from("Prague"), Value::from("CZ")],
-        ],
+        expected_trips,
         "{name}: trips nodes"
     );
     assert_eq!(

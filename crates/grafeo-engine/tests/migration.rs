@@ -1,11 +1,12 @@
-//! Migration of 0.5.x database files to the 0.6 format on a read-write open.
+//! Migration of 0.5.x databases to the 0.6 format on a read-write open.
 //!
-//! A read-write open of a file written by 0.5.x writes the 0.6 image to
-//! `<path>.migrating`, moves the old file (and its sidecar WAL) to
-//! `<path>.pre-0.6`, and renames the image into place, all under the lock file
-//! `<path>.migrate.lock`. These tests crash a migration at each step in a child
-//! process, build each state a crash can leave, hold the lock from another
-//! process, and open each half-migrated state read-only.
+//! A read-write open of a database written by 0.5.x (a file, or a WAL
+//! directory) writes the 0.6 image to `<path>.migrating`, moves the old file
+//! (and its sidecar WAL) or the old directory to `<path>.pre-0.6`, and renames
+//! the image into place, all under the lock file `<path>.migrate.lock`. These
+//! tests crash a migration at each step in a child process, build each state a
+//! crash can leave, hold the lock from another process, and open each
+//! half-migrated state read-only.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test migration
@@ -27,6 +28,9 @@ use grafeo_common::testing::child_process;
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 use grafeo_storage::file::detect::{OnDisk, detect};
+
+#[path = "common/unlistable.rs"]
+mod unlistable;
 
 /// The 0.5.44 database whose second session is only in its sidecar WAL, so a
 /// migration has a file and a sidecar WAL to keep.
@@ -100,18 +104,14 @@ fn copy_fixture(to: &Path) {
     copy(&with_suffix(&fixture(), ".wal"), &with_suffix(to, ".wal"));
 }
 
-/// Writes a 0.6 database holding a person for each of `people` to `to`. `save`
-/// writes a single file only to a `.grafeo` path, so it writes next to `to` and
-/// the file is renamed.
+/// Writes a 0.6 database holding a person for each of `people` to `to`.
 fn write_v3(to: &Path, people: &[&str]) {
     let db = GrafeoDB::new_in_memory();
     for name in people {
         db.execute(&format!("INSERT (:Person {{name: '{name}'}})"))
             .unwrap();
     }
-    let staging = to.parent().unwrap().join("staging.grafeo");
-    db.save(&staging).unwrap();
-    std::fs::rename(&staging, to).unwrap();
+    db.save(to).unwrap();
 }
 
 /// What a database holds, as queries see it.
@@ -232,7 +232,7 @@ fn assert_no_leftovers(path: &Path, context: &str) {
 
 /// The 0.5.x files a migration keeps, to compare the kept copies with.
 struct Kept {
-    /// The database file, kept as `<path>.pre-0.6`.
+    /// The database file or WAL directory, kept as `<path>.pre-0.6`.
     file: PathBuf,
     /// The sidecar WAL, kept as `<path>.pre-0.6.wal`.
     wal: Option<PathBuf>,
@@ -240,11 +240,51 @@ struct Kept {
     checkpoint: Option<PathBuf>,
 }
 
+impl Kept {
+    /// Where a test puts the database in `dir`: `db.grafeo` for a file, `db`
+    /// for a WAL directory (0.5.x created a directory only for a path without
+    /// the `.grafeo` extension, unless told otherwise).
+    fn path_in(&self, dir: &Path) -> PathBuf {
+        dir.join(if self.file.is_dir() {
+            "db"
+        } else {
+            "db.grafeo"
+        })
+    }
+}
+
 /// What a migration of the fixture keeps: the file and its sidecar WAL.
 fn fixture_kept() -> Kept {
     Kept {
         file: fixture(),
         wal: Some(with_suffix(&fixture(), ".wal")),
+        checkpoint: None,
+    }
+}
+
+/// The 0.5.44 WAL-directory database: its `wal/` and the `LOCK` file 0.5.44
+/// creates. A migration keeps the whole directory.
+fn directory() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/released/0.5.44/directory")
+}
+
+/// What a migration of the WAL-directory fixture keeps: the directory.
+fn directory_kept() -> Kept {
+    Kept {
+        file: directory(),
+        wal: None,
+        checkpoint: None,
+    }
+}
+
+/// The same for the 0.5.43 WAL directory, which has no `LOCK` file (0.5.43
+/// took no lock): the migration creates one while it holds the directory, and
+/// removes it before the directory moves.
+fn directory_0_5_43_kept() -> Kept {
+    Kept {
+        file: Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/released/0.5.43/directory"),
+        wal: None,
         checkpoint: None,
     }
 }
@@ -275,7 +315,7 @@ fn arrange_kept(kept: &Kept, path: &Path) {
 /// What a read-only open of the 0.5.x files of `kept` finds.
 fn kept_contents(kept: &Kept) -> Contents {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("db.grafeo");
+    let path = kept.path_in(dir.path());
     arrange_kept(kept, &path);
     let db = GrafeoDB::open_read_only(&path).unwrap();
     let found = contents(&db);
@@ -284,13 +324,45 @@ fn kept_contents(kept: &Kept) -> Contents {
 }
 
 /// Checks that the kept copies next to `path` hold the files of `kept` byte for
-/// byte, that nothing is kept that `kept` does not have, and that no 0.5.x
-/// checkpoint image is left under the database's name.
+/// byte (every file of a kept directory, and no other), that nothing is kept
+/// that `kept` does not have, and that no 0.5.x checkpoint image is left under
+/// the database's name.
 fn assert_kept(path: &Path, kept: &Kept, context: &str) {
-    assert!(
-        std::fs::read(with_suffix(path, ".pre-0.6")).unwrap() == std::fs::read(&kept.file).unwrap(),
-        "{context}: <path>.pre-0.6 holds the bytes of the 0.5.x file"
-    );
+    assert_kept_with(path, kept, context, false);
+}
+
+/// [`assert_kept`], where `lock_may_remain` allows a kept directory one more
+/// file than the original: an empty `LOCK`, which a crash leaves when it stops
+/// a migration that created it to lock a directory without one.
+fn assert_kept_with(path: &Path, kept: &Kept, context: &str, lock_may_remain: bool) {
+    let kept_file = with_suffix(path, ".pre-0.6");
+    if kept.file.is_dir() {
+        let mut found = if kept_file.is_dir() {
+            files(&kept_file)
+        } else {
+            BTreeMap::new()
+        };
+        if lock_may_remain
+            && !kept.file.join("LOCK").exists()
+            && found.get(Path::new("LOCK")) == Some(&Entry::File(Vec::new()))
+        {
+            found.remove(Path::new("LOCK"));
+        }
+        assert!(
+            kept_file.is_dir() && found == files(&kept.file),
+            "{context}: <path>.pre-0.6/ holds the files of the 0.5.x directory, byte for byte: \
+             kept {:?}, original {:?}",
+            kept_file
+                .is_dir()
+                .then(|| files(&kept_file).into_keys().collect::<Vec<_>>()),
+            files(&kept.file).into_keys().collect::<Vec<_>>()
+        );
+    } else {
+        assert!(
+            std::fs::read(&kept_file).unwrap() == std::fs::read(&kept.file).unwrap(),
+            "{context}: <path>.pre-0.6 holds the bytes of the 0.5.x file"
+        );
+    }
     let kept_wal = with_suffix(path, ".pre-0.6.wal");
     match &kept.wal {
         Some(wal) => {
@@ -330,6 +402,17 @@ fn assert_kept(path: &Path, kept: &Kept, context: &str) {
 /// 0.6 format, that the files of `kept` are kept, and that nothing of the
 /// migration is left.
 fn assert_migrated(path: &Path, expected: &Contents, kept: &Kept, context: &str) {
+    assert_migrated_with(path, expected, kept, context, false);
+}
+
+/// [`assert_migrated`], with the `lock_may_remain` of [`assert_kept_with`].
+fn assert_migrated_with(
+    path: &Path,
+    expected: &Contents,
+    kept: &Kept,
+    context: &str,
+    lock_may_remain: bool,
+) {
     let db = GrafeoDB::open(path).unwrap_or_else(|error| panic!("{context}: {error}"));
     assert_eq!(
         contents(&db),
@@ -343,7 +426,7 @@ fn assert_migrated(path: &Path, expected: &Contents, kept: &Kept, context: &str)
         OnDisk::Current,
         "{context}: the database file is in the 0.6 format"
     );
-    assert_kept(path, kept, context);
+    assert_kept_with(path, kept, context, lock_may_remain);
     assert_no_leftovers(path, context);
 }
 
@@ -381,6 +464,22 @@ const PENDING_MIGRATION_POINTS: [&str; 11] = [
     "migrate:after_image",
     "migrate:renamed:.pre-0.6",
     "migrate:renamed:.pre-0.6.checkpoint",
+    "migrate:after_old",
+    "migrate:renamed:database",
+    "migrate:after_new",
+];
+
+/// The same for a WAL directory ([`directory_kept`]): it has no side files,
+/// and the whole directory moves to `<p>.pre-0.6`.
+#[cfg(feature = "testing-crash-injection")]
+const DIRECTORY_MIGRATION_POINTS: [&str; 10] = [
+    "create:after_write",
+    "checkpoint:after_chunks",
+    "checkpoint:after_data_sync",
+    "checkpoint:after_header",
+    "checkpoint:before_trim",
+    "migrate:after_image",
+    "migrate:renamed:.pre-0.6",
     "migrate:after_old",
     "migrate:renamed:database",
     "migrate:after_new",
@@ -448,13 +547,22 @@ fn migrate_child() {
 /// there, then checks that an open in this process finds the 0.5.x files of
 /// `kept` migrated ([`assert_migrated`]). Checks that the open reaches exactly
 /// `points`, in order, and then completes.
+///
+/// A crash before the old database moved (`migrate:renamed:.pre-0.6`) may
+/// leave an empty `LOCK` in a directory that had none: the migration created
+/// it to lock the directory, and only removes it when it is not stopped. The
+/// kept directory may hold it ([`assert_kept_with`]); one kept after a later
+/// crash, or after none, is the original exactly.
 #[cfg(feature = "testing-crash-injection")]
 fn sweep_crashes(arrange: impl Fn(&Path), points: &[&str], kept: &Kept) {
     let expected = kept_contents(kept);
+    let moved_at = points
+        .iter()
+        .position(|point| *point == "migrate:renamed:.pre-0.6");
     let mut reached = Vec::new();
     for crash_point in 1..=points.len() + 1 {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("db.grafeo");
+        let path = kept.path_in(dir.path());
         arrange(&path);
 
         let crashed_at = open_in_child(crash_point, &path);
@@ -468,7 +576,8 @@ fn sweep_crashes(arrange: impl Fn(&Path), points: &[&str], kept: &Kept) {
                 "{context}: a crash inside the migration leaves its lock file"
             );
         }
-        assert_migrated(&path, &expected, kept, &context);
+        let before_the_move = crashed_at.is_some() && moved_at.is_some_and(|at| crash_point <= at);
+        assert_migrated_with(&path, &expected, kept, &context, before_the_move);
         reached.push(crashed_at);
     }
 
@@ -488,7 +597,8 @@ fn sweep_crashes(arrange: impl Fn(&Path), points: &[&str], kept: &Kept) {
 /// data, the old files are kept byte for byte, and nothing else is left. A
 /// crash point after each rename pins their order: the 0.5.x side files (the
 /// sidecar WAL of the fixture, the pending checkpoint image of the second
-/// arrangement) are out of the way before the image becomes the database.
+/// arrangement) are out of the way before the image becomes the database. A
+/// WAL directory goes through the same steps, as one rename of the directory.
 #[test]
 #[cfg(feature = "testing-crash-injection")]
 fn a_crash_at_each_migration_step_recovers() {
@@ -503,6 +613,18 @@ fn a_crash_at_each_migration_step_recovers() {
         |path| arrange_kept(&pending, path),
         &PENDING_MIGRATION_POINTS,
         &pending,
+    );
+    let directory = directory_kept();
+    sweep_crashes(
+        |path| arrange_kept(&directory, path),
+        &DIRECTORY_MIGRATION_POINTS,
+        &directory,
+    );
+    let without_lock = directory_0_5_43_kept();
+    sweep_crashes(
+        |path| arrange_kept(&without_lock, path),
+        &DIRECTORY_MIGRATION_POINTS,
+        &without_lock,
     );
 }
 
@@ -545,18 +667,23 @@ fn arrange_between_renames(kept: &Kept, image: &Path, path: &Path) {
     std::fs::write(with_suffix(path, ".migrate.lock"), b"").unwrap();
 }
 
+/// The same for a WAL directory, which has no side files to move.
+#[cfg(feature = "testing-crash-injection")]
+const DIRECTORY_FINISH_POINTS: [&str; 1] = ["migrate:renamed:database"];
+
 /// Finishing a migration cut off between its renames survives a crash at each
 /// of its own renames: the side files (sidecar WAL, pending checkpoint image)
 /// move to their kept names before the image becomes the database, so the 0.6
 /// database never replays the 0.5.x WAL, and no 0.5.x image is left under its
-/// name.
+/// name. A WAL directory moved to `<p>.pre-0.6/` is finished the same way.
 #[test]
 #[cfg(feature = "testing-crash-injection")]
 fn a_crash_while_finishing_a_migration_recovers() {
     let images = tempfile::tempdir().unwrap();
     for (index, (kept, points)) in [
-        (fixture_kept(), FINISH_POINTS),
-        (pending_kept(), PENDING_FINISH_POINTS),
+        (fixture_kept(), &FINISH_POINTS[..]),
+        (pending_kept(), &PENDING_FINISH_POINTS[..]),
+        (directory_kept(), &DIRECTORY_FINISH_POINTS[..]),
     ]
     .into_iter()
     .enumerate()
@@ -565,7 +692,7 @@ fn a_crash_while_finishing_a_migration_recovers() {
         write_migrated_image(&kept, &image);
         sweep_crashes(
             |path| arrange_between_renames(&kept, &image, path),
-            &points,
+            points,
             &kept,
         );
     }
@@ -1137,14 +1264,13 @@ fn race_child() {
 /// Deterministic, with pause points: the opener pauses right after its check
 /// (the 0.5.x file is there), the migrator pauses after moving the old files
 /// (holding the lock, `<p>` missing), then the opener goes on, then the
-/// migrator. Both for a `.grafeo` path and for a path without an extension,
-/// for which the default format detection would make a missing path a WAL
-/// directory.
+/// migrator. Both for a `.grafeo` path and for a path without an extension
+/// (where the extension once decided what a missing path became).
 ///
 /// The outcome is decided by the lock and by the checks at the end: an opener
 /// that created a database at `<p>` prints its own node count (0, not the
-/// fixture's), or makes the migrator's last rename fail (on Windows, or over a
-/// WAL directory), so the migrator does not exit cleanly. The 500 ms before the
+/// fixture's), or makes the migrator's last rename fail (on Windows), so the
+/// migrator does not exit cleanly. The 500 ms before the
 /// migrator resumes only give such an opener time to show the race early, in
 /// the `!path.exists()` check; a correct opener is still waiting for the lock
 /// then, however long the pause.
@@ -1210,6 +1336,102 @@ fn a_create_never_races_a_migration_between_its_renames() {
             "{name}: the database is a file, not a directory"
         );
         assert_migrated(&path, &expected, &fixture_kept(), name);
+    }
+}
+
+/// Marks a [`read_child`] run, and says how it opens: `read-only` or `in-memory`.
+#[cfg(feature = "testing-crash-injection")]
+const READ_VAR: &str = "GRAFEO_MIGRATION_READ";
+/// Exit code of a [`read_child`] whose open failed.
+#[cfg(feature = "testing-crash-injection")]
+const READ_FAILED: i32 = 6;
+
+/// Child-process entry for
+/// [`a_read_of_a_0_5_database_that_another_process_migrates_meanwhile_fails`];
+/// a no-op when run directly. Opens the database read-only or in memory
+/// (pausing where the environment says) and prints its node count or the
+/// error.
+#[test]
+#[cfg(feature = "testing-crash-injection")]
+fn read_child() {
+    let (Ok(mode), Some(path)) = (std::env::var(READ_VAR), std::env::var_os(PATH_VAR)) else {
+        return;
+    };
+    let opened = if mode == "in-memory" {
+        GrafeoDB::open_in_memory(&path)
+    } else {
+        GrafeoDB::open_read_only(&path)
+    };
+    match opened {
+        Ok(db) => {
+            println!("nodes={}", db.node_count());
+            drop(db);
+            std::process::exit(OPENED_AND_CLOSED);
+        }
+        Err(error) => {
+            println!("error={error}");
+            std::process::exit(READ_FAILED);
+        }
+    }
+}
+
+/// A read-only open (or `open_in_memory`) of a 0.5.x database takes no lock,
+/// so another process can migrate the database while it is read: here the
+/// reader pauses right after it listed the WAL files (of the directory, or the
+/// sidecar WAL of the file), and this process migrates the database before
+/// the reader goes on to read them. The reader then fails with an error that
+/// says what happened, instead of opening a database without the WAL's part.
+#[test]
+#[cfg(feature = "testing-crash-injection")]
+fn a_read_of_a_0_5_database_that_another_process_migrates_meanwhile_fails() {
+    use grafeo_common::testing::pause::{FLAG_VAR, POINT_VAR};
+
+    for (kept, mode) in [
+        (directory_kept(), "read-only"),
+        (directory_kept(), "in-memory"),
+        (fixture_kept(), "read-only"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = kept.path_in(dir.path());
+        arrange_kept(&kept, &path);
+        let name = format!("{} {mode}", path.file_name().unwrap().to_string_lossy());
+        let flag = dir.path().join("reader");
+
+        let (child_path, child_flag, child_mode) = (path.clone(), flag.clone(), mode.to_string());
+        let reader = std::thread::spawn(move || {
+            child_process::output(
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "read_child", "--nocapture"])
+                    .env(READ_VAR, &child_mode)
+                    .env(PATH_VAR, &child_path)
+                    .env(POINT_VAR, "wal_recovery:after_listing")
+                    .env(FLAG_VAR, &child_flag),
+            )
+            .unwrap()
+        });
+        wait_for(&with_suffix(&flag, ".paused"), &reader);
+
+        let db = GrafeoDB::open(&path).unwrap_or_else(|error| panic!("{name}: {error}"));
+        db.close().unwrap();
+        drop(db);
+        assert!(
+            path.is_file(),
+            "{name}: the database was migrated meanwhile"
+        );
+        std::fs::write(with_suffix(&flag, ".resume"), b"go").unwrap();
+
+        let output = reader.join().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.code() == Some(READ_FAILED)
+                && stdout.contains(
+                    "was migrated to the 0.6 format by another process while it was read"
+                ),
+            "{name}: the reader fails, saying the database was migrated while it was read: \
+             {:?}\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
@@ -1368,6 +1590,435 @@ fn a_0_5_writer_holding_the_file_makes_the_migration_fail() {
         files(dir.path()) == before,
         "the failed migration changes nothing"
     );
+}
+
+// =========================================================================
+// WAL directories
+// =========================================================================
+
+/// Copies the WAL-directory fixture to a new directory; returns it and the
+/// path of the copy.
+fn copy_directory() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = directory_kept().path_in(dir.path());
+    copy(&directory(), &path);
+    (dir, path)
+}
+
+/// A read-write open of a 0.5.x WAL directory migrates it to a single file at
+/// the same path, whatever the configured storage format: an existing path
+/// opens by what it is. The deprecated `WalDirectory` format included.
+#[test]
+#[allow(
+    deprecated,
+    reason = "pins what the deprecated `StorageFormat::WalDirectory` still does until 0.7.0"
+)]
+fn a_wal_directory_migrates_whatever_the_configured_format() {
+    use grafeo_engine::config::StorageFormat;
+
+    let expected = kept_contents(&directory_kept());
+    for format in [
+        StorageFormat::Auto,
+        StorageFormat::SingleFile,
+        StorageFormat::WalDirectory,
+    ] {
+        let (_dir, path) = copy_directory();
+        let db = GrafeoDB::with_config(
+            grafeo_engine::Config::persistent(&path).with_storage_format(format),
+        )
+        .unwrap_or_else(|error| panic!("{format}: {error}"));
+        assert_eq!(contents(&db), expected, "{format}: the migrated data");
+        db.close().unwrap();
+        drop(db);
+        assert!(path.is_file(), "{format}: the database is a single file");
+        assert_migrated(&path, &expected, &directory_kept(), &format.to_string());
+    }
+}
+
+/// Each state a crash can leave in the migration of a WAL directory is
+/// finished by the next read-write open, as for a file.
+#[test]
+fn interrupted_directory_migrations_resume_from_the_files_present() {
+    let expected = kept_contents(&directory_kept());
+
+    // `<p>/` (0.5.x) and `<p>.migrating`: the image may be incomplete, so it
+    // goes and the migration runs again.
+    {
+        let (_dir, path) = copy_directory();
+        write_v3(&with_suffix(&path, ".migrating"), &["Vincent"]);
+        assert_migrated(
+            &path,
+            &expected,
+            &directory_kept(),
+            "0.5.x directory and an image",
+        );
+    }
+
+    // `<p>.pre-0.6/` and `<p>.migrating`, no `<p>`: the directory was moved
+    // after the image was complete, so the image goes into place.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let path = directory_kept().path_in(dir.path());
+        copy(&directory(), &with_suffix(&path, ".pre-0.6"));
+        write_v3(&with_suffix(&path, ".migrating"), &["Vincent", "Mia"]);
+        let db = GrafeoDB::open(&path).unwrap();
+        assert_eq!(
+            people(&db),
+            names(&["Mia", "Vincent"]),
+            "kept directory and an image: the database is the image"
+        );
+        db.close().unwrap();
+        drop(db);
+        assert_kept(&path, &directory_kept(), "kept directory and an image");
+        assert_no_leftovers(&path, "kept directory and an image");
+    }
+}
+
+/// A read-only open (and `open_in_memory`) never finishes a half-migrated WAL
+/// directory: it reads a directory still in place (next to a stale image) as
+/// it is, and refuses one already moved to `<p>.pre-0.6/`, saying a read-write
+/// open finishes the migration. Neither changes a file.
+#[test]
+fn a_read_only_open_never_finishes_a_directory_migration() {
+    let expected = kept_contents(&directory_kept());
+
+    {
+        let (dir, path) = copy_directory();
+        write_v3(&with_suffix(&path, ".migrating"), &["Vincent"]);
+        let before = files(dir.path());
+        let db = GrafeoDB::open_read_only(&path).unwrap();
+        assert_eq!(
+            contents(&db),
+            expected,
+            "0.5.x directory and an image: the read-only open reads the directory"
+        );
+        db.close().unwrap();
+        drop(db);
+        let db = GrafeoDB::open_in_memory(&path).unwrap();
+        assert_eq!(
+            contents(&db),
+            expected,
+            "0.5.x directory and an image: open_in_memory reads the directory"
+        );
+        drop(db);
+        assert!(
+            files(dir.path()) == before,
+            "0.5.x directory and an image: the read-only open and open_in_memory change nothing"
+        );
+    }
+
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let path = directory_kept().path_in(dir.path());
+        copy(&directory(), &with_suffix(&path, ".pre-0.6"));
+        write_v3(&with_suffix(&path, ".migrating"), &["Vincent"]);
+        let before = files(dir.path());
+        for (open, error) in [
+            ("read-only", read_only_error(&path)),
+            ("in-memory", in_memory_error(&path)),
+        ] {
+            assert!(
+                error.contains("read-write open"),
+                "kept directory and an image: the {open} error says a read-write open \
+                 finishes the migration: {error}"
+            );
+        }
+        assert!(
+            files(dir.path()) == before,
+            "kept directory and an image: the read-only open and open_in_memory change nothing"
+        );
+    }
+}
+
+/// A migration never replaces a kept copy, also for a WAL directory: with
+/// `<p>.pre-0.6` already there, the open fails before it writes anything.
+#[test]
+fn an_existing_kept_copy_is_never_replaced_by_a_directory() {
+    let (dir, path) = copy_directory();
+    let kept = with_suffix(&path, ".pre-0.6");
+    write_v3(&kept, &["Gus"]);
+    let before = files(dir.path());
+    let error = open_error(&path);
+    assert!(
+        error.contains(&kept.display().to_string()),
+        "the error names the kept copy: {error}"
+    );
+    assert!(
+        files(dir.path()) == before,
+        "the failed migration changes nothing"
+    );
+}
+
+/// While a 0.5.44 process has a WAL directory open for writing, it holds the
+/// directory's `LOCK` file: the migration fails with its "locked" error and
+/// changes nothing. A read-only open takes no lock (there is no shared one),
+/// so it reads the directory meanwhile.
+#[test]
+fn a_0_5_44_writer_holding_the_directory_makes_the_migration_fail() {
+    let expected = kept_contents(&directory_kept());
+    let (dir, path) = copy_directory();
+    let before = files(dir.path());
+
+    let writer = grafeo_storage::lock::DirectoryLock::acquire(&path).unwrap();
+    let opened = GrafeoDB::open(&path);
+    let read = GrafeoDB::open_read_only(&path).map(|db| {
+        let found = contents(&db);
+        db.close().unwrap();
+        found
+    });
+    drop(writer);
+
+    let error = match opened {
+        Ok(_) => panic!("the migration ran while a 0.5.44 writer held the directory"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("locked") && error.contains(&path.display().to_string()),
+        "the error says the directory is locked, and which: {error}"
+    );
+    assert_eq!(
+        read.unwrap_or_else(|error| panic!("the read-only open failed: {error}")),
+        expected,
+        "the read-only open reads the directory while the writer holds it"
+    );
+    assert!(
+        files(dir.path()) == before,
+        "the failed migration changes nothing"
+    );
+}
+
+/// A directory that is not a 0.5.x database (no `wal/` inside) is never
+/// migrated: every open fails with an error naming it, and nothing in it or
+/// next to it changes.
+#[test]
+fn a_directory_that_is_not_a_database_is_refused_and_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("notes.txt"), "Vincent and Mia went to Paris").unwrap();
+    let before = files(dir.path());
+
+    for (open, error) in [
+        ("read-write", open_error(&path)),
+        ("read-only", read_only_error(&path)),
+        ("in-memory", in_memory_error(&path)),
+    ] {
+        assert!(
+            error.contains(&path.display().to_string()) && error.contains("not a 0.5.x"),
+            "the {open} error names the directory and says it is not a 0.5.x database: {error}"
+        );
+        assert!(
+            files(dir.path()) == before,
+            "the refused {open} open changes nothing"
+        );
+    }
+}
+
+/// A 0.5.x directory whose `wal/` exists but cannot be listed is never read as
+/// empty: the read-write open fails (naming the directory) before anything
+/// moves, so no empty database replaces it, and the read-only open and
+/// `open_in_memory` fail too.
+#[test]
+fn a_directory_whose_wal_cannot_be_listed_is_refused_and_untouched() {
+    let (dir, path) = copy_directory();
+    let before = files(dir.path());
+    let outcomes = {
+        let Some(_denied) = unlistable::Unlistable::deny(&path.join("wal")) else {
+            return;
+        };
+        [
+            ("read-write", GrafeoDB::open(&path).map(drop)),
+            ("read-only", GrafeoDB::open_read_only(&path).map(drop)),
+            ("in-memory", GrafeoDB::open_in_memory(&path).map(drop)),
+        ]
+    };
+    for (open, outcome) in outcomes {
+        let error = match outcome {
+            Ok(()) => panic!("the {open} open read a WAL it cannot list"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains(&path.join("wal").display().to_string()),
+            "the {open} error names the WAL directory: {error}"
+        );
+    }
+    assert!(path.is_dir(), "the 0.5.x directory is still the database");
+    assert!(
+        files(dir.path()) == before,
+        "the refused opens changed nothing: no image, no kept copy"
+    );
+}
+
+/// A directory path written with a trailing separator (`<p>/`, and `<p>\` on
+/// Windows), a natural way to name a WAL directory, migrates as `<p>`: the
+/// single file at `<p>` and the kept directory `<p>.pre-0.6/` next to it, never
+/// side files inside the directory being moved. A read-only open through such
+/// a path reads it in place.
+#[test]
+fn a_directory_path_with_a_trailing_separator_migrates_as_the_directory() {
+    let expected = kept_contents(&directory_kept());
+    let mut separators = vec!["/"];
+    if cfg!(windows) {
+        separators.push("\\");
+    }
+    for separator in separators {
+        let (_dir, path) = copy_directory();
+        let written = with_suffix(&path, separator);
+
+        let db = GrafeoDB::open_read_only(&written)
+            .unwrap_or_else(|error| panic!("{separator}: read-only: {error}"));
+        assert_eq!(contents(&db), expected, "{separator}: read in place");
+        db.close().unwrap();
+        drop(db);
+
+        let db = GrafeoDB::open(&written).unwrap_or_else(|error| panic!("{separator}: {error}"));
+        assert_eq!(contents(&db), expected, "{separator}: the migrated data");
+        // Compared as strings: `Path` equality ignores a trailing separator.
+        assert_eq!(
+            db.path().map(Path::as_os_str),
+            Some(written.as_os_str()),
+            "{separator}: the database reports the path as it was given"
+        );
+        // The path as given no longer exists once `<p>` is a file (`<p>/` is
+        // not a directory): disk usage goes by the database's files.
+        let file_bytes = usize::try_from(std::fs::metadata(&path).unwrap().len()).unwrap();
+        let disk_bytes = db.detailed_stats().disk_bytes;
+        assert!(
+            disk_bytes.is_some_and(|bytes| bytes >= file_bytes),
+            "{separator}: disk usage {disk_bytes:?} counts the migrated file ({file_bytes} bytes)"
+        );
+        db.close().unwrap();
+        drop(db);
+        assert!(path.is_file(), "{separator}: <p> is the migrated file");
+        assert_migrated(&path, &expected, &directory_kept(), separator);
+    }
+}
+
+/// A path that ends in `..` names the directory it leads to: `<p>/wal/..`
+/// migrates `<p>`, with its side files next to it, never inside it.
+#[test]
+fn a_directory_path_ending_in_parent_migrates_the_directory_it_names() {
+    let expected = kept_contents(&directory_kept());
+    let (_dir, path) = copy_directory();
+    let written = path.join("wal").join("..");
+    let db = GrafeoDB::open(&written).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(contents(&db), expected, "the migrated data");
+    db.close().unwrap();
+    drop(db);
+    assert!(path.is_file(), "<p> is the migrated file");
+    assert_migrated(&path, &expected, &directory_kept(), "<p>/wal/..");
+}
+
+/// Marks a [`current_directory_child`] run.
+const CURRENT_DIRECTORY_VAR: &str = "GRAFEO_MIGRATION_CURRENT_DIRECTORY";
+
+/// Child-process entry for
+/// [`a_directory_that_is_the_current_directory_is_read_but_not_migrated`]; a
+/// no-op when run directly. Runs with the 0.5.x directory as its current
+/// directory, opens `.` read-write (printing the error) and read-only
+/// (printing the node count).
+#[test]
+fn current_directory_child() {
+    if std::env::var_os(CURRENT_DIRECTORY_VAR).is_none() {
+        return;
+    }
+    match GrafeoDB::open(".") {
+        Ok(_) => println!("read-write=opened"),
+        Err(error) => println!("read-write={error}"),
+    }
+    match GrafeoDB::open_read_only(".") {
+        Ok(db) => println!("read-only={}", db.node_count()),
+        Err(error) => println!("read-only={error}"),
+    }
+}
+
+/// A 0.5.x directory opened as `.` from inside it (as `grafeo info .` does) is
+/// read in place by a read-only open. A read-write open refuses to migrate it:
+/// it is the process's current directory, which cannot move (on Windows not
+/// at all, elsewhere the process would go on inside the kept copy). The error
+/// says to open it by its name from outside, nothing changes, and no side file
+/// goes inside the directory.
+#[test]
+fn a_directory_that_is_the_current_directory_is_read_but_not_migrated() {
+    let expected_nodes = {
+        let db = GrafeoDB::open_read_only(directory()).unwrap();
+        let nodes = db.node_count();
+        db.close().unwrap();
+        nodes
+    };
+    let (dir, path) = copy_directory();
+    let before = files(dir.path());
+    let output = child_process::output(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "current_directory_child", "--nocapture"])
+            .env(CURRENT_DIRECTORY_VAR, "1")
+            .current_dir(&path),
+    )
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the child ran: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let read_write = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("read-write="))
+        .unwrap_or_else(|| panic!("the child printed no read-write outcome:\n{stdout}"));
+    assert!(
+        read_write.contains("current directory")
+            && read_write.contains(&format!("{}db", std::path::MAIN_SEPARATOR)),
+        "the read-write open refuses, naming the directory and why: {read_write}"
+    );
+    assert!(
+        stdout.contains(&format!("read-only={expected_nodes}")),
+        "the read-only open reads the directory in place:\n{stdout}"
+    );
+    assert!(
+        files(dir.path()) == before,
+        "nothing changed, inside the directory or next to it"
+    );
+}
+
+/// On Windows a directory cannot be renamed while any process has a file in it
+/// open. The migration then fails before anything moved, and its error says
+/// why and what to do (not only "access is denied"). Elsewhere an open file
+/// does not keep the directory from moving, and the migration succeeds.
+#[test]
+fn a_directory_that_cannot_move_says_why() {
+    let expected = kept_contents(&directory_kept());
+    let (dir, path) = copy_directory();
+    let before = files(dir.path());
+    let reader = std::fs::File::open(path.join("wal/wal_00000000.log")).unwrap();
+    let opened = GrafeoDB::open(&path);
+    if cfg!(windows) {
+        drop(reader);
+        let error = match opened {
+            Ok(_) => panic!("a directory with an open file in it was renamed on Windows"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("another process may have a file in it open")
+                && error.contains("a directory of its own"),
+            "the error says why the directory cannot move and what to do: {error}"
+        );
+        assert_eq!(
+            error.matches("GRAFEO-").count(),
+            1,
+            "the error carries one code: {error}"
+        );
+        assert!(
+            files(dir.path()) == before,
+            "the failed migration changes nothing"
+        );
+    } else {
+        let db = opened.unwrap();
+        drop(reader);
+        assert_eq!(contents(&db), expected, "the open file did not keep it");
+        db.close().unwrap();
+        drop(db);
+        assert_migrated(&path, &expected, &directory_kept(), "an open file inside");
+    }
 }
 
 // =========================================================================

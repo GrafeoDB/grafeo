@@ -1,8 +1,9 @@
 //! Only one `GrafeoDB` can open a persistent database for writing (#405).
 //!
-//! Without a lock, two processes could open the same WAL-directory database
-//! and the one that closed last silently overwrote the other's commits. A
-//! second open now fails with a "locked" error until the first one closes.
+//! Without a lock, two processes could open the same database and the one
+//! that closed last silently overwrote the other's commits. A second
+//! read-write open of the same single file now fails with a "locked" error
+//! until the first one closes, whatever its name (`.grafeo` or none).
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --features full --test database_lock
@@ -10,7 +11,7 @@
 
 #![allow(missing_docs)]
 
-#[cfg(feature = "wal")]
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod tests {
     use grafeo_common::testing::child_process;
     use grafeo_common::types::Value;
@@ -23,25 +24,24 @@ mod tests {
     const CHILD_PATH_VAR: &str = "GRAFEO_LOCK_TEST_CHILD_PATH";
     const CHILD_FORMAT_VAR: &str = "GRAFEO_LOCK_TEST_CHILD_FORMAT";
 
+    /// The databases each test runs on: a `.grafeo` file with the format
+    /// given, and a file without an extension with the default format (a path
+    /// that was a WAL directory before 0.6).
     fn formats(dir: &Path) -> Vec<(&'static str, PathBuf, StorageFormat)> {
-        let mut formats = vec![(
-            "wal-directory",
-            dir.join("dir-db"),
-            StorageFormat::WalDirectory,
-        )];
-        #[cfg(feature = "grafeo-file")]
-        formats.push((
-            "single-file",
-            dir.join("single.grafeo"),
-            StorageFormat::SingleFile,
-        ));
-        formats
+        vec![
+            (
+                "single-file",
+                dir.join("single.grafeo"),
+                StorageFormat::SingleFile,
+            ),
+            ("auto", dir.join("db"), StorageFormat::Auto),
+        ]
     }
 
     fn format_from_name(name: &str) -> StorageFormat {
         match name {
-            "wal-directory" => StorageFormat::WalDirectory,
             "single-file" => StorageFormat::SingleFile,
+            "auto" => StorageFormat::Auto,
             other => panic!("unknown format {other}"),
         }
     }
@@ -70,6 +70,7 @@ mod tests {
         for (name, path, format) in formats(dir.path()) {
             let first = open(&path, format).unwrap();
             insert(&first, "Alix");
+            assert!(path.is_file(), "{name}: the database is a single file");
 
             let Err(err) = open(&path, format) else {
                 panic!("{name}: second open of a database in use must fail");

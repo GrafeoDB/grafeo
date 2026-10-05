@@ -100,11 +100,7 @@ fn in_a_grafeo_file_with_cdc() {
 #[test]
 fn in_a_file_without_the_grafeo_extension() {
     let dir = tempfile::tempdir().unwrap();
-    let db = GrafeoDB::with_config(
-        Config::persistent(dir.path().join("edges"))
-            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
-    )
-    .unwrap();
+    let db = GrafeoDB::with_config(Config::persistent(dir.path().join("edges"))).unwrap();
     reads_its_new_edge(&db, "a file without the .grafeo extension");
     db.close().unwrap();
 }

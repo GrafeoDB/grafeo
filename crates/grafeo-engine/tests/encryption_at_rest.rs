@@ -649,18 +649,37 @@ fn an_encrypted_database_spills_nothing_to_disk() {
     assert_eq!(files_with_marker(&encrypted_dir), Vec::<PathBuf>::new());
 }
 
+/// A new path without the `.grafeo` extension (a WAL directory before 0.6) is
+/// a single file: with a key it is created encrypted, holds no written value
+/// in plaintext, and opens only with its key.
 #[test]
-fn a_wal_directory_database_with_a_key_is_refused() {
+fn a_key_on_a_new_path_without_the_extension_creates_an_encrypted_file() {
     let dir = tempfile::tempdir().unwrap();
-    // A new path without the `.grafeo` extension is a WAL-directory database.
     let path = dir.path().join("berlin");
+    let chain = key_chain(3);
 
-    let error = error_of(GrafeoDB::with_config(encrypted(&path, &key_chain(3))));
-    assert!(error.contains("single-file"), "{error}");
-    assert!(
-        !path.exists(),
-        "nothing is written for a refused WAL-directory database"
+    let db = open_encrypted(&path, &chain);
+    db.execute(&format!(
+        "INSERT (:Person {{name: 'Alix', note: '{MARKER}'}})"
+    ))
+    .unwrap();
+    db.close().unwrap();
+    drop(db);
+
+    assert!(path.is_file(), "the database is a single file");
+    assert!(file_header(&path).encrypted, "the file is encrypted");
+    assert_eq!(
+        files_with_marker(dir.path()),
+        Vec::<PathBuf>::new(),
+        "no file holds the written value in plaintext"
     );
+    let error = error_of(GrafeoDB::open(&path));
+    assert!(
+        error.contains("the database is encrypted and needs its key"),
+        "{error}"
+    );
+    let db = open_encrypted(&path, &chain);
+    assert_eq!(people(&db), names(&["Alix"]));
 }
 
 // --- Keys are per database -----------------------------------------------------
@@ -730,23 +749,36 @@ fn saving_an_encrypted_database_writes_an_encrypted_file_with_its_own_id() {
     assert_eq!(people(&copied), names(&["Alix"]));
 }
 
+/// `save` to a path without the `.grafeo` extension (a WAL directory before
+/// 0.6) writes a single file, encrypted as `save` to a `.grafeo` path is.
 #[test]
-fn saving_an_encrypted_database_to_a_wal_directory_is_refused() {
+fn saving_an_encrypted_database_to_a_path_without_the_extension_writes_an_encrypted_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("amsterdam.grafeo");
     let target = dir.path().join("copy");
-    let db = open_encrypted(&path, &key_chain(3));
+    let chain = key_chain(3);
+    let db = open_encrypted(&path, &chain);
     db.execute(&format!(
         "INSERT (:Person {{name: 'Alix', note: '{MARKER}'}})"
     ))
     .unwrap();
 
-    let error = db
-        .save(&target)
-        .expect_err("a WAL-directory copy would be plaintext")
-        .to_string();
-    assert!(error.contains("single-file"), "{error}");
-    assert!(!target.exists(), "nothing is written for the refused copy");
+    db.save(&target).unwrap();
+    db.close().unwrap();
+    assert!(target.is_file(), "the copy is a single file");
+    let header = file_header(&target);
+    assert!(header.encrypted, "the copy is encrypted");
+    assert_ne!(
+        header.database_id,
+        file_header(&path).database_id,
+        "the copy is a database of its own"
+    );
+    assert!(
+        !contains(&std::fs::read(&target).unwrap(), MARKER.as_bytes()),
+        "the copy holds no written value in plaintext"
+    );
+    let copied = open_encrypted(&target, &chain);
+    assert_eq!(people(&copied), names(&["Alix"]));
 }
 
 /// `to_memory` copies the data, not the key: an in-memory database cannot be
@@ -1067,6 +1099,118 @@ fn a_05x_database_opened_read_only_with_a_key_is_refused() {
         std::fs::read(fixture()).unwrap(),
         "the 0.5.x file is unchanged"
     );
+    assert!(
+        !with_suffix(&path, ".pre-0.6").exists(),
+        "a read-only open never migrates"
+    );
+}
+
+/// The 0.5.44 WAL-directory database: `wal/` and the `LOCK` file 0.5.44 creates.
+fn directory_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/released/0.5.44/directory")
+}
+
+/// A read-write open of a 0.5.x WAL directory with a key migrates it into an
+/// encrypted single file at the same path. The directory is kept as
+/// `<path>.pre-0.6/` byte for byte (it is the user's 0.5.x data, never
+/// encrypted), and no other file next to the database holds its values in
+/// plaintext.
+#[test]
+fn a_05x_wal_directory_opened_with_a_key_is_migrated_into_an_encrypted_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = {
+        let reference = dir.path().join("reference");
+        copy(&directory_fixture(), &reference);
+        let db = GrafeoDB::open_read_only(&reference).unwrap();
+        let found = summary(&db);
+        db.close().unwrap();
+        assert!(found.0.len() > 1, "the fixture holds people: {found:?}");
+        found
+    };
+    // The migrated database gets a directory of its own, so every file in it
+    // is the migration's.
+    let migrated_dir = dir.path().join("migrated");
+    std::fs::create_dir(&migrated_dir).unwrap();
+    let path = migrated_dir.join("db");
+    copy(&directory_fixture(), &path);
+    let chain = key_chain(3);
+
+    let db = open_encrypted(&path, &chain);
+    assert_eq!(summary(&db), expected, "the migration keeps the data");
+    db.close().unwrap();
+    drop(db);
+
+    assert!(path.is_file(), "the migrated database is a single file");
+    assert!(
+        file_header(&path).encrypted,
+        "the migrated file is encrypted"
+    );
+    let kept = with_suffix(&path, ".pre-0.6");
+    let relative = |root: &Path| {
+        let mut found: Vec<(PathBuf, Vec<u8>)> = files_under(root)
+            .into_iter()
+            .map(|file| {
+                let bytes = std::fs::read(&file).unwrap();
+                (file.strip_prefix(root).unwrap().to_path_buf(), bytes)
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    assert!(
+        relative(&kept) == relative(&directory_fixture()),
+        "the kept 0.5.x directory is the fixture, byte for byte (it stays unencrypted)"
+    );
+
+    let (kept_files, other_files): (Vec<PathBuf>, Vec<PathBuf>) = files_under(&migrated_dir)
+        .into_iter()
+        .partition(|file| file.starts_with(&kept));
+    assert!(
+        other_files.contains(&path),
+        "the scan covers the migrated file: {other_files:?}"
+    );
+    let kept_bytes: Vec<u8> = kept_files
+        .iter()
+        .flat_map(|file| std::fs::read(file).unwrap())
+        .collect();
+    for value in ["alix@example.org", "gus@example.org", "mia@example.org"] {
+        assert!(
+            contains(&kept_bytes, value.as_bytes()),
+            "the kept 0.5.x directory holds {value} in plaintext"
+        );
+        for file in &other_files {
+            assert!(
+                !contains(&std::fs::read(file).unwrap(), value.as_bytes()),
+                "{} holds {value} in plaintext",
+                file.display()
+            );
+        }
+    }
+
+    let error = error_of(GrafeoDB::open(&path));
+    assert!(
+        error.contains("the database is encrypted and needs its key"),
+        "{error}"
+    );
+    let db = open_encrypted(&path, &chain);
+    assert_eq!(summary(&db), expected);
+}
+
+/// A read-only open of a 0.5.x WAL directory with a key fails as for a 0.5.x
+/// file: the directory is not encrypted, and only a read-write open migrates
+/// it into an encrypted file. Nothing changes.
+#[test]
+fn a_05x_wal_directory_opened_read_only_with_a_key_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    copy(&directory_fixture(), &path);
+
+    let error = error_of(GrafeoDB::with_config(encrypted_read_only(
+        &path,
+        &key_chain(3),
+    )));
+    assert!(error.contains("the database is not encrypted"), "{error}");
+    assert!(path.join("wal").is_dir(), "the directory is unchanged");
     assert!(
         !with_suffix(&path, ".pre-0.6").exists(),
         "a read-only open never migrates"

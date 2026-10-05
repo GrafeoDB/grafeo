@@ -11,9 +11,6 @@ use hashbrown::HashSet;
 
 use crate::config::Config;
 
-#[cfg(feature = "wal")]
-use grafeo_storage::wal::WalRecord;
-
 use crate::catalog::{
     EdgeTypeDefinition, GraphTypeDefinition, NodeTypeDefinition, ProcedureDefinition,
 };
@@ -569,211 +566,26 @@ impl super::GrafeoDB {
     // ADMIN API: Persistence Control
     // =========================================================================
 
-    /// Saves the database to a file path.
-    ///
-    /// - If the path ends in `.grafeo`: creates a single-file database
-    /// - Otherwise: creates a WAL directory-backed database at the path
-    /// - If in-memory: creates a new persistent database at path
-    /// - If file-backed: creates a copy at the new path
-    ///
-    /// The original database remains unchanged.
+    /// Saves a copy of the database to a new single file at `path`, whatever
+    /// its extension (`.grafeo`, `.db` or none): a database of its own, with
+    /// every graph, the schema and the indexes, and no sidecar WAL. Works the
+    /// same for an in-memory and a persistent database; the original stays
+    /// as it is.
     ///
     /// The copy of an encrypted database (`Config::encryption`) is encrypted
-    /// with the same key chain: it is a database of its own, with a new
-    /// database id and so its own keys. A WAL-directory copy of an encrypted
-    /// database is refused, as it would be written in plaintext.
+    /// with the same key chain: it has a new database id and so its own
+    /// keys.
     ///
     /// # Errors
     ///
-    /// Returns an error if the save operation fails, if an encrypted
-    /// database is saved to a path that is not a `.grafeo` file, or after a
-    /// commit that did not complete (see
+    /// Returns an error if `path` already exists, if the file cannot be
+    /// written, or after a commit that did not complete (see
     /// [`TransactionManager`](crate::transaction::TransactionManager)).
     ///
     /// Requires the `wal` feature for persistence support.
     #[cfg(feature = "wal")]
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-
-        // Single-file format: export snapshot directly to a .grafeo file
-        #[cfg(feature = "grafeo-file")]
-        if path.extension().is_some_and(|ext| ext == "grafeo") {
-            return self.save_as_grafeo_file(path);
-        }
-
-        // The copy holds every commit whole, and none that did not complete
-        // (whose stamped part the store holds); refused before the target
-        // exists.
-        let _commits = self.transaction_manager.hold_commits()?;
-
-        // Create target database with WAL enabled; with a key, its open
-        // refuses the WAL-directory format instead of writing plaintext.
-        let target_config = Config::persistent(path);
-        #[cfg(feature = "encryption")]
-        let target_config = Config {
-            encryption: self.config.encryption.clone(),
-            ..target_config
-        };
-        let target = Self::with_config(target_config)?;
-
-        // Copy all nodes using WAL-enabled methods
-        for node in self.lpg_store().all_nodes() {
-            let label_refs: Vec<&str> = node.labels.iter().map(|s| &**s).collect();
-            target
-                .lpg_store()
-                .create_node_with_id(node.id, &label_refs)?;
-
-            // Log to WAL
-            target.log_wal(&WalRecord::CreateNode {
-                id: node.id,
-                labels: node.labels.iter().map(|s| s.to_string()).collect(),
-            })?;
-
-            // Copy properties
-            for (key, value) in node.properties {
-                target
-                    .lpg_store()
-                    .set_node_property(node.id, key.as_str(), value.clone());
-                target.log_wal(&WalRecord::SetNodeProperty {
-                    id: node.id,
-                    key: key.to_string(),
-                    value,
-                })?;
-            }
-        }
-
-        // Copy all edges using WAL-enabled methods
-        for edge in self.lpg_store().all_edges() {
-            target
-                .lpg_store()
-                .create_edge_with_id(edge.id, edge.src, edge.dst, &edge.edge_type)?;
-
-            // Log to WAL
-            target.log_wal(&WalRecord::CreateEdge {
-                id: edge.id,
-                src: edge.src,
-                dst: edge.dst,
-                edge_type: edge.edge_type.to_string(),
-            })?;
-
-            // Copy properties
-            for (key, value) in edge.properties {
-                target
-                    .lpg_store()
-                    .set_edge_property(edge.id, key.as_str(), value.clone());
-                target.log_wal(&WalRecord::SetEdgeProperty {
-                    id: edge.id,
-                    key: key.to_string(),
-                    value,
-                })?;
-            }
-        }
-
-        // Copy named graphs
-        for graph_name in self.lpg_store().graph_names() {
-            if let Some(src_graph) = self.lpg_store().graph(&graph_name) {
-                target.log_wal(&WalRecord::CreateNamedGraph {
-                    name: graph_name.clone(),
-                })?;
-                target
-                    .lpg_store()
-                    .create_graph(&graph_name)
-                    .map_err(|e| Error::Internal(e.to_string()))?;
-
-                if let Some(dst_graph) = target.lpg_store().graph(&graph_name) {
-                    // Switch WAL context to this named graph
-                    target.log_wal(&WalRecord::SwitchGraph {
-                        name: Some(graph_name.clone()),
-                    })?;
-
-                    for node in src_graph.all_nodes() {
-                        let label_refs: Vec<&str> = node.labels.iter().map(|s| &**s).collect();
-                        dst_graph.create_node_with_id(node.id, &label_refs)?;
-                        target.log_wal(&WalRecord::CreateNode {
-                            id: node.id,
-                            labels: node.labels.iter().map(|s| s.to_string()).collect(),
-                        })?;
-                        for (key, value) in node.properties {
-                            dst_graph.set_node_property(node.id, key.as_str(), value.clone());
-                            target.log_wal(&WalRecord::SetNodeProperty {
-                                id: node.id,
-                                key: key.to_string(),
-                                value,
-                            })?;
-                        }
-                    }
-                    for edge in src_graph.all_edges() {
-                        dst_graph.create_edge_with_id(
-                            edge.id,
-                            edge.src,
-                            edge.dst,
-                            &edge.edge_type,
-                        )?;
-                        target.log_wal(&WalRecord::CreateEdge {
-                            id: edge.id,
-                            src: edge.src,
-                            dst: edge.dst,
-                            edge_type: edge.edge_type.to_string(),
-                        })?;
-                        for (key, value) in edge.properties {
-                            dst_graph.set_edge_property(edge.id, key.as_str(), value.clone());
-                            target.log_wal(&WalRecord::SetEdgeProperty {
-                                id: edge.id,
-                                key: key.to_string(),
-                                value,
-                            })?;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Switch WAL context back to default graph
-        if !self.lpg_store().graph_names().is_empty() {
-            target.log_wal(&WalRecord::SwitchGraph { name: None })?;
-        }
-
-        // Copy RDF data with WAL logging
-        #[cfg(feature = "triple-store")]
-        {
-            for triple in self.rdf_store.triples() {
-                let record = WalRecord::InsertRdfTriple {
-                    subject: triple.subject().to_string(),
-                    predicate: triple.predicate().to_string(),
-                    object: triple.object().to_string(),
-                    graph: None,
-                };
-                target.rdf_store.insert((*triple).clone());
-                target.log_wal(&record)?;
-            }
-            for name in self.rdf_store.graph_names() {
-                target.log_wal(&WalRecord::CreateRdfGraph { name: name.clone() })?;
-                if let Some(src_graph) = self.rdf_store.graph(&name) {
-                    let dst_graph = target.rdf_store.graph_or_create(&name);
-                    for triple in src_graph.triples() {
-                        let record = WalRecord::InsertRdfTriple {
-                            subject: triple.subject().to_string(),
-                            predicate: triple.predicate().to_string(),
-                            object: triple.object().to_string(),
-                            graph: Some(name.clone()),
-                        };
-                        dst_graph.insert((*triple).clone());
-                        target.log_wal(&record)?;
-                    }
-                }
-            }
-        }
-
-        // Checkpoint and close the target database
-        target.close()?;
-
-        Ok(())
-    }
-
-    /// Saves the database to a single `.grafeo` file (see [`save`](Self::save)).
-    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-    fn save_as_grafeo_file(&self, path: &Path) -> Result<()> {
-        self.write_image(path)
+        self.write_image(path.as_ref())
     }
 
     /// Writes the database's complete state to a new `.grafeo` file at
@@ -783,7 +595,7 @@ impl super::GrafeoDB {
     /// # Errors
     ///
     /// The same as [`write_image_with`](Self::write_image_with).
-    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    #[cfg(feature = "wal")]
     pub(crate) fn write_image(&self, path: &Path) -> Result<()> {
         self.write_image_with(
             path,
@@ -917,34 +729,34 @@ impl super::GrafeoDB {
     /// it with its key ([`with_config`](Self::with_config)) and call
     /// [`to_memory`](Self::to_memory).
     ///
-    /// A `.grafeo` file written by 0.5.x is read as
-    /// [`open_read_only`](Self::open_read_only) reads it (its sidecar WAL
-    /// replayed) and is not migrated: nothing on disk changes. A path whose
-    /// migration was cut off fails as a read-only open does.
+    /// A database written by 0.5.x (a `.grafeo` file or a WAL directory) is
+    /// read as [`open_read_only`](Self::open_read_only) reads it (the sidecar
+    /// WAL of a file, the WAL of a directory, replayed) and is not migrated:
+    /// nothing on disk changes. A path whose migration was cut off fails as a
+    /// read-only open does.
     ///
     /// # Errors
     ///
     /// Returns an error if the file can't be opened or loaded.
     #[cfg(feature = "wal")]
     pub fn open_in_memory(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        #[cfg(feature = "grafeo-file")]
-        {
-            use grafeo_storage::file::detect::{OnDisk, detect};
-            match detect(path)? {
-                // Read as a read-only open reads it: a read-write open would
-                // migrate it.
-                OnDisk::LegacyFile => {
-                    let source = Self::with_config(Config::read_only(path))?;
-                    let target = source.to_memory()?;
-                    source.close()?;
-                    return Ok(target);
-                }
-                // A missing file next to a cut-off migration or a kept copy
-                // fails as a read-only open does, before anything is created.
-                OnDisk::Missing => super::migration::check_read_only(path)?,
-                _ => {}
+        use grafeo_storage::file::detect::{OnDisk, detect};
+
+        // The spelling every open uses (see `normalize_path`).
+        let path = &super::normalize_path(path.as_ref())?;
+        match detect(path)? {
+            // Read as a read-only open reads it: a read-write open would
+            // migrate it.
+            OnDisk::LegacyFile | OnDisk::WalDirectory => {
+                let source = Self::with_config(Config::read_only(path))?;
+                let target = source.to_memory()?;
+                source.close()?;
+                return Ok(target);
             }
+            // A missing file next to a cut-off migration or a kept copy
+            // fails as a read-only open does, before anything is created.
+            OnDisk::Missing => super::migration::check_read_only(path)?,
+            _ => {}
         }
 
         // Open the source database (triggers WAL recovery)

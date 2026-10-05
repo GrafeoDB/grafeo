@@ -232,8 +232,11 @@ impl super::GrafeoDB {
     pub fn detailed_stats(&self) -> crate::admin::DatabaseStats {
         #[cfg(feature = "wal")]
         let disk_bytes = self.config.path.as_ref().and_then(|p| {
-            if p.exists() {
-                Self::calculate_disk_usage(p).ok()
+            // The spelling the files are named after: the caller's (`db/`)
+            // no longer exists once a migrated directory became a file.
+            let path = super::normalize_path(p).ok()?;
+            if path.exists() {
+                Self::calculate_disk_usage(&path).ok()
             } else {
                 None
             }
@@ -253,25 +256,54 @@ impl super::GrafeoDB {
         }
     }
 
-    /// Calculates total disk usage for the database directory.
+    /// Calculates the disk usage of the database at `path`: its file and its
+    /// sidecar WAL directory `<path>.wal/`, or every file of a 0.5.x WAL
+    /// directory read in place.
     #[cfg(feature = "wal")]
     fn calculate_disk_usage(path: &Path) -> Result<usize> {
-        let mut total = 0usize;
+        // The spelling the database's files are named after (`path()` keeps
+        // the caller's).
+        let path = &super::normalize_path(path)?;
         if path.is_dir() {
-            for entry in std::fs::read_dir(path)? {
+            return Self::directory_size(path);
+        }
+        let file = if path.is_file() {
+            Self::file_size(path, &std::fs::metadata(path)?)?
+        } else {
+            0
+        };
+        let wal = Self::directory_size(&grafeo_storage::file::detect::sidecar_wal_path(path))?;
+        Ok(file.saturating_add(wal))
+    }
+
+    /// The total size of the files under `dir` (0 when it does not exist).
+    #[cfg(feature = "wal")]
+    fn directory_size(dir: &Path) -> Result<usize> {
+        let mut total = 0usize;
+        if dir.is_dir() {
+            for entry in std::fs::read_dir(dir)? {
                 let entry = entry?;
                 let metadata = entry.metadata()?;
                 if metadata.is_file() {
-                    // reason: file sizes fit usize on 64-bit targets
-                    #[allow(clippy::cast_possible_truncation)]
-                    let file_len = metadata.len() as usize;
-                    total += file_len;
+                    total = total.saturating_add(Self::file_size(&entry.path(), &metadata)?);
                 } else if metadata.is_dir() {
-                    total += Self::calculate_disk_usage(&entry.path())?;
+                    total = total.saturating_add(Self::directory_size(&entry.path())?);
                 }
             }
         }
         Ok(total)
+    }
+
+    /// The size of the file at `path` as a `usize`.
+    #[cfg(feature = "wal")]
+    fn file_size(path: &Path, metadata: &std::fs::Metadata) -> Result<usize> {
+        usize::try_from(metadata.len()).map_err(|_| {
+            grafeo_common::utils::error::Error::Internal(format!(
+                "the size of {} ({} bytes) does not fit in a usize on this platform",
+                path.display(),
+                metadata.len()
+            ))
+        })
     }
 
     /// Returns schema information (labels, edge types, property keys).
@@ -419,7 +451,8 @@ impl super::GrafeoDB {
         if let Some(ref wal) = self.wal {
             return crate::admin::WalStatus {
                 enabled: true,
-                path: self.config.path.as_ref().map(|p| p.join("wal")),
+                // The sidecar WAL of the database file, `<path>.wal/`.
+                path: Some(wal.dir().to_path_buf()),
                 size_bytes: wal.size_bytes(),
                 // reason: WAL record count fits usize on 64-bit targets
                 #[allow(clippy::cast_possible_truncation)]
@@ -441,8 +474,7 @@ impl super::GrafeoDB {
 
     /// Forces a WAL checkpoint.
     ///
-    /// Flushes all pending WAL records to the main storage. In WAL-directory
-    /// databases the WAL is the only copy of the data, so this only syncs it.
+    /// Flushes all pending WAL records to the database file.
     ///
     /// # Errors
     ///
@@ -456,23 +488,6 @@ impl super::GrafeoDB {
         }
         // The store holds the stamped part of a commit that did not complete.
         self.transaction_manager.check_no_incomplete_commit()?;
-
-        // WAL-directory mode: a checkpoint record would make recovery skip,
-        // and truncation delete, WAL files that exist nowhere else (#419).
-        #[cfg(feature = "wal")]
-        {
-            #[cfg(feature = "grafeo-file")]
-            let has_snapshot = self.file_manager.is_some();
-            #[cfg(not(feature = "grafeo-file"))]
-            let has_snapshot = false;
-
-            if !has_snapshot {
-                if let Some(ref wal) = self.wal {
-                    wal.sync()?;
-                }
-                return Ok(());
-            }
-        }
 
         // Flush all sections to the .grafeo file. The flush marks and truncates
         // the WAL only once the file is durable (#417).

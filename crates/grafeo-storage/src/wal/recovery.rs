@@ -236,6 +236,8 @@ impl WalRecovery {
 
         // Get all log files in order
         let log_files = self.get_log_files()?;
+        // Lets a test move the directory between the listing and the reads.
+        grafeo_common::testing::pause::maybe_pause("wal_recovery:after_listing");
 
         // Determine the minimum sequence number to process
         let min_sequence = checkpoint.as_ref().map_or(0, |cp| cp.log_sequence);
@@ -338,19 +340,30 @@ impl WalRecovery {
             .and_then(|s| s.parse().ok())
     }
 
+    /// The WAL files of the directory, sorted by sequence. A missing
+    /// directory holds none; one that cannot be listed is an error, never
+    /// "no files": recovering nothing would lose the records it holds.
     fn get_log_files(&self) -> Result<Vec<std::path::PathBuf>> {
+        let cannot_list = |error: std::io::Error| {
+            Error::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot list the WAL directory {}: {error}",
+                    self.dir.display()
+                ),
+            ))
+        };
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(cannot_list(error)),
+        };
+
         let mut files = Vec::new();
-
-        if !self.dir.exists() {
-            return Ok(files);
-        }
-
-        if let Ok(entries) = std::fs::read_dir(&self.dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "log") {
-                    files.push(path);
-                }
+        for entry in entries {
+            let path = entry.map_err(cannot_list)?.path();
+            if path.extension().is_some_and(|ext| ext == "log") {
+                files.push(path);
             }
         }
 
@@ -494,6 +507,111 @@ mod tests {
 
         // Uncommitted records should be discarded
         assert_eq!(records.len(), 0);
+    }
+
+    /// Denies the listing of a directory to everyone until dropped, which
+    /// allows it again, also when the test fails in between, so the temporary
+    /// directory can be removed.
+    struct Unlisted<'a>(&'a Path);
+
+    impl<'a> Unlisted<'a> {
+        fn deny(dir: &'a Path) -> Self {
+            assert!(
+                set_listing(dir, false),
+                "cannot deny listing {}",
+                dir.display()
+            );
+            Self(dir)
+        }
+    }
+
+    impl Drop for Unlisted<'_> {
+        /// Reports a failure instead of panicking: a panic in a drop while a
+        /// failed test unwinds would abort the test binary.
+        fn drop(&mut self) {
+            if !set_listing(self.0, true) {
+                eprintln!("cannot allow listing {} again", self.0.display());
+            }
+        }
+    }
+
+    /// Denies (`allowed` false) or allows again the listing of `dir` to
+    /// everyone: `icacls` on Windows, the mode on Unix. Returns whether it
+    /// worked.
+    fn set_listing(dir: &Path, allowed: bool) -> bool {
+        #[cfg(windows)]
+        {
+            let mut command = std::process::Command::new("icacls");
+            command.arg(dir);
+            if allowed {
+                command.args(["/remove:d", "*S-1-1-0"]);
+            } else {
+                command.args(["/deny", "*S-1-1-0:(RD)"]);
+            }
+            command.status().is_ok_and(|status| status.success())
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if allowed { 0o700 } else { 0o300 };
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).is_ok()
+        }
+    }
+
+    /// A WAL directory that exists but cannot be listed fails the recovery,
+    /// naming the directory, instead of recovering nothing: the records it
+    /// holds would be lost to whatever the caller does next (a migration
+    /// writes an empty image, an open replays nothing). A missing directory
+    /// still recovers nothing.
+    #[test]
+    fn a_wal_directory_that_cannot_be_listed_fails_the_recovery() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        {
+            let wal = WalManager::open(&wal_dir).unwrap();
+            wal.log(&WalRecord::CreateNode {
+                id: NodeId::new(3),
+                labels: vec!["Person".to_string()],
+            })
+            .unwrap();
+            wal.log(&WalRecord::TransactionCommit {
+                transaction_id: TransactionId::new(19),
+            })
+            .unwrap();
+            wal.sync().unwrap();
+        }
+
+        let (listed, recovered) = {
+            let _denied = Unlisted::deny(&wal_dir);
+            (
+                std::fs::read_dir(&wal_dir).map(|_| ()),
+                WalRecovery::new(&wal_dir).recover_all_with_tail(),
+            )
+        };
+        if listed.is_ok() {
+            eprintln!("skipped: the WAL directory can still be listed (permissions do not apply)");
+            return;
+        }
+
+        let error = recovered
+            .expect_err("a WAL directory that cannot be listed is an error")
+            .to_string();
+        assert!(
+            error.contains(&wal_dir.display().to_string()),
+            "the error names the WAL directory: {error}"
+        );
+        assert_eq!(
+            WalRecovery::new(&wal_dir).recover().unwrap().len(),
+            2,
+            "listed again, the WAL recovers its records"
+        );
+        assert!(
+            WalRecovery::new(dir.path().join("missing"))
+                .recover()
+                .unwrap()
+                .is_empty(),
+            "a missing WAL directory recovers nothing"
+        );
     }
 
     #[test]

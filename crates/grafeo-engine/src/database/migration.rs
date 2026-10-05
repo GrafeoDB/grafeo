@@ -1,20 +1,27 @@
-//! Migration of database files written by 0.5.x to the 0.6 file format.
+//! Migration of databases written by 0.5.x to the 0.6 file format.
 //!
-//! A read-write open of a 0.5.x file (container v1 or v2) migrates it before
-//! the normal open. [`migrate`] does, under an exclusive lock on
+//! A read-write open of a 0.5.x database migrates it before the normal open:
+//! a 0.5.x file (container v1 or v2), or a 0.5.x WAL directory (a directory
+//! `<path>/` holding its WAL in `wal/`), which becomes a single file at the
+//! same path. [`migrate`] does, under an exclusive lock on
 //! `<path>.migrate.lock`:
 //!
-//! 1. Take a shared lock on the old file, which fails while a 0.5.x process
-//!    has it open for writing and keeps one from opening it until it has
-//!    moved. Open the old database read-only, with the 0.5.x reader (its
-//!    sidecar WAL included), write its complete state as a 0.6 image to
+//! 1. Lock the old database against 0.5.x writers: a shared lock on a file,
+//!    which fails while a 0.5.x process has it open for writing and keeps one
+//!    from opening it until it has moved; the `LOCK` file of a directory,
+//!    taken exclusively as a 0.5.44 writer takes it (0.5.43 and older took no
+//!    lock). Open the old database read-only, with the 0.5.x reader (the
+//!    sidecar WAL of a file included, every file of a directory's WAL
+//!    replayed), write its complete state as a 0.6 image to
 //!    `<path>.migrating`, and open the image read-only to check it (its counts
 //!    are logged once it is in place).
-//! 2. Move the old file to `<path>.pre-0.6`, its sidecar WAL `<path>.wal` to
-//!    `<path>.pre-0.6.wal` and a checkpoint image 0.5.44 left pending,
-//!    `<path>.checkpoint`, to `<path>.pre-0.6.checkpoint`, syncing the
-//!    directory after each move: a power loss keeps the first moves, never a
-//!    later one without an earlier one.
+//! 2. Move the old file, or the whole directory, to `<path>.pre-0.6`, a
+//!    sidecar WAL `<path>.wal` to `<path>.pre-0.6.wal` and a checkpoint image
+//!    0.5.44 left pending, `<path>.checkpoint`, to `<path>.pre-0.6.checkpoint`,
+//!    syncing the directory after each move: a power loss keeps the first
+//!    moves, never a later one without an earlier one. A directory's lock is
+//!    released right before it moves (on Windows a directory with an open
+//!    handle inside cannot be renamed).
 //! 3. Rename `<path>.migrating` to `<path>` and sync the directory.
 //!
 //! The old files are kept byte for byte. To go back to 0.5.x, move the 0.6
@@ -24,13 +31,17 @@
 //! replaces a kept copy: while one of the `.pre-0.6` names is taken, it fails
 //! before it writes anything.
 //!
+//! A directory that is not a 0.5.x database (no `wal/` inside) is never
+//! migrated: the open fails with an error naming it.
+//!
 //! With `Config::encryption` set, the image is encrypted with the keys the key
 //! chain derives for its new database id. The kept files stay unencrypted
 //! (0.5.x never encrypted them), and a warning names each of them.
 //!
 //! A 0.5.x sidecar WAL holds changes the file does not. A build without the
 //! `wal` feature cannot replay it, so it refuses to read (and so to migrate)
-//! a 0.5.x database whose sidecar WAL holds files.
+//! a 0.5.x database whose sidecar WAL holds files, and every 0.5.x WAL
+//! directory (its WAL is the only copy of its data).
 //!
 //! ## What a failure leaves
 //!
@@ -42,7 +53,8 @@
 //!   after a crash.
 //! - A crash leaves one of these states, which [`finish_interrupted`] (or, for
 //!   a missing `<path>`, [`lock_if_missing`]) handles on the next read-write
-//!   open:
+//!   open. `<path>` (0.5.x) is a 0.5.x file or WAL directory, and
+//!   `<path>.pre-0.6` the kept file or directory:
 //!
 //! | Files present | Next read-write open |
 //! | --- | --- |
@@ -52,7 +64,10 @@
 //! | `<path>.migrating`, no `<path>` and no `<path>.pre-0.6` | fails with an error naming the files: the old database is missing, and nothing is guessed |
 //! | `<path>` (0.6) and `<path>.pre-0.6` | nothing to do |
 //!
-//! A crash also leaves the lock file behind, which the next open removes.
+//! A crash also leaves the lock file behind, which the next open removes, and
+//! a crash while a directory is locked can leave an empty `LOCK` file in it
+//! (as a 0.5.44 open creates one); the migration otherwise removes a `LOCK`
+//! file it created.
 //!
 //! Two states are never the result of a migration, and are not acted on: a
 //! `<path>.migrating` next to a 0.6 `<path>` is left alone with a warning, and
@@ -60,13 +75,13 @@
 //! was lost, so every open fails instead of creating an empty database there.
 //!
 //! A migration in another process holds the lock while `<path>` is missing
-//! between its renames. A read-write open therefore decides what to do with
-//! the files ([`decide_read_write`]) without the lock only while `<path>`
-//! exists: a 0.5.x file is migrated under the lock (which looks at the files
-//! again), and a 0.6 file is never moved. Whenever `<path>` turns out missing,
-//! the open takes the lock, looks again, and creates a database only while it
-//! holds it (the lock is released once the new file, or the directory of a new
-//! WAL-directory database, exists).
+//! between its renames. Every read-write open, whatever its storage format,
+//! therefore decides what to do with the files ([`decide_read_write`])
+//! without the lock only while `<path>` exists: a 0.5.x database is migrated
+//! under the lock (which looks at the files again), and a 0.6 file is never
+//! moved. Whenever `<path>` turns out missing, the open takes the lock, looks
+//! again, and creates a database only while it holds it (the lock is released
+//! once the new file exists).
 //!
 //! A read-only open (and `open_in_memory`) never migrates and never changes
 //! these files: it reads a 0.5.x `<path>` in place, and fails for a state
@@ -86,18 +101,32 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use grafeo_common::grafeo_warn;
 use grafeo_common::testing::child_process;
 use grafeo_common::testing::crash::maybe_crash;
 use grafeo_common::testing::pause::maybe_pause;
-use grafeo_common::utils::error::{Error, Result, StorageError};
-use grafeo_common::{grafeo_info, grafeo_warn};
-use grafeo_storage::file::GrafeoFileManager;
+use grafeo_common::utils::error::{Error, Result};
 use grafeo_storage::file::detect::{
     OnDisk, detect, migrate_lock_path, migrating_path, pre_06_path, sidecar_wal_path,
 };
 
+// The migration itself reads the old database into the LPG store; the lock
+// protocol, finishing a cut-off migration and the read-only checks need no
+// `lpg` and run in every build.
+#[cfg(feature = "lpg")]
+use grafeo_common::grafeo_info;
+#[cfg(feature = "lpg")]
+use grafeo_common::utils::error::StorageError;
+#[cfg(feature = "lpg")]
+use grafeo_storage::file::GrafeoFileManager;
+#[cfg(feature = "lpg")]
+use grafeo_storage::lock::{DirectoryLock, LOCK_FILE_NAME};
+
+#[cfg(feature = "lpg")]
 use super::GrafeoDB;
+#[cfg(feature = "lpg")]
 use super::encryption::DatabaseKeys;
+#[cfg(feature = "lpg")]
 use crate::config::Config;
 
 /// How long an open waits for a migration another process is running.
@@ -131,10 +160,10 @@ pub(super) fn finish_interrupted(path: &Path) -> Result<()> {
     resolve(path)
 }
 
-/// Decides what a read-write open finds at `path`: whether it is a single file
-/// (`single_file` tells from the path and the configured format), what is on
-/// disk, and, when a database is to be created at the missing `path`, the
-/// migration lock to hold until it exists.
+/// Decides what a read-write open finds at `path`: what is on disk, and, when
+/// a database is to be created at the missing `path`, the migration lock to
+/// hold until it exists. What is on disk is all that decides how an existing
+/// path opens; the configured storage format only matters for a missing one.
 ///
 /// First finishes a migration a crash cut off ([`finish_interrupted`]). The
 /// files are then looked at without the lock while `path` exists; whenever it
@@ -146,18 +175,14 @@ pub(super) fn finish_interrupted(path: &Path) -> Result<()> {
 ///
 /// The errors of [`finish_interrupted`] and [`lock_if_missing`], or a file
 /// that cannot be inspected.
-pub(super) fn decide_read_write(
-    path: &Path,
-    single_file: impl Fn(&Path) -> bool,
-) -> Result<(bool, OnDisk, Option<MigrateLock>)> {
+pub(super) fn decide_read_write(path: &Path) -> Result<(OnDisk, Option<MigrateLock>)> {
     finish_interrupted(path)?;
     let mut create_lock = lock_if_missing(path)?;
     maybe_pause("open:after_check");
     loop {
-        let is_single_file = single_file(path);
         let on_disk = detect(path)?;
         if on_disk != OnDisk::Missing || create_lock.is_some() {
-            return Ok((is_single_file, on_disk, create_lock));
+            return Ok((on_disk, create_lock));
         }
         create_lock = lock_if_missing(path)?;
     }
@@ -200,10 +225,11 @@ pub(super) fn lock_if_missing(path: &Path) -> Result<Option<MigrateLock>> {
     Ok(Some(lock))
 }
 
-/// Migrates the 0.5.x database at `path` to the 0.6 format: a read-only open,
-/// the 0.6 image written to `<path>.migrating`, then the renames (see the
-/// module docs). Nothing to do if, once the lock is held, `<path>` is no
-/// longer a 0.5.x file: another process migrated it meanwhile.
+/// Migrates the 0.5.x database at `path` (a file or a WAL directory) to a
+/// single file in the 0.6 format at the same path: a read-only open, the 0.6
+/// image written to `<path>.migrating`, then the renames (see the module
+/// docs). Nothing to do if, once the lock is held, `<path>` is no longer a
+/// 0.5.x database: another process migrated it meanwhile.
 ///
 /// `config` is the configuration of the open that migrates; the read-only
 /// open of the old database uses its memory limit and spill path, and the
@@ -214,15 +240,20 @@ pub(super) fn lock_if_missing(path: &Path) -> Result<Option<MigrateLock>> {
 /// Returns an error if another process holds the migration lock for longer
 /// than the wait, a kept copy (`<path>.pre-0.6` and its side files) already
 /// exists, the old database cannot be read (for example while a 0.5.x process
-/// holds it, or in a build without the `wal` feature when its sidecar WAL
-/// holds files), or the image cannot be written or a rename fails.
+/// holds it, or in a build without the `wal` feature when its WAL holds
+/// files), or the image cannot be written or a rename fails.
+#[cfg(feature = "lpg")]
 pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
     let _lock = MigrateLock::acquire(path)?;
     // While this open waited for the lock, another process may have migrated
-    // the file, or crashed while it did.
+    // the database, or crashed while it did.
     resolve(path)?;
-    if detect(path)? != OnDisk::LegacyFile {
+    let on_disk = detect(path)?;
+    if !is_legacy(on_disk) {
         return Ok(());
+    }
+    if on_disk == OnDisk::WalDirectory {
+        refuse_current_directory(path)?;
     }
 
     let moves = kept_names(path);
@@ -238,10 +269,14 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
     }
 
     let failed = |error: Error| with_migration_context(path, error);
-    // A 0.5.x process that opened the file for writing after the read-only
-    // open would write to the kept copy: a shared lock keeps it out until the
-    // old file is moved, and makes the migration fail while one holds it.
-    let _old_file_lock = lock_shared(path)?;
+    // A 0.5.x process that opened the database for writing after the
+    // read-only open would write to the kept copy: a lock keeps it out, and
+    // makes the migration fail while one holds the database.
+    let old_lock = if on_disk == OnDisk::WalDirectory {
+        OldDatabaseLock::Directory(LegacyDirectoryLock::acquire(path).map_err(failed)?)
+    } else {
+        OldDatabaseLock::File(lock_shared(path)?)
+    };
     let migrating = migrating_path(path);
     // The old database is read without a key (a 0.5.x file is never
     // encrypted); the image is encrypted when the open has one, and then no
@@ -275,11 +310,23 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
     };
     maybe_crash("migrate:after_image");
 
+    // The lock on a file stays until the file has moved. A directory's lock
+    // is its `LOCK` file, inside it, and on Windows a directory with an open
+    // handle inside cannot be renamed (the WAL files the load read are closed
+    // by now): it is released right before the move. A 0.5.x process that
+    // opens the directory in that window would write to the kept copy;
+    // stopping 0.5.x processes before the first 0.6 open is the user's part,
+    // as the upgrade notes say.
+    let _old_file_lock = old_lock.release_directory();
+
     // Up to the first rename the old database is untouched: on failure the
     // image goes, so the database is as it was.
     let [(file, kept_file, file_point), side_files @ ..] = &moves;
     if let Err(error) = rename(file, kept_file, file_point) {
         remove_after_failure(&migrating);
+        if on_disk == OnDisk::WalDirectory {
+            return Err(directory_cannot_move(error));
+        }
         return Err(error);
     }
     // The move of the old file is durable before a side file moves: a power
@@ -323,6 +370,7 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
 
 /// The node and edge counts the active database header of the image at
 /// `image` records, opened read-only with the keys it was written with.
+#[cfg(feature = "lpg")]
 fn image_counts(image: &Path, keys: &DatabaseKeys) -> Result<(u64, u64)> {
     let manager =
         GrafeoFileManager::open_read_only_with_cipher_for(image, |id| keys.container_cipher(id))?;
@@ -331,8 +379,9 @@ fn image_counts(image: &Path, keys: &DatabaseKeys) -> Result<(u64, u64)> {
 }
 
 /// Refuses a read-only open of a database whose migration was cut off after
-/// the old file or one of its side files was moved away (only a read-write
-/// open finishes it), or whose migrated file is missing next to its kept copy.
+/// the old file or directory or one of its side files was moved away (only a
+/// read-write open finishes it), or whose migrated file is missing next to its
+/// kept copy.
 ///
 /// # Errors
 ///
@@ -345,7 +394,7 @@ pub(super) fn check_read_only(path: &Path) -> Result<()> {
     if exists(path)? {
         // Only a 0.5.x `<path>` can be part of a cut-off migration (as in
         // `resolve`): next to a 0.6 file, the leftovers are left alone.
-        if !exists(&migrating_path(path))? || detect(path)? != OnDisk::LegacyFile {
+        if !exists(&migrating_path(path))? || !is_legacy(detect(path)?) {
             return Ok(());
         }
         let [(_, kept_file, _), side_files @ ..] = &kept_names(path);
@@ -387,6 +436,7 @@ pub(super) fn check_read_only(path: &Path) -> Result<()> {
 ///
 /// Returns an error naming the sidecar WAL in that case, or if it cannot be
 /// inspected.
+#[cfg(feature = "lpg")]
 pub(super) fn refuse_unreplayable_wal(path: &Path, can_replay: bool) -> Result<()> {
     let wal = sidecar_wal_path(path);
     if can_replay || !GrafeoDB::holds_files(&wal)? {
@@ -410,7 +460,7 @@ fn resolve(path: &Path) -> Result<()> {
     match detect(path)? {
         // The image may be incomplete: the migration runs again, with the
         // side files back under their 0.5.x names.
-        OnDisk::LegacyFile => {
+        OnDisk::LegacyFile | OnDisk::WalDirectory => {
             move_side_files_back(path)?;
             remove_file(&migrating)
         }
@@ -429,8 +479,8 @@ fn resolve(path: &Path) -> Result<()> {
         // `<path>` is the database; the image is no part of a migration state.
         _ => {
             grafeo_warn!(
-                "{} is not part of a migration (the database {} is not a 0.5.x file) and is \
-                 left alone; remove it if it is not needed",
+                "{} is not part of a migration (the database {} is not a 0.5.x database) and \
+                 is left alone; remove it if it is not needed",
                 migrating.display(),
                 path.display()
             );
@@ -524,6 +574,7 @@ fn move_side_files_back(path: &Path) -> Result<()> {
 /// variant: an I/O error keeps its kind, a message-carrying error gets the
 /// context in front of its message, and an error without a message is
 /// returned as it is.
+#[cfg(feature = "lpg")]
 fn with_migration_context(path: &Path, error: Error) -> Error {
     let context = |message: &dyn std::fmt::Display| {
         format!(
@@ -548,6 +599,79 @@ fn with_migration_context(path: &Path, error: Error) -> Error {
         Error::Storage(StorageError::CheckpointFailed(message)) => {
             Error::Storage(StorageError::CheckpointFailed(context(&message)))
         }
+        other => other,
+    }
+}
+
+/// Whether nothing of a database is at `path`: no database, no image or lock
+/// file of a migration, and no kept copy. Only then is a database created
+/// there; an open that may not create one can refuse at once, without the
+/// migration lock (which creates the directory the lock file goes in).
+///
+/// # Errors
+///
+/// Returns an error if one of these paths cannot be inspected.
+pub(super) fn nothing_at(path: &Path) -> Result<bool> {
+    for side in [
+        path.to_path_buf(),
+        migrating_path(path),
+        migrate_lock_path(path),
+    ] {
+        if exists(&side)? {
+            return Ok(false);
+        }
+    }
+    for (_, kept, _) in kept_names(path) {
+        if exists(&kept)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Refuses to migrate the 0.5.x directory at `path` when it is, or holds, the
+/// current directory of this process (an open of `.` from inside it): on
+/// Windows it cannot be renamed at all, and elsewhere the process would go on
+/// inside the kept copy.
+///
+/// # Errors
+///
+/// Returns an error saying so in that case.
+#[cfg(feature = "lpg")]
+fn refuse_current_directory(path: &Path) -> Result<()> {
+    // Canonical forms, so neither `..` nor a symlink or junction hides that
+    // the current directory is inside the database directory.
+    let (Ok(current), Ok(database)) = (
+        std::env::current_dir().and_then(std::fs::canonicalize),
+        std::fs::canonicalize(path),
+    ) else {
+        // Without a current directory, or without the directory, there is
+        // nothing it could hold.
+        return Ok(());
+    };
+    if !current.starts_with(&database) {
+        return Ok(());
+    }
+    Err(Error::InvalidValue(format!(
+        "cannot migrate {} to the 0.6 format: it is the current directory of this process (or \
+         holds it), which cannot be moved; open it read-only, or read-write by its name from \
+         outside it",
+        path.display()
+    )))
+}
+
+/// Adds to the message of a failed rename of a 0.5.x directory why it may
+/// fail, and what to do: on Windows a directory cannot be renamed while any
+/// process has a file in it open, and nowhere can a mount point be renamed.
+/// The message is extended, not the formatted error wrapped, so the error
+/// keeps one code.
+#[cfg(feature = "lpg")]
+fn directory_cannot_move(error: Error) -> Error {
+    const HINT: &str = "; another process may have a file in it open, or the directory cannot \
+                        be renamed (for example a mount point): close it, or move the database \
+                        into a directory of its own, and open it again";
+    match error {
+        Error::Internal(message) => Error::Internal(format!("{message}{HINT}")),
         other => other,
     }
 }
@@ -634,10 +758,97 @@ fn remove_file(path: &Path) -> Result<()> {
         .map_err(|error| Error::Internal(format!("cannot remove {}: {error}", path.display())))
 }
 
+/// Whether `on_disk` is a database written by 0.5.x: a file, or a WAL
+/// directory.
+fn is_legacy(on_disk: OnDisk) -> bool {
+    matches!(on_disk, OnDisk::LegacyFile | OnDisk::WalDirectory)
+}
+
+/// What keeps 0.5.x writers away from the old database while a migration
+/// reads it.
+#[cfg(feature = "lpg")]
+enum OldDatabaseLock {
+    /// A shared lock on a 0.5.x file.
+    File(SharedLock),
+    /// The `LOCK` of a 0.5.x WAL directory.
+    Directory(LegacyDirectoryLock),
+}
+
+#[cfg(feature = "lpg")]
+impl OldDatabaseLock {
+    /// Releases the lock of a directory, which is inside it and would keep it
+    /// from being renamed on Windows; returns the lock of a file, to be held
+    /// until the file has moved.
+    fn release_directory(self) -> Option<SharedLock> {
+        match self {
+            Self::File(lock) => Some(lock),
+            Self::Directory(lock) => {
+                drop(lock);
+                None
+            }
+        }
+    }
+}
+
+/// The `LOCK` file of a 0.5.x WAL directory, locked exclusively as a 0.5.44
+/// writer locks it (0.5.43 and older took no lock), so a 0.5.44 process that
+/// has the directory open makes the migration fail with its "locked" error,
+/// and one that starts meanwhile fails to open it. Released when dropped,
+/// which also removes a `LOCK` file the lock created, so the kept directory
+/// holds the 0.5.x files as they were.
+#[cfg(feature = "lpg")]
+struct LegacyDirectoryLock {
+    /// The held lock, taken out when dropped so its handle closes first.
+    lock: Option<DirectoryLock>,
+    /// The `LOCK` file, when this lock created it.
+    created: Option<PathBuf>,
+}
+
+#[cfg(feature = "lpg")]
+impl LegacyDirectoryLock {
+    /// Locks the 0.5.x WAL directory at `directory`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if another process holds the directory's `LOCK` (a
+    /// 0.5.44 writer), or it cannot be inspected, created or locked.
+    fn acquire(directory: &Path) -> Result<Self> {
+        let lock_file = directory.join(LOCK_FILE_NAME);
+        let existed = exists(&lock_file)?;
+        let lock = DirectoryLock::acquire(directory)?;
+        Ok(Self {
+            lock: Some(lock),
+            created: (!existed).then_some(lock_file),
+        })
+    }
+}
+
+#[cfg(feature = "lpg")]
+impl Drop for LegacyDirectoryLock {
+    fn drop(&mut self) {
+        drop(self.lock.take());
+        // A panic stands in for a crash (crash injection does this), which
+        // leaves the `LOCK` file, as a 0.5.44 open leaves one.
+        if std::thread::panicking() {
+            return;
+        }
+        if let Some(lock_file) = &self.created
+            && let Err(error) = fs::remove_file(lock_file)
+        {
+            grafeo_warn!(
+                "cannot remove the lock file {} the migration created: {error}",
+                lock_file.display()
+            );
+        }
+    }
+}
+
 /// A shared lock on the 0.5.x database file, released when dropped. A 0.5.x
 /// writer's exclusive lock and this one exclude each other.
+#[cfg(feature = "lpg")]
 struct SharedLock(File);
 
+#[cfg(feature = "lpg")]
 impl Drop for SharedLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
@@ -645,6 +856,7 @@ impl Drop for SharedLock {
 }
 
 /// Opens the 0.5.x file at `path` under a shared lock.
+#[cfg(feature = "lpg")]
 fn lock_shared(path: &Path) -> Result<SharedLock> {
     let file = File::open(path)
         .map_err(|error| Error::Internal(format!("cannot open {}: {error}", path.display())))?;
@@ -666,6 +878,7 @@ fn lock_shared(path: &Path) -> Result<SharedLock> {
 
 /// Removes the image of a migration that failed. Best effort: the error that
 /// matters is the one returned, and the next open removes a leftover image.
+#[cfg(feature = "lpg")]
 fn remove_after_failure(migrating: &Path) {
     if let Err(error) = fs::remove_file(migrating) {
         grafeo_warn!(
@@ -820,7 +1033,7 @@ impl Drop for MigrateLock {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
 

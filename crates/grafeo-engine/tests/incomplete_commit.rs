@@ -420,11 +420,15 @@ fn a_failed_commit_is_never_checkpointed_saved_or_copied() {
         };
 
     let copy = dir.path().join("copy.grafeo");
-    let copy_directory = dir.path().join("copy");
+    let copy_without_extension = dir.path().join("copy");
     let backups = dir.path().join("backups");
     assert_refused(&db, "wal_checkpoint", db.wal_checkpoint());
     assert_refused(&db, "save to a .grafeo file", db.save(&copy));
-    assert_refused(&db, "save to a WAL directory", db.save(&copy_directory));
+    assert_refused(
+        &db,
+        "save to a path without the extension",
+        db.save(&copy_without_extension),
+    );
     assert_refused(&db, "to_memory", db.to_memory().map(drop));
     assert_refused(&db, "export_snapshot", db.export_snapshot().map(drop));
     assert_refused(&db, "backup_full", db.backup_full(&backups).map(drop));
@@ -435,7 +439,7 @@ fn a_failed_commit_is_never_checkpointed_saved_or_copied() {
         assert_refused(&db, "compact", outcome);
         db
     };
-    for target in [&copy, &copy_directory] {
+    for target in [&copy, &copy_without_extension] {
         assert!(
             !target.exists(),
             "nothing is written to {}",

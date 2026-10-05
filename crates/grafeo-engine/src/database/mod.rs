@@ -51,7 +51,7 @@ pub use upsert::{EdgeUpsertOptions, UpsertSummary};
 mod import;
 #[cfg(feature = "lpg")]
 mod index;
-#[cfg(all(feature = "lpg", feature = "grafeo-file"))]
+#[cfg(feature = "grafeo-file")]
 mod migration;
 #[cfg(feature = "lpg")]
 mod persistence;
@@ -90,10 +90,10 @@ use grafeo_storage::file::GrafeoFileManager;
 use grafeo_storage::file::detect::{OnDisk, detect};
 #[cfg(feature = "grafeo-file")]
 use grafeo_storage::file::v3::header::new_database_id;
-#[cfg(all(feature = "wal", feature = "lpg"))]
-use grafeo_storage::wal::WalRecovery;
 #[cfg(feature = "wal")]
-use grafeo_storage::wal::{DurabilityMode as WalDurabilityMode, LpgWal, WalConfig, WalRecord};
+use grafeo_storage::wal::{DurabilityMode as WalDurabilityMode, LpgWal, WalConfig};
+#[cfg(all(feature = "wal", feature = "lpg"))]
+use grafeo_storage::wal::{WalRecord, WalRecovery};
 
 use crate::catalog::Catalog;
 use crate::config::Config;
@@ -141,11 +141,6 @@ pub struct GrafeoDB {
     /// Write-ahead log manager (if durability is enabled).
     #[cfg(feature = "wal")]
     pub(super) wal: Option<Arc<LpgWal>>,
-    /// Exclusive lock on a WAL-directory database, held until `close()` so a
-    /// second open cannot overwrite this one's data (#405). `.grafeo` files
-    /// lock themselves through the file manager.
-    #[cfg(feature = "wal")]
-    directory_lock: parking_lot::Mutex<Option<grafeo_storage::lock::DirectoryLock>>,
     /// Query cache for parsed and optimized plans.
     pub(super) query_cache: Arc<QueryCache>,
     /// Shared commit counter for auto-GC across sessions.
@@ -298,15 +293,18 @@ impl GrafeoDB {
     ///
     /// If you've used this path before, Grafeo recovers your data from the
     /// write-ahead log automatically. First open on a new path creates an
-    /// empty database.
+    /// empty database: a single file, whatever the path's extension, with its
+    /// write-ahead log in the sidecar directory `<path>.wal/` while it is open.
     ///
-    /// A `.grafeo` file written by 0.5.x is migrated to the 0.6 file format
-    /// first. The old files are kept, byte for byte: the file as
-    /// `<path>.pre-0.6`, its sidecar WAL as `<path>.pre-0.6.wal` and a
-    /// checkpoint image 0.5.44 left pending as `<path>.pre-0.6.checkpoint`.
-    /// The migration refuses to start while one of these names is taken (it
-    /// never replaces a kept copy), and an open waits up to five seconds for a
-    /// migration another process is running before it fails.
+    /// A database written by 0.5.x is migrated to the 0.6 file format first:
+    /// a `.grafeo` file, or a WAL directory (a directory holding `wal/`),
+    /// which becomes a single file at the same path. The old files are kept,
+    /// byte for byte: the file (or the whole directory) as `<path>.pre-0.6`,
+    /// a file's sidecar WAL as `<path>.pre-0.6.wal` and a checkpoint image
+    /// 0.5.44 left pending as `<path>.pre-0.6.checkpoint`. The migration
+    /// refuses to start while one of these names is taken (it never replaces
+    /// a kept copy), and an open waits up to five seconds for a migration
+    /// another process is running before it fails.
     ///
     /// # Errors
     ///
@@ -333,15 +331,14 @@ impl GrafeoDB {
     /// `.grafeo` file concurrently. The database loads the last checkpoint
     /// but does **not** replay the WAL.
     ///
-    /// A file written by 0.5.x is different: it is read once into memory,
-    /// with its sidecar WAL replayed, and no lock is held once it is loaded.
-    /// It is not migrated.
-    ///
-    /// Currently only supports the single-file (`.grafeo`) format.
+    /// A database written by 0.5.x is different: it is read once into
+    /// memory, a file with its sidecar WAL replayed, a WAL directory by
+    /// replaying its WAL, and no lock is held once it is loaded. It is not
+    /// migrated, and nothing in it changes.
     ///
     /// # Errors
     ///
-    /// Returns an error if the file doesn't exist or can't be read.
+    /// Returns an error if the database doesn't exist or can't be read.
     ///
     /// # Examples
     ///
@@ -367,16 +364,18 @@ impl GrafeoDB {
     /// [`new_in_memory()`](Self::new_in_memory) or [`open()`](Self::open)
     /// are simpler.
     ///
-    /// With `Config::encryption` (feature `encryption`), a new single-file
-    /// database is created encrypted, and an existing one opens only with the
-    /// key chain it was created with.
+    /// With `Config::encryption` (feature `encryption`), a new database is
+    /// created encrypted, and an existing one opens only with the key chain
+    /// it was created with.
     ///
     /// # Errors
     ///
-    /// Returns an error if the database can't be created or recovery fails;
-    /// with encryption, also if an encrypted database is opened without its
-    /// key or with another one, an unencrypted one is opened with a key, or
-    /// the database would not be a single file.
+    /// Returns an error if the database can't be created or recovery fails,
+    /// if the deprecated `StorageFormat::WalDirectory` is given for a path
+    /// where nothing exists (WAL directories are no longer created), or if
+    /// the path holds neither a database file nor a 0.5.x WAL directory; with
+    /// encryption, also if an encrypted database is opened without its key or
+    /// with another one, or an unencrypted one is opened with a key.
     ///
     /// # Examples
     ///
@@ -399,6 +398,13 @@ impl GrafeoDB {
     /// `config.spill_path` is `None`: the migration with a key reads the old
     /// database this way, so none of its data reaches a plaintext spill file.
     pub(crate) fn with_config_and_spill(config: Config, derive_spill_path: bool) -> Result<Self> {
+        // One spelling of the path for every decision and every side-file
+        // name: `db/` (a natural way to name a 0.5.x WAL directory) is `db`,
+        // and `.` is the directory it names, so `<path>.pre-0.6` and the
+        // other side files go next to it, never inside it. `config.path`
+        // keeps the caller's spelling, which `path()` reports.
+        let database_path = config.path.as_deref().map(normalize_path).transpose()?;
+
         // Validate configuration before proceeding
         config
             .validate()
@@ -424,7 +430,7 @@ impl GrafeoDB {
                 b
             }),
             spill_path: config.spill_path.clone().or_else(|| {
-                let p = config.path.as_ref().filter(|_| derive_spill_path)?;
+                let p = database_path.as_ref().filter(|_| derive_spill_path)?;
                 let parent = p.parent()?;
                 let name = p.file_name()?.to_str()?;
                 Some(parent.join(format!("{name}.spill")))
@@ -470,7 +476,7 @@ impl GrafeoDB {
         // The migration lock while a read-write open creates a database at a
         // missing path, released once the database exists (see
         // `migration::decide_read_write`).
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        #[cfg(feature = "grafeo-file")]
         let mut create_lock: Option<migration::MigrateLock> = None;
 
         // --- Single-file format (.grafeo) ---
@@ -478,22 +484,25 @@ impl GrafeoDB {
         let file_manager: Option<Arc<GrafeoFileManager>> = if is_read_only {
             // Read-only mode: load the file under a shared lock and write
             // nothing; no WAL is opened.
-            let Some(ref db_path) = config.path else {
+            let Some(ref db_path) = database_path else {
                 return Err(grafeo_common::utils::error::Error::Internal(
                     "read-only mode requires a database path".to_string(),
                 ));
             };
             // Only a read-write open finishes a migration a crash cut off.
-            #[cfg(feature = "lpg")]
             migration::check_read_only(db_path)?;
             match detect(db_path)? {
-                // A 0.5.x file is read into memory as it is, with its sidecar
-                // WAL: nothing keeps it open, and nothing migrates it.
-                OnDisk::LegacyFile => {
+                // A 0.5.x database is read into memory as it is: a file with
+                // its sidecar WAL, a WAL directory by replaying its WAL.
+                // Nothing keeps it open, and nothing migrates it.
+                on_disk @ (OnDisk::LegacyFile | OnDisk::WalDirectory) => {
                     // The 0.5.x reader loads into the LPG store: a build
                     // without it would open an empty database.
                     #[cfg(not(feature = "lpg"))]
-                    return Err(legacy_file_needs_lpg(db_path));
+                    {
+                        let _ = on_disk;
+                        return Err(legacy_database_needs_lpg(db_path));
+                    }
                     #[cfg(feature = "lpg")]
                     {
                         // It is never encrypted, and only a read-write open
@@ -513,14 +522,24 @@ impl GrafeoDB {
                             db_path.display(),
                             db_path.display()
                         );
-                        Self::load_legacy_file(
-                            db_path,
-                            &store,
-                            &catalog,
-                            #[cfg(feature = "triple-store")]
-                            &rdf_store,
-                            &mut loaded_sections,
-                        )?;
+                        if on_disk == OnDisk::WalDirectory {
+                            Self::load_legacy_directory(
+                                db_path,
+                                &store,
+                                &catalog,
+                                #[cfg(feature = "triple-store")]
+                                &rdf_store,
+                            )?;
+                        } else {
+                            Self::load_legacy_file(
+                                db_path,
+                                &store,
+                                &catalog,
+                                #[cfg(feature = "triple-store")]
+                                &rdf_store,
+                                &mut loaded_sections,
+                            )?;
+                        }
                         None
                     }
                 }
@@ -541,198 +560,125 @@ impl GrafeoDB {
                     }
                     Some(Arc::new(fm))
                 }
-                _ => {
+                OnDisk::Missing => {
                     return Err(grafeo_common::utils::error::Error::Internal(format!(
-                        "read-only open requires an existing .grafeo file: {}",
+                        "read-only open requires an existing database: {} does not exist",
                         db_path.display()
                     )));
                 }
+                _ => return Err(not_a_database(db_path)),
             }
-        } else if let Some(ref db_path) = config.path {
-            // A migration a crash cut off is finished first: until then the
-            // database file can be missing, and the path would look new. A
-            // decision that creates a database at a missing path is taken
-            // holding the migration lock, which a migration holds while the
-            // file is missing between its renames.
-            let format = config.storage_format;
-            #[cfg(feature = "lpg")]
-            let (single_file, on_disk) = if format == crate::config::StorageFormat::WalDirectory {
-                (
-                    Self::should_use_single_file(db_path, format),
-                    detect(db_path)?,
-                )
-            } else {
-                let (single_file, on_disk, lock) = migration::decide_read_write(db_path, |path| {
-                    Self::should_use_single_file(path, format)
-                })?;
-                create_lock = lock;
-                (single_file, on_disk)
-            };
-            #[cfg(not(feature = "lpg"))]
-            let (single_file, on_disk) = (
-                Self::should_use_single_file(db_path, format),
-                detect(db_path)?,
-            );
-            // A WAL-directory database would be written in plaintext.
-            if keys.is_encrypted() && !single_file {
-                return Err(Error::InvalidValue(format!(
-                    "encryption at rest requires a single-file database, but {} opens as a \
-                     WAL-directory database: use a path ending in `.grafeo`, or \
-                     `StorageFormat::SingleFile`",
-                    db_path.display()
-                )));
+        } else if let Some(ref db_path) = database_path {
+            // An existing path opens as what it holds, whatever the storage
+            // format; the format only decides about a missing path, which is
+            // always created as a single file. A migration a crash cut off is
+            // finished first: until then the database file can be missing,
+            // and the path would look new. A decision that creates a database
+            // at a missing path is taken holding the migration lock, which a
+            // migration holds while the file is missing between its renames.
+            // Builds without `lpg` follow the same protocol: they finish a
+            // cut-off migration (that only renames), and refuse to migrate.
+            #[allow(
+                deprecated,
+                reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
+            )]
+            let creates_nothing =
+                config.storage_format == crate::config::StorageFormat::WalDirectory;
+            // Refused before the migration lock creates the directory its
+            // file goes in.
+            if creates_nothing && migration::nothing_at(db_path)? {
+                return Err(wal_directories_are_no_longer_created(db_path));
             }
-            // Initialize the file manager whenever single-file format is selected,
-            // regardless of whether WAL is enabled. Without this, a database opened
-            // with wal_enabled:false + StorageFormat::SingleFile would produce no
-            // output at all (the file manager was previously gated behind wal_enabled).
-            if single_file {
-                let fm = match on_disk {
-                    OnDisk::Missing => {
-                        Self::refuse_leftover_sidecar_wal(db_path)?;
-                        let database_id = new_database_id();
-                        GrafeoFileManager::create_with_id(
-                            db_path,
-                            database_id,
-                            keys.container_cipher(database_id),
-                        )?
+            let (on_disk, lock) = migration::decide_read_write(db_path)?;
+            create_lock = lock;
+            let fm = match on_disk {
+                OnDisk::Missing => {
+                    if creates_nothing {
+                        return Err(wal_directories_are_no_longer_created(db_path));
                     }
-                    // A 0.5.x file is migrated to the 0.6 format (encrypted
-                    // when a key is configured), then opened.
-                    #[cfg(feature = "lpg")]
-                    OnDisk::LegacyFile => {
-                        migration::migrate(db_path, &config)?;
-                        GrafeoFileManager::open_with_cipher_for(db_path, |id| {
-                            keys.container_cipher(id)
-                        })?
-                    }
-                    // The migration reads the old database into the LPG
-                    // store, so a build without it cannot migrate.
-                    #[cfg(not(feature = "lpg"))]
-                    OnDisk::LegacyFile => return Err(legacy_file_needs_lpg(db_path)),
-                    // For any other file the manager says what is wrong.
-                    OnDisk::Current | OnDisk::Unknown if db_path.is_file() => {
-                        GrafeoFileManager::open_with_cipher_for(db_path, |id| {
-                            keys.container_cipher(id)
-                        })?
-                    }
-                    _ => {
-                        return Err(grafeo_common::utils::error::Error::Internal(format!(
-                            "path exists but is not a file: {}",
-                            db_path.display()
-                        )));
-                    }
-                };
-
+                    Self::refuse_leftover_sidecar_wal(db_path)?;
+                    let database_id = new_database_id();
+                    GrafeoFileManager::create_with_id(
+                        db_path,
+                        database_id,
+                        keys.container_cipher(database_id),
+                    )?
+                }
+                // A 0.5.x database (a file, or a WAL directory) is migrated
+                // to a single file in the 0.6 format at the same path
+                // (encrypted when a key is configured), then opened.
                 #[cfg(feature = "lpg")]
-                {
-                    loaded_sections = sections::load_sections(
-                        &mut |section_type| fm.read_section(section_type),
-                        &store,
-                        &catalog,
-                        #[cfg(feature = "triple-store")]
-                        &rdf_store,
-                    )?;
+                OnDisk::LegacyFile | OnDisk::WalDirectory => {
+                    // Taken only for a path that was missing: the migration
+                    // takes the lock itself.
+                    drop(create_lock.take());
+                    migration::migrate(db_path, &config)?;
+                    GrafeoFileManager::open_with_cipher_for(db_path, |id| {
+                        keys.container_cipher(id)
+                    })?
                 }
-
-                // Recover sidecar WAL if WAL is enabled and a sidecar exists
-                #[cfg(all(feature = "wal", feature = "lpg"))]
-                if config.wal_enabled && fm.has_sidecar_wal() {
-                    let recovery = WalRecovery::with_cipher(
-                        fm.sidecar_wal_path(),
-                        keys.wal_cipher(fm.database_id()),
-                    );
-                    let recovered = recovery.recover_with_tail()?;
-                    Self::apply_wal_records(
-                        &store,
-                        &catalog,
-                        #[cfg(feature = "triple-store")]
-                        &rdf_store,
-                        &recovered.records,
-                    )?;
-                    wal_torn_tail = recovered.torn_tail;
-                    wal_in_named_graph = Self::ends_in_named_graph(&recovered.records);
+                // The migration reads the old database into the LPG store,
+                // so a build without it cannot migrate.
+                #[cfg(not(feature = "lpg"))]
+                OnDisk::LegacyFile | OnDisk::WalDirectory => {
+                    return Err(legacy_database_needs_lpg(db_path));
                 }
+                // For any other file the manager says what is wrong.
+                OnDisk::Current | OnDisk::Unknown if db_path.is_file() => {
+                    GrafeoFileManager::open_with_cipher_for(db_path, |id| {
+                        keys.container_cipher(id)
+                    })?
+                }
+                _ => return Err(not_a_database(db_path)),
+            };
 
-                Some(Arc::new(fm))
-            } else {
-                None
+            #[cfg(feature = "lpg")]
+            {
+                loaded_sections = sections::load_sections(
+                    &mut |section_type| fm.read_section(section_type),
+                    &store,
+                    &catalog,
+                    #[cfg(feature = "triple-store")]
+                    &rdf_store,
+                )?;
             }
+
+            // Recover sidecar WAL if WAL is enabled and a sidecar exists
+            #[cfg(all(feature = "wal", feature = "lpg"))]
+            if config.wal_enabled && fm.has_sidecar_wal() {
+                let recovery = WalRecovery::with_cipher(
+                    fm.sidecar_wal_path(),
+                    keys.wal_cipher(fm.database_id()),
+                );
+                let recovered = recovery.recover_with_tail()?;
+                Self::apply_wal_records(
+                    &store,
+                    &catalog,
+                    #[cfg(feature = "triple-store")]
+                    &rdf_store,
+                    &recovered.records,
+                )?;
+                wal_torn_tail = recovered.torn_tail;
+                wal_in_named_graph = Self::ends_in_named_graph(&recovered.records);
+            }
+
+            Some(Arc::new(fm))
         } else {
             None
         };
 
-        // WAL-directory databases have no file to lock: lock the directory
-        // before recovery so a second open fails instead of later overwriting
-        // this one's data (#405).
-        #[cfg(feature = "wal")]
-        let directory_lock = match config.path {
-            Some(ref db_path) if !is_read_only && config.wal_enabled => {
-                #[cfg(feature = "grafeo-file")]
-                let is_single_file = file_manager.is_some();
-                #[cfg(not(feature = "grafeo-file"))]
-                let is_single_file = false;
-                if is_single_file {
-                    None
-                } else {
-                    Some(grafeo_storage::lock::DirectoryLock::acquire(db_path)?)
-                }
-            }
-            _ => None,
-        };
-
-        // The new database exists now (its file, or the directory of a
-        // WAL-directory database): other opens may look at the path again.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        // The new database file exists now: other opens may look at the
+        // path again.
+        #[cfg(feature = "grafeo-file")]
         drop(create_lock);
 
-        // Determine whether to use the WAL directory path (legacy) or sidecar
-        // Read-only mode skips WAL entirely (no recovery, no creation).
+        // The WAL is the sidecar directory of the database file. Read-only
+        // mode skips it entirely (no recovery, no creation).
         #[cfg(feature = "wal")]
-        let wal = if is_read_only {
-            None
-        } else if config.wal_enabled {
-            if let Some(ref db_path) = config.path {
-                // When using single-file format, the WAL is a sidecar directory
-                #[cfg(feature = "grafeo-file")]
-                let wal_path = if let Some(ref fm) = file_manager {
-                    let p = fm.sidecar_wal_path();
-                    std::fs::create_dir_all(&p)?;
-                    p
-                } else {
-                    // Legacy: WAL inside the database directory
-                    std::fs::create_dir_all(db_path)?;
-                    db_path.join("wal")
-                };
-
-                #[cfg(not(feature = "grafeo-file"))]
-                let wal_path = {
-                    std::fs::create_dir_all(db_path)?;
-                    db_path.join("wal")
-                };
-
-                // For legacy WAL directory format, check if WAL exists and recover
-                #[cfg(all(feature = "lpg", feature = "grafeo-file"))]
-                let is_single_file = file_manager.is_some();
-                #[cfg(all(feature = "lpg", not(feature = "grafeo-file")))]
-                let is_single_file = false;
-
-                // The WAL is the only copy of the data here, so replay every
-                // file even if an older version left checkpoint metadata (#419).
-                #[cfg(feature = "lpg")]
-                if !is_single_file && wal_path.exists() {
-                    let recovery = WalRecovery::new(&wal_path);
-                    let recovered = recovery.recover_all_with_tail()?;
-                    Self::apply_wal_records(
-                        &store,
-                        &catalog,
-                        #[cfg(feature = "triple-store")]
-                        &rdf_store,
-                        &recovered.records,
-                    )?;
-                    wal_torn_tail = recovered.torn_tail;
-                    wal_in_named_graph = Self::ends_in_named_graph(&recovered.records);
-                }
+        let wal = match file_manager {
+            Some(ref fm) if !is_read_only && config.wal_enabled => {
+                let wal_path = fm.sidecar_wal_path();
+                std::fs::create_dir_all(&wal_path)?;
 
                 // Open/create WAL manager with configured durability
                 let wal_durability = match config.wal_durability {
@@ -754,14 +700,8 @@ impl GrafeoDB {
                     ..WalConfig::default()
                 };
                 // The sidecar WAL of an encrypted database is encrypted from
-                // its first record on (a WAL-directory database has no key:
-                // it was refused above).
-                #[cfg(feature = "grafeo-file")]
-                let wal_cipher = file_manager
-                    .as_ref()
-                    .and_then(|fm| keys.wal_cipher(fm.database_id()));
-                #[cfg(not(feature = "grafeo-file"))]
-                let wal_cipher = None;
+                // its first record on.
+                let wal_cipher = keys.wal_cipher(fm.database_id());
                 let wal_manager =
                     LpgWal::with_config_and_cipher(&wal_path, wal_config, wal_cipher)?;
                 #[cfg(feature = "lpg")]
@@ -774,11 +714,8 @@ impl GrafeoDB {
                     }
                 }
                 Some(Arc::new(wal_manager))
-            } else {
-                None
             }
-        } else {
-            None
+            _ => None,
         };
 
         // `Adaptive` leaves syncing the WAL to a background flusher.
@@ -797,10 +734,31 @@ impl GrafeoDB {
         // Create query cache with default capacity (1000 queries)
         let query_cache = Arc::new(QueryCache::default());
 
-        // After all snapshot/WAL recovery, sync TransactionManager epoch
-        // with the store so queries use the correct viewing epoch.
+        // After all snapshot/WAL recovery, the database continues at the
+        // highest epoch any graph reached: replay advances the epoch of the
+        // graph each commit lands in, and a 0.5.43 WAL never switched back to
+        // the default graph, so its named graphs can be ahead of the root
+        // store. The root store, every named graph and the transaction
+        // manager move to that epoch (as a live commit keeps them on one),
+        // so reads see every replayed version, a checkpoint records that
+        // epoch, and new commits continue above it.
         #[cfg(all(feature = "temporal", feature = "lpg"))]
-        transaction_manager.sync_epoch(store.current_epoch());
+        {
+            let graphs: Vec<Arc<LpgStore>> = store
+                .graph_names()
+                .iter()
+                .filter_map(|name| store.graph(name))
+                .collect();
+            let epoch = graphs
+                .iter()
+                .map(|graph| graph.current_epoch())
+                .fold(store.current_epoch(), std::cmp::max);
+            store.sync_epoch(epoch);
+            for graph in &graphs {
+                graph.sync_epoch(epoch);
+            }
+            transaction_manager.sync_epoch(epoch);
+        }
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled;
@@ -818,8 +776,6 @@ impl GrafeoDB {
             buffer_manager,
             #[cfg(feature = "wal")]
             wal,
-            #[cfg(feature = "wal")]
-            directory_lock: parking_lot::Mutex::new(directory_lock),
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
@@ -954,8 +910,6 @@ impl GrafeoDB {
             buffer_manager,
             #[cfg(feature = "wal")]
             wal: None,
-            #[cfg(feature = "wal")]
-            directory_lock: parking_lot::Mutex::new(None),
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
@@ -1052,8 +1006,6 @@ impl GrafeoDB {
             buffer_manager,
             #[cfg(feature = "wal")]
             wal: None,
-            #[cfg(feature = "wal")]
-            directory_lock: parking_lot::Mutex::new(None),
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
@@ -1543,33 +1495,81 @@ impl GrafeoDB {
         )))
     }
 
-    /// Returns `true` if the given path should use single-file format.
-    #[cfg(feature = "grafeo-file")]
-    fn should_use_single_file(
+    /// Loads a 0.5.x WAL-directory database (the directory `path` holding its
+    /// WAL in `wal/`) into the stores without writing anything, by replaying
+    /// every file of its WAL. The WAL is the only copy of the data there, so
+    /// every file is replayed even when an older version left checkpoint
+    /// metadata, which would otherwise skip the files below its sequence
+    /// (#419). A corrupt or torn record ends the replay of its file, and the
+    /// replay goes on with the next file (the recovery is best effort).
+    ///
+    /// No lock is taken: the directory's `LOCK` has no shared mode, so a
+    /// read-only open reads the WAL while a 0.5.44 writer may still append to
+    /// it, and sees the commits that reached it. A migration locks the
+    /// directory itself before it loads it. A migration in another process
+    /// can move the directory away while it is read: afterwards the path is
+    /// checked to still be the directory, so such a read fails instead of
+    /// returning part of the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `wal/` cannot be listed or a WAL file cannot be
+    /// read, if the directory was migrated while it was read, or if a record
+    /// cannot be replayed; in a build without the `wal` feature, always (it
+    /// cannot replay a WAL).
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    fn load_legacy_directory(
         path: &std::path::Path,
-        configured: crate::config::StorageFormat,
-    ) -> bool {
-        use crate::config::StorageFormat;
-        match configured {
-            StorageFormat::SingleFile => true,
-            StorageFormat::WalDirectory => false,
-            StorageFormat::Auto => {
-                // An existing file can only be a single-file database (a
-                // WAL-directory database is a directory); the file manager
-                // says what is wrong with any other file. Its first bytes are
-                // not read: Windows refuses that while another process holds
-                // the file locked.
-                if path.is_file() {
-                    return true;
-                }
-                // Existing directory: legacy format
-                if path.is_dir() {
-                    return false;
-                }
-                // New path: check extension
-                path.extension().is_some_and(|ext| ext == "grafeo")
-            }
+        store: &Arc<LpgStore>,
+        catalog: &Arc<Catalog>,
+        #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
+    ) -> Result<()> {
+        #[cfg(not(feature = "wal"))]
+        {
+            let _ = (store, catalog);
+            #[cfg(feature = "triple-store")]
+            let _ = rdf_store;
+            Err(Error::Internal(format!(
+                "{} is a 0.5.x WAL-directory database, whose data only a build with the `wal` \
+                 feature can replay: open or migrate it with such a build",
+                path.display()
+            )))
         }
+        #[cfg(feature = "wal")]
+        {
+            let recovered = WalRecovery::new(path.join("wal")).recover_all_with_tail();
+            // Checked first: a recovery error may only be the directory
+            // moving away while it was read.
+            Self::refuse_migrated_while_read(path, OnDisk::WalDirectory)?;
+            Self::apply_wal_records(
+                store,
+                catalog,
+                #[cfg(feature = "triple-store")]
+                rdf_store,
+                &recovered?.records,
+            )
+        }
+    }
+
+    /// Fails if `path` is no longer the 0.5.x database (`expected`, a file or
+    /// a WAL directory) that was just read without a lock: a migration in
+    /// another process moved it away meanwhile (a migration only moves the old
+    /// database away, never back), and what was read may lack part of it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error saying so in that case, or if `path` cannot be
+    /// inspected.
+    #[cfg(all(feature = "wal", feature = "lpg"))]
+    fn refuse_migrated_while_read(path: &std::path::Path, expected: OnDisk) -> Result<()> {
+        if detect(path)? == expected {
+            return Ok(());
+        }
+        Err(Error::Internal(format!(
+            "{} was migrated to the 0.6 format by another process while it was read; open it \
+             again",
+            path.display()
+        )))
     }
 
     /// Loads a database file written by 0.5.x into the stores without
@@ -1626,8 +1626,15 @@ impl GrafeoDB {
         #[cfg(feature = "wal")]
         {
             let wal_path = file.sidecar_wal_path();
-            if wal_path.exists() {
-                let recovered = WalRecovery::new(&wal_path).recover_with_tail()?;
+            let recovered = wal_path
+                .exists()
+                .then(|| WalRecovery::new(&wal_path).recover_with_tail())
+                .transpose();
+            // A migration in another process moves the file and then its
+            // sidecar WAL: a WAL read (or found missing) meanwhile may lack
+            // records, and a recovery error may only be that move.
+            Self::refuse_migrated_while_read(path, OnDisk::LegacyFile)?;
+            if let Some(recovered) = recovered? {
                 Self::apply_wal_records(
                     store,
                     catalog,
@@ -2440,20 +2447,11 @@ impl GrafeoDB {
             {
                 grafeo_common::grafeo_warn!("failed to release the database file: {e}");
             }
-            #[cfg(feature = "wal")]
-            drop(self.directory_lock.lock().take());
             *is_open = false;
             return self.transaction_manager.check_no_incomplete_commit();
         }
 
-        // For single-file format: checkpoint to .grafeo file, then clean up sidecar WAL.
-        // We must do this BEFORE the WAL close path because checkpoint_to_file
-        // removes the sidecar WAL directory.
-        #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-        let is_single_file = self.file_manager.is_some();
-        #[cfg(all(feature = "wal", not(feature = "grafeo-file")))]
-        let is_single_file = false;
-
+        // Checkpoint to the database file, then remove the sidecar WAL.
         #[cfg(feature = "grafeo-file")]
         if let Some(ref fm) = self.file_manager {
             // Flush WAL first so all records are on disk before we snapshot
@@ -2492,31 +2490,6 @@ impl GrafeoDB {
             fm.close()?;
         }
 
-        // Commit and sync WAL (legacy directory format only).
-        // We intentionally do NOT call wal.checkpoint() here. Directory format
-        // has no snapshot: the WAL files are the sole source of truth. Writing
-        // checkpoint.meta would cause recovery to skip older WAL files, losing
-        // all data that predates the current log sequence.
-        #[cfg(feature = "wal")]
-        if !is_single_file && let Some(ref wal) = self.wal {
-            // Use the last assigned transaction ID, or create one for the commit record
-            let commit_tx = self
-                .transaction_manager
-                .last_assigned_transaction_id()
-                .unwrap_or_else(|| self.transaction_manager.begin());
-
-            // Log a TransactionCommit to mark all pending records as committed
-            wal.log(&WalRecord::TransactionCommit {
-                transaction_id: commit_tx,
-            })?;
-
-            wal.sync()?;
-        }
-
-        // Release the directory lock last, after the WAL is synced.
-        #[cfg(feature = "wal")]
-        drop(self.directory_lock.lock().take());
-
         *is_open = false;
         Ok(())
     }
@@ -2542,15 +2515,6 @@ impl GrafeoDB {
         {
             grafeo_common::grafeo_warn!("Failed to log a graph change to the WAL: {}", e);
         }
-    }
-
-    /// Logs a WAL record if WAL is enabled.
-    #[cfg(feature = "wal")]
-    pub(super) fn log_wal(&self, record: &WalRecord) -> Result<()> {
-        if let Some(ref wal) = self.wal {
-            wal.log(record)?;
-        }
-        Ok(())
     }
 
     /// Registers storage sections as [`MemoryConsumer`]s with the BufferManager.
@@ -3027,15 +2991,76 @@ impl GrafeoDB {
     }
 }
 
-/// The error of a build without the `lpg` feature for a file written by
-/// 0.5.x: it can neither read it (the 0.5.x reader loads into the LPG store)
-/// nor migrate it.
+/// The spelling of a database path that decisions and side-file names use:
+/// `path` without trailing separators and inner `.` components (`db/` and
+/// `data/./db` name the same databases as `db` and `data/db`). A path that
+/// ends in `.` or `..` (or is a root) is made absolute, with its `.` and `..`
+/// resolved: side-file names (`<path>.wal`, `<path>.pre-0.6`, ...) are
+/// appended to the path, and `..pre-0.6` would name a file inside the
+/// directory `.` names.
+///
+/// # Errors
+///
+/// Returns an error if such a path cannot be made absolute (the current
+/// directory is unknown, or the path is empty).
+pub(crate) fn normalize_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    use std::path::Component;
+
+    if matches!(path.components().next_back(), Some(Component::Normal(_))) {
+        return Ok(path.components().collect());
+    }
+    let absolute = std::path::absolute(path).map_err(|error| {
+        Error::InvalidValue(format!(
+            "cannot resolve the database path {:?}: {error}",
+            path.display()
+        ))
+    })?;
+    let mut resolved = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other),
+        }
+    }
+    Ok(resolved)
+}
+
+/// The error of a build without the `lpg` feature for a database written by
+/// 0.5.x (a file or a WAL directory): it can neither read it (the 0.5.x
+/// reader loads into the LPG store) nor migrate it.
 #[cfg(all(feature = "grafeo-file", not(feature = "lpg")))]
-fn legacy_file_needs_lpg(path: &std::path::Path) -> Error {
+fn legacy_database_needs_lpg(path: &std::path::Path) -> Error {
     Error::InvalidValue(format!(
         "{} was written by Grafeo 0.5.x, and this build cannot read or migrate it (it lacks \
          the `lpg` feature): open it read-write once with a build that has the `lpg` feature, \
          which migrates it to the 0.6 file format",
+        path.display()
+    ))
+}
+
+/// The error of an open with the deprecated `StorageFormat::WalDirectory` at
+/// a path where nothing exists: WAL directories are no longer created.
+#[cfg(feature = "grafeo-file")]
+fn wal_directories_are_no_longer_created(path: &std::path::Path) -> Error {
+    Error::InvalidValue(format!(
+        "cannot create a database at {}: WAL directories are no longer created (since 0.6 a \
+         database is a single file); use `StorageFormat::Auto`, which creates a single file at \
+         any path",
+        path.display()
+    ))
+}
+
+/// The error of an open of a path that holds neither a database file nor a
+/// 0.5.x WAL directory: a directory without `wal/` inside, or something that
+/// is neither a file nor a directory.
+#[cfg(feature = "grafeo-file")]
+fn not_a_database(path: &std::path::Path) -> Error {
+    Error::InvalidValue(format!(
+        "cannot open {}: it is not a database file, and not a 0.5.x WAL-directory database (a \
+         directory holding `wal/`); nothing was changed",
         path.display()
     ))
 }
@@ -4473,6 +4498,10 @@ mod tests {
     // =========================================================================
 
     #[test]
+    #[allow(
+        deprecated,
+        reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
+    )]
     fn test_storage_format_display() {
         use crate::config::StorageFormat;
         assert_eq!(StorageFormat::Auto.to_string(), "auto");

@@ -5,6 +5,10 @@
 use grafeo_common::types::Value;
 use grafeo_engine::{Config, GrafeoDB};
 
+#[cfg(all(feature = "wal", feature = "lpg"))]
+#[path = "common/unlistable.rs"]
+mod unlistable;
+
 /// Helper: extract string values from column 0 of query result rows.
 fn extract_strings(rows: &[Vec<Value>]) -> Vec<String> {
     let mut names: Vec<String> = rows
@@ -175,26 +179,29 @@ fn multiple_checkpoints_alternate_headers() {
     db2.close().unwrap();
 }
 
+/// The extension decides nothing: a new path without `.grafeo` is a single
+/// file too (it was a WAL directory before 0.6), and an existing file opens as
+/// what it is.
 #[test]
-fn auto_detect_does_not_use_grafeo_file_for_directory_path() {
+fn auto_detect_uses_a_single_file_for_a_path_without_the_extension() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("test_legacy");
 
-    // Without .grafeo extension, should use WAL directory format
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-
-    #[cfg(feature = "grafeo-file")]
     assert!(
-        db.file_manager().is_none(),
-        "directory path should not use single-file format"
+        db.file_manager().is_some(),
+        "a path without the extension uses the single-file format"
     );
 
     let session = db.session();
     session.execute("INSERT (:Person {name: 'Butch'})").unwrap();
     db.close().unwrap();
+    drop(db);
 
-    // Path should be a directory (WAL format)
-    assert!(path.is_dir());
+    assert!(path.is_file(), "the database is a file, not a directory");
+    let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+    assert_eq!(db.node_count(), 1, "the reopened file holds Butch");
+    db.close().unwrap();
 }
 
 #[test]
@@ -715,6 +722,117 @@ fn validate_reports_clean_state() {
 // =========================================================================
 // WAL status and detailed stats
 // =========================================================================
+
+/// The total size of the files under `dir`, recursively (0 when it is missing).
+#[cfg(all(feature = "wal", feature = "lpg"))]
+fn size_under(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                size_under(&path)
+            } else {
+                std::fs::metadata(&path).unwrap().len()
+            }
+        })
+        .sum()
+}
+
+/// A sidecar WAL that exists but cannot be listed fails the open, naming it,
+/// instead of opening the file without the commits only the WAL holds. Listed
+/// again, the same open replays them.
+#[cfg(all(feature = "wal", feature = "lpg"))]
+#[test]
+fn a_sidecar_wal_that_cannot_be_listed_fails_the_open() {
+    use grafeo_common::types::{NodeId, TransactionId};
+    use grafeo_storage::wal::{WalManager, WalRecord};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("berlin.grafeo");
+    GrafeoDB::with_config(Config::persistent(&path))
+        .unwrap()
+        .close()
+        .unwrap();
+    let sidecar = sidecar_wal_path(&path);
+    {
+        // A commit that only the sidecar WAL holds, as a process that exited
+        // without `close()` leaves it.
+        let wal = WalManager::open(&sidecar).unwrap();
+        wal.log(&WalRecord::CreateNode {
+            id: NodeId::new(3),
+            labels: vec!["Person".to_string()],
+        })
+        .unwrap();
+        wal.log(&WalRecord::TransactionCommit {
+            transaction_id: TransactionId::new(19),
+        })
+        .unwrap();
+        wal.sync().unwrap();
+    }
+    let file = std::fs::read(&path).unwrap();
+
+    let opened = {
+        let Some(_denied) = unlistable::Unlistable::deny(&sidecar) else {
+            return;
+        };
+        GrafeoDB::with_config(Config::persistent(&path)).map(|db| db.node_count())
+    };
+    let error = match opened {
+        Ok(nodes) => panic!("the open replayed a sidecar WAL it cannot list ({nodes} nodes)"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains(&sidecar.display().to_string()),
+        "the error names the sidecar WAL: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        file,
+        "the refused open changed nothing"
+    );
+
+    let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+    assert_eq!(
+        db.node_count(),
+        1,
+        "listed again, the WAL replays its commit"
+    );
+    db.close().unwrap();
+}
+
+/// The WAL of a database file is its sidecar `<path>.wal/`, and its disk usage
+/// is the file plus that sidecar WAL.
+#[cfg(all(feature = "wal", feature = "lpg"))]
+#[test]
+fn wal_status_and_disk_usage_count_the_file_and_its_sidecar_wal() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("amsterdam.grafeo");
+
+    let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+    db.execute("INSERT (:Person {name: 'Alix', city: 'Amsterdam'})")
+        .unwrap();
+    assert_eq!(
+        db.wal_status().path,
+        Some(sidecar_wal_path(&path)),
+        "the WAL is the sidecar of the database file"
+    );
+    let disk = db
+        .detailed_stats()
+        .disk_bytes
+        .expect("a persistent database reports its disk usage");
+    let file = std::fs::metadata(&path).unwrap().len();
+    let wal = size_under(&sidecar_wal_path(&path));
+    assert!(wal > 0, "the commit is in the sidecar WAL");
+    assert_eq!(
+        u64::try_from(disk).unwrap(),
+        file + wal,
+        "the disk usage is the file ({file} bytes) plus the sidecar WAL ({wal} bytes)"
+    );
+    db.close().unwrap();
+}
 
 #[test]
 fn wal_status_reflects_single_file() {

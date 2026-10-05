@@ -86,20 +86,32 @@ impl fmt::Display for AccessMode {
 
 /// Storage format for persistent databases.
 ///
-/// Controls whether the database uses a single `.grafeo` file or a legacy
-/// WAL directory. The default (`Auto`) auto-detects based on the path:
-/// files ending in `.grafeo` use single-file format, directories use WAL.
+/// Since 0.6 every database is a single file (its WAL is the sidecar
+/// directory `<path>.wal/` while it is open), and the format only decides
+/// what happens at a path where nothing exists yet. An existing path always
+/// opens as what it holds, whatever the format: a 0.6 file opens, and a
+/// database written by 0.5.x (a file, or a WAL directory) is migrated to a
+/// single 0.6 file at the same path by a read-write open and read in place by
+/// a read-only open.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum StorageFormat {
-    /// Auto-detect based on path: `.grafeo` extension = single file,
-    /// existing directory = WAL directory, new path without extension = WAL directory.
+    /// A new path becomes a single file, whatever its extension (`.grafeo`,
+    /// `.db` or none). An existing path opens as what it holds.
     #[default]
     Auto,
-    /// Legacy WAL directory format (directory with `wal/` subdirectory).
+    /// The 0.5.x WAL-directory format (a directory holding `wal/`). WAL
+    /// directories are no longer created: on a new path the open fails, use
+    /// [`StorageFormat::Auto`] instead. An existing path opens as what it
+    /// holds, as with `Auto`: a 0.5.x WAL directory is migrated to a single
+    /// file at the same path.
+    #[deprecated(
+        since = "0.6.0",
+        note = "WAL directories are migrated to a single file on open and no longer created; removed in 0.7.0"
+    )]
     WalDirectory,
-    /// Single `.grafeo` file with a sidecar `.grafeo.wal/` directory during operation.
-    /// At rest (after checkpoint), only the `.grafeo` file exists.
+    /// A new path becomes a single file, as with [`StorageFormat::Auto`]. An
+    /// existing path opens as what it holds.
     SingleFile,
 }
 
@@ -107,6 +119,10 @@ impl fmt::Display for StorageFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Auto => write!(f, "auto"),
+            #[allow(
+                deprecated,
+                reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
+            )]
             Self::WalDirectory => write!(f, "wal-directory"),
             Self::SingleFile => write!(f, "single-file"),
         }
@@ -269,10 +285,11 @@ pub struct Config {
     /// WAL durability mode. Only used when `wal_enabled` is true.
     pub wal_durability: DurabilityMode,
 
-    /// Storage format for persistent databases.
+    /// Storage format for persistent databases: what a new path becomes.
     ///
-    /// `Auto` (default) detects the format from the path: `.grafeo` extension
-    /// uses single-file format, directories use the legacy WAL directory.
+    /// With `Auto` (the default) a new path is a single file whatever its
+    /// extension; an existing path opens as what it holds (see
+    /// [`StorageFormat`]).
     pub storage_format: StorageFormat,
 
     /// Whether to enable catalog schema constraint enforcement.
@@ -360,12 +377,12 @@ pub struct Config {
     /// database (see [`EncryptionConfig`]). A new database is created
     /// encrypted; an encrypted database opens only with the key chain it was
     /// created with, and an unencrypted one only without a key. A database
-    /// written by 0.5.x is migrated into an encrypted file by a read-write
-    /// open (the kept `.pre-0.6` copy stays unencrypted).
+    /// written by 0.5.x (a file or a WAL directory) is migrated into an
+    /// encrypted file by a read-write open (the kept `.pre-0.6` copy stays
+    /// unencrypted).
     ///
-    /// Requires a persistent single-file database: [`validate`](Self::validate)
-    /// refuses it without a path, and an open refuses it for a WAL-directory
-    /// database.
+    /// Requires a persistent database: [`validate`](Self::validate) refuses
+    /// it without a path.
     ///
     /// An encrypted database spills nothing to disk: it gets no default spill
     /// path, and [`validate`](Self::validate) refuses an explicit
@@ -1343,6 +1360,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        deprecated,
+        reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
+    )]
     fn test_storage_format_display() {
         assert_eq!(StorageFormat::Auto.to_string(), "auto");
         assert_eq!(StorageFormat::WalDirectory.to_string(), "wal-directory");
@@ -1350,6 +1371,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        deprecated,
+        reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
+    )]
     fn test_config_with_storage_format() {
         let config = Config::in_memory().with_storage_format(StorageFormat::SingleFile);
         assert_eq!(config.storage_format, StorageFormat::SingleFile);

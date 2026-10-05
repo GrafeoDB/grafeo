@@ -221,3 +221,36 @@ fn a_0_5_file_with_a_sidecar_wal_is_refused_without_the_wal_feature() {
         }
     }
 }
+
+/// A 0.5.x WAL directory holds its data only in its WAL, which this build
+/// cannot replay: a read-write and a read-only open refuse it with an error
+/// that names the directory and the `wal` feature, and every file stays as it
+/// was.
+#[test]
+fn a_0_5_wal_directory_is_refused_without_the_wal_feature() {
+    for version in VERSIONS {
+        let original = fixture(version, "directory");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        copy(&original, &path);
+        let before = files(dir.path());
+
+        for (open, result) in [
+            ("read-write", open(&path)),
+            ("read-only", GrafeoDB::open_read_only(&path)),
+        ] {
+            let error = match result {
+                Ok(_) => panic!("{version}: the {open} open succeeded without replaying the WAL"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains(&path.display().to_string()) && error.contains("`wal` feature"),
+                "{version}: the {open} error names the directory and the feature: {error}"
+            );
+            assert!(
+                files(dir.path()) == before,
+                "{version}: the refused {open} open changes nothing"
+            );
+        }
+    }
+}

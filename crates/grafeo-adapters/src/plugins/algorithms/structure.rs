@@ -313,9 +313,15 @@ pub fn kcore_decomposition(store: &dyn GraphStore) -> KCoreResult {
             }
         }
     }
-    for neighbors in &mut adj {
-        neighbors.sort_unstable();
-        neighbors.dedup();
+    // Drop parallel edges in linear time: `last_seen[u]` is the last vertex
+    // whose list kept u, so a second u in the same list is a duplicate.
+    let mut last_seen = vec![usize::MAX; n];
+    for (v, neighbors) in adj.iter_mut().enumerate() {
+        neighbors.retain(|&u| {
+            let first = last_seen[u] != v;
+            last_seen[u] = v;
+            first
+        });
     }
 
     // `degree[v]` starts as the degree and ends as the core number of v.

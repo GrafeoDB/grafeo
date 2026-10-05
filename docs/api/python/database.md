@@ -1271,7 +1271,7 @@ def floyd_warshall(self, weight: Optional[str] = None) -> Dict[Tuple[int, int], 
 | ------ | ------- | ----------- |
 | `articulation_points()` | `List[int]` | Cut vertices whose removal disconnects the graph |
 | `bridges()` | `List[Tuple[int, int]]` | Cut edges whose removal disconnects the graph |
-| `kcore(k=None)` | `Dict` or `List[int]` | k-core decomposition (all cores or specific k) |
+| `kcore(k=None)` | `Dict` or `List[int]` | k-core decomposition: `core_numbers` and `max_core`, or the nodes of the k-core when `k` is given |
 
 ### Minimum Spanning Tree
 

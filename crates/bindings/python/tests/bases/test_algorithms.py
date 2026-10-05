@@ -257,4 +257,5 @@ class BaseAlgorithmsTest(ABC):
         self.setup_algorithm_graph(db)
 
         kcore = db.algorithms.kcore()
-        assert "max_core" in kcore or isinstance(kcore, dict)
+        assert set(kcore) == {"core_numbers", "max_core"}
+        assert kcore["max_core"] == max(kcore["core_numbers"].values(), default=0)

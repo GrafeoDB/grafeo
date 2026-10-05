@@ -422,6 +422,27 @@ tests:
       columns: [node_id, core_number, max_core]
       count: 3
 
+  # A triangle with a pendant node: the triangle is the 2-core, the pendant
+  # is only in the 1-core, whatever the order nodes are peeled in.
+  - name: k_core_numbers_triangle_with_pendant
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:Person {name: 'Gus'})"
+      - "INSERT (:Person {name: 'Vincent'})"
+      - "INSERT (:Person {name: 'Jules'})"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)"
+      - "MATCH (a:Person {name: 'Gus'}), (b:Person {name: 'Vincent'}) INSERT (a)-[:KNOWS]->(b)"
+      - "MATCH (a:Person {name: 'Vincent'}), (b:Person {name: 'Alix'}) INSERT (a)-[:KNOWS]->(b)"
+      - "MATCH (a:Person {name: 'Vincent'}), (b:Person {name: 'Jules'}) INSERT (a)-[:KNOWS]->(b)"
+    query: "CALL grafeo.kcore() YIELD core_number, max_core"
+    expect:
+      columns: [core_number, max_core]
+      rows:
+        - [2, 2]
+        - [2, 2]
+        - [2, 2]
+        - [1, 2]
+
   # ---------------------------------------------------------------------------
   # Error Handling
   # ---------------------------------------------------------------------------

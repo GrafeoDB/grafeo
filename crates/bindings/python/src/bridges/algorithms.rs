@@ -793,11 +793,15 @@ impl PyAlgorithms {
 
     /// Compute k-core decomposition.
     ///
+    /// The graph is treated as simple and undirected: edge direction is
+    /// ignored, parallel edges count once and self-loops are ignored.
+    ///
     /// Args:
     ///     k: If provided, return only nodes in the k-core
     ///
     /// Returns:
-    ///     If k is None: Dict mapping node ID to core number
+    ///     If k is None: Dict with 'core_numbers' (node ID to core number)
+    ///     and 'max_core' (the largest core number) keys
     ///     If k is provided: List of node IDs in the k-core
     #[pyo3(signature = (k=None))]
     fn kcore(&self, k: Option<usize>, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -809,10 +813,12 @@ impl PyAlgorithms {
             let nodes: Vec<u64> = result.k_core(k_val).into_iter().map(|n| n.0).collect();
             Ok(nodes.into_pyobject(py)?.into_any().unbind())
         } else {
-            let dict = PyDict::new(py);
+            let core_numbers = PyDict::new(py);
             for (node, core) in result.core_numbers {
-                dict.set_item(node.0, core)?;
+                core_numbers.set_item(node.0, core)?;
             }
+            let dict = PyDict::new(py);
+            dict.set_item("core_numbers", core_numbers)?;
             dict.set_item("max_core", result.max_core)?;
             Ok(dict.into_any().unbind())
         }

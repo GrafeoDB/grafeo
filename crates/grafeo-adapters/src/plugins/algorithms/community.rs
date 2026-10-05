@@ -281,17 +281,17 @@ fn sorted_neighbors(adjacency: Vec<FxHashMap<usize, f64>>) -> Vec<Vec<(usize, f6
 /// weight from node i to community X (its self-loop excluded), `k_i` its degree
 /// and `Σ_X` the total degree of X. The gains are compared multiplied by `2m`:
 /// on an unweighted graph at resolution 1 they are then whole numbers, so ties
-/// are exact and float rounding cannot make nodes move back and forth.
+/// are exact; at other resolutions a move must beat staying by more than the
+/// rounding error (see [`move_gains`]), so nodes cannot move back and forth.
 fn move_nodes(
     graph: &[Vec<(usize, f64)>],
     total_weight: f64,
     resolution: f64,
 ) -> Option<Vec<usize>> {
-    // Every pass that moves a node raises modularity, so passes end; the cap
-    // only guards against rounding at resolutions other than 1.
-    const MAX_PASSES: usize = 1_000;
-
     let k = graph.len();
+    // Edge weights are whole numbers, so at resolution 1 every gain below is a
+    // whole number too and compares exactly (see `move_gains`).
+    let exact = resolution.to_bits() == 1.0_f64.to_bits();
     let m2 = 2.0 * total_weight;
     let degrees: Vec<f64> = graph
         .iter()
@@ -308,8 +308,11 @@ fn move_nodes(
     let mut is_touched: Vec<bool> = vec![false; k];
     let mut touched: Vec<usize> = Vec::new();
 
+    // Sweeps until one moves nothing. That point comes: `move_gains` lets a node
+    // move only when the move raises the exact modularity, so no partition comes
+    // back, and a graph has finitely many partitions.
     let mut moved = false;
-    for _ in 0..MAX_PASSES {
+    loop {
         let mut improved = false;
         for i in 0..k {
             let current = community[i];
@@ -328,10 +331,10 @@ fn move_nodes(
             touched.sort_unstable();
 
             let ki = degrees[i];
-            // Staying is the baseline; a move must gain strictly more.
+            // The best neighbouring community (on a tie the smallest index), then
+            // the move only if it beats staying for certain.
             let mut best = current;
-            let mut best_gain =
-                links_to[current] * m2 - resolution * ki * (community_total[current] - ki);
+            let mut best_gain = f64::NEG_INFINITY;
             for &target in &touched {
                 if target == current {
                     continue;
@@ -341,6 +344,17 @@ fn move_nodes(
                     best_gain = gain;
                     best = target;
                 }
+            }
+            if best != current
+                && !move_gains(
+                    links_to[best] * m2,
+                    resolution * ki * community_total[best],
+                    links_to[current] * m2,
+                    resolution * ki * (community_total[current] - ki),
+                    exact,
+                )
+            {
+                best = current;
             }
 
             for &c in &touched {
@@ -363,6 +377,34 @@ fn move_nodes(
     }
 
     moved.then_some(community)
+}
+
+/// Whether a move gains modularity for certain. The scaled gains of moving
+/// (`target_links - target_expected`) and of staying (`stay_links -
+/// stay_expected`) are each a link term `k_i,X * 2m` minus an expected term
+/// `resolution * k_i * sigma_X`. `exact` says the terms are whole numbers
+/// (resolution 1, as edge weights are); below 2^53 they then compare exactly
+/// and any positive difference is a real gain. Otherwise the difference must
+/// exceed the rounding error of computing it, so a move taken always raises
+/// the exact modularity and local moving cannot cycle.
+fn move_gains(
+    target_links: f64,
+    target_expected: f64,
+    stay_links: f64,
+    stay_expected: f64,
+    exact: bool,
+) -> bool {
+    // 2^53: whole numbers up to here are exact in f64.
+    const EXACT_LIMIT: f64 = 9_007_199_254_740_992.0;
+    let magnitude =
+        target_links.abs() + target_expected.abs() + stay_links.abs() + stay_expected.abs();
+    let rounding = if exact && magnitude < EXACT_LIMIT {
+        0.0
+    } else {
+        // Each term carries at most two roundings and the difference three more.
+        4.0 * f64::EPSILON * magnitude
+    };
+    (target_links - target_expected) - (stay_links - stay_expected) > rounding
 }
 
 /// Renumbers communities 0, 1, 2, ... in order of their first member. Returns the
@@ -1478,6 +1520,106 @@ mod tests {
                 first.modularity.to_bits(),
                 "run {run}"
             );
+        }
+    }
+
+    #[test]
+    fn test_a_move_must_beat_staying_beyond_rounding() {
+        // Exact (resolution 1, whole-number terms below 2^53): a gain of 1 wins, a tie does not.
+        let big = 1.0e15;
+        assert!(move_gains(big + 1.0, big, big, big, true));
+        assert!(!move_gains(big, big, big, big, true));
+        // Inexact: a difference inside the rounding error is not a gain.
+        assert!(!move_gains(10.0, 5.0 + 1.0e-14, 10.0, 5.0, false));
+        assert!(!move_gains(10.0, 5.0 - 1.0e-15, 10.0, 5.0, false));
+        assert!(move_gains(10.0, 4.0, 10.0, 5.0, false));
+        // Past 2^53 even resolution 1 rounds, so the margin applies.
+        let huge = 2.0e16;
+        assert!(!move_gains(huge + 2.0, huge, huge, huge, true));
+        assert!(move_gains(huge + 1.0e3, huge, huge, huge, true));
+    }
+
+    /// Louvain's level-0 weights for `edges`, as `louvain` builds them.
+    fn level_weights(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<(usize, f64)>> {
+        let mut adjacency: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); n];
+        for &(u, v) in edges {
+            *adjacency[u].entry(v).or_insert(0.0) += 1.0;
+            *adjacency[v].entry(u).or_insert(0.0) += 1.0;
+        }
+        sorted_neighbors(adjacency)
+    }
+
+    #[test]
+    fn test_local_moving_stops_at_a_local_optimum() {
+        // Small whole numbers in the exact check below fit in i32.
+        let to_f64 = |x: i128| f64::from(i32::try_from(x).unwrap());
+        // xorshift64: a fixed seed keeps the graphs the same on every run.
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            usize::try_from(state % u64::try_from(bound).unwrap()).unwrap()
+        };
+        // Resolutions p / 20, so gains compare exactly in i128 after scaling by 20.
+        for p in [6_i32, 15, 20, 32] {
+            let resolution = f64::from(p) / 20.0;
+            let p = i128::from(p);
+            for case in 0..60 {
+                let n = 2 + next(40);
+                let edge_count = 1 + next(n * 3);
+                let edges: Vec<(usize, usize)> =
+                    (0..edge_count).map(|_| (next(n), next(n))).collect();
+                let graph = level_weights(n, &edges);
+                let m = to_f64(i128::try_from(edges.len()).unwrap());
+                let community =
+                    move_nodes(&graph, m, resolution).unwrap_or_else(|| (0..n).collect());
+
+                // The same weights as whole numbers: each edge adds 1 both ways.
+                let mut weight: Vec<FxHashMap<usize, i128>> = vec![FxHashMap::default(); n];
+                for &(u, v) in &edges {
+                    *weight[u].entry(v).or_insert(0) += 1;
+                    *weight[v].entry(u).or_insert(0) += 1;
+                }
+                let m2 = 2 * i128::try_from(edges.len()).unwrap();
+                let degree: Vec<i128> = weight.iter().map(|nb| nb.values().sum()).collect();
+                let mut total = vec![0_i128; n];
+                for v in 0..n {
+                    total[community[v]] += degree[v];
+                }
+                for i in 0..n {
+                    let mut links: FxHashMap<usize, i128> = FxHashMap::default();
+                    for (&j, &w) in &weight[i] {
+                        if j != i {
+                            *links.entry(community[j]).or_insert(0) += w;
+                        }
+                    }
+                    let own = community[i];
+                    let own_links = links.get(&own).copied().unwrap_or(0);
+                    // Exact gains: 20 * (links * 2m) - p * k_i * sigma.
+                    let stay = 20 * own_links * m2 - p * degree[i] * (total[own] - degree[i]);
+                    for (&target, &l) in &links {
+                        if target == own {
+                            continue;
+                        }
+                        let gain = 20 * l * m2 - p * degree[i] * total[target];
+                        // Nothing better is left, up to the rounding margin of the
+                        // comparison (zero at resolution 1, where gains are exact).
+                        let margin = if p == 20 {
+                            0.0
+                        } else {
+                            let magnitude = to_f64(20 * (l + own_links) * m2)
+                                + to_f64(p * degree[i] * (total[target] + total[own]));
+                            4.0 * f64::EPSILON * magnitude
+                        };
+                        assert!(
+                            to_f64(gain - stay) <= margin,
+                            "resolution {resolution}, case {case}: node {i} gains {} by moving",
+                            gain - stay
+                        );
+                    }
+                }
+            }
         }
     }
 

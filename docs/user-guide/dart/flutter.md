@@ -114,8 +114,9 @@ accept the optional `libraryPath` parameter.
 
 ## Recommended Pattern for Flutter Apps
 
-Use `openSingleFile` with the application documents directory from the
-[`path_provider`](https://pub.dev/packages/path_provider) package:
+Use `open` with the application documents directory from the
+[`path_provider`](https://pub.dev/packages/path_provider) package
+(`openSingleFile` is the same since 0.6):
 
 ```dart
 import 'package:path_provider/path_provider.dart';
@@ -124,7 +125,7 @@ import 'package:grafeo/grafeo.dart';
 Future<GrafeoDB> openDatabase() async {
   final dir = await getApplicationDocumentsDirectory();
   final dbPath = '${dir.path}/my_app.grafeo';
-  return GrafeoDB.openSingleFile(dbPath);
+  return GrafeoDB.open(dbPath);
 }
 ```
 

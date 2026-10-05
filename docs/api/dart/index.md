@@ -87,9 +87,10 @@ final db = GrafeoDB.open('/tmp/my_graph.db');
 
 #### GrafeoDB.openSingleFile()
 
-Open or create a single-file `.grafeo` database. Recommended for embedded use
-(desktop apps, mobile apps). All data is stored in one file with a sidecar WAL
-for crash safety.
+Open or create a persistent database at the given path (a single file). All data
+is stored in one file with a sidecar WAL for crash safety. Since 0.6 every
+database is a single file, whatever the extension of its path, so this is the
+same as `open()`.
 
 ```dart
 static GrafeoDB openSingleFile(String path, {String? libraryPath})

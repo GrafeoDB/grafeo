@@ -31,9 +31,10 @@ const WAL_CONTEXT: &str = "grafeo-wal";
 type KeyChainHandle = std::sync::Arc<grafeo_common::encryption::KeyChain>;
 
 /// Without the `encryption` feature there is no key chain: the type has no
-/// values, so a database is never encrypted.
+/// values, so a database is never encrypted. (Not `Infallible`, which is
+/// `Copy`: the handle is passed by reference as with the feature.)
 #[cfg(not(feature = "encryption"))]
-type KeyChainHandle = std::convert::Infallible;
+enum KeyChainHandle {}
 
 /// Derives the ciphers of a database from the key chain of
 /// `Config::encryption`. Without one the database is not encrypted.

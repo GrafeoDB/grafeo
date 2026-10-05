@@ -94,7 +94,7 @@ DROP GRAPH old_data;
 
 ## Encryption at Rest
 
-Grafeo can encrypt a single-file database (`.grafeo`) and its WAL with AES-256-GCM. Enable the `encryption` feature of `grafeo-engine` and set `Config::encryption` to a key chain built from a 32-byte master key:
+Grafeo can encrypt a persistent database (a single file, as every database is since 0.6) and its WAL with AES-256-GCM. Enable the `encryption` feature of `grafeo-engine` and set `Config::encryption` to a key chain built from a 32-byte master key:
 
 ```rust
 use std::sync::Arc;
@@ -119,12 +119,12 @@ Grafeo stores no key material: keep the master key safe, as the database cannot 
 
 | Encrypted | Not encrypted |
 |-----------|---------------|
-| The `.grafeo` file: every section (data, schema, indexes) and the directory that lists them | The file header (format version, the encrypted flag, the database id, the creation time and Grafeo version) and the two database headers (checkpoint counters and time, node and edge counts) |
+| The database file: every section (data, schema, indexes) and the directory that lists them | The file header (format version, the encrypted flag, the database id, the creation time and Grafeo version) and the two database headers (checkpoint counters and time, node and edge counts) |
 | The sidecar WAL (`<file>.wal/`): every record | WAL bookkeeping files (the checkpoint marker, the backup cursor) |
-| A copy written by `save()` to a `.grafeo` path | The bytes `export_snapshot()` returns: plaintext, to be stored as safely as the data |
+| A copy written by `save()` | The bytes `export_snapshot()` returns: plaintext, to be stored as safely as the data |
 | Full backups (`backup_full()`, a copy of the encrypted file) and incremental segments (`backup_incremental()`, encrypted WAL records) | The backup manifest (segment names, epochs, sizes, checksums) |
 | A database restored with `restore_to_epoch_with()`, and the WAL it writes next to it | An in-memory copy made with `to_memory()`: it has no key, so a copy saved from it is plaintext (call `save()` on the encrypted database instead) |
-| | The `.pre-0.6` files a migration keeps of a database written by 0.5.x: the file and, if they existed, its WAL and a pending checkpoint image |
+| | The `.pre-0.6` files a migration keeps of a database written by 0.5.x: the file and, if they existed, its WAL and a pending checkpoint image, or the whole WAL directory |
 
 An encrypted database writes no spill files: spill files are not encrypted, so it gets no spill path (`<file>.spill/` for other databases), and `Config::validate` refuses an explicit `spill_path`, or a section pinned to `TierOverride::ForceDisk`, together with `encryption`. In 0.6.0 a memory limit therefore cannot move the data of an encrypted database to disk.
 
@@ -138,8 +138,8 @@ The key chain derives the keys with HKDF-SHA256, one per database and component:
 - Opening an encrypted database without a key fails with "the database is encrypted and needs its key". With another master key it fails while reading the file ("wrong key or corrupted data"). Neither changes the file.
 - Opening an unencrypted database with a key fails with "the database is not encrypted", so plaintext data is never taken for encrypted data.
 - A read-only open (`Config::read_only`) needs the key as well, and works with it.
-- A database written by 0.5.x is never encrypted. A read-write open with a key migrates it into an encrypted 0.6 file. The migration keeps the old files unencrypted: the file as `<file>.pre-0.6`, its WAL as `<file>.pre-0.6.wal` and, if present, a checkpoint 0.5.44 left pending as `<file>.pre-0.6.checkpoint`. Remove all of them once you no longer need to go back to 0.5.x. A read-only open with a key fails with "the database is not encrypted".
-- Encryption needs a persistent single-file database: `Config::validate` refuses it for an in-memory database, and opening a WAL-directory database with a key fails.
+- A database written by 0.5.x is never encrypted. A read-write open with a key migrates it into an encrypted 0.6 file, a WAL directory included. The migration keeps the old files unencrypted: the file as `<file>.pre-0.6`, its WAL as `<file>.pre-0.6.wal` and, if present, a checkpoint 0.5.44 left pending as `<file>.pre-0.6.checkpoint`, or a WAL directory as `<path>.pre-0.6/`. Remove all of them once you no longer need to go back to 0.5.x. A read-only open with a key fails with "the database is not encrypted".
+- Encryption needs a persistent database: `Config::validate` refuses it for an in-memory database.
 - `GrafeoDB::open_in_memory` takes no key: open an encrypted database with its key and call `to_memory()` instead.
 
 ### Backups of an Encrypted Database
@@ -173,7 +173,7 @@ Protect database files with appropriate permissions:
 
 === "Linux/macOS"
     ```bash
-    # Create directory with restricted permissions
+    # Create a data directory the service owns, with restricted permissions
     mkdir -p /var/lib/myapp/data
     chmod 700 /var/lib/myapp/data
     chown myapp:myapp /var/lib/myapp/data
@@ -196,6 +196,8 @@ Protect database files with appropriate permissions:
     $acl.AddAccessRule($rule)
     Set-Acl "C:\ProgramData\MyApp\Data" $acl
     ```
+
+Put the database inside that directory, for example at `/var/lib/myapp/data/graph.grafeo` (`C:\ProgramData\MyApp\Data\graph.grafeo`). The directory itself is not a database path, and the database writes its WAL (`graph.grafeo.wal/`) and other side files next to the file, so the service needs write access to the directory, not only to the file. A database written by 0.5.x as a WAL directory at `/var/lib/myapp/data` is migrated to a file at that same path, which needs write access to `/var/lib/myapp`: see [Special Cases](../user-guide/persistence/persistent.md#special-cases).
 
 ### 2. Input Validation
 
@@ -446,7 +448,7 @@ Before deploying:
 - [ ] Sessions use appropriate roles (`ReadOnly` for read paths, `ReadWrite` for mutations)
 - [ ] Per-graph grants restrict multi-tenant access where needed
 - [ ] Database files have restricted permissions (700 or 600)
-- [ ] Databases holding sensitive data are encrypted at rest (`Config::encryption`) and the master key is kept outside the database directory
+- [ ] Databases holding sensitive data are encrypted at rest (`Config::encryption`) and the master key is kept away from the database files
 - [ ] All queries use parameterization (no string interpolation)
 - [ ] Input validation on all user-provided data
 - [ ] Query results are limited to prevent DoS

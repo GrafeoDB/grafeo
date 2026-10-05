@@ -315,7 +315,14 @@ the varint `0x01` of the bincode format version, in a v3 file the version is
 - A read-only open and `open_in_memory()` read the file in place, with its
   sidecar WAL, and change nothing.
 
-0.7.0 will no longer read v1 and v2 files. See
+A 0.5.x WAL directory (a directory holding `wal/`, which 0.5.x created by
+default for a path without the `.grafeo` extension) is handled the same way:
+a read-write open replays its WAL into a v3 image, keeps the whole directory
+as `<path>.pre-0.6/` and renames the image to `<path>`, so the database
+becomes a file at the same path; a read-only open replays it in place. 0.6
+creates no WAL directories.
+
+0.7.0 will no longer read v1 and v2 files or WAL directories. See
 [Upgrading from 0.5](../../user-guide/persistence/persistent.md#upgrading-from-05)
 for what users need to do.
 

@@ -842,6 +842,18 @@ impl Session {
         self.transaction_manager.check_open()
     }
 
+    /// Holds commits off for a change that takes effect at once and logs its
+    /// own WAL group, outside any commit (a schema or graph command), for as
+    /// long as the guard lives: a checkpoint, a copy or `close()` sees all of
+    /// it or none of it. Waits for a commit or checkpoint in progress, then
+    /// fails once the database is closed or after a commit that did not
+    /// complete.
+    fn hold_commits_for_change(&self) -> Result<crate::transaction::CommitsHeld<'_>> {
+        let held = self.transaction_manager.hold_commits()?;
+        self.transaction_manager.check_open()?;
+        Ok(held)
+    }
+
     /// Executes a session or transaction command, returning an empty result.
     #[cfg(feature = "gql")]
     fn execute_session_command(
@@ -853,17 +865,18 @@ impl Session {
         use grafeo_adapters::query::gql::ast::TransactionIsolationLevel;
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
-        // Check role-based permission for graph management commands
-        match &cmd {
+        // Check role-based permission for graph management commands; they
+        // hold commits off until they return (see `hold_commits_for_change`).
+        let _held = match &cmd {
             SessionCommand::CreateGraph { .. }
             | SessionCommand::DropGraph { .. }
             | SessionCommand::CreateProjection { .. }
             | SessionCommand::DropProjection { .. } => {
                 self.require_permission(crate::auth::StatementKind::Write)?;
-                self.transaction_manager.check_open()?;
+                Some(self.hold_commits_for_change()?)
             }
-            _ => {} // Session state + transaction control: always allowed
-        }
+            _ => None, // Session state + transaction control: always allowed
+        };
 
         // Check per-graph grants for graph-scoped commands
         if self.identity.has_grants() {
@@ -1278,9 +1291,9 @@ impl Session {
         use grafeo_storage::wal::WalRecord;
 
         // A schema change takes effect at once and logs its own WAL group,
-        // outside any commit: once the database is closed it fails, as a
-        // write does.
-        if !matches!(
+        // outside any commit: it holds commits off until it returns (see
+        // `hold_commits_for_change`), and fails once the database is closed.
+        let _held = if matches!(
             cmd,
             SchemaStatement::ShowConstraints
                 | SchemaStatement::ShowIndexes
@@ -1292,8 +1305,10 @@ impl Session {
                 | SchemaStatement::ShowGraphs
                 | SchemaStatement::ShowSchemas
         ) {
-            self.transaction_manager.check_open()?;
-        }
+            None
+        } else {
+            Some(self.hold_commits_for_change()?)
+        };
 
         /// Logs a WAL record for schema changes. Compiles to nothing without `wal`.
         macro_rules! wal_log {

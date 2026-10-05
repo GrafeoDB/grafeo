@@ -53,8 +53,8 @@ func main() {
 
 ```go
 db, err := grafeo.OpenInMemory()                // in-memory
-db, err := grafeo.Open("./path")                // persistent (auto-detects format)
-db, err := grafeo.OpenSingleFile("./data.grafeo") // single-file .grafeo format
+db, err := grafeo.Open("./path")                // persistent (a single file)
+db, err := grafeo.OpenSingleFile("./data.grafeo") // same as Open
 defer db.Close()
 
 db.NodeCount()   // number of nodes

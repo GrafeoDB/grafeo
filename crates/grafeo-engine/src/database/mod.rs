@@ -2370,9 +2370,10 @@ impl GrafeoDB {
     /// Called automatically when the database is dropped, but you can call
     /// it explicitly if you need to guarantee durability at a specific point.
     ///
-    /// Once `close()` of a persistent database starts, every commit and every
-    /// write outside a transaction fails with an error saying the database is
-    /// closed; a commit already in progress completes first and is written.
+    /// Once `close()` of a persistent database starts, every commit, write
+    /// outside a transaction, schema change and graph command fails with
+    /// [`TransactionError::DatabaseClosed`](grafeo_common::utils::error::TransactionError::DatabaseClosed);
+    /// one already in progress completes first and is written.
     /// Reads still work. An in-memory database keeps taking writes.
     ///
     /// # Errors
@@ -2389,6 +2390,18 @@ impl GrafeoDB {
         let mut is_open = self.is_open.write();
         if !*is_open {
             return Ok(());
+        }
+
+        // From here on, commits, writes outside a transaction and schema
+        // changes fail: one that ran after the final checkpoint below would be
+        // written only to the WAL this close removes (or, without a WAL,
+        // nowhere). A commit or checkpoint in progress completes first (the
+        // commit lock), and the final checkpoint holds it. Taken before the
+        // timer stops: the lock is released again before the timer thread is
+        // joined. An in-memory database has nothing to persist and keeps
+        // taking writes.
+        if self.config.path.is_some() && !self.read_only {
+            self.transaction_manager.close_for_writes();
         }
 
         // Stop the periodic checkpoint timer first, even for read-only databases.
@@ -2417,15 +2430,6 @@ impl GrafeoDB {
             }
             *is_open = false;
             return Ok(());
-        }
-
-        // From here on, commits and writes outside a transaction fail: one
-        // that ran after the final checkpoint below would be written only to
-        // the WAL this close removes (or, without a WAL, nowhere). A commit in
-        // progress completes first, and the checkpoint holds it. An in-memory
-        // database has nothing to persist and keeps taking writes.
-        if self.config.path.is_some() {
-            self.transaction_manager.close_for_writes();
         }
 
         // After a commit that did not complete, the store holds its stamped
@@ -2994,10 +2998,12 @@ impl GrafeoDB {
 /// The spelling of a database path that decisions and side-file names use:
 /// `path` without trailing separators and inner `.` components (`db/` and
 /// `data/./db` name the same databases as `db` and `data/db`). A path that
-/// ends in `.` or `..` (or is a root) is made absolute, with its `.` and `..`
-/// resolved: side-file names (`<path>.wal`, `<path>.pre-0.6`, ...) are
-/// appended to the path, and `..pre-0.6` would name a file inside the
-/// directory `.` names.
+/// ends in `.` or `..` (or is a root) is resolved to the directory it names:
+/// side-file names (`<path>.wal`, `<path>.pre-0.6`, ...) are appended to the
+/// path, and `..pre-0.6` would name a file inside the directory `.` names. It
+/// is resolved through the file system when it exists (so `link/..` is the
+/// parent of the symlink's target, as the file system reads it), and
+/// lexically, from the current directory, when it does not.
 ///
 /// # Errors
 ///
@@ -3008,6 +3014,9 @@ pub(crate) fn normalize_path(path: &std::path::Path) -> Result<std::path::PathBu
 
     if matches!(path.components().next_back(), Some(Component::Normal(_))) {
         return Ok(path.components().collect());
+    }
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return Ok(resolved);
     }
     let absolute = std::path::absolute(path).map_err(|error| {
         Error::InvalidValue(format!(
@@ -4587,5 +4596,26 @@ mod tests {
 
         // drop_graph with external store (no built-in store) returns false
         assert!(!db.drop_graph("anything"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod normalize_path_tests {
+    /// A path ending in `..` names the directory the file system reads:
+    /// through a symlink, the parent of its target, not the lexical parent.
+    #[test]
+    fn a_path_ending_in_parent_follows_a_symlink_as_the_file_system_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("amsterdam").join("berlin");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let resolved = super::normalize_path(&link.join("..")).unwrap();
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(dir.path().join("amsterdam")).unwrap(),
+            "link/.. is the parent of the link's target"
+        );
     }
 }

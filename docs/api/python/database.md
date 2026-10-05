@@ -52,7 +52,7 @@ def open(path: str) -> GrafeoDB
 
 ### open_read_only()
 
-Open a database in read-only mode. Uses a shared file lock, so multiple processes can read the same `.grafeo` file concurrently. Mutations will raise an error. A file written by 0.5.x is read into memory once, with no lock held afterwards, and is not migrated.
+Open a database in read-only mode. Uses a shared file lock, so multiple processes can read the same database file concurrently. Mutations will raise an error. A database written by 0.5.x (a file or a WAL directory) is read into memory once, with no lock held afterwards, and is not migrated.
 
 ```python
 @staticmethod
@@ -1035,7 +1035,7 @@ print(f"WAL size: {wal['size_bytes']} bytes")
 
 ### save()
 
-Save the database to a file path. For in-memory databases, creates a new persistent copy. For file-backed databases, creates a copy at the new path. The original database remains unchanged.
+Save the database to a file path. For in-memory databases, creates a new persistent copy. For file-backed databases, creates a copy at the new path. The copy is a single file, whatever the extension of the path, and `save()` fails if the path already exists. The original database remains unchanged.
 
 ```python
 def save(self, path: str) -> None

@@ -182,6 +182,10 @@ pub extern "C" fn grafeo_open_memory() -> *mut GrafeoDatabase {
 
 /// Open or create a persistent database at `path`.
 ///
+/// The database is a single file, whatever the extension of `path`; a
+/// database written by 0.5.x (a single file, usually `.grafeo`, or a WAL
+/// directory) is migrated to the 0.6 format when it opens.
+///
 /// Returns an opaque pointer, or null on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_open(path: *const c_char) -> *mut GrafeoDatabase {
@@ -202,7 +206,9 @@ pub extern "C" fn grafeo_open(path: *const c_char) -> *mut GrafeoDatabase {
 /// Open an existing database in read-only mode.
 ///
 /// Uses a shared file lock, so multiple processes can read the same
-/// .grafeo file concurrently. Mutations will return an error.
+/// database file concurrently. Mutations will return an error. A database
+/// written by 0.5.x (a file, or a WAL directory) is read in place and not
+/// migrated.
 ///
 /// Returns an opaque pointer, or null on error.
 #[unsafe(no_mangle)]
@@ -223,10 +229,10 @@ pub extern "C" fn grafeo_open_read_only(path: *const c_char) -> *mut GrafeoDatab
 
 /// Open or create a persistent database at `path` using single-file format.
 ///
-/// The database is stored as a single `.grafeo` file. This is the recommended
-/// format for embedded use (mobile apps, desktop apps). At rest only the
-/// `.grafeo` file exists; a sidecar `.grafeo.wal/` directory is used during
-/// operation and removed automatically on close.
+/// Since 0.6 every database is a single file, whatever the extension of
+/// `path`, so this is the same as [`grafeo_open`]. At rest only the file
+/// exists; a sidecar `<path>.wal/` directory is used during operation and
+/// removed automatically on close.
 ///
 /// Returns an opaque pointer, or null on error (check `grafeo_last_error()`).
 #[unsafe(no_mangle)]

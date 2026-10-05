@@ -10,8 +10,10 @@
 //! to a single file at the same path, a read-only open reads it in place.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test wal_directory
+//! cargo test -p grafeo-engine --features full,temporal --test wal_directory
 //! ```
+//!
+//! The named-graph epoch test needs `temporal` (CI runs every feature).
 
 #![cfg(all(
     feature = "lpg",

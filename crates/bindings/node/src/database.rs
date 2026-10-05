@@ -117,7 +117,9 @@ impl JsGrafeoDB {
     /// Open an existing database in read-only mode.
     ///
     /// Uses a shared file lock, so multiple processes can read the same
-    /// .grafeo file concurrently. Mutations will throw an error.
+    /// database file concurrently. Mutations will throw an error. A database
+    /// written by 0.5.x (a file, or a WAL directory) is read in place and not
+    /// migrated.
     #[napi(factory)]
     pub fn open_read_only(path: String) -> Result<Self> {
         let config = Config::read_only(path);
@@ -563,7 +565,8 @@ impl JsGrafeoDB {
     ///
     /// If in-memory, creates a new persistent database at the given path.
     /// If file-backed, creates a copy at the new path.
-    /// The original database remains unchanged.
+    /// The copy is a single file, whatever the extension; fails if `path`
+    /// exists. The original database remains unchanged.
     #[napi]
     pub fn save(&self, path: String) -> Result<()> {
         let db = self.inner.read();

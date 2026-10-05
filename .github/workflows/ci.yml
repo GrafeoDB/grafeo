@@ -584,6 +584,15 @@ jobs:
     name: Code Coverage
     runs-on: ubuntu-latest
     steps:
+      # Instrumented test binaries with full debug info fill the runner's
+      # disk, and the linker then dies with a bus error: remove preinstalled
+      # SDKs that this job does not use, as rust-test does.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain

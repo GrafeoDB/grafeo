@@ -51,7 +51,7 @@ final class GrafeoBindings {
       Pointer<Void> Function(Pointer<Utf8>),
       Pointer<Void> Function(Pointer<Utf8>)>('grafeo_open');
 
-  /// Open a persistent database in single-file `.grafeo` format.
+  /// Open or create a persistent database (a single file, as with `grafeo_open`).
   late final grafeoOpenSingleFile = library.lookupFunction<
       Pointer<Void> Function(Pointer<Utf8>),
       Pointer<Void> Function(Pointer<Utf8>)>('grafeo_open_single_file');

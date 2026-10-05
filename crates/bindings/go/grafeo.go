@@ -70,9 +70,9 @@ func Open(path string) (*Database, error) {
 	return db, nil
 }
 
-// OpenSingleFile opens or creates a persistent database in single-file
-// `.grafeo` format at the given path, bypassing the Auto storage-format
-// detection based on path extension.
+// OpenSingleFile opens or creates a persistent database at the given path,
+// as Open does: since 0.6 every database is a single file, whatever the
+// extension of its path.
 func OpenSingleFile(path string) (*Database, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))

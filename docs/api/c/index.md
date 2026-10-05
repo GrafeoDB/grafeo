@@ -105,13 +105,15 @@ The pointer from `grafeo_last_error()` is valid until the next FFI call on the s
 
 ```c
 GrafeoDatabase* grafeo_open_memory(void);                    /* in-memory */
-GrafeoDatabase* grafeo_open(const char* path);               /* persistent (directory) */
+GrafeoDatabase* grafeo_open(const char* path);               /* persistent (a single file) */
 GrafeoDatabase* grafeo_open_read_only(const char* path);     /* read-only (shared lock) */
-GrafeoDatabase* grafeo_open_single_file(const char* path);   /* single .grafeo file */
+GrafeoDatabase* grafeo_open_single_file(const char* path);   /* same as grafeo_open */
 GrafeoStatus    grafeo_close(GrafeoDatabase* db);            /* flush and close */
 void            grafeo_free_database(GrafeoDatabase* db);    /* free handle */
 const char*     grafeo_version(void);                        /* library version (static) */
 ```
+
+A persistent database is a single file, whatever the extension of its path; a database written by 0.5.x is migrated on its first read-write open (see [Upgrading from 0.5](../../user-guide/persistence/persistent.md#upgrading-from-05)).
 
 All `grafeo_open*` functions return `NULL` on error. Always call `grafeo_close` before `grafeo_free_database` to flush pending writes.
 

@@ -348,3 +348,45 @@ fn a_checkpoint_holds_a_commit_over_two_graphs_whole() {
         "the reopened database holds the whole commit, in both graphs"
     );
 }
+
+/// Schema changes and graph commands take effect at once and log their own
+/// WAL group, outside any commit: they hold commits off for the whole
+/// statement, so a checkpoint in progress finishes first and its image holds
+/// none of them, and once it is written they run.
+#[test]
+fn schema_changes_and_graph_commands_wait_for_a_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rotterdam.grafeo");
+    database_with_alix(&path);
+
+    let db = Arc::new(GrafeoDB::open(&path).unwrap());
+    for statement in [
+        "CREATE CONSTRAINT person_name FOR (p:Person) ON (p.name) UNIQUE",
+        "CREATE GRAPH berlin",
+    ] {
+        let writer = Arc::clone(&db);
+        let (sender, started) = mpsc::channel();
+        during_next_checkpoint(move || {
+            let write = Started::spawn(move || {
+                writer
+                    .execute(statement)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            });
+            let finished = write.finishes_briefly();
+            sender.send((write, finished)).unwrap();
+        });
+        db.wal_checkpoint().unwrap();
+        let (write, finished) = started.recv().expect("the checkpoint ran the hook");
+        assert!(
+            !finished,
+            "{statement}: waits for the checkpoint in progress"
+        );
+        write
+            .join()
+            .unwrap_or_else(|error| panic!("{statement}: runs after the checkpoint: {error}"));
+    }
+    let constraints = db.execute("SHOW CONSTRAINTS").unwrap();
+    assert_eq!(constraints.rows().len(), 1, "{:?}", constraints.rows());
+    assert!(db.graph("berlin").is_ok(), "the graph exists");
+}

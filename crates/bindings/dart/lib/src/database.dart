@@ -66,11 +66,12 @@ class GrafeoDB implements Finalizable {
     }
   }
 
-  /// Open or create a single-file `.grafeo` database at [path].
+  /// Open or create a persistent database at [path] (a single file).
   ///
-  /// Recommended for embedded use (desktop apps, mobile apps). All data is
-  /// stored in one file with a sidecar WAL for crash safety, similar to
-  /// DuckDB's `.duckdb` format.
+  /// All data is stored in one file with a sidecar WAL for crash safety,
+  /// similar to DuckDB's `.duckdb` format. Since 0.6 every database is a
+  /// single file, whatever the extension of its path, so this is the same
+  /// as [open].
   static GrafeoDB openSingleFile(String path, {String? libraryPath}) {
     final lib = loadNativeLibrary(libraryPath);
     final bindings = GrafeoBindings(lib);

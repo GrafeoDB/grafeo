@@ -30,20 +30,23 @@ Persistent mode stores data durably on disk.
 
 ## File Structure
 
-A path without the `.grafeo` extension is a directory database:
+A persistent database is a single file at the path you give, whatever its extension (`.grafeo`, `.db` or none). While it is open, the changes since its last checkpoint are kept in a write-ahead log next to it:
 
 ```text
-my_graph.db/
-├── wal/            # Write-ahead log: the database's data
-└── LOCK            # Held while the database is open for writing
+my_graph.db         # The database: its state as of the last checkpoint
+my_graph.db.wal/    # Write-ahead log, while the database is open
 ```
 
-A directory database keeps its data in the write-ahead log and replays it when it opens. A [single-file database](#single-file-format-grafeo) keeps its state in the `.grafeo` file and the changes since its last checkpoint in a `my_graph.grafeo.wal/` directory next to it.
+A path with a trailing separator (`./data/`) names the same database as `./data`, and `path()` (`db.path` in Python) returns the path as you gave it.
+
+The database also writes next to its path: its WAL (`<path>.wal/`), spill files under memory pressure (`<path>.spill/`) and, while the database is created, short-lived files (`<path>.creating`, `<path>.migrate.lock`). The directory that holds the path must therefore be writable, not only the database file.
+
+By default, Grafeo 0.5.x stored a database at a path without the `.grafeo` extension as a WAL directory (a directory holding `wal/`). 0.6 no longer creates WAL directories: it migrates an existing one to a single file at the same path the first time it opens it for writing (see [Upgrading from 0.5](#upgrading-from-05)). A directory that is not a 0.5.x database, such as an empty directory created beforehand, is refused as not a database and left unchanged: give the database a path where nothing exists yet, for example a file inside that directory.
 
 ## Durability Guarantees
 
 - **Write-Ahead Logging (WAL)**: a transaction's changes are written to the WAL when it commits
-- **Checkpointing**: a `.grafeo` file is brought up to date periodically and on `close()`, after which the WAL keeps only newer changes
+- **Checkpointing**: the database file is brought up to date periodically and on `close()`, after which the WAL keeps only newer changes
 - **Crash Recovery**: the WAL is replayed automatically when the database opens
 
 ## Sync Modes
@@ -70,7 +73,7 @@ let db = GrafeoDB::with_config(config)?;
 
 ## Single-File Format (`.grafeo`)
 
-Since 0.5.21, Grafeo supports a single-file database format. The entire database is stored in one `.grafeo` file with a sidecar WAL directory for crash safety.
+The entire database is stored in one file in the `.grafeo` format, with a sidecar WAL directory for crash safety. Grafeo has had single-file databases since 0.5.21; 0.6.0 writes a new version of the format and uses it for every database, whatever the extension of its path. `.grafeo` is the usual one:
 
 === "Python"
 
@@ -88,12 +91,15 @@ Features:
 
 - Two alternating database headers, and a CRC-32 checksum on every header and every piece of data
 - Checkpoints are copy-on-write: a checkpoint writes the new state into space in the file that the last good state does not use, and switches the database header to it only once it is on disk. A checkpoint that fails or is cut off by a crash (for example on a full disk) leaves the last good state readable. A checkpoint needs free disk space for a second copy of the data while it runs; the next checkpoint reuses the space of the older copy.
-- Automatic format detection: `.grafeo` extension uses single-file mode, directory paths use multi-file mode
 - Exclusive file locking prevents multiple processes from opening the same file simultaneously
+
+### Storage Format Setting (Rust)
+
+`Config::storage_format` decides only what a new path becomes. `StorageFormat::Auto` (the default) and `StorageFormat::SingleFile` both create a single file there, and an existing path opens as what it holds, whatever the setting. `StorageFormat::WalDirectory` is deprecated and removed in 0.7.0: it opens an existing 0.5.x WAL directory by migrating it, as the other settings do, and fails at a new path with "WAL directories are no longer created". Use `StorageFormat::Auto` instead.
 
 ## Read-Only Mode
 
-Open a database in read-only mode to allow multiple processes to read the same `.grafeo` file concurrently. Mutations are rejected at the session level.
+Open a database in read-only mode to allow multiple processes to read the same database file concurrently. Mutations are rejected at the session level.
 
 === "Python"
 
@@ -107,13 +113,13 @@ Open a database in read-only mode to allow multiple processes to read the same `
     let db = GrafeoDB::open_read_only("my_graph.grafeo")?;
     ```
 
-Read-only mode uses a shared file lock instead of an exclusive lock, so multiple readers can coexist. A file written by 0.5.x is read into memory once instead, and is not migrated (see [Upgrading from 0.5](#upgrading-from-05)).
+Read-only mode uses a shared file lock instead of an exclusive lock, so multiple readers can coexist. A database written by 0.5.x (a file or a WAL directory) is read into memory once instead, and is not migrated (see [Upgrading from 0.5](#upgrading-from-05)).
 
 ## One Writer at a Time
 
-A persistent database can be open for writing by one `GrafeoDB` instance at a time, in one process. Opening it again, from the same process or another one, fails with a "locked by another process" error (`database file is locked by another process` for a `.grafeo` file, `database is locked by another process` for a directory) until the first instance calls `close()` or is dropped. A directory database is locked through its `LOCK` file, which it takes only when the WAL is enabled (the default).
+A persistent database can be open for writing by one `GrafeoDB` instance at a time, in one process. Opening it again, from the same process or another one, fails with `database file is locked by another process` until the first instance calls `close()` or is dropped.
 
-To share a database between processes, run it behind [Grafeo Server](https://github.com/GrafeoDB/grafeo-server), or open `.grafeo` files in [read-only mode](#read-only-mode) from the readers.
+To share a database between processes, run it behind [Grafeo Server](https://github.com/GrafeoDB/grafeo-server), or open it in [read-only mode](#read-only-mode) from the readers.
 
 ## Reopening a Database
 
@@ -158,9 +164,11 @@ Save and restore database snapshots for backup or migration:
 
 Snapshots include all nodes, edges, properties, labels, schema definitions, index metadata and named graph data. The current format is v4, which also preserves temporal version history.
 
+`save()` writes a copy of the database to a new single file, whatever the extension of the path, and fails if the path already exists. The copy is a database of its own: open it like any other.
+
 ## Upgrading from 0.5
 
-Grafeo 0.6.0 writes `.grafeo` files in a new format. A `.grafeo` file written by 0.5.x is migrated the first time 0.6 opens it for writing: with `GrafeoDB(path=...)` in Python, `GrafeoDB::open` in Rust, a read-write open in another binding, or a command of the `grafeo` command line tool.
+Grafeo 0.6.0 writes databases in a new file format, and every database is a single file. A database written by 0.5.x is migrated the first time 0.6 opens it for writing: with `GrafeoDB(path=...)` in Python, `GrafeoDB::open` in Rust, a read-write open in another binding, or a command of the `grafeo` command line tool. Both kinds of 0.5.x database are migrated: a single file (usually `.grafeo`, at any extension), and a WAL directory (a directory holding `wal/`, which 0.5.x created by default for a path without the `.grafeo` extension).
 
 The migration reads the old database, including the changes in its WAL, and writes it to a new file (named `my_graph.grafeo.migrating` while it is written, so the migration needs free disk space for a copy of the database). It then renames the old files and gives the new file the database's name. The old files are kept, byte for byte:
 
@@ -169,22 +177,33 @@ The migration reads the old database, including the changes in its WAL, and writ
 | `my_graph.grafeo` | `my_graph.grafeo.pre-0.6` |
 | `my_graph.grafeo.wal/` | `my_graph.grafeo.pre-0.6.wal/` |
 | `my_graph.grafeo.checkpoint` (a checkpoint 0.5.44 left pending) | `my_graph.grafeo.pre-0.6.checkpoint` |
+| `my_graph.db/` (a WAL directory) | `my_graph.db.pre-0.6/`, the whole directory |
+
+A WAL directory becomes a file at the same path: after the migration, `my_graph.db` is the 0.6 database file, and the path you used before opens it, also when it ends with a separator (`my_graph.db/`).
 
 A migration never replaces a kept copy: while one of these names is taken, the open fails before it writes anything. If a migration fails or is cut off by a crash, the next read-write open finishes it or starts it again; the old files are never changed. A read-write open in another process waits up to five seconds for a running migration, then fails with "database locked: a migration is running".
 
-0.7.0 will no longer read 0.5.x files: open each 0.5.x database once with 0.6, for writing, before you upgrade to 0.7.
+0.7.0 will no longer read 0.5.x databases: open each 0.5.x database once with 0.6, for writing, before you upgrade to 0.7.
 
 ### Before the First Open
 
-Stop every 0.5.x process that uses the database. 0.5.x cannot open the migrated file, and while a 0.5.x process has the file open for writing, the migration fails and changes nothing.
+Stop every 0.5.x process that uses the database. 0.5.x cannot open the migrated file. While a 0.5.x process has a database file open for writing, or a 0.5.44 process has a WAL directory open, the migration fails with a "locked by another process" error and changes nothing. 0.5.43 and older take no lock on a WAL directory, so the migration cannot tell that they use it: make sure they are stopped.
 
 ### Read-Only Opens
 
-A read-only open (`GrafeoDB.open_read_only()` in Python, `GrafeoDB::open_read_only` or `Config::read_only` in Rust) and `open_in_memory()` read a 0.5.x file, with its WAL, without migrating or changing it. A read-only open loads such a file into memory once and then holds no lock on it. If a migration was cut off after the old file was renamed, read-only opens and `open_in_memory()` fail until a read-write open has finished it.
+A read-only open (`GrafeoDB.open_read_only()` in Python, `GrafeoDB::open_read_only` or `Config::read_only` in Rust) and `open_in_memory()` read a 0.5.x database, a file with its WAL or a WAL directory, without migrating or changing it. A read-only open loads such a database into memory once and then holds no lock on it. If a migration was cut off after the old files were renamed, read-only opens and `open_in_memory()` fail until a read-write open has finished it.
 
 ### Encrypted Databases
 
-A read-write open with a key (`Config::encryption`) migrates a 0.5.x file into an encrypted file. The kept files are not encrypted, as 0.5.x never encrypted its files: `my_graph.grafeo.pre-0.6`, `my_graph.grafeo.pre-0.6.wal/` and, if present, `my_graph.grafeo.pre-0.6.checkpoint`. Remove all of them once you no longer need to go back to 0.5.x. See [Encryption at Rest](../../getting-started/security.md#encryption-at-rest).
+A read-write open with a key (`Config::encryption`) migrates a 0.5.x database, a WAL directory included, into an encrypted file. The kept files are not encrypted, as 0.5.x never encrypted its files: `my_graph.grafeo.pre-0.6`, `my_graph.grafeo.pre-0.6.wal/` and, if present, `my_graph.grafeo.pre-0.6.checkpoint`, or the directory `my_graph.db.pre-0.6/`. Remove all of them once you no longer need to go back to 0.5.x. See [Encryption at Rest](../../getting-started/security.md#encryption-at-rest).
+
+### Special Cases
+
+- **A directory whose parent is not writable**: the migration writes next to the database path (`<path>.migrate.lock`, the image `<path>.migrating`, the kept `<path>.pre-0.6/`), and the 0.6 database keeps its WAL (`<path>.wal/`) and spill files (`<path>.spill/`) there too. The process therefore needs write access to the directory that holds the database path, not only to the database directory, which a 0.5.x WAL directory did not need. Without it the open fails and changes nothing: grant it, or move the database into a directory of its own, as for a mount point.
+- **A symbolic link or junction**: when the database path is a link, the migrated file is created where the link is, and the link itself is renamed to `<path>.pre-0.6`. The 0.5.x data stays where the link points, and the new file (with its image while it is written, and later its WAL) is on the link's file system, which needs the free space. To keep the database on the link's target, open the target path instead.
+- **A mount point**: a database directory that is a mount point (a container volume, for example) cannot be renamed, so it cannot be migrated in place. For a database at the mount point `/data`, copy `/data/wal/` to `/data/graph/wal/` and open `/data/graph` from then on. Or open `/data` read-only and `save()` it to a new file inside the volume, such as `/data/graph.grafeo`, and open that file from then on.
+- **Open files on Windows**: on Windows a directory cannot be renamed while any process has a file inside it open, so the migration of a WAL directory fails, and changes nothing, until they are closed.
+- **The current directory**: a read-write open of a 0.5.x WAL directory from a process whose current directory is inside it (with `.` or by its name) is refused, as a process's own working directory cannot be moved (a read-only open works). Open it read-write from a process whose current directory is outside it.
 
 ### Going Back to 0.5.x
 
@@ -193,5 +212,7 @@ The kept copy holds the database as it was before the migration: what was writte
 1. Close the database in every 0.6 process, read-only opens included.
 2. Move the 0.6 file `my_graph.grafeo` aside rather than deleting it, for example to `my_graph-0.6.grafeo`, so the writes made since the migration are not lost. If its WAL `my_graph.grafeo.wal/` exists, move it along as `my_graph-0.6.grafeo.wal/`: 0.5.x would otherwise replay the 0.6 WAL.
 3. Rename the kept files back: `my_graph.grafeo.pre-0.6` to `my_graph.grafeo` and, if they exist, `my_graph.grafeo.pre-0.6.wal/` to `my_graph.grafeo.wal/` and `my_graph.grafeo.pre-0.6.checkpoint` to `my_graph.grafeo.checkpoint`.
+
+For a WAL directory the steps are the same: move the 0.6 file `my_graph.db` and its WAL `my_graph.db.wal/` aside, then rename the kept directory `my_graph.db.pre-0.6/` back to `my_graph.db/`.
 
 Once you no longer need to go back to 0.5.x, you can delete the kept files.

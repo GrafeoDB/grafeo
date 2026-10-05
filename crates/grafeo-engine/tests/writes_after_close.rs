@@ -328,6 +328,64 @@ fn a_direct_write_waiting_for_the_final_checkpoint_fails() {
     assert_eq!(people_after_reopen(&path), vec![Value::from("Alix")]);
 }
 
+/// A schema change or a graph command that waits for the final checkpoint
+/// (they hold commits off for the whole statement) fails once it is written,
+/// instead of changing the catalog after the last image and logging to the WAL
+/// `close()` removes.
+#[cfg(feature = "testing-statement-injection")]
+#[test]
+fn a_schema_change_waiting_for_the_final_checkpoint_fails() {
+    use std::sync::{Arc, mpsc};
+
+    use grafeo_common::testing::commit_hook::during_next_checkpoint;
+
+    for (city, statement) in [
+        (
+            "leiden",
+            "CREATE CONSTRAINT person_name FOR (p:Person) ON (p.name) UNIQUE",
+        ),
+        ("haarlem", "CREATE GRAPH berlin"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{city}.grafeo"));
+        database_with_alix(&path);
+
+        let db = Arc::new(open(&path));
+        let writer = Arc::clone(&db);
+        let (sender, started) = mpsc::channel();
+        during_next_checkpoint(move || {
+            let write = Started::spawn(move || {
+                writer
+                    .execute(statement)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            });
+            let finished = write.finishes_briefly();
+            sender.send((write, finished)).unwrap();
+        });
+        db.close().unwrap();
+
+        let (write, finished) = started.recv().expect("close() checkpointed");
+        assert!(!finished, "{statement}: waits for the final checkpoint");
+        assert_closed(&write.join().expect_err("the statement fails"));
+        drop(db);
+        let reopened = open(&path);
+        assert!(
+            reopened
+                .execute("SHOW CONSTRAINTS")
+                .unwrap()
+                .rows()
+                .is_empty(),
+            "{statement}: no constraint in the file"
+        );
+        assert!(
+            reopened.graph("berlin").is_err(),
+            "{statement}: no graph in the file"
+        );
+        reopened.close().unwrap();
+    }
+}
+
 /// A commit in progress when `close()` starts completes first and is in the
 /// final checkpoint.
 #[cfg(feature = "testing-statement-injection")]

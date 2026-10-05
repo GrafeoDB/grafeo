@@ -14,8 +14,8 @@ Grafeo uses Write-Ahead Logging (WAL) to ensure durability and enable crash reco
 ## How WAL Works
 
 1. **Log First** - All changes are written to the WAL before being applied
-2. **Apply Changes** - Changes are applied to the main data files
-3. **Checkpoint** - Periodically, WAL is merged into data files
+2. **Apply Changes** - Changes are applied to the database in memory
+3. **Checkpoint** - Periodically, the WAL is merged into the database file
 4. **Truncate** - Old WAL entries are removed after checkpointing
 
 ## Crash Recovery
@@ -35,7 +35,7 @@ db = grafeo.GrafeoDB(path="my_graph.db")
 
 ## Checkpointing
 
-Checkpoints merge WAL changes into the main data files:
+Checkpoints merge WAL changes into the database file:
 
 ```python
 # Manual checkpoint

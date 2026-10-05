@@ -52,7 +52,7 @@ def open(path: str) -> GrafeoDB
 
 ### open_read_only()
 
-Open a database in read-only mode. Uses a shared file lock, so multiple processes can read the same `.grafeo` file concurrently. Mutations will raise an error.
+Open a database in read-only mode. Uses a shared file lock, so multiple processes can read the same `.grafeo` file concurrently. Mutations will raise an error. A file written by 0.5.x is read into memory once, with no lock held afterwards, and is not migrated.
 
 ```python
 @staticmethod

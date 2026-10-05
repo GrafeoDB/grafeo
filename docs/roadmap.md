@@ -30,7 +30,7 @@ The 0.6 series makes Grafeo dependable by design: durable and crash-safe persist
 | [**0.6.3**](https://github.com/GrafeoDB/grafeo/milestone/6) | Push-only execution engine and benchmark-gated parallelism |
 | [**0.6.4**](https://github.com/GrafeoDB/grafeo/milestone/7) | API parity across bindings, feature flag cleanup, query language completeness, test depth |
 
-The 0.6.0 storage format change is the only planned migration: older files are converted automatically on open, and the old file is kept next to the new one (see [Versioning](versioning.md)).
+The 0.6.0 storage format change is the only planned migration: older files are converted automatically on their first read-write open, and the old file is kept next to the new one (see [Versioning](versioning.md)).
 
 ---
 

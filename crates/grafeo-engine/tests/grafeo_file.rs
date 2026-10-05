@@ -494,10 +494,14 @@ fn file_grows_and_shrinks_with_data() {
     let large_size = fm.file_size().unwrap();
     assert!(large_size > initial_size, "file should grow with data");
 
-    // Delete most data
+    // Delete most data. A checkpoint writes its image next to the active
+    // one, which it must not overwrite: the first after the delete goes into
+    // the free pages around the larger image, the second reuses the larger
+    // image's pages and cuts the file after its own.
     session
         .execute("MATCH (n:Node) WHERE n.idx > 5 DELETE n")
         .unwrap();
+    db.wal_checkpoint().unwrap();
     db.wal_checkpoint().unwrap();
     let small_size = fm.file_size().unwrap();
     assert!(
@@ -656,22 +660,22 @@ fn corrupt_snapshot_detected_on_open() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("corrupt.grafeo");
 
-    // Write valid data
-    {
+    // Write valid data, and note where the active image's directory is
+    let directory_offset = {
         let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
         let session = db.session();
         session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
         db.close().unwrap();
-    }
+        db.file_manager().unwrap().active_header().root.offset
+    };
 
-    // Corrupt the post-header region at offset 12288 (0x3000). In v1 files
-    // this is the snapshot blob; in v2 files it is the section directory.
-    // Either way, the bytes here are integrity-checked at open and the
-    // corruption must be surfaced rather than masked.
+    // Corrupt the directory block the active database header points at.
+    // Its bytes are integrity-checked at open and the corruption must be
+    // surfaced rather than masked.
     {
         use std::io::{Seek, SeekFrom, Write};
         let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        file.seek(SeekFrom::Start(12288)).unwrap();
+        file.seek(SeekFrom::Start(directory_offset)).unwrap();
         file.write_all(b"CORRUPTED DATA HERE!!!").unwrap();
     }
 
@@ -1428,5 +1432,79 @@ fn deleted_base_edges_stay_deleted_across_reopen() {
         "previously-deleted base edge must stay deleted across reopen"
     );
     drop(session);
+    db.close().unwrap();
+}
+
+// =========================================================================
+// A sidecar WAL left next to a missing database file
+// =========================================================================
+
+/// Copies the files of the directory `from` into a new directory `to`.
+#[cfg(feature = "wal")]
+fn copy_directory(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+    }
+}
+
+/// The name and bytes of every file in the directory `dir`, sorted.
+#[cfg(feature = "wal")]
+fn directory_files(dir: &std::path::Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), std::fs::read(entry.path()).unwrap())
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// A new database is never created next to a sidecar WAL that holds files:
+/// they belong to another database (one that was at this path, or a WAL
+/// moved here), and the new one would replay its records. The open fails,
+/// names the WAL, and changes nothing; an empty sidecar directory is no
+/// obstacle.
+#[cfg(feature = "wal")]
+#[test]
+fn a_new_database_is_never_created_next_to_a_sidecar_wal_with_files() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let other = dir.path().join("other.grafeo");
+    let path = dir.path().join("new.grafeo");
+    let wal = sidecar_wal_path(&path);
+    {
+        let db = GrafeoDB::with_config(Config::persistent(&other)).unwrap();
+        db.session()
+            .execute("INSERT (:Person {name: 'Vincent'})")
+            .unwrap();
+        db.wal().unwrap().sync().unwrap();
+        copy_directory(&sidecar_wal_path(&other), &wal);
+        db.close().unwrap();
+    }
+    let leftover = directory_files(&wal);
+    assert!(!leftover.is_empty(), "the copied WAL holds files");
+
+    let error = match GrafeoDB::with_config(Config::persistent(&path)) {
+        Ok(db) => panic!(
+            "a database was created next to the leftover WAL, holding {} nodes",
+            db.node_count()
+        ),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains(&wal.display().to_string()),
+        "the error names the sidecar WAL: {error}"
+    );
+    assert!(!path.exists(), "no database file is created");
+    assert_eq!(directory_files(&wal), leftover, "the WAL is left as it was");
+
+    // Without files, the sidecar directory is no obstacle.
+    std::fs::remove_dir_all(&wal).unwrap();
+    std::fs::create_dir(&wal).unwrap();
+    let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+    assert_eq!(db.node_count(), 0, "a new, empty database");
     db.close().unwrap();
 }

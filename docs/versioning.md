@@ -39,8 +39,8 @@ They are published so that `grafeo` can depend on them, and their APIs may chang
 ## Database files
 
 A patch release never changes the file format. A minor release that does migrates a database the first time it is
-opened, and keeps a copy of the old file next to it (for example `data.grafeo.pre-0.7`), so you can return to the
-previous version. The release before it announces the change in its notes.
+opened for writing, and keeps a copy of the old file next to it (for example `data.grafeo.pre-0.7`), so you can
+return to the previous version. The release before it announces the change in its notes.
 
 ## Deprecation
 

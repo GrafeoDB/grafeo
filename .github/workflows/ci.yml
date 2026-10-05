@@ -341,6 +341,52 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
+  # Tests that need a minimal feature set, so they are covered outside
+  # --all-features too: encryption at rest with only the features it needs,
+  # and the migration of 0.5.x files in a build without `wal` (the default
+  # `embedded` profile of the Node.js, C, Go, C# and Dart bindings). A job of
+  # its own: the rust-test runners are near their disk limit, and these are
+  # extra engine builds.
+  minimal-features:
+    name: Minimal Features
+    needs: [rust-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Test encryption at rest
+        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,wal,grafeo-file,encryption --test encryption_at_rest
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+      - name: Test migration without the wal feature
+        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
   # Rust tests (release, ubuntu only)
   # Release-mode catches issues from inlining and overflow checks.
   # These bugs are platform-independent, so one OS is sufficient.
@@ -1084,6 +1130,7 @@ jobs:
       - wasm-spec
       - rust-test
       - rust-test-release
+      - minimal-features
       - rust-feature-matrix
       - miri
       - python-test

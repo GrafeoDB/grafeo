@@ -1,16 +1,16 @@
 //! Unified flush: one code path for every checkpoint.
 //!
 //! Periodic checkpoints, `wal_checkpoint()`, `close()` and the async snapshot
-//! all write every section. A checkpoint writes a complete new container that
+//! all write every section. A checkpoint writes a complete new image that
 //! holds only the sections it was given, so leaving an unchanged section out
-//! would drop it from the file. Writing only what changed needs a container
-//! that keeps the other sections (incremental checkpoints, #430).
+//! would drop it from the file. Writing only what changed needs an image that
+//! keeps the other sections (incremental checkpoints, #430).
 
-use grafeo_common::storage::{Section, SectionType};
+use grafeo_common::storage::Section;
 use grafeo_common::utils::error::Result;
 
 #[cfg(feature = "grafeo-file")]
-use grafeo_storage::file::GrafeoFileManager;
+use grafeo_storage::file::{CheckpointHeader, GrafeoFileManager};
 
 use super::sections::CheckpointSources;
 
@@ -22,26 +22,45 @@ pub(super) struct FlushContext {
     pub edge_count: u64,
 }
 
+#[cfg(feature = "grafeo-file")]
+impl FlushContext {
+    /// The values the checkpoint records in its database header.
+    /// `checkpoint_lsn` stays 0 until the WAL records sequence numbers: the
+    /// WAL's own checkpoint marker tells recovery where to start.
+    pub fn checkpoint_header(&self) -> CheckpointHeader {
+        CheckpointHeader {
+            checkpoint_lsn: 0,
+            epoch: self.epoch,
+            last_transaction_id: self.transaction_id,
+            node_count: self.node_count,
+            edge_count: self.edge_count,
+        }
+    }
+}
+
 /// Result of a flush operation.
 pub(super) struct FlushResult {
     /// Number of sections written to the container.
     pub sections_written: usize,
 }
 
-/// Executes the unified flush: serialize every section, write the container,
+/// Executes the unified flush: write every section as a new image, then
 /// truncate the WAL.
 ///
 /// This is the single write path for all persistence operations. With a WAL,
 /// the order is what makes a crash at any point safe (#417):
 ///
 /// 1. start a new WAL file, so every record logged so far is in an earlier file,
-/// 2. serialize the sections (the snapshot then contains all those records),
-/// 3. write and sync the container,
-/// 4. only then mark the WAL: recovery starts at the new file, and the earlier
+/// 2. serialize the sections and write them as a new image (the snapshot then
+///    contains all those records); the file manager syncs the image, then
+///    switches the database header to it,
+/// 3. only then mark the WAL: recovery starts at the new file, and the earlier
 ///    files are deleted unless an incremental backup still needs them.
 ///
-/// A crash before step 4 leaves the previous mark in place, so recovery
+/// A crash before step 3 leaves the previous mark in place, so recovery
 /// replays more than needed, which is harmless because replay is idempotent.
+/// A failed image write keeps the WAL for the same reason: the new header may
+/// have reached the disk, or not.
 ///
 /// # Errors
 ///
@@ -80,27 +99,9 @@ pub(super) fn flush(
 
     maybe_crash("flush:after_rotate");
 
-    // Step 2: serialize.
-    let mut targets: Vec<(SectionType, Vec<u8>)> = Vec::with_capacity(sections.len());
-    for section in sections {
-        targets.push((section.section_type(), section.serialize()?));
-    }
-
-    let sections_written = targets.len();
-
-    maybe_crash("flush:after_serialize");
-
-    // Write sections to container
-    let section_refs: Vec<(SectionType, &[u8])> =
-        targets.iter().map(|(t, d)| (*t, d.as_slice())).collect();
-
-    fm.write_sections(
-        &section_refs,
-        context.epoch,
-        context.transaction_id,
-        context.node_count,
-        context.edge_count,
-    )?;
+    // Step 2: serialize each section into the new image.
+    fm.write_checkpoint(sections, &context.checkpoint_header())?;
+    let sections_written = sections.len();
 
     for section in sections {
         section.mark_clean();
@@ -108,7 +109,8 @@ pub(super) fn flush(
 
     maybe_crash("flush:after_write");
 
-    // Step 4: the container is durable (`write_sections` syncs it).
+    // Step 3: the image is durable and active (`write_checkpoint` synced the
+    // image and its header).
     #[cfg(feature = "wal")]
     if let (Some(wal), Some(sequence)) = (wal, covered_sequence) {
         use grafeo_common::types::{EpochId, TransactionId};
@@ -179,6 +181,7 @@ impl CheckpointSources {
 #[cfg(all(test, feature = "grafeo-file"))]
 mod tests {
     use super::*;
+    use grafeo_common::storage::SectionType;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A section holding fixed bytes, with its own dirty flag.
@@ -225,6 +228,18 @@ mod tests {
         }
     }
 
+    fn run_with(
+        fm: &GrafeoFileManager,
+        sections: &[&dyn Section],
+        context: &FlushContext,
+    ) -> usize {
+        #[cfg(feature = "wal")]
+        let result = flush(fm, sections, context, None);
+        #[cfg(not(feature = "wal"))]
+        let result = flush(fm, sections, context);
+        result.unwrap().sections_written
+    }
+
     fn run(fm: &GrafeoFileManager, sections: &[&dyn Section]) -> usize {
         let context = FlushContext {
             epoch: 1,
@@ -232,17 +247,41 @@ mod tests {
             node_count: 0,
             edge_count: 0,
         };
-        #[cfg(feature = "wal")]
-        let result = flush(fm, sections, &context, None);
-        #[cfg(not(feature = "wal"))]
-        let result = flush(fm, sections, &context);
-        result.unwrap().sections_written
+        run_with(fm, sections, &context)
     }
 
     fn stored(fm: &GrafeoFileManager, section_type: SectionType) -> Option<Vec<u8>> {
-        let directory = fm.read_section_directory().unwrap()?;
-        let entry = directory.find(section_type)?;
-        Some(fm.read_section_data(entry).unwrap())
+        fm.read_section(section_type).unwrap()
+    }
+
+    /// The new image's database header records the flush context; it has
+    /// no WAL sequence number until the WAL records them.
+    #[test]
+    fn the_checkpoint_header_carries_the_flush_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let fm = GrafeoFileManager::create(dir.path().join("db.grafeo"), None).unwrap();
+        let catalog = FixedSection::new(SectionType::Catalog, b"Amsterdam", true);
+        let context = FlushContext {
+            epoch: 19,
+            transaction_id: 88,
+            node_count: 3,
+            edge_count: 319,
+        };
+        assert_eq!(run_with(&fm, &[&catalog], &context), 1);
+
+        let header = fm.active_header();
+        assert_eq!(
+            (
+                header.iteration,
+                header.checkpoint_lsn,
+                header.epoch,
+                header.last_transaction_id,
+                header.node_count,
+                header.edge_count
+            ),
+            (1, 0, 19, 88, 3, 319)
+        );
+        assert!(!catalog.is_dirty(), "a written section is clean");
     }
 
     /// Each checkpoint writes a complete file holding only the sections it
@@ -252,7 +291,7 @@ mod tests {
     #[test]
     fn a_checkpoint_keeps_every_section_in_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        let fm = GrafeoFileManager::create(dir.path().join("db.grafeo")).unwrap();
+        let fm = GrafeoFileManager::create(dir.path().join("db.grafeo"), None).unwrap();
         let catalog = FixedSection::new(SectionType::Catalog, b"catalog", false);
         let store = FixedSection::new(SectionType::LpgStore, b"store", false);
 

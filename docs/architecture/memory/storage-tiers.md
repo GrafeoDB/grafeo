@@ -109,6 +109,8 @@ The reload is synchronous; for large sections, call from a background thread.
 
 The spill directory holds mmap-backed files for spilled sections. It's set via `Config::with_spill_path` (or auto-derived from the `.grafeo` file path for persistent databases). After the database closes, the spill files persist; reopening the database re-mmaps them so spilled state survives restarts.
 
+An encrypted database (`Config::encryption`) has no spill directory, as spill files are not encrypted: none is derived, and setting one together with `encryption` is a configuration error. Its sections stay in RAM.
+
 ```rust
 let config = Config::persistent("/var/lib/grafeo/db.grafeo")
     .with_spill_path("/var/lib/grafeo/spill");

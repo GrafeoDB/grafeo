@@ -152,9 +152,13 @@ fn encode_block(entries: &[DirectoryEntry], next: BlockRef) -> Result<Vec<u8>> {
 /// naming the next one.
 ///
 /// `place(len)` returns where a block of `len` bytes goes; blocks are placed
-/// last to first. Returns the reference to the first block (the root, with
-/// length 0 when there are no entries) and the blocks as `(offset, bytes)` in
-/// chain order. The bytes are not padded to pages.
+/// last to first. Returns the reference to the first block (the root) and the
+/// blocks as `(offset, bytes)` in chain order. The bytes are not padded to
+/// pages.
+///
+/// An empty `entries` still produces one block, holding zero entries, so
+/// every image has a directory block to read (and, when encrypted, to
+/// decrypt) when it is opened.
 ///
 /// # Errors
 ///
@@ -163,9 +167,14 @@ pub fn encode_blocks(
     entries: &[DirectoryEntry],
     mut place: impl FnMut(usize) -> Result<u64>,
 ) -> Result<(BlockRef, Vec<(u64, Vec<u8>)>)> {
+    let groups: Vec<&[DirectoryEntry]> = if entries.is_empty() {
+        vec![&[]]
+    } else {
+        entries.chunks(ENTRIES_PER_BLOCK).collect()
+    };
     let mut next = BlockRef::default();
     let mut blocks = Vec::new();
-    for group in entries.chunks(ENTRIES_PER_BLOCK).rev() {
+    for group in groups.into_iter().rev() {
         let bytes = encode_block(group, next)?;
         let offset = place(bytes.len())?;
         next = BlockRef {
@@ -209,7 +218,8 @@ fn check_pointer(pointer: BlockRef) -> Result<()> {
 /// bytes of a block.
 ///
 /// Returns the entries in order and the pages of the blocks themselves. A
-/// root with length 0 is an empty directory.
+/// root with length 0 is accepted as an empty directory, although
+/// [`encode_blocks`] never produces one.
 ///
 /// # Errors
 ///
@@ -551,11 +561,40 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_root_is_a_directory_without_chunks() {
-        let (root, blocks) = encode_blocks(&[], |_| panic!("no block to place")).unwrap();
-        assert_eq!(root, BlockRef::default());
-        assert_eq!(blocks.len(), 0);
-        let (entries, runs) = decode_chain(root, |_, _| panic!("must not read")).unwrap();
+    fn an_empty_entry_list_still_encodes_one_block() {
+        let mut placed = Vec::new();
+        let (root, blocks) = encode_blocks(&[], |length| {
+            placed.push(length);
+            Ok(12_288)
+        })
+        .unwrap();
+        assert_eq!(
+            placed,
+            [BLOCK_HEADER_SIZE],
+            "one block holding only its header"
+        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            root,
+            BlockRef {
+                offset: 12_288,
+                length: len32(BLOCK_HEADER_SIZE),
+                crc: crc32fast::hash(&blocks[0].1),
+            }
+        );
+        let (entries, runs) = decode_chain(root, |offset, _| {
+            assert_eq!(offset, 12_288);
+            Ok(blocks[0].1.clone())
+        })
+        .unwrap();
+        assert!(entries.is_empty(), "a block without entries");
+        assert_eq!(runs, [PageRun { first: 3, count: 1 }], "the block's page");
+    }
+
+    #[test]
+    fn a_zero_length_root_still_decodes_as_a_directory_without_chunks() {
+        let (entries, runs) =
+            decode_chain(BlockRef::default(), |_, _| panic!("must not read")).unwrap();
         assert!(entries.is_empty() && runs.is_empty());
     }
 }

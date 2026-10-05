@@ -86,8 +86,8 @@ Since 0.5.21, Grafeo supports a single-file database format. The entire database
 
 Features:
 
-- Dual-header crash safety with CRC32 checksums
-- Checkpoints write the new state to `my_graph.grafeo.checkpoint` first and copy it over the database file only when it is complete, so a checkpoint that fails (for example on a full disk) leaves the last good state readable. A checkpoint needs free disk space for a second copy of the file while it runs.
+- Two alternating database headers, and a CRC-32 checksum on every header and every piece of data
+- Checkpoints are copy-on-write: a checkpoint writes the new state into space in the file that the last good state does not use, and switches the database header to it only once it is on disk. A checkpoint that fails or is cut off by a crash (for example on a full disk) leaves the last good state readable. A checkpoint needs free disk space for a second copy of the data while it runs; the next checkpoint reuses the space of the older copy.
 - Automatic format detection: `.grafeo` extension uses single-file mode, directory paths use multi-file mode
 - Exclusive file locking prevents multiple processes from opening the same file simultaneously
 
@@ -107,7 +107,7 @@ Open a database in read-only mode to allow multiple processes to read the same `
     let db = GrafeoDB::open_read_only("my_graph.grafeo")?;
     ```
 
-Read-only mode uses a shared file lock instead of an exclusive lock, so multiple readers can coexist.
+Read-only mode uses a shared file lock instead of an exclusive lock, so multiple readers can coexist. A file written by 0.5.x is read into memory once instead, and is not migrated (see [Upgrading from 0.5](#upgrading-from-05)).
 
 ## One Writer at a Time
 
@@ -157,3 +157,41 @@ Save and restore database snapshots for backup or migration:
     ```
 
 Snapshots include all nodes, edges, properties, labels, schema definitions, index metadata and named graph data. The current format is v4, which also preserves temporal version history.
+
+## Upgrading from 0.5
+
+Grafeo 0.6.0 writes `.grafeo` files in a new format. A `.grafeo` file written by 0.5.x is migrated the first time 0.6 opens it for writing: with `GrafeoDB(path=...)` in Python, `GrafeoDB::open` in Rust, a read-write open in another binding, or a command of the `grafeo` command line tool.
+
+The migration reads the old database, including the changes in its WAL, and writes it to a new file (named `my_graph.grafeo.migrating` while it is written, so the migration needs free disk space for a copy of the database). It then renames the old files and gives the new file the database's name. The old files are kept, byte for byte:
+
+| Written by 0.5.x | Kept as |
+|------------------|---------|
+| `my_graph.grafeo` | `my_graph.grafeo.pre-0.6` |
+| `my_graph.grafeo.wal/` | `my_graph.grafeo.pre-0.6.wal/` |
+| `my_graph.grafeo.checkpoint` (a checkpoint 0.5.44 left pending) | `my_graph.grafeo.pre-0.6.checkpoint` |
+
+A migration never replaces a kept copy: while one of these names is taken, the open fails before it writes anything. If a migration fails or is cut off by a crash, the next read-write open finishes it or starts it again; the old files are never changed. A read-write open in another process waits up to five seconds for a running migration, then fails with "database locked: a migration is running".
+
+0.7.0 will no longer read 0.5.x files: open each 0.5.x database once with 0.6, for writing, before you upgrade to 0.7.
+
+### Before the First Open
+
+Stop every 0.5.x process that uses the database. 0.5.x cannot open the migrated file, and while a 0.5.x process has the file open for writing, the migration fails and changes nothing.
+
+### Read-Only Opens
+
+A read-only open (`GrafeoDB.open_read_only()` in Python, `GrafeoDB::open_read_only` or `Config::read_only` in Rust) and `open_in_memory()` read a 0.5.x file, with its WAL, without migrating or changing it. A read-only open loads such a file into memory once and then holds no lock on it. If a migration was cut off after the old file was renamed, read-only opens and `open_in_memory()` fail until a read-write open has finished it.
+
+### Encrypted Databases
+
+A read-write open with a key (`Config::encryption`) migrates a 0.5.x file into an encrypted file. The kept files are not encrypted, as 0.5.x never encrypted its files: `my_graph.grafeo.pre-0.6`, `my_graph.grafeo.pre-0.6.wal/` and, if present, `my_graph.grafeo.pre-0.6.checkpoint`. Remove all of them once you no longer need to go back to 0.5.x. See [Encryption at Rest](../../getting-started/security.md#encryption-at-rest).
+
+### Going Back to 0.5.x
+
+The kept copy holds the database as it was before the migration: what was written with 0.6 since then is not in it, only in the 0.6 file. To return to 0.5.x:
+
+1. Close the database in every 0.6 process, read-only opens included.
+2. Move the 0.6 file `my_graph.grafeo` aside rather than deleting it, for example to `my_graph-0.6.grafeo`, so the writes made since the migration are not lost. If its WAL `my_graph.grafeo.wal/` exists, move it along as `my_graph-0.6.grafeo.wal/`: 0.5.x would otherwise replay the 0.6 WAL.
+3. Rename the kept files back: `my_graph.grafeo.pre-0.6` to `my_graph.grafeo` and, if they exist, `my_graph.grafeo.pre-0.6.wal/` to `my_graph.grafeo.wal/` and `my_graph.grafeo.pre-0.6.checkpoint` to `my_graph.grafeo.checkpoint`.
+
+Once you no longer need to go back to 0.5.x, you can delete the kept files.

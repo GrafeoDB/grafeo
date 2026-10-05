@@ -125,8 +125,9 @@ impl<'a> CheckpointWriter<'a> {
 
     /// Writes the directory and returns its root and every run the new image uses.
     ///
-    /// Zero-length runs are left out. The file is not padded to a page
-    /// boundary.
+    /// The directory has at least one block, also when no chunk was written,
+    /// so the root always names a block. Zero-length runs are left out. The
+    /// file is not padded to a page boundary.
     ///
     /// # Errors
     ///
@@ -227,7 +228,76 @@ impl SectionSink for CheckpointWriter<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_stored_length, write_at};
+    use std::fs::File;
+
+    use super::super::ImageReader;
+    use super::super::alloc::{PageAllocator, PageRun};
+    use super::super::header::{DATA_START_PAGE, PAGE_SIZE};
+    use super::{CheckpointWriter, check_stored_length, write_at};
+
+    fn open(dir: &tempfile::TempDir) -> File {
+        File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dir.path().join("x"))
+            .unwrap()
+    }
+
+    #[test]
+    fn an_image_without_chunks_still_has_one_directory_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = open(&dir);
+        let writer = CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
+        let (root, runs) = writer.finish().unwrap();
+        assert_eq!(
+            runs,
+            [PageRun {
+                first: DATA_START_PAGE,
+                count: 1
+            }],
+            "one page for the directory block"
+        );
+        assert_eq!(root.offset, DATA_START_PAGE * PAGE_SIZE);
+        assert_ne!(root.length, 0, "the root names a real block");
+        assert_eq!(
+            file.metadata().unwrap().len(),
+            root.offset + u64::from(root.length),
+            "the block is on disk"
+        );
+        let reader = ImageReader::open(&mut file, root, None).unwrap();
+        assert_eq!(reader.entries(), [], "no chunks");
+        assert_eq!(reader.used_runs(), runs);
+    }
+
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn an_encrypted_image_without_chunks_still_needs_its_key() {
+        use grafeo_common::encryption::PageEncryptor;
+        let alix = PageEncryptor::new(&[3u8; 32]);
+        let gus = PageEncryptor::new(&[19u8; 32]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = open(&dir);
+        let writer = CheckpointWriter::new(
+            &mut file,
+            PageAllocator::from_used([]).unwrap(),
+            Some(&alix),
+        );
+        let (root, _) = writer.finish().unwrap();
+        assert_eq!(
+            ImageReader::open(&mut file, root, Some(&alix))
+                .unwrap()
+                .entries(),
+            [],
+            "the right key reads the empty directory"
+        );
+        let wrong = ImageReader::open(&mut file, root, Some(&gus))
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(wrong.contains("decrypt"), "{wrong}");
+    }
 
     #[test]
     fn bytes_of_another_length_than_their_run_was_sized_for_are_refused() {

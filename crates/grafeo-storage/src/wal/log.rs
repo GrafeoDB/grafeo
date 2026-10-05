@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "encryption")]
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -120,9 +122,33 @@ pub struct WalManager {
     current_sequence: AtomicU64,
     /// Latest checkpoint epoch.
     checkpoint_epoch: Mutex<Option<EpochId>>,
-    /// Encryptor for WAL records (None = unencrypted).
+    /// Encryptor for WAL records (None = unencrypted), shared with the
+    /// recoveries made from this manager.
     #[cfg(feature = "encryption")]
-    encryptor: Option<grafeo_common::encryption::PageEncryptor>,
+    encryptor: Option<Arc<grafeo_common::encryption::PageEncryptor>>,
+}
+
+/// Encrypts and decrypts WAL records: see
+/// [`WalManager::with_config_and_cipher`] and
+/// [`WalRecovery::with_cipher`](super::WalRecovery::with_cipher).
+#[cfg(feature = "encryption")]
+pub type WalCipher = grafeo_common::encryption::PageEncryptor;
+
+/// Placeholder without the `encryption` feature: it has no values, so a
+/// cipher can never be supplied.
+#[cfg(not(feature = "encryption"))]
+#[derive(Debug)]
+pub enum WalCipher {}
+
+/// The length prefix of a frame whose payload is `length` bytes.
+fn frame_length(length: usize) -> Result<u32> {
+    u32::try_from(length).map_err(|_| {
+        Error::Internal(format!(
+            "a WAL record of {length} bytes does not fit a frame, whose length prefix \
+             allows at most {} bytes",
+            u32::MAX
+        ))
+    })
 }
 
 impl WalManager {
@@ -141,6 +167,24 @@ impl WalManager {
     ///
     /// Returns an error if the directory cannot be created or accessed.
     pub fn with_config(dir: impl AsRef<Path>, config: WalConfig) -> Result<Self> {
+        Self::with_config_and_cipher(dir, config, None)
+    }
+
+    /// Opens or creates a WAL with custom configuration that encrypts every
+    /// record it writes with `cipher` (see [`set_encryptor`](Self::set_encryptor)
+    /// for the frame format); `None` writes plaintext.
+    ///
+    /// The cipher is in place before the manager exists, so no record can be
+    /// written without it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created or accessed.
+    pub fn with_config_and_cipher(
+        dir: impl AsRef<Path>,
+        config: WalConfig,
+        cipher: Option<WalCipher>,
+    ) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
 
@@ -169,8 +213,12 @@ impl WalManager {
             current_sequence: AtomicU64::new(max_sequence),
             checkpoint_epoch: Mutex::new(None),
             #[cfg(feature = "encryption")]
-            encryptor: None,
+            encryptor: cipher.map(Arc::new),
         };
+        #[cfg(not(feature = "encryption"))]
+        if let Some(cipher) = cipher {
+            match cipher {}
+        }
 
         // Open or create the active log
         manager.ensure_active_log()?;
@@ -181,11 +229,12 @@ impl WalManager {
     /// Sets the encryptor for WAL record encryption.
     ///
     /// When set, all written records are encrypted with AES-256-GCM and the
-    /// GCM authentication tag replaces the CRC32 checksum. The nonce is derived
-    /// from the WAL sequence number.
+    /// GCM authentication tag replaces the CRC32 checksum. Each record gets a
+    /// random nonce, stored in front of its ciphertext, so a log that starts
+    /// over under the same key never repeats one.
     #[cfg(feature = "encryption")]
     pub fn set_encryptor(&mut self, encryptor: grafeo_common::encryption::PageEncryptor) {
-        self.encryptor = Some(encryptor);
+        self.encryptor = Some(Arc::new(encryptor));
     }
 
     /// Returns whether encryption is active.
@@ -193,6 +242,31 @@ impl WalManager {
     #[must_use]
     pub fn is_encrypted(&self) -> bool {
         self.encryptor.is_some()
+    }
+
+    /// The encryptor of this WAL, for a recovery that reads it.
+    #[cfg(feature = "encryption")]
+    pub(crate) fn encryptor(&self) -> Option<&Arc<grafeo_common::encryption::PageEncryptor>> {
+        self.encryptor.as_ref()
+    }
+
+    /// The encrypted payload of a frame (`nonce || ciphertext || tag`), or
+    /// `None` for a WAL without an encryptor.
+    ///
+    /// Each record gets a random nonce: the key of a database's WAL stays the
+    /// same for its whole life, while the log starts over at file 0, offset 0
+    /// whenever a clean close removes the sidecar WAL, so a nonce built from
+    /// the file sequence and offset would repeat under that key.
+    #[cfg(feature = "encryption")]
+    fn encrypt(&self, data: &[u8]) -> Result<Option<Vec<u8>>> {
+        let Some(encryptor) = &self.encryptor else {
+            return Ok(None);
+        };
+        let nonce = grafeo_common::encryption::random_nonce();
+        encryptor
+            .encrypt(data, &nonce, b"grafeo-wal")
+            .map(Some)
+            .map_err(|e| Error::Internal(format!("WAL encryption failed: {e}")))
     }
 
     /// Logs a record to the WAL.
@@ -248,6 +322,20 @@ impl WalManager {
     pub(crate) fn write_frames(&self, frames: &[&[u8]], force_sync: bool) -> Result<()> {
         use grafeo_common::testing::crash::maybe_crash;
 
+        // A frame too long for its length prefix fails before any frame of
+        // the group is written.
+        #[cfg(feature = "encryption")]
+        let overhead = if self.encryptor.is_some() {
+            grafeo_common::encryption::ENCRYPTION_OVERHEAD
+        } else {
+            0
+        };
+        #[cfg(not(feature = "encryption"))]
+        let overhead = 0;
+        for data in frames {
+            frame_length(data.len().saturating_add(overhead))?;
+        }
+
         self.ensure_active_log()?;
 
         // Phase 1: write frame data and flush buffer while holding the lock.
@@ -262,83 +350,33 @@ impl WalManager {
             for &data in frames {
                 maybe_crash("wal_before_write");
 
-                // Encrypt or write plaintext depending on encryption configuration.
                 // Encrypted frame: [len:4][nonce(12) || ciphertext || tag(16)]
-                // Plaintext frame:  [len:4][data][crc32:4]
+                // Plaintext frame: [len:4][data][crc32:4]
                 #[cfg(feature = "encryption")]
-                let (frame_data, record_size) = if let Some(ref enc) = self.encryptor {
-                    let file_seq = self.current_sequence.load(Ordering::Relaxed);
-                    // Use the file byte offset as the nonce counter, not the ephemeral
-                    // record count. The byte offset survives restarts (file is append-only)
-                    // and is unique per record within a file. Combined with the file sequence,
-                    // this guarantees nonce uniqueness even after crash + restart.
-                    //
-                    // The nonce high word is 4 bytes, so the file sequence must fit in u32.
-                    // With one rotation per ~64 MB of WAL, this allows ~256 exabytes of
-                    // total WAL writes before exhaustion, which is effectively unlimited.
-                    let seq_u32 = u32::try_from(file_seq).map_err(|_| {
-                        Error::Internal(
-                            "WAL file sequence exceeds u32::MAX: encryption nonce space exhausted"
-                                .to_string(),
-                        )
-                    })?;
-                    let byte_offset = log_file.size;
-                    let nonce = grafeo_common::encryption::build_nonce(seq_u32, byte_offset);
-                    let aad = b"grafeo-wal";
-                    let encrypted = enc
-                        .encrypt(data, &nonce, aad)
-                        .map_err(|e| Error::Internal(format!("WAL encryption failed: {e}")))?;
-                    // reason: WAL wire format uses u32 length prefix; individual records are well under 4 GiB
-                    #[allow(clippy::cast_possible_truncation)]
-                    let len = encrypted.len() as u32;
-                    log_file.writer.write_all(&len.to_le_bytes())?;
-                    log_file.writer.write_all(&encrypted)?;
-                    let size = 4 + encrypted.len() as u64;
-                    (true, size)
-                } else {
-                    (false, 0u64)
-                };
-
-                #[cfg(feature = "encryption")]
-                if !frame_data {
-                    // reason: WAL wire format uses u32 length prefix; individual records are well under 4 GiB
-                    #[allow(clippy::cast_possible_truncation)]
-                    let len = data.len() as u32;
-                    log_file.writer.write_all(&len.to_le_bytes())?;
-                    log_file.writer.write_all(data)?;
-                    let checksum = crc32fast::hash(data);
-                    log_file.writer.write_all(&checksum.to_le_bytes())?;
-                }
-
+                let encrypted = self.encrypt(data)?;
                 #[cfg(not(feature = "encryption"))]
-                {
-                    // Write length prefix
-                    // reason: WAL wire format uses u32 length prefix; individual records are well under 4 GiB
-                    #[allow(clippy::cast_possible_truncation)]
-                    let len = data.len() as u32;
-                    log_file.writer.write_all(&len.to_le_bytes())?;
-
-                    // Write data
-                    log_file.writer.write_all(data)?;
-
-                    // Write checksum
-                    let checksum = crc32fast::hash(data);
-                    log_file.writer.write_all(&checksum.to_le_bytes())?;
-                }
+                let encrypted: Option<Vec<u8>> = None;
+                let record_size = match encrypted {
+                    Some(encrypted) => {
+                        let length = frame_length(encrypted.len())?;
+                        log_file.writer.write_all(&length.to_le_bytes())?;
+                        log_file.writer.write_all(&encrypted)?;
+                        4 + u64::from(length)
+                    }
+                    None => {
+                        let length = frame_length(data.len())?;
+                        log_file.writer.write_all(&length.to_le_bytes())?;
+                        log_file.writer.write_all(data)?;
+                        log_file
+                            .writer
+                            .write_all(&crc32fast::hash(data).to_le_bytes())?;
+                        4 + u64::from(length) + 4
+                    }
+                };
 
                 maybe_crash("wal_after_write");
 
-                // Update size tracking
-                #[cfg(feature = "encryption")]
-                let record_size = if frame_data {
-                    record_size
-                } else {
-                    4 + data.len() as u64 + 4
-                };
-                #[cfg(not(feature = "encryption"))]
-                let record_size = 4 + data.len() as u64 + 4; // length + data + checksum
                 log_file.size += record_size;
-
                 self.total_record_count.fetch_add(1, Ordering::Relaxed);
                 self.records_since_sync.fetch_add(1, Ordering::Relaxed);
             }
@@ -975,5 +1013,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(wal.checkpoint_epoch(), Some(EpochId::new(10)));
+    }
+
+    /// A log that starts over under the same key, as the sidecar WAL of an
+    /// encrypted database does after a clean close removed it, never repeats
+    /// a nonce: the same record at the same position of the first log file
+    /// gets a different nonce the second time.
+    #[cfg(all(feature = "encryption", not(miri)))]
+    #[test]
+    fn a_log_started_over_under_one_key_never_repeats_a_nonce() {
+        use grafeo_common::encryption::{KeyChain, NONCE_SIZE};
+
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("amsterdam.grafeo.wal");
+        let chain = KeyChain::new([3; 32]);
+        let record = WalRecord::CreateNode {
+            id: NodeId::new(19),
+            labels: vec!["Person".to_string()],
+        };
+        let mut nonces = Vec::new();
+        for _ in 0..2 {
+            {
+                let mut wal = WalManager::open(&wal_dir).unwrap();
+                wal.set_encryptor(chain.encryptor_for("grafeo-wal", &88u128.to_le_bytes()));
+                wal.log(&record).unwrap();
+                wal.flush().unwrap();
+            }
+            let log = fs::read(wal_dir.join("wal_00000000.log")).unwrap();
+            // Frame: length (4 bytes), then the nonce.
+            nonces.push(log[4..4 + NONCE_SIZE].to_vec());
+            fs::remove_dir_all(&wal_dir).unwrap();
+        }
+        assert_ne!(
+            nonces[0], nonces[1],
+            "the log started over reused the nonce of its first record"
+        );
     }
 }

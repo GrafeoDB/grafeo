@@ -1,6 +1,6 @@
 //! Persistence, snapshots, and data export for GrafeoDB.
 
-#[cfg(feature = "wal")]
+#[cfg(any(feature = "wal", feature = "grafeo-file"))]
 use std::path::Path;
 
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
@@ -578,9 +578,15 @@ impl super::GrafeoDB {
     ///
     /// The original database remains unchanged.
     ///
+    /// The copy of an encrypted database (`Config::encryption`) is encrypted
+    /// with the same key chain: it is a database of its own, with a new
+    /// database id and so its own keys. A WAL-directory copy of an encrypted
+    /// database is refused, as it would be written in plaintext.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the save operation fails.
+    /// Returns an error if the save operation fails, or if an encrypted
+    /// database is saved to a path that is not a `.grafeo` file.
     ///
     /// Requires the `wal` feature for persistence support.
     #[cfg(feature = "wal")]
@@ -593,8 +599,14 @@ impl super::GrafeoDB {
             return self.save_as_grafeo_file(path);
         }
 
-        // Create target database with WAL enabled
+        // Create target database with WAL enabled; with a key, its open
+        // refuses the WAL-directory format instead of writing plaintext.
         let target_config = Config::persistent(path);
+        #[cfg(feature = "encryption")]
+        let target_config = Config {
+            encryption: self.config.encryption.clone(),
+            ..target_config
+        };
         let target = Self::with_config(target_config)?;
 
         // Copy all nodes using WAL-enabled methods
@@ -754,26 +766,73 @@ impl super::GrafeoDB {
     /// Saves the database to a single `.grafeo` file (see [`save`](Self::save)).
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     fn save_as_grafeo_file(&self, path: &Path) -> Result<()> {
+        self.write_image(path)
+    }
+
+    /// Writes the database's complete state to a new `.grafeo` file at
+    /// `path` (see [`write_image_with`](Self::write_image_with)), encrypted
+    /// when this database is.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`write_image_with`](Self::write_image_with).
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub(crate) fn write_image(&self, path: &Path) -> Result<()> {
+        self.write_image_with(
+            path,
+            &super::encryption::DatabaseKeys::from_config(&self.config),
+        )
+    }
+
+    /// Writes the database's complete state to a new `.grafeo` file at
+    /// `path`: every checkpoint section, as one image, with the header
+    /// values of a checkpoint. The file has no sidecar WAL; it holds
+    /// everything.
+    ///
+    /// The file is a database of its own, with a new database id, encrypted
+    /// with the keys `keys` derive for that id (not encrypted when `keys`
+    /// has no key chain).
+    ///
+    /// If writing the image fails, the new file is removed again: it would
+    /// open as an empty database, and a retry would find `path` taken.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `path` already exists, or a section fails to
+    /// serialize, or the file cannot be written.
+    #[cfg(feature = "grafeo-file")]
+    pub(crate) fn write_image_with(
+        &self,
+        path: &Path,
+        keys: &super::encryption::DatabaseKeys,
+    ) -> Result<()> {
         use grafeo_storage::file::GrafeoFileManager;
+        use grafeo_storage::file::v3::header::new_database_id;
 
-        let snapshot_data = self.export_snapshot()?;
-        let epoch = self.lpg_store().current_epoch();
-        let transaction_id = self
-            .transaction_manager
-            .last_assigned_transaction_id()
-            .map_or(0, |t| t.0);
-        let node_count = self.lpg_store().node_count() as u64;
-        let edge_count = self.lpg_store().edge_count() as u64;
-
-        let fm = GrafeoFileManager::create(path)?;
-        fm.write_snapshot(
-            &snapshot_data,
-            epoch.0,
-            transaction_id,
-            node_count,
-            edge_count,
+        let sources = self.checkpoint_sources();
+        let sections = sources.sections();
+        let section_refs: Vec<&dyn grafeo_common::storage::Section> =
+            sections.iter().map(AsRef::as_ref).collect();
+        let database_id = new_database_id();
+        let fm = GrafeoFileManager::create_with_id(
+            path,
+            database_id,
+            keys.container_cipher(database_id),
         )?;
-        Ok(())
+        let written = fm
+            .write_checkpoint(&section_refs, &sources.context().checkpoint_header())
+            .and_then(|()| fm.close());
+        if written.is_err() {
+            drop(fm);
+            // Best effort: the error that matters is the one returned.
+            if let Err(error) = std::fs::remove_file(path) {
+                grafeo_common::grafeo_warn!(
+                    "cannot remove the incomplete image {}: {error}",
+                    path.display()
+                );
+            }
+        }
+        written
     }
 
     /// Creates an in-memory copy of this database.
@@ -788,6 +847,11 @@ impl super::GrafeoDB {
     /// Useful for:
     /// - Testing modifications without affecting the original
     /// - Faster operations when persistence isn't needed
+    ///
+    /// The copy of an encrypted database has no key (an in-memory database
+    /// cannot carry `Config::encryption`), so a copy saved from it with
+    /// [`save`](Self::save) is not encrypted. For an encrypted copy, call
+    /// `save` on the encrypted database itself.
     ///
     /// # Errors
     ///
@@ -832,11 +896,40 @@ impl super::GrafeoDB {
     /// The returned database has no connection to the original file.
     /// Changes will NOT be written back to the file.
     ///
+    /// This takes no key, so an encrypted database fails to open here: open
+    /// it with its key ([`with_config`](Self::with_config)) and call
+    /// [`to_memory`](Self::to_memory).
+    ///
+    /// A `.grafeo` file written by 0.5.x is read as
+    /// [`open_read_only`](Self::open_read_only) reads it (its sidecar WAL
+    /// replayed) and is not migrated: nothing on disk changes. A path whose
+    /// migration was cut off fails as a read-only open does.
+    ///
     /// # Errors
     ///
     /// Returns an error if the file can't be opened or loaded.
     #[cfg(feature = "wal")]
     pub fn open_in_memory(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        #[cfg(feature = "grafeo-file")]
+        {
+            use grafeo_storage::file::detect::{OnDisk, detect};
+            match detect(path)? {
+                // Read as a read-only open reads it: a read-write open would
+                // migrate it.
+                OnDisk::LegacyFile => {
+                    let source = Self::with_config(Config::read_only(path))?;
+                    let target = source.to_memory()?;
+                    source.close()?;
+                    return Ok(target);
+                }
+                // A missing file next to a cut-off migration or a kept copy
+                // fails as a read-only open does, before anything is created.
+                OnDisk::Missing => super::migration::check_read_only(path)?,
+                _ => {}
+            }
+        }
+
         // Open the source database (triggers WAL recovery)
         let source = Self::open(path)?;
 
@@ -858,6 +951,11 @@ impl super::GrafeoDB {
     /// The returned bytes can be stored (e.g. in IndexedDB) and later
     /// restored with [`import_snapshot()`](Self::import_snapshot).
     /// Includes all named graph data.
+    ///
+    /// The bytes are never encrypted, also for a database with
+    /// `Config::encryption`: they are the plaintext data, to be stored as
+    /// safely as the data itself. For an encrypted copy, use
+    /// [`save`](Self::save) with a `.grafeo` path.
     ///
     /// Properties are stored as version-history lists. When `temporal` is
     /// enabled, the full history is captured. Otherwise, each property is
@@ -934,7 +1032,8 @@ impl super::GrafeoDB {
 
     /// Creates a new in-memory database from a binary snapshot.
     ///
-    /// The `data` must have been produced by [`export_snapshot()`](Self::export_snapshot).
+    /// The `data` must have been produced by [`export_snapshot()`](Self::export_snapshot),
+    /// so it is plaintext (snapshots are never encrypted).
     ///
     /// All edge references are validated before any data is inserted: every
     /// edge's source and destination must reference a node present in the
@@ -1020,7 +1119,8 @@ impl super::GrafeoDB {
     /// Replaces the current database contents with data from a binary snapshot.
     ///
     /// The `data` must have been produced by
-    /// [`export_snapshot()`](Self::export_snapshot).
+    /// [`export_snapshot()`](Self::export_snapshot), so it is plaintext
+    /// (snapshots are never encrypted).
     ///
     /// All validation (duplicate IDs, dangling edge references) is performed
     /// before any data is modified. If validation fails, the current database
@@ -1644,5 +1744,42 @@ mod tests {
         // Restore should bring back the index
         db.restore_snapshot(&snapshot).unwrap();
         assert!(db.has_property_index("email"));
+    }
+
+    /// A `write_image` that fails, before or after the new header is
+    /// written, leaves no file behind: the file `create` made would open as
+    /// an empty database, and a retry would find the path taken. The retry
+    /// then succeeds.
+    #[cfg(all(
+        feature = "wal",
+        feature = "grafeo-file",
+        feature = "testing-crash-injection"
+    ))]
+    #[test]
+    fn a_failed_image_write_leaves_no_file_behind() {
+        use grafeo_common::testing::crash::with_failure_at;
+
+        let db = GrafeoDB::new_in_memory();
+        db.create_node(&["City"]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prague.grafeo");
+        let points = [
+            "checkpoint:after_chunks",
+            "checkpoint:after_data_sync",
+            "checkpoint:after_header",
+            "checkpoint:before_trim",
+        ];
+        for (count, point) in (1..).zip(points) {
+            let error = with_failure_at(count, || db.write_image(&path))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(point), "the original error: {error}");
+            assert!(!path.exists(), "{point}: the failed image is removed");
+        }
+
+        db.write_image(&path).unwrap();
+        let written = GrafeoDB::open(&path).unwrap();
+        assert_eq!(written.node_count(), 1);
+        written.close().unwrap();
     }
 }

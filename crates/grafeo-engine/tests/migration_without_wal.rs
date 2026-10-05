@@ -1,0 +1,223 @@
+//! Migration of 0.5.x database files in a build without the `wal` feature,
+//! such as the default `embedded` profile of the Node.js, C, Go, C# and Dart
+//! bindings.
+//!
+//! A file 0.5.x closed cleanly has no sidecar WAL: a read-write open migrates
+//! it as in any build. A file whose sidecar WAL holds changes is refused, by a
+//! read-write and a read-only open alike: this build cannot replay the WAL, and
+//! the file alone would lack its changes. These tests run in CI with:
+//!
+//! ```bash
+//! cargo test -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file \
+//!     --test migration_without_wal
+//! ```
+
+#![cfg(all(
+    feature = "lpg",
+    feature = "gql",
+    feature = "grafeo-file",
+    not(feature = "wal")
+))]
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use grafeo_common::types::Value;
+use grafeo_engine::{Config, GrafeoDB};
+use grafeo_storage::file::detect::{OnDisk, detect};
+
+/// The released versions with fixtures (#427).
+const VERSIONS: [&str; 2] = ["0.5.43", "0.5.44"];
+
+/// The fixture `name` written by `version`.
+fn fixture(version: &str, name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/released")
+        .join(version)
+        .join(name)
+}
+
+/// `<path><suffix>`, next to the database file.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn copy(from: &Path, to: &Path) {
+    if from.is_dir() {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            copy(&entry.path(), &to.join(entry.file_name()));
+        }
+    } else {
+        std::fs::copy(from, to).unwrap();
+    }
+}
+
+/// Every file under `root` with its bytes (`None` for a directory), leaving
+/// out the spill directories an open creates next to a database (scratch
+/// space, not part of it).
+fn files(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    let mut found = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if relative.to_string_lossy().ends_with(".spill") {
+                continue;
+            }
+            if path.is_dir() {
+                found.insert(relative, None);
+                pending.push(path);
+            } else {
+                found.insert(relative, Some(std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    found
+}
+
+/// A read-write open of `path` (`GrafeoDB::open` needs the `wal` feature).
+fn open(path: &Path) -> grafeo_common::utils::error::Result<GrafeoDB> {
+    GrafeoDB::with_config(Config::persistent(path))
+}
+
+fn rows(db: &GrafeoDB, query: &str) -> Vec<Vec<Value>> {
+    db.execute(query)
+        .unwrap_or_else(|error| panic!("{query}: {error}"))
+        .rows()
+        .to_vec()
+}
+
+/// What a database holds, as queries see it.
+#[derive(Debug, PartialEq)]
+struct Contents {
+    /// The label sets, with their node counts.
+    nodes: Vec<Vec<Value>>,
+    /// The edge types, with their counts.
+    edges: Vec<Vec<Value>>,
+    /// Every person with some properties, by name.
+    people: Vec<Vec<Value>>,
+    /// The named graphs, sorted.
+    graphs: Vec<String>,
+}
+
+fn contents(db: &GrafeoDB) -> Contents {
+    let mut graphs = db.list_graphs();
+    graphs.sort();
+    Contents {
+        nodes: rows(
+            db,
+            "MATCH (n) RETURN labels(n) AS l, count(*) AS c ORDER BY l",
+        ),
+        edges: rows(
+            db,
+            "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c ORDER BY t",
+        ),
+        people: rows(
+            db,
+            "MATCH (p:Person) RETURN p.name AS name, p.email, p.age ORDER BY name",
+        ),
+        graphs,
+    }
+}
+
+/// A read-write open migrates a 0.5.x file 0.5.x closed cleanly: the data is
+/// there, the old file is kept as `<path>.pre-0.6` byte for byte, the new file
+/// is in the 0.6 format, nothing of the migration is left, and a reopen finds
+/// the same data.
+#[test]
+fn a_closed_0_5_file_migrates_without_the_wal_feature() {
+    for version in VERSIONS {
+        let original = fixture(version, "closed.grafeo");
+        let dir = tempfile::tempdir().unwrap();
+        let expected = {
+            let reference = dir.path().join("reference.grafeo");
+            copy(&original, &reference);
+            let db = GrafeoDB::open_read_only(&reference).unwrap();
+            let found = contents(&db);
+            db.close().unwrap();
+            found
+        };
+        let people: Vec<&Value> = expected.people.iter().map(|person| &person[0]).collect();
+        assert_eq!(
+            people,
+            [
+                &Value::from("Alix"),
+                &Value::from("Gus"),
+                &Value::from("Mia")
+            ],
+            "{version}: the fixture holds its people"
+        );
+
+        let path = dir.path().join("db.grafeo");
+        copy(&original, &path);
+        let db = open(&path).unwrap_or_else(|error| panic!("{version}: {error}"));
+        assert_eq!(contents(&db), expected, "{version}: the migrated data");
+        db.close().unwrap();
+        drop(db);
+
+        assert!(
+            std::fs::read(with_suffix(&path, ".pre-0.6")).unwrap()
+                == std::fs::read(&original).unwrap(),
+            "{version}: <path>.pre-0.6 holds the bytes of the 0.5.x file"
+        );
+        assert!(
+            !with_suffix(&path, ".pre-0.6.wal").exists(),
+            "{version}: there was no sidecar WAL to keep"
+        );
+        assert_eq!(
+            detect(&path).unwrap(),
+            OnDisk::Current,
+            "{version}: the database file is in the 0.6 format"
+        );
+        for leftover in [".migrating", ".migrating.creating", ".migrate.lock"] {
+            assert!(
+                !with_suffix(&path, leftover).exists(),
+                "{version}: the migration left <path>{leftover} behind"
+            );
+        }
+
+        let db = open(&path).unwrap_or_else(|error| panic!("{version}: {error}"));
+        assert_eq!(contents(&db), expected, "{version}: the reopened data");
+        db.close().unwrap();
+    }
+}
+
+/// A 0.5.x file whose sidecar WAL holds changes is refused by a read-write and
+/// a read-only open, with an error that names the WAL and the `wal` feature,
+/// and every file stays as it was.
+#[test]
+fn a_0_5_file_with_a_sidecar_wal_is_refused_without_the_wal_feature() {
+    for version in VERSIONS {
+        let original = fixture(version, "unflushed.grafeo");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        copy(&original, &path);
+        copy(&with_suffix(&original, ".wal"), &with_suffix(&path, ".wal"));
+        let before = files(dir.path());
+        let wal = with_suffix(&path, ".wal").display().to_string();
+
+        for (open, result) in [
+            ("read-write", open(&path)),
+            ("read-only", GrafeoDB::open_read_only(&path)),
+        ] {
+            let error = match result {
+                Ok(_) => panic!("{version}: the {open} open succeeded without replaying the WAL"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains(&wal)
+                    && error.contains("only a build with the `wal` feature can replay"),
+                "{version}: the {open} error names the WAL and the feature: {error}"
+            );
+            assert!(
+                files(dir.path()) == before,
+                "{version}: the refused {open} open changes nothing"
+            );
+        }
+    }
+}

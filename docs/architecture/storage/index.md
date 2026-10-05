@@ -69,7 +69,7 @@ graph TB
 
     ---
 
-    `.grafeo` file format: section-based container with crash safety.
+    `.grafeo` file format: copy-on-write checkpoints, a chained directory and checksummed chunks.
 
 -   **[Ring Index](ring-index.md)**
 

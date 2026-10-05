@@ -188,7 +188,9 @@ mod tests {
     fn timer_stops_promptly() {
         let store = Arc::new(LpgStore::new().unwrap());
         let dir = tempfile::TempDir::new().unwrap();
-        let fm = Arc::new(GrafeoFileManager::create(dir.path().join("timer_test.grafeo")).unwrap());
+        let fm = Arc::new(
+            GrafeoFileManager::create(dir.path().join("timer_test.grafeo"), None).unwrap(),
+        );
 
         // Long interval
         let mut timer = start(Duration::from_mins(1), &fm, &store);
@@ -208,8 +210,9 @@ mod tests {
     fn timer_checkpoints_on_interval() {
         let store = Arc::new(LpgStore::new().unwrap());
         let dir = tempfile::TempDir::new().unwrap();
-        let fm =
-            Arc::new(GrafeoFileManager::create(dir.path().join("interval_test.grafeo")).unwrap());
+        let fm = Arc::new(
+            GrafeoFileManager::create(dir.path().join("interval_test.grafeo"), None).unwrap(),
+        );
 
         // Add some data so sections have content
         store.create_node(&["Test"]);
@@ -235,7 +238,9 @@ mod tests {
     fn timer_runs_on_an_empty_database() {
         let store = Arc::new(LpgStore::new().unwrap());
         let dir = tempfile::TempDir::new().unwrap();
-        let fm = Arc::new(GrafeoFileManager::create(dir.path().join("clean_test.grafeo")).unwrap());
+        let fm = Arc::new(
+            GrafeoFileManager::create(dir.path().join("clean_test.grafeo"), None).unwrap(),
+        );
 
         let created = fm.active_header().iteration;
         let mut timer = start(Duration::from_millis(200), &fm, &store);

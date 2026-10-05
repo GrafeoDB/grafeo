@@ -20,7 +20,7 @@ Grafeo is designed as an **embedded library**, not a network-accessible server:
 - **Per-graph grants** - Identities can be restricted to specific named graphs
 - **No built-in authentication** - The caller is trusted to assign roles; no credentials or crypto at this layer
 - **No network protocol** - No TCP/HTTP ports to secure
-- **No encryption at rest** - Database files are not encrypted
+- **Optional encryption at rest**: a `.grafeo` database and its WAL can be encrypted (see [Encryption at Rest](#encryption-at-rest))
 - **File-based access control** - Database files rely on filesystem permissions
 
 This model is appropriate for:
@@ -89,6 +89,79 @@ DROP GRAPH old_data;
 
 !!! note "No credentials at this layer"
     Grafeo does not handle authentication (passwords, tokens, certificates). The caller is trusted to assign the correct role. Use your application's auth layer to map users to Grafeo identities.
+
+---
+
+## Encryption at Rest
+
+Grafeo can encrypt a single-file database (`.grafeo`) and its WAL with AES-256-GCM. Enable the `encryption` feature of `grafeo-engine` and set `Config::encryption` to a key chain built from a 32-byte master key:
+
+```rust
+use std::sync::Arc;
+
+use grafeo_common::encryption::KeyChain;
+use grafeo_engine::config::EncryptionConfig;
+use grafeo_engine::{Config, GrafeoDB};
+
+// 32 bytes from your key management (a KMS, a secrets manager, an HSM).
+let master_key: [u8; 32] = load_master_key();
+
+let mut config = Config::persistent("social.grafeo");
+config.encryption = Some(EncryptionConfig {
+    key_chain: Arc::new(KeyChain::new(master_key)),
+});
+let db = GrafeoDB::with_config(config)?;
+```
+
+Grafeo stores no key material: keep the master key safe, as the database cannot be opened without it. To derive the master key from a passphrase, `PasswordKeyProvider::derive_with_salt` (Argon2id) gives the same key for the same passphrase and salt; store the salt with the database.
+
+### What Is Encrypted
+
+| Encrypted | Not encrypted |
+|-----------|---------------|
+| The `.grafeo` file: every section (data, schema, indexes) and the directory that lists them | The file header (format version, the encrypted flag, the database id, the creation time and Grafeo version) and the two database headers (checkpoint counters and time, node and edge counts) |
+| The sidecar WAL (`<file>.wal/`): every record | WAL bookkeeping files (the checkpoint marker, the backup cursor) |
+| A copy written by `save()` to a `.grafeo` path | The bytes `export_snapshot()` returns: plaintext, to be stored as safely as the data |
+| Full backups (`backup_full()`, a copy of the encrypted file) and incremental segments (`backup_incremental()`, encrypted WAL records) | The backup manifest (segment names, epochs, sizes, checksums) |
+| A database restored with `restore_to_epoch_with()`, and the WAL it writes next to it | An in-memory copy made with `to_memory()`: it has no key, so a copy saved from it is plaintext (call `save()` on the encrypted database instead) |
+| | The `.pre-0.6` files a migration keeps of a database written by 0.5.x: the file and, if they existed, its WAL and a pending checkpoint image |
+
+An encrypted database writes no spill files: spill files are not encrypted, so it gets no spill path (`<file>.spill/` for other databases), and `Config::validate` refuses an explicit `spill_path`, or a section pinned to `TierOverride::ForceDisk`, together with `encryption`. In 0.6.0 a memory limit therefore cannot move the data of an encrypted database to disk.
+
+### Keys
+
+The key chain derives the keys with HKDF-SHA256, one per database and component: `"grafeo-container"` for the file and `"grafeo-wal"` for its WAL, each with the database id from the file header. Two databases configured with the same master key therefore have different keys, and a copy made with `save()` gets a new database id and keys of its own.
+
+### Opening an Encrypted Database
+
+- A database created with a key is encrypted, one created without a key is not, and that stays so: changing the key, or encrypting an existing 0.6 database, is not supported yet.
+- Opening an encrypted database without a key fails with "the database is encrypted and needs its key". With another master key it fails while reading the file ("wrong key or corrupted data"). Neither changes the file.
+- Opening an unencrypted database with a key fails with "the database is not encrypted", so plaintext data is never taken for encrypted data.
+- A read-only open (`Config::read_only`) needs the key as well, and works with it.
+- A database written by 0.5.x is never encrypted. A read-write open with a key migrates it into an encrypted 0.6 file. The migration keeps the old files unencrypted: the file as `<file>.pre-0.6`, its WAL as `<file>.pre-0.6.wal` and, if present, a checkpoint 0.5.44 left pending as `<file>.pre-0.6.checkpoint`. Remove all of them once you no longer need to go back to 0.5.x. A read-only open with a key fails with "the database is not encrypted".
+- Encryption needs a persistent single-file database: `Config::validate` refuses it for an in-memory database, and opening a WAL-directory database with a key fails.
+- `GrafeoDB::open_in_memory` takes no key: open an encrypted database with its key and call `to_memory()` instead.
+
+### Backups of an Encrypted Database
+
+`backup_full()` and `backup_incremental()` of an encrypted database write encrypted backups, and need no key. To restore them, pass the same key chain to `restore_to_epoch_with`:
+
+```rust
+use std::path::Path;
+use std::sync::Arc;
+
+use grafeo_common::encryption::KeyChain;
+use grafeo_engine::config::EncryptionConfig;
+use grafeo_engine::GrafeoDB;
+
+let encryption = EncryptionConfig {
+    key_chain: Arc::new(KeyChain::new(master_key)),
+};
+let output = Path::new("restored.grafeo");
+GrafeoDB::restore_to_epoch_with(backup_dir, target_epoch, output, &encryption)?;
+```
+
+The key is checked against the full backup before anything is written. The restored database is encrypted with the backup's keys: open it with the same key chain. `restore_to_epoch` without a key refuses an encrypted backup when it has incremental segments to replay; a restore that needs only the full backup copies the encrypted file.
 
 ---
 
@@ -373,6 +446,7 @@ Before deploying:
 - [ ] Sessions use appropriate roles (`ReadOnly` for read paths, `ReadWrite` for mutations)
 - [ ] Per-graph grants restrict multi-tenant access where needed
 - [ ] Database files have restricted permissions (700 or 600)
+- [ ] Databases holding sensitive data are encrypted at rest (`Config::encryption`) and the master key is kept outside the database directory
 - [ ] All queries use parameterization (no string interpolation)
 - [ ] Input validation on all user-provided data
 - [ ] Query results are limited to prevent DoS

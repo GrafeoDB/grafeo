@@ -234,45 +234,30 @@ mod tests {
         );
     }
 
-    /// A checkpoint that fails partway (here its new image cannot be created,
-    /// as on a full disk) leaves the database usable, and the data readable
-    /// after a reopen, once, for query writes and direct writes alike (#418,
-    /// #424).
-    #[test]
-    fn failed_checkpoint_keeps_the_database_readable() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("db.grafeo");
-        let blocker = {
-            let mut name = path.as_os_str().to_owned();
-            name.push(".checkpoint.tmp");
-            PathBuf::from(name)
-        };
-        {
-            let db = open(&path);
-            let session = db.session();
-            session
-                .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
-                .unwrap();
-            db.wal_checkpoint().unwrap();
-            session
-                .execute("INSERT (:Person {name: 'Vincent'})")
-                .unwrap();
-            let mia = db
-                .create_node_with_props(&["Person"], [("name", Value::from("Mia"))])
-                .unwrap();
-            let butch = db
-                .create_node_with_props(&["Person"], [("name", Value::from("Butch"))])
-                .unwrap();
-            db.create_edge(mia, butch, "LIKES").unwrap();
+    /// Writes Alix and Gus and checkpoints, then writes Vincent with a query
+    /// and Mia, Butch and their edge with direct calls: the writes a failed
+    /// checkpoint must not lose.
+    fn write_and_checkpoint_then_write_more(db: &GrafeoDB) {
+        let session = db.session();
+        session
+            .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+            .unwrap();
+        db.wal_checkpoint().unwrap();
+        session
+            .execute("INSERT (:Person {name: 'Vincent'})")
+            .unwrap();
+        let mia = db
+            .create_node_with_props(&["Person"], [("name", Value::from("Mia"))])
+            .unwrap();
+        let butch = db
+            .create_node_with_props(&["Person"], [("name", Value::from("Butch"))])
+            .unwrap();
+        db.create_edge(mia, butch, "LIKES").unwrap();
+    }
 
-            std::fs::create_dir(&blocker).unwrap();
-            assert!(db.wal_checkpoint().is_err(), "the checkpoint must fail");
-            session.execute("INSERT (:Person {name: 'Jules'})").unwrap();
-            assert!(db.close().is_err(), "close() checkpoints too");
-        }
-        std::fs::remove_dir(&blocker).unwrap();
-
-        let db = open(&path);
+    /// Every write of [`write_and_checkpoint_then_write_more`] and Jules,
+    /// written after the failed checkpoint, is there once.
+    fn assert_every_write_once(db: &GrafeoDB, what: &str) {
         let names = db
             .session()
             .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
@@ -288,13 +273,137 @@ mod tests {
                 vec![Value::from("Jules")],
                 vec![Value::from("Mia")],
                 vec![Value::from("Vincent")],
-            ]
+            ],
+            "{what}"
         );
         assert_eq!(
-            knows(&db),
-            vec![vec![Value::from("Alix"), Value::from("Gus")]]
+            knows(db),
+            vec![vec![Value::from("Alix"), Value::from("Gus")]],
+            "{what}"
         );
-        assert_eq!(db.edge_count(), 2, "KNOWS and LIKES, once each");
+        assert_eq!(db.edge_count(), 2, "{what}: KNOWS and LIKES, once each");
+    }
+
+    /// Copies the files of the directory `from` into a new directory `to`,
+    /// reading each through a handle that shares it with the open database.
+    #[cfg(feature = "testing-crash-injection")]
+    fn copy_files(from: &Path, to: &Path) {
+        std::fs::create_dir(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let bytes = std::fs::read(entry.path()).unwrap();
+            std::fs::write(to.join(entry.file_name()), bytes).unwrap();
+        }
+    }
+
+    /// A checkpoint that fails inside its image write, with `count` and
+    /// `point` naming where (before or after the new header is written),
+    /// returns the error and keeps the WAL it would have truncated. The
+    /// database stays usable for query writes and direct writes alike, and
+    /// every write reads back once after a reopen: from the file and WAL the
+    /// failure left (as after a crash at that moment), and after a clean
+    /// close (#418, #424).
+    #[cfg(feature = "testing-crash-injection")]
+    fn a_failed_image_write_keeps_the_database_readable(count: u64, point: &str) {
+        use grafeo_common::testing::crash::with_failure_at;
+        use grafeo_storage::wal::WalRecovery;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        let crashed = dir.path().join("crashed.grafeo");
+        {
+            let db = open(&path);
+            write_and_checkpoint_then_write_more(&db);
+            let sidecar = sidecar_wal(&path);
+            let marked = || {
+                WalRecovery::new(&sidecar)
+                    .checkpoint()
+                    .expect("checkpoint.meta")
+                    .log_sequence
+            };
+            let (files_before, marked_before) = (log_files(&sidecar), marked());
+
+            let error = with_failure_at(count, || db.wal_checkpoint())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(point),
+                "the checkpoint fails at {point}: {error}"
+            );
+            db.session()
+                .execute("INSERT (:Person {name: 'Jules'})")
+                .unwrap();
+
+            // The failed checkpoint started a new WAL file, and marked and
+            // deleted nothing.
+            let files_after = log_files(&sidecar);
+            assert!(
+                files_before.iter().all(|file| files_after.contains(file)),
+                "{point}: the WAL lost files: {files_before:?}, then {files_after:?}"
+            );
+            assert_eq!(
+                files_after.len(),
+                files_before.len() + 1,
+                "{point}: the checkpoint rotated the WAL"
+            );
+            assert_eq!(marked(), marked_before, "{point}: the WAL is not marked");
+
+            // What a crash at this moment leaves: the file and its WAL.
+            db.wal().unwrap().sync().unwrap();
+            db.file_manager().unwrap().copy_to(&crashed).unwrap();
+            copy_files(&sidecar, &sidecar_wal(&crashed));
+            db.close().unwrap();
+        }
+        assert_every_write_once(&open(&crashed), &format!("{point}, as after a crash"));
+        assert_every_write_once(&open(&path), &format!("{point}, after close"));
+    }
+
+    #[cfg(feature = "testing-crash-injection")]
+    #[test]
+    fn failed_checkpoint_before_its_header_keeps_the_database_readable() {
+        a_failed_image_write_keeps_the_database_readable(1, "checkpoint:after_chunks");
+    }
+
+    #[cfg(feature = "testing-crash-injection")]
+    #[test]
+    fn failed_checkpoint_after_its_header_keeps_the_database_readable() {
+        a_failed_image_write_keeps_the_database_readable(3, "checkpoint:after_header");
+    }
+
+    /// Checkpoints that fail before anything is written (the new WAL file
+    /// each one starts cannot be created, as on a full disk), including those
+    /// of `close()` and `Drop`, leave every write in the WAL, which a reopen
+    /// replays once.
+    #[test]
+    fn checkpoints_whose_wal_cannot_rotate_keep_the_database_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        let mut blockers = Vec::new();
+        {
+            let db = open(&path);
+            write_and_checkpoint_then_write_more(&db);
+
+            // Every checkpoint from here on fails: the WAL file it starts is
+            // a directory. Three are tried, each with the next sequence
+            // number: `wal_checkpoint()`, `close()` and the `close()` of `Drop`.
+            let next = db.wal().unwrap().current_sequence() + 1;
+            blockers.extend(
+                (next..next + 3)
+                    .map(|sequence| sidecar_wal(&path).join(format!("wal_{sequence:08}.log"))),
+            );
+            for blocker in &blockers {
+                std::fs::create_dir(blocker).unwrap();
+            }
+            assert!(db.wal_checkpoint().is_err(), "the checkpoint must fail");
+            db.session()
+                .execute("INSERT (:Person {name: 'Jules'})")
+                .unwrap();
+            assert!(db.close().is_err(), "close() checkpoints too");
+        }
+        for blocker in &blockers {
+            std::fs::remove_dir(blocker).unwrap();
+        }
+        assert_every_write_once(&open(&path), "reopened from the WAL");
     }
 
     fn log_files(dir: &Path) -> Vec<PathBuf> {

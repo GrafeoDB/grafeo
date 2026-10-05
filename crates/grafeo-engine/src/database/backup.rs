@@ -300,8 +300,17 @@ fn wal_file_sequence(path: &Path) -> u64 {
 
 // ── Backup operations (called from GrafeoDB) ───────────────────────
 
+use std::io::Read;
+
 use grafeo_storage::file::GrafeoFileManager;
-use grafeo_storage::wal::LpgWal;
+use grafeo_storage::file::detect::{OnDisk, detect};
+use grafeo_storage::file::v3::header::{DbHeaderV3, FileHeaderV3, active_header};
+use grafeo_storage::wal::{LpgWal, WalCipher};
+
+use super::encryption::DatabaseKeys;
+
+/// Size of a page (and of each header) of a `.grafeo` file, in bytes.
+const PAGE_BYTES: usize = 4096;
 
 /// Creates a full backup by copying the .grafeo container file.
 ///
@@ -339,12 +348,12 @@ pub(super) fn do_backup_full(
 
     // Copy the .grafeo file to the backup directory through the locked handle
     fm.copy_to(&dest_path)?;
-    let copied_epoch = EpochId::new(fm.active_header().epoch);
 
     let file_size = std::fs::metadata(&dest_path).map_or(0, |m| m.len());
     let file_data = std::fs::read(&dest_path)
         .map_err(|e| Error::Internal(format!("failed to read backup file for checksum: {e}")))?;
     let checksum = crc32fast::hash(&file_data);
+    let copied_epoch = active_epoch(&file_data, &dest_path)?;
 
     let segment = BackupSegment {
         kind: BackupKind::Full,
@@ -379,6 +388,32 @@ pub(super) fn do_backup_full(
     }
 
     Ok(segment)
+}
+
+/// The epoch of the image a copied `.grafeo` file opens at, from its own
+/// active database header (headers are never encrypted).
+///
+/// The manager's in-memory header can be older: after a checkpoint that
+/// failed once its header was written, the manager keeps serving the
+/// previous image while the file opens at the new one.
+fn active_epoch(file_data: &[u8], path: &Path) -> Result<EpochId> {
+    let page = |index: usize| {
+        let start = index * PAGE_BYTES;
+        file_data.get(start..start + PAGE_BYTES).unwrap_or(&[])
+    };
+    let (_, header) = active_header([DbHeaderV3::decode(page(1)), DbHeaderV3::decode(page(2))])
+        .and_then(|active| {
+            active.ok_or_else(|| {
+                Error::Serialization("both database header slots are empty".to_string())
+            })
+        })
+        .map_err(|e| {
+            Error::Internal(format!(
+                "full backup {}: cannot read the copied file's database header: {e}",
+                path.display()
+            ))
+        })?;
+    Ok(EpochId::new(header.epoch))
 }
 
 /// Creates an incremental backup containing WAL records since the last backup.
@@ -517,19 +552,25 @@ pub(super) fn do_backup_incremental(
 
 /// Restores a database to a specific epoch from a backup chain.
 ///
-/// 1. Finds the most recent full backup with `end_epoch <= target_epoch`.
-/// 2. Opens the full backup as a GrafeoDB (via file manager).
+/// 1. Finds the most recent full backup with `end_epoch <= target_epoch`
+///    and the incremental segments after it, and checks `keys` against the
+///    full backup ([`restore_ciphers`]).
+/// 2. Copies the full backup to `output_path`.
 /// 3. Replays incremental segments up to `target_epoch` using epoch-bounded
-///    WAL recovery.
+///    WAL recovery, and writes the records as the sidecar WAL of the
+///    restored file. For an encrypted backup the segments are decrypted, and
+///    that WAL encrypted, with the WAL key of the backup's database.
 ///
 /// # Errors
 ///
 /// Returns an error if the backup chain does not cover the target epoch,
-/// if segment checksums fail, or if I/O fails.
+/// if `keys` do not fit the backup, if segment checksums fail, or if I/O
+/// fails.
 pub(super) fn do_restore_to_epoch(
     backup_dir: &Path,
     target_epoch: EpochId,
     output_path: &Path,
+    keys: &DatabaseKeys,
 ) -> Result<()> {
     // Restore must target a fresh path: the copy below overwrites
     // `output_path` and the sidecar handling deletes `<output_path>.wal/`,
@@ -558,11 +599,6 @@ pub(super) fn do_restore_to_epoch(
             ))
         })?;
 
-    // Copy full backup to output path
-    let full_path = backup_dir.join(&full.filename);
-    std::fs::copy(&full_path, output_path)
-        .map_err(|e| Error::Internal(format!("failed to copy full backup to output: {e}")))?;
-
     // Find incremental segments that cover (full.end_epoch, target_epoch]
     let incrementals: Vec<&BackupSegment> = manifest
         .segments
@@ -573,6 +609,14 @@ pub(super) fn do_restore_to_epoch(
                 && s.start_epoch <= target_epoch
         })
         .collect();
+
+    // The key is checked before anything is written.
+    let full_path = backup_dir.join(&full.filename);
+    let ciphers = restore_ciphers(&full_path, keys, !incrementals.is_empty())?;
+
+    // Copy full backup to output path
+    std::fs::copy(&full_path, output_path)
+        .map_err(|e| Error::Internal(format!("failed to copy full backup to output: {e}")))?;
 
     if incrementals.is_empty() {
         // Full backup already covers the target epoch
@@ -623,7 +667,7 @@ pub(super) fn do_restore_to_epoch(
     // that contains only records within the epoch boundary. This ensures
     // that when GrafeoDB::open() replays the sidecar WAL, it does not
     // advance beyond the target epoch.
-    let recovery = grafeo_storage::wal::WalRecovery::new(&wal_dir);
+    let recovery = grafeo_storage::wal::WalRecovery::with_cipher(&wal_dir, ciphers.decrypt);
     let records = recovery.recover_until_epoch(target_epoch)?;
 
     // Write a single trimmed WAL file containing only the bounded records
@@ -639,7 +683,8 @@ pub(super) fn do_restore_to_epoch(
 
     if !records.is_empty() {
         use grafeo_storage::wal::{LpgWal, WalConfig};
-        let trimmed_wal = LpgWal::with_config(&trimmed_dir, WalConfig::default())?;
+        let trimmed_wal =
+            LpgWal::with_config_and_cipher(&trimmed_dir, WalConfig::default(), ciphers.encrypt)?;
         for record in &records {
             trimmed_wal.log(record)?;
         }
@@ -662,6 +707,77 @@ pub(super) fn do_restore_to_epoch(
         .map_err(|e| Error::Internal(format!("failed to move WAL to sidecar location: {e}")))?;
 
     Ok(())
+}
+
+/// The WAL ciphers of a restore: one decrypts the segments, the other
+/// encrypts the WAL written next to the restored file (the same key, but a
+/// cipher cannot be shared between the two).
+struct RestoreCiphers {
+    decrypt: Option<WalCipher>,
+    encrypt: Option<WalCipher>,
+}
+
+/// Checks `keys` against the full backup at `path` before a restore writes
+/// anything, and returns the WAL ciphers of the backup's database (`None`
+/// for an unencrypted backup).
+///
+/// An encrypted backup restored without a key is refused when
+/// `has_segments` (its segments cannot be read); without segments the
+/// restore only copies the encrypted file. A key is checked by opening the
+/// backup with it, which decrypts its directory, and is refused for a backup
+/// that is not encrypted.
+fn restore_ciphers(path: &Path, keys: &DatabaseKeys, has_segments: bool) -> Result<RestoreCiphers> {
+    let plain = RestoreCiphers {
+        decrypt: None,
+        encrypt: None,
+    };
+    // A full backup taken by 0.5.x is a 0.5.x file, which is never encrypted.
+    let encrypted = match detect(path)? {
+        OnDisk::Current => {
+            let mut page = Vec::with_capacity(4096);
+            std::fs::File::open(path)
+                .and_then(|file| file.take(4096).read_to_end(&mut page))
+                .map_err(|e| {
+                    Error::Internal(format!(
+                        "cannot read the full backup {}: {e}",
+                        path.display()
+                    ))
+                })?;
+            let header = FileHeaderV3::decode(&page).map_err(|e| {
+                Error::Serialization(format!("full backup {}: {e}", path.display()))
+            })?;
+            header.encrypted.then_some(header.database_id)
+        }
+        _ => None,
+    };
+    match (encrypted, keys.is_encrypted()) {
+        (None, false) => Ok(plain),
+        (None, true) => Err(Error::InvalidValue(format!(
+            "the backup {} is not encrypted: restore it with `GrafeoDB::restore_to_epoch`, \
+             without a key",
+            path.display()
+        ))),
+        (Some(_), false) if has_segments => Err(Error::InvalidValue(format!(
+            "the backup {} is of an encrypted database, and its incremental segments can only \
+             be replayed with its key: restore it with `GrafeoDB::restore_to_epoch_with`",
+            path.display()
+        ))),
+        (Some(_), false) => Ok(plain),
+        (Some(database_id), true) => {
+            GrafeoFileManager::open_read_only_with_cipher_for(path, |id| keys.container_cipher(id))
+                .and_then(|backup| backup.close())
+                .map_err(|e| {
+                    Error::InvalidValue(format!(
+                        "the key does not open the backup {}: {e}",
+                        path.display()
+                    ))
+                })?;
+            Ok(RestoreCiphers {
+                decrypt: keys.wal_cipher(database_id),
+                encrypt: keys.wal_cipher(database_id),
+            })
+        }
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -798,6 +914,83 @@ mod tests {
         assert_eq!(parsed, BackupKind::Full);
     }
 
+    /// A full backup records the epoch of the image it copied. After a
+    /// checkpoint failed once its database header was written, the manager
+    /// still serves the previous image (epoch 3), but the file opens at the
+    /// new one (epoch 19): the backup must say 19, or a restore to an epoch
+    /// in between would copy it and return newer data.
+    #[cfg(feature = "testing-crash-injection")]
+    #[test]
+    fn a_full_backup_records_the_epoch_of_the_image_it_copied() {
+        use grafeo_common::storage::{Section, SectionType};
+        use grafeo_common::testing::crash::with_failure_at;
+        use grafeo_storage::file::CheckpointHeader;
+
+        /// A catalog section holding fixed bytes.
+        struct Fixed(&'static [u8]);
+
+        impl Section for Fixed {
+            fn section_type(&self) -> SectionType {
+                SectionType::Catalog
+            }
+
+            fn serialize(&self) -> Result<Vec<u8>> {
+                Ok(self.0.to_vec())
+            }
+
+            fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
+                Ok(())
+            }
+
+            fn is_dirty(&self) -> bool {
+                true
+            }
+
+            fn mark_clean(&self) {}
+
+            fn memory_usage(&self) -> usize {
+                self.0.len()
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        let backup_dir = dir.path().join("backups");
+        let fm = GrafeoFileManager::create(dir.path().join("vincent.grafeo"), None).unwrap();
+        let checkpoint = |data: &'static [u8], epoch: u64| {
+            fm.write_checkpoint(
+                &[&Fixed(data)],
+                &CheckpointHeader {
+                    epoch,
+                    ..CheckpointHeader::default()
+                },
+            )
+        };
+        checkpoint(b"Alix", 3).unwrap();
+        // The third failure point of a checkpoint is checkpoint:after_header.
+        let error = with_failure_at(3, || checkpoint(b"Gus", 19))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("checkpoint:after_header"), "{error}");
+        assert_eq!(
+            fm.active_header().epoch,
+            3,
+            "the manager serves the previous image"
+        );
+
+        let segment = do_backup_full(&backup_dir, &fm, None).unwrap();
+        let copy = GrafeoFileManager::open(backup_dir.join(&segment.filename), None).unwrap();
+        assert_eq!(
+            copy.active_header().epoch,
+            19,
+            "the copy opens at the new image"
+        );
+        assert_eq!(
+            segment.end_epoch,
+            EpochId::new(19),
+            "the backup records the epoch of the image it copied"
+        );
+    }
+
     #[test]
     fn test_do_restore_to_epoch_refuses_existing_output() {
         let dir = TempDir::new().unwrap();
@@ -810,7 +1003,13 @@ mod tests {
         let output_path = dir.path().join("live.grafeo");
         std::fs::write(&output_path, b"existing database, must not be clobbered").unwrap();
 
-        let err = do_restore_to_epoch(&backup_dir, EpochId::new(0), &output_path).unwrap_err();
+        let err = do_restore_to_epoch(
+            &backup_dir,
+            EpochId::new(0),
+            &output_path,
+            &DatabaseKeys::none(),
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("already exists"),
@@ -836,7 +1035,13 @@ mod tests {
         let sidecar = dir.path().join("live.grafeo.wal");
         std::fs::create_dir_all(&sidecar).unwrap();
 
-        let err = do_restore_to_epoch(&backup_dir, EpochId::new(0), &output_path).unwrap_err();
+        let err = do_restore_to_epoch(
+            &backup_dir,
+            EpochId::new(0),
+            &output_path,
+            &DatabaseKeys::none(),
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("already exists"),
             "expected refuse-if-exists error for leftover sidecar, got: {err}"

@@ -1,12 +1,14 @@
 //! WAL recovery.
 
 use super::record::WalEntry;
-use super::{CheckpointMetadata, WalManager, WalRecord};
+use super::{CheckpointMetadata, WalCipher, WalManager, WalRecord};
 use grafeo_common::utils::error::{Error, Result, StorageError};
 use grafeo_common::{grafeo_debug, grafeo_info, grafeo_warn};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
+#[cfg(feature = "encryption")]
+use std::sync::Arc;
 
 /// Name of the checkpoint metadata file.
 const CHECKPOINT_METADATA_FILE: &str = "checkpoint.meta";
@@ -30,7 +32,7 @@ pub struct WalRecovery {
     dir: std::path::PathBuf,
     /// Encryptor for decrypting WAL records (None = unencrypted).
     #[cfg(feature = "encryption")]
-    encryptor: Option<grafeo_common::encryption::PageEncryptor>,
+    encryptor: Option<Arc<grafeo_common::encryption::PageEncryptor>>,
 }
 
 impl WalRecovery {
@@ -43,19 +45,35 @@ impl WalRecovery {
         }
     }
 
+    /// Creates a recovery handler for the given WAL directory that decrypts
+    /// its records with `cipher`; `None` reads plaintext records.
+    #[must_use]
+    pub fn with_cipher(dir: impl AsRef<Path>, cipher: Option<WalCipher>) -> Self {
+        #[cfg(not(feature = "encryption"))]
+        if let Some(cipher) = cipher {
+            match cipher {}
+        }
+        Self {
+            dir: dir.as_ref().to_path_buf(),
+            #[cfg(feature = "encryption")]
+            encryptor: cipher.map(Arc::new),
+        }
+    }
+
     /// Sets the encryptor for decrypting WAL records during recovery.
     #[cfg(feature = "encryption")]
     pub fn set_encryptor(&mut self, encryptor: grafeo_common::encryption::PageEncryptor) {
-        self.encryptor = Some(encryptor);
+        self.encryptor = Some(Arc::new(encryptor));
     }
 
-    /// Creates a recovery handler from a WAL manager.
+    /// Creates a recovery handler from a WAL manager, which decrypts with
+    /// the manager's encryptor, if it has one.
     #[must_use]
     pub fn from_wal(wal: &WalManager) -> Self {
         Self {
             dir: wal.dir().to_path_buf(),
             #[cfg(feature = "encryption")]
-            encryptor: None,
+            encryptor: wal.encryptor().cloned(),
         }
     }
 
@@ -1469,6 +1487,39 @@ mod crash_tests {
             records.len(),
             2,
             "Aborted + crashed records should both be discarded"
+        );
+    }
+
+    /// A recovery made from an encrypted WAL manager decrypts with its key.
+    #[cfg(all(feature = "encryption", not(miri)))]
+    #[test]
+    fn recovery_from_an_encrypted_wal_keeps_its_cipher() {
+        use grafeo_common::encryption::KeyChain;
+
+        let dir = tempdir().unwrap();
+        let chain = KeyChain::new([3; 32]);
+        let wal = WalManager::with_config_and_cipher(
+            dir.path(),
+            super::super::WalConfig::default(),
+            Some(chain.encryptor_for("grafeo-wal", &19u128.to_le_bytes())),
+        )
+        .unwrap();
+        wal.log(&WalRecord::CreateNode {
+            id: NodeId::new(88),
+            labels: vec!["Person".to_string()],
+        })
+        .unwrap();
+        wal.log(&WalRecord::TransactionCommit {
+            transaction_id: TransactionId::new(3),
+        })
+        .unwrap();
+        wal.flush().unwrap();
+
+        let records = WalRecovery::from_wal(&wal).recover().unwrap();
+        assert_eq!(records.len(), 2, "both records decrypt: {records:?}");
+        assert!(
+            WalRecovery::new(dir.path()).recover().unwrap().is_empty(),
+            "without the cipher nothing reads"
         );
     }
 

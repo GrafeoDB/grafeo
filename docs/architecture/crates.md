@@ -97,16 +97,16 @@ use grafeo_core::execution::DataChunk;
 
 ## grafeo-storage
 
-Persistence I/O: section-based `.grafeo` container format, WAL management and crash safety. Sibling to `grafeo-core` (both depend only on `grafeo-common`, not on each other).
+Persistence I/O: the `.grafeo` container format, WAL management and crash safety. Sibling to `grafeo-core` (both depend only on `grafeo-common`, not on each other).
 
 | Module | Purpose |
 |--------|---------|
-| `container/` | Section-based `.grafeo` file format with checksummed, independently addressable sections |
+| `file/` | The `.grafeo` file: container format v3 (copy-on-write checkpoints, a chained directory, checksummed chunks), file locking, and the readers of files written by 0.5.x |
+| `container/` | The 0.5.x section directory, and memory-mapped spill files via `memmap2` |
 | `wal/` | Write-ahead log: append, replay, truncation, backup cursor |
-| `mmap/` | Memory-mapped section reads via `memmap2` |
 
 ```rust
-use grafeo_storage::container::Container;
+use grafeo_storage::file::GrafeoFileManager;
 use grafeo_storage::wal::WalManager;
 ```
 

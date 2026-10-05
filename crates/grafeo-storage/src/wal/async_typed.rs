@@ -41,6 +41,9 @@ use super::record::WalEntry;
 /// # Ok(())
 /// # }
 /// ```
+///
+/// Like [`AsyncWalManager`], it writes plaintext records: it has no
+/// encryption.
 pub struct AsyncTypedWal<R: WalEntry> {
     manager: AsyncWalManager,
     _record: PhantomData<R>,

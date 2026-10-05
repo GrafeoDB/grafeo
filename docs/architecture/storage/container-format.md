@@ -1,245 +1,266 @@
 # `.grafeo` Container Format Specification
 
 The `.grafeo` file is the single-file persistence format for Grafeo databases.
-It stores data in typed **sections**, each independently addressable, checksummed,
-and (for index sections) memory-mappable.
+This page describes container format v3, written since 0.6.0. A file holds
+**images**: an image is the state of one checkpoint, made of the **chunks** of
+its typed **sections** and a chained **directory** that lists them. Every
+header, directory block and chunk is checksummed, and checkpoints are
+copy-on-write: a new image never overwrites a page the active one uses.
+
+Files written by 0.5.x (container v1 and v2) are described under
+[Files Written by 0.5.x](#files-written-by-05x).
 
 ## File Layout
 
-```
+```text
 Offset    Size     Contents
 ────────────────────────────────────────────────────
-0x0000    4 KiB    FileHeader (magic, version, page size)
-0x1000    4 KiB    DbHeader H1 (iteration, checksum, metadata)
-0x2000    4 KiB    DbHeader H2 (alternating crash-safe copy)
-0x3000    4 KiB    Section Directory (type/offset/length/CRC entries)
-0x4000+   varies   Section data (page-aligned per section)
+0x0000    4 KiB    File header (magic, format version 3, flags, database id)
+0x1000    4 KiB    Database header, slot 0
+0x2000    4 KiB    Database header, slot 1
+0x3000+   pages    Chunks and directory blocks of the images
 ```
 
-Total header overhead: 16 KiB. All regions are page-aligned (4 KiB boundaries).
+The page size is 4 KiB. The headers take the first three pages (12 KiB); data
+starts at page 3 (`0x3000`). Every chunk and directory block starts on a page
+boundary, except that a chunk without bytes is stored with offset 0 and length 0
+and takes no pages. All integers are little-endian.
 
 ---
 
-## FileHeader (0x0000, 4 KiB)
+## File Header (0x0000, 4 KiB)
 
-Written once at database creation. Never modified afterwards.
+Written once when the database is created, never modified afterwards.
 
 | Offset | Size | Type | Field | Description |
 |--------|------|------|-------|-------------|
-| 0 | 4 | `[u8; 4]` | `magic` | `0x47524146` ("GRAF") |
-| 4 | 4 | `u32 LE` | `format_version` | `1` (current) |
-| 8 | 4 | `u32 LE` | `page_size` | Always `4096` |
-| 12 | 8 | `u64 LE` | `creation_timestamp_ms` | Unix epoch milliseconds |
-| 20 | 32 | `[u8; 32]` | `creator_version` | UTF-8 Grafeo version, zero-padded |
-| 52 | 4044 | - | (reserved) | Zero-filled |
+| 0 | 4 | `[u8; 4]` | `magic` | `GRAF` |
+| 4 | 4 | `u32` | `format_version` | `3` |
+| 8 | 4 | `u32` | `page_size` | Always `4096` |
+| 12 | 4 | `u32` | `flags` | Feature flags (see below) |
+| 16 | 16 | `u128` | `database_id` | Random id of the database, set at creation |
+| 32 | 8 | `u64` | `creation_timestamp_ms` | Unix epoch milliseconds |
+| 40 | 32 | `[u8; 32]` | `creator_version` | UTF-8 Grafeo version, zero-padded |
+| 72 | 4 | `u32` | `crc` | CRC-32 of bytes 0..72 |
+| 76 | 4020 | - | (reserved) | Written as zero, ignored by readers |
 
-The header is serialized with bincode and zero-padded to 4 KiB.
+**Flags:** bits 0 to 15 are incompatible features, which change how the file
+must be read: a reader refuses a file that sets one it does not know. Bits 16
+to 31 are compatible features, which a reader that does not know them ignores.
+The only feature today is incompatible bit 0: the file is encrypted.
 
-**Validation on open:**
-
-- `magic` must equal `b"GRAF"` (reject otherwise)
-- `format_version` must be `<= FORMAT_VERSION` (reject unknown future versions)
-
----
-
-## DbHeader H1/H2 (0x1000 and 0x2000, 4 KiB each)
-
-Two alternating header slots provide crash safety. On each checkpoint, the
-**inactive** slot is overwritten with the new state, then fsynced. If the process
-crashes mid-write, the other slot still contains valid metadata.
-
-| Field | Size | Type | Description |
-|-------|------|------|-------------|
-| `iteration` | 8 | `u64 LE` | Monotonic counter, higher = current |
-| `checksum` | 4 | `u32 LE` | CRC-32 of section directory (v2) or snapshot (v1) |
-| `snapshot_length` | 8 | `u64 LE` | `0` for v2 section format, `>0` for v1 blob format |
-| `epoch` | 8 | `u64 LE` | MVCC epoch at checkpoint |
-| `transaction_id` | 8 | `u64 LE` | Last committed transaction ID |
-| `node_count` | 8 | `u64 LE` | LPG node count |
-| `edge_count` | 8 | `u64 LE` | LPG edge count |
-| `timestamp_ms` | 8 | `u64 LE` | Checkpoint timestamp (Unix epoch ms) |
-| (reserved) | ~3940 | - | Zero-filled to 4 KiB |
-
-**Active header selection:** On open, read both H1 and H2. The header with
-the higher `iteration` value is the active state. If both are empty
-(`iteration == 0`), the database has never been checkpointed.
-
-**v1/v2 detection:** If the active header has `snapshot_length > 0`, the file
-uses the v1 blob format (a single bincode snapshot starting at `DATA_OFFSET`).
-If `snapshot_length == 0` and `iteration > 0`, the file uses the v2 section
-format with a section directory at `0x3000`.
+**Validation on open**, in this order: the magic, the CRC, the format version
+(must be 3), the page size (must be 4096) and the incompatible flags.
 
 ---
 
-## Section Directory (0x3000, 4 KiB)
+## Database Headers (0x1000 and 0x2000, 4 KiB each)
 
-A fixed-size page containing an array of section entries. Each entry is 32 bytes.
-Maximum capacity: 127 sections (`(4096 - 8) / 32`).
-
-### Directory Header
-
-| Offset | Size | Type | Field |
-|--------|------|------|-------|
-| 0 | 4 | `u32 LE` | `entry_count` |
-| 4 | 4 | `u32 LE` | `reserved` (zero) |
-
-### Directory Entry (32 bytes each, starting at offset 8)
+Two alternating slots provide crash safety. A checkpoint writes its header into
+the **inactive** slot, so the active one stays intact until the new header is
+on disk.
 
 | Offset | Size | Type | Field | Description |
 |--------|------|------|-------|-------------|
-| 0 | 4 | `u32 LE` | `section_type` | Section type ID (see table below) |
-| 4 | 1 | `u8` | `version` | Per-section format version |
-| 5 | 1 | `u8` | `flags` | Bit 0: required, Bit 1: mmap-able |
-| 6 | 2 | `u16 LE` | `reserved` | Zero |
-| 8 | 8 | `u64 LE` | `offset` | Byte offset from file start |
-| 16 | 8 | `u64 LE` | `length` | Byte length of section data |
-| 24 | 4 | `u32 LE` | `checksum` | CRC-32 of section data |
-| 28 | 4 | `u32 LE` | `reserved` | Zero |
+| 0 | 4 | `[u8; 4]` | `magic` | `GDBH` |
+| 4 | 4 | `u32` | (reserved) | Zero |
+| 8 | 8 | `u64` | `iteration` | Checkpoint counter, higher = current |
+| 16 | 8 | `u64` | `checkpoint_lsn` | WAL position the checkpoint covers (currently always 0) |
+| 24 | 8 | `u64` | `epoch` | MVCC epoch at the checkpoint |
+| 32 | 8 | `u64` | `last_transaction_id` | Last committed transaction id |
+| 40 | 8 | `u64` | `root.offset` | Offset of the image's first directory block |
+| 48 | 4 | `u32` | `root.length` | Length of that block |
+| 52 | 4 | `u32` | `root.crc` | CRC-32 of that block |
+| 56 | 8 | `u64` | `node_count` | LPG node count |
+| 64 | 8 | `u64` | `edge_count` | LPG edge count |
+| 72 | 8 | `u64` | `timestamp_ms` | Checkpoint time (Unix epoch ms) |
+| 80 | 4 | `u32` | `crc` | CRC-32 of bytes 0..80 |
+| 84 | 4012 | - | (reserved) | Written as zero, ignored by readers |
 
-Remaining bytes after the last entry are zero-filled to 4 KiB.
+**Active header selection:** a slot whose bytes are all zero was never written.
+Any other slot without the magic and a matching CRC is damaged (a torn or
+corrupted write). The valid slot with the higher `iteration` is active (slot 0
+on a tie). If no slot is valid and one is damaged, the open fails instead of
+treating the file as empty: the image the damaged slot pointed at may still be
+in the file. A new database gets a valid iteration-0 header in slot 0 that
+points at an image without sections.
+
+---
+
+## Directory
+
+The directory of an image lists every chunk in fixed 48-byte entries. It is
+stored in blocks of at most 64 KiB (up to 1,364 entries each); each block names
+the next one, so the number of chunks is not limited. The active database
+header points at the first block.
+
+### Directory Block
+
+| Offset | Size | Type | Field | Description |
+|--------|------|------|-------|-------------|
+| 0 | 4 | `[u8; 4]` | `magic` | `GDIR` |
+| 4 | 4 | `u32` | `entry_count` | Entries in this block |
+| 8 | 8 | `u64` | `next.offset` | Offset of the next block |
+| 16 | 4 | `u32` | `next.length` | Length of the next block; `0` ends the chain |
+| 20 | 4 | `u32` | `next.crc` | CRC-32 of the next block |
+| 24 | 8 | `u64` | (reserved) | Zero |
+| 32 | 48 each | | entries | `entry_count` directory entries |
+
+The CRC of a block is kept by whoever points at it: the database header for the
+first block, the previous block for the others. An open checks that every block
+pointer is page-aligned and lies in the data area, that the length fits the
+entries, the CRC and the magic, and that the chain never visits a block twice.
+
+### Directory Entry (48 bytes)
+
+| Offset | Size | Type | Field | Description |
+|--------|------|------|-------|-------------|
+| 0 | 1 | `u8` | `section_type` | Section the chunk belongs to (see below) |
+| 1 | 1 | `u8` | `section_version` | Format version of the section's bytes |
+| 2 | 1 | `u8` | `chunk_kind` | What the chunk holds; `0` = raw bytes |
+| 3 | 1 | `u8` | `codec` | Codec of the chunk's bytes; `0` = none |
+| 4 | 4 | `u32` | `graph_id` | Graph of the chunk (`0` when not graph-specific) |
+| 8 | 4 | `u32` | `column_id` | Column of the chunk (`0` when not column-specific) |
+| 12 | 4 | `u32` | `row_count` | Rows the chunk holds |
+| 16 | 8 | `u64` | `row_start` | First row the chunk holds |
+| 24 | 8 | `u64` | `offset` | Byte offset of the chunk (page-aligned; 0 for a chunk without bytes) |
+| 32 | 8 | `u64` | `length` | Stored length of the chunk |
+| 40 | 4 | `u32` | `crc` | CRC-32 of the stored chunk |
+| 44 | 4 | `u32` | (reserved) | Zero |
+
+A reader refuses an entry with a section type or chunk kind it does not know.
+An open also checks that every chunk is page-aligned, lies within the file, and
+shares no page with another chunk or directory block.
 
 ---
 
 ## Section Types
 
-| Value | Name | Required | Mmap-able | Description |
-|-------|------|----------|-----------|-------------|
-| 1 | `CATALOG` | yes | no | Schema defs, index metadata, epoch, config |
-| 2 | `LPG_STORE` | yes | no | Nodes, edges, properties, named graphs |
-| 3 | `RDF_STORE` | no | no | RDF triples, named graphs |
-| 10 | `VECTOR_STORE` | no | yes | Embeddings + HNSW topology |
-| 11 | `TEXT_INDEX` | no | yes | BM25 postings + term dictionary |
-| 12 | `RDF_RING` | no | yes | Wavelet trees + dictionary |
-| 20 | `PROPERTY_INDEX` | no | yes | Property hash/btree indexes |
+| Value | Name | Description |
+|-------|------|-------------|
+| 1 | `CATALOG` | Schema definitions, index metadata, epoch, configuration |
+| 2 | `LPG_STORE` | Nodes, edges, properties, named graphs |
+| 3 | `RDF_STORE` | RDF triples, named graphs |
+| 4 | `COMPACT_STORE` | Columnar base of the layered compact store |
+| 5 | `OVERLAY_DELETIONS` | Base entities the compact store's overlay deleted |
+| 10 | `VECTOR_STORE` | Embeddings and HNSW topology |
+| 11 | `TEXT_INDEX` | BM25 postings and term dictionary |
+| 12 | `RDF_RING` | Wavelet trees and dictionary |
+| 20 | `PROPERTY_INDEX` | Property hash and btree indexes |
 
 **Type ranges:**
 
 - 1-9: Data sections (authoritative, cannot be rebuilt)
 - 10-19: Index sections (derived, can be rebuilt from data)
-- 20+: Reserved for acceleration structures
+- 20+: Acceleration structures
 
-**Flags:**
-
-- **Bit 0 (required):** If set, older binaries that don't recognize this
-  section type must refuse to open the file. If clear, the section can be
-  safely skipped (the database opens without that index).
-- **Bit 1 (mmap-able):** If set, the section uses a fixed binary layout
-  suitable for zero-copy memory-mapped access. If clear, the section must
-  be deserialized into RAM (bincode format).
-
-**Empty sections** are omitted from the directory entirely. If no RDF data
-exists, there is no `RDF_STORE` entry.
+**Optional sections without data** (indexes, RDF data, overlay deletions) are
+left out of the image: if no RDF data exists, there is no `RDF_STORE` chunk. The
+`CATALOG` and `LPG_STORE` sections are always written.
 
 ---
 
-## Section Data (0x4000+)
+## Chunks
 
-Sections are written sequentially after the directory, each starting at a
-page-aligned (4 KiB) offset. The next section starts at the first 4 KiB
-boundary after the previous section ends.
+A section is written as a stream of chunks, which the reader gathers back by
+section type. The chunk fields (graph, column, rows, codec) let a section split
+its data into many independently addressable chunks. Currently every section
+is written as one raw chunk holding its serialized bytes.
 
-```
-0x4000  [CATALOG data ................] pad
-0x5000  [LPG_STORE data ..............] pad
-0xA000  [VECTOR_STORE data ...........] pad
-...
-```
+The container has no 4 GiB limit: chunk offsets and lengths are 64-bit. The LPG
+section's own block directory currently uses 32-bit offsets, so a single LPG
+section is limited to 4 GiB; a checkpoint over that limit fails with an error
+that names it and keeps the WAL ([#392](https://github.com/GrafeoDB/grafeo/issues/392)).
 
-### Data Section Encoding (Catalog, LPG, RDF)
+### Encryption
 
-Data sections use **bincode** serialization (standard configuration). They
-are fully deserialized into RAM on load. The internal format is
-version-specific (the `version` byte in the directory entry allows
-independent evolution).
-
-### Index Section Encoding (Vector, Text, Ring, Property)
-
-Index sections use **bincode** serialization currently (version 1). Future
-versions may switch to fixed binary layouts for zero-copy mmap access.
-The `mmap_able` flag indicates whether the section can be memory-mapped
-after being written.
+In an encrypted file (flag bit 0), every chunk and every directory block is
+encrypted with AES-256-GCM under a key derived for the database's id, with a
+random nonce each. The associated data binds a chunk to its section type, chunk
+kind, graph, column and first row, and a directory block to its offset, so a
+chunk cannot pass for another part of a section, nor a directory block for one
+at another offset. A stored block is the nonce, the ciphertext and the tag: 28
+bytes longer than its plaintext. A chunk's `length` and `crc` cover the stored
+bytes; a directory block's pointer holds the plaintext length and CRC. The file
+header and the database headers are not encrypted. See
+[Encryption at Rest](../../getting-started/security.md#encryption-at-rest).
 
 ---
 
 ## Checkpoint Flow
 
-```
-Checkpoint(reason):
-  1. Collect target sections based on reason:
-     - Explicit:   all sections (dirty or clean)
-     - Periodic:   dirty sections only (skip if none dirty)
-     - Eviction:   lowest-priority dirty section only
-  2. For each target section:
-     a. Serialize section data to bytes (Section::serialize())
-     b. Compute CRC-32
-  3. Write sections to new page-aligned offsets in the file
-  4. Build section directory with updated entries
-  5. Write section directory at 0x3000
-  6. Build new DbHeader (increment iteration, set checksum/counts)
-  7. Write DbHeader to inactive slot (H1 or H2)
-  8. fsync
-  9. (Engine) truncate WAL
+Every checkpoint writes the whole database as a new image:
+
+```text
+Checkpoint:
+  1. (Engine) Start a new WAL file
+  2. (Engine) Serialize every section
+  3. Write each section's chunks into free pages (CRC-32, encrypted if enabled)
+  4. Write the directory blocks into free pages
+  5. fsync
+  6. Write the new database header (iteration + 1, the new root) into the
+     inactive slot
+  7. fsync
+  8. Shorten the file to end at the last page of the new image
+  9. (Engine) Mark the WAL: recovery starts at the new WAL file, and earlier
+     WAL files are deleted unless an incremental backup still needs them
 ```
 
-**Dirty tracking:** Each section has an `is_dirty()` flag. Mutations in the
-store mark the corresponding section dirty. Periodic checkpoints skip sections
-that haven't changed since the last flush.
+**Free space:** the pages free for a checkpoint are derived from the pages the
+active image uses, which an open reads from its directory: every page from
+page 3 up to the end of the last used page that the active image does not use.
+No free list is stored. Allocation is first fit and appends at the end of the
+file when no gap is large enough, so a checkpoint reuses the pages of the image
+before the active one. While a checkpoint runs, the file can hold the active
+image and the new one.
 
-**Crash safety:** If the process crashes at any point during steps 3-7, the
-active header still points to the previous valid state. The dual-header
-alternation ensures atomicity of the commit point (step 8).
+**Crash safety:** steps 3 to 5 write only pages the active image does not use,
+so a crash before the new header is on disk opens the previous image, intact. A
+torn header write fails its CRC, so the other slot stays active. A crash after
+step 7 opens the new image. If a checkpoint fails at or after its header
+write, the new header may or may not have reached the disk: the next checkpoint
+spares the pages of both images, and the WAL is kept until a later checkpoint
+succeeds.
 
 ---
 
-## Memory-Mapped Section Access
+## Spilled Sections
 
-After a checkpoint, index sections with `flags.mmap_able = true` can be
-memory-mapped for zero-copy read access. This is the foundation for tiered
-storage: when RAM is scarce, index sections are flushed to the container
-and served via mmap instead of keeping the full data in heap memory.
-
-**Lifecycle:**
-
-1. Engine flushes dirty sections via checkpoint
-2. Engine calls `mmap_section()` for index sections
-3. CRC-32 is verified against the mmap'd bytes (also warms page cache)
-4. Engine drops in-memory copy of the section data
-5. Reads go through the mmap (OS page cache manages eviction)
-6. Before next checkpoint: drop all mmaps, then write
-
-**Platform note:** On Windows, the OS rejects writes to a file with active
-memory mappings (error 1224). All mmap handles must be dropped before
-`write_sections()`. On Linux/macOS, writes succeed with active mappings
-but the drop-before-write lifecycle is used on all platforms for consistency.
+The `.grafeo` file is read with positional reads and is not memory-mapped.
+When memory pressure spills a section (or a `ForceDisk` tier override asks for
+it), the engine writes the section to a spill file in the spill directory
+(`<file>.spill/` by default) and memory-maps that file. An encrypted database
+spills nothing, as spill files are not encrypted. See
+[Storage Tiers](../memory/storage-tiers.md).
 
 ---
 
 ## Recovery
 
-```
+```text
 Open database:
-  1. Read FileHeader at 0x0000, validate magic and format_version
-  2. Read both DbHeaders (H1 at 0x1000, H2 at 0x2000)
-  3. Select active header (highest iteration)
-  4. Detect format:
-     - snapshot_length > 0: v1 blob format (read snapshot at DATA_OFFSET)
-     - snapshot_length == 0 && iteration > 0: v2 section format
-  5. For v2: read section directory at 0x3000
-  6. For each directory entry:
-     a. Read section data at entry.offset
-     b. Verify CRC-32
-     c. Deserialize into RAM (or mmap if configured as ForceDisk)
-  7. If sidecar WAL exists: replay committed transactions since last flush
-  8. Database is ready
+  1. Read the file header at 0x0000 and validate it (a file written by 0.5.x
+     takes the migration path instead, see below)
+  2. Read both database header slots and select the active one
+  3. Read the directory chain from the active header's root, checking every
+     block (and decrypting it in an encrypted file)
+  4. Check that every chunk lies within the file and that no pages overlap
+  5. Read each section's chunks, verify their CRC-32 (and decrypt them), and
+     load the section into RAM
+  6. If a sidecar WAL exists: replay the changes committed since the last
+     checkpoint
+  7. Database is ready
 ```
+
+A read-only open loads the last checkpoint and does not replay the WAL.
 
 ---
 
 ## Periodic Checkpoints
 
 When `Config::checkpoint_interval` is set, a background thread periodically
-flushes sections to the container. This bounds the WAL size and limits
-data loss on crash to at most one interval.
+checkpoints the database to the container. This bounds the size of the WAL,
+and so the time a reopen spends replaying it.
 
 The timer polls a shutdown flag every 100 ms. On database close, the timer
 is stopped before the final checkpoint to prevent races.
@@ -248,11 +269,14 @@ is stopped before the final checkpoint to prevent races.
 
 ## File Locking
 
-- **Exclusive lock** on create/open (read-write mode): prevents concurrent
+- **Exclusive lock** on open (read-write mode): prevents concurrent
   writers on the same file.
 - **Shared lock** on open (read-only mode): allows multiple concurrent
-  readers.
+  readers. A read-write open and read-only opens exclude each other.
 - Locks are released on close or drop.
+- A new file is built and synced as `<file>.creating` and then renamed, so the
+  database path never holds a partial file.
+- A migration of a 0.5.x file holds `<file>.migrate.lock` (see below).
 
 ---
 
@@ -260,17 +284,47 @@ is stopped before the final checkpoint to prevent races.
 
 | Component | Size |
 |-----------|------|
-| Fixed overhead (headers + directory) | 16 KiB |
-| Empty database (headers + empty catalog + LPG) | ~20 KiB |
-| Per-section overhead | 32 bytes (directory entry) + page alignment padding |
-| Typical 10K-node LPG | ~1-5 MB |
-| 1M-vector HNSW index (384-dim, f32) | ~1.5 GB |
+| Fixed overhead (file header and database headers) | 12 KiB |
+| New database | 16 KiB (the headers and one directory block page) |
+| After the first checkpoint | A few pages more: the `CATALOG` and `LPG_STORE` sections are always written |
+| Per chunk | 48 bytes (directory entry) plus padding to a page boundary; 28 bytes more when encrypted |
+| Per directory block | 32-byte header, up to 1,364 entries (64 KiB) |
+| Typical 10K-node LPG | about 1 to 5 MB |
+| 1M-vector HNSW index (384-dim, f32) | about 1.5 GB |
+| During a checkpoint | up to the active image plus the new one |
+
+---
+
+## Files Written by 0.5.x
+
+0.5.x wrote container v1 (0.5.21 to 0.5.34: one bincode snapshot after the
+headers) and v2 (0.5.35 to 0.5.44: a section directory page at `0x3000` with
+32-byte entries, section data from `0x4000`). Both use bincode headers in the
+same three 4 KiB pages. Byte 4 tells the formats apart: in a 0.5.x file it is
+the varint `0x01` of the bincode format version, in a v3 file the version is
+`03 00 00 00`.
+
+0.6 reads these files only to migrate them, or to open them without changes:
+
+- A read-write open migrates the file. Under `<file>.migrate.lock`, it reads
+  the old database (its sidecar WAL replayed), writes it as a v3 image to
+  `<file>.migrating`, renames the old files to `<file>.pre-0.6`,
+  `<file>.pre-0.6.wal` and `<file>.pre-0.6.checkpoint`, and renames the image
+  to `<file>`. The old files are kept byte for byte, and a crash at any step is
+  resolved from the files present at the next read-write open.
+- A read-only open and `open_in_memory()` read the file in place, with its
+  sidecar WAL, and change nothing.
+
+0.7.0 will no longer read v1 and v2 files. See
+[Upgrading from 0.5](../../user-guide/persistence/persistent.md#upgrading-from-05)
+for what users need to do.
 
 ---
 
 ## Version History
 
-| Version | Format | Notes |
-|---------|--------|-------|
-| v1 (0.5.0-0.5.34) | Monolithic blob at `DATA_OFFSET` | Single bincode snapshot |
-| v2 (0.5.35+) | Section-based with directory at `0x3000` | Independent sections, mmap support |
+| Version | Format | Written by | Notes |
+|---------|--------|------------|-------|
+| v1 | Monolithic blob after the headers | 0.5.21 to 0.5.34 | Single bincode snapshot; read by 0.6 only to migrate |
+| v2 | Section directory at `0x3000` | 0.5.35 to 0.5.44 | Independent sections; read by 0.6 only to migrate |
+| v3 | Copy-on-write pages, chained directory | 0.6.0 and later | Checksummed chunks, per-chunk encryption |

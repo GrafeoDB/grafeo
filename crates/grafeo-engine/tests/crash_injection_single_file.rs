@@ -825,6 +825,34 @@ fn wal_off_open_child() {
     }
 }
 
+/// A copy, in a fresh directory, of the database at `path` and every side
+/// file next to it (its sidecar WAL included), as a crash left them. Returns
+/// the directory, which removes the copy when dropped, and the copy's path.
+#[cfg(feature = "wal")]
+fn copy_of_crashed(path: &std::path::Path) -> (tempfile::TempDir, std::path::PathBuf) {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        if from.is_dir() {
+            std::fs::create_dir(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap() {
+                let entry = entry.unwrap();
+                copy(&entry.path(), &to.join(entry.file_name()));
+            }
+        } else {
+            std::fs::copy(from, to).unwrap();
+        }
+    }
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    let dir = tempfile::TempDir::new().unwrap();
+    for entry in std::fs::read_dir(path.parent().unwrap()).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().to_string_lossy().starts_with(&name) {
+            copy(&entry.path(), &dir.path().join(entry.file_name()));
+        }
+    }
+    let copy = dir.path().join(&name);
+    (dir, copy)
+}
+
 /// The database path of a [`wal_off_open_child`].
 #[cfg(feature = "wal")]
 const WAL_OFF_OPEN_PATH_VAR: &str = "GRAFEO_CRASH_WAL_OFF_OPEN_PATH";
@@ -896,11 +924,15 @@ fn a_crash_while_a_wal_off_open_retires_the_wal_loses_nothing() {
                 "the completed open removed the sidecar WAL"
             );
         }
+        // Each mode recovers from the crash on its own copy: a reopen
+        // replays, checkpoints and removes the WAL, so the second one would
+        // otherwise start from the first one's clean file.
         for wal_enabled in [false, true] {
+            let (_copy_dir, copy) = copy_of_crashed(&path);
             let config = if wal_enabled {
-                Config::persistent(&path)
+                Config::persistent(&copy)
             } else {
-                wal_disabled_config(&path)
+                wal_disabled_config(&copy)
             };
             let db = GrafeoDB::with_config(config).unwrap();
             assert_eq!(

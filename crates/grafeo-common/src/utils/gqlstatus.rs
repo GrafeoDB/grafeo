@@ -218,9 +218,13 @@ impl From<&super::error::Error> for GqlStatus {
                 | TransactionError::WriteConflict(_) => GqlStatus::TX_ROLLBACK,
                 TransactionError::SerializationFailure(_) => GqlStatus::TX_ROLLBACK,
                 TransactionError::Deadlock => GqlStatus::TX_ROLLBACK,
-                TransactionError::Timeout
-                | TransactionError::DatabaseClosed
-                | TransactionError::IncompleteCommit => GqlStatus::INVALID_TX_STATE,
+                TransactionError::Timeout | TransactionError::DatabaseClosed => {
+                    GqlStatus::INVALID_TX_STATE
+                }
+                // The status flags the database, not the refused operation
+                // (which did not happen): it holds an earlier commit whose
+                // completion is unknown, and must be reopened.
+                TransactionError::IncompleteCommit => GqlStatus::TX_COMPLETION_UNKNOWN,
             },
             Error::TypeMismatch { .. } => GqlStatus::DATA_INVALID_VALUE_TYPE,
             Error::InvalidValue(_) => GqlStatus::DATA_EXCEPTION,
@@ -404,6 +408,27 @@ mod tests {
         assert_eq!(
             GqlStatus::from(&type_err),
             GqlStatus::DATA_INVALID_VALUE_TYPE
+        );
+    }
+
+    /// After a commit that did not complete, the database holds a commit
+    /// whose completion is unknown and must be reopened: every operation it
+    /// refuses for that reason gets `40003` ("completion unknown"), so a
+    /// client knows to reopen, not the generic invalid state of a closed
+    /// database.
+    #[test]
+    fn an_incomplete_commit_is_completion_unknown() {
+        use super::super::error::{Error, TransactionError};
+
+        assert_eq!(
+            GqlStatus::from(&Error::Transaction(TransactionError::IncompleteCommit)),
+            GqlStatus::TX_COMPLETION_UNKNOWN
+        );
+        assert_eq!(GqlStatus::TX_COMPLETION_UNKNOWN.as_str(), "40003");
+        assert_eq!(
+            GqlStatus::from(&Error::Transaction(TransactionError::DatabaseClosed)),
+            GqlStatus::INVALID_TX_STATE,
+            "a closed database keeps its status"
         );
     }
 

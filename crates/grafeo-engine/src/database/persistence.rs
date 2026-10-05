@@ -976,11 +976,19 @@ impl super::GrafeoDB {
     /// references, has duplicate IDs, or deserialization fails, after a
     /// commit that did not complete (the restored database could never be
     /// checkpointed, see [`TransactionManager`](crate::transaction::TransactionManager)),
-    /// and the database-closed error after `close()` of a persistent database.
+    /// on a read-only database, and the database-closed error after `close()`
+    /// of a persistent database (read-only or not).
     pub fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
+        // A restore writes no WAL record: after `close()` (which releases the
+        // file) nothing would persist it, so it fails then, and `close()`
+        // waits for one in progress.
+        let _open = self.hold_open()?;
+        if self.read_only {
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::ReadOnly,
+            ));
+        }
         self.transaction_manager.check_no_incomplete_commit()?;
-        // A restore writes no WAL record: after `close()` nothing would
-        // persist it.
         self.transaction_manager.check_open()?;
         if data.is_empty() {
             return Err(Error::Internal("empty snapshot data".to_string()));

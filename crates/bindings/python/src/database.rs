@@ -417,8 +417,10 @@ impl PyGrafeoDB {
 
     /// Open an existing database in read-only mode.
     ///
-    /// Uses a shared file lock, so multiple processes can read the same
-    /// database file concurrently. Mutations will raise an error.
+    /// Takes a shared lock on a database file, so multiple processes can read
+    /// the same file concurrently. A 0.5.x WAL directory is read in place
+    /// without a lock: when another process migrates it meanwhile, the open
+    /// fails. Mutations will raise an error.
     ///
     /// Args:
     ///     path: Path to the database (a file, or a 0.5.x WAL directory,

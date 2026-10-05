@@ -957,6 +957,187 @@ fn imports_and_restores_after_close_fail() {
     assert_eq!(db.node_count(), 1);
 }
 
+/// A bulk import or an RDF batch insert, by name, given a directory for its
+/// input file, and how many items it adds (see [`imported`]): three nodes
+/// and two edges besides Alix, or two triples.
+type Import = (
+    &'static str,
+    fn(&GrafeoDB, &Path) -> grafeo_common::utils::error::Result<()>,
+    usize,
+);
+
+/// The bulk imports and the RDF batch insert, which write no WAL record.
+fn imports() -> Vec<Import> {
+    let imports: Vec<Import> = vec![
+        (
+            "import_tsv_str",
+            |db, _| {
+                db.import_tsv_str("3\t19\n19\t88\n", "KNOWS", true)
+                    .map(drop)
+            },
+            5,
+        ),
+        (
+            "import_mmio",
+            |db, dir| {
+                let mtx = dir.join("edges.mtx");
+                std::fs::write(
+                    &mtx,
+                    "%%MatrixMarket matrix coordinate real general\n88 88 2\n3 19 1.0\n19 88 1.0\n",
+                )
+                .unwrap();
+                db.import_mmio(&mtx, "KNOWS").map(drop)
+            },
+            5,
+        ),
+    ];
+    #[cfg(feature = "triple-store")]
+    let imports = imports.into_iter().chain::<[Import; 2]>([
+        (
+            "import_tsv_rdf",
+            |db, dir| {
+                let tsv = dir.join("edges.tsv");
+                std::fs::write(&tsv, "3\t19\n19\t88\n").unwrap();
+                db.import_tsv_rdf(&tsv, "http://ex.org/knows", "http://ex.org/")
+                    .map(drop)
+            },
+            2,
+        ),
+        (
+            "batch_insert_rdf",
+            |db, _| {
+                use grafeo_core::graph::rdf::{Term, Triple};
+                let city = |name: &str, city: &str| {
+                    Triple::new(
+                        Term::iri(format!("http://ex.org/{name}")),
+                        Term::iri("http://ex.org/city"),
+                        Term::literal(city),
+                    )
+                };
+                db.batch_insert_rdf([city("gus", "Berlin"), city("mia", "Prague")])
+                    .map(drop)
+            },
+            2,
+        ),
+    ]);
+    imports.into_iter().collect()
+}
+
+/// The items an import added to `db`, which holds Alix besides: its nodes
+/// and edges, and its triples.
+fn imported(db: &GrafeoDB) -> usize {
+    let items = db.node_count() - 1 + db.edge_count();
+    #[cfg(feature = "triple-store")]
+    let items = items + db.rdf_store().len();
+    items
+}
+
+/// A read-only handle never takes a snapshot restore, an import or an RDF
+/// batch insert (nothing would persist them): while open each refuses with
+/// the read-only error, and after its `close()` (which releases the file)
+/// with the database-closed error. Before, each changed the handle's store.
+#[test]
+fn a_read_only_handle_takes_no_restore_or_import_open_or_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prague.grafeo");
+    database_with_alix(&path);
+    let snapshot = {
+        let other = GrafeoDB::new_in_memory();
+        other.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+        other.export_snapshot().unwrap()
+    };
+    // Each call, run against the handle.
+    type Call<'a> = Box<dyn Fn(&GrafeoDB) -> grafeo_common::utils::error::Result<()> + 'a>;
+    let mut calls: Vec<(&str, Call<'_>)> = vec![(
+        "restore_snapshot",
+        Box::new(|db| db.restore_snapshot(&snapshot)),
+    )];
+    let inputs = dir.path();
+    for (name, call, _) in imports() {
+        calls.push((name, Box::new(move |db| call(db, inputs))));
+    }
+
+    let mut failures = Vec::new();
+    for (name, call) in &calls {
+        for closed in [false, true] {
+            let db = GrafeoDB::open_read_only(&path).unwrap();
+            if closed {
+                db.close().unwrap();
+            }
+            let outcome = call(&db);
+            match outcome {
+                Ok(()) => failures.push(format!("{name}, closed {closed}: it succeeded")),
+                Err(Error::Transaction(TransactionError::ReadOnly)) if !closed => {}
+                Err(Error::Transaction(TransactionError::DatabaseClosed)) if closed => {}
+                Err(error) => {
+                    failures.push(format!("{name}, closed {closed}: another error: {error:?}"));
+                }
+            }
+            let seen = people(&db);
+            if seen != vec![Value::from("Alix")] || imported(&db) != 0 {
+                failures.push(format!(
+                    "{name}, closed {closed}: the handle shows {seen:?} and {} more items",
+                    imported(&db)
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// An import holds commits off while it changes the store, so a `close()`
+/// started from a hook inside one (once it holds them, before it changes
+/// anything) waits for it, and the final checkpoint holds all of the import:
+/// the reopened database shows every node and edge, or triple, it added.
+#[cfg(feature = "testing-statement-injection")]
+#[test]
+fn close_waits_for_an_import_holding_commits_off() {
+    use std::sync::{Arc, mpsc};
+
+    use grafeo_common::testing::commit_hook::during_next_held_change;
+
+    // Every call is checked, and every failure listed at the end.
+    let mut failures = Vec::new();
+    for (name, call, adds) in imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("amsterdam.grafeo");
+        database_with_alix(&path);
+        let db = Arc::new(open(&path));
+        let closer = Arc::clone(&db);
+        let (sender, started) = mpsc::channel();
+        during_next_held_change(move || {
+            let close = Started::spawn(move || closer.close().map_err(|e| e.to_string()));
+            let finished = close.finishes_briefly();
+            sender.send((close, finished)).unwrap();
+        });
+        call(&db, dir.path()).unwrap_or_else(|error| panic!("{name}: {error}"));
+
+        // The hook runs inside the import, so its message is there now.
+        let Ok((close, finished)) = started.try_recv() else {
+            failures.push(format!(
+                "{name}: the import never held commits off (the hook did not run)"
+            ));
+            db.close().unwrap();
+            continue;
+        };
+        if finished {
+            failures.push(format!("{name}: close() did not wait for the import"));
+        }
+        close.join().unwrap();
+        drop(db);
+
+        let reopened = open(&path);
+        let items = imported(&reopened);
+        if items != adds {
+            failures.push(format!(
+                "{name}: the reopened file holds {items} of the {adds} imported items"
+            ));
+        }
+        reopened.close().unwrap();
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// Runs the SPARQL update that adds Gus's triple outside a transaction,
 /// through a session statement (`execute_language`) or through
 /// `GrafeoDB::execute_sparql`.

@@ -6,8 +6,9 @@
 //! ([`after_next_commit_logged`]), inside a checkpoint while it holds
 //! commits off, before it writes its image ([`during_next_checkpoint`]), or
 //! inside a change outside any commit (a schema statement, a graph command, an
-//! RDF update, a direct write, or a direct graph or index call) once it holds
-//! commits off and before it changes anything ([`during_next_held_change`]).
+//! RDF update, a direct write, a direct graph or index call, an import or an
+//! RDF batch insert) once it holds commits off and before it changes anything
+//! ([`during_next_held_change`]).
 //! [`checkpoints_started`] counts the checkpoints started on a database
 //! file, from any thread (the engine calls [`count_checkpoint`]).
 //!
@@ -89,8 +90,8 @@ mod inner {
 
     /// Arms `hook` to run once, inside the next change outside any commit on
     /// this thread (a schema statement, a graph command, an RDF update, a
-    /// direct write, or a direct graph or index call), once it holds commits
-    /// off and before it changes anything.
+    /// direct write, a direct graph or index call, an import or an RDF batch
+    /// insert), once it holds commits off and before it changes anything.
     pub fn during_next_held_change(hook: impl FnOnce() + 'static) {
         DURING_HELD_CHANGE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }

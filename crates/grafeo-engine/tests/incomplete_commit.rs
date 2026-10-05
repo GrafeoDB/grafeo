@@ -18,9 +18,10 @@
 //! and a reopen replays it whole.
 //!
 //! What these tests do not cover: without the `temporal` feature, property
-//! values have no versions, so a query or a direct read can see a property
-//! value written by a commit that is not complete, or never completes (#412);
-//! the property assertions below need `temporal`.
+//! values and labels have no versions and a deletion takes effect at once, so
+//! a query or a direct read can see the property values and labels written,
+//! and miss what was deleted, by a commit that is not complete, or never
+//! completes (#412); the property assertions below need `temporal`.
 //!
 //! These tests panic inside a commit, or run reads from another thread inside
 //! one, with the `testing-statement-injection` commit hook:
@@ -40,6 +41,11 @@ use std::sync::{Arc, mpsc};
 use grafeo_common::testing::commit_hook::{after_next_commit_logged, after_next_commit_stamped};
 use grafeo_common::types::{EdgeId, EpochId, NodeId, Value};
 use grafeo_engine::GrafeoDB;
+
+#[path = "common/started.rs"]
+mod started;
+
+use started::Started;
 
 /// The names of the people in `db`, sorted.
 fn people(db: &GrafeoDB) -> Vec<Value> {
@@ -239,6 +245,108 @@ fn after_a_commit_that_does_not_complete_no_commit_publishes_part_of_it() {
         "reads see what was published before the failed commit, never part of it"
     );
     assert_eq!(db.current_epoch(), before);
+}
+
+/// A bulk import or an RDF batch insert, which write no WAL record, by name.
+type Import = (
+    &'static str,
+    fn(&GrafeoDB) -> grafeo_common::utils::error::Result<()>,
+);
+
+/// The bulk imports and the RDF batch insert.
+fn imports() -> Vec<Import> {
+    let imports: Vec<Import> = vec![("import_tsv_str", |db| {
+        db.import_tsv_str("3\t19\n19\t88\n", "KNOWS", true)
+            .map(drop)
+    })];
+    #[cfg(feature = "triple-store")]
+    let imports = imports.into_iter().chain::<[Import; 2]>([
+        ("import_tsv_rdf", |db| {
+            let dir = tempfile::tempdir().unwrap();
+            let tsv = dir.path().join("edges.tsv");
+            std::fs::write(&tsv, "3\t19\n19\t88\n").unwrap();
+            db.import_tsv_rdf(&tsv, "http://ex.org/knows", "http://ex.org/")
+                .map(drop)
+        }),
+        ("batch_insert_rdf", |db| {
+            db.batch_insert_rdf([grafeo_core::graph::rdf::Triple::new(
+                grafeo_core::graph::rdf::Term::iri("http://ex.org/gus"),
+                grafeo_core::graph::rdf::Term::iri("http://ex.org/city"),
+                grafeo_core::graph::rdf::Term::literal("Berlin"),
+            )])
+            .map(drop)
+        }),
+    ]);
+    imports.into_iter().collect()
+}
+
+/// An import that starts while a commit is in progress waits for it, and
+/// when that commit then fails, the import refuses with the failed commit's
+/// error and adds nothing: it writes no WAL record, and after a commit that
+/// did not complete no checkpoint could persist what it added (before, it
+/// returned `Ok` for data that was lost on reopen).
+#[test]
+fn an_import_waiting_for_a_commit_that_fails_refuses() {
+    let mut failures = Vec::new();
+    for (name, import) in imports() {
+        let db = Arc::new(GrafeoDB::new_in_memory());
+        let alix = db
+            .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
+            .unwrap();
+
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        session
+            .set_node_property(alix, "city", Value::from("Paris"))
+            .unwrap();
+        let importer = Arc::clone(&db);
+        let (sender, during) = mpsc::channel();
+        after_next_commit_stamped(move || {
+            let started = Started::spawn(move || import(&importer));
+            let finished = started.finishes_briefly();
+            sender.send((started, finished)).unwrap();
+            panic!("injected: the commit stops after stamping");
+        });
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.commit()));
+        assert!(unwound.is_err(), "{name}: the commit panicked");
+
+        let (started, finished) = during.recv().expect("the commit ran the hook");
+        if finished {
+            failures.push(format!(
+                "{name}: the import did not wait for the commit in progress"
+            ));
+        }
+        match started.join() {
+            Ok(()) => failures.push(format!(
+                "{name}: the import returned Ok after the commit failed"
+            )),
+            Err(error) => {
+                if !matches!(
+                    error,
+                    grafeo_common::utils::error::Error::Transaction(
+                        grafeo_common::utils::error::TransactionError::IncompleteCommit
+                    )
+                ) {
+                    failures.push(format!("{name}: another error: {error:?}"));
+                }
+            }
+        }
+        if db.node_count() != 1 || db.edge_count() != 0 {
+            failures.push(format!(
+                "{name}: the import added {} nodes and {} edges",
+                db.node_count() - 1,
+                db.edge_count()
+            ));
+        }
+        #[cfg(feature = "triple-store")]
+        if !db.rdf_store().is_empty() {
+            failures.push(format!(
+                "{name}: the import added {} triples",
+                db.rdf_store().len()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 /// The change events of a commit are recorded before it is complete; the

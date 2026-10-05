@@ -1586,6 +1586,53 @@ fn a_read_write_open_of_a_kept_copy_is_refused() {
     }
 }
 
+/// A kept copy whose name is not valid UTF-8 (a byte that is not UTF-8 on
+/// Unix, an unpaired surrogate on Windows) is refused the same way: it is
+/// recognized by the bytes of its name, not by a UTF-8 reading of it.
+#[cfg(any(unix, windows))]
+#[test]
+fn a_read_write_open_of_a_kept_copy_with_a_non_utf8_name_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let kept = dir.path().join(non_utf8_name("db", ".pre-0.6"));
+    copy_fixture(&kept);
+    let before = files(dir.path());
+
+    let error = open_error(&kept);
+    assert!(
+        error.contains("kept copy") && error.contains("read-only"),
+        "the error says it is a kept copy and how to read it: {error}"
+    );
+    assert!(
+        files(dir.path()) == before,
+        "the refused open changes nothing"
+    );
+}
+
+/// `prefix`, a byte (Unix) or a UTF-16 code unit (Windows) that is not valid
+/// UTF-8 or UTF-16, then `suffix`: a file name `to_str()` cannot read.
+#[cfg(unix)]
+fn non_utf8_name(prefix: &str, suffix: &str) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut bytes = prefix.as_bytes().to_vec();
+    bytes.push(0xff);
+    bytes.extend_from_slice(suffix.as_bytes());
+    std::ffi::OsString::from_vec(bytes)
+}
+
+/// `prefix`, a byte (Unix) or a UTF-16 code unit (Windows) that is not valid
+/// UTF-8 or UTF-16, then `suffix`: a file name `to_str()` cannot read.
+#[cfg(windows)]
+fn non_utf8_name(prefix: &str, suffix: &str) -> std::ffi::OsString {
+    use std::os::windows::ffi::OsStringExt;
+
+    let mut wide: Vec<u16> = prefix.encode_utf16().collect();
+    // An unpaired surrogate.
+    wide.push(0xD800);
+    wide.extend(suffix.encode_utf16());
+    std::ffi::OsString::from_wide(&wide)
+}
+
 /// A checkpoint image a 0.5.44 checkpoint left pending (`<p>.checkpoint`) holds
 /// the database: the migration reads it, and keeps it as
 /// `<p>.pre-0.6.checkpoint` next to the kept file, byte for byte.

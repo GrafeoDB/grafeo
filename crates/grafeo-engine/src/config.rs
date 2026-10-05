@@ -73,7 +73,8 @@ pub enum AccessMode {
     /// readers. The database loads the last checkpoint and replays the
     /// sidecar WAL into memory, writes nothing, and allows no mutations. A
     /// build without the `wal` feature refuses a file whose sidecar WAL holds
-    /// files, as a read-write open there does.
+    /// commits to replay (a non-empty log file; for a 0.5.x file, any file),
+    /// as a read-write open there does.
     ReadOnly,
 }
 
@@ -260,15 +261,17 @@ pub struct Config {
     pub threads: usize,
 
     /// Whether new commits are logged to the sidecar WAL (`<path>.wal/`) for
-    /// durability. With it off, a commit reaches the file only at the next
-    /// checkpoint (`close()`, `wal_checkpoint()` or the periodic one), so a
-    /// crash loses the commits since the last one.
+    /// durability, in a build with the `wal` feature (a build without it logs
+    /// no commit, whatever this says). With it off, a commit reaches the file
+    /// only at the next checkpoint (`close()`, `wal_checkpoint()` or the
+    /// periodic one), so a crash loses the commits since the last one.
     ///
     /// It never hides commits already in a WAL: in a build with the `wal`
     /// feature an open replays a sidecar WAL that a writer left without
-    /// `close()` either way. An open with it off then writes those commits to
-    /// the file and removes the WAL before it returns, so no later crash can
-    /// replay that WAL over newer data.
+    /// `close()` either way. A read-write open with it off then writes those
+    /// commits to the file and removes the WAL before it returns, so no later
+    /// crash can replay that WAL over newer data; a read-only open only
+    /// replays them into memory.
     pub wal_enabled: bool,
 
     /// WAL flush interval in milliseconds.

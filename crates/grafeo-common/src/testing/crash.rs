@@ -16,13 +16,15 @@
 //! When the feature is **disabled**, all functions compile to no-ops with zero
 //! runtime overhead.
 //!
-//! An injected crash is a panic, and it unwinds: a database that exists when
-//! it fires is dropped on the way out, and its `Drop` closes it (a checkpoint,
-//! then the WAL removed), so what a test inspects afterwards is a clean close,
-//! not the crash. A child process that stands in for a crash must not unwind
-//! a database: exit inside a panic hook (`std::panic::set_hook` that prints
-//! the panic and calls `std::process::exit`), or keep the database outside
-//! the closure and exit without dropping it.
+//! An injected crash is a panic, and it unwinds: a database the closure owns
+//! when it fires is dropped on the way out, and its `Drop` closes it (a
+//! checkpoint, then the WAL removed), so what a test inspects afterwards is a
+//! clean close, not the crash. A database outside the closure, which it only
+//! borrows, stays open. A child process that stands in for a crash must not
+//! unwind a database the closure owns: exit inside a panic hook
+//! (`std::panic::set_hook` that prints the panic and calls
+//! `std::process::exit`), or keep the database outside the closure and exit
+//! without dropping it.
 //!
 //! # Example
 //!

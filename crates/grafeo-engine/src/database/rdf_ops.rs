@@ -159,20 +159,23 @@ impl GrafeoDB {
     ///
     /// Returns the number of triples that were newly inserted.
     ///
+    /// While it changes the store, commits, new transactions and checkpoints
+    /// wait for it; `triples` is collected before, without blocking anything.
+    ///
     /// # Errors
     ///
-    /// Returns the database-closed error after `close()` of a persistent
-    /// database, and the incomplete-commit error after a commit that did not
-    /// complete.
+    /// Returns the read-only error on a read-only database, the
+    /// database-closed error after `close()` of a persistent database
+    /// (read-only or not), and the incomplete-commit error after a commit
+    /// that did not complete.
     pub fn batch_insert_rdf(
         &self,
         triples: impl IntoIterator<Item = grafeo_core::graph::rdf::Triple>,
     ) -> Result<usize> {
-        // It writes no WAL record: after `close()`, or after a commit that
-        // did not complete (no checkpoint runs then), nothing would persist
-        // it.
-        self.transaction_manager.check_no_incomplete_commit()?;
-        self.transaction_manager.check_open()?;
+        // Collected before commits are held off: the caller's iterator may
+        // parse or compute the triples.
+        let triples: Vec<_> = triples.into_iter().collect();
+        let _held = self.hold_commits_for_import()?;
         Ok(self.rdf_store.batch_insert(triples))
     }
 }

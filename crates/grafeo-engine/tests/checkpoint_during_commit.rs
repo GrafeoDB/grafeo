@@ -349,10 +349,29 @@ fn a_checkpoint_holds_a_commit_over_two_graphs_whole() {
     );
 }
 
+/// Whether the image the database file holds now (its active header and the
+/// sections it names) contains `needle`: the catalog for a constraint, the
+/// LPG store for a named graph. Read through the database's own file handle,
+/// which on Windows is the only one that can read a locked file.
+fn image_holds(db: &GrafeoDB, needle: &str) -> bool {
+    use grafeo_common::storage::SectionType;
+
+    let fm = db.file_manager().expect("a database file");
+    [SectionType::Catalog, SectionType::LpgStore]
+        .into_iter()
+        .filter_map(|section| fm.read_section(section).unwrap())
+        .any(|bytes| {
+            bytes
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+        })
+}
+
 /// Schema changes and graph commands take effect at once and log their own
 /// WAL group, outside any commit: they hold commits off for the whole
 /// statement, so a checkpoint in progress finishes first and its image holds
-/// none of them, and once it is written they run.
+/// none of them (no other checkpoint runs here, so the file holds that image
+/// until the last one below), and once it is written they run.
 #[test]
 fn schema_changes_and_graph_commands_wait_for_a_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
@@ -360,10 +379,14 @@ fn schema_changes_and_graph_commands_wait_for_a_checkpoint() {
     database_with_alix(&path);
 
     let db = Arc::new(GrafeoDB::open(&path).unwrap());
-    for statement in [
-        "CREATE CONSTRAINT person_name FOR (p:Person) ON (p.name) UNIQUE",
-        "CREATE GRAPH berlin",
-    ] {
+    let statements = [
+        (
+            "CREATE CONSTRAINT person_name FOR (p:Person) ON (p.name) UNIQUE",
+            "person_name",
+        ),
+        ("CREATE GRAPH berlin", "berlin"),
+    ];
+    for (statement, made) in statements {
         let writer = Arc::clone(&db);
         let (sender, started) = mpsc::channel();
         during_next_checkpoint(move || {
@@ -385,8 +408,19 @@ fn schema_changes_and_graph_commands_wait_for_a_checkpoint() {
         write
             .join()
             .unwrap_or_else(|error| panic!("{statement}: runs after the checkpoint: {error}"));
+        assert!(
+            !image_holds(&db, made),
+            "{statement}: the image of the checkpoint it waited for holds none of it"
+        );
     }
     let constraints = db.execute("SHOW CONSTRAINTS").unwrap();
     assert_eq!(constraints.rows().len(), 1, "{:?}", constraints.rows());
     assert!(db.graph("berlin").is_ok(), "the graph exists");
+    db.wal_checkpoint().unwrap();
+    for (statement, made) in statements {
+        assert!(
+            image_holds(&db, made),
+            "{statement}: the next checkpoint's image holds it"
+        );
+    }
 }

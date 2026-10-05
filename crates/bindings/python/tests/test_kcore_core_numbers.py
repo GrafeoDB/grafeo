@@ -42,6 +42,15 @@ def test_kcore_returns_core_numbers(shape):
         assert {name[node]: core for node, core in result["core_numbers"].items()} == expected
         assert result["max_core"] == max(expected.values())
 
+
+# `CALL` is a GQL statement: a build without GQL (such as the analytics profile) skips it.
+@pytest.mark.gql
+@pytest.mark.skipif("gql" not in grafeo.features(), reason="grafeo built without gql feature")
+@pytest.mark.parametrize("shape", SHAPES)
+def test_call_kcore_yields_the_same_core_numbers(shape):
+    edges, expected = SHAPES[shape]
+    db, name = build(edges)
+    for _ in range(3):
         rows = db.execute("CALL grafeo.kcore() YIELD node_id, core_number")
         assert {name[row["node_id"]]: row["core_number"] for row in rows} == expected
 

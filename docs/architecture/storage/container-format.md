@@ -253,8 +253,10 @@ Open database:
 ```
 
 A read-only open takes a shared lock instead and goes through the same steps, the WAL
-replay included, but only into memory: it writes nothing, so a torn tail stays for
-the next read-write open to seal.
+replay included, but only into memory: it writes nothing, so a torn tail stays until
+the next read-write open. With the WAL enabled, that open seals the tail before it
+logs anything new; with `wal_enabled` off, it writes the replayed changes to the file
+and removes the WAL, the torn tail with it.
 
 ---
 

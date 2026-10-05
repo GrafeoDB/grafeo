@@ -394,13 +394,15 @@ const KEPT_SUFFIX: &str = ".pre-0.6";
 /// Returns an error saying so, naming the original name, for such a path.
 #[cfg(feature = "lpg")]
 fn refuse_kept_copy(path: &Path) -> Result<()> {
-    let Some(original) = path
-        .to_str()
-        .and_then(|name| name.strip_suffix(KEPT_SUFFIX))
-        .filter(|original| !original.is_empty())
-    else {
+    // The bytes of the name, not a UTF-8 reading of it: a name that is not
+    // valid UTF-8 is a kept copy all the same.
+    let name = path.as_os_str().as_encoded_bytes();
+    if name.len() <= KEPT_SUFFIX.len() || !name.ends_with(KEPT_SUFFIX.as_bytes()) {
         return Ok(());
-    };
+    }
+    // A lossy reading still ends with the suffix, which is ASCII.
+    let lossy = path.to_string_lossy();
+    let original = lossy.strip_suffix(KEPT_SUFFIX).unwrap_or(&lossy);
     Err(Error::InvalidValue(format!(
         "{} is the kept copy a migration to the 0.6 format made of the 0.5.x database {original}, \
          and is not migrated itself: open it read-only to read it, or move it back to {original} \
@@ -1092,6 +1094,65 @@ impl Drop for MigrateLock {
 #[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
+
+    /// `<path>.pre-0.6` is a kept copy whatever the rest of its name holds,
+    /// also when it is not valid UTF-8; a bare `.pre-0.6`, and any other
+    /// name, is not. The refusal names the original name.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_kept_copy_is_recognized_by_the_bytes_of_its_name() {
+        for (path, kept) in [
+            (PathBuf::from("amsterdam.grafeo.pre-0.6"), true),
+            (non_utf8_path("berlin", ".pre-0.6"), true),
+            (non_utf8_path("berlin", ".grafeo.pre-0.6"), true),
+            (PathBuf::from("amsterdam.grafeo"), false),
+            (non_utf8_path("berlin", ""), false),
+            (non_utf8_path("berlin", ".pre-0.6.wal"), false),
+            (PathBuf::from(".pre-0.6"), false),
+        ] {
+            match refuse_kept_copy(&path) {
+                Ok(()) => assert!(
+                    !kept,
+                    "{} is a kept copy and is not refused",
+                    path.display()
+                ),
+                Err(error) => {
+                    assert!(
+                        kept,
+                        "{} is not a kept copy and is refused: {error}",
+                        path.display()
+                    );
+                    let original = path.to_string_lossy().replace(KEPT_SUFFIX, "");
+                    assert!(
+                        error.to_string().contains(&format!("database {original},")),
+                        "the error names the original name {original}: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `prefix`, a byte that is not valid UTF-8, then `suffix`.
+    #[cfg(unix)]
+    fn non_utf8_path(prefix: &str, suffix: &str) -> PathBuf {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut bytes = prefix.as_bytes().to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(suffix.as_bytes());
+        PathBuf::from(std::ffi::OsString::from_vec(bytes))
+    }
+
+    /// `prefix`, an unpaired surrogate (not valid UTF-16), then `suffix`.
+    #[cfg(windows)]
+    fn non_utf8_path(prefix: &str, suffix: &str) -> PathBuf {
+        use std::os::windows::ffi::OsStringExt;
+
+        let mut wide: Vec<u16> = prefix.encode_utf16().collect();
+        wide.push(0xD800);
+        wide.extend(suffix.encode_utf16());
+        PathBuf::from(std::ffi::OsString::from_wide(&wide))
+    }
 
     /// The refusal a build without the `wal` feature applies, tested here with
     /// `can_replay` false: a sidecar WAL with files refuses, an empty or

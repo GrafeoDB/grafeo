@@ -113,7 +113,7 @@ void            grafeo_free_database(GrafeoDatabase* db);    /* free handle */
 const char*     grafeo_version(void);                        /* library version (static) */
 ```
 
-A persistent database is a single file, whatever the extension of its path; a database written by 0.5.x is migrated on its first read-write open (see [Upgrading from 0.5](../../user-guide/persistence/persistent.md#upgrading-from-05)).
+A persistent database is a single file at rest, whatever the extension of its path. While it is open for writing it also has a WAL, the `<path>.wal/` directory next to it, which `grafeo_close` writes into the file and removes. A database written by 0.5.x is migrated on its first read-write open (see [Upgrading from 0.5](../../user-guide/persistence/persistent.md#upgrading-from-05)).
 
 All `grafeo_open*` functions return `NULL` on error. Always call `grafeo_close` before `grafeo_free_database` to flush pending writes.
 
@@ -352,7 +352,7 @@ int32_t      grafeo_drop_vector_index(GrafeoDatabase* db, const char* label, con
 GrafeoStatus grafeo_rebuild_vector_index(GrafeoDatabase* db, const char* label, const char* property);
 ```
 
-Pass `-1` for `dimensions`, `m`, or `ef_construction` to use defaults. Pass `NULL` for `metric` to default to cosine similarity. `grafeo_drop_vector_index` returns 1 if the index was dropped, 0 if there was none, and -1 on a database error (see `grafeo_last_error`).
+Pass `-1` for `dimensions`, `m`, or `ef_construction` to use defaults. Pass `NULL` for `metric` to default to cosine similarity. `grafeo_drop_vector_index` returns 1 if the index was dropped, 0 if there was none, and -1 on an error (see `grafeo_last_error`): a null pointer, a name that is not UTF-8, or a database error such as a closed database.
 
 ### Nearest Neighbor Search
 

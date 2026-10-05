@@ -134,15 +134,31 @@ pub fn run(cmd: BackupCommands, _format: OutputFormat, quiet: bool) -> Result<()
 /// backup is opened read-only (so it is never changed, and a 0.5.x backup is
 /// read in place instead of migrated, its WAL replayed as a read-write open
 /// would) and written to `<path>.restoring`; only then is the old database
-/// removed, with its sidecar WAL, and the image renamed into its place. A
-/// missing or unreadable backup, a backup inside the target, or a target that
-/// is not a database, is in use, or is (or holds) the current directory,
-/// leaves everything as it was. The target stays locked from its check until
-/// right before its removal.
+/// removed, with its sidecar WAL, and the image moved into its place without
+/// replacing anything: a database another process creates there meanwhile
+/// stays as it is, and the restore fails. A missing or unreadable backup, a
+/// backup inside the target, or a target that is not a database, is in use,
+/// or is (or holds) the current directory, leaves everything as it was. The
+/// target stays locked from its check until right before its removal.
 fn restore(backup: &Path, path: &Path, force: bool, quiet: bool) -> Result<()> {
+    restore_with(backup, path, force, quiet, || {})
+}
+
+/// [`restore`], calling `before_install` right before the restored image is
+/// moved to the target path: the moment another process could create a
+/// database there.
+fn restore_with(
+    backup: &Path,
+    path: &Path,
+    force: bool,
+    quiet: bool,
+    before_install: impl FnOnce(),
+) -> Result<()> {
     // The spelling the engine uses: side-file names are appended to the path,
     // so `db/` is `db` and `.` is the directory it names.
-    let path = normalize_target(path)?;
+    let path = normalize_database_path(path)?;
+    let backup = normalize_database_path(backup)?;
+    let backup = backup.as_path();
     refuse_current_directory(&path)?;
     let sidecar = with_suffix(&path, ".wal");
     let taken = path.exists() || sidecar.exists();
@@ -195,21 +211,61 @@ fn restore(backup: &Path, path: &Path, force: bool, quiet: bool) -> Result<()> {
             return Err(error);
         }
     }
-    fs::rename(&restoring, &path).with_context(|| {
-        format!(
-            "Failed to rename the restored database {} to {}; it is complete, rename it \
-             yourself",
-            restoring.display(),
-            path.display()
-        )
-    })
+    before_install();
+    install(&restoring, &path, &sidecar)
 }
 
-/// The target path as the engine spells a database path: without trailing
-/// separators and inner `.` components, and a path that ends in `.` or `..`
-/// resolved to the directory it names (through the file system when it
-/// exists, lexically from the current directory when it does not).
-fn normalize_target(path: &Path) -> Result<PathBuf> {
+/// Moves the restored image `restoring` to `path`, where no database is (it
+/// was absent at the check, or removed), without replacing anything: a
+/// database another process created at `path` meanwhile, or its sidecar WAL
+/// `sidecar` (which would be replayed into the restored database), is left as
+/// it is, and the restore fails without leaving the image behind.
+fn install(restoring: &Path, path: &Path, sidecar: &Path) -> Result<()> {
+    let appeared = |what: &Path| {
+        // Best effort: the error that matters is that the target appeared.
+        let _ = fs::remove_file(restoring);
+        anyhow::anyhow!(
+            "{} appeared while the backup was restored: it is left as it is, and nothing was \
+             restored",
+            what.display()
+        )
+    };
+    if sidecar.exists() {
+        return Err(appeared(sidecar));
+    }
+    // A hard link fails when `path` exists, where a rename would replace it
+    // (on Windows as well as on Unix).
+    match fs::hard_link(restoring, path) {
+        Ok(()) => {
+            if fs::remove_file(restoring).is_err() {
+                // The restore is complete; the next one removes the leftover.
+                output::error(&format!(
+                    "The database is restored, but {} could not be removed",
+                    restoring.display()
+                ));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(appeared(path)),
+        // A file system without hard links (FAT): a rename after a last
+        // check, which only a database created within that moment escapes.
+        Err(_) if path.exists() => Err(appeared(path)),
+        Err(_) => fs::rename(restoring, path).with_context(|| {
+            format!(
+                "Failed to rename the restored database {} to {}; it is complete, rename it \
+                 yourself",
+                restoring.display(),
+                path.display()
+            )
+        }),
+    }
+}
+
+/// `path` as the engine spells a database path: without trailing separators
+/// and inner `.` components, and a path that ends in `.` or `..` resolved to
+/// the directory it names (through the file system when it exists, lexically
+/// from the current directory when it does not).
+fn normalize_database_path(path: &Path) -> Result<PathBuf> {
     use std::path::Component;
 
     if matches!(path.components().next_back(), Some(Component::Normal(_))) {
@@ -219,7 +275,7 @@ fn normalize_target(path: &Path) -> Result<PathBuf> {
         return Ok(resolved);
     }
     let absolute = std::path::absolute(path)
-        .with_context(|| format!("Cannot resolve the target path {}", path.display()))?;
+        .with_context(|| format!("Cannot resolve the path {}", path.display()))?;
     let mut resolved = PathBuf::new();
     for component in absolute.components() {
         match component {
@@ -663,6 +719,92 @@ mod tests {
             "the child process created {}",
             path.display()
         );
+    }
+
+    /// A database another process creates at an absent target while the
+    /// backup is restored is never replaced: the restore fails, the new
+    /// database stays as it is, and no image is left behind. The same holds
+    /// with `--force`, for a database created after the old one was removed.
+    #[test]
+    fn a_target_that_appears_during_the_restore_is_never_replaced() {
+        for force in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let backup = dir.path().join("backup.grafeo");
+            database_with(&backup, "Alix");
+            let live = dir.path().join("live.grafeo");
+            if force {
+                database_with(&live, "Vincent");
+            }
+
+            let error = super::restore_with(&backup, &live, force, true, || {
+                assert!(!live.exists(), "force {force}: the target is absent");
+                database_with(&live, "Gus");
+            })
+            .expect_err("a target that appeared is not replaced");
+
+            // The target itself appeared (not its sidecar WAL): the
+            // no-replace install refused it.
+            assert!(
+                format!("{error:#}").contains(&format!("{} appeared", live.display())),
+                "force {force}: the error names the target: {error:#}"
+            );
+            assert_eq!(
+                names(&live),
+                vec!["Gus".to_string()],
+                "force {force}: the database that appeared is untouched"
+            );
+            assert!(
+                !dir.path().join("live.grafeo.restoring").exists(),
+                "force {force}: no image is left behind"
+            );
+        }
+    }
+
+    /// A sidecar WAL that appears at an absent target during the restore
+    /// would be replayed into the restored database: the restore fails and
+    /// leaves it as it is.
+    #[test]
+    fn a_sidecar_wal_that_appears_during_the_restore_is_never_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup = dir.path().join("backup.grafeo");
+        database_with(&backup, "Alix");
+        let live = dir.path().join("live.grafeo");
+
+        let error = super::restore_with(&backup, &live, false, true, || {
+            std::fs::create_dir_all(sidecar(&live)).unwrap();
+            std::fs::write(sidecar(&live).join("wal_00000000.log"), b"Vincent").unwrap();
+        })
+        .expect_err("a sidecar WAL that appeared is not adopted");
+
+        assert!(
+            format!("{error:#}").contains(&format!("{} appeared", sidecar(&live).display())),
+            "the error names the sidecar WAL: {error:#}"
+        );
+        assert!(!live.exists(), "nothing was restored");
+        assert_eq!(
+            std::fs::read(sidecar(&live).join("wal_00000000.log")).unwrap(),
+            b"Vincent",
+            "the sidecar WAL is untouched"
+        );
+        assert!(
+            !dir.path().join("live.grafeo.restoring").exists(),
+            "no image is left behind"
+        );
+    }
+
+    /// A backup path spelled with a trailing separator (`backup.grafeo/`)
+    /// names the backup file, as the target path and the engine read it.
+    #[test]
+    fn a_backup_path_with_a_trailing_separator_is_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup = dir.path().join("backup.grafeo");
+        database_with(&backup, "Alix");
+        let restored = dir.path().join("restored.grafeo");
+
+        restore(&dir.path().join("backup.grafeo/"), &restored, false)
+            .unwrap_or_else(|error| panic!("{error:#}"));
+
+        assert_eq!(names(&restored), vec!["Alix".to_string()]);
     }
 
     /// A target directory that is not a database (0.6 databases are files)

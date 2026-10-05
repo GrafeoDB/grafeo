@@ -345,7 +345,8 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the database doesn't exist or can't be read, and,
-    /// in a build without the `wal` feature, if its sidecar WAL holds files.
+    /// in a build without the `wal` feature, if its sidecar WAL holds commits
+    /// to replay (a non-empty log file; for a 0.5.x file, any file).
     ///
     /// # Examples
     ///
@@ -384,7 +385,8 @@ impl GrafeoDB {
     /// encryption, also if an encrypted database is opened without its key or
     /// with another one, or an unencrypted one is opened with a key; in a
     /// build without the `wal` feature, also if the sidecar WAL of the
-    /// database file holds files (commits only a build with `wal` can replay).
+    /// database file holds commits only a build with `wal` can replay (a
+    /// non-empty log file; for a 0.5.x file, any file).
     ///
     /// # Examples
     ///
@@ -581,7 +583,8 @@ impl GrafeoDB {
                     // since the last checkpoint in the sidecar WAL. They are
                     // replayed into memory, as a read-write open replays them,
                     // and nothing is written (a torn tail stays for the next
-                    // read-write open to seal). The shared lock keeps writers
+                    // read-write open, which seals it, or with `wal_enabled`
+                    // off removes it with the WAL). The shared lock keeps writers
                     // out, so the WAL does not change while it is read.
                     #[cfg(all(feature = "wal", feature = "lpg"))]
                     if fm.has_sidecar_wal() {
@@ -1141,21 +1144,28 @@ impl GrafeoDB {
     /// Runs `change`, which replaces the store, with the periodic checkpoint
     /// timer stopped (a checkpoint running meanwhile would write the old
     /// store), then restarts the timer on the new state, also when `change`
-    /// fails. Fails at once after `close()` (see [`hold_open`](Self::hold_open)). `change` runs with commits held off (see
+    /// fails. Fails at once after `close()` (see [`hold_open`](Self::hold_open)).
+    /// `change` runs with commits held off (see
     /// [`TransactionManager::hold_commits`]), taken once the timer is
     /// stopped: the new store holds every commit whole, and nothing runs
     /// after a commit that did not complete (the new store would be built
-    /// from its stamped part).
+    /// from its stamped part). Under that hold the closed state is checked
+    /// again (see [`TransactionManager::check_open`]), as every change
+    /// outside a commit does.
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
     fn with_checkpoint_timer_paused(&mut self, change: fn(&mut Self) -> Result<()>) -> Result<()> {
-        // After `close()` no timer may run against the released file.
+        // After `close()` no timer may run against the released file. The
+        // receiver is exclusive, so no `close()` of this handle starts
+        // meanwhile; should one ever run in between, the check under the
+        // commit guard below still refuses the change.
         drop(self.hold_open()?);
         #[cfg(feature = "grafeo-file")]
         self.stop_checkpoint_timer();
         let transaction_manager = Arc::clone(&self.transaction_manager);
-        let result = transaction_manager
-            .hold_commits()
-            .and_then(|_commits| change(self));
+        let result = transaction_manager.hold_commits().and_then(|_commits| {
+            transaction_manager.check_open()?;
+            change(self)
+        });
         // After a commit that did not complete the timer could never write.
         #[cfg(feature = "grafeo-file")]
         if !transaction_manager.has_incomplete_commit() {
@@ -2530,13 +2540,12 @@ impl GrafeoDB {
     /// `close()` waits for one already in progress, which completes and is
     /// written: a commit, a statement, a schema statement or graph command, an
     /// RDF update, a direct write, a direct graph or index call (a vector or
-    /// text index is built first and waited for only once it installs), and a
-    /// checkpoint, save or backup. The bulk imports, `batch_insert_rdf` and
-    /// `restore_snapshot` only refuse once closed: `close()` does not wait for
-    /// one in progress, and what it writes after the final checkpoint is
-    /// missing from the file although it returns `Ok`. Reads, `to_memory`,
-    /// `export_snapshot` and projections (`CREATE PROJECTION`, which change
-    /// only a session) still work. An in-memory database keeps taking writes.
+    /// text index is built first and waited for only once it installs), a
+    /// bulk import or `batch_insert_rdf` (its input is read first, and waited
+    /// for only once it changes the store), `restore_snapshot`, and a
+    /// checkpoint, save or backup. Reads, `to_memory`, `export_snapshot` and
+    /// projections (`CREATE PROJECTION`, which change only a session) still
+    /// work. An in-memory database keeps taking writes.
     ///
     /// # Errors
     ///
@@ -2673,7 +2682,7 @@ impl GrafeoDB {
     ///
     /// Returns [`TransactionError::DatabaseClosed`](grafeo_common::utils::error::TransactionError::DatabaseClosed)
     /// once `close()` of a database with a path has run.
-    #[cfg(feature = "lpg")]
+    #[cfg(any(feature = "lpg", feature = "triple-store"))]
     pub(crate) fn hold_open(&self) -> Result<parking_lot::RwLockReadGuard<'_, bool>> {
         let open = self.is_open.read();
         if !*open && self.config.path.is_some() {
@@ -2682,6 +2691,39 @@ impl GrafeoDB {
             ));
         }
         Ok(open)
+    }
+
+    /// Holds commits off while an import or an RDF batch insert changes the
+    /// store, for as long as the guard lives (see
+    /// [`TransactionManager::hold_commits_for_change`](crate::transaction::TransactionManager)):
+    /// they write no WAL record, so only a checkpoint persists them, and a
+    /// checkpoint or `close()` waits and holds all of the change or none of
+    /// it. Meanwhile commits, new transactions, writes outside a transaction
+    /// and checkpoints wait; the input is parsed before, outside the hold.
+    ///
+    /// Nothing would persist the change on a read-only database or after
+    /// `close()`, so it fails with the read-only error on a read-only
+    /// database and with the database-closed error after `close()` of a
+    /// persistent one (read-only or not), as `restore_snapshot` does.
+    /// Otherwise it waits for a commit in progress, then fails once a
+    /// `close()` has started, and after a commit that did not complete (the
+    /// change would be stamped at an epoch that is never published, and no
+    /// checkpoint runs any more).
+    #[cfg(any(feature = "lpg", feature = "triple-store"))]
+    fn hold_commits_for_import(&self) -> Result<crate::transaction::CommitsHeld<'_>> {
+        // A read-only `close()` sets no closed state for `check_open`: the
+        // open state refuses a closed handle of either kind.
+        drop(self.hold_open()?);
+        if self.read_only {
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::ReadOnly,
+            ));
+        }
+        let held = self.transaction_manager.hold_commits_for_change()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
+        Ok(held)
     }
 
     /// Returns the typed WAL if available.

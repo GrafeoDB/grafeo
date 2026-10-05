@@ -1238,7 +1238,8 @@ pub extern "C" fn grafeo_create_property_index(
 }
 
 /// Drop a property index. Returns 1 if dropped, 0 if not found, -1 on error
-/// (check `grafeo_last_error()`), such as a closed database.
+/// (check `grafeo_last_error()`): a null pointer, a name that is not UTF-8, or
+/// a database error such as a closed database.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_drop_property_index(
     db: *mut GrafeoDatabase,
@@ -1395,8 +1396,9 @@ pub extern "C" fn grafeo_create_vector_index(
 }
 
 /// Drop a vector index for the given label and property.
-/// Returns 1 if removed, 0 if not found, -1 on a database error (check
-/// `grafeo_last_error()`), such as a closed database.
+/// Returns 1 if removed, 0 if not found, -1 on error (check
+/// `grafeo_last_error()`): a null pointer, a name that is not UTF-8, or a
+/// database error such as a closed database.
 #[cfg(feature = "vector-index")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_drop_vector_index(
@@ -1406,15 +1408,15 @@ pub extern "C" fn grafeo_drop_vector_index(
 ) -> i32 {
     if db.is_null() {
         set_last_error("Null database pointer");
-        return 0;
+        return -1;
     }
     // SAFETY: Caller guarantees valid pointer from grafeo_open*.
     let db = unsafe { &*db };
     let Ok(label_str) = str_from_ptr(label) else {
-        return 0;
+        return -1;
     };
     let Ok(prop_str) = str_from_ptr(property) else {
-        return 0;
+        return -1;
     };
     match db.inner.read().drop_vector_index(label_str, prop_str) {
         Ok(removed) => i32::from(removed),
@@ -2280,6 +2282,63 @@ mod tests {
         }
         grafeo_free_database(db);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A drop with a null pointer or a name that is not UTF-8 returns -1, as
+    /// every other error does, and sets `grafeo_last_error`: 0 means only
+    /// "there was nothing to drop".
+    #[test]
+    fn a_drop_with_a_bad_argument_returns_an_error() {
+        let db = grafeo_open_memory();
+        let name = CString::new("name").unwrap();
+        let not_utf8 = CString::new(vec![b'a', 0xff]).unwrap();
+
+        let mut failures = Vec::new();
+        let mut check = |call: &str, drop: &dyn Fn() -> i32| {
+            crate::error::grafeo_clear_error();
+            let result = drop();
+            if result != -1 {
+                failures.push(format!("{call}: returned {result}"));
+            } else if crate::error::grafeo_last_error().is_null() {
+                failures.push(format!("{call}: no last error"));
+            }
+        };
+        check("property: null database", &|| {
+            grafeo_drop_property_index(std::ptr::null_mut(), name.as_ptr())
+        });
+        check("property: null name", &|| {
+            grafeo_drop_property_index(db, std::ptr::null())
+        });
+        check("property: not UTF-8", &|| {
+            grafeo_drop_property_index(db, not_utf8.as_ptr())
+        });
+        #[cfg(feature = "vector-index")]
+        {
+            let label = CString::new("Person").unwrap();
+            for (call, label, property) in [
+                ("vector: null label", std::ptr::null(), name.as_ptr()),
+                ("vector: null property", label.as_ptr(), std::ptr::null()),
+                ("vector: label not UTF-8", not_utf8.as_ptr(), name.as_ptr()),
+                (
+                    "vector: property not UTF-8",
+                    label.as_ptr(),
+                    not_utf8.as_ptr(),
+                ),
+            ] {
+                check(call, &|| grafeo_drop_vector_index(db, label, property));
+            }
+            check("vector: null database", &|| {
+                grafeo_drop_vector_index(std::ptr::null_mut(), label.as_ptr(), name.as_ptr())
+            });
+            assert_eq!(
+                grafeo_drop_vector_index(db, label.as_ptr(), name.as_ptr()),
+                0,
+                "no such index: 0"
+            );
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+        grafeo_close(db);
+        grafeo_free_database(db);
     }
 
     #[test]

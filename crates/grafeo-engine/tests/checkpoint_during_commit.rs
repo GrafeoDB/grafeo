@@ -25,8 +25,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, mpsc};
-use std::thread::JoinHandle;
-use std::time::Duration;
 
 use grafeo_common::testing::child_process;
 use grafeo_common::testing::commit_hook::{
@@ -35,39 +33,10 @@ use grafeo_common::testing::commit_hook::{
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
-/// How long work that should wait gets to finish in the middle anyway.
-const BRIEFLY: Duration = Duration::from_millis(300);
+#[path = "common/started.rs"]
+mod started;
 
-/// Work running on another thread.
-struct Started<T> {
-    handle: JoinHandle<T>,
-    done: mpsc::Receiver<()>,
-}
-
-impl<T: Send + 'static> Started<T> {
-    /// Starts `work` and returns once it runs.
-    fn spawn(work: impl FnOnce() -> T + Send + 'static) -> Self {
-        let (running, started) = mpsc::channel();
-        let (finished, done) = mpsc::channel();
-        let handle = std::thread::spawn(move || {
-            let _ = running.send(());
-            let result = work();
-            let _ = finished.send(());
-            result
-        });
-        started.recv().expect("the work started");
-        Self { handle, done }
-    }
-
-    /// Whether the work finishes within [`BRIEFLY`].
-    fn finishes_briefly(&self) -> bool {
-        self.done.recv_timeout(BRIEFLY).is_ok()
-    }
-
-    fn join(self) -> T {
-        self.handle.join().expect("the work panicked")
-    }
-}
+use started::Started;
 
 /// The names of the people in `db`, sorted.
 fn people(db: &GrafeoDB) -> Vec<Value> {

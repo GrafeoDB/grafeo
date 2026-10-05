@@ -836,7 +836,10 @@ impl Session {
                 grafeo_common::utils::error::TransactionError::ReadOnly,
             ));
         }
-        Ok(())
+        // After `close()` the commit would fail (see
+        // `TransactionManager::check_open`): fail before writing, also a
+        // write outside a transaction, which has no commit.
+        self.transaction_manager.check_open()
     }
 
     /// Executes a session or transaction command, returning an empty result.
@@ -857,6 +860,7 @@ impl Session {
             | SessionCommand::CreateProjection { .. }
             | SessionCommand::DropProjection { .. } => {
                 self.require_permission(crate::auth::StatementKind::Write)?;
+                self.transaction_manager.check_open()?;
             }
             _ => {} // Session state + transaction control: always allowed
         }
@@ -1272,6 +1276,24 @@ impl Session {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
         #[cfg(feature = "wal")]
         use grafeo_storage::wal::WalRecord;
+
+        // A schema change takes effect at once and logs its own WAL group,
+        // outside any commit: once the database is closed it fails, as a
+        // write does.
+        if !matches!(
+            cmd,
+            SchemaStatement::ShowConstraints
+                | SchemaStatement::ShowIndexes
+                | SchemaStatement::ShowNodeTypes
+                | SchemaStatement::ShowEdgeTypes
+                | SchemaStatement::ShowGraphTypes
+                | SchemaStatement::ShowGraphType(_)
+                | SchemaStatement::ShowCurrentGraphType
+                | SchemaStatement::ShowGraphs
+                | SchemaStatement::ShowSchemas
+        ) {
+            self.transaction_manager.check_open()?;
+        }
 
         /// Logs a WAL record for schema changes. Compiles to nothing without `wal`.
         macro_rules! wal_log {

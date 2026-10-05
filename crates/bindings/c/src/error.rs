@@ -28,7 +28,11 @@ impl From<&grafeo_common::utils::error::Error> for GrafeoStatus {
         use grafeo_bindings_common::error::{ErrorCategory, classify_error};
         match classify_error(err) {
             ErrorCategory::Query => GrafeoStatus::ErrorQuery,
-            ErrorCategory::Transaction => GrafeoStatus::ErrorTransaction,
+            // No status of its own, so the C ABI stays as it is; the
+            // message names it.
+            ErrorCategory::Transaction | ErrorCategory::DatabaseClosed => {
+                GrafeoStatus::ErrorTransaction
+            }
             ErrorCategory::Storage => GrafeoStatus::ErrorStorage,
             ErrorCategory::Io => GrafeoStatus::ErrorIo,
             ErrorCategory::Serialization => GrafeoStatus::ErrorSerialization,

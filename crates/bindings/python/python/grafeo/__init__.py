@@ -14,6 +14,7 @@ Example:
 """
 
 from grafeo.grafeo import (
+    DatabaseClosedError,
     Edge,
     GrafeoDB,
     GrafeoError,
@@ -32,6 +33,7 @@ from grafeo.grafeo import (
 __all__ = [
     "GrafeoDB",
     "GrafeoError",
+    "DatabaseClosedError",
     "GraphHandle",
     "Node",
     "Edge",

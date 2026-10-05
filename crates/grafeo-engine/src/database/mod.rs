@@ -2363,6 +2363,11 @@ impl GrafeoDB {
     /// Called automatically when the database is dropped, but you can call
     /// it explicitly if you need to guarantee durability at a specific point.
     ///
+    /// Once `close()` of a persistent database starts, every commit and every
+    /// write outside a transaction fails with an error saying the database is
+    /// closed; a commit already in progress completes first and is written.
+    /// Reads still work. An in-memory database keeps taking writes.
+    ///
     /// # Errors
     ///
     /// Returns an error if the WAL can't be flushed (check disk space/permissions).
@@ -2405,6 +2410,15 @@ impl GrafeoDB {
             }
             *is_open = false;
             return Ok(());
+        }
+
+        // From here on, commits and writes outside a transaction fail: one
+        // that ran after the final checkpoint below would be written only to
+        // the WAL this close removes (or, without a WAL, nowhere). A commit in
+        // progress completes first, and the checkpoint holds it. An in-memory
+        // database has nothing to persist and keeps taking writes.
+        if self.config.path.is_some() {
+            self.transaction_manager.close_for_writes();
         }
 
         // After a commit that did not complete, the store holds its stamped

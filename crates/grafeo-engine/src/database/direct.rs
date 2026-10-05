@@ -359,6 +359,7 @@ impl GrafeoDB {
     /// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager))
     /// from its epoch until it is published, so no checkpoint holds part of
     /// it (lock order: the idle gate, then the commit lock, as in `begin`).
+    /// Fails, like a commit, once the database is closed.
     fn write_outside_transaction<T>(
         &self,
         store: &Arc<LpgStore>,
@@ -367,6 +368,7 @@ impl GrafeoDB {
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {
         let commits = self.transaction_manager.hold_commits()?;
+        self.transaction_manager.check_open()?;
         let root = self.lpg_store();
         let read_epoch = self.transaction_manager.current_epoch();
         let epoch = EpochId::new(read_epoch.as_u64() + 1);

@@ -4,7 +4,7 @@
 //! (Python `PyErr`, Node.js `napi::Error`, C `GrafeoStatus`, etc.) using a
 //! single small match expression.
 
-use grafeo_common::utils::error::Error;
+use grafeo_common::utils::error::{Error, TransactionError};
 
 /// Categories that all bindings map errors into.
 ///
@@ -16,6 +16,8 @@ pub enum ErrorCategory {
     Query,
     /// Transaction conflict, timeout, or invalid state.
     Transaction,
+    /// The database is closed and takes no more writes.
+    DatabaseClosed,
     /// Storage-layer error (disk, memory limit).
     Storage,
     /// I/O error (file, network).
@@ -33,6 +35,7 @@ pub enum ErrorCategory {
 pub fn classify_error(err: &Error) -> ErrorCategory {
     match err {
         Error::Query(_) => ErrorCategory::Query,
+        Error::Transaction(TransactionError::DatabaseClosed) => ErrorCategory::DatabaseClosed,
         Error::Transaction(_) => ErrorCategory::Transaction,
         Error::Storage(_) => ErrorCategory::Storage,
         Error::Io(_) => ErrorCategory::Io,
@@ -66,6 +69,14 @@ mod tests {
     fn classifies_not_found_as_database() {
         let err = Error::NodeNotFound(grafeo_common::types::NodeId(42));
         assert_eq!(classify_error(&err), ErrorCategory::Database);
+    }
+
+    #[test]
+    fn classifies_database_closed_apart_from_other_transaction_errors() {
+        let err = Error::Transaction(TransactionError::DatabaseClosed);
+        assert_eq!(classify_error(&err), ErrorCategory::DatabaseClosed);
+        let err = Error::Transaction(TransactionError::InvalidState("x".into()));
+        assert_eq!(classify_error(&err), ErrorCategory::Transaction);
     }
 
     #[test]

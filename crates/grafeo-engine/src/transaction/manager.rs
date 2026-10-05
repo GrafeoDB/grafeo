@@ -213,7 +213,8 @@ pub struct TransactionManager {
     /// [`CommitGuard`]), by a write outside a transaction from its epoch
     /// until it is published, by a checkpoint or a copy of the store while it
     /// builds its image (see [`hold_commits`](Self::hold_commits)), and
-    /// briefly by every [`begin`](Self::begin): commits complete one at a
+    /// briefly by every [`begin`](Self::begin) and by
+    /// [`close_for_writes`](Self::close_for_writes): commits complete one at a
     /// time, in epoch order, no transaction starts in the middle of one, and
     /// no image holds part of one.
     ///
@@ -225,6 +226,10 @@ pub struct TransactionManager {
     /// Set when a commit did not complete (its [`CommitGuard`] was dropped
     /// without `complete`): no commit can run afterwards.
     poisoned: AtomicBool,
+    /// Set by [`close_for_writes`](Self::close_for_writes) when a persistent
+    /// database closes: no commit and no write outside a transaction can run
+    /// afterwards.
+    closed: AtomicBool,
 }
 
 /// Commits held off (see [`TransactionManager::hold_commits`]): while this
@@ -326,6 +331,7 @@ impl TransactionManager {
             idle_gate: Mutex::new(()),
             commit_lock: Mutex::new(()),
             poisoned: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -475,6 +481,7 @@ impl TransactionManager {
     /// - (Serializable only) There's a read-write conflict (SSI violation)
     /// - An earlier commit did not complete (see [`TransactionManager`]): no
     ///   transaction commits until the database is reopened
+    /// - The database is closed: `close()` of a persistent database started
     pub fn commit(&self, transaction_id: TransactionId) -> Result<EpochId> {
         let commit = self.start_commit(transaction_id)?;
         let epoch = commit.epoch();
@@ -495,6 +502,7 @@ impl TransactionManager {
         // commit lock: any epoch published after it would publish its
         // stamped versions too.
         self.check_no_incomplete_commit()?;
+        self.check_open()?;
         // Lock ordering: transactions first, then committed_epochs (matches gc()).
         // Both held as write locks to ensure state and epoch are updated atomically,
         // preventing a race where another thread sees state == Committed but the
@@ -626,6 +634,34 @@ impl TransactionManager {
         };
         self.check_no_incomplete_commit()?;
         Ok(Some(CommitsHeld { _commit: commit }))
+    }
+
+    /// Closes the database for writes: from now on every commit and every
+    /// write outside a transaction fails (see [`check_open`](Self::check_open)).
+    /// Waits for a commit in progress to complete. A persistent database
+    /// calls this when it closes, before its final checkpoint: a write that
+    /// ran after that checkpoint would be written only to the WAL the close
+    /// removes. Transactions still begin, and reads still work.
+    pub(crate) fn close_for_writes(&self) {
+        let _commit = self.commit_lock.lock();
+        // Set while the commit lock is held: a commit or a write outside a
+        // transaction waiting for the lock sees it.
+        self.closed.store(true, Ordering::Release);
+    }
+
+    /// Fails once the database is closed for writes (see
+    /// [`close_for_writes`](Self::close_for_writes)). Every commit, and every
+    /// write outside a transaction, calls this while it holds the commit
+    /// lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransactionError::DatabaseClosed`].
+    pub(crate) fn check_open(&self) -> Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::Transaction(TransactionError::DatabaseClosed));
+        }
+        Ok(())
     }
 
     /// Whether a commit did not complete (see [`TransactionManager`]): its

@@ -19,9 +19,10 @@
 //!    sidecar WAL `<path>.wal` to `<path>.pre-0.6.wal` and a checkpoint image
 //!    0.5.44 left pending, `<path>.checkpoint`, to `<path>.pre-0.6.checkpoint`,
 //!    syncing the directory after each move: a power loss keeps the first
-//!    moves, never a later one without an earlier one. A directory's lock is
-//!    released right before it moves (on Windows a directory with an open
-//!    handle inside cannot be renamed).
+//!    moves, never a later one without an earlier one. The old database stays
+//!    locked until it has moved, except a directory on Windows, whose lock is
+//!    released right before it moves (there a directory with an open handle
+//!    inside cannot be renamed).
 //! 3. Rename `<path>.migrating` to `<path>` and sync the directory.
 //!
 //! The old files are kept byte for byte. To go back to 0.5.x, move the 0.6
@@ -32,7 +33,9 @@
 //! before it writes anything.
 //!
 //! A directory that is not a 0.5.x database (no `wal/` inside) is never
-//! migrated: the open fails with an error naming it.
+//! migrated: the open fails with an error naming it. Neither is a kept copy (a
+//! 0.5.x database whose name ends in `.pre-0.6`): a read-write open of it fails
+//! and says to open it read-only, or to move it back to its original name.
 //!
 //! With `Config::encryption` set, the image is encrypted with the keys the key
 //! chain derives for its new database id. The kept files stay unencrypted
@@ -66,8 +69,9 @@
 //!
 //! A crash also leaves the lock file behind, which the next open removes, and
 //! a crash while a directory is locked can leave an empty `LOCK` file in it
-//! (as a 0.5.44 open creates one); the migration otherwise removes a `LOCK`
-//! file it created.
+//! (as a 0.5.44 open creates one), which a crash right after the directory
+//! moved (not on Windows, where its lock is released before) leaves in the
+//! kept copy; the migration otherwise removes a `LOCK` file it created.
 //!
 //! Two states are never the result of a migration, and are not acted on: a
 //! `<path>.migrating` next to a 0.6 `<path>` is left alone with a warning, and
@@ -244,6 +248,7 @@ pub(super) fn lock_if_missing(path: &Path) -> Result<Option<MigrateLock>> {
 /// files), or the image cannot be written or a rename fails.
 #[cfg(feature = "lpg")]
 pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
+    refuse_kept_copy(path)?;
     let _lock = MigrateLock::acquire(path)?;
     // While this open waited for the lock, another process may have migrated
     // the database, or crashed while it did.
@@ -275,7 +280,9 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
     let old_lock = if on_disk == OnDisk::WalDirectory {
         OldDatabaseLock::Directory(LegacyDirectoryLock::acquire(path).map_err(failed)?)
     } else {
-        OldDatabaseLock::File(lock_shared(path)?)
+        OldDatabaseLock::File {
+            _shared: lock_shared(path)?,
+        }
     };
     let migrating = migrating_path(path);
     // The old database is read without a key (a 0.5.x file is never
@@ -310,14 +317,15 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
     };
     maybe_crash("migrate:after_image");
 
-    // The lock on a file stays until the file has moved. A directory's lock
+    // The old database stays locked until it has moved. A directory's lock
     // is its `LOCK` file, inside it, and on Windows a directory with an open
     // handle inside cannot be renamed (the WAL files the load read are closed
-    // by now): it is released right before the move. A 0.5.x process that
-    // opens the directory in that window would write to the kept copy;
+    // by now): there it is released right before the move. A 0.5.x process
+    // that opens the directory in that window would write to the kept copy;
     // stopping 0.5.x processes before the first 0.6 open is the user's part,
     // as the upgrade notes say.
-    let _old_file_lock = old_lock.release_directory();
+    let old_lock = old_lock.before_move();
+    maybe_pause("migrate:before_move");
 
     // Up to the first rename the old database is untouched: on failure the
     // image goes, so the database is as it was.
@@ -329,6 +337,9 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
         }
         return Err(error);
     }
+    // Released now that the old database is out of the way (a `LOCK` file
+    // the migration created goes from the kept copy).
+    drop(old_lock.map(|lock| lock.moved_to(kept_file)));
     // The move of the old file is durable before a side file moves: a power
     // loss that kept a side file's move without it would leave a 0.5.x
     // `<path>` without its sidecar WAL.
@@ -366,6 +377,36 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The suffix of a kept copy: `<path>.pre-0.6`.
+#[cfg(feature = "lpg")]
+const KEPT_SUFFIX: &str = ".pre-0.6";
+
+/// Refuses to migrate a 0.5.x database whose name ends in `.pre-0.6`: it is
+/// the copy a migration kept of the database at the name without that
+/// suffix. Migrating it would move the old data to `<path>.pre-0.6.pre-0.6`,
+/// where nobody looks for it, and the way back to 0.5.x (renaming the kept
+/// copy back) would no longer work.
+///
+/// # Errors
+///
+/// Returns an error saying so, naming the original name, for such a path.
+#[cfg(feature = "lpg")]
+fn refuse_kept_copy(path: &Path) -> Result<()> {
+    let Some(original) = path
+        .to_str()
+        .and_then(|name| name.strip_suffix(KEPT_SUFFIX))
+        .filter(|original| !original.is_empty())
+    else {
+        return Ok(());
+    };
+    Err(Error::InvalidValue(format!(
+        "{} is the kept copy a migration to the 0.6 format made of the 0.5.x database {original}, \
+         and is not migrated itself: open it read-only to read it, or move it back to {original} \
+         first to migrate it (see Going Back to 0.5.x)",
+        path.display()
+    )))
 }
 
 /// The node and edge counts the active database header of the image at
@@ -768,24 +809,39 @@ fn is_legacy(on_disk: OnDisk) -> bool {
 /// reads it.
 #[cfg(feature = "lpg")]
 enum OldDatabaseLock {
-    /// A shared lock on a 0.5.x file.
-    File(SharedLock),
+    /// A shared lock on a 0.5.x file, released when dropped.
+    File { _shared: SharedLock },
     /// The `LOCK` of a 0.5.x WAL directory.
     Directory(LegacyDirectoryLock),
 }
 
 #[cfg(feature = "lpg")]
 impl OldDatabaseLock {
-    /// Releases the lock of a directory, which is inside it and would keep it
-    /// from being renamed on Windows; returns the lock of a file, to be held
-    /// until the file has moved.
-    fn release_directory(self) -> Option<SharedLock> {
+    /// The lock to hold while the old database moves: all of it, except the
+    /// lock of a directory on Windows, which is inside it and would keep it
+    /// from being renamed there, so it is released now.
+    fn before_move(self) -> Option<Self> {
         match self {
-            Self::File(lock) => Some(lock),
-            Self::Directory(lock) => {
+            Self::Directory(lock) if cfg!(windows) => {
                 drop(lock);
                 None
             }
+            held => Some(held),
+        }
+    }
+
+    /// The lock once the old database has moved to `kept`: a `LOCK` file the
+    /// migration created in a directory is now in the kept copy, and is
+    /// removed from there when the lock is released.
+    fn moved_to(self, kept: &Path) -> Self {
+        match self {
+            Self::Directory(mut lock) => {
+                if let Some(created) = &mut lock.created {
+                    *created = kept.join(LOCK_FILE_NAME);
+                }
+                Self::Directory(lock)
+            }
+            file => file,
         }
     }
 }

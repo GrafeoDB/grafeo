@@ -8,7 +8,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use grafeo_common::types::{EdgeId, NodeId};
-use grafeo_engine::config::{Config, StorageFormat};
+use grafeo_engine::config::Config;
 use grafeo_engine::database::GrafeoDB;
 
 use crate::error::{GrafeoStatus, set_error, set_last_error, str_from_ptr};
@@ -241,9 +241,7 @@ pub extern "C" fn grafeo_open_single_file(path: *const c_char) -> *mut GrafeoDat
     let Ok(path_str) = str_from_ptr(path) else {
         return std::ptr::null_mut();
     };
-    match GrafeoDB::with_config(
-        Config::persistent(path_str).with_storage_format(StorageFormat::SingleFile),
-    ) {
+    match GrafeoDB::with_config(Config::persistent(path_str)) {
         Ok(db) => Box::into_raw(Box::new(GrafeoDatabase {
             inner: Arc::new(RwLock::new(db)),
         })),
@@ -1233,11 +1231,14 @@ pub extern "C" fn grafeo_create_property_index(
         Ok(s) => s,
         Err(e) => return e,
     };
-    db.inner.read().create_property_index(prop_str);
-    GrafeoStatus::Ok
+    match db.inner.read().create_property_index(prop_str) {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(e) => set_error(&e),
+    }
 }
 
-/// Drop a property index. Returns 1 if dropped, 0 if not found.
+/// Drop a property index. Returns 1 if dropped, 0 if not found, -1 on error
+/// (check `grafeo_last_error()`), such as a closed database.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_drop_property_index(
     db: *mut GrafeoDatabase,
@@ -1252,7 +1253,13 @@ pub extern "C" fn grafeo_drop_property_index(
     let Ok(prop_str) = str_from_ptr(property) else {
         return -1;
     };
-    i32::from(db.inner.read().drop_property_index(prop_str))
+    match db.inner.read().drop_property_index(prop_str) {
+        Ok(dropped) => i32::from(dropped),
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
 }
 
 /// Check if a property index exists. Returns 1 if exists, 0 otherwise.
@@ -1388,7 +1395,8 @@ pub extern "C" fn grafeo_create_vector_index(
 }
 
 /// Drop a vector index for the given label and property.
-/// Returns 1 if removed, 0 if not found.
+/// Returns 1 if removed, 0 if not found, -1 on a database error (check
+/// `grafeo_last_error()`), such as a closed database.
 #[cfg(feature = "vector-index")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_drop_vector_index(
@@ -1408,7 +1416,13 @@ pub extern "C" fn grafeo_drop_vector_index(
     let Ok(prop_str) = str_from_ptr(property) else {
         return 0;
     };
-    i32::from(db.inner.read().drop_vector_index(label_str, prop_str))
+    match db.inner.read().drop_vector_index(label_str, prop_str) {
+        Ok(removed) => i32::from(removed),
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
 }
 
 /// Rebuild a vector index by rescanning all matching nodes.
@@ -2227,6 +2241,46 @@ pub extern "C" fn grafeo_free_string(s: *mut c_char) {
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    /// After `grafeo_close` the handle lives on until `grafeo_free_database`:
+    /// the index calls on it fail, and a drop returns -1 (not 0, "nothing to
+    /// drop"), which the Go, Dart and C# wrappers read as an error.
+    #[test]
+    fn index_calls_after_close_return_an_error() {
+        let dir = std::env::temp_dir().join(format!("grafeo-c-closed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = CString::new(dir.join("amsterdam.grafeo").to_str().unwrap()).unwrap();
+        let db = grafeo_open(path.as_ptr());
+        assert!(!db.is_null());
+        assert_eq!(grafeo_close(db), GrafeoStatus::Ok);
+
+        let last_error = || {
+            // SAFETY: the pointer is valid until the next call on this thread.
+            unsafe { std::ffi::CStr::from_ptr(crate::error::grafeo_last_error()) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let property = CString::new("name").unwrap();
+        assert_eq!(
+            grafeo_create_property_index(db, property.as_ptr()),
+            GrafeoStatus::ErrorDatabase
+        );
+        assert!(last_error().contains("GRAFEO-T007"), "{}", last_error());
+        assert_eq!(grafeo_drop_property_index(db, property.as_ptr()), -1);
+        assert!(last_error().contains("GRAFEO-T007"), "{}", last_error());
+        #[cfg(feature = "vector-index")]
+        {
+            let label = CString::new("Person").unwrap();
+            assert_eq!(
+                grafeo_drop_vector_index(db, label.as_ptr(), property.as_ptr()),
+                -1
+            );
+            assert!(last_error().contains("GRAFEO-T007"), "{}", last_error());
+        }
+        grafeo_free_database(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_open_memory_and_close() {

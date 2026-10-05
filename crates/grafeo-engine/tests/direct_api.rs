@@ -74,7 +74,7 @@ fn property_index_calls_follow_the_selected_graph() {
     let in_model = db
         .create_node_with_props(&["Doc"], [("id", Value::from("x"))])
         .unwrap();
-    db.create_property_index("id");
+    db.create_property_index("id").unwrap();
     assert!(db.has_property_index("id"));
     assert_eq!(
         db.find_nodes_by_property("id", &Value::from("x")),
@@ -219,7 +219,7 @@ fn a_failing_batch_creates_nothing() {
         db.execute("CREATE CONSTRAINT doc_id FOR (n:Doc) ON (n.id) UNIQUE")
             .unwrap();
         if with_index {
-            db.create_property_index("id");
+            db.create_property_index("id").unwrap();
         }
         let row = |id: &str| HashMap::from([(PropertyKey::new("id"), Value::from(id))]);
 

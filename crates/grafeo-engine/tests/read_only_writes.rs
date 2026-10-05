@@ -249,3 +249,41 @@ fn a_read_only_database_rejects_direct_writes() {
 
     assert_eq!(state(&db), seeded_state());
 }
+
+/// `GrafeoDB::execute_sparql` respects a read-only database, as the session
+/// path does: an update fails and changes nothing, a query still runs.
+#[cfg(all(feature = "grafeo-file", feature = "sparql", feature = "triple-store"))]
+#[test]
+fn a_read_only_database_rejects_sparql_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("triples.grafeo");
+    {
+        let db = GrafeoDB::open(&path).unwrap();
+        db.execute_sparql(r#"INSERT DATA { <http://ex.org/alix> <http://ex.org/name> "Alix" . }"#)
+            .unwrap();
+        db.close().unwrap();
+    }
+
+    let db = GrafeoDB::open_read_only(&path).unwrap();
+    assert_read_only(
+        db.execute_sparql(r#"INSERT DATA { <http://ex.org/gus> <http://ex.org/name> "Gus" . }"#),
+        "GrafeoDB::execute_sparql INSERT DATA",
+    );
+    assert_read_only(
+        db.execute_language(
+            r#"INSERT DATA { <http://ex.org/gus> <http://ex.org/name> "Gus" . }"#,
+            "sparql",
+            None,
+        ),
+        "execute_language sparql INSERT DATA",
+    );
+    assert_eq!(db.rdf_store().len(), 1, "no triple was added");
+    assert_eq!(
+        db.execute_sparql("SELECT ?s WHERE { ?s ?p ?o }")
+            .unwrap()
+            .rows()
+            .len(),
+        1,
+        "queries still run"
+    );
+}

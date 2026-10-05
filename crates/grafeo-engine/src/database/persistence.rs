@@ -579,13 +579,19 @@ impl super::GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if `path` already exists, if the file cannot be
-    /// written, or after a commit that did not complete (see
-    /// [`TransactionManager`](crate::transaction::TransactionManager)).
+    /// written, after a commit that did not complete (see
+    /// [`TransactionManager`](crate::transaction::TransactionManager)), and
+    /// the database-closed error after `close()` of a persistent database.
     ///
     /// Requires the `wal` feature for persistence support.
     #[cfg(feature = "wal")]
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.write_image(path.as_ref())
+        // `close()` waits for the save, and none runs after it.
+        let _open = self.hold_open()?;
+        // The spelling every open uses (see `normalize_path`): `copy/` names
+        // the file `copy`, as an open of `copy/` does.
+        let path = super::normalize_path(path.as_ref())?;
+        self.write_image(&path)
     }
 
     /// Writes the database's complete state to a new `.grafeo` file at
@@ -729,11 +735,14 @@ impl super::GrafeoDB {
     /// it with its key ([`with_config`](Self::with_config)) and call
     /// [`to_memory`](Self::to_memory).
     ///
-    /// A database written by 0.5.x (a `.grafeo` file or a WAL directory) is
-    /// read as [`open_read_only`](Self::open_read_only) reads it (the sidecar
-    /// WAL of a file, the WAL of a directory, replayed) and is not migrated:
-    /// nothing on disk changes. A path whose migration was cut off fails as a
-    /// read-only open does.
+    /// An existing database is read as [`open_read_only`](Self::open_read_only)
+    /// reads it, and nothing on disk changes: a 0.6 file under a shared lock
+    /// (other readers may hold it too) with its sidecar WAL replayed, and no
+    /// checkpoint or WAL removal when it is closed; a database written by 0.5.x
+    /// (a `.grafeo` file or a WAL directory) with its WAL replayed, and not
+    /// migrated. A path whose migration was cut off fails as a read-only open
+    /// does. At a missing path a new, empty database file is created, as
+    /// [`open`](Self::open) creates one.
     ///
     /// # Errors
     ///
@@ -745,21 +754,21 @@ impl super::GrafeoDB {
         // The spelling every open uses (see `normalize_path`).
         let path = &super::normalize_path(path.as_ref())?;
         match detect(path)? {
-            // Read as a read-only open reads it: a read-write open would
-            // migrate it.
-            OnDisk::LegacyFile | OnDisk::WalDirectory => {
+            // A missing file next to a cut-off migration or a kept copy
+            // fails as a read-only open does, before anything is created.
+            OnDisk::Missing => super::migration::check_read_only(path)?,
+            // Read as a read-only open reads it: a read-write open would take
+            // the exclusive lock, checkpoint the file and remove its WAL when
+            // it closes, and migrate a 0.5.x database.
+            _ => {
                 let source = Self::with_config(Config::read_only(path))?;
                 let target = source.to_memory()?;
                 source.close()?;
                 return Ok(target);
             }
-            // A missing file next to a cut-off migration or a kept copy
-            // fails as a read-only open does, before anything is created.
-            OnDisk::Missing => super::migration::check_read_only(path)?,
-            _ => {}
         }
 
-        // Open the source database (triggers WAL recovery)
+        // A missing path becomes a new, empty database, as `open` creates.
         let source = Self::open(path)?;
 
         // Create in-memory copy
@@ -964,11 +973,15 @@ impl super::GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the snapshot is invalid, contains dangling edge
-    /// references, has duplicate IDs, or deserialization fails, or after a
+    /// references, has duplicate IDs, or deserialization fails, after a
     /// commit that did not complete (the restored database could never be
-    /// checkpointed, see [`TransactionManager`](crate::transaction::TransactionManager)).
+    /// checkpointed, see [`TransactionManager`](crate::transaction::TransactionManager)),
+    /// and the database-closed error after `close()` of a persistent database.
     pub fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
         self.transaction_manager.check_no_incomplete_commit()?;
+        // A restore writes no WAL record: after `close()` nothing would
+        // persist it.
+        self.transaction_manager.check_open()?;
         if data.is_empty() {
             return Err(Error::Internal("empty snapshot data".to_string()));
         }
@@ -1487,7 +1500,7 @@ mod tests {
         session
             .execute("INSERT (:Person {name: 'Alix', email: 'alix@example.com'})")
             .unwrap();
-        db.create_property_index("email");
+        db.create_property_index("email").unwrap();
         assert!(db.has_property_index("email"));
 
         let snapshot = db.export_snapshot().unwrap();
@@ -1578,7 +1591,7 @@ mod tests {
         session
             .execute("INSERT (:Person {name: 'Alix', email: 'alix@example.com'})")
             .unwrap();
-        db.create_property_index("email");
+        db.create_property_index("email").unwrap();
 
         let snapshot = db.export_snapshot().unwrap();
 
@@ -1586,7 +1599,7 @@ mod tests {
         session
             .execute("INSERT (:Person {name: 'Gus', email: 'gus@example.com'})")
             .unwrap();
-        db.drop_property_index("email");
+        db.drop_property_index("email").unwrap();
         assert!(!db.has_property_index("email"));
 
         // Restore should bring back the index

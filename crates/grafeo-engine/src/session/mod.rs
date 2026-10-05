@@ -849,9 +849,25 @@ impl Session {
     /// fails once the database is closed or after a commit that did not
     /// complete.
     fn hold_commits_for_change(&self) -> Result<crate::transaction::CommitsHeld<'_>> {
-        let held = self.transaction_manager.hold_commits()?;
-        self.transaction_manager.check_open()?;
-        Ok(held)
+        self.transaction_manager.hold_commits_for_change()
+    }
+
+    /// What an RDF update needs before it runs: it fails once the database is
+    /// closed (also for an admin identity, which skips the other write
+    /// checks), and outside a transaction it holds commits off until the
+    /// returned guard drops, as a schema change does (see
+    /// [`hold_commits_for_change`](Self::hold_commits_for_change)): it changes
+    /// the store at once and logs its own WAL group. Inside a transaction the
+    /// commit writes it, and checks again.
+    #[cfg(feature = "triple-store")]
+    pub(super) fn hold_for_rdf_update(
+        &self,
+    ) -> Result<Option<crate::transaction::CommitsHeld<'_>>> {
+        if self.current_transaction.lock().is_some() {
+            self.transaction_manager.check_open()?;
+            return Ok(None);
+        }
+        self.hold_commits_for_change().map(Some)
     }
 
     /// Executes a session or transaction command, returning an empty result.
@@ -865,18 +881,17 @@ impl Session {
         use grafeo_adapters::query::gql::ast::TransactionIsolationLevel;
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
-        // Check role-based permission for graph management commands; they
-        // hold commits off until they return (see `hold_commits_for_change`).
-        let _held = match &cmd {
+        // Check role-based permission for graph management commands.
+        if matches!(
+            cmd,
             SessionCommand::CreateGraph { .. }
-            | SessionCommand::DropGraph { .. }
-            | SessionCommand::CreateProjection { .. }
-            | SessionCommand::DropProjection { .. } => {
-                self.require_permission(crate::auth::StatementKind::Write)?;
-                Some(self.hold_commits_for_change()?)
-            }
-            _ => None, // Session state + transaction control: always allowed
-        };
+                | SessionCommand::DropGraph { .. }
+                | SessionCommand::CreateProjection { .. }
+                | SessionCommand::DropProjection { .. }
+        ) {
+            self.require_permission(crate::auth::StatementKind::Write)?;
+        }
+        // Session state + transaction control: always allowed
 
         // Check per-graph grants for graph-scoped commands
         if self.identity.has_grants() {
@@ -912,6 +927,24 @@ impl Session {
                 }
                 _ => {} // Session state + transaction control allowed
             }
+        }
+
+        // Graph commands change the store at once and log their own WAL
+        // group: once the checks above passed, they hold commits off until
+        // they return, and fail once the database is closed (see
+        // `hold_commits_for_change`). Projections change only this session's
+        // state, which nothing persists.
+        let graph_command = matches!(
+            cmd,
+            SessionCommand::CreateGraph { .. } | SessionCommand::DropGraph { .. }
+        );
+        let _held = graph_command
+            .then(|| self.hold_commits_for_change())
+            .transpose()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        if graph_command {
+            grafeo_common::testing::commit_hook::run_during_held_change();
         }
 
         match cmd {
@@ -1293,7 +1326,7 @@ impl Session {
         // A schema change takes effect at once and logs its own WAL group,
         // outside any commit: it holds commits off until it returns (see
         // `hold_commits_for_change`), and fails once the database is closed.
-        let _held = if matches!(
+        let changes = !matches!(
             cmd,
             SchemaStatement::ShowConstraints
                 | SchemaStatement::ShowIndexes
@@ -1304,11 +1337,15 @@ impl Session {
                 | SchemaStatement::ShowCurrentGraphType
                 | SchemaStatement::ShowGraphs
                 | SchemaStatement::ShowSchemas
-        ) {
-            None
-        } else {
-            Some(self.hold_commits_for_change()?)
-        };
+        );
+        let _held = changes
+            .then(|| self.hold_commits_for_change())
+            .transpose()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        if changes {
+            grafeo_common::testing::commit_hook::run_during_held_change();
+        }
 
         /// Logs a WAL record for schema changes. Compiles to nothing without `wal`.
         macro_rules! wal_log {
@@ -5520,17 +5557,37 @@ impl Session {
         }
     }
 
-    /// Creates an index on a node property of the session's graph.
+    /// Creates an index on a node property of the session's graph. Commits
+    /// are held off while it is built, as for `CREATE INDEX`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database-closed error after `close()` of a persistent
+    /// database, and the incomplete-commit error after a commit that did not
+    /// complete.
     #[cfg(feature = "lpg")]
-    pub fn create_property_index(&self, property: &str) {
+    pub fn create_property_index(&self, property: &str) -> Result<()> {
+        let _held = self.hold_commits_for_change()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
         self.active_lpg_store().create_property_index(property);
+        Ok(())
     }
 
     /// Drops the index on a node property of the session's graph. Returns
     /// whether there was one.
+    ///
+    /// # Errors
+    ///
+    /// As [`create_property_index`](Self::create_property_index).
     #[cfg(feature = "lpg")]
-    pub fn drop_property_index(&self, property: &str) -> bool {
-        self.active_lpg_store().drop_property_index(property)
+    pub fn drop_property_index(&self, property: &str) -> Result<bool> {
+        let _held = self.hold_commits_for_change()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
+        Ok(self.active_lpg_store().drop_property_index(property))
     }
 
     /// Returns whether a node property of the session's graph has an index.
@@ -7396,7 +7453,7 @@ mod tests {
         db.create_graph("model").unwrap();
         let session = db.session();
         session.use_graph("model");
-        assert!(db.drop_graph("model"));
+        assert!(db.drop_graph("model").unwrap());
 
         assert_eq!(session.active_store().node_count(), 0);
         assert!(session.active_write_store().is_none());

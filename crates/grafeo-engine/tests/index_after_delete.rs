@@ -24,7 +24,7 @@ fn find(db: &GrafeoDB, value: &str) -> Vec<NodeId> {
 fn deleted_node_leaves_the_property_index() {
     // The downstream repro: create, DETACH DELETE through a query, re-create.
     let db = GrafeoDB::new_in_memory();
-    db.create_property_index("id");
+    db.create_property_index("id").unwrap();
     let session = db.session();
     session
         .execute_cypher("CREATE (:Graph:File {id: 'a'})")
@@ -46,7 +46,7 @@ fn deleted_node_leaves_the_property_index() {
 #[test]
 fn rolled_back_delete_is_found_again() {
     let db = GrafeoDB::new_in_memory();
-    db.create_property_index("id");
+    db.create_property_index("id").unwrap();
     let node = db
         .create_node_with_props(&["Graph"], [("id", Value::from("a"))])
         .unwrap();
@@ -64,7 +64,7 @@ fn rolled_back_delete_is_found_again() {
 #[test]
 fn uncommitted_nodes_are_not_returned_by_the_lookup_api() {
     let db = GrafeoDB::new_in_memory();
-    db.create_property_index("id");
+    db.create_property_index("id").unwrap();
     let mut session = db.session();
     session.begin_transaction().unwrap();
     session.execute_cypher("CREATE (:Graph {id: 'a'})").unwrap();

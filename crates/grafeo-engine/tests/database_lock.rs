@@ -24,24 +24,19 @@ mod tests {
     const CHILD_PATH_VAR: &str = "GRAFEO_LOCK_TEST_CHILD_PATH";
     const CHILD_FORMAT_VAR: &str = "GRAFEO_LOCK_TEST_CHILD_FORMAT";
 
-    /// The databases each test runs on: a `.grafeo` file with the format
-    /// given, and a file without an extension with the default format (a path
-    /// that was a WAL directory before 0.6).
+    /// The databases each test runs on, both with the default format: a
+    /// `.grafeo` file, and a file without an extension (a path that was a WAL
+    /// directory before 0.6).
     fn formats(dir: &Path) -> Vec<(&'static str, PathBuf, StorageFormat)> {
         vec![
-            (
-                "single-file",
-                dir.join("single.grafeo"),
-                StorageFormat::SingleFile,
-            ),
+            ("grafeo", dir.join("single.grafeo"), StorageFormat::Auto),
             ("auto", dir.join("db"), StorageFormat::Auto),
         ]
     }
 
     fn format_from_name(name: &str) -> StorageFormat {
         match name {
-            "single-file" => StorageFormat::SingleFile,
-            "auto" => StorageFormat::Auto,
+            "grafeo" | "auto" => StorageFormat::Auto,
             other => panic!("unknown format {other}"),
         }
     }

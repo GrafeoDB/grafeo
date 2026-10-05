@@ -606,9 +606,17 @@ func TestVectorDropAndRebuild(t *testing.T) {
 	}
 
 	// Drop index
-	dropped := db.DropVectorIndex("Doc", "emb")
+	dropped, err := db.DropVectorIndex("Doc", "emb")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !dropped {
 		t.Error("expected index to be dropped")
+	}
+	// Dropping it again finds nothing to drop: false, and no error.
+	dropped, err = db.DropVectorIndex("Doc", "emb")
+	if err != nil || dropped {
+		t.Errorf("expected (false, nil) for a missing index, got (%v, %v)", dropped, err)
 	}
 
 	// Rebuild index

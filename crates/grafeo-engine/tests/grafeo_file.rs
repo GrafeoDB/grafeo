@@ -1153,7 +1153,7 @@ fn schema_with_data_across_multiple_cycles() {
 // =========================================================================
 
 /// Verifies the bug fixed in #185: file manager was previously gated behind
-/// `wal_enabled`, so opening with WAL disabled + SingleFile produced no output.
+/// `wal_enabled`, so opening a single file with WAL disabled produced no output.
 /// With the fix, checkpoint-on-close persists the snapshot correctly.
 #[test]
 fn wal_disabled_single_file_persists_on_close() {
@@ -1165,7 +1165,7 @@ fn wal_disabled_single_file_persists_on_close() {
     {
         let config = Config {
             wal_enabled: false,
-            ..Config::persistent(&path).with_storage_format(StorageFormat::SingleFile)
+            ..Config::persistent(&path).with_storage_format(StorageFormat::Auto)
         };
         let db = GrafeoDB::with_config(config).unwrap();
         let session = db.session();
@@ -1198,7 +1198,7 @@ fn wal_disabled_single_file_persists_on_close() {
     {
         let config = Config {
             wal_enabled: false,
-            ..Config::persistent(&path).with_storage_format(StorageFormat::SingleFile)
+            ..Config::persistent(&path).with_storage_format(StorageFormat::Auto)
         };
         let db = GrafeoDB::with_config(config).unwrap();
         assert_eq!(
@@ -1437,6 +1437,96 @@ fn save_from_read_only_database() {
     restored.close().unwrap();
 }
 
+/// Every file and directory under `root` (spill directories left out), with
+/// the bytes of each file, sorted.
+#[cfg(all(feature = "wal", feature = "lpg"))]
+fn contents_under(root: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.to_string_lossy().contains(".spill") {
+                continue;
+            }
+            if path.is_dir() {
+                found.push((path.clone(), None));
+                pending.push(path);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                found.push((path, Some(bytes)));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// `save()` never writes into or over something that exists: a database
+/// file (with or without an extension), an empty directory, or a 0.5.x WAL
+/// directory (where 0.5.x saved into the database already there). Each fails
+/// with an error naming the path and leaves it as it was.
+#[cfg(all(feature = "wal", feature = "lpg"))]
+#[test]
+fn save_fails_at_an_existing_path_and_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = GrafeoDB::new_in_memory();
+    source.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+
+    let file = dir.path().join("amsterdam.grafeo");
+    let other = GrafeoDB::new_in_memory();
+    other.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+    other.save(&file).unwrap();
+    let without_extension = dir.path().join("berlin");
+    other.save(&without_extension).unwrap();
+    let empty = dir.path().join("paris");
+    std::fs::create_dir(&empty).unwrap();
+    let wal_directory = dir.path().join("prague");
+    std::fs::create_dir_all(wal_directory.join("wal")).unwrap();
+    std::fs::write(wal_directory.join("wal").join("wal_00000000.log"), b"Mia").unwrap();
+    let before = contents_under(dir.path());
+
+    for target in [&file, &without_extension, &empty, &wal_directory] {
+        let error = source
+            .save(target)
+            .expect_err("save() refuses an existing path");
+        assert!(
+            error.to_string().contains(&target.display().to_string()),
+            "{}: the error names the path: {error}",
+            target.display()
+        );
+    }
+    assert!(
+        contents_under(dir.path()) == before,
+        "the refused saves changed nothing"
+    );
+    let gus = GrafeoDB::open_read_only(&file).unwrap();
+    assert_eq!(gus.node_count(), 1, "the existing database is as it was");
+    gus.close().unwrap();
+}
+
+/// `save("copy/")` names the file `copy`, as an open of `copy/` does: the
+/// path is normalized, and the side files go next to it.
+#[cfg(all(feature = "wal", feature = "lpg"))]
+#[test]
+fn save_to_a_path_with_a_trailing_separator_writes_the_file_it_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = GrafeoDB::new_in_memory();
+    source.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+
+    let mut with_separator = dir.path().join("copy").into_os_string();
+    with_separator.push(std::path::MAIN_SEPARATOR_STR);
+    source
+        .save(&with_separator)
+        .unwrap_or_else(|error| panic!("save() to {with_separator:?}: {error}"));
+
+    let copy = dir.path().join("copy");
+    assert!(copy.is_file(), "the copy is the file {}", copy.display());
+    let db = GrafeoDB::open(&with_separator).unwrap();
+    assert_eq!(db.node_count(), 1, "the copy opens by the same spelling");
+    db.close().unwrap();
+}
+
 // =========================================================================
 // Layered overlay deletion durability (#323 follow-up)
 // =========================================================================
@@ -1625,4 +1715,36 @@ fn a_new_database_is_never_created_next_to_a_sidecar_wal_with_files() {
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
     assert_eq!(db.node_count(), 0, "a new, empty database");
     db.close().unwrap();
+}
+
+/// `open_in_memory` reads a 0.6 file as a read-only open does: no exclusive
+/// lock (it works while a reader holds the file), no checkpoint and no WAL
+/// removal when the copy closes. The files stay byte for byte as they were,
+/// also after writes to the in-memory copy and its `close()`.
+#[cfg(all(feature = "wal", feature = "lpg"))]
+#[test]
+fn open_in_memory_changes_nothing_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prague.grafeo");
+    {
+        let db = GrafeoDB::open(&path).unwrap();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.close().unwrap();
+    }
+    let before = contents_under(dir.path());
+
+    let reader = GrafeoDB::open_read_only(&path).unwrap();
+    let copy = GrafeoDB::open_in_memory(&path)
+        .unwrap_or_else(|error| panic!("open_in_memory while a reader holds the file: {error}"));
+    copy.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+    assert_eq!(copy.node_count(), 2, "the copy takes writes");
+    copy.close().unwrap();
+    drop(copy);
+    reader.close().unwrap();
+    drop(reader);
+
+    assert!(
+        contents_under(dir.path()) == before,
+        "open_in_memory, writes to the copy and its close() leave every file as it was"
+    );
 }

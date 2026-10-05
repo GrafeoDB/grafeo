@@ -26,7 +26,8 @@ pub enum ErrorCategory {
     Serialization,
     /// Internal error (should not happen in normal operation).
     Internal,
-    /// Catch-all for other database errors (not found, type mismatch, etc.).
+    /// Catch-all for other database errors (not found, type mismatch, a
+    /// commit that did not complete, etc.).
     Database,
 }
 
@@ -36,6 +37,8 @@ pub fn classify_error(err: &Error) -> ErrorCategory {
     match err {
         Error::Query(_) => ErrorCategory::Query,
         Error::Transaction(TransactionError::DatabaseClosed) => ErrorCategory::DatabaseClosed,
+        // Only a reopen helps, never a retry of the transaction.
+        Error::Transaction(TransactionError::IncompleteCommit) => ErrorCategory::Database,
         Error::Transaction(_) => ErrorCategory::Transaction,
         Error::Storage(_) => ErrorCategory::Storage,
         Error::Io(_) => ErrorCategory::Io,
@@ -77,6 +80,15 @@ mod tests {
         assert_eq!(classify_error(&err), ErrorCategory::DatabaseClosed);
         let err = Error::Transaction(TransactionError::InvalidState("x".into()));
         assert_eq!(classify_error(&err), ErrorCategory::Transaction);
+    }
+
+    /// A commit that did not complete is no transaction error a retry could
+    /// fix: only a reopen helps, so it is a database error with its own code.
+    #[test]
+    fn classifies_an_incomplete_commit_as_a_database_error() {
+        let err = Error::Transaction(TransactionError::IncompleteCommit);
+        assert_eq!(classify_error(&err), ErrorCategory::Database);
+        assert_eq!(err.error_code().as_str(), "GRAFEO-T008");
     }
 
     #[test]

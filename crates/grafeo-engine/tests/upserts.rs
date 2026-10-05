@@ -123,7 +123,7 @@ fn a_node_matches_only_with_all_the_labels() {
 #[test]
 fn edges_are_created_then_updated_between_existing_nodes() {
     let db = GrafeoDB::new_in_memory();
-    db.create_property_index("id");
+    db.create_property_index("id").unwrap();
     files(&db);
     let edge = |src: &str, dst: &str, id: &str, w: i64| {
         row(&[
@@ -237,7 +237,7 @@ fn duplicate_keyed_edges_are_all_updated() {
 #[test]
 fn a_row_with_an_ambiguous_endpoint_is_skipped() {
     let db = GrafeoDB::new_in_memory();
-    db.create_property_index("id");
+    db.create_property_index("id").unwrap();
     files(&db);
     db.execute("INSERT (:Other {id: 'f2'})").unwrap();
     let edge = |src: &str, dst: &str, id: &str| {

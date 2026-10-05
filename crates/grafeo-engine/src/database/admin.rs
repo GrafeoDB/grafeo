@@ -478,9 +478,13 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the checkpoint fails, or after a commit that did
-    /// not complete (see [`TransactionManager`](crate::transaction::TransactionManager)).
+    /// Returns an error if the checkpoint fails, after a commit that did not
+    /// complete (see [`TransactionManager`](crate::transaction::TransactionManager)),
+    /// and the database-closed error after `close()` of a persistent database
+    /// (its file is released: another handle may have written it since).
     pub fn wal_checkpoint(&self) -> Result<()> {
+        // `close()` waits for the checkpoint, and none runs after it.
+        let _open = self.hold_open()?;
         // Read-only databases have no WAL and the on-disk file is already a
         // valid snapshot: nothing to checkpoint.
         if self.read_only {

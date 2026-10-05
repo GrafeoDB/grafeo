@@ -24,10 +24,8 @@ mod tests {
     const PATH_VAR: &str = "GRAFEO_CHECKPOINT_REPLAY_PATH";
 
     fn open(path: &Path) -> GrafeoDB {
-        GrafeoDB::with_config(
-            Config::persistent(path).with_storage_format(StorageFormat::SingleFile),
-        )
-        .unwrap()
+        GrafeoDB::with_config(Config::persistent(path).with_storage_format(StorageFormat::Auto))
+            .unwrap()
     }
 
     fn sidecar_wal(path: &Path) -> PathBuf {

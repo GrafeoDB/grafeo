@@ -70,8 +70,10 @@ pub enum AccessMode {
     #[default]
     ReadWrite,
     /// Read-only access. Acquires a shared file lock, allowing concurrent
-    /// readers. The database loads the last checkpoint snapshot but does not
-    /// replay the WAL or allow mutations.
+    /// readers. The database loads the last checkpoint and replays the
+    /// sidecar WAL into memory, writes nothing, and allows no mutations. A
+    /// build without the `wal` feature refuses a file whose sidecar WAL holds
+    /// files, as a read-write open there does.
     ReadOnly,
 }
 
@@ -111,7 +113,12 @@ pub enum StorageFormat {
     )]
     WalDirectory,
     /// A new path becomes a single file, as with [`StorageFormat::Auto`]. An
-    /// existing path opens as what it holds.
+    /// existing path opens as what it holds. Since every database is a single
+    /// file, it does the same as `Auto`.
+    #[deprecated(
+        since = "0.6.0",
+        note = "every database is a single file, so it does the same as `StorageFormat::Auto`; removed in 0.7.0"
+    )]
     SingleFile,
 }
 
@@ -124,6 +131,10 @@ impl fmt::Display for StorageFormat {
                 reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
             )]
             Self::WalDirectory => write!(f, "wal-directory"),
+            #[allow(
+                deprecated,
+                reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
+            )]
             Self::SingleFile => write!(f, "single-file"),
         }
     }
@@ -248,7 +259,16 @@ pub struct Config {
     /// Number of worker threads for query execution.
     pub threads: usize,
 
-    /// Whether to enable WAL for durability.
+    /// Whether new commits are logged to the sidecar WAL (`<path>.wal/`) for
+    /// durability. With it off, a commit reaches the file only at the next
+    /// checkpoint (`close()`, `wal_checkpoint()` or the periodic one), so a
+    /// crash loses the commits since the last one.
+    ///
+    /// It never hides commits already in a WAL: in a build with the `wal`
+    /// feature an open replays a sidecar WAL that a writer left without
+    /// `close()` either way. An open with it off then writes those commits to
+    /// the file and removes the WAL before it returns, so no later crash can
+    /// replay that WAL over newer data.
     pub wal_enabled: bool,
 
     /// WAL flush interval in milliseconds.

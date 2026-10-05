@@ -14,8 +14,8 @@ use grafeo_engine::GrafeoDB;
 fn docs(indexed: bool) -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     if indexed {
-        db.create_property_index("id");
-        db.create_property_index("n");
+        db.create_property_index("id").unwrap();
+        db.create_property_index("n").unwrap();
     }
     db.execute("UNWIND range(0, 11) AS i INSERT (:Doc {id: 'd' + toString(i), n: i})")
         .unwrap();

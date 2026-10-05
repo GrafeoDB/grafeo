@@ -51,7 +51,7 @@ mod vector {
         db.set_node_property(n4, "category", Value::String("science".into()))
             .unwrap();
 
-        db.create_property_index("category");
+        db.create_property_index("category").unwrap();
         db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
             .expect("create vector index");
 
@@ -164,7 +164,7 @@ mod vector {
         assert_eq!(r1.len(), 2);
 
         // Drop index
-        assert!(db.drop_vector_index("Doc", "emb"));
+        assert!(db.drop_vector_index("Doc", "emb").unwrap());
 
         // Search should fail
         let err = db.vector_search("Doc", "emb", &[1.0, 0.0, 0.0], 2, None, None);
@@ -496,7 +496,7 @@ mod text {
         assert!(!r1.is_empty(), "r1 is empty");
 
         // Drop index
-        assert!(db.drop_text_index("Article", "title"));
+        assert!(db.drop_text_index("Article", "title").unwrap());
 
         // Search should fail
         let err = db.text_search("Article", "title", "Rust", 10);

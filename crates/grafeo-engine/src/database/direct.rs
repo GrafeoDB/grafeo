@@ -367,8 +367,7 @@ impl GrafeoDB {
         batch: bool,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {
-        let commits = self.transaction_manager.hold_commits()?;
-        self.transaction_manager.check_open()?;
+        let commits = self.transaction_manager.hold_commits_for_change()?;
         let root = self.lpg_store();
         let read_epoch = self.transaction_manager.current_epoch();
         let epoch = EpochId::new(read_epoch.as_u64() + 1);
@@ -383,6 +382,10 @@ impl GrafeoDB {
             store.sync_epoch(epoch);
             epoch
         };
+        // Tests start a checkpoint or `close()` here (a single call's epoch
+        // has moved, nothing is published yet), which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
 
         let target: Arc<dyn GraphStoreMut> = Arc::clone(store) as Arc<dyn GraphStoreMut>;
         #[cfg(feature = "wal")]
@@ -885,7 +888,7 @@ mod tests {
     fn a_panicking_call_leaves_nothing_for_the_next() {
         let config = |path: &std::path::Path| {
             Config::persistent(path)
-                .with_storage_format(StorageFormat::SingleFile)
+                .with_storage_format(StorageFormat::Auto)
                 .with_cdc()
         };
         if let Some(path) = std::env::var_os(CHILD_PATH_VAR) {

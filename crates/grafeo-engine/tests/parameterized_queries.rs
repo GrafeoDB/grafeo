@@ -163,7 +163,7 @@ fn parameterized_writes_are_tracked_per_graph() {
 #[test]
 fn a_cached_plan_does_not_keep_the_values() {
     let db = GrafeoDB::new_in_memory();
-    db.create_property_index("id");
+    db.create_property_index("id").unwrap();
     db.execute("UNWIND range(0, 9) AS i INSERT (:Doc {id: 'd' + toString(i), n: i})")
         .unwrap();
     let query = "MATCH (n:Doc {id: $id}) RETURN n.n";

@@ -26,6 +26,12 @@ extern "C" {
 
 /* ---- Status codes -------------------------------------------------------- */
 
+/* GRAFEO_ERROR_TRANSACTION covers errors a retry of the transaction can
+   fix (conflicts) and invalid transaction states. A write to a closed
+   database (GRAFEO-T007 in the message) and any call after a commit that
+   did not complete (GRAFEO-T008: reopen the database) return
+   GRAFEO_ERROR_DATABASE: no retry fixes them. */
+
 typedef enum {
     GRAFEO_OK                  = 0,
     GRAFEO_ERROR_DATABASE      = 1,

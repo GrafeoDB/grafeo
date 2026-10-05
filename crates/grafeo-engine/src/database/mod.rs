@@ -304,7 +304,9 @@ impl GrafeoDB {
     /// 0.5.44 left pending as `<path>.pre-0.6.checkpoint`. The migration
     /// refuses to start while one of these names is taken (it never replaces
     /// a kept copy), and an open waits up to five seconds for a migration
-    /// another process is running before it fails.
+    /// another process is running before it fails. A kept copy itself (a
+    /// 0.5.x database whose name ends in `.pre-0.6`) is never migrated: its
+    /// read-write open fails, and a read-only open reads it.
     ///
     /// # Errors
     ///
@@ -329,7 +331,11 @@ impl GrafeoDB {
     /// A file written by 0.6 or later is held under a shared file lock until
     /// the database is closed, so multiple processes can read the same
     /// `.grafeo` file concurrently. The database loads the last checkpoint
-    /// but does **not** replay the WAL.
+    /// and replays the sidecar WAL `<path>.wal/` into memory, where a writer
+    /// that exited without `close()` left its last commits. Nothing is
+    /// written: the WAL stays for the next read-write open. A build without
+    /// the `wal` feature cannot replay it, and refuses a file whose sidecar
+    /// WAL holds files.
     ///
     /// A database written by 0.5.x is different: it is read once into
     /// memory, a file with its sidecar WAL replayed, a WAL directory by
@@ -338,7 +344,8 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the database doesn't exist or can't be read.
+    /// Returns an error if the database doesn't exist or can't be read, and,
+    /// in a build without the `wal` feature, if its sidecar WAL holds files.
     ///
     /// # Examples
     ///
@@ -375,7 +382,9 @@ impl GrafeoDB {
     /// where nothing exists (WAL directories are no longer created), or if
     /// the path holds neither a database file nor a 0.5.x WAL directory; with
     /// encryption, also if an encrypted database is opened without its key or
-    /// with another one, or an unencrypted one is opened with a key.
+    /// with another one, or an unencrypted one is opened with a key; in a
+    /// build without the `wal` feature, also if the sidecar WAL of the
+    /// database file holds files (commits only a build with `wal` can replay).
     ///
     /// # Examples
     ///
@@ -472,6 +481,11 @@ impl GrafeoDB {
         let mut wal_torn_tail = false;
         #[cfg(all(feature = "wal", feature = "lpg"))]
         let mut wal_in_named_graph = false;
+        // A sidecar WAL a read-write open with `wal_enabled` off replayed:
+        // nothing of this handle ever marks or trims it, so the open retires
+        // it before it returns (`Some(true)` when it held records).
+        #[cfg(all(feature = "wal", feature = "lpg"))]
+        let mut retire_sidecar_wal: Option<bool> = None;
 
         // The migration lock while a read-write open creates a database at a
         // missing path, released once the database exists (see
@@ -482,8 +496,8 @@ impl GrafeoDB {
         // --- Single-file format (.grafeo) ---
         #[cfg(feature = "grafeo-file")]
         let file_manager: Option<Arc<GrafeoFileManager>> = if is_read_only {
-            // Read-only mode: load the file under a shared lock and write
-            // nothing; no WAL is opened.
+            // Read-only mode: load the file (and replay its sidecar WAL)
+            // under a shared lock and write nothing; no WAL is opened.
             let Some(ref db_path) = database_path else {
                 return Err(grafeo_common::utils::error::Error::Internal(
                     "read-only mode requires a database path".to_string(),
@@ -548,6 +562,11 @@ impl GrafeoDB {
                     let fm = GrafeoFileManager::open_read_only_with_cipher_for(db_path, |id| {
                         keys.container_cipher(id)
                     })?;
+                    // Without the `wal` feature its commits since the last
+                    // checkpoint cannot be replayed: the file alone would
+                    // show the database without them.
+                    #[cfg(not(feature = "wal"))]
+                    Self::refuse_unreplayable_sidecar_wal(db_path)?;
                     #[cfg(feature = "lpg")]
                     {
                         loaded_sections = sections::load_sections(
@@ -556,6 +575,27 @@ impl GrafeoDB {
                             &catalog,
                             #[cfg(feature = "triple-store")]
                             &rdf_store,
+                        )?;
+                    }
+                    // A writer that exited without `close()` left its commits
+                    // since the last checkpoint in the sidecar WAL. They are
+                    // replayed into memory, as a read-write open replays them,
+                    // and nothing is written (a torn tail stays for the next
+                    // read-write open to seal). The shared lock keeps writers
+                    // out, so the WAL does not change while it is read.
+                    #[cfg(all(feature = "wal", feature = "lpg"))]
+                    if fm.has_sidecar_wal() {
+                        let recovered = WalRecovery::with_cipher(
+                            fm.sidecar_wal_path(),
+                            keys.wal_cipher(fm.database_id()),
+                        )
+                        .recover_with_tail()?;
+                        Self::apply_wal_records(
+                            &store,
+                            &catalog,
+                            #[cfg(feature = "triple-store")]
+                            &rdf_store,
+                            &recovered.records,
                         )?;
                     }
                     Some(Arc::new(fm))
@@ -625,9 +665,15 @@ impl GrafeoDB {
                 }
                 // For any other file the manager says what is wrong.
                 OnDisk::Current | OnDisk::Unknown if db_path.is_file() => {
-                    GrafeoFileManager::open_with_cipher_for(db_path, |id| {
+                    let fm = GrafeoFileManager::open_with_cipher_for(db_path, |id| {
                         keys.container_cipher(id)
-                    })?
+                    })?;
+                    // Without the `wal` feature its commits since the last
+                    // checkpoint cannot be replayed, and `close()` would
+                    // remove the WAL that holds them.
+                    #[cfg(not(feature = "wal"))]
+                    Self::refuse_unreplayable_sidecar_wal(db_path)?;
+                    fm
                 }
                 _ => return Err(not_a_database(db_path)),
             };
@@ -643,9 +689,13 @@ impl GrafeoDB {
                 )?;
             }
 
-            // Recover sidecar WAL if WAL is enabled and a sidecar exists
+            // A sidecar WAL holds the commits since the last checkpoint that a
+            // writer left without `close()`: they are replayed whatever
+            // `wal_enabled` says (it decides only whether new commits are
+            // logged), and reach the file at the next checkpoint, before
+            // `close()` removes the WAL.
             #[cfg(all(feature = "wal", feature = "lpg"))]
-            if config.wal_enabled && fm.has_sidecar_wal() {
+            if fm.has_sidecar_wal() {
                 let recovery = WalRecovery::with_cipher(
                     fm.sidecar_wal_path(),
                     keys.wal_cipher(fm.database_id()),
@@ -660,6 +710,9 @@ impl GrafeoDB {
                 )?;
                 wal_torn_tail = recovered.torn_tail;
                 wal_in_named_graph = Self::ends_in_named_graph(&recovered.records);
+                if !config.wal_enabled {
+                    retire_sidecar_wal = Some(!recovered.records.is_empty());
+                }
             }
 
             Some(Arc::new(fm))
@@ -672,8 +725,9 @@ impl GrafeoDB {
         #[cfg(feature = "grafeo-file")]
         drop(create_lock);
 
-        // The WAL is the sidecar directory of the database file. Read-only
-        // mode skips it entirely (no recovery, no creation).
+        // The WAL is the sidecar directory of the database file. A read-only
+        // open, and one with `wal_enabled` off, logs nothing: it opens no WAL
+        // (an existing sidecar WAL was replayed above).
         #[cfg(feature = "wal")]
         let wal = match file_manager {
             Some(ref fm) if !is_read_only && config.wal_enabled => {
@@ -818,6 +872,21 @@ impl GrafeoDB {
         // now that WAL recovery is done.
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
         db.finish_load(loaded_sections)?;
+
+        // With `wal_enabled` off, no WAL of this handle marks or trims the
+        // sidecar WAL it replayed: left in place, a crash after a later
+        // checkpoint would replay it over the newer image and revert what
+        // changed since. The replayed commits are written to the file now,
+        // and the WAL is removed. A crash before the removal replays the same
+        // commits again, which the file already holds.
+        #[cfg(all(feature = "wal", feature = "lpg"))]
+        if let (Some(held_records), Some(fm)) = (retire_sidecar_wal, db.file_manager.clone()) {
+            if held_records {
+                db.checkpoint_to_file(&fm)?;
+            }
+            grafeo_common::testing::crash::maybe_crash("open:before_remove_replayed_wal");
+            fm.remove_sidecar_wal()?;
+        }
 
         // Start periodic checkpoint timer if configured (after the layered
         // store is wired, so its checkpoints include the compacted base)
@@ -1059,8 +1128,9 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the conversion fails (e.g. more than 32,767
-    /// distinct labels or edge types), or after a commit that did not
-    /// complete (see [`TransactionManager`]).
+    /// distinct labels or edge types), after a commit that did not complete
+    /// (see [`TransactionManager`]), and the database-closed error after
+    /// `close()` of a persistent database.
     ///
     /// [`CompactStore`]: grafeo_core::graph::compact::CompactStore
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
@@ -1071,13 +1141,15 @@ impl GrafeoDB {
     /// Runs `change`, which replaces the store, with the periodic checkpoint
     /// timer stopped (a checkpoint running meanwhile would write the old
     /// store), then restarts the timer on the new state, also when `change`
-    /// fails. `change` runs with commits held off (see
+    /// fails. Fails at once after `close()` (see [`hold_open`](Self::hold_open)). `change` runs with commits held off (see
     /// [`TransactionManager::hold_commits`]), taken once the timer is
     /// stopped: the new store holds every commit whole, and nothing runs
     /// after a commit that did not complete (the new store would be built
     /// from its stamped part).
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
     fn with_checkpoint_timer_paused(&mut self, change: fn(&mut Self) -> Result<()>) -> Result<()> {
+        // After `close()` no timer may run against the released file.
+        drop(self.hold_open()?);
         #[cfg(feature = "grafeo-file")]
         self.stop_checkpoint_timer();
         let transaction_manager = Arc::clone(&self.transaction_manager);
@@ -1190,7 +1262,8 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the database was not previously compacted, if
-    /// the merge fails, or after a commit that did not complete.
+    /// the merge fails, after a commit that did not complete, and the
+    /// database-closed error after `close()` of a persistent database.
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
     pub fn recompact(&mut self) -> Result<()> {
         self.with_checkpoint_timer_paused(Self::merge_overlay_into_base)
@@ -1492,6 +1565,53 @@ impl GrafeoDB {
              database; move it away, or open it with the database it belongs to",
             db_path.display(),
             wal.display()
+        )))
+    }
+
+    /// Refuses an open (read-write or read-only) of the 0.6 file at `db_path`
+    /// in a build without the `wal` feature when its sidecar WAL holds a log
+    /// file with records (a non-empty `*.log`, the files a replay reads): they
+    /// hold commits since the last checkpoint (a writer exited without
+    /// `close()`), which only a build with the `wal` feature can replay. The
+    /// file alone would lack them, and a read-write `close()` would remove the
+    /// WAL with them. A missing sidecar WAL, or one with nothing to replay
+    /// (only `checkpoint.meta` or empty logs), is no obstacle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the database, its WAL, the log files found
+    /// and the feature in that case, or if the WAL cannot be inspected.
+    #[cfg(all(feature = "grafeo-file", not(feature = "wal")))]
+    fn refuse_unreplayable_sidecar_wal(db_path: &std::path::Path) -> Result<()> {
+        let wal = grafeo_storage::file::detect::sidecar_wal_path(db_path);
+        let cannot_list = |error: std::io::Error| {
+            Error::Internal(format!("cannot list {}: {error}", wal.display()))
+        };
+        let entries = match std::fs::read_dir(&wal) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(cannot_list(error)),
+        };
+        let mut logs = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(cannot_list)?;
+            let path = entry.path();
+            if path.extension().is_some_and(|extension| extension == "log")
+                && entry.metadata().map_err(cannot_list)?.len() > 0
+            {
+                logs.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        if logs.is_empty() {
+            return Ok(());
+        }
+        logs.sort();
+        Err(Error::Internal(format!(
+            "{} has records in its sidecar WAL {} (log files {}), commits that only a build with \
+             the `wal` feature can replay: open it with such a build",
+            db_path.display(),
+            wal.display(),
+            logs.join(", ")
         )))
     }
 
@@ -2135,11 +2255,17 @@ impl GrafeoDB {
 
     /// Creates a named graph. Returns `true` if created, `false` if it already exists.
     ///
+    /// The graph exists at once, outside any transaction, and is logged as a
+    /// change of its own: commits are held off meanwhile, so a checkpoint or
+    /// `close()` sees all of it or none of it.
+    ///
     /// # Errors
     ///
     /// Returns an error if arena allocation fails, or if the database uses an
     /// external store ([`with_store`](Self::with_store),
-    /// [`with_read_store`](Self::with_read_store)), which has no named graphs.
+    /// [`with_read_store`](Self::with_read_store)), which has no named graphs;
+    /// the database-closed error after `close()` of a persistent database,
+    /// and the incomplete-commit error after a commit that did not complete.
     #[cfg(feature = "lpg")]
     pub fn create_graph(&self, name: &str) -> Result<bool> {
         let Some(store) = &self.store else {
@@ -2150,6 +2276,10 @@ impl GrafeoDB {
                 ),
             ));
         };
+        let _held = self.transaction_manager.hold_commits_for_change()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
         let created = store.create_graph(name)?;
         #[cfg(feature = "wal")]
         if created {
@@ -2160,15 +2290,27 @@ impl GrafeoDB {
         Ok(created)
     }
 
-    /// Drops a named graph. Returns `true` if dropped, `false` if it did not exist.
+    /// Drops a named graph. Returns `true` if dropped, `false` if it did not
+    /// exist (also on an external store, which has no named graphs).
     ///
     /// If the dropped graph was the active graph context, the context is reset
-    /// to the default graph.
+    /// to the default graph. As [`create_graph`](Self::create_graph), it holds
+    /// commits off while it runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database-closed error after `close()` of a persistent
+    /// database, and the incomplete-commit error after a commit that did not
+    /// complete.
     #[cfg(feature = "lpg")]
-    pub fn drop_graph(&self, name: &str) -> bool {
+    pub fn drop_graph(&self, name: &str) -> Result<bool> {
         let Some(store) = &self.store else {
-            return false;
+            return Ok(false);
         };
+        let _held = self.transaction_manager.hold_commits_for_change()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
         let dropped = store.drop_graph(name);
         if dropped {
             #[cfg(feature = "wal")]
@@ -2183,7 +2325,7 @@ impl GrafeoDB {
                 *current = None;
             }
         }
-        dropped
+        Ok(dropped)
     }
 
     /// Returns all named graph names (none on an external store).
@@ -2370,11 +2512,31 @@ impl GrafeoDB {
     /// Called automatically when the database is dropped, but you can call
     /// it explicitly if you need to guarantee durability at a specific point.
     ///
-    /// Once `close()` of a persistent database starts, every commit, write
-    /// outside a transaction, schema change and graph command fails with
-    /// [`TransactionError::DatabaseClosed`](grafeo_common::utils::error::TransactionError::DatabaseClosed);
-    /// one already in progress completes first and is written.
-    /// Reads still work. An in-memory database keeps taking writes.
+    /// Once `close()` of a persistent database starts, these fail with
+    /// [`TransactionError::DatabaseClosed`](grafeo_common::utils::error::TransactionError::DatabaseClosed):
+    ///
+    /// - commits, and statements that write, in every query language (SPARQL
+    ///   updates included), schema statements and graph commands
+    ///   (`CREATE GRAPH`, `DROP GRAPH`);
+    /// - the direct writes: the node, edge, property and label calls (on the
+    ///   database, a session or a graph handle), [`create_graph`](Self::create_graph),
+    ///   [`drop_graph`](Self::drop_graph), the property, vector and text index
+    ///   calls, the bulk imports, `batch_insert_rdf` and `restore_snapshot`;
+    /// - what persists: `wal_checkpoint`, `save`, `backup_full`,
+    ///   `backup_incremental`, `async_write_snapshot`, `compact` and
+    ///   `recompact` (the file is released: another handle may have written
+    ///   it since).
+    ///
+    /// `close()` waits for one already in progress, which completes and is
+    /// written: a commit, a statement, a schema statement or graph command, an
+    /// RDF update, a direct write, a direct graph or index call (a vector or
+    /// text index is built first and waited for only once it installs), and a
+    /// checkpoint, save or backup. The bulk imports, `batch_insert_rdf` and
+    /// `restore_snapshot` only refuse once closed: `close()` does not wait for
+    /// one in progress, and what it writes after the final checkpoint is
+    /// missing from the file although it returns `Ok`. Reads, `to_memory`,
+    /// `export_snapshot` and projections (`CREATE PROJECTION`, which change
+    /// only a session) still work. An in-memory database keeps taking writes.
     ///
     /// # Errors
     ///
@@ -2496,6 +2658,30 @@ impl GrafeoDB {
 
         *is_open = false;
         Ok(())
+    }
+
+    /// Holds `close()` off while a checkpoint, backup or save runs (it waits
+    /// for the returned guard), and fails once the database is closed.
+    ///
+    /// After `close()` the file of a persistent database is released and its
+    /// WAL removed: another handle may have opened and written it since, so
+    /// nothing is persisted from this one any more (an in-memory database has
+    /// no file, and is not refused). Lock order: this guard, then the
+    /// checkpoint guard, then the commit lock, as in `close()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransactionError::DatabaseClosed`](grafeo_common::utils::error::TransactionError::DatabaseClosed)
+    /// once `close()` of a database with a path has run.
+    #[cfg(feature = "lpg")]
+    pub(crate) fn hold_open(&self) -> Result<parking_lot::RwLockReadGuard<'_, bool>> {
+        let open = self.is_open.read();
+        if !*open && self.config.path.is_some() {
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::DatabaseClosed,
+            ));
+        }
+        Ok(open)
     }
 
     /// Returns the typed WAL if available.
@@ -2814,10 +3000,12 @@ impl GrafeoDB {
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     fn start_checkpoint_timer(&self) {
         self.stop_checkpoint_timer();
-        // `compact()` clears `read_only`, but a file opened read-only stays so.
+        // `compact()` clears `read_only`, but a file opened read-only stays
+        // so; a closed database has released its file.
         if let (Some(interval), Some(fm)) = (self.config.checkpoint_interval, &self.file_manager)
             && !self.read_only
             && !fm.is_read_only()
+            && *self.is_open.read()
         {
             *self.checkpoint_timer.lock() = Some(checkpoint_timer::CheckpointTimer::start(
                 interval,
@@ -2850,9 +3038,11 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the database has no file manager or I/O fails.
+    /// Returns an error if the database has no file manager or I/O fails,
+    /// and the database-closed error after `close()`.
     #[cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]
     pub fn backup_full(&self, backup_dir: &std::path::Path) -> Result<backup::BackupSegment> {
+        let _open = self.hold_open()?;
         let fm = self
             .file_manager
             .as_ref()
@@ -2874,12 +3064,14 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if no full backup exists, or if the WAL has no new records.
+    /// Returns an error if no full backup exists, or if the WAL has no new
+    /// records, and the database-closed error after `close()`.
     #[cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]
     pub fn backup_incremental(
         &self,
         backup_dir: &std::path::Path,
     ) -> Result<backup::BackupSegment> {
+        let _open = self.hold_open()?;
         let wal = self
             .wal
             .as_ref()
@@ -3480,7 +3672,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = GrafeoDB::with_config(
             Config::persistent(dir.path().join("db.grafeo"))
-                .with_storage_format(crate::config::StorageFormat::SingleFile)
+                .with_storage_format(crate::config::StorageFormat::Auto)
                 .with_wal_durability(crate::config::DurabilityMode::Adaptive {
                     target_interval_ms: 10,
                 }),
@@ -3513,6 +3705,34 @@ mod tests {
         .unwrap();
         db.compact().unwrap();
         assert!(db.checkpoint_timer.lock().is_none());
+    }
+
+    /// `compact()` after `close()` fails and starts no checkpoint timer: its
+    /// checkpoints would write a file the database no longer holds.
+    #[cfg(all(feature = "compact-store", feature = "wal", feature = "lpg"))]
+    #[test]
+    fn compacting_a_closed_database_starts_no_checkpoint_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = GrafeoDB::with_config(
+            Config::persistent(dir.path().join("db.grafeo"))
+                .with_checkpoint_interval(std::time::Duration::from_secs(60)),
+        )
+        .unwrap();
+        assert!(
+            db.checkpoint_timer.lock().is_some(),
+            "an open database runs its timer"
+        );
+        db.close().unwrap();
+
+        let error = db.compact().expect_err("compact() after close() fails");
+        assert!(
+            matches!(
+                error,
+                Error::Transaction(grafeo_common::utils::error::TransactionError::DatabaseClosed)
+            ),
+            "{error:?}"
+        );
+        assert!(db.checkpoint_timer.lock().is_none(), "no timer was started");
     }
 
     #[test]
@@ -4321,8 +4541,8 @@ mod tests {
     fn test_drop_graph() {
         let db = GrafeoDB::new_in_memory();
         db.create_graph("temp").unwrap();
-        assert!(db.drop_graph("temp"));
-        assert!(!db.drop_graph("temp")); // Already dropped
+        assert!(db.drop_graph("temp").unwrap());
+        assert!(!db.drop_graph("temp").unwrap()); // Already dropped
     }
 
     #[test]
@@ -4332,7 +4552,7 @@ mod tests {
         db.set_current_graph(Some("active")).unwrap();
         assert_eq!(db.current_graph(), Some("active".to_string()));
 
-        db.drop_graph("active");
+        db.drop_graph("active").unwrap();
         assert_eq!(db.current_graph(), None);
     }
 
@@ -4525,6 +4745,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        deprecated,
+        reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
+    )]
     fn test_config_with_storage_format() {
         use crate::config::StorageFormat;
         let config = Config::in_memory().with_storage_format(StorageFormat::SingleFile);
@@ -4595,7 +4819,7 @@ mod tests {
         let db = GrafeoDB::with_read_store(read_store, Config::in_memory()).unwrap();
 
         // drop_graph with external store (no built-in store) returns false
-        assert!(!db.drop_graph("anything"));
+        assert!(!db.drop_graph("anything").unwrap());
     }
 }
 

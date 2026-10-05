@@ -22,7 +22,9 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the query fails.
+    /// Returns an error if the query fails; for an update, also on a
+    /// read-only database, after `close()` of a persistent database, and after
+    /// a commit that did not complete.
     ///
     /// # Examples
     ///
@@ -49,6 +51,14 @@ impl GrafeoDB {
         let optimizer = Optimizer::from_rdf_statistics((*rdf_stats).clone());
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
+        // An update on a read-only database fails, as in a session.
+        let mutates = optimized_plan.root.has_mutations();
+        if mutates && self.read_only {
+            return Err(grafeo_common::utils::error::Error::Transaction(
+                grafeo_common::utils::error::TransactionError::ReadOnly,
+            ));
+        }
+
         // EXPLAIN: return the physical plan tree without executing
         if optimized_plan.explain {
             let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
@@ -58,8 +68,20 @@ impl GrafeoDB {
             return Ok(physical_explain_result(&optimized_plan, entries));
         }
 
-        // No transaction here: each statement's WAL records are written as
-        // one implicit group once it has run.
+        // No transaction here: an update changes the store at once and its
+        // WAL records are written as one implicit group once it has run, so
+        // it holds commits off meanwhile (a checkpoint or `close()` sees all
+        // of it or none), and fails once the database is closed.
+        let held = if mutates {
+            Some(self.transaction_manager.hold_commits_for_change()?)
+        } else {
+            None
+        };
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        if held.is_some() {
+            grafeo_common::testing::commit_hook::run_during_held_change();
+        }
         #[cfg(feature = "wal")]
         let wal_buffer = self.wal.as_ref().map(|wal| {
             Arc::new(crate::transaction::wal_buffer::WalBuffer::new(Arc::clone(
@@ -88,6 +110,7 @@ impl GrafeoDB {
             let result = executor.execute(physical_plan.operator.as_mut());
             #[cfg(feature = "wal")]
             flush_wal();
+            drop(held);
             let _result = result?;
             let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -110,6 +133,8 @@ impl GrafeoDB {
         let result = executor.execute(physical_plan.operator.as_mut());
         #[cfg(feature = "wal")]
         flush_wal();
+        // The update and its WAL group are written: commits may go on.
+        drop(held);
         result
     }
 
@@ -133,11 +158,22 @@ impl GrafeoDB {
     /// once for the entire batch. Duplicates are silently skipped.
     ///
     /// Returns the number of triples that were newly inserted.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database-closed error after `close()` of a persistent
+    /// database, and the incomplete-commit error after a commit that did not
+    /// complete.
     pub fn batch_insert_rdf(
         &self,
         triples: impl IntoIterator<Item = grafeo_core::graph::rdf::Triple>,
-    ) -> usize {
-        self.rdf_store.batch_insert(triples)
+    ) -> Result<usize> {
+        // It writes no WAL record: after `close()`, or after a commit that
+        // did not complete (no checkpoint runs then), nothing would persist
+        // it.
+        self.transaction_manager.check_no_incomplete_commit()?;
+        self.transaction_manager.check_open()?;
+        Ok(self.rdf_store.batch_insert(triples))
     }
 }
 

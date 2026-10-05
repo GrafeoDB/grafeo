@@ -20,7 +20,7 @@ mod tests {
     fn checkpoint_over_a_format_limit_fails_and_data_survives_in_the_wal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("limits.grafeo");
-        let config = || Config::persistent(&path).with_storage_format(StorageFormat::SingleFile);
+        let config = || Config::persistent(&path).with_storage_format(StorageFormat::Auto);
 
         let labels: Vec<String> = (0..=usize::from(u16::MAX))
             .map(|i| format!("L{i}"))

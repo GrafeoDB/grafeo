@@ -172,7 +172,7 @@ fn property_indexes_and_lookups_are_per_graph() {
     let model = db.graph("model").unwrap();
     let extraction = db.graph("extraction").unwrap();
     let session = model.session().unwrap();
-    session.create_property_index("id");
+    session.create_property_index("id").unwrap();
     let component = session
         .create_node_with_props(&["Component"], [("id", Value::from("x"))])
         .unwrap();

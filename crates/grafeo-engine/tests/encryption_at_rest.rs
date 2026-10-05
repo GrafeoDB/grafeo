@@ -178,7 +178,7 @@ fn an_encrypted_database_keeps_its_data_across_a_reopen() {
             .unwrap();
         db.create_edge_with_props(alix, gus, "KNOWS", [("since", Value::from(2019_i64))])
             .unwrap();
-        db.create_property_index("city");
+        db.create_property_index("city").unwrap();
         db.execute("CREATE GRAPH berlin").unwrap();
         let in_berlin = db.session();
         in_berlin.use_graph("berlin");
@@ -322,6 +322,115 @@ fn an_encrypted_wal_replays_with_the_key_after_an_exit_without_close() {
     db.close().unwrap();
     let db = open_encrypted(&path, &chain);
     assert_eq!(people(&db), names(&["Jules", "Mia"]));
+}
+
+/// Every file under `dir` with its bytes, sorted by path.
+fn contents_under(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut contents: Vec<(PathBuf, Vec<u8>)> = files_under(dir)
+        .into_iter()
+        .map(|file| {
+            let bytes = std::fs::read(&file).unwrap();
+            (file, bytes)
+        })
+        .collect();
+    contents.sort();
+    contents
+}
+
+/// `Config::wal_enabled` decides only whether new commits are logged: a
+/// read-write open with it off still replays the sidecar WAL a writer left
+/// without `close()` (decrypted with the database's WAL key when it is
+/// encrypted), and its `close()` writes those commits to the file before it
+/// removes the WAL, so every later open finds them, with or without a WAL.
+#[test]
+fn an_open_with_the_wal_off_replays_the_sidecar_wal_and_keeps_its_commits() {
+    for key in [None, Some(19)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("barcelona.grafeo");
+        write_in_child_and_exit(&path, key);
+        assert!(
+            !files_under(&sidecar_wal(&path)).is_empty(),
+            "key {key:?}: the child left Jules in the sidecar WAL"
+        );
+        let config = |wal_enabled: bool| {
+            let mut config = match key {
+                None => Config::persistent(&path),
+                Some(seed) => encrypted(&path, &key_chain(seed)),
+            };
+            config.wal_enabled = wal_enabled;
+            config
+        };
+
+        // What an open with the WAL off sees, whether its close() leaves the
+        // sidecar WAL, and what a reopen (also with the WAL off) finds.
+        let db = GrafeoDB::with_config(config(false))
+            .unwrap_or_else(|error| panic!("key {key:?}: the open fails: {error}"));
+        let seen = people(&db);
+        db.close().unwrap();
+        drop(db);
+        let wal_left = sidecar_wal(&path).exists();
+        let db = GrafeoDB::with_config(config(false)).unwrap();
+        let reopened = people(&db);
+        db.close().unwrap();
+        drop(db);
+        assert_eq!(
+            (seen, wal_left, reopened),
+            (names(&["Jules", "Mia"]), false, names(&["Jules", "Mia"])),
+            "key {key:?}: the open with the WAL off replays Jules, and close() writes him to \
+             the file before it removes the WAL"
+        );
+
+        for wal_enabled in [false, true] {
+            let db = GrafeoDB::with_config(config(wal_enabled)).unwrap();
+            assert_eq!(
+                people(&db),
+                names(&["Jules", "Mia"]),
+                "key {key:?}: a reopen (WAL {wal_enabled}) finds the replayed commit in the file"
+            );
+            db.close().unwrap();
+        }
+    }
+}
+
+/// A read-only open of a 0.6 file that a writer left without `close()` (a
+/// crash) replays its sidecar WAL into memory, decrypted with the database's
+/// WAL key when it is encrypted: it sees every commit. It writes nothing, so
+/// every file is byte for byte as the writer left it.
+#[test]
+fn a_read_only_open_replays_the_sidecar_wal_and_writes_nothing() {
+    for key in [None, Some(3)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prague.grafeo");
+        write_in_child_and_exit(&path, key);
+        assert!(
+            !files_under(&sidecar_wal(&path)).is_empty(),
+            "key {key:?}: the child left Jules in the sidecar WAL"
+        );
+        let before = contents_under(dir.path());
+
+        let config = match key {
+            None => Config::read_only(&path),
+            Some(seed) => encrypted_read_only(&path, &key_chain(seed)),
+        };
+        let db = GrafeoDB::with_config(config)
+            .unwrap_or_else(|error| panic!("key {key:?}: the read-only open fails: {error}"));
+        assert_eq!(
+            people(&db),
+            names(&["Jules", "Mia"]),
+            "key {key:?}: Mia comes from the file, Jules from the sidecar WAL"
+        );
+        db.close().unwrap();
+        drop(db);
+
+        let mut after = contents_under(dir.path());
+        // A read-only open may create an empty spill directory, nothing else.
+        after.retain(|(file, _)| !file.to_string_lossy().contains(".spill"));
+        assert!(
+            after == before,
+            "key {key:?}: the read-only open changed files: {:?}",
+            after.iter().map(|(file, _)| file).collect::<Vec<_>>()
+        );
+    }
 }
 
 /// The files under `dir` that hold the marker.

@@ -58,7 +58,7 @@ fn setup_db() -> GrafeoDB {
         .unwrap();
 
     // Create property index for fast lookups
-    db.create_property_index("user_id");
+    db.create_property_index("user_id").unwrap();
 
     db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
         .expect("create index");

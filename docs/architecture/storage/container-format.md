@@ -252,7 +252,9 @@ Open database:
   7. Database is ready
 ```
 
-A read-only open loads the last checkpoint and does not replay the WAL.
+A read-only open takes a shared lock instead and goes through the same steps, the WAL
+replay included, but only into memory: it writes nothing, so a torn tail stays for
+the next read-write open to seal.
 
 ---
 

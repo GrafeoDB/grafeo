@@ -15,7 +15,7 @@ use grafeo_engine::GrafeoDB;
 /// A property index, a named index and a UNIQUE constraint in the default
 /// graph, and a property index in the named graph `model`.
 fn build(db: &GrafeoDB) {
-    db.create_property_index("id");
+    db.create_property_index("id").unwrap();
     db.execute("CREATE INDEX file_size FOR (n:File) ON (n.size)")
         .unwrap();
     db.execute("CREATE CONSTRAINT file_id FOR (n:File) ON (n.id) UNIQUE")
@@ -23,7 +23,7 @@ fn build(db: &GrafeoDB) {
     db.execute("INSERT (:File {id: 'f0', size: 1})").unwrap();
     db.create_graph("model").unwrap();
     let model = db.graph("model").unwrap().session().unwrap();
-    model.create_property_index("id");
+    model.create_property_index("id").unwrap();
     model.execute("INSERT (:Component {id: 'c0'})").unwrap();
 }
 
@@ -104,7 +104,7 @@ fn reopened_chain(dir: &tempfile::TempDir) -> GrafeoDB {
         .unwrap();
     db.execute("MATCH (a:File), (b:File) WHERE b.i = a.i + 1 INSERT (a)-[:T]->(b)")
         .unwrap();
-    db.create_property_index("id");
+    db.create_property_index("id").unwrap();
     db.close().unwrap();
     GrafeoDB::open(&path).unwrap()
 }
@@ -323,7 +323,7 @@ fn to_memory_copies_a_compacted_database() {
         .unwrap();
     db.compact().unwrap();
     db.execute("INSERT (:File {id: 'f2'})").unwrap();
-    db.create_property_index("id");
+    db.create_property_index("id").unwrap();
 
     let copy = db.to_memory().unwrap();
     let ids = copy

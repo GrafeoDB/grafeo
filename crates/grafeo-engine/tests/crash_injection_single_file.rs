@@ -675,3 +675,250 @@ fn wal_disabled_uncommitted_data_lost_on_crash() {
 
     db.close().unwrap();
 }
+
+// =========================================================================
+// An open with the WAL off over a WAL a crash left
+// =========================================================================
+
+/// Which [`wal_off_child`] scenario a child runs.
+#[cfg(feature = "wal")]
+const WAL_OFF_SCENARIO_VAR: &str = "GRAFEO_CRASH_WAL_OFF_SCENARIO";
+
+/// Runs [`wal_off_child`] with `scenario` on the database at `path`.
+#[cfg(feature = "wal")]
+fn run_wal_off_child(scenario: &str, path: &std::path::Path) {
+    let output = child_process::output(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "wal_off_child", "--nocapture"])
+            .env(WAL_OFF_SCENARIO_VAR, scenario)
+            .env(CHILD_PATH_VAR, path),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "the {scenario} child failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Child-process entry for
+/// [`a_crash_after_a_wal_off_checkpoint_never_replays_the_old_wal`]; a no-op
+/// when run directly. `writer`: with the WAL on, Mia is checkpointed, then
+/// Jules (age 30) and Gus are committed only to the sidecar WAL. `wal_off`:
+/// an open with the WAL off (which replays them) sets Jules's age to 31,
+/// deletes Gus and checkpoints. Each exits without `close()`.
+#[cfg(feature = "wal")]
+#[test]
+fn wal_off_child() {
+    let (Ok(scenario), Some(path)) = (
+        std::env::var(WAL_OFF_SCENARIO_VAR),
+        std::env::var_os(CHILD_PATH_VAR),
+    ) else {
+        return;
+    };
+    let path = std::path::Path::new(&path);
+    let db = match scenario.as_str() {
+        "writer" => {
+            let db = GrafeoDB::with_config(Config::persistent(path)).unwrap();
+            db.execute("INSERT (:Person {name: 'Mia'})").unwrap();
+            db.wal_checkpoint().unwrap();
+            db.execute("INSERT (:Person {name: 'Jules', age: 30})")
+                .unwrap();
+            db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+            db.wal().unwrap().sync().unwrap();
+            db
+        }
+        "wal_off" => {
+            let db = GrafeoDB::with_config(wal_disabled_config(path)).unwrap();
+            db.execute("MATCH (p:Person {name: 'Jules'}) SET p.age = 31")
+                .unwrap();
+            db.execute("MATCH (p:Person {name: 'Gus'}) DELETE p")
+                .unwrap();
+            db.wal_checkpoint().unwrap();
+            db
+        }
+        other => panic!("unknown scenario {other}"),
+    };
+    // A crash: no close(), no destructors (the database is still open).
+    std::mem::forget(db);
+    std::process::exit(0);
+}
+
+/// An open with the WAL off replays the WAL a crashed writer left, and logs
+/// nothing itself, so its own checkpoints would never retire that WAL: after
+/// a crash, the old WAL would be replayed over the newer image and revert
+/// what was changed since (Jules's age, Gus's deletion). The open writes the
+/// replayed commits to the file and removes the WAL before it returns, so
+/// every reopen after the crash, with the WAL off or on, shows the new state.
+#[cfg(feature = "wal")]
+#[test]
+fn a_crash_after_a_wal_off_checkpoint_never_replays_the_old_wal() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("wal_off_replayed.grafeo");
+    run_wal_off_child("writer", &path);
+    assert!(
+        std::fs::read_dir(sidecar_wal_path(&path)).unwrap().count() > 0,
+        "the writer left Jules and Gus in the sidecar WAL"
+    );
+    run_wal_off_child("wal_off", &path);
+
+    let people = |db: &GrafeoDB| -> Vec<(String, Value)> {
+        db.execute("MATCH (p:Person) RETURN p.name AS name, p.age AS age ORDER BY name")
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| (row[0].as_str().unwrap().to_string(), row[1].clone()))
+            .collect()
+    };
+    let expected = vec![
+        ("Jules".to_string(), Value::Int64(31)),
+        ("Mia".to_string(), Value::Null),
+    ];
+    let wal_left = sidecar_wal_path(&path).exists();
+    let db = GrafeoDB::with_config(wal_disabled_config(&path)).unwrap();
+    let reopened = people(&db);
+    db.close().unwrap();
+    drop(db);
+    assert_eq!(
+        (wal_left, reopened),
+        (false, expected.clone()),
+        "the WAL-off open retired the old WAL, and a reopen (WAL off) shows the new state"
+    );
+
+    let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+    assert_eq!(people(&db), expected, "a reopen with the WAL shows it too");
+    db.close().unwrap();
+}
+
+/// Child-process entry for
+/// [`a_crash_while_a_wal_off_open_retires_the_wal_loses_nothing`]; a no-op
+/// when run directly. Opens the database with the WAL off and crashes at the
+/// given crash point; exits with 0 when the open completes.
+#[cfg(feature = "wal")]
+#[test]
+fn wal_off_open_child() {
+    let (Ok(point), Some(path)) = (
+        std::env::var(CHILD_POINT_VAR),
+        std::env::var_os(WAL_OFF_OPEN_PATH_VAR),
+    ) else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    // The child exits inside the panic hook, before anything unwinds: the
+    // crash points come after the database exists, and an unwound database
+    // closes itself (`Drop` checkpoints and removes the WAL), so the parent
+    // would find a clean close instead of the crash. The hook prints the
+    // panic first, so the parent reads the crash point.
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("{info}");
+        std::process::exit(CRASHED);
+    }));
+    let result = with_crash_at(point.parse().unwrap(), move || {
+        GrafeoDB::with_config(wal_disabled_config(&path))
+    });
+    match result {
+        CrashResult::Completed(opened) => {
+            std::mem::forget(opened.unwrap());
+            std::process::exit(0);
+        }
+        _ => unreachable!("an injected crash exits in the panic hook"),
+    }
+}
+
+/// The database path of a [`wal_off_open_child`].
+#[cfg(feature = "wal")]
+const WAL_OFF_OPEN_PATH_VAR: &str = "GRAFEO_CRASH_WAL_OFF_OPEN_PATH";
+
+/// A crash at any point of a WAL-off open that retires a replayed WAL (its
+/// checkpoint, then the removal) loses nothing and duplicates nothing: the
+/// WAL is removed only once the file holds its commits, and replaying it
+/// again over that file changes nothing.
+#[cfg(feature = "wal")]
+#[test]
+fn a_crash_while_a_wal_off_open_retires_the_wal_loses_nothing() {
+    let people = |db: &GrafeoDB| -> Vec<(String, Value)> {
+        db.execute("MATCH (p:Person) RETURN p.name AS name, p.age AS age ORDER BY name")
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| (row[0].as_str().unwrap().to_string(), row[1].clone()))
+            .collect()
+    };
+    let expected = vec![
+        ("Gus".to_string(), Value::Null),
+        ("Jules".to_string(), Value::Int64(30)),
+        ("Mia".to_string(), Value::Null),
+    ];
+    let mut reached = Vec::new();
+    for crash_point in 1..=20_u64 {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wal_off_retire.grafeo");
+        run_wal_off_child("writer", &path);
+        let output = child_process::output(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "wal_off_open_child", "--nocapture"])
+                .env(CHILD_POINT_VAR, crash_point.to_string())
+                .env(WAL_OFF_OPEN_PATH_VAR, &path),
+        )
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let crashed_at = match output.status.code() {
+            Some(0) => None,
+            Some(CRASHED) => Some(
+                stderr
+                    .lines()
+                    .find_map(|line| line.split_once("crash injection at: "))
+                    .map_or_else(
+                        || {
+                            panic!(
+                                "crash_point={crash_point}: the child names no crash point:\n{stderr}"
+                            )
+                        },
+                        |(_, point)| point.trim().to_string(),
+                    ),
+            ),
+            other => {
+                panic!("crash_point={crash_point}: the child exited with {other:?}:\n{stderr}")
+            }
+        };
+        // Every crash point comes before the removal: a real crash there
+        // leaves the WAL in place (an unwound one would have closed the
+        // database, which removes it). Once the open completed, it is gone.
+        let wal_files = std::fs::read_dir(sidecar_wal_path(&path)).map_or(0, Iterator::count);
+        if crashed_at.is_some() {
+            assert!(
+                wal_files > 0,
+                "crash at {crashed_at:?}: the sidecar WAL is still there after the crash"
+            );
+        } else {
+            assert!(
+                !sidecar_wal_path(&path).exists(),
+                "the completed open removed the sidecar WAL"
+            );
+        }
+        for wal_enabled in [false, true] {
+            let config = if wal_enabled {
+                Config::persistent(&path)
+            } else {
+                wal_disabled_config(&path)
+            };
+            let db = GrafeoDB::with_config(config).unwrap();
+            assert_eq!(
+                people(&db),
+                expected,
+                "crash at {crashed_at:?}, reopen with the WAL {wal_enabled}: nothing lost or doubled"
+            );
+            db.close().unwrap();
+        }
+        let completed = crashed_at.is_none();
+        reached.push(crashed_at);
+        if completed {
+            break;
+        }
+    }
+    assert_eq!(
+        reached.iter().rev().nth(1).cloned().flatten().as_deref(),
+        Some("open:before_remove_replayed_wal"),
+        "the last crash point before the open completes is the WAL removal: {reached:?}"
+    );
+}

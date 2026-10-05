@@ -273,7 +273,7 @@ fn test_zone_map_negative_early_exit() {
 #[test]
 fn test_compound_filter_with_remaining_predicate() {
     let db = social_graph();
-    db.create_property_index("name");
+    db.create_property_index("name").unwrap();
     let r = db
         .session()
         .execute("MATCH (n:Person) WHERE n.name = 'Alix' AND n.age > 25 RETURN n.name")
@@ -286,7 +286,7 @@ fn test_compound_filter_with_remaining_predicate() {
 #[test]
 fn test_compound_filter_remaining_predicate_filters_out() {
     let db = social_graph();
-    db.create_property_index("name");
+    db.create_property_index("name").unwrap();
     let r = db
         .session()
         .execute("MATCH (n:Person) WHERE n.name = 'Alix' AND n.age > 35 RETURN n.name")

@@ -378,15 +378,20 @@ impl PyGraphHandle {
     /// Creates an index on a node property of this graph.
     fn create_property_index(&self, property: &str) -> PyResult<()> {
         self.with_session(|session| {
-            session.create_property_index(property);
-            Ok(())
+            Ok(session
+                .create_property_index(property)
+                .map_err(PyGrafeoError::from)?)
         })
     }
 
     /// Drops the index on a node property of this graph; returns whether
     /// there was one.
     fn drop_property_index(&self, property: &str) -> PyResult<bool> {
-        self.with_session(|session| Ok(session.drop_property_index(property)))
+        self.with_session(|session| {
+            Ok(session
+                .drop_property_index(property)
+                .map_err(PyGrafeoError::from)?)
+        })
     }
 
     /// Returns whether a node property of this graph has an index.

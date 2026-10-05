@@ -3,8 +3,11 @@
 //! ([`after_next_commit_epoch`]), once its versions are stamped but before
 //! its events and WAL records are written ([`after_next_commit_stamped`]),
 //! once its WAL records are written but before the commit is complete
-//! ([`after_next_commit_logged`]), or inside a checkpoint while it holds
-//! commits off, before it writes its image ([`during_next_checkpoint`]).
+//! ([`after_next_commit_logged`]), inside a checkpoint while it holds
+//! commits off, before it writes its image ([`during_next_checkpoint`]), or
+//! inside a change outside any commit (a schema statement, a graph command, an
+//! RDF update, a direct write, or a direct graph or index call) once it holds
+//! commits off and before it changes anything ([`during_next_held_change`]).
 //! [`checkpoints_started`] counts the checkpoints started on a database
 //! file, from any thread (the engine calls [`count_checkpoint`]).
 //!
@@ -26,6 +29,7 @@ mod inner {
         static AFTER_STAMPED: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_LOGGED: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static DURING_HELD_CHANGE: RefCell<Option<Hook>> = const { RefCell::new(None) };
     }
 
     /// The checkpoints started on each database file.
@@ -79,6 +83,23 @@ mod inner {
     #[inline]
     pub fn run_after_commit_logged() {
         if let Some(hook) = AFTER_LOGGED.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// Arms `hook` to run once, inside the next change outside any commit on
+    /// this thread (a schema statement, a graph command, an RDF update, a
+    /// direct write, or a direct graph or index call), once it holds commits
+    /// off and before it changes anything.
+    pub fn during_next_held_change(hook: impl FnOnce() + 'static) {
+        DURING_HELD_CHANGE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the [`during_next_held_change`] hook armed on this thread, if
+    /// any. Called by the engine once such a change holds commits off.
+    #[inline]
+    pub fn run_during_held_change() {
+        if let Some(hook) = DURING_HELD_CHANGE.with(|slot| slot.borrow_mut().take()) {
             hook();
         }
     }
@@ -142,6 +163,13 @@ mod inner {
 
     /// No-op when injection is disabled.
     pub fn during_next_checkpoint(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    pub fn during_next_held_change(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_during_held_change() {}
 
     /// No-op when injection is disabled.
     pub fn count_checkpoint(_path: &Path) {}

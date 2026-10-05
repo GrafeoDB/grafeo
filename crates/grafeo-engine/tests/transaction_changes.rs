@@ -52,7 +52,7 @@ fn alix_knows_gus() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
         .unwrap();
-    db.create_property_index("name");
+    db.create_property_index("name").unwrap();
     db
 }
 

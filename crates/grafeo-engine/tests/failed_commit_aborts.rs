@@ -136,10 +136,8 @@ mod persistent {
     use std::path::Path;
 
     fn open(path: &Path) -> GrafeoDB {
-        GrafeoDB::with_config(
-            Config::persistent(path).with_storage_format(StorageFormat::SingleFile),
-        )
-        .unwrap()
+        GrafeoDB::with_config(Config::persistent(path).with_storage_format(StorageFormat::Auto))
+            .unwrap()
     }
 
     /// Seeds Alix, loses the conflict, then commits age 33.

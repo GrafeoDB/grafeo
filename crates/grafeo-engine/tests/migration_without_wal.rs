@@ -5,7 +5,9 @@
 //! A file 0.5.x closed cleanly has no sidecar WAL: a read-write open migrates
 //! it as in any build. A file whose sidecar WAL holds changes is refused, by a
 //! read-write and a read-only open alike: this build cannot replay the WAL, and
-//! the file alone would lack its changes. These tests run in CI with:
+//! the file alone would lack its changes. For the same reason a read-write and
+//! a read-only open refuse a 0.6 file whose sidecar WAL holds commits. These
+//! tests run in CI with:
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file \
@@ -253,4 +255,110 @@ fn a_0_5_wal_directory_is_refused_without_the_wal_feature() {
             );
         }
     }
+}
+
+/// A 0.6 file whose sidecar WAL holds files has commits only the WAL holds (a
+/// writer with the `wal` feature exited without `close()`). This build cannot
+/// replay them: a read-write open (whose `close()` would remove the WAL with
+/// them) and a read-only open refuse the file with an error that names the
+/// database, its WAL and the `wal` feature, and nothing on disk changes, the
+/// WAL byte for byte, so a build with `wal` still finds its commits. A missing
+/// or empty sidecar WAL is no obstacle.
+#[test]
+fn a_0_6_file_with_a_sidecar_wal_is_refused_without_the_wal_feature() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("amsterdam.grafeo");
+    {
+        let db = open(&path).unwrap();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.close().unwrap();
+    }
+    let people = |db: &GrafeoDB| rows(db, "MATCH (p:Person) RETURN p.name AS name");
+    let wal = with_suffix(&path, ".wal");
+
+    // No sidecar WAL, an empty one, and one with nothing to replay (the
+    // checkpoint metadata and an empty log, as a writer leaves that
+    // checkpointed and crashed before its next commit): both opens work. A
+    // read-write `close()` removes the sidecar, so it is made again before
+    // the read-only open.
+    let arrange = |state: &str| match state {
+        "missing" => {}
+        "empty" => std::fs::create_dir_all(&wal).unwrap(),
+        "nothing to replay" => {
+            std::fs::create_dir_all(&wal).unwrap();
+            std::fs::write(wal.join("checkpoint.meta"), [3_u8; 12]).unwrap();
+            std::fs::write(wal.join("wal_00000019.log"), []).unwrap();
+        }
+        other => panic!("unknown sidecar state {other}"),
+    };
+    for state in ["missing", "empty", "nothing to replay"] {
+        arrange(state);
+        let db = open(&path)
+            .unwrap_or_else(|error| panic!("sidecar {state}: a read-write open works: {error}"));
+        assert_eq!(people(&db), vec![vec![Value::from("Alix")]]);
+        db.close().unwrap();
+        drop(db);
+        arrange(state);
+        let db = GrafeoDB::open_read_only(&path)
+            .unwrap_or_else(|error| panic!("sidecar {state}: a read-only open works: {error}"));
+        assert_eq!(people(&db), vec![vec![Value::from("Alix")]]);
+        db.close().unwrap();
+        drop(db);
+        if wal.exists() {
+            std::fs::remove_dir_all(&wal).unwrap();
+        }
+    }
+
+    // A log file stands in for the records of a writer with the `wal`
+    // feature (this build cannot write a WAL).
+    let log = fixture("0.5.44", "unflushed.grafeo.wal").join("wal_00000000.log");
+    std::fs::create_dir_all(&wal).unwrap();
+    std::fs::copy(&log, wal.join("wal_00000000.log")).unwrap();
+    let before = files(dir.path());
+
+    for read_write in [true, false] {
+        let kind = if read_write {
+            "read-write"
+        } else {
+            "read-only"
+        };
+        let opened = if read_write {
+            open(&path)
+        } else {
+            GrafeoDB::open_read_only(&path)
+        };
+        let error = match opened {
+            Ok(db) => {
+                db.close().unwrap();
+                drop(db);
+                let left = wal.join("wal_00000000.log").exists();
+                panic!(
+                    "the {kind} open succeeded without replaying the sidecar WAL; after close() \
+                     the WAL's log file {}",
+                    if left {
+                        "is still there"
+                    } else {
+                        "is gone, with its commits"
+                    }
+                );
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains(&path.display().to_string())
+                && error.contains(&wal.display().to_string())
+                && error.contains("wal_00000000.log")
+                && error.contains("`wal` feature"),
+            "the {kind} error names the database, its WAL, the log file it found and the feature: \
+             {error}"
+        );
+        assert!(
+            files(dir.path()) == before,
+            "the refused {kind} open changes nothing"
+        );
+    }
+    assert!(
+        std::fs::read(wal.join("wal_00000000.log")).unwrap() == std::fs::read(&log).unwrap(),
+        "the WAL keeps its commits, byte for byte, for a build with the `wal` feature"
+    );
 }

@@ -279,7 +279,7 @@ fn directory_kept() -> Kept {
 
 /// The same for the 0.5.43 WAL directory, which has no `LOCK` file (0.5.43
 /// took no lock): the migration creates one while it holds the directory, and
-/// removes it before the directory moves.
+/// removes it once the directory has moved (on Windows right before it moves).
 fn directory_0_5_43_kept() -> Kept {
     Kept {
         file: Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -551,14 +551,18 @@ fn migrate_child() {
 /// A crash before the old database moved (`migrate:renamed:.pre-0.6`) may
 /// leave an empty `LOCK` in a directory that had none: the migration created
 /// it to lock the directory, and only removes it when it is not stopped. The
-/// kept directory may hold it ([`assert_kept_with`]); one kept after a later
+/// lock is held through the move (except on Windows, where it is released
+/// right before), so a crash right after the move may leave it too. The kept
+/// directory may hold it ([`assert_kept_with`]); one kept after a later
 /// crash, or after none, is the original exactly.
 #[cfg(feature = "testing-crash-injection")]
 fn sweep_crashes(arrange: impl Fn(&Path), points: &[&str], kept: &Kept) {
     let expected = kept_contents(kept);
+    // The last crash point (1-based) at which the lock is still held.
     let moved_at = points
         .iter()
-        .position(|point| *point == "migrate:renamed:.pre-0.6");
+        .position(|point| *point == "migrate:renamed:.pre-0.6")
+        .map(|at| if cfg!(windows) { at } else { at + 1 });
     let mut reached = Vec::new();
     for crash_point in 1..=points.len() + 1 {
         let dir = tempfile::tempdir().unwrap();
@@ -1155,11 +1159,9 @@ fn open_child() {
         assert!(Instant::now() < deadline, "the go file never came");
         std::thread::sleep(Duration::from_millis(1));
     }
-    // The format is given: Windows refuses to read a locked file, so `Auto`
-    // could not tell a single file from its first bytes while the other
-    // process has it open.
-    let config = grafeo_engine::Config::persistent(&path)
-        .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile);
+    // Windows refuses to read a locked file: while the other process has
+    // the migrated database open, the open fails with a "locked" error.
+    let config = grafeo_engine::Config::persistent(&path);
     loop {
         match GrafeoDB::with_config(config.clone()) {
             Ok(db) => {
@@ -1339,6 +1341,54 @@ fn a_create_never_races_a_migration_between_its_renames() {
     }
 }
 
+/// A 0.5.44 writer cannot open a 0.5.x WAL directory while it is migrated:
+/// the migration holds the directory's `LOCK` until the directory has moved,
+/// so a writer that opens it then cannot write into what becomes the kept
+/// copy. Not on Windows, where the lock is released right before the move (a
+/// directory with an open handle inside cannot be renamed there).
+/// Deterministic: the migrating child pauses right before the move, and the
+/// lock is tried meanwhile, as a 0.5.44 writer takes it.
+#[test]
+#[cfg(all(feature = "testing-crash-injection", not(windows)))]
+fn a_wal_directory_stays_locked_until_it_has_moved() {
+    use grafeo_storage::lock::DirectoryLock;
+
+    for (version, kept) in [
+        ("0.5.44", directory_kept()),
+        ("0.5.43", directory_0_5_43_kept()),
+    ] {
+        let expected = kept_contents(&kept);
+        let dir = tempfile::tempdir().unwrap();
+        let path = kept.path_in(dir.path());
+        arrange_kept(&kept, &path);
+        let flag = dir.path().join("migrator");
+
+        let migrator = start_race_child(&path, "migrate:before_move", &flag);
+        wait_for(&with_suffix(&flag, ".paused"), &migrator);
+        assert!(
+            path.join("wal").is_dir() && with_suffix(&path, ".migrating").exists(),
+            "{version}: the migrator wrote its image and has not moved the directory"
+        );
+        match DirectoryLock::acquire(&path) {
+            Ok(_) => panic!("{version}: a 0.5.44 writer locked the directory before it moved"),
+            Err(error) => assert!(
+                error.to_string().contains("locked by another process"),
+                "{version}: the migration holds the lock: {error}"
+            ),
+        }
+        std::fs::write(with_suffix(&flag, ".resume"), b"go").unwrap();
+
+        let output = migrator.join().unwrap();
+        assert!(
+            output.status.code() == Some(OPENED_AND_CLOSED),
+            "{version}: the migrator opens the database: {:?}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_migrated(&path, &expected, &kept, version);
+    }
+}
+
 /// Marks a [`read_child`] run, and says how it opens: `read-only` or `in-memory`.
 #[cfg(feature = "testing-crash-injection")]
 const READ_VAR: &str = "GRAFEO_MIGRATION_READ";
@@ -1500,6 +1550,42 @@ fn an_existing_kept_copy_is_never_replaced() {
     );
 }
 
+/// A kept copy (`<p>.pre-0.6`, a file or a WAL directory) is a 0.5.x database
+/// itself: a read-write open of it is refused instead of migrating it, which
+/// would leave the old data under a name nobody knows and break the way back
+/// to 0.5.x. Nothing changes, and a read-only open reads it.
+#[test]
+fn a_read_write_open_of_a_kept_copy_is_refused() {
+    for (kind, arrange) in [
+        ("file", copy_fixture as fn(&Path)),
+        ("directory", |to: &Path| copy(&directory(), to)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = dir.path().join("db.pre-0.6");
+        arrange(&kept);
+        let before = files(dir.path());
+
+        let error = open_error(&kept);
+        assert!(
+            error.contains("kept copy") && error.contains("read-only"),
+            "{kind}: the error says it is a kept copy and how to read it: {error}"
+        );
+        assert!(
+            error.contains(&dir.path().join("db").display().to_string()),
+            "{kind}: the error names the original name: {error}"
+        );
+        assert!(
+            files(dir.path()) == before,
+            "{kind}: the refused open changes nothing"
+        );
+
+        let db = GrafeoDB::open_read_only(&kept)
+            .unwrap_or_else(|error| panic!("{kind}: a read-only open reads it: {error}"));
+        assert!(db.node_count() > 0, "{kind}: the kept data is there");
+        db.close().unwrap();
+    }
+}
+
 /// A checkpoint image a 0.5.44 checkpoint left pending (`<p>.checkpoint`) holds
 /// the database: the migration reads it, and keeps it as
 /// `<p>.pre-0.6.checkpoint` next to the kept file, byte for byte.
@@ -1569,12 +1655,7 @@ fn a_0_5_writer_holding_the_file_makes_the_migration_fail() {
         .open(&path)
         .unwrap();
     writer.lock().unwrap();
-    // The format is given: Windows refuses to read a locked file, so `Auto`
-    // could not tell a single file from its first bytes.
-    let opened = GrafeoDB::with_config(
-        grafeo_engine::Config::persistent(&path)
-            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
-    );
+    let opened = GrafeoDB::open(&path);
     writer.unlock().unwrap();
     drop(writer);
 
@@ -1607,11 +1688,13 @@ fn copy_directory() -> (tempfile::TempDir, PathBuf) {
 
 /// A read-write open of a 0.5.x WAL directory migrates it to a single file at
 /// the same path, whatever the configured storage format: an existing path
-/// opens by what it is. The deprecated `WalDirectory` format included.
+/// opens by what it is. The deprecated `SingleFile` and `WalDirectory`
+/// formats included.
 #[test]
 #[allow(
     deprecated,
-    reason = "pins what the deprecated `StorageFormat::WalDirectory` still does until 0.7.0"
+    reason = "pins what the deprecated `StorageFormat::WalDirectory` and `SingleFile` still do \
+              until 0.7.0"
 )]
 fn a_wal_directory_migrates_whatever_the_configured_format() {
     use grafeo_engine::config::StorageFormat;

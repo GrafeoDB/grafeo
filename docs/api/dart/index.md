@@ -641,7 +641,7 @@ for (final r in results) {
 
 #### dropVectorIndex()
 
-Drop a vector index. Returns `true` if the index existed.
+Drop a vector index. Returns `true` if the index existed; throws a `DatabaseException` when the database refuses the change.
 
 ```dart
 bool dropVectorIndex(String label, String property)

@@ -620,6 +620,24 @@ impl TransactionManager {
         Ok(CommitsHeld { _commit: commit })
     }
 
+    /// Holds commits off for a change that takes effect at once and logs its
+    /// own WAL group outside any commit (a schema statement, a graph command,
+    /// an RDF update or a write outside a transaction), for as long as the
+    /// guard lives: a checkpoint, a copy or `close()` sees all of it or none
+    /// of it. Waits for a commit or checkpoint in progress, then fails once
+    /// the database is closed (see [`check_open`](Self::check_open)) or after
+    /// a commit that did not complete.
+    ///
+    /// # Errors
+    ///
+    /// [`TransactionError::IncompleteCommit`] or
+    /// [`TransactionError::DatabaseClosed`].
+    pub(crate) fn hold_commits_for_change(&self) -> Result<CommitsHeld<'_>> {
+        let held = self.hold_commits()?;
+        self.check_open()?;
+        Ok(held)
+    }
+
     /// [`hold_commits`](Self::hold_commits) without waiting: `None` while a
     /// commit (or anything else holding commits off) is in progress, also
     /// one on the calling thread.
@@ -678,16 +696,11 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// Returns an error saying a commit did not complete and the database
-    /// must be reopened.
+    /// Returns [`TransactionError::IncompleteCommit`], which says a commit
+    /// did not complete and the database must be reopened.
     pub fn check_no_incomplete_commit(&self) -> Result<()> {
         if self.has_incomplete_commit() {
-            return Err(Error::Transaction(TransactionError::InvalidState(
-                "an earlier commit did not complete, so no transaction can commit and nothing \
-                 can be checkpointed, saved or copied: reopen the database (reads still see \
-                 every commit published before it)"
-                    .to_string(),
-            )));
+            return Err(Error::Transaction(TransactionError::IncompleteCommit));
         }
         Ok(())
     }
@@ -1712,11 +1725,16 @@ mod tests {
             assert!(
                 matches!(
                     &error,
-                    Error::Transaction(TransactionError::InvalidState(message))
-                        if message.contains("did not complete") && message.contains("reopen")
+                    Error::Transaction(TransactionError::IncompleteCommit)
                 ),
+                "a typed error: {error:?}"
+            );
+            assert_eq!(error.error_code().as_str(), "GRAFEO-T008");
+            let message = error.to_string();
+            assert!(
+                message.contains("did not complete") && message.contains("reopen"),
                 "the error says a commit did not complete and the database must be \
-                 reopened: {error}"
+                 reopened: {message}"
             );
             assert!(
                 mgr.commit(next).is_err(),

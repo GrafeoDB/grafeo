@@ -52,7 +52,10 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be opened or contains malformed lines.
+    /// Returns an error if the file cannot be opened or contains malformed
+    /// lines; the database-closed error after `close()` of a persistent
+    /// database, and the incomplete-commit error after a commit that did not
+    /// complete.
     pub fn import_tsv(
         &self,
         path: impl AsRef<Path>,
@@ -76,7 +79,9 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the data contains malformed lines.
+    /// Returns an error if the data contains malformed lines; the
+    /// database-closed error after `close()` of a persistent database, and
+    /// the incomplete-commit error after a commit that did not complete.
     pub fn import_tsv_str(
         &self,
         data: &str,
@@ -111,7 +116,10 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be opened or has an invalid MMIO header or data.
+    /// Returns an error if the file cannot be opened or has an invalid MMIO
+    /// header or data; the database-closed error after `close()` of a
+    /// persistent database, and the incomplete-commit error after a commit
+    /// that did not complete.
     pub fn import_mmio(&self, path: impl AsRef<Path>, edge_type: &str) -> Result<(usize, usize)> {
         let path = path.as_ref();
         let file = std::fs::File::open(path)
@@ -129,6 +137,11 @@ impl super::GrafeoDB {
         edge_type: &str,
         directed: bool,
     ) -> Result<(usize, usize)> {
+        // An import writes no WAL record: after `close()` nothing would
+        // persist it, and after a commit that did not complete it would be
+        // stamped at an epoch that is never published.
+        self.transaction_manager.check_no_incomplete_commit()?;
+        self.transaction_manager.check_open()?;
         let store = self.lpg_store();
 
         // Phase 1: Collect unique external IDs and create nodes.
@@ -189,7 +202,10 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be opened or contains malformed lines.
+    /// Returns an error if the file cannot be opened or contains malformed
+    /// lines; the database-closed error after `close()` of a persistent
+    /// database, and the incomplete-commit error after a commit that did not
+    /// complete.
     #[cfg(feature = "triple-store")]
     pub fn import_tsv_rdf(
         &self,
@@ -199,6 +215,11 @@ impl super::GrafeoDB {
     ) -> Result<(usize, usize)> {
         use grafeo_core::graph::rdf::{Term, Triple};
 
+        // An import writes no WAL record: after `close()` nothing would
+        // persist it, and after a commit that did not complete it would be
+        // stamped at an epoch that is never published.
+        self.transaction_manager.check_no_incomplete_commit()?;
+        self.transaction_manager.check_open()?;
         let path = path.as_ref();
         let file = std::fs::File::open(path)
             .map_err(|e| Error::Internal(format!("failed to open {}: {}", path.display(), e)))?;

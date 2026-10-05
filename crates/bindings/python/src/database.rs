@@ -1268,8 +1268,9 @@ impl PyGrafeoDB {
     /// ```
     fn create_property_index(&self, property: &str) -> PyResult<()> {
         let db = self.inner.read();
-        db.create_property_index(property);
-        Ok(())
+        Ok(db
+            .create_property_index(property)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Create a vector similarity index on a node property.
@@ -1325,9 +1326,11 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     removed = db.drop_vector_index("Doc", "embedding")
-    fn drop_vector_index(&self, label: &str, property: &str) -> bool {
+    fn drop_vector_index(&self, label: &str, property: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        db.drop_vector_index(label, property)
+        Ok(db
+            .drop_vector_index(label, property)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Rebuild a vector index by rescanning all matching nodes.
@@ -1711,9 +1714,11 @@ impl PyGrafeoDB {
     ///     label: Node label of the index
     ///     property: Property name of the index
     #[cfg(feature = "text-index")]
-    fn drop_text_index(&self, label: &str, property: &str) -> bool {
+    fn drop_text_index(&self, label: &str, property: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        db.drop_text_index(label, property)
+        Ok(db
+            .drop_text_index(label, property)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Rebuild a text index by rescanning all matching nodes.
@@ -1950,7 +1955,9 @@ impl PyGrafeoDB {
     /// ```
     fn drop_property_index(&self, property: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.drop_property_index(property))
+        Ok(db
+            .drop_property_index(property)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Check if a property has an index.
@@ -3392,8 +3399,12 @@ impl PyGrafeoDB {
 
     /// Drops a named graph. Returns ``True`` if dropped, ``False`` if it did
     /// not exist.
-    fn drop_graph(&self, name: &str) -> bool {
-        self.inner.read().drop_graph(name)
+    fn drop_graph(&self, name: &str) -> PyResult<bool> {
+        Ok(self
+            .inner
+            .read()
+            .drop_graph(name)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Returns a list of all named graph names.

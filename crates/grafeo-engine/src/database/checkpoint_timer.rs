@@ -210,6 +210,19 @@ mod tests {
         );
     }
 
+    /// Waits until a checkpoint moved the file's header past `iteration`,
+    /// for up to ten seconds (a loaded machine may run the timer late).
+    fn wait_for_a_checkpoint(fm: &GrafeoFileManager, iteration: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while fm.active_header().iteration == iteration {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the timer never checkpointed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn timer_checkpoints_on_interval() {
         let store = Arc::new(LpgStore::new().unwrap());
@@ -222,10 +235,11 @@ mod tests {
         store.create_node(&["Test"]);
 
         // Short interval for testing
+        let created = fm.active_header().iteration;
         let mut timer = start(Duration::from_millis(200), &fm, &store);
 
-        // Wait for at least one checkpoint cycle (200ms interval + margin)
-        std::thread::sleep(Duration::from_millis(500));
+        // Wait for the first checkpoint, however loaded the machine is.
+        wait_for_a_checkpoint(&fm, created);
         timer.stop();
 
         // Verify that a checkpoint happened (iteration > 0)
@@ -249,7 +263,7 @@ mod tests {
         let created = fm.active_header().iteration;
         let mut timer = start(Duration::from_millis(200), &fm, &store);
 
-        std::thread::sleep(Duration::from_millis(500));
+        wait_for_a_checkpoint(&fm, created);
         timer.stop();
 
         let header = fm.active_header();

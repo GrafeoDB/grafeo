@@ -153,7 +153,7 @@ fn vector_search_with_filter_after_compact() {
         .unwrap();
 
     db.compact().expect("compact");
-    db.create_property_index("category");
+    db.create_property_index("category").unwrap();
     db.create_vector_index(
         "Doc",
         "embedding",

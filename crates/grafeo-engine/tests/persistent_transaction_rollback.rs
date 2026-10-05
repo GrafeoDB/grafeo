@@ -24,7 +24,7 @@ mod tests {
     const VARIANTS: [(&str, bool); 2] = [("single file", false), ("single file + cdc", true)];
 
     fn config(path: &Path, cdc: bool) -> Config {
-        let config = Config::persistent(path).with_storage_format(StorageFormat::SingleFile);
+        let config = Config::persistent(path).with_storage_format(StorageFormat::Auto);
         if cdc { config.with_cdc() } else { config }
     }
 

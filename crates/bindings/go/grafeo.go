@@ -346,13 +346,23 @@ func (db *Database) ExecuteLanguage(language, query, paramsJSON string) (*QueryR
 }
 
 // DropVectorIndex drops a vector index for the given label and property.
-// Returns true if the index existed and was removed.
-func (db *Database) DropVectorIndex(label, property string) bool {
+// Returns true if the index existed and was removed, and an error when the
+// database refuses the change (for example after a commit that did not
+// complete).
+func (db *Database) DropVectorIndex(label, property string) (bool, error) {
 	cLabel := C.CString(label)
 	defer C.free(unsafe.Pointer(cLabel))
 	cProp := C.CString(property)
 	defer C.free(unsafe.Pointer(cProp))
-	return C.grafeo_drop_vector_index(db.handle, cLabel, cProp) != 0
+	runtime.LockOSThread()
+	result := int(C.grafeo_drop_vector_index(db.handle, cLabel, cProp))
+	if result < 0 {
+		err := lastError()
+		runtime.UnlockOSThread()
+		return false, err
+	}
+	runtime.UnlockOSThread()
+	return result == 1, nil
 }
 
 // RebuildVectorIndex drops and recreates a vector index, rescanning all

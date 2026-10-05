@@ -40,7 +40,7 @@ mod crash {
     fn open(path: &Path) -> GrafeoDB {
         GrafeoDB::with_config(
             Config::persistent(path)
-                .with_storage_format(StorageFormat::SingleFile)
+                .with_storage_format(StorageFormat::Auto)
                 .with_wal_durability(DurabilityMode::Sync),
         )
         .unwrap()

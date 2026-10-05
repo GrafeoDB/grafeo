@@ -35,7 +35,7 @@ mod durability {
         GrafeoDB::with_config(
             Config::persistent(path)
                 .with_graph_model(GraphModel::Rdf)
-                .with_storage_format(StorageFormat::SingleFile),
+                .with_storage_format(StorageFormat::Auto),
         )
         .expect("open single-file rdf db")
     }

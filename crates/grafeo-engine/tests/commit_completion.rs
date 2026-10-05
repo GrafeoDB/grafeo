@@ -229,10 +229,8 @@ mod wal {
     const PATH_VAR: &str = "GRAFEO_COMMIT_COMPLETION_PATH";
 
     fn open(path: &Path) -> GrafeoDB {
-        GrafeoDB::with_config(
-            Config::persistent(path).with_storage_format(StorageFormat::SingleFile),
-        )
-        .unwrap()
+        GrafeoDB::with_config(Config::persistent(path).with_storage_format(StorageFormat::Auto))
+            .unwrap()
     }
 
     /// Runs `scenario` in a child process that exits without closing the

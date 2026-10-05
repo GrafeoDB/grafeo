@@ -150,7 +150,7 @@ fn test_property_index_lifecycle() {
     assert!(!db.has_property_index("name"));
 
     // Create index
-    db.create_property_index("name");
+    db.create_property_index("name").unwrap();
     assert!(db.has_property_index("name"));
 
     // Create nodes with the property
@@ -179,9 +179,9 @@ fn test_property_index_lifecycle() {
     assert!(results.is_empty(), "{results:?}");
 
     // Drop index
-    assert!(db.drop_property_index("name"));
+    assert!(db.drop_property_index("name").unwrap());
     assert!(!db.has_property_index("name"));
-    assert!(!db.drop_property_index("name")); // second drop returns false
+    assert!(!db.drop_property_index("name").unwrap()); // second drop returns false
 }
 
 // ── Iteration ────────────────────────────────────────────────────

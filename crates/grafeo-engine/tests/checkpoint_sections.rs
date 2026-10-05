@@ -24,7 +24,7 @@ use grafeo_engine::config::StorageFormat;
 use grafeo_engine::{Config, GrafeoDB};
 
 fn config(path: &std::path::Path) -> Config {
-    Config::persistent(path).with_storage_format(StorageFormat::SingleFile)
+    Config::persistent(path).with_storage_format(StorageFormat::Auto)
 }
 
 fn single_value(db: &GrafeoDB, query: &str) -> Value {

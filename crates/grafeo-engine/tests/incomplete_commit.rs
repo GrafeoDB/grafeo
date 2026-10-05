@@ -168,6 +168,61 @@ fn after_a_commit_that_does_not_complete_no_commit_publishes_part_of_it() {
         "an explicit transaction cannot commit either"
     );
 
+    // The direct graph and index calls change the store outside any commit,
+    // and a checkpoint could never write them: they fail the same way.
+    let incomplete = |call: &str, error: Option<grafeo_common::utils::error::Error>| {
+        let error = error.unwrap_or_else(|| panic!("{call} after a failed commit succeeded"));
+        assert!(
+            matches!(
+                error,
+                grafeo_common::utils::error::Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::IncompleteCommit
+                )
+            ),
+            "{call}: {error:?}"
+        );
+    };
+    incomplete("create_graph", db.create_graph("berlin").err());
+    incomplete("drop_graph", db.drop_graph("berlin").err());
+    incomplete(
+        "create_property_index",
+        db.create_property_index("name").err(),
+    );
+    incomplete("drop_property_index", db.drop_property_index("name").err());
+    #[cfg(feature = "vector-index")]
+    incomplete(
+        "create_vector_index",
+        db.create_vector_index("Person", "embedding", Some(3), None, None, None, None)
+            .err(),
+    );
+    #[cfg(feature = "text-index")]
+    incomplete(
+        "create_text_index",
+        db.create_text_index("Person", "name").err(),
+    );
+    // So do the imports and the RDF batch insert, which would stamp their
+    // writes at the failed commit's epoch, or write what no checkpoint can
+    // persist.
+    incomplete(
+        "import_tsv_str",
+        db.import_tsv_str("3\t19\n19\t88\n", "KNOWS", true).err(),
+    );
+    #[cfg(feature = "triple-store")]
+    incomplete(
+        "batch_insert_rdf",
+        db.batch_insert_rdf([grafeo_core::graph::rdf::Triple::new(
+            grafeo_core::graph::rdf::Term::iri("http://ex.org/alix"),
+            grafeo_core::graph::rdf::Term::iri("http://ex.org/city"),
+            grafeo_core::graph::rdf::Term::literal("Amsterdam"),
+        )])
+        .err(),
+    );
+    assert!(db.list_graphs().is_empty(), "no graph was created");
+    assert!(!db.has_property_index("name"), "no index was created");
+    // A projection is only the session's state: it still works.
+    db.execute("CREATE PROJECTION social LABELS (Person)")
+        .unwrap_or_else(|error| panic!("CREATE PROJECTION after a failed commit: {error}"));
+
     let snapshot = {
         let other = GrafeoDB::new_in_memory();
         other.create_node(&["Person"]).unwrap();

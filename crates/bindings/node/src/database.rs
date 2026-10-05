@@ -698,7 +698,9 @@ impl JsGrafeoDB {
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let db = db.read();
-            Ok(db.drop_vector_index(&label, &property))
+            db.drop_vector_index(&label, &property)
+                .map_err(NodeGrafeoError::from)
+                .map_err(napi::Error::from)
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?
@@ -847,7 +849,9 @@ impl JsGrafeoDB {
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let db = db.read();
-            Ok(db.drop_text_index(&label, &property))
+            db.drop_text_index(&label, &property)
+                .map_err(NodeGrafeoError::from)
+                .map_err(napi::Error::from)
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?

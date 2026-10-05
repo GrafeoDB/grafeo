@@ -318,6 +318,8 @@ int32_t      grafeo_drop_property_index(GrafeoDatabase* db, const char* property
 int32_t      grafeo_has_property_index(GrafeoDatabase* db, const char* property);
 ```
 
+`grafeo_drop_property_index` returns 1 if the index was dropped, 0 if there was none, and -1 on an error (see `grafeo_last_error`), such as a database whose `grafeo_close` ran.
+
 ### Find Nodes by Property
 
 ```c
@@ -350,7 +352,7 @@ int32_t      grafeo_drop_vector_index(GrafeoDatabase* db, const char* label, con
 GrafeoStatus grafeo_rebuild_vector_index(GrafeoDatabase* db, const char* label, const char* property);
 ```
 
-Pass `-1` for `dimensions`, `m`, or `ef_construction` to use defaults. Pass `NULL` for `metric` to default to cosine similarity.
+Pass `-1` for `dimensions`, `m`, or `ef_construction` to use defaults. Pass `NULL` for `metric` to default to cosine similarity. `grafeo_drop_vector_index` returns 1 if the index was dropped, 0 if there was none, and -1 on a database error (see `grafeo_last_error`).
 
 ### Nearest Neighbor Search
 

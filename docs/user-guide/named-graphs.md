@@ -194,7 +194,7 @@ db.drop_graph("friends")
 In Rust:
 
 ```rust
-db.drop_graph("friends");
+db.drop_graph("friends")?;
 ```
 
 ## Cross-Graph Transactions

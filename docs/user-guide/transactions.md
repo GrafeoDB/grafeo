@@ -435,5 +435,6 @@ Transaction errors use standardized `GRAFEO-TXXX` codes:
 | `GRAFEO-T005` | Serialization failure (SSI violation) | No |
 | `GRAFEO-T006` | Deadlock detected | Yes |
 | `GRAFEO-T007` | Database closed: a write after `close()` of a persistent database | No |
+| `GRAFEO-T008` | Incomplete commit: an earlier commit did not complete, reopen the database | No |
 
 In Rust, error codes expose an `is_retryable()` method to indicate whether the operation can be safely retried. This method is not currently exposed in the Python bindings.

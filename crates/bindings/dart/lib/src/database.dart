@@ -873,7 +873,8 @@ class GrafeoDB implements Finalizable {
     }
   }
 
-  /// Drop a vector index. Returns true if the index existed.
+  /// Drop a vector index. Returns true if the index existed; throws when the
+  /// database refuses the change.
   bool dropVectorIndex(String label, String property) {
     _checkOpen();
     final labelPtr = label.toNativeUtf8(allocator: malloc);
@@ -884,7 +885,9 @@ class GrafeoDB implements Finalizable {
         labelPtr,
         propertyPtr,
       );
-      return result != 0;
+      // -1: the database refused the change (see grafeo_last_error).
+      if (result < 0) throwLastError(_bindings);
+      return result == 1;
     } finally {
       malloc.free(labelPtr);
       malloc.free(propertyPtr);

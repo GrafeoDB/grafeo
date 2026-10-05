@@ -299,6 +299,6 @@ fn named_graphs_survive_compact_and_recompact() {
     assert_eq!(names, vec!["asia".to_string(), "europe".to_string()]);
     assert!(db.store().graph("europe").is_some());
 
-    assert!(db.drop_graph("europe"));
+    assert!(db.drop_graph("europe").unwrap());
     assert_eq!(db.list_graphs(), vec!["asia".to_string()]);
 }

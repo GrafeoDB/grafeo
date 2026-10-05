@@ -31,7 +31,7 @@ mod tests {
     }
 
     fn config(path: &Path) -> Config {
-        Config::persistent(path).with_storage_format(StorageFormat::SingleFile)
+        Config::persistent(path).with_storage_format(StorageFormat::Auto)
     }
 
     fn open(path: &Path) -> GrafeoDB {
@@ -277,7 +277,7 @@ mod tests {
                 let session = db.session();
                 session.use_graph("doomed");
                 insert(&session, "Hans");
-                assert!(db.drop_graph("doomed"));
+                assert!(db.drop_graph("doomed").unwrap());
                 assert_eq!(db.list_graphs(), strings(&["empty"]));
             }
             // A transaction still open when the process exits, while another

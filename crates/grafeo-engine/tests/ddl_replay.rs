@@ -29,9 +29,7 @@ mod tests {
 
     /// A single-file database.
     fn open_file(path: &Path) -> grafeo_common::utils::error::Result<GrafeoDB> {
-        GrafeoDB::with_config(
-            Config::persistent(path).with_storage_format(StorageFormat::SingleFile),
-        )
+        GrafeoDB::with_config(Config::persistent(path).with_storage_format(StorageFormat::Auto))
     }
 
     fn open(path: &Path) -> GrafeoDB {

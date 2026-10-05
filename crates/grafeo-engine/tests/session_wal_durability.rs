@@ -42,7 +42,7 @@ mod session_wal_durability {
     use std::path::Path;
 
     fn open(path: &Path) -> GrafeoDB {
-        let config = Config::persistent(path).with_storage_format(StorageFormat::SingleFile);
+        let config = Config::persistent(path).with_storage_format(StorageFormat::Auto);
         GrafeoDB::with_config(config).expect("open")
     }
 

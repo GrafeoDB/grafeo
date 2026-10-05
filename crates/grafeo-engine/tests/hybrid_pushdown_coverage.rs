@@ -606,7 +606,7 @@ fn test_resolve_vector_literal_string_element_falls_through() {
 #[test]
 fn test_property_index_equality_pushdown_no_tx() {
     let db = social_graph();
-    db.create_property_index("name");
+    db.create_property_index("name").unwrap();
 
     // Run via the default session (not inside BEGIN/COMMIT) so transaction_id
     // is None and the non-transactional `get_node_at_epoch` branch fires.

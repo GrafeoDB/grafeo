@@ -485,10 +485,16 @@ impl Database {
     /// Drops a text index on a label+property pair.
     ///
     /// Returns `true` if the index existed and was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if the index cannot be dropped.
     #[cfg(feature = "text-index")]
     #[wasm_bindgen(js_name = "dropTextIndex")]
-    pub fn drop_text_index(&self, label: &str, property: &str) -> bool {
-        self.inner.drop_text_index(label, property)
+    pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool, JsError> {
+        self.inner
+            .drop_text_index(label, property)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Rebuilds a text index by re-scanning all matching nodes.
@@ -653,10 +659,16 @@ impl Database {
     /// Drops a vector index on a label+property pair.
     ///
     /// Returns `true` if the index existed and was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if the index cannot be dropped.
     #[cfg(feature = "vector-index")]
     #[wasm_bindgen(js_name = "dropVectorIndex")]
-    pub fn drop_vector_index(&self, label: &str, property: &str) -> bool {
-        self.inner.drop_vector_index(label, property)
+    pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool, JsError> {
+        self.inner
+            .drop_vector_index(label, property)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Rebuilds a vector index by re-scanning all matching nodes.
@@ -1119,7 +1131,10 @@ impl Database {
             grafeo_core::graph::rdf::Triple::new(subject, predicate, object)
         });
 
-        let inserted = self.inner.batch_insert_rdf(triples);
+        let inserted = self
+            .inner
+            .batch_insert_rdf(triples)
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
         let result = js_sys::Object::new();
         let _ = js_sys::Reflect::set(
@@ -2430,7 +2445,7 @@ mod tests {
                 ),
             ];
 
-            let inserted = db.batch_insert_rdf(triples);
+            let inserted = db.batch_insert_rdf(triples).unwrap();
             assert_eq!(inserted, 2);
         }
 
@@ -2445,17 +2460,17 @@ mod tests {
                 Term::literal("Alix"),
             );
 
-            let first = db.batch_insert_rdf(vec![triple.clone()]);
+            let first = db.batch_insert_rdf(vec![triple.clone()]).unwrap();
             assert_eq!(first, 1);
 
-            let second = db.batch_insert_rdf(vec![triple]);
+            let second = db.batch_insert_rdf(vec![triple]).unwrap();
             assert_eq!(second, 0, "duplicate triple should be skipped");
         }
 
         #[test]
         fn batch_insert_rdf_empty() {
             let db = GrafeoDB::new_in_memory();
-            let inserted = db.batch_insert_rdf(Vec::new());
+            let inserted = db.batch_insert_rdf(Vec::new()).unwrap();
             assert_eq!(inserted, 0);
         }
 
@@ -2477,7 +2492,7 @@ mod tests {
                 ),
             ];
 
-            let inserted = db.batch_insert_rdf(triples);
+            let inserted = db.batch_insert_rdf(triples).unwrap();
             assert_eq!(inserted, 2);
         }
 
@@ -2499,7 +2514,7 @@ mod tests {
                 ),
             ];
 
-            let inserted = db.batch_insert_rdf(triples);
+            let inserted = db.batch_insert_rdf(triples).unwrap();
             assert_eq!(inserted, 2);
         }
 
@@ -2518,7 +2533,7 @@ mod tests {
                 })
                 .collect();
 
-            let inserted = db.batch_insert_rdf(triples);
+            let inserted = db.batch_insert_rdf(triples).unwrap();
             assert_eq!(inserted, 1000);
         }
 
@@ -2534,7 +2549,9 @@ mod tests {
             );
 
             // Same triple 3 times in one batch
-            let inserted = db.batch_insert_rdf(vec![triple.clone(), triple.clone(), triple]);
+            let inserted = db
+                .batch_insert_rdf(vec![triple.clone(), triple.clone(), triple])
+                .unwrap();
             assert_eq!(
                 inserted, 1,
                 "duplicates within same batch should be deduped"

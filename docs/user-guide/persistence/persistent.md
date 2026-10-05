@@ -95,7 +95,7 @@ Features:
 
 ### Storage Format Setting (Rust)
 
-`Config::storage_format` decides only what a new path becomes. `StorageFormat::Auto` (the default) and `StorageFormat::SingleFile` both create a single file there, and an existing path opens as what it holds, whatever the setting. `StorageFormat::WalDirectory` is deprecated and removed in 0.7.0: it opens an existing 0.5.x WAL directory by migrating it, as the other settings do, and fails at a new path with "WAL directories are no longer created". Use `StorageFormat::Auto` instead.
+`Config::storage_format` decides only what a new path becomes. `StorageFormat::Auto` (the default) creates a single file there, and an existing path opens as what it holds, whatever the setting. `StorageFormat::SingleFile` and `StorageFormat::WalDirectory` are deprecated and removed in 0.7.0: `SingleFile` does the same as `Auto`, and `WalDirectory` opens an existing 0.5.x WAL directory by migrating it, as the other settings do, and fails at a new path with "WAL directories are no longer created". Use `StorageFormat::Auto` (or leave the setting out) instead.
 
 ## Read-Only Mode
 
@@ -113,13 +113,17 @@ Open a database in read-only mode to allow multiple processes to read the same d
     let db = GrafeoDB::open_read_only("my_graph.grafeo")?;
     ```
 
-Read-only mode uses a shared file lock instead of an exclusive lock, so multiple readers can coexist. A database written by 0.5.x (a file or a WAL directory) is read into memory once instead, and is not migrated (see [Upgrading from 0.5](#upgrading-from-05)).
+Read-only mode uses a shared file lock instead of an exclusive lock, so multiple readers can coexist. It sees every commit, also those a writer that exited without `close()` left in the WAL (`<path>.wal/`), which it reads without changing anything. A database written by 0.5.x (a file or a WAL directory) is read into memory once instead, and is not migrated (see [Upgrading from 0.5](#upgrading-from-05)).
 
 ## One Writer at a Time
 
 A persistent database can be open for writing by one `GrafeoDB` instance at a time, in one process. Opening it again, from the same process or another one, fails with `database file is locked by another process` until the first instance calls `close()` or is dropped.
 
 To share a database between processes, run it behind [Grafeo Server](https://github.com/GrafeoDB/grafeo-server), or open it in [read-only mode](#read-only-mode) from the readers.
+
+## After `close()`
+
+Once `close()` of a persistent database starts, the handle takes no more writes: commits and statements that write (in every query language, SPARQL updates included), schema statements and graph commands, the direct calls that write (nodes, edges, properties and labels, named graphs, property, vector and text indexes, imports and `restore_snapshot`), and the calls that persist (`wal_checkpoint()`, `save()`, the backups, `compact()`) fail with the database-closed error (`GRAFEO-T007`, Python `DatabaseClosedError`). A write already in progress completes first and is saved; imports and `restore_snapshot` only refuse once `close()` started, so let them finish before you close. Reads still work. Open the database again to write. An in-memory database has nothing to persist and keeps working.
 
 ## Reopening a Database
 
@@ -179,15 +183,19 @@ The migration reads the old database, including the changes in its WAL, and writ
 | `my_graph.grafeo.checkpoint` (a checkpoint 0.5.44 left pending) | `my_graph.grafeo.pre-0.6.checkpoint` |
 | `my_graph.db/` (a WAL directory) | `my_graph.db.pre-0.6/`, the whole directory |
 
-A WAL directory becomes a file at the same path: after the migration, `my_graph.db` is the 0.6 database file, and the path you used before opens it, also when it ends with a separator (`my_graph.db/`).
+A WAL directory becomes a file at the same path: after the migration, `my_graph.db` is the 0.6 database file, and the path you used before opens it, also when it ends with a separator (`my_graph.db/`). The whole directory moves to `my_graph.db.pre-0.6/`, also files in it that are not part of the database: 0.5.x created `wal/` inside any directory it was given, so an application may keep other files there. Move them out before the first 0.6 open, or take them from the kept directory afterwards.
 
-A migration never replaces a kept copy: while one of these names is taken, the open fails before it writes anything. If a migration fails or is cut off by a crash, the next read-write open finishes it or starts it again; the old files are never changed. A read-write open in another process waits up to five seconds for a running migration, then fails with "database locked: a migration is running".
+A migration never replaces a kept copy: while one of these names is taken, the open fails before it writes anything. A kept copy is never migrated itself: a read-write open of `my_graph.grafeo.pre-0.6` fails; open it read-only, or rename it back first (see [Going Back to 0.5.x](#going-back-to-05x)). If a migration fails or is cut off by a crash, the next read-write open finishes it or starts it again. The old files are never changed, with one exception: a crash while migrating a WAL directory written by 0.5.43 (which has no `LOCK` file) can leave an empty `LOCK` file in the kept directory, as the migration creates one to lock the directory. A read-write open in another process waits up to five seconds for a running migration, then fails with "database locked: a migration is running".
 
 0.7.0 will no longer read 0.5.x databases: open each 0.5.x database once with 0.6, for writing, before you upgrade to 0.7.
 
 ### Before the First Open
 
 Stop every 0.5.x process that uses the database. 0.5.x cannot open the migrated file. While a 0.5.x process has a database file open for writing, or a 0.5.44 process has a WAL directory open, the migration fails with a "locked by another process" error and changes nothing. 0.5.43 and older take no lock on a WAL directory, so the migration cannot tell that they use it: make sure they are stopped.
+
+### Builds Without the `wal` Feature
+
+A build without the `wal` feature cannot replay a WAL, so it refuses to open (or migrate) a 0.5.x WAL directory, whose WAL holds all of its data, and a 0.5.x file whose sidecar WAL holds files, and changes nothing. The `grafeo` Rust crate's default profile (`embedded`) is such a build. Open these databases read-write once with a build that has `wal`: the `grafeo` crate with the `lpg` or `storage` feature, the Python, Node.js or C bindings, or the `grafeo` command line tool. A 0.5.x file that was closed cleanly (its sidecar WAL is gone or empty) migrates in every build. For the same reason, a read-only and a read-write open in such a build refuse a 0.6 file whose WAL holds commits a writer left when it exited without `close()`, and change nothing: open it with a build that has `wal`, which replays them.
 
 ### Read-Only Opens
 

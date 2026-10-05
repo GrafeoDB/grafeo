@@ -55,3 +55,46 @@ def test_an_in_memory_database_still_takes_writes_after_close():
     db.close()
     db.execute("INSERT (:Person {name: 'Gus'})")
     assert names(db) == ["Alix", "Gus"]
+
+
+def test_a_sparql_update_after_close_raises_and_is_not_in_the_file(tmp_path):
+    path = str(tmp_path / "prague.grafeo")
+    db = grafeo.GrafeoDB(path)
+    if not hasattr(db, "execute_sparql"):
+        db.close()
+        pytest.skip("this build has no SPARQL")
+    db.execute_sparql('INSERT DATA { <http://ex.org/alix> <http://ex.org/city> "Amsterdam" . }')
+    db.close()
+
+    with pytest.raises(grafeo.DatabaseClosedError):
+        db.execute_sparql('INSERT DATA { <http://ex.org/gus> <http://ex.org/city> "Berlin" . }')
+    query = "SELECT ?s WHERE { ?s ?p ?o }"
+    assert len(db.execute_sparql(query)) == 1, "queries still run"
+
+    reopened = grafeo.GrafeoDB(path)
+    assert len(reopened.execute_sparql(query)) == 1, "the file holds Alix's triple only"
+    reopened.close()
+
+
+def test_graph_index_and_persist_calls_after_close_raise(tmp_path):
+    path = str(tmp_path / "paris.grafeo")
+    db = grafeo.GrafeoDB(path)
+    db.create_graph("berlin")
+    db.close()
+
+    for call in (
+        lambda: db.create_graph("prague"),
+        lambda: db.drop_graph("berlin"),
+        lambda: db.create_property_index("name"),
+        lambda: db.drop_property_index("name"),
+        db.wal_checkpoint,
+        lambda: db.save(str(tmp_path / "copy.grafeo")),
+    ):
+        with pytest.raises(grafeo.DatabaseClosedError):
+            call()
+    assert not (tmp_path / "copy.grafeo").exists(), "nothing was saved"
+
+    reopened = grafeo.GrafeoDB(path)
+    assert reopened.list_graphs() == ["berlin"]
+    assert not reopened.has_property_index("name")
+    reopened.close()

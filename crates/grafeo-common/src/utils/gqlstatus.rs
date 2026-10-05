@@ -218,9 +218,9 @@ impl From<&super::error::Error> for GqlStatus {
                 | TransactionError::WriteConflict(_) => GqlStatus::TX_ROLLBACK,
                 TransactionError::SerializationFailure(_) => GqlStatus::TX_ROLLBACK,
                 TransactionError::Deadlock => GqlStatus::TX_ROLLBACK,
-                TransactionError::Timeout | TransactionError::DatabaseClosed => {
-                    GqlStatus::INVALID_TX_STATE
-                }
+                TransactionError::Timeout
+                | TransactionError::DatabaseClosed
+                | TransactionError::IncompleteCommit => GqlStatus::INVALID_TX_STATE,
             },
             Error::TypeMismatch { .. } => GqlStatus::DATA_INVALID_VALUE_TYPE,
             Error::InvalidValue(_) => GqlStatus::DATA_EXCEPTION,

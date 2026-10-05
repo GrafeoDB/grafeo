@@ -41,6 +41,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 ### Result changes
 
 - **k-core decomposition returns core numbers** ([#563](https://github.com/GrafeoDB/grafeo/issues/563)): `kcore` (`db.algorithms.kcore()`, `CALL grafeo.kcore()`) gave each node its degree at the moment it was peeled, below its core number for most nodes (on K4, every node in the 3-core, the four nodes got 3, 2, 1 and 0), and which node got which value changed between calls. It now returns each node's core number, which does not depend on node or edge order. Self-loops no longer count toward a node's degree. `max_core` was already right.
+- **Louvain merges communities level by level** ([#564](https://github.com/GrafeoDB/grafeo/issues/564)): `louvain` (`db.algorithms.louvain()`, `CALL grafeo.louvain()`) only moved single nodes between communities and never merged communities into super-nodes, so it stopped at many small ones (a 1,000-node path gave 500 pairs at modularity 0.50; it now gives 31 communities at 0.94). Every Louvain result changes: fewer, larger communities with higher modularity, still the same on every run. `resolution` now changes the communities (it only changed the reported modularity), and the reported modularity is now that of the returned communities (it left out part of the expected-edges term and came out too high).
 
 ### Deprecated
 

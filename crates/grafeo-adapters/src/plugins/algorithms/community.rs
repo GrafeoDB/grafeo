@@ -146,10 +146,16 @@ pub struct LouvainResult {
 
 /// Detects communities using the Louvain algorithm.
 ///
-/// The Louvain algorithm optimizes modularity through a greedy approach,
-/// consisting of two phases that are repeated iteratively:
-/// 1. Local optimization: Move nodes to neighboring communities if it increases modularity
-/// 2. Aggregation: Build a new graph where communities become super-nodes
+/// The Louvain algorithm optimizes modularity greedily, repeating two phases
+/// until a level changes nothing:
+/// 1. Local moving: each node joins the neighbouring community that gains the
+///    most modularity, until no move gains.
+/// 2. Aggregation: every community becomes a super-node of a new graph, with
+///    the weights between communities summed and the weight inside each
+///    community kept as a self-loop.
+///
+/// The graph is treated as undirected with weight 1 per edge: two edges between
+/// the same nodes weigh 2, and a self-loop adds 2 to its node's degree.
 ///
 /// # Arguments
 ///
@@ -158,14 +164,16 @@ pub struct LouvainResult {
 ///
 /// # Returns
 ///
-/// Community assignments and modularity score.
+/// Community assignments and the modularity of the partition at `resolution`.
 ///
 /// # Determinism
 ///
-/// The same graph always gives the same result: nodes are visited in node id
-/// order, a node that gains equally from several moves joins the community
-/// with the smallest index, and communities are numbered 0, 1, 2, ... in
-/// increasing order of their smallest node id.
+/// The same graph always gives the same result, at every level: nodes and
+/// super-nodes are visited in node id order (a super-node by the smallest node
+/// id it holds), a node that gains equally from several moves joins the
+/// community with the smallest index, sums run in a fixed order, and
+/// communities are numbered 0, 1, 2, ... in increasing order of their smallest
+/// node id.
 ///
 /// # Complexity
 ///
@@ -183,41 +191,27 @@ pub fn louvain(store: &dyn GraphStore, resolution: f64) -> LouvainResult {
         };
     }
 
-    // Build node index mapping
-    let mut node_to_idx: FxHashMap<NodeId, usize> = FxHashMap::default();
-    for (idx, &node) in nodes.iter().enumerate() {
-        node_to_idx.insert(node, idx);
-    }
+    let node_to_idx: FxHashMap<NodeId, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(idx, &node)| (node, idx))
+        .collect();
 
-    // Build adjacency with weights (for undirected graph)
-    // adjacency[i][j] = weight of edge between nodes i and j
+    // Undirected weights: each edge adds 1 to both directions, so a self-loop
+    // adds 2 to its own entry.
     let mut adjacency: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); n];
     let mut total_weight = 0.0;
-
     for (i, &node) in nodes.iter().enumerate() {
         for (neighbor, _edge_id) in store.edges_from(node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
-                // For undirected: add weight to both directions
-                let w = 1.0; // Could extract from edge property
-                *adjacency[i].entry(j).or_insert(0.0) += w;
-                *adjacency[j].entry(i).or_insert(0.0) += w;
-                total_weight += w;
+                *adjacency[i].entry(j).or_insert(0.0) += 1.0;
+                *adjacency[j].entry(i).or_insert(0.0) += 1.0;
+                total_weight += 1.0;
             }
         }
     }
 
-    // Neighbor lists sorted by index: every sum below runs in the same order
-    // on every call (hash map iteration order differs between map instances).
-    let weights: Vec<Vec<(usize, f64)>> = adjacency
-        .into_iter()
-        .map(|neighbors| {
-            let mut sorted: Vec<(usize, f64)> = neighbors.into_iter().collect();
-            sorted.sort_unstable_by_key(|&(j, _)| j);
-            sorted
-        })
-        .collect();
-
-    // Handle isolated nodes
+    // Isolated nodes only: each node is its own community.
     if total_weight == 0.0 {
         let communities: FxHashMap<NodeId, u64> = nodes
             .iter()
@@ -231,32 +225,98 @@ pub fn louvain(store: &dyn GraphStore, resolution: f64) -> LouvainResult {
         };
     }
 
-    // Compute node degrees (sum of incident edge weights)
-    let degrees: Vec<f64> = weights
+    let weights = sorted_neighbors(adjacency);
+
+    // `membership[v]` is the super-node holding node v at the current level.
+    let mut membership: Vec<usize> = (0..n).collect();
+    let mut level = weights.clone();
+    loop {
+        let Some(community) = move_nodes(&level, total_weight, resolution) else {
+            break;
+        };
+        let (renumbered, count) = number_by_first_member(&community);
+        for super_node in &mut membership {
+            *super_node = renumbered[*super_node];
+        }
+        level = aggregate(&level, &renumbered, count);
+    }
+
+    // Nodes are sorted and super-nodes are numbered by their first member, so
+    // `membership` already numbers communities by their smallest node id.
+    let num_communities = membership.iter().copied().max().map_or(0, |max| max + 1);
+    let communities: FxHashMap<NodeId, u64> = nodes
+        .iter()
+        .zip(&membership)
+        .map(|(&node, &community)| (node, community as u64))
+        .collect();
+    let modularity = compute_modularity(&weights, &membership, total_weight, resolution);
+
+    LouvainResult {
+        communities,
+        modularity,
+        num_communities,
+    }
+}
+
+/// Turns adjacency maps into neighbour lists sorted by index, so every sum over
+/// them runs in the same order (hash map iteration order differs between map
+/// instances).
+fn sorted_neighbors(adjacency: Vec<FxHashMap<usize, f64>>) -> Vec<Vec<(usize, f64)>> {
+    adjacency
+        .into_iter()
+        .map(|neighbors| {
+            let mut sorted: Vec<(usize, f64)> = neighbors.into_iter().collect();
+            sorted.sort_unstable_by_key(|&(j, _)| j);
+            sorted
+        })
+        .collect()
+}
+
+/// Louvain phase 1 on one level: moves nodes between neighbouring communities
+/// until no move gains modularity. Returns the community of each node, or
+/// `None` when no node moved.
+///
+/// A move from community A to B gains, in units of `1 / m`,
+/// `k_i,B - k_i,A - resolution * k_i * (Σ_B - Σ_A\i) / 2m`, where `k_i,X` is the
+/// weight from node i to community X (its self-loop excluded), `k_i` its degree
+/// and `Σ_X` the total degree of X. The gains are compared multiplied by `2m`:
+/// on an unweighted graph at resolution 1 they are then whole numbers, so ties
+/// are exact and float rounding cannot make nodes move back and forth.
+fn move_nodes(
+    graph: &[Vec<(usize, f64)>],
+    total_weight: f64,
+    resolution: f64,
+) -> Option<Vec<usize>> {
+    // Every pass that moves a node raises modularity, so passes end; the cap
+    // only guards against rounding at resolutions other than 1.
+    const MAX_PASSES: usize = 1_000;
+
+    let k = graph.len();
+    let m2 = 2.0 * total_weight;
+    let degrees: Vec<f64> = graph
         .iter()
         .map(|neighbors| neighbors.iter().map(|&(_, w)| w).sum())
         .collect();
 
-    // Initialize: each node in its own community, identified by the node's index
-    let mut community: Vec<usize> = (0..n).collect();
+    // Each node starts in its own community, identified by the node's index.
+    let mut community: Vec<usize> = (0..k).collect();
     let mut community_total: Vec<f64> = degrees.clone();
 
-    // Links from the node being moved to each neighboring community, reset
+    // Links from the node being moved to each neighbouring community, reset
     // after every node: `touched` lists the communities with an entry.
-    let mut links_to: Vec<f64> = vec![0.0; n];
-    let mut is_touched: Vec<bool> = vec![false; n];
+    let mut links_to: Vec<f64> = vec![0.0; k];
+    let mut is_touched: Vec<bool> = vec![false; k];
     let mut touched: Vec<usize> = Vec::new();
 
-    // Phase 1: Local optimization
-    let mut improved = true;
-    while improved {
-        improved = false;
-
-        for i in 0..n {
-            let current_comm = community[i];
-
-            // Compute links to each neighboring community
-            for &(j, w) in &weights[i] {
+    let mut moved = false;
+    for _ in 0..MAX_PASSES {
+        let mut improved = false;
+        for i in 0..k {
+            let current = community[i];
+            for &(j, w) in &graph[i] {
+                if j == i {
+                    continue;
+                }
                 let c = community[j];
                 if !is_touched[c] {
                     is_touched[c] = true;
@@ -267,32 +327,19 @@ pub fn louvain(store: &dyn GraphStore, resolution: f64) -> LouvainResult {
             // Candidates in increasing order: on a tie the smallest index wins.
             touched.sort_unstable();
 
-            // Try moving to each neighboring community
-            let mut best_delta = 0.0;
-            let mut best_comm = current_comm;
-
-            // Remove node from current community for delta calculation
             let ki = degrees[i];
-            let ki_in = links_to[current_comm];
-
-            for &target_comm in &touched {
-                if target_comm == current_comm {
+            // Staying is the baseline; a move must gain strictly more.
+            let mut best = current;
+            let mut best_gain =
+                links_to[current] * m2 - resolution * ki * (community_total[current] - ki);
+            for &target in &touched {
+                if target == current {
                     continue;
                 }
-
-                let k_i_to_comm = links_to[target_comm];
-                let sigma_tot = community_total[target_comm];
-
-                // Modularity delta for moving to target_comm
-                let delta = resolution
-                    * (k_i_to_comm
-                        - ki_in
-                        - ki * (sigma_tot - community_total[current_comm] + ki)
-                            / (2.0 * total_weight));
-
-                if delta > best_delta {
-                    best_delta = delta;
-                    best_comm = target_comm;
+                let gain = links_to[target] * m2 - resolution * ki * community_total[target];
+                if gain > best_gain {
+                    best_gain = gain;
+                    best = target;
                 }
             }
 
@@ -302,69 +349,87 @@ pub fn louvain(store: &dyn GraphStore, resolution: f64) -> LouvainResult {
             }
             touched.clear();
 
-            if best_comm != current_comm {
-                // Move node to best community
-                community_total[current_comm] -= ki;
-                community[i] = best_comm;
-                community_total[best_comm] += ki;
-
+            if best != current {
+                community_total[current] -= ki;
+                community_total[best] += ki;
+                community[i] = best;
                 improved = true;
             }
         }
+        if !improved {
+            break;
+        }
+        moved = true;
     }
 
-    // Number communities by their smallest node id: nodes are sorted, so the
-    // first node met in a community is its smallest.
-    let mut canonical_id: Vec<Option<u64>> = vec![None; n];
-    let mut num_communities = 0;
-    let mut communities: FxHashMap<NodeId, u64> = FxHashMap::default();
-    for (i, &node) in nodes.iter().enumerate() {
-        let id = *canonical_id[community[i]].get_or_insert_with(|| {
-            num_communities += 1;
-            (num_communities - 1) as u64
-        });
-        communities.insert(node, id);
-    }
-
-    // Compute final modularity
-    let modularity = compute_modularity(&weights, &community, total_weight, resolution);
-
-    LouvainResult {
-        communities,
-        modularity,
-        num_communities,
-    }
+    moved.then_some(community)
 }
 
-/// Computes the modularity of a community assignment.
+/// Renumbers communities 0, 1, 2, ... in order of their first member. Returns the
+/// new number of each old community index and the number of communities.
+fn number_by_first_member(community: &[usize]) -> (Vec<usize>, usize) {
+    let mut number: Vec<Option<usize>> = vec![None; community.len()];
+    let mut count = 0;
+    let renumbered = community
+        .iter()
+        .map(|&c| {
+            *number[c].get_or_insert_with(|| {
+                count += 1;
+                count - 1
+            })
+        })
+        .collect();
+    (renumbered, count)
+}
+
+/// Louvain phase 2: one super-node per community, with the weights between
+/// communities summed and the weight inside a community as its self-loop.
+fn aggregate(
+    graph: &[Vec<(usize, f64)>],
+    community: &[usize],
+    count: usize,
+) -> Vec<Vec<(usize, f64)>> {
+    let mut adjacency: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); count];
+    for (i, neighbors) in graph.iter().enumerate() {
+        for &(j, w) in neighbors {
+            *adjacency[community[i]].entry(community[j]).or_insert(0.0) += w;
+        }
+    }
+    sorted_neighbors(adjacency)
+}
+
+/// Computes the modularity of a community assignment:
+/// `Σ_c (A_c / 2m - resolution * (Σ_c / 2m)²)`, where `A_c` sums the weights
+/// inside community c in both directions (self-loops included) and `Σ_c` is
+/// its total degree.
 fn compute_modularity(
     weights: &[Vec<(usize, f64)>],
     community: &[usize],
     total_weight: f64,
     resolution: f64,
 ) -> f64 {
-    let n = community.len();
     let m2 = 2.0 * total_weight;
-
     if m2 == 0.0 {
         return 0.0;
     }
 
-    let degrees: Vec<f64> = (0..n)
-        .map(|i| weights[i].iter().map(|&(_, w)| w).sum())
-        .collect();
-
-    let mut modularity = 0.0;
-
-    for i in 0..n {
-        for &(j, a_ij) in &weights[i] {
+    let count = community.iter().copied().max().map_or(0, |max| max + 1);
+    let mut internal = vec![0.0; count];
+    let mut total = vec![0.0; count];
+    for (i, neighbors) in weights.iter().enumerate() {
+        for &(j, w) in neighbors {
+            total[community[i]] += w;
             if community[i] == community[j] {
-                modularity += a_ij - resolution * degrees[i] * degrees[j] / m2;
+                internal[community[i]] += w;
             }
         }
     }
 
-    modularity / m2
+    internal
+        .iter()
+        .zip(&total)
+        .map(|(&inside, &degree)| inside / m2 - resolution * (degree / m2) * (degree / m2))
+        .sum()
 }
 
 // ============================================================================
@@ -999,8 +1064,12 @@ mod tests {
         let store = create_simple_graph();
         let result = louvain(&store, 1.0);
 
+        // A three-node path is best left whole: modularity 0, against -0.125 for
+        // any split.
         assert_eq!(result.communities.len(), 3);
-        assert!(result.num_communities >= 1);
+        assert!(result.communities.values().all(|&c| c == 0));
+        assert_eq!(result.num_communities, 1);
+        assert!(result.modularity.abs() < 1e-15);
     }
 
     #[test]
@@ -1008,14 +1077,10 @@ mod tests {
         let store = create_two_cliques_graph();
         let result = louvain(&store, 1.0);
 
-        assert_eq!(result.communities.len(), 8);
-
-        // Two K4 cliques connected by a single bridge: should detect 2-3 communities
-        assert!(
-            result.num_communities >= 2 && result.num_communities <= 3,
-            "Two cliques should produce 2-3 communities, got {}",
-            result.num_communities
-        );
+        // Two K4 cliques connected by a single bridge: one community each.
+        let mut nodes: Vec<NodeId> = result.communities.keys().copied().collect();
+        nodes.sort_unstable();
+        assert_eq!(partition(&result, &nodes), vec![0, 0, 0, 0, 1, 1, 1, 1]);
     }
 
     #[test]
@@ -1052,9 +1117,9 @@ mod tests {
         // High resolution: more, smaller communities
         let result_high = louvain(&store, 2.0);
 
-        // Both should be valid
-        assert!(!result_low.communities.is_empty());
-        assert!(!result_high.communities.is_empty());
+        assert_eq!(result_low.communities.len(), 8);
+        assert_eq!(result_high.communities.len(), 8);
+        assert!(result_low.num_communities <= result_high.num_communities);
     }
 
     #[test]
@@ -1156,6 +1221,264 @@ mod tests {
             })
             .collect();
         assert_eq!(rows, expected);
+    }
+
+    /// Builds a store with `n` nodes and one directed edge per pair in `edges`.
+    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (LpgStore, Vec<NodeId>) {
+        let store = LpgStore::new().unwrap();
+        let nodes: Vec<NodeId> = (0..n).map(|_| store.create_node(&["Node"])).collect();
+        for &(u, v) in edges {
+            store.create_edge(nodes[u], nodes[v], "EDGE");
+        }
+        (store, nodes)
+    }
+
+    fn path_edges(n: usize) -> Vec<(usize, usize)> {
+        (1..n).map(|i| (i - 1, i)).collect()
+    }
+
+    /// Community of each node, in node order.
+    fn partition(result: &LouvainResult, nodes: &[NodeId]) -> Vec<u64> {
+        nodes.iter().map(|node| result.communities[node]).collect()
+    }
+
+    /// Modularity from its definition, every edge undirected with weight 1:
+    /// the sum over communities of `L_c / m - resolution * (d_c / 2m)^2`, where a
+    /// self-loop counts once in `L_c` and twice in the degree sum `d_c`.
+    fn reference_modularity(
+        n: usize,
+        edges: &[(usize, usize)],
+        communities: &[u64],
+        resolution: f64,
+    ) -> f64 {
+        let m = edges.len() as f64;
+        let mut degree = vec![0.0; n];
+        let mut internal: FxHashMap<u64, f64> = FxHashMap::default();
+        for &(u, v) in edges {
+            degree[u] += 1.0;
+            degree[v] += 1.0;
+            if communities[u] == communities[v] {
+                *internal.entry(communities[u]).or_insert(0.0) += 1.0;
+            }
+        }
+        let mut degree_sum: FxHashMap<u64, f64> = FxHashMap::default();
+        for (v, &d) in degree.iter().enumerate() {
+            *degree_sum.entry(communities[v]).or_insert(0.0) += d;
+        }
+        degree_sum
+            .iter()
+            .map(|(c, &d)| {
+                internal.get(c).copied().unwrap_or(0.0) / m
+                    - resolution * (d / (2.0 * m)) * (d / (2.0 * m))
+            })
+            .sum()
+    }
+
+    /// Zachary's karate club (34 members, 78 friendships).
+    const KARATE_CLUB: [(usize, usize); 78] = [
+        (0, 1),
+        (0, 2),
+        (0, 3),
+        (0, 4),
+        (0, 5),
+        (0, 6),
+        (0, 7),
+        (0, 8),
+        (0, 10),
+        (0, 11),
+        (0, 12),
+        (0, 13),
+        (0, 17),
+        (0, 19),
+        (0, 21),
+        (0, 31),
+        (1, 2),
+        (1, 3),
+        (1, 7),
+        (1, 13),
+        (1, 17),
+        (1, 19),
+        (1, 21),
+        (1, 30),
+        (2, 3),
+        (2, 7),
+        (2, 8),
+        (2, 9),
+        (2, 13),
+        (2, 27),
+        (2, 28),
+        (2, 32),
+        (3, 7),
+        (3, 12),
+        (3, 13),
+        (4, 6),
+        (4, 10),
+        (5, 6),
+        (5, 10),
+        (5, 16),
+        (6, 16),
+        (8, 30),
+        (8, 32),
+        (8, 33),
+        (9, 33),
+        (13, 33),
+        (14, 32),
+        (14, 33),
+        (15, 32),
+        (15, 33),
+        (18, 32),
+        (18, 33),
+        (19, 33),
+        (20, 32),
+        (20, 33),
+        (22, 32),
+        (22, 33),
+        (23, 25),
+        (23, 27),
+        (23, 29),
+        (23, 32),
+        (23, 33),
+        (24, 25),
+        (24, 27),
+        (24, 31),
+        (25, 31),
+        (26, 29),
+        (26, 33),
+        (27, 33),
+        (28, 31),
+        (28, 33),
+        (29, 32),
+        (29, 33),
+        (30, 32),
+        (30, 33),
+        (31, 32),
+        (31, 33),
+        (32, 33),
+    ];
+
+    #[test]
+    fn test_louvain_aggregates_a_long_path() {
+        // One level of local moving pairs up neighbours (500 communities, modularity
+        // 0.5); merging communities level by level reaches above 0.9.
+        let edges = path_edges(1000);
+        let (store, nodes) = store_from_edges(1000, &edges);
+        let result = louvain(&store, 1.0);
+        assert!(result.modularity > 0.9, "modularity {}", result.modularity);
+        assert!(
+            (10..=100).contains(&result.num_communities),
+            "{} communities",
+            result.num_communities
+        );
+        // Every community of a path is a contiguous run of nodes.
+        let communities = partition(&result, &nodes);
+        assert!(
+            communities
+                .windows(2)
+                .all(|w| w[1] == w[0] || w[1] == w[0] + 1)
+        );
+    }
+
+    #[test]
+    fn test_louvain_keeps_two_joined_five_cliques_apart() {
+        let mut edges = Vec::new();
+        for clique in [0..5, 5..10] {
+            for a in clique.clone() {
+                for b in (a + 1)..clique.end {
+                    edges.push((a, b));
+                }
+            }
+        }
+        edges.push((4, 5));
+        let (store, nodes) = store_from_edges(10, &edges);
+        let result = louvain(&store, 1.0);
+        assert_eq!(
+            partition(&result, &nodes),
+            vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+        );
+    }
+
+    #[test]
+    fn test_louvain_reaches_known_modularity_on_karate_club() {
+        // The best partition of the karate club has modularity 0.4198; Louvain finds
+        // 0.4188 or 0.4198 depending on the visiting order.
+        let (store, nodes) = store_from_edges(34, &KARATE_CLUB);
+        let result = louvain(&store, 1.0);
+        assert!(
+            result.modularity > 0.418,
+            "modularity {}",
+            result.modularity
+        );
+        assert!(
+            (3..=5).contains(&result.num_communities),
+            "{} communities",
+            result.num_communities
+        );
+        let expected = reference_modularity(34, &KARATE_CLUB, &partition(&result, &nodes), 1.0);
+        assert!((result.modularity - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_louvain_resolution_changes_the_partition() {
+        let (store, nodes) = store_from_edges(34, &KARATE_CLUB);
+        let coarse = louvain(&store, 0.05);
+        let standard = louvain(&store, 1.0);
+        let fine = louvain(&store, 3.0);
+        // A low resolution merges the connected club into one community, a high one
+        // splits it further than the standard resolution does.
+        assert_eq!(coarse.num_communities, 1);
+        assert!(
+            fine.num_communities > standard.num_communities,
+            "{} at 3.0 against {} at 1.0",
+            fine.num_communities,
+            standard.num_communities
+        );
+        for (resolution, result) in [(0.05, &coarse), (3.0, &fine)] {
+            let expected =
+                reference_modularity(34, &KARATE_CLUB, &partition(result, &nodes), resolution);
+            assert!(
+                (result.modularity - expected).abs() < 1e-12,
+                "resolution {resolution}: {} against {expected}",
+                result.modularity
+            );
+        }
+    }
+
+    #[test]
+    fn test_louvain_handles_self_loops() {
+        // Two triangles joined by one edge, with a self-loop on every node.
+        let mut edges = vec![(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3), (2, 3)];
+        edges.extend((0..6).map(|v| (v, v)));
+        let (store, nodes) = store_from_edges(6, &edges);
+        let result = louvain(&store, 1.0);
+        let communities = partition(&result, &nodes);
+        assert_eq!(communities, vec![0, 0, 0, 1, 1, 1]);
+        let expected = reference_modularity(6, &edges, &communities, 1.0);
+        assert!((result.modularity - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_louvain_reported_modularity_matches_its_partition() {
+        let edges = path_edges(1000);
+        let (store, nodes) = store_from_edges(1000, &edges);
+        let result = louvain(&store, 1.0);
+        let expected = reference_modularity(1000, &edges, &partition(&result, &nodes), 1.0);
+        assert!((result.modularity - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_louvain_is_deterministic_across_levels() {
+        let edges = path_edges(1000);
+        let (store, _) = store_from_edges(1000, &edges);
+        let first = louvain(&store, 1.0);
+        for run in 0..5 {
+            let again = louvain(&store, 1.0);
+            assert_eq!(again.communities, first.communities, "run {run}");
+            assert_eq!(
+                again.modularity.to_bits(),
+                first.modularity.to_bits(),
+                "run {run}"
+            );
+        }
     }
 
     // ---- Stochastic Block Partition tests ----

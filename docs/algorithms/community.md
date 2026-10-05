@@ -12,18 +12,25 @@ Find clusters and communities within graphs.
 
 ## Louvain Algorithm
 
-Fast modularity-based community detection.
+Fast modularity-based community detection. Louvain repeats two phases until a
+round changes nothing: each node moves to the neighbouring community that raises
+modularity the most, then every community becomes a single node of a smaller
+graph. A higher `resolution` gives smaller communities.
 
 ```python
 import grafeo
 
 db = grafeo.GrafeoDB()
-algs = db.algorithms()
+# ... create nodes and edges ...
 
-communities = algs.louvain()
-for community_id, members in communities.items():
-    print(f"Community {community_id}: {len(members)} members")
+result = db.algorithms.louvain()  # resolution=1.0
+print(f"{result['num_communities']} communities, modularity {result['modularity']:.3f}")
+for node_id, community_id in result["communities"].items():
+    print(f"Node {node_id}: community {community_id}")
 ```
+
+The same graph always gives the same communities, numbered 0, 1, 2, ... in order
+of their smallest node id. Edge direction is ignored.
 
 ## Label Propagation
 

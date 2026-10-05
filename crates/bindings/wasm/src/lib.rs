@@ -1352,19 +1352,20 @@ impl Database {
     /// Creates a named graph projection. Returns `true` if created, `false`
     /// if a projection with that name already exists.
     ///
-    /// A projection is a read-only, filtered view of the default graph.
-    /// Only nodes with matching labels and edges with matching types are visible.
+    /// A projection is a read-only, filtered view of the graph selected when
+    /// it is created (the default graph when none is selected). Only nodes
+    /// with matching labels and edges with matching types are visible.
     ///
     /// # Errors
     ///
-    /// This method does not currently return errors.
+    /// Returns `JsError` if the selected graph no longer exists.
     #[wasm_bindgen(js_name = "createProjection")]
     pub fn create_projection(
         &self,
         name: &str,
         node_labels: Option<Vec<String>>,
         edge_types: Option<Vec<String>>,
-    ) -> bool {
+    ) -> Result<bool, JsError> {
         use grafeo_engine::ProjectionSpec;
 
         let mut spec = ProjectionSpec::new();
@@ -1374,7 +1375,9 @@ impl Database {
         if let Some(types) = edge_types.filter(|t| !t.is_empty()) {
             spec = spec.with_edge_types(types);
         }
-        self.inner.create_projection(name, spec)
+        self.inner
+            .create_projection(name, spec)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Drops a named graph projection. Returns `true` if it existed.

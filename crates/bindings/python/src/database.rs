@@ -2603,10 +2603,15 @@ impl PyGrafeoDB {
     /// Get the algorithms interface.
     ///
     /// Returns an Algorithms object providing access to all graph algorithms.
+    /// They read the graph ``set_graph()`` selects (the default graph when none
+    /// is selected); every method takes ``projection=`` to read a projection
+    /// instead. ``db.graph(name).algorithms`` reads one named graph.
     ///
     /// Example:
     ///     pr = db.algorithms.pagerank()
     ///     path = db.algorithms.dijkstra(1, 5)
+    ///     db.create_projection("extraction", node_labels=["Graph"])
+    ///     scores = db.algorithms.pagerank(projection="extraction", directed=False)
     #[cfg(feature = "algos")]
     #[getter]
     fn algorithms(&self) -> PyAlgorithms {
@@ -3421,13 +3426,19 @@ impl PyGrafeoDB {
     /// Creates a named graph projection. Returns ``True`` if created, ``False``
     /// if a projection with that name already exists.
     ///
-    /// A projection is a read-only, filtered view of the default graph. Only
-    /// nodes with matching labels and edges with matching types are visible.
+    /// A projection is a read-only, filtered view of the graph ``set_graph()``
+    /// selects when it is created (the default graph when none is selected);
+    /// it keeps reading that graph whatever is selected later. Only nodes with
+    /// matching labels and edges with matching types are visible. Graph
+    /// algorithms run on it with ``db.algorithms.<name>(projection=...)``.
     ///
     /// Args:
     ///     name: Projection name.
     ///     node_labels: Node labels to include (empty means all).
     ///     edge_types: Edge types to include (empty means all).
+    ///
+    /// Raises:
+    ///     GrafeoError: The selected graph no longer exists.
     ///
     /// Example:
     ///     db.create_projection("social", node_labels=["Person"], edge_types=["KNOWS"])
@@ -3437,7 +3448,7 @@ impl PyGrafeoDB {
         name: &str,
         node_labels: Vec<String>,
         edge_types: Vec<String>,
-    ) -> bool {
+    ) -> PyResult<bool> {
         use grafeo_core::graph::ProjectionSpec;
 
         let mut spec = ProjectionSpec::new();
@@ -3447,7 +3458,11 @@ impl PyGrafeoDB {
         if !edge_types.is_empty() {
             spec = spec.with_edge_types(edge_types);
         }
-        self.inner.read().create_projection(name, spec)
+        Ok(self
+            .inner
+            .read()
+            .create_projection(name, spec)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Drops a named graph projection. Returns ``True`` if it existed, ``False``
@@ -3481,7 +3496,8 @@ impl PyGrafeoDB {
     /// Sets the current graph for subsequent ``execute()`` calls.
     ///
     /// Equivalent to running ``USE GRAPH <name>`` but persists across calls.
-    /// Use ``reset_graph()`` to clear it.
+    /// Use ``reset_graph()`` to clear it. The direct API, ``db.algorithms``,
+    /// ``CALL`` procedures and ``create_projection()`` follow it too.
     ///
     /// Example:
     ///     db.set_graph("social")

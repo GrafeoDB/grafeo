@@ -189,6 +189,13 @@ GrafeoStatus grafeo_create_property_index(GrafeoDatabase* db, const char* proper
 int32_t      grafeo_drop_property_index(GrafeoDatabase* db, const char* property);
 int32_t      grafeo_has_property_index(GrafeoDatabase* db, const char* property);
 GrafeoStatus grafeo_find_nodes_by_property(GrafeoDatabase* db, const char* property, const char* value_json, uint64_t** out_ids, size_t* out_count);
+
+/* ---- Graph projections ---------------------------------------------------- */
+
+/* Return 1 (created / dropped), 0 (name taken / no such projection), -1 on error (grafeo_last_error). */
+int32_t      grafeo_create_projection(GrafeoDatabase* db, const char* name, const char* const* node_labels, size_t num_labels, const char* const* edge_types, size_t num_types);
+int32_t      grafeo_drop_projection(GrafeoDatabase* db, const char* name);
+char*        grafeo_list_projections(GrafeoDatabase* db);
 void         grafeo_free_node_ids(uint64_t* ids, size_t count);
 
 /* ---- Vector operations --------------------------------------------------- */

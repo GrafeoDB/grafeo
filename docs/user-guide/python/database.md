@@ -147,7 +147,9 @@ db.reset_schema()           # Back to default schema
 
 ## Graph Projections
 
-Create filtered virtual views of your graph for algorithms or scoped queries:
+Create filtered virtual views of your graph for algorithms or scoped queries.
+A projection views the graph `set_graph()` selects when it is created (the
+default graph when none is selected) and keeps reading that graph:
 
 ```python
 # Create a projection with specific labels and edge types
@@ -156,9 +158,17 @@ db.create_projection("people",
     edge_types=["KNOWS", "WORKS_WITH"]
 )
 
+# Run graph algorithms on the projection only
+scores = db.algorithms.pagerank(projection="people", directed=False)
+communities = db.algorithms.louvain(projection="people")
+
 print(db.list_projections())  # ['people']
 db.drop_projection("people")
 ```
+
+Without `projection=`, `db.algorithms` reads the graph `set_graph()` selects,
+like `execute()` and `CALL grafeo.pagerank()`; `db.graph("name").algorithms`
+reads one named graph.
 
 ## Data Import
 

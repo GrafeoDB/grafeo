@@ -39,6 +39,49 @@ tests:
     expect:
       count: 2
 
+  # The path Jules - Alix - Gus - Vincent, its edges pointing different ways:
+  # undirected PageRank ranks the two inner nodes equal and first, the two
+  # ends equal and last.
+  - name: pagerank_undirected_path
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:Person {name: 'Gus'})"
+      - "INSERT (:Person {name: 'Vincent'})"
+      - "INSERT (:Person {name: 'Jules'})"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)"
+      - "MATCH (a:Person {name: 'Gus'}), (b:Person {name: 'Vincent'}) INSERT (a)-[:KNOWS]->(b)"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Jules'}) INSERT (a)-[:KNOWS]->(b)"
+    query: "CALL grafeo.pagerank({directed: false}) YIELD score RETURN score ORDER BY score DESC"
+    expect:
+      columns: [score]
+      ordered: true
+      precision: 9
+      rows:
+        - [0.324561602]
+        - [0.324561602]
+        - [0.175438398]
+        - [0.175438398]
+
+  # A projection argument runs the algorithm on the projection only: the City
+  # node is outside it.
+  - name: pagerank_on_a_projection
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})"
+      - "INSERT (:City {name: 'Amsterdam'})"
+      - "CREATE PROJECTION people LABELS (Person)"
+    query: "CALL grafeo.pagerank({projection: 'people', directed: false}) YIELD score"
+    expect:
+      columns: [score]
+      precision: 9
+      rows:
+        - [0.5]
+        - [0.5]
+
+  - name: algorithm_on_an_unknown_projection_fails
+    query: "CALL grafeo.pagerank({projection: 'nope'})"
+    expect:
+      error: "Projection 'nope' does not exist"
+
   - name: pagerank_empty_graph
     query: "CALL grafeo.pagerank()"
     expect:

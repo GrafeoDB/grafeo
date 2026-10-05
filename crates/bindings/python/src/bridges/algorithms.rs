@@ -14,24 +14,71 @@ use pyo3::types::PyDict;
 use grafeo_adapters::plugins::algorithms;
 use grafeo_common::types::NodeId;
 use grafeo_common::types::Value;
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+use grafeo_core::graph::GraphStoreSearch;
 use grafeo_engine::database::GrafeoDB;
 
 use crate::error::PyGrafeoError;
 
 /// Run graph algorithms at Rust speed from Python.
 ///
-/// Get this via `db.algorithms`. All algorithms run directly on the Rust
-/// graph store - no copying to Python data structures. Results come back
-/// as Python dicts and lists.
+/// Get this via `db.algorithms` or `db.graph(name).algorithms`. All
+/// algorithms run directly on the Rust graph store, with no copying to Python
+/// data structures; results come back as Python dicts and lists.
+///
+/// Which graph they read: `db.algorithms` reads the graph `set_graph()`
+/// selects (the default graph when none is selected), like `execute()` and
+/// `CALL grafeo.<algorithm>()`; `db.graph(name).algorithms` reads that graph.
+/// Every method takes a keyword-only `projection=` that names a projection
+/// (`create_projection()`) to read instead.
 #[pyclass(name = "Algorithms")]
 pub struct PyAlgorithms {
     db: Arc<RwLock<GrafeoDB>>,
+    /// The named graph (schema, name) of a `GraphHandle`; `None` reads the
+    /// graph `set_graph()` selects.
+    graph: Option<(Option<String>, String)>,
 }
 
 impl PyAlgorithms {
-    /// Creates a new algorithms interface for the given database.
+    /// The algorithms of the database: they read the graph `set_graph()`
+    /// selects, or the default graph when none is selected.
     pub fn new(db: Arc<RwLock<GrafeoDB>>) -> Self {
-        Self { db }
+        Self { db, graph: None }
+    }
+
+    /// The algorithms of one named graph (`db.graph(name).algorithms`).
+    pub fn for_graph(db: Arc<RwLock<GrafeoDB>>, schema: Option<String>, name: String) -> Self {
+        Self {
+            db,
+            graph: Some((schema, name)),
+        }
+    }
+
+    /// The store an algorithm reads: the projection when the call names one
+    /// (projection names are database-wide, so it wins over the graph), else
+    /// the handle's graph, else the selected graph. A graph or projection that
+    /// does not exist is an error, never another graph.
+    fn store_for(
+        &self,
+        db: &GrafeoDB,
+        projection: Option<&str>,
+    ) -> PyResult<Arc<dyn GraphStoreSearch>> {
+        if let Some(name) = projection {
+            return db.projection(name).ok_or_else(|| {
+                PyGrafeoError::from(Error::Query(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    format!("Projection '{name}' does not exist"),
+                )))
+                .into()
+            });
+        }
+        let store = match &self.graph {
+            Some((schema, name)) => db
+                .graph_in(schema.as_deref(), name)
+                .and_then(|graph| graph.graph_store()),
+            None => db.selected_graph_store(),
+        };
+        Ok(store.map_err(PyGrafeoError::from)?)
     }
 }
 
@@ -48,10 +95,11 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     List of node IDs in BFS order
-    fn bfs(&self, start: u64) -> PyResult<Vec<u64>> {
+    #[pyo3(signature = (start, *, projection=None))]
+    fn bfs(&self, start: u64, projection: Option<&str>) -> PyResult<Vec<u64>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::bfs(&**store, NodeId::new(start));
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::bfs(&*store, NodeId::new(start));
         Ok(result.into_iter().map(|n| n.0).collect())
     }
 
@@ -62,10 +110,11 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     List of lists, where result[i] contains nodes at distance i
-    fn bfs_layers(&self, start: u64) -> PyResult<Vec<Vec<u64>>> {
+    #[pyo3(signature = (start, *, projection=None))]
+    fn bfs_layers(&self, start: u64, projection: Option<&str>) -> PyResult<Vec<Vec<u64>>> {
         let db = self.db.read();
-        let store = db.store();
-        let layers = algorithms::bfs_layers(&**store, NodeId::new(start));
+        let store = self.store_for(&db, projection)?;
+        let layers = algorithms::bfs_layers(&*store, NodeId::new(start));
         Ok(layers
             .into_iter()
             .map(|layer| layer.into_iter().map(|n| n.0).collect())
@@ -79,10 +128,11 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     List of node IDs in post-order (finished order)
-    fn dfs(&self, start: u64) -> PyResult<Vec<u64>> {
+    #[pyo3(signature = (start, *, projection=None))]
+    fn dfs(&self, start: u64, projection: Option<&str>) -> PyResult<Vec<u64>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::dfs(&**store, NodeId::new(start));
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::dfs(&*store, NodeId::new(start));
         Ok(result.into_iter().map(|n| n.0).collect())
     }
 
@@ -90,10 +140,11 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     List of all node IDs in DFS post-order
-    fn dfs_all(&self) -> PyResult<Vec<u64>> {
+    #[pyo3(signature = (*, projection=None))]
+    fn dfs_all(&self, projection: Option<&str>) -> PyResult<Vec<u64>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::dfs_all(&**store);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::dfs_all(&*store);
         Ok(result.into_iter().map(|n| n.0).collect())
     }
 
@@ -105,28 +156,31 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict mapping node ID to component ID
-    fn connected_components(&self) -> PyResult<HashMap<u64, u64>> {
+    #[pyo3(signature = (*, projection=None))]
+    fn connected_components(&self, projection: Option<&str>) -> PyResult<HashMap<u64, u64>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::connected_components(&**store);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::connected_components(&*store);
         Ok(result.into_iter().map(|(n, c)| (n.0, c)).collect())
     }
 
     /// Count the number of connected components.
-    fn connected_component_count(&self) -> PyResult<usize> {
+    #[pyo3(signature = (*, projection=None))]
+    fn connected_component_count(&self, projection: Option<&str>) -> PyResult<usize> {
         let db = self.db.read();
-        let store = db.store();
-        Ok(algorithms::connected_component_count(&**store))
+        let store = self.store_for(&db, projection)?;
+        Ok(algorithms::connected_component_count(&*store))
     }
 
     /// Find strongly connected components.
     ///
     /// Returns:
     ///     List of lists, each inner list is a strongly connected component
-    fn strongly_connected_components(&self) -> PyResult<Vec<Vec<u64>>> {
+    #[pyo3(signature = (*, projection=None))]
+    fn strongly_connected_components(&self, projection: Option<&str>) -> PyResult<Vec<Vec<u64>>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::strongly_connected_components(&**store);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::strongly_connected_components(&*store);
 
         // Group nodes by component ID
         let mut grouped: HashMap<u64, Vec<u64>> = HashMap::new();
@@ -141,17 +195,19 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     List of node IDs in topological order, or None if graph has cycle
-    fn topological_sort(&self) -> PyResult<Option<Vec<u64>>> {
+    #[pyo3(signature = (*, projection=None))]
+    fn topological_sort(&self, projection: Option<&str>) -> PyResult<Option<Vec<u64>>> {
         let db = self.db.read();
-        let store = db.store();
-        Ok(algorithms::topological_sort(&**store).map(|v| v.into_iter().map(|n| n.0).collect()))
+        let store = self.store_for(&db, projection)?;
+        Ok(algorithms::topological_sort(&*store).map(|v| v.into_iter().map(|n| n.0).collect()))
     }
 
     /// Check if the graph is a DAG.
-    fn is_dag(&self) -> PyResult<bool> {
+    #[pyo3(signature = (*, projection=None))]
+    fn is_dag(&self, projection: Option<&str>) -> PyResult<bool> {
         let db = self.db.read();
-        let store = db.store();
-        Ok(algorithms::is_dag(&**store))
+        let store = self.store_for(&db, projection)?;
+        Ok(algorithms::is_dag(&*store))
     }
 
     // ==========================================================================
@@ -168,20 +224,21 @@ impl PyAlgorithms {
     /// Returns:
     ///     If target is None: Dict mapping node ID to distance
     ///     If target is provided: Tuple of (distance, path) or None if unreachable
-    #[pyo3(signature = (source, target=None, weight=None))]
+    #[pyo3(signature = (source, target=None, weight=None, *, projection=None))]
     fn dijkstra(
         &self,
         source: u64,
         target: Option<u64>,
         weight: Option<&str>,
+        projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
+        let store = self.store_for(&db, projection)?;
 
         if let Some(target_id) = target {
             match algorithms::dijkstra_path(
-                &**store,
+                &*store,
                 NodeId::new(source),
                 NodeId::new(target_id),
                 weight,
@@ -193,7 +250,7 @@ impl PyAlgorithms {
                 None => Ok(py.None()),
             }
         } else {
-            let result = algorithms::dijkstra(&**store, NodeId::new(source), weight);
+            let result = algorithms::dijkstra(&*store, NodeId::new(source), weight);
             let distances: HashMap<u64, f64> = result
                 .distances
                 .into_iter()
@@ -214,10 +271,16 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict mapping node name (str) to distance (float)
-    #[pyo3(signature = (source, weight_attr=None))]
-    fn sssp(&self, source: &str, weight_attr: Option<&str>, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (source, weight_attr=None, *, projection=None))]
+    fn sssp(
+        &self,
+        source: &str,
+        weight_attr: Option<&str>,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
+        let store = self.store_for(&db, projection)?;
 
         // Resolve source: try integer parse first, then name property lookup
         let source_id = if let Ok(id) = source.parse::<u64>() {
@@ -241,7 +304,7 @@ impl PyAlgorithms {
             }
         };
 
-        let result = algorithms::dijkstra(&**store, source_id, weight_attr);
+        let result = algorithms::dijkstra(&*store, source_id, weight_attr);
 
         // Map node IDs to names (falling back to string ID)
         let distances: HashMap<String, f64> = result
@@ -276,17 +339,18 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Tuple of (distance, path) or None if unreachable
-    #[pyo3(signature = (source, target, heuristic=None, weight=None))]
+    #[pyo3(signature = (source, target, heuristic=None, weight=None, *, projection=None))]
     fn astar(
         &self,
         source: u64,
         target: u64,
         heuristic: Option<&Bound<'_, PyDict>>,
         weight: Option<&str>,
+        projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
+        let store = self.store_for(&db, projection)?;
 
         // Build heuristic function
         let h_map: HashMap<u64, f64> = if let Some(h) = heuristic {
@@ -304,7 +368,7 @@ impl PyAlgorithms {
         let heuristic_fn = |n: NodeId| -> f64 { h_map.get(&n.0).copied().unwrap_or(0.0) };
 
         match algorithms::astar(
-            &**store,
+            &*store,
             NodeId::new(source),
             NodeId::new(target),
             weight,
@@ -326,17 +390,18 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict with 'distances', 'predecessors', and 'has_negative_cycle' keys
-    #[pyo3(signature = (source, weight=None))]
+    #[pyo3(signature = (source, weight=None, *, projection=None))]
     fn bellman_ford(
         &self,
         source: u64,
         weight: Option<&str>,
+        projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
+        let store = self.store_for(&db, projection)?;
 
-        let result = algorithms::bellman_ford(&**store, NodeId::new(source), weight);
+        let result = algorithms::bellman_ford(&*store, NodeId::new(source), weight);
 
         let distances: HashMap<u64, f64> = result
             .distances
@@ -364,12 +429,17 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict mapping (source, target) tuples to distances
-    #[pyo3(signature = (weight=None))]
-    fn floyd_warshall(&self, weight: Option<&str>, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (weight=None, *, projection=None))]
+    fn floyd_warshall(
+        &self,
+        weight: Option<&str>,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
+        let store = self.store_for(&db, projection)?;
 
-        let result = algorithms::floyd_warshall(&**store, weight);
+        let result = algorithms::floyd_warshall(&*store, weight);
 
         let dict = PyDict::new(py);
         let nodes = result.nodes();
@@ -396,17 +466,22 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict mapping node ID to centrality score
-    #[pyo3(signature = (normalized=false))]
-    fn degree_centrality(&self, normalized: bool, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (normalized=false, *, projection=None))]
+    fn degree_centrality(
+        &self,
+        normalized: bool,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
+        let store = self.store_for(&db, projection)?;
 
         if normalized {
-            let result = algorithms::degree_centrality_normalized(&**store);
+            let result = algorithms::degree_centrality_normalized(&*store);
             let scores: HashMap<u64, f64> = result.into_iter().map(|(n, s)| (n.0, s)).collect();
             Ok(scores.into_pyobject(py)?.into_any().unbind())
         } else {
-            let result = algorithms::degree_centrality(&**store);
+            let result = algorithms::degree_centrality(&*store);
             let dict = PyDict::new(py);
             for (node, total) in result.total_degree {
                 let in_d = *result.in_degree.get(&node).unwrap_or(&0);
@@ -427,19 +502,25 @@ impl PyAlgorithms {
     ///     damping: Damping factor (default: 0.85)
     ///     max_iterations: Maximum iterations (default: 100)
     ///     tolerance: Convergence tolerance (default: 1e-6)
+    ///     directed: Follow edge direction (default: True). False walks the
+    ///         simple undirected graph: each pair of connected nodes once, in
+    ///         both directions, whatever the edge types or count; self-loops
+    ///         are ignored.
     ///
     /// Returns:
     ///     Dict mapping node ID to PageRank score
-    #[pyo3(signature = (damping=0.85, max_iterations=100, tolerance=1e-6))]
+    #[pyo3(signature = (damping=0.85, max_iterations=100, tolerance=1e-6, directed=true, *, projection=None))]
     fn pagerank(
         &self,
         damping: f64,
         max_iterations: usize,
         tolerance: f64,
+        directed: bool,
+        projection: Option<&str>,
     ) -> PyResult<HashMap<u64, f64>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::pagerank(&**store, damping, max_iterations, tolerance);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::pagerank(&*store, damping, max_iterations, tolerance, directed);
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
@@ -450,11 +531,15 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict mapping node ID to betweenness score
-    #[pyo3(signature = (normalized=true))]
-    fn betweenness_centrality(&self, normalized: bool) -> PyResult<HashMap<u64, f64>> {
+    #[pyo3(signature = (normalized=true, *, projection=None))]
+    fn betweenness_centrality(
+        &self,
+        normalized: bool,
+        projection: Option<&str>,
+    ) -> PyResult<HashMap<u64, f64>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::betweenness_centrality(&**store, normalized);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::betweenness_centrality(&*store, normalized);
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
@@ -465,11 +550,15 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict mapping node ID to closeness score
-    #[pyo3(signature = (wf_improved=false))]
-    fn closeness_centrality(&self, wf_improved: bool) -> PyResult<HashMap<u64, f64>> {
+    #[pyo3(signature = (wf_improved=false, *, projection=None))]
+    fn closeness_centrality(
+        &self,
+        wf_improved: bool,
+        projection: Option<&str>,
+    ) -> PyResult<HashMap<u64, f64>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::closeness_centrality(&**store, wf_improved);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::closeness_centrality(&*store, wf_improved);
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
@@ -484,11 +573,15 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict mapping node ID to community ID
-    #[pyo3(signature = (max_iterations=100))]
-    fn label_propagation(&self, max_iterations: usize) -> PyResult<HashMap<u64, u64>> {
+    #[pyo3(signature = (max_iterations=100, *, projection=None))]
+    fn label_propagation(
+        &self,
+        max_iterations: usize,
+        projection: Option<&str>,
+    ) -> PyResult<HashMap<u64, u64>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::label_propagation(&**store, max_iterations);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::label_propagation(&*store, max_iterations);
         Ok(result.into_iter().map(|(n, c)| (n.0, c)).collect())
     }
 
@@ -499,11 +592,16 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict with 'communities', 'modularity', and 'num_communities' keys
-    #[pyo3(signature = (resolution=1.0))]
-    fn louvain(&self, resolution: f64, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (resolution=1.0, *, projection=None))]
+    fn louvain(
+        &self,
+        resolution: f64,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::louvain(&**store, resolution);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::louvain(&*store, resolution);
 
         let communities: HashMap<u64, u64> = result
             .communities
@@ -530,11 +628,16 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict with 'edges' (list of (src, dst, weight)) and 'total_weight'
-    #[pyo3(signature = (weight=None))]
-    fn kruskal(&self, weight: Option<&str>, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (weight=None, *, projection=None))]
+    fn kruskal(
+        &self,
+        weight: Option<&str>,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::kruskal(&**store, weight);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::kruskal(&*store, weight);
 
         let edges: Vec<(u64, u64, f64)> = result
             .edges
@@ -557,17 +660,18 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict with 'edges' (list of (src, dst, weight)) and 'total_weight'
-    #[pyo3(signature = (weight=None, start=None))]
+    #[pyo3(signature = (weight=None, start=None, *, projection=None))]
     fn prim(
         &self,
         weight: Option<&str>,
         start: Option<u64>,
+        projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
+        let store = self.store_for(&db, projection)?;
         let start_node = start.map(NodeId::new);
-        let result = algorithms::prim(&**store, weight, start_node);
+        let result = algorithms::prim(&*store, weight, start_node);
 
         let edges: Vec<(u64, u64, f64)> = result
             .edges
@@ -595,18 +699,19 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict with 'max_flow' and 'flow_edges' (list of (src, dst, flow))
-    #[pyo3(signature = (source, sink, capacity=None))]
+    #[pyo3(signature = (source, sink, capacity=None, *, projection=None))]
     fn max_flow(
         &self,
         source: u64,
         sink: u64,
         capacity: Option<&str>,
+        projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
+        let store = self.store_for(&db, projection)?;
 
-        match algorithms::max_flow(&**store, NodeId::new(source), NodeId::new(sink), capacity) {
+        match algorithms::max_flow(&*store, NodeId::new(source), NodeId::new(sink), capacity) {
             Some(result) => {
                 let flow_edges: Vec<(u64, u64, f64)> = result
                     .flow_edges
@@ -636,20 +741,21 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict with 'max_flow', 'total_cost', and 'flow_edges'
-    #[pyo3(signature = (source, sink, capacity=None, cost=None))]
+    #[pyo3(signature = (source, sink, capacity=None, cost=None, *, projection=None))]
     fn min_cost_max_flow(
         &self,
         source: u64,
         sink: u64,
         capacity: Option<&str>,
         cost: Option<&str>,
+        projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
+        let store = self.store_for(&db, projection)?;
 
         match algorithms::min_cost_max_flow(
-            &**store,
+            &*store,
             NodeId::new(source),
             NodeId::new(sink),
             capacity,
@@ -690,15 +796,20 @@ impl PyAlgorithms {
     /// Returns:
     ///     Dict with 'coefficients', 'triangle_counts', 'total_triangles',
     ///     and 'global_coefficient' keys
-    #[pyo3(signature = (parallel=true))]
-    fn clustering_coefficient(&self, parallel: bool, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (parallel=true, *, projection=None))]
+    fn clustering_coefficient(
+        &self,
+        parallel: bool,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
+        let store = self.store_for(&db, projection)?;
 
         let result = if parallel {
-            algorithms::clustering_coefficient_parallel(&**store, 50)
+            algorithms::clustering_coefficient_parallel(&*store, 50)
         } else {
-            algorithms::clustering_coefficient(&**store)
+            algorithms::clustering_coefficient(&*store)
         };
 
         let coefficients: HashMap<u64, f64> = result
@@ -725,10 +836,11 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict mapping node ID to triangle count
-    fn triangle_count(&self) -> PyResult<HashMap<u64, u64>> {
+    #[pyo3(signature = (*, projection=None))]
+    fn triangle_count(&self, projection: Option<&str>) -> PyResult<HashMap<u64, u64>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::triangle_count(&**store);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::triangle_count(&*store);
         Ok(result.into_iter().map(|(n, t)| (n.0, t)).collect())
     }
 
@@ -738,30 +850,36 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Total unique triangle count
-    fn total_triangles(&self) -> PyResult<u64> {
+    #[pyo3(signature = (*, projection=None))]
+    fn total_triangles(&self, projection: Option<&str>) -> PyResult<u64> {
         let db = self.db.read();
-        let store = db.store();
-        Ok(algorithms::total_triangles(&**store))
+        let store = self.store_for(&db, projection)?;
+        Ok(algorithms::total_triangles(&*store))
     }
 
     /// Compute the global (average) clustering coefficient.
     ///
     /// Returns:
     ///     Average clustering coefficient across all nodes (0.0 to 1.0)
-    fn global_clustering_coefficient(&self) -> PyResult<f64> {
+    #[pyo3(signature = (*, projection=None))]
+    fn global_clustering_coefficient(&self, projection: Option<&str>) -> PyResult<f64> {
         let db = self.db.read();
-        let store = db.store();
-        Ok(algorithms::global_clustering_coefficient(&**store))
+        let store = self.store_for(&db, projection)?;
+        Ok(algorithms::global_clustering_coefficient(&*store))
     }
 
     /// Compute local clustering coefficients for each node.
     ///
     /// Returns:
     ///     Dict mapping node ID to local clustering coefficient (0.0 to 1.0)
-    fn local_clustering_coefficient(&self) -> PyResult<HashMap<u64, f64>> {
+    #[pyo3(signature = (*, projection=None))]
+    fn local_clustering_coefficient(
+        &self,
+        projection: Option<&str>,
+    ) -> PyResult<HashMap<u64, f64>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::local_clustering_coefficient(&**store);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::local_clustering_coefficient(&*store);
         Ok(result.into_iter().map(|(n, c)| (n.0, c)).collect())
     }
 
@@ -773,10 +891,11 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     List of node IDs that are articulation points
-    fn articulation_points(&self) -> PyResult<Vec<u64>> {
+    #[pyo3(signature = (*, projection=None))]
+    fn articulation_points(&self, projection: Option<&str>) -> PyResult<Vec<u64>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::articulation_points(&**store);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::articulation_points(&*store);
         Ok(result.into_iter().map(|n| n.0).collect())
     }
 
@@ -784,10 +903,11 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     List of (source, target) tuples representing bridges
-    fn bridges(&self) -> PyResult<Vec<(u64, u64)>> {
+    #[pyo3(signature = (*, projection=None))]
+    fn bridges(&self, projection: Option<&str>) -> PyResult<Vec<(u64, u64)>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::bridges(&**store);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::bridges(&*store);
         Ok(result.into_iter().map(|(s, t)| (s.0, t.0)).collect())
     }
 
@@ -803,11 +923,16 @@ impl PyAlgorithms {
     ///     If k is None: Dict with 'core_numbers' (node ID to core number)
     ///     and 'max_core' (the largest core number) keys
     ///     If k is provided: List of node IDs in the k-core
-    #[pyo3(signature = (k=None))]
-    fn kcore(&self, k: Option<usize>, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (k=None, *, projection=None))]
+    fn kcore(
+        &self,
+        k: Option<usize>,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::kcore_decomposition(&**store);
+        let store = self.store_for(&db, projection)?;
+        let result = algorithms::kcore_decomposition(&*store);
 
         if let Some(k_val) = k {
             let nodes: Vec<u64> = result.k_core(k_val).into_iter().map(|n| n.0).collect();

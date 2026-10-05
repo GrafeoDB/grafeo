@@ -140,8 +140,10 @@ export declare class GrafeoDB {
    * Creates a named graph projection. Returns `true` if created, `false`
    * if a projection with that name already exists.
    *
-   * A projection is a read-only, filtered view of the default graph.
-   * Only nodes with matching labels and edges with matching types are visible.
+   * A projection is a read-only, filtered view of the graph selected when
+   * it is created (the default graph when none is selected). Only nodes
+   * with matching labels and edges with matching types are visible.
+   * Throws if the selected graph no longer exists.
    */
   createProjection(name: string, nodeLabels?: Array<string> | undefined | null, edgeTypes?: Array<string> | undefined | null): boolean
   /** Drops a named graph projection. Returns `true` if it existed. */

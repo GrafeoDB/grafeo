@@ -381,14 +381,16 @@ impl PyNetworkXAdapter {
     // NetworkX-style algorithm methods
     // ==========================================================================
 
-    /// Compute PageRank (NetworkX-compatible).
+    /// Compute PageRank (NetworkX-compatible). An undirected view
+    /// (`as_networkx(directed=False)`) walks each pair of connected nodes once,
+    /// in both directions.
     #[pyo3(signature = (alpha=0.85, max_iter=100, tol=1e-6))]
     fn pagerank(&self, alpha: f64, max_iter: usize, tol: f64) -> PyResult<HashMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
         let db = self.db.read();
         let store = db.store();
-        let result = algorithms::pagerank(&**store, alpha, max_iter, tol);
+        let result = algorithms::pagerank(&**store, alpha, max_iter, tol, self.directed);
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 

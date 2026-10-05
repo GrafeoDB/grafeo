@@ -2352,9 +2352,16 @@ impl GrafeoDB {
 
     /// Creates a named graph projection (virtual subgraph).
     ///
-    /// The projection filters the graph store to only include nodes with the
-    /// specified labels and edges with the specified types. Returns `true` if
-    /// created, `false` if a projection with that name already exists.
+    /// The projection filters the graph selected now (see
+    /// [`set_current_graph`](Self::set_current_graph); the default graph when
+    /// none is selected) to the nodes with the specified labels and the edges
+    /// with the specified types, and keeps reading that graph whatever is
+    /// selected later. Returns `true` if created, `false` if a projection with
+    /// that name already exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the selected graph no longer exists.
     ///
     /// # Examples
     ///
@@ -2366,26 +2373,27 @@ impl GrafeoDB {
     /// let spec = ProjectionSpec::new()
     ///     .with_node_labels(["Person", "City"])
     ///     .with_edge_types(["LIVES_IN"]);
-    /// assert!(db.create_projection("social", spec));
+    /// assert!(db.create_projection("social", spec)?);
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     pub fn create_projection(
         &self,
         name: impl Into<String>,
         spec: grafeo_core::graph::ProjectionSpec,
-    ) -> bool {
+    ) -> Result<bool> {
         use grafeo_core::graph::GraphProjection;
         use std::collections::hash_map::Entry;
 
-        let store = self.graph_store();
+        let store = self.selected_graph_store()?;
         let projection = Arc::new(GraphProjection::new(store, spec));
         let mut projections = self.projections.write();
-        match projections.entry(name.into()) {
+        Ok(match projections.entry(name.into()) {
             Entry::Occupied(_) => false,
             Entry::Vacant(e) => {
                 e.insert(projection);
                 true
             }
-        }
+        })
     }
 
     /// Drops a named graph projection. Returns `true` if it existed.
@@ -2406,6 +2414,26 @@ impl GrafeoDB {
             .read()
             .get(name)
             .map(|p| Arc::clone(p) as Arc<dyn GraphStoreSearch>)
+    }
+
+    /// The store of the graph [`set_current_graph`](Self::set_current_graph) and
+    /// [`set_current_schema`](Self::set_current_schema) select, or of the default
+    /// graph when they select none, as the direct API reads it. Graph algorithms
+    /// read this store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the selected graph no longer exists.
+    pub fn selected_graph_store(&self) -> Result<Arc<dyn GraphStoreSearch>> {
+        #[cfg(feature = "lpg")]
+        {
+            self.read_store(direct::DirectTarget::Current)
+        }
+        // Without the LPG model there are no named graphs to select.
+        #[cfg(not(feature = "lpg"))]
+        {
+            Ok(self.graph_store())
+        }
     }
 
     /// Returns the graph store as a trait object.

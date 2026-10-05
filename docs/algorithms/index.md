@@ -160,9 +160,18 @@ CALL grafeo.pagerank() YIELD node_id, score
 -- Alias output columns
 CALL grafeo.pagerank() YIELD node_id AS id, score AS rank
 
+-- Ignore edge direction: each pair of connected nodes counts once
+CALL grafeo.pagerank({directed: false})
+
+-- Run on a projection only (CREATE PROJECTION or create_projection())
+CALL grafeo.pagerank({projection: 'people'})
+
 -- List all available procedures
 CALL grafeo.procedures()
 ```
+
+A `CALL` reads the graph the session selects (`USE GRAPH`, or `set_graph()` in
+Python), unless its `projection` argument names a projection.
 
 Works the same way across all three languages:
 

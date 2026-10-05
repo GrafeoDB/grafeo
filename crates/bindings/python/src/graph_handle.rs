@@ -80,6 +80,20 @@ impl PyGraphHandle {
 
 #[pymethods]
 impl PyGraphHandle {
+    /// Graph algorithms on this graph, whatever graph ``set_graph()`` selects.
+    ///
+    /// Example:
+    ///     db.graph("model").algorithms.pagerank()
+    #[cfg(feature = "algos")]
+    #[getter]
+    fn algorithms(&self) -> crate::bridges::PyAlgorithms {
+        crate::bridges::PyAlgorithms::for_graph(
+            Arc::clone(&self.db),
+            self.schema.clone(),
+            self.name.clone(),
+        )
+    }
+
     /// The graph's name.
     #[getter]
     fn name(&self) -> &str {

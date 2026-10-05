@@ -43,6 +43,14 @@ use crate::transaction::TransactionManager;
 /// Auto-created by `CREATE SCHEMA` and auto-dropped by `DROP SCHEMA`.
 const SCHEMA_DEFAULT_GRAPH: &str = "__default__";
 
+/// The database's named graph projections, shared by its sessions.
+#[cfg(feature = "lpg")]
+pub(crate) type ProjectionRegistry = Arc<
+    parking_lot::RwLock<
+        std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
+    >,
+>;
+
 /// The storage key of `graph` in `schema`, as graphs are stored in the root
 /// store: `None` is the default graph.
 pub(crate) fn graph_storage_key(schema: Option<&str>, graph: Option<&str>) -> Option<String> {
@@ -5178,6 +5186,11 @@ impl Session {
         #[cfg(feature = "lpg")]
         if matches!(self.lpg_backend, LpgBackend::Active) {
             planner = planner.with_lpg_store(Arc::clone(&self.store));
+        }
+
+        #[cfg(feature = "lpg")]
+        {
+            planner = planner.with_projections(Arc::clone(&self.projections));
         }
 
         // Attach the constraint validator for schema enforcement and property size limits

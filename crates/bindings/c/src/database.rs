@@ -2113,8 +2113,10 @@ pub extern "C" fn grafeo_compact(db: *mut GrafeoDatabase) -> GrafeoStatus {
 // Graph Projections
 // =========================================================================
 
-/// Creates a named graph projection. Returns `true` if created, `false` if a
-/// projection with that name already exists.
+/// Creates a named graph projection over the graph selected now (the default
+/// graph when none is selected). Returns 1 if created, 0 if a projection with
+/// that name already exists, -1 on error (check `grafeo_last_error()`), such as
+/// a selected graph that no longer exists or an invalid argument.
 ///
 /// `node_labels` and `edge_types` are arrays of null-terminated UTF-8 strings.
 /// Pass null with a count of 0 to include all nodes/edges.
@@ -2132,27 +2134,29 @@ pub extern "C" fn grafeo_create_projection(
     num_labels: usize,
     edge_types: *const *const c_char,
     num_types: usize,
-) -> bool {
+) -> i32 {
     use grafeo_core::graph::ProjectionSpec;
 
     if db.is_null() || name.is_null() {
         set_last_error("Null pointer argument");
-        return false;
+        return -1;
     }
     // SAFETY: Caller guarantees valid pointers.
     let db = unsafe { &*db };
     let Ok(name_str) = str_from_ptr(name) else {
-        return false;
+        return -1;
     };
 
     let mut spec = ProjectionSpec::new();
 
     // Reject null pointer with non-zero count (caller error)
     if node_labels.is_null() && num_labels > 0 {
-        return false;
+        set_last_error("Null node_labels with a non-zero count");
+        return -1;
     }
     if edge_types.is_null() && num_types > 0 {
-        return false;
+        set_last_error("Null edge_types with a non-zero count");
+        return -1;
     }
 
     if !node_labels.is_null() && num_labels > 0 {
@@ -2161,7 +2165,7 @@ pub extern "C" fn grafeo_create_projection(
             // SAFETY: Caller guarantees node_labels[0..num_labels] are valid.
             let ptr = unsafe { *node_labels.add(i) };
             let Ok(s) = str_from_ptr(ptr) else {
-                return false;
+                return -1;
             };
             labels.push(s.to_owned());
         }
@@ -2174,33 +2178,40 @@ pub extern "C" fn grafeo_create_projection(
             // SAFETY: Caller guarantees edge_types[0..num_types] are valid.
             let ptr = unsafe { *edge_types.add(i) };
             let Ok(s) = str_from_ptr(ptr) else {
-                return false;
+                return -1;
             };
             types.push(s.to_owned());
         }
         spec = spec.with_edge_types(types);
     }
 
-    db.inner.read().create_projection(name_str, spec)
+    match db.inner.read().create_projection(name_str, spec) {
+        Ok(created) => i32::from(created),
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
 }
 
-/// Drops a named graph projection. Returns `true` if it existed.
+/// Drops a named graph projection. Returns 1 if it existed, 0 if not, -1 on
+/// an invalid argument (check `grafeo_last_error()`).
 ///
 /// # Safety
 /// `db` must be a valid pointer returned by `grafeo_open*`. `name` must be a
 /// valid null-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub extern "C" fn grafeo_drop_projection(db: *mut GrafeoDatabase, name: *const c_char) -> bool {
+pub extern "C" fn grafeo_drop_projection(db: *mut GrafeoDatabase, name: *const c_char) -> i32 {
     if db.is_null() || name.is_null() {
         set_last_error("Null pointer argument");
-        return false;
+        return -1;
     }
     // SAFETY: Caller guarantees valid pointers.
     let db = unsafe { &*db };
     let Ok(name_str) = str_from_ptr(name) else {
-        return false;
+        return -1;
     };
-    db.inner.read().drop_projection(name_str)
+    i32::from(db.inner.read().drop_projection(name_str))
 }
 
 /// Returns the names of all graph projections as a JSON array string.
@@ -2337,6 +2348,34 @@ mod tests {
             );
         }
         assert!(failures.is_empty(), "{failures:#?}");
+        grafeo_close(db);
+        grafeo_free_database(db);
+    }
+
+    /// `grafeo_create_projection` returns 1 when created, 0 when the name is
+    /// taken, -1 with a last error on an invalid argument; `grafeo_drop_projection`
+    /// returns 1 when it dropped one, 0 when there was none, -1 on an invalid
+    /// argument.
+    #[test]
+    fn create_projection_returns_a_status() {
+        let db = grafeo_open_memory();
+        let name = CString::new("people").unwrap();
+        let label = CString::new("Person").unwrap();
+        let labels = [label.as_ptr()];
+        let create = |labels: *const *const c_char, count: usize| {
+            grafeo_create_projection(db, name.as_ptr(), labels, count, std::ptr::null(), 0)
+        };
+        assert_eq!(create(labels.as_ptr(), 1), 1);
+        assert_eq!(create(labels.as_ptr(), 1), 0);
+        assert_eq!(create(std::ptr::null(), 2), -1);
+        // SAFETY: the pointer is valid until the next call on this thread.
+        let error = unsafe { std::ffi::CStr::from_ptr(crate::error::grafeo_last_error()) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(error.contains("node_labels"), "{error}");
+        assert_eq!(grafeo_drop_projection(db, name.as_ptr()), 1);
+        assert_eq!(grafeo_drop_projection(db, name.as_ptr()), 0);
+        assert_eq!(grafeo_drop_projection(db, std::ptr::null()), -1);
         grafeo_close(db);
         grafeo_free_database(db);
     }

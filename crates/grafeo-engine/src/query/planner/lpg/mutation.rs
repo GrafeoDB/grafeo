@@ -717,7 +717,7 @@ impl super::Planner {
         };
 
         let mut op = crate::query::executor::procedure_call::ProcedureCallOperator::new(
-            Arc::clone(&self.store),
+            self.procedure_store(&params)?,
             procedure,
             params,
             yield_columns,
@@ -735,6 +735,31 @@ impl super::Planner {
         }
 
         Ok((operator, output_columns))
+    }
+
+    /// The store a procedure reads: the projection its `projection` argument
+    /// names (`CALL grafeo.pagerank({projection: 'p'})`), else the planner's
+    /// store, the selected graph. Projection names are database-wide.
+    #[cfg(feature = "algos")]
+    fn procedure_store(
+        &self,
+        params: &grafeo_adapters::plugins::Parameters,
+    ) -> Result<Arc<dyn grafeo_core::graph::GraphStoreSearch>> {
+        let Some(name) = params.get_string("projection") else {
+            return Ok(Arc::clone(&self.store));
+        };
+        #[cfg(feature = "lpg")]
+        if let Some(projection) = self
+            .projections
+            .as_ref()
+            .and_then(|projections| projections.read().get(name).cloned())
+        {
+            return Ok(projection as Arc<dyn grafeo_core::graph::GraphStoreSearch>);
+        }
+        Err(Error::Query(QueryError::new(
+            QueryErrorKind::Semantic,
+            format!("Projection '{name}' does not exist"),
+        )))
     }
 
     /// Plans a static result set (e.g., from `grafeo.procedures()`).

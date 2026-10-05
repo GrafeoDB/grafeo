@@ -233,6 +233,10 @@ pub struct Planner {
     /// and text search reach HNSW / BM25 indexes owned by the LPG store).
     #[cfg(feature = "lpg")]
     pub(super) lpg_store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
+    /// The database's named projections, so `CALL grafeo.<algorithm>({projection: ...})`
+    /// can run on one.
+    #[cfg(feature = "lpg")]
+    pub(super) projections: Option<crate::session::ProjectionRegistry>,
     /// Shared parameter state for the currently planning correlated Apply.
     /// Set by `plan_apply` before planning the inner operator, consumed by
     /// `plan_operator` when encountering `ParameterScan`.
@@ -294,6 +298,8 @@ impl Planner {
             catalog: None,
             #[cfg(feature = "lpg")]
             lpg_store: None,
+            #[cfg(feature = "lpg")]
+            projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             profiling: std::cell::Cell::new(false),
@@ -362,6 +368,8 @@ impl Planner {
             catalog: None,
             #[cfg(feature = "lpg")]
             lpg_store: None,
+            #[cfg(feature = "lpg")]
+            projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             profiling: std::cell::Cell::new(false),
@@ -504,6 +512,15 @@ impl Planner {
     #[must_use]
     pub fn with_lpg_store(mut self, lpg_store: Arc<grafeo_core::graph::lpg::LpgStore>) -> Self {
         self.lpg_store = Some(lpg_store);
+        self
+    }
+
+    /// Attaches the database's projections, so `CALL grafeo.<algorithm>({projection: ...})`
+    /// can run on one.
+    #[cfg(feature = "lpg")]
+    #[must_use]
+    pub fn with_projections(mut self, projections: crate::session::ProjectionRegistry) -> Self {
+        self.projections = Some(projections);
         self
     }
 

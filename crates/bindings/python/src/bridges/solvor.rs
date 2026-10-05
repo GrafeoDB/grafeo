@@ -369,16 +369,24 @@ impl PySolvORAdapter {
     ///     damping: Damping factor (default: 0.85)
     ///     max_iter: Maximum iterations (default: 100)
     ///     tol: Convergence tolerance (default: 1e-6)
+    ///     directed: Follow edge direction (default: True). False walks each
+    ///         pair of connected nodes once, in both directions.
     ///
     /// Returns:
     ///     Dict mapping node ID to PageRank score.
-    #[pyo3(signature = (damping=0.85, max_iter=100, tol=1e-6))]
-    fn pagerank(&self, damping: f64, max_iter: usize, tol: f64) -> PyResult<HashMap<u64, f64>> {
+    #[pyo3(signature = (damping=0.85, max_iter=100, tol=1e-6, directed=true))]
+    fn pagerank(
+        &self,
+        damping: f64,
+        max_iter: usize,
+        tol: f64,
+        directed: bool,
+    ) -> PyResult<HashMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
         let db = self.db.read();
         let store = db.store();
-        let result = algorithms::pagerank(&**store, damping, max_iter, tol);
+        let result = algorithms::pagerank(&**store, damping, max_iter, tol, directed);
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 

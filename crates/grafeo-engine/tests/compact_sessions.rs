@@ -35,6 +35,7 @@ mod crash {
     use super::*;
 
     const PATH_VAR: &str = "GRAFEO_COMPACT_SESSIONS_CRASH_PATH";
+    const SCENARIO_VAR: &str = "GRAFEO_COMPACT_SESSIONS_CRASH_SCENARIO";
 
     fn open(path: &Path) -> GrafeoDB {
         GrafeoDB::with_config(
@@ -45,32 +46,102 @@ mod crash {
         .unwrap()
     }
 
-    /// Child-process entry for [`writes_after_compact_survive_a_crash`]; a
-    /// no-op when run directly.
+    /// Where the `concurrent_writes` scenario writes the state it left.
+    fn expected_path(path: &Path) -> std::path::PathBuf {
+        path.with_extension("expected")
+    }
+
+    /// Runs `scenario` on a new database at `path` in a child process that
+    /// exits without `close()`, like a crash.
+    fn crash_after(scenario: &str, path: &Path) {
+        let status = child_process::run(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "crash::crash_child", "--nocapture"])
+                .env(PATH_VAR, path)
+                .env(SCENARIO_VAR, scenario),
+        )
+        .unwrap();
+        assert!(status.success(), "scenario {scenario} failed");
+    }
+
+    /// Child-process entry for [`crash_after`]; a no-op when run directly.
     #[test]
     fn crash_child() {
-        let Some(path) = std::env::var_os(PATH_VAR) else {
+        let (Some(path), Ok(scenario)) = (std::env::var_os(PATH_VAR), std::env::var(SCENARIO_VAR))
+        else {
             return;
         };
-        let mut db = open(Path::new(&path));
-        db.create_graph("model").unwrap();
-        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
-        db.compact().unwrap();
-        // The file itself is compacted from here on: it reopens layered.
-        db.wal_checkpoint().unwrap();
-        let person = |name: &str| {
-            db.create_node_with_props(&["Person"], [("name", Value::from(name))])
-                .unwrap()
-        };
-        let gus = person("Gus");
-        let jules = person("Jules");
-        db.set_node_property(jules, "city", Value::from("Paris"))
-            .unwrap();
-        db.create_edge(gus, jules, "KNOWS").unwrap();
-        db.graph("model")
-            .unwrap()
-            .create_node_with_props(&["Component"], [("id", Value::from("c0"))])
-            .unwrap();
+        let path = Path::new(&path);
+        let mut db = open(path);
+        match scenario.as_str() {
+            "checkpointed_compact" => {
+                db.create_graph("model").unwrap();
+                db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+                db.compact().unwrap();
+                // The file itself is compacted from here on: it reopens layered.
+                db.wal_checkpoint().unwrap();
+                let person = |name: &str| {
+                    db.create_node_with_props(&["Person"], [("name", Value::from(name))])
+                        .unwrap()
+                };
+                let gus = person("Gus");
+                let jules = person("Jules");
+                db.set_node_property(jules, "city", Value::from("Paris"))
+                    .unwrap();
+                db.create_edge(gus, jules, "KNOWS").unwrap();
+                db.graph("model")
+                    .unwrap()
+                    .create_node_with_props(&["Component"], [("id", Value::from("c0"))])
+                    .unwrap();
+            }
+            // No checkpoint: the file stays empty, the WAL holds everything.
+            "compact_without_checkpoint" => {
+                let alix = db
+                    .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
+                    .unwrap();
+                db.compact().unwrap();
+                db.create_node_with_props(&["Person"], [("name", Value::from("Gus"))])
+                    .unwrap();
+                db.set_node_property(alix, "city", Value::from("Amsterdam"))
+                    .unwrap();
+            }
+            "concurrent_writes" => {
+                db.execute("INSERT (:Seed)").unwrap();
+                db.compact().unwrap();
+                let counters: Vec<_> = (0..4)
+                    .map(|_| {
+                        db.create_node_with_props(&["Counter"], [("v", Value::Int64(0))])
+                            .unwrap()
+                    })
+                    .collect();
+                std::thread::scope(|scope| {
+                    for thread in 0..8_i64 {
+                        let (db, counters) = (&db, &counters);
+                        scope.spawn(move || {
+                            for step in 0..200_i64 {
+                                let counter = counters[usize::try_from(step + thread).unwrap() % 4];
+                                let value = Value::Int64(thread * 1_000 + step);
+                                // Writes to one node conflict (each call is a
+                                // transaction here): retry, a bounded number of times.
+                                let mut attempts = 0;
+                                while let Err(error) =
+                                    db.set_node_property(counter, "v", value.clone())
+                                {
+                                    attempts += 1;
+                                    assert!(
+                                        error.to_string().contains("conflict") && attempts < 10_000,
+                                        "{error}"
+                                    );
+                                    std::thread::yield_now();
+                                }
+                            }
+                        });
+                    }
+                });
+                std::fs::write(expected_path(path), format!("{:?}", counter_values(&db))).unwrap();
+            }
+            other => panic!("unknown scenario {other}"),
+        }
         // Crash: no close(), no checkpoint, no destructors.
         std::process::exit(0);
     }
@@ -81,13 +152,7 @@ mod crash {
     fn writes_after_compact_survive_a_crash() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db.grafeo");
-        let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "crash::crash_child", "--nocapture"])
-                .env(PATH_VAR, &path),
-        )
-        .unwrap();
-        assert!(status.success());
+        crash_after("checkpointed_compact", &path);
 
         let db = open(&path);
         assert_eq!(
@@ -113,98 +178,49 @@ mod crash {
             .unwrap();
         assert_eq!(model.rows(), [[Value::from("c0")]]);
     }
-}
 
-/// A WAL-directory database keeps only its WAL, so direct calls after
-/// `compact()` must be in it to survive a clean close; replay rebuilds a
-/// plain store, so updates of data from before `compact()` come back too.
-#[cfg(feature = "wal")]
-#[test]
-fn a_wal_directory_keeps_writes_after_compact() {
-    use grafeo_engine::config::StorageFormat;
+    /// Before its first checkpoint a database has only its WAL, so direct
+    /// calls after `compact()` must be in it to survive a crash; replay
+    /// rebuilds a plain store, so updates of data from before `compact()`
+    /// come back too.
+    #[test]
+    fn writes_after_compact_survive_a_crash_before_any_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        crash_after("compact_without_checkpoint", &path);
 
-    let dir = tempfile::tempdir().unwrap();
-    let config = || {
-        Config::persistent(dir.path().join("db")).with_storage_format(StorageFormat::WalDirectory)
-    };
-    {
-        let mut db = GrafeoDB::with_config(config()).unwrap();
-        let alix = db
-            .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
+        let db = open(&path);
+        assert_eq!(names(&db), [Value::from("Alix"), Value::from("Gus")]);
+        let city = db
+            .execute("MATCH (p:Person {name: 'Alix'}) RETURN p.city")
             .unwrap();
-        db.compact().unwrap();
-        db.create_node_with_props(&["Person"], [("name", Value::from("Gus"))])
-            .unwrap();
-        db.set_node_property(alix, "city", Value::from("Amsterdam"))
-            .unwrap();
+        assert_eq!(city.rows(), [[Value::from("Amsterdam")]]);
         db.close().unwrap();
     }
-    let db = GrafeoDB::with_config(config()).unwrap();
-    assert_eq!(names(&db), [Value::from("Alix"), Value::from("Gus")]);
-    let city = db
-        .execute("MATCH (p:Person {name: 'Alix'}) RETURN p.city")
-        .unwrap();
-    assert_eq!(city.rows(), [[Value::from("Amsterdam")]]);
-    db.close().unwrap();
-}
 
-/// Direct calls from several threads on a compacted database: the WAL ends
-/// with the state they left, so a reopen reads what memory held, never an
-/// older value that one call logged after another call's newer one.
-#[cfg(feature = "wal")]
-#[test]
-fn concurrent_writes_after_compact_replay_to_the_last_state() {
-    use grafeo_engine::config::StorageFormat;
-
-    let dir = tempfile::tempdir().unwrap();
-    let config = || {
-        Config::persistent(dir.path().join("db")).with_storage_format(StorageFormat::WalDirectory)
-    };
-    let values = |db: &GrafeoDB| {
+    /// The `id` and `v` of every `Counter`, by id.
+    fn counter_values(db: &GrafeoDB) -> Vec<Vec<Value>> {
         db.execute("MATCH (c:Counter) RETURN id(c), c.v ORDER BY id(c)")
             .unwrap()
             .rows()
             .to_vec()
-    };
-    let expected = {
-        let mut db = GrafeoDB::with_config(config()).unwrap();
-        db.execute("INSERT (:Seed)").unwrap();
-        db.compact().unwrap();
-        let counters: Vec<_> = (0..4)
-            .map(|_| {
-                db.create_node_with_props(&["Counter"], [("v", Value::Int64(0))])
-                    .unwrap()
-            })
-            .collect();
-        std::thread::scope(|scope| {
-            for thread in 0..8_i64 {
-                let (db, counters) = (&db, &counters);
-                scope.spawn(move || {
-                    for step in 0..200_i64 {
-                        let counter = counters[usize::try_from(step + thread).unwrap() % 4];
-                        let value = Value::Int64(thread * 1_000 + step);
-                        // Writes to one node conflict (each call is a
-                        // transaction here): retry, a bounded number of times.
-                        let mut attempts = 0;
-                        while let Err(error) = db.set_node_property(counter, "v", value.clone()) {
-                            attempts += 1;
-                            assert!(
-                                error.to_string().contains("conflict") && attempts < 10_000,
-                                "{error}"
-                            );
-                            std::thread::yield_now();
-                        }
-                    }
-                });
-            }
-        });
-        let expected = values(&db);
+    }
+
+    /// Direct calls from several threads on a compacted database: the WAL ends
+    /// with the state they left, so a reopen that replays it reads what memory
+    /// held, never an older value that one call logged after another call's
+    /// newer one.
+    #[test]
+    fn concurrent_writes_after_compact_replay_to_the_last_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        crash_after("concurrent_writes", &path);
+        let expected = std::fs::read_to_string(expected_path(&path)).unwrap();
+
+        let db = open(&path);
+        assert_eq!(format!("{:?}", counter_values(&db)), expected);
         db.close().unwrap();
-        expected
-    };
-    let db = GrafeoDB::with_config(config()).unwrap();
-    assert_eq!(values(&db), expected);
-    db.close().unwrap();
+    }
 }
 
 /// Compacting again merges the overlay into a fresh base: inserts, updates

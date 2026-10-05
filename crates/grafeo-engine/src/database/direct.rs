@@ -354,7 +354,11 @@ impl GrafeoDB {
     }
 
     /// Writes one direct call to `store` (the graph with storage key `graph`)
-    /// and commits it at a new epoch. The caller holds the idle gate.
+    /// and commits it at a new epoch. The caller holds the idle gate; this
+    /// holds commits off (see
+    /// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager))
+    /// from its epoch until it is published, so no checkpoint holds part of
+    /// it (lock order: the idle gate, then the commit lock, as in `begin`).
     fn write_outside_transaction<T>(
         &self,
         store: &Arc<LpgStore>,
@@ -362,6 +366,7 @@ impl GrafeoDB {
         batch: bool,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {
+        let commits = self.transaction_manager.hold_commits()?;
         let root = self.lpg_store();
         let read_epoch = self.transaction_manager.current_epoch();
         let epoch = EpochId::new(read_epoch.as_u64() + 1);
@@ -486,6 +491,7 @@ impl GrafeoDB {
             }
         }
         self.transaction_manager.sync_epoch(epoch);
+        drop(commits);
         #[cfg(feature = "cdc")]
         {
             let events = std::mem::take(&mut *self.implicit_writes.cdc_events.lock());
@@ -669,11 +675,13 @@ impl DirectCalls<'_> {
     }
 
     pub(crate) fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
-        Ok(self.store()?.get_node(id))
+        let epoch = self.db.read_epoch();
+        Ok(self.store()?.get_node_at_epoch(id, epoch))
     }
 
     pub(crate) fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
-        Ok(self.store()?.get_edge(id))
+        let epoch = self.db.read_epoch();
+        Ok(self.store()?.get_edge_at_epoch(id, epoch))
     }
 }
 
@@ -830,7 +838,13 @@ pub(crate) fn missing_graph(name: &str) -> Error {
     ))
 }
 
-#[cfg(all(test, feature = "wal", feature = "cdc", feature = "gql"))]
+#[cfg(all(
+    test,
+    feature = "wal",
+    feature = "grafeo-file",
+    feature = "cdc",
+    feature = "gql"
+))]
 mod tests {
     use grafeo_common::types::EpochId;
 
@@ -856,21 +870,59 @@ mod tests {
         created.into_inner().unwrap()
     }
 
+    /// Tells [`a_panicking_call_leaves_nothing_for_the_next`], run in a child
+    /// process, where its database is.
+    const CHILD_PATH_VAR: &str = "GRAFEO_DIRECT_PANICKING_CALL_PATH";
+
     /// A batch that panics leaves nothing: its versions are gone, and the
     /// next call writes none of its WAL records or change events. A single
     /// call writes in place, so what it wrote before the panic is committed,
-    /// as after an error: the WAL matches memory.
+    /// as after an error: the WAL matches memory. The calls run in a child
+    /// process that exits without `close()`, so the reopen replays the WAL.
     #[test]
     fn a_panicking_call_leaves_nothing_for_the_next() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = || {
-            Config::persistent(dir.path().join("db"))
-                .with_storage_format(StorageFormat::WalDirectory)
+        let config = |path: &std::path::Path| {
+            Config::persistent(path)
+                .with_storage_format(StorageFormat::SingleFile)
                 .with_cdc()
         };
-        let db = GrafeoDB::with_config(config()).unwrap();
-        let batch = panicking_call(&db, true, "Batch");
-        let single = panicking_call(&db, false, "Single");
+        if let Some(path) = std::env::var_os(CHILD_PATH_VAR) {
+            let db = GrafeoDB::with_config(config(std::path::Path::new(&path))).unwrap();
+            writes_and_panics(&db);
+            // Crash: no close(), no checkpoint, no destructors.
+            std::process::exit(0);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        let status = grafeo_common::testing::child_process::run(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "database::direct::tests::a_panicking_call_leaves_nothing_for_the_next",
+                    "--nocapture",
+                ])
+                .env(CHILD_PATH_VAR, &path),
+        )
+        .unwrap();
+        assert!(status.success(), "the child process failed");
+        assert!(path.exists(), "the child process created no database");
+
+        let db = GrafeoDB::with_config(config(&path)).unwrap();
+        let labels = db
+            .execute("MATCH (n) RETURN labels(n)[0] AS label ORDER BY label")
+            .unwrap();
+        assert_eq!(
+            labels.rows(),
+            [[Value::from("Person")], [Value::from("Single")]]
+        );
+        db.close().unwrap();
+    }
+
+    /// The calls of [`a_panicking_call_leaves_nothing_for_the_next`], with
+    /// what memory holds after them.
+    fn writes_and_panics(db: &GrafeoDB) {
+        let batch = panicking_call(db, true, "Batch");
+        let single = panicking_call(db, false, "Single");
         let alix = db
             .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
             .unwrap();
@@ -887,17 +939,5 @@ mod tests {
             .map(|event| event.entity_id)
             .collect();
         assert_eq!(events, [EntityId::Node(single), EntityId::Node(alix)]);
-        db.close().unwrap();
-        drop(db);
-
-        let db = GrafeoDB::with_config(config()).unwrap();
-        let labels = db
-            .execute("MATCH (n) RETURN labels(n)[0] AS label ORDER BY label")
-            .unwrap();
-        assert_eq!(
-            labels.rows(),
-            [[Value::from("Person")], [Value::from("Single")]]
-        );
-        db.close().unwrap();
     }
 }

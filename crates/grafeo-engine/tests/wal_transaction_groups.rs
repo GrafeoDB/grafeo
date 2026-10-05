@@ -12,7 +12,7 @@
 
 #![allow(missing_docs)]
 
-#[cfg(feature = "wal")]
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod tests {
     use grafeo_common::testing::child_process;
     use grafeo_common::types::{NodeId, TransactionId, Value};
@@ -24,55 +24,38 @@ mod tests {
 
     const SCENARIO_VAR: &str = "GRAFEO_WAL_GROUP_SCENARIO";
     const PATH_VAR: &str = "GRAFEO_WAL_GROUP_PATH";
-    const FORMAT_VAR: &str = "GRAFEO_WAL_GROUP_FORMAT";
 
-    fn formats(dir: &Path) -> Vec<(&'static str, PathBuf)> {
-        let mut formats = vec![("wal-directory", dir.join("dir-db"))];
-        #[cfg(feature = "grafeo-file")]
-        formats.push(("single-file", dir.join("single.grafeo")));
-        formats
+    /// The database file of a test.
+    fn db_path(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path().join("single.grafeo")
     }
 
-    fn storage_format(name: &str) -> StorageFormat {
-        match name {
-            "wal-directory" => StorageFormat::WalDirectory,
-            "single-file" => StorageFormat::SingleFile,
-            other => panic!("unknown format {other}"),
-        }
+    fn config(path: &Path) -> Config {
+        Config::persistent(path).with_storage_format(StorageFormat::SingleFile)
     }
 
-    fn config(path: &Path, format: &str) -> Config {
-        Config::persistent(path).with_storage_format(storage_format(format))
+    fn open(path: &Path) -> GrafeoDB {
+        GrafeoDB::with_config(config(path)).unwrap()
     }
 
-    fn open(path: &Path, format: &str) -> GrafeoDB {
-        GrafeoDB::with_config(config(path, format)).unwrap()
-    }
-
-    /// Directory holding the WAL files for a database.
-    fn wal_dir(path: &Path, format: &str) -> PathBuf {
-        match format {
-            "wal-directory" => path.join("wal"),
-            _ => {
-                let mut sidecar = path.as_os_str().to_owned();
-                sidecar.push(".wal");
-                PathBuf::from(sidecar)
-            }
-        }
+    /// Directory holding the WAL files for a database: its sidecar WAL.
+    fn wal_dir(path: &Path) -> PathBuf {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(".wal");
+        PathBuf::from(sidecar)
     }
 
     /// Runs `scenario` in a child process that exits without closing the
     /// database, like a crash.
-    fn crash_after(scenario: &str, path: &Path, format: &str) {
+    fn crash_after(scenario: &str, path: &Path) {
         let status = child_process::run(
             std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "tests::crash_child", "--nocapture"])
                 .env(SCENARIO_VAR, scenario)
-                .env(PATH_VAR, path)
-                .env(FORMAT_VAR, format),
+                .env(PATH_VAR, path),
         )
         .unwrap();
-        assert!(status.success(), "{format}: scenario {scenario} failed");
+        assert!(status.success(), "scenario {scenario} failed");
     }
 
     /// Sorted `n.name` of every `:Person` in the session's current graph.
@@ -297,6 +280,16 @@ mod tests {
                 assert!(db.drop_graph("doomed"));
                 assert_eq!(db.list_graphs(), strings(&["empty"]));
             }
+            // A transaction still open when the process exits, while another
+            // session commits.
+            "open_transaction" => {
+                let mut open_tx = db.session();
+                open_tx.begin_transaction().unwrap();
+                insert(&open_tx, "Vincent");
+                insert(&db.session(), "Gus");
+                // Still open when the process exits.
+                std::mem::forget(open_tx);
+            }
             "seed_alix" => insert(&db.session(), "Alix"),
             "insert_gus" => insert(&db.session(), "Gus"),
             other => panic!("unknown scenario {other}"),
@@ -310,8 +303,7 @@ mod tests {
             return;
         };
         let path = PathBuf::from(std::env::var_os(PATH_VAR).unwrap());
-        let format = std::env::var(FORMAT_VAR).unwrap();
-        let mut config = config(&path, &format);
+        let mut config = config(&path);
         #[cfg(feature = "triple-store")]
         if scenario.starts_with("rdf_") {
             config = config.with_graph_model(grafeo_engine::GraphModel::Rdf);
@@ -329,74 +321,49 @@ mod tests {
     #[test]
     fn rollback_does_not_discard_another_transaction() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("abort_between", &path, format);
-            assert_eq!(
-                names(&open(&path, format)),
-                strings(&["Alix", "Jules"]),
-                "{format}"
-            );
-        }
+        let path = db_path(&dir);
+        crash_after("abort_between", &path);
+        assert_eq!(names(&open(&path)), strings(&["Alix", "Jules"]));
     }
 
     #[test]
     fn commit_does_not_commit_another_transaction() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("commit_between", &path, format);
-            assert_eq!(names(&open(&path, format)), strings(&["Gus"]), "{format}");
-        }
+        let path = db_path(&dir);
+        crash_after("commit_between", &path);
+        assert_eq!(names(&open(&path)), strings(&["Gus"]));
     }
 
     #[test]
     fn rollback_to_savepoint_is_not_replayed() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("savepoint", &path, format);
-            assert_eq!(
-                names(&open(&path, format)),
-                strings(&["Alix", "Vincent"]),
-                "{format}"
-            );
-        }
+        let path = db_path(&dir);
+        crash_after("savepoint", &path);
+        assert_eq!(names(&open(&path)), strings(&["Alix", "Vincent"]));
     }
 
     #[test]
     fn named_graph_writes_replay_into_their_graph() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("named_graphs", &path, format);
-            let db = open(&path, format);
-            assert_eq!(
-                names(&db),
-                strings(&["Alix", "Gus", "Jules"]),
-                "{format}: default graph"
-            );
-            assert_eq!(
-                names_in_graph(&db, "g"),
-                strings(&["Mia"]),
-                "{format}: graph g"
-            );
-        }
+        let path = db_path(&dir);
+        crash_after("named_graphs", &path);
+        let db = open(&path);
+        assert_eq!(
+            names(&db),
+            strings(&["Alix", "Gus", "Jules"]),
+            "default graph"
+        );
+        assert_eq!(names_in_graph(&db, "g"), strings(&["Mia"]), "graph g");
     }
 
     #[test]
     fn direct_writes_outside_a_transaction_are_durable() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("direct_writes", &path, format);
-            let db = open(&path, format);
-            assert_eq!(
-                names(&db),
-                strings(&["Django", "Jules"]),
-                "{format}: default graph"
-            );
-            assert_eq!(
-                names_in_graph(&db, "g"),
-                strings(&["Hans"]),
-                "{format}: graph g"
-            );
-        }
+        let path = db_path(&dir);
+        crash_after("direct_writes", &path);
+        let db = open(&path);
+        assert_eq!(names(&db), strings(&["Django", "Jules"]), "default graph");
+        assert_eq!(names_in_graph(&db, "g"), strings(&["Hans"]), "graph g");
     }
 
     /// A direct write to a graph that does not exist fails and logs nothing:
@@ -405,12 +372,11 @@ mod tests {
     #[test]
     fn direct_write_to_an_unknown_graph_leaves_no_trace() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("direct_write_to_unknown_graph", &path, format);
-            let db = open(&path, format);
-            assert_eq!(names(&db), strings(&["Butch"]), "{format}: default graph");
-            assert_eq!(db.list_graphs(), Vec::<String>::new(), "{format}");
-        }
+        let path = db_path(&dir);
+        crash_after("direct_write_to_unknown_graph", &path);
+        let db = open(&path);
+        assert_eq!(names(&db), strings(&["Butch"]), "default graph");
+        assert_eq!(db.list_graphs(), Vec::<String>::new());
     }
 
     /// `create_graph` and `drop_graph` are logged like `CREATE GRAPH` and
@@ -419,27 +385,17 @@ mod tests {
     #[test]
     fn graphs_created_and_dropped_through_the_api_are_durable() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("api_graphs", &path, format);
-            assert_eq!(
-                open(&path, format).list_graphs(),
-                strings(&["empty"]),
-                "{format}"
-            );
-        }
+        let path = db_path(&dir);
+        crash_after("api_graphs", &path);
+        assert_eq!(open(&path).list_graphs(), strings(&["empty"]));
     }
 
     #[test]
     fn schema_change_outside_a_transaction_is_durable() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("ddl_only", &path, format);
-            assert_eq!(
-                open(&path, format).list_graphs(),
-                vec!["g".to_string()],
-                "{format}"
-            );
-        }
+        let path = db_path(&dir);
+        crash_after("ddl_only", &path);
+        assert_eq!(open(&path).list_graphs(), vec!["g".to_string()]);
     }
 
     /// Schema changes take effect immediately and a rollback does not undo
@@ -449,14 +405,13 @@ mod tests {
     #[test]
     fn schema_changes_in_a_rolled_back_transaction_match_memory() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("ddl_in_rolled_back_tx", &path, format);
-            let db = open(&path, format);
-            assert_eq!(db.list_graphs(), vec!["h".to_string()], "{format}");
-            let types = db.session().execute("SHOW NODE TYPES").unwrap();
-            let names: Vec<Value> = types.rows().iter().map(|row| row[0].clone()).collect();
-            assert_eq!(names, vec![Value::from("Robot")], "{format}");
-        }
+        let path = db_path(&dir);
+        crash_after("ddl_in_rolled_back_tx", &path);
+        let db = open(&path);
+        assert_eq!(db.list_graphs(), vec!["h".to_string()]);
+        let types = db.session().execute("SHOW NODE TYPES").unwrap();
+        let names: Vec<Value> = types.rows().iter().map(|row| row[0].clone()).collect();
+        assert_eq!(names, vec![Value::from("Robot")]);
     }
 
     /// Rows of a query, each value rendered as text (`NULL` for null).
@@ -497,56 +452,53 @@ mod tests {
     #[test]
     fn database_level_write_survives_checkpoint_without_close() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("db_write_then_checkpoint", &path, format);
-            assert_eq!(
-                rows(&open(&path, format), "MATCH (d:Document) RETURN d.title"),
-                vec![row(&["test"])],
-                "{format}"
-            );
-        }
+        let path = db_path(&dir);
+        crash_after("db_write_then_checkpoint", &path);
+        assert_eq!(
+            rows(&open(&path), "MATCH (d:Document) RETURN d.title"),
+            vec![row(&["test"])]
+        );
     }
 
     /// Every database-level write call is durable when it returns.
     #[test]
     fn database_level_writes_are_durable() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("db_crud", &path, format);
-            let db = open(&path, format);
-            assert_eq!(
-                rows(
-                    &db,
-                    "MATCH (n:Person) RETURN n.name, labels(n), n.age ORDER BY n.name"
-                ),
-                vec![
-                    row(&["Alix", "Employee,Person", "NULL"]),
-                    row(&["Gus", "Person", "NULL"]),
-                ],
-                "{format}: nodes"
-            );
-            assert_eq!(
-                rows(
-                    &db,
-                    "MATCH (a)-[r]->(b)                      RETURN a.name, type(r), b.name, r.since, r.w, r.x ORDER BY type(r)"
-                ),
-                vec![
-                    row(&["Alix", "KNOWS", "Gus", "2020", "NULL", "NULL"]),
-                    row(&["Gus", "LIKES", "Alix", "NULL", "1", "NULL"]),
-                ],
-                "{format}: edges"
-            );
-            assert_eq!(
-                rows(&db, "MATCH (n:Vec) RETURN count(n)"),
-                vec![row(&["2"])],
-                "{format}: batch_create_nodes"
-            );
-            assert_eq!(
-                rows(&db, "MATCH (n:Doc) RETURN n.title ORDER BY n.title"),
-                vec![row(&["a"]), row(&["b"])],
-                "{format}: batch_create_nodes_with_props"
-            );
-        }
+        let path = db_path(&dir);
+        crash_after("db_crud", &path);
+        let db = open(&path);
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (n:Person) RETURN n.name, labels(n), n.age ORDER BY n.name"
+            ),
+            vec![
+                row(&["Alix", "Employee,Person", "NULL"]),
+                row(&["Gus", "Person", "NULL"]),
+            ],
+            "nodes"
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "MATCH (a)-[r]->(b)                      RETURN a.name, type(r), b.name, r.since, r.w, r.x ORDER BY type(r)"
+            ),
+            vec![
+                row(&["Alix", "KNOWS", "Gus", "2020", "NULL", "NULL"]),
+                row(&["Gus", "LIKES", "Alix", "NULL", "1", "NULL"]),
+            ],
+            "edges"
+        );
+        assert_eq!(
+            rows(&db, "MATCH (n:Vec) RETURN count(n)"),
+            vec![row(&["2"])],
+            "batch_create_nodes"
+        );
+        assert_eq!(
+            rows(&db, "MATCH (n:Doc) RETURN n.title ORDER BY n.title"),
+            vec![row(&["a"]), row(&["b"])],
+            "batch_create_nodes_with_props"
+        );
     }
 
     /// A database-level write is committed on its own, without an open
@@ -554,31 +506,35 @@ mod tests {
     #[test]
     fn database_level_write_during_a_session_transaction() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("db_write_during_session_tx", &path, format);
-            assert_eq!(
-                names(&open(&path, format)),
-                strings(&["Django"]),
-                "{format}"
-            );
-        }
+        let path = db_path(&dir);
+        crash_after("db_write_during_session_tx", &path);
+        assert_eq!(names(&open(&path)), strings(&["Django"]));
     }
 
-    /// A transaction still open at `close()` is not committed on replay.
+    /// A transaction still open at `close()` is not committed: not by the
+    /// checkpoint `close()` writes, and not on replay when the process exits
+    /// with the transaction open.
     #[test]
     fn open_transaction_at_close_is_not_recovered() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            {
-                let db = open(&path, format);
-                let mut open_tx = db.session();
-                open_tx.begin_transaction().unwrap();
-                insert(&open_tx, "Vincent");
-                insert(&db.session(), "Gus");
-                db.close().unwrap();
-            }
-            assert_eq!(names(&open(&path, format)), strings(&["Gus"]), "{format}");
+        let path = dir.path().join("closed.grafeo");
+        {
+            let db = open(&path);
+            let mut open_tx = db.session();
+            open_tx.begin_transaction().unwrap();
+            insert(&open_tx, "Vincent");
+            insert(&db.session(), "Gus");
+            db.close().unwrap();
         }
+        assert_eq!(names(&open(&path)), strings(&["Gus"]), "after close()");
+
+        let crashed = dir.path().join("crashed.grafeo");
+        crash_after("open_transaction", &crashed);
+        assert_eq!(
+            names(&open(&crashed)),
+            strings(&["Gus"]),
+            "after replay of the WAL"
+        );
     }
 
     /// Records left without a commit marker by a crash are sealed at open,
@@ -586,30 +542,25 @@ mod tests {
     #[test]
     fn torn_tail_is_not_committed_by_a_later_transaction() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            crash_after("seed_alix", &path, format);
-            {
-                // A group cut off by a crash before its commit marker.
-                let wal = WalManager::open(wal_dir(&path, format)).unwrap();
-                wal.log(&WalRecord::CreateNode {
-                    id: NodeId::new(9_000),
-                    labels: vec!["Person".to_string()],
-                })
-                .unwrap();
-                wal.log(&WalRecord::SetNodeProperty {
-                    id: NodeId::new(9_000),
-                    key: "name".to_string(),
-                    value: Value::from("Torn"),
-                })
-                .unwrap();
-            }
-            crash_after("insert_gus", &path, format);
-            assert_eq!(
-                names(&open(&path, format)),
-                strings(&["Alix", "Gus"]),
-                "{format}"
-            );
+        let path = db_path(&dir);
+        crash_after("seed_alix", &path);
+        {
+            // A group cut off by a crash before its commit marker.
+            let wal = WalManager::open(wal_dir(&path)).unwrap();
+            wal.log(&WalRecord::CreateNode {
+                id: NodeId::new(9_000),
+                labels: vec!["Person".to_string()],
+            })
+            .unwrap();
+            wal.log(&WalRecord::SetNodeProperty {
+                id: NodeId::new(9_000),
+                key: "name".to_string(),
+                value: Value::from("Torn"),
+            })
+            .unwrap();
         }
+        crash_after("insert_gus", &path);
+        assert_eq!(names(&open(&path)), strings(&["Alix", "Gus"]));
     }
 
     /// A log written by an older version can end inside a named graph. New
@@ -617,9 +568,11 @@ mod tests {
     #[test]
     fn default_graph_writes_after_a_log_ending_in_a_named_graph() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dir-db");
+        let path = db_path(&dir);
+        // The database file, checkpointed empty: the log below comes after it.
+        open(&path).close().unwrap();
         {
-            let wal = WalManager::open(path.join("wal")).unwrap();
+            let wal = WalManager::open(wal_dir(&path)).unwrap();
             let records = [
                 WalRecord::CreateNamedGraph {
                     name: "g".to_string(),
@@ -644,9 +597,9 @@ mod tests {
                 wal.log(record).unwrap();
             }
         }
-        crash_after("insert_gus", &path, "wal-directory");
+        crash_after("insert_gus", &path);
 
-        let db = open(&path, "wal-directory");
+        let db = open(&path);
         assert_eq!(names(&db), strings(&["Gus"]));
         assert_eq!(names_in_graph(&db, "g"), strings(&["Mia"]));
     }
@@ -656,8 +609,8 @@ mod tests {
         use super::*;
         use grafeo_engine::GraphModel;
 
-        fn open_rdf(path: &Path, format: &str) -> GrafeoDB {
-            GrafeoDB::with_config(config(path, format).with_graph_model(GraphModel::Rdf)).unwrap()
+        fn open_rdf(path: &Path) -> GrafeoDB {
+            GrafeoDB::with_config(config(path).with_graph_model(GraphModel::Rdf)).unwrap()
         }
 
         fn subjects(db: &GrafeoDB) -> Vec<String> {
@@ -678,28 +631,21 @@ mod tests {
         #[test]
         fn sparql_rollback_does_not_discard_another_transaction() {
             let dir = tempfile::tempdir().unwrap();
-            for (format, path) in formats(dir.path()) {
-                crash_after("rdf_abort_between", &path, format);
-                let db = open_rdf(&path, format);
-                assert_eq!(
-                    subjects(&db),
-                    vec!["http://ex.org/alix".to_string()],
-                    "{format}"
-                );
-            }
+            let path = db_path(&dir);
+            crash_after("rdf_abort_between", &path);
+            let db = open_rdf(&path);
+            assert_eq!(subjects(&db), vec!["http://ex.org/alix".to_string()]);
         }
 
         #[test]
         fn database_level_sparql_update_is_durable() {
             let dir = tempfile::tempdir().unwrap();
-            for (format, path) in formats(dir.path()) {
-                crash_after("rdf_db_level", &path, format);
-                assert_eq!(
-                    subjects(&open_rdf(&path, format)),
-                    vec!["http://ex.org/mia".to_string()],
-                    "{format}"
-                );
-            }
+            let path = db_path(&dir);
+            crash_after("rdf_db_level", &path);
+            assert_eq!(
+                subjects(&open_rdf(&path)),
+                vec!["http://ex.org/mia".to_string()]
+            );
         }
     }
 }

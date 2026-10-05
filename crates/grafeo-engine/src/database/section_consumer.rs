@@ -700,17 +700,31 @@ impl MemoryConsumer for CompactStoreConsumer {
 /// the overlay holds unflushed mutations and merging it requires
 /// rebuilding the base, so this is the last-resort spill before query
 /// failure under sustained mutation pressure.
+///
+/// The merge runs with commits held off (see
+/// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager)):
+/// the base has no versions, so a commit in the middle of being written, or
+/// one that did not complete, would become visible in it. It does not wait:
+/// while a commit is in progress (possibly on the thread that asks for
+/// memory), nothing is merged, and after a commit that did not complete, the
+/// spill fails.
 #[cfg(all(feature = "compact-store", feature = "lpg"))]
 pub struct OverlayConsumer {
     layered: Weak<grafeo_core::graph::compact::layered::LayeredStore>,
+    transaction_manager: Arc<crate::transaction::TransactionManager>,
 }
 
 #[cfg(all(feature = "compact-store", feature = "lpg"))]
 impl OverlayConsumer {
-    /// Creates a consumer that monitors the overlay of `layered`.
-    pub fn new(layered: &Arc<grafeo_core::graph::compact::layered::LayeredStore>) -> Self {
+    /// Creates a consumer that monitors the overlay of `layered`, whose
+    /// commits `transaction_manager` runs.
+    pub fn new(
+        layered: &Arc<grafeo_core::graph::compact::layered::LayeredStore>,
+        transaction_manager: &Arc<crate::transaction::TransactionManager>,
+    ) -> Self {
         Self {
             layered: Arc::downgrade(layered),
+            transaction_manager: Arc::clone(transaction_manager),
         }
     }
 }
@@ -756,6 +770,14 @@ impl MemoryConsumer for OverlayConsumer {
         if layered.overlay_mutation_count() == 0 {
             return Ok(0);
         }
+        let Some(_commits) = self
+            .transaction_manager
+            .try_hold_commits()
+            .map_err(|error| SpillError::IoError(error.to_string()))?
+        else {
+            // A commit is in progress: merge later.
+            return Ok(0);
+        };
 
         let before = layered.overlay_memory_bytes();
         layered

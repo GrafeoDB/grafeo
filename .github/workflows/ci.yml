@@ -343,8 +343,9 @@ jobs:
 
   # Tests that need a minimal feature set, so they are covered outside
   # --all-features too: encryption at rest with only the features it needs,
-  # and the migration of 0.5.x files in a build without `wal` (the default
-  # `embedded` profile of the Node.js, C, Go, C# and Dart bindings). A job of
+  # the migration of 0.5.x files in a build without `wal` (the default
+  # `embedded` profile of the Node.js, C, Go, C# and Dart bindings), and the
+  # refusal of 0.5.x files in a build without `lpg` (the `rdf` profile). A job of
   # its own: the rust-test runners are near their disk limit, and these are
   # extra engine builds.
   minimal-features:
@@ -382,6 +383,13 @@ jobs:
 
       - name: Test migration without the wal feature
         run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+      - name: Test 0.5.x files without the lpg feature
+        run: cargo nextest run -p grafeo-engine --no-default-features --features gql,grafeo-file,wal --test legacy_without_lpg
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"

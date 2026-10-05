@@ -176,7 +176,10 @@ pub(super) fn read_active_header(file: &mut File) -> Result<(u8, DbHeader)> {
 ///
 /// # Errors
 ///
-/// Returns an error if the read fails or the CRC checksum does not match.
+/// Returns an error if the snapshot lies beyond the end of the file (checked
+/// before its buffer is allocated: 0.5.x headers have no checksum, so a
+/// damaged length never allocates), the read fails or the CRC checksum does
+/// not match.
 pub(super) fn read_snapshot_blob(file: &mut File, active_header: &DbHeader) -> Result<Vec<u8>> {
     if active_header.is_empty() {
         return Ok(Vec::new());
@@ -189,6 +192,17 @@ pub(super) fn read_snapshot_blob(file: &mut File, active_header: &DbHeader) -> R
         return Ok(Vec::new());
     }
 
+    let file_length = file.metadata()?.len();
+    if DATA_OFFSET
+        .checked_add(active_header.snapshot_length)
+        .is_none_or(|end| end > file_length)
+    {
+        return Err(Error::Internal(format!(
+            "snapshot at offset {DATA_OFFSET} (length {}) lies beyond the end of the file \
+             ({file_length} bytes)",
+            active_header.snapshot_length
+        )));
+    }
     let length = usize::try_from(active_header.snapshot_length).map_err(|_| {
         Error::Internal(format!(
             "snapshot length {} does not fit in memory on this platform",
@@ -291,13 +305,26 @@ pub(super) fn read_directory(
 ///
 /// # Errors
 ///
-/// Returns an error if the read fails, the CRC checksum does not match, or
-/// the decryption fails.
+/// Returns an error if the section lies beyond the end of the file (checked
+/// before its buffer is allocated, so a corrupt length never allocates), the
+/// read fails, the CRC checksum does not match, or the decryption fails.
 pub(super) fn read_section(
     file: &mut File,
     entry: &SectionDirectoryEntry,
     cipher: Option<&ChunkCipher>,
 ) -> Result<Vec<u8>> {
+    let file_length = file.metadata()?.len();
+    if entry
+        .offset
+        .checked_add(entry.length)
+        .is_none_or(|end| end > file_length)
+    {
+        return Err(Error::Internal(format!(
+            "section {:?} at offset {} (length {}) lies beyond the end of the file \
+             ({file_length} bytes)",
+            entry.section_type, entry.offset, entry.length
+        )));
+    }
     file.seek(SeekFrom::Start(entry.offset))?;
 
     let length = usize::try_from(entry.length).map_err(|_| {
@@ -505,6 +532,98 @@ mod tests {
         write_empty(&path);
         let file = LegacyFile::open(&path, None).unwrap();
         assert_eq!(file.contents().unwrap(), LegacyContents::Empty);
+    }
+
+    /// A corrupt v2 directory entry can claim a section far longer than the
+    /// file: the read fails with the section and its offset before it
+    /// allocates a buffer of that length.
+    #[test]
+    fn a_section_longer_than_the_file_is_refused_before_it_is_read() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("db.grafeo");
+        write_v2(&path, &[(SectionType::LpgStore, b"Amsterdam")]);
+        let file_length = std::fs::metadata(&path).unwrap().len();
+        let remaining = file_length - SECTION_DATA_OFFSET;
+        // Past the end by one byte, a terabyte, and an end beyond `u64`.
+        for length in [remaining + 1, 1 << 40, u64::MAX - 88] {
+            let mut directory = SectionDirectory::new();
+            directory
+                .upsert(SectionDirectoryEntry {
+                    section_type: SectionType::LpgStore,
+                    version: 1,
+                    flags: SectionType::LpgStore.default_flags(),
+                    offset: SECTION_DATA_OFFSET,
+                    length,
+                    checksum: crc32fast::hash(b"Amsterdam"),
+                })
+                .unwrap();
+            let mut file = File::options().write(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(DIRECTORY_OFFSET)).unwrap();
+            file.write_all(&directory.to_bytes()).unwrap();
+            write_headers(
+                &mut file,
+                &DbHeader {
+                    iteration: 1,
+                    checksum: directory.checksum(),
+                    epoch: 1,
+                    ..DbHeader::EMPTY
+                },
+            );
+            drop(file);
+
+            let legacy = LegacyFile::open(&path, None).unwrap();
+            let error = legacy
+                .contents()
+                .expect_err("a section beyond the end of the file")
+                .to_string();
+            assert!(
+                error.contains("LpgStore")
+                    && error.contains(&SECTION_DATA_OFFSET.to_string())
+                    && error.contains(&file_length.to_string()),
+                "length {length}: the error names the section, its offset and the file \
+                 length: {error}"
+            );
+        }
+    }
+
+    /// A damaged v1 header (0.5.x headers have no checksum) can claim a
+    /// snapshot far longer than the file: the read fails with its offset,
+    /// length and the file size before it allocates a buffer of that length.
+    #[test]
+    fn a_snapshot_longer_than_the_file_is_refused_before_it_is_read() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("db.grafeo");
+        write_v1(&path, b"Vincent");
+        let file_length = std::fs::metadata(&path).unwrap().len();
+        let remaining = file_length - DATA_OFFSET;
+        // Past the end by one byte, a terabyte, and an end beyond `u64`.
+        for length in [remaining + 1, 1 << 40, u64::MAX - 88] {
+            let mut file = File::options().write(true).open(&path).unwrap();
+            write_headers(
+                &mut file,
+                &DbHeader {
+                    iteration: 1,
+                    checksum: crc32fast::hash(b"Vincent"),
+                    snapshot_length: length,
+                    epoch: 1,
+                    ..DbHeader::EMPTY
+                },
+            );
+            drop(file);
+
+            let legacy = LegacyFile::open(&path, None).unwrap();
+            let error = legacy
+                .contents()
+                .expect_err("a snapshot beyond the end of the file")
+                .to_string();
+            assert!(
+                error.contains(&DATA_OFFSET.to_string())
+                    && error.contains(&length.to_string())
+                    && error.contains(&file_length.to_string()),
+                "length {length}: the error names the offset, the length and the file \
+                 length: {error}"
+            );
+        }
     }
 
     #[test]

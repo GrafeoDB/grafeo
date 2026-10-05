@@ -271,8 +271,8 @@ impl PyGrafeoDB {
     #[cfg(feature = "arrow-export")]
     fn nodes_ipc_bytes(&self) -> PyResult<Vec<u8>> {
         let db = self.inner.read();
-        let store = db.store();
-        let nodes: Vec<_> = store.all_nodes().collect();
+        // As of the current epoch: never part of a commit.
+        let nodes: Vec<_> = db.iter_nodes().collect();
         grafeo_engine::database::arrow::nodes_to_ipc_stream(&nodes).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Arrow export failed: {e}"))
         })
@@ -282,8 +282,8 @@ impl PyGrafeoDB {
     #[cfg(feature = "arrow-export")]
     fn edges_ipc_bytes(&self) -> PyResult<Vec<u8>> {
         let db = self.inner.read();
-        let store = db.store();
-        let edges: Vec<_> = store.all_edges().collect();
+        // As of the current epoch: never part of a commit.
+        let edges: Vec<_> = db.iter_edges().collect();
         grafeo_engine::database::arrow::edges_to_ipc_stream(&edges).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Arrow export failed: {e}"))
         })

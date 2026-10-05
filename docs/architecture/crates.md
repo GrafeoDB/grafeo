@@ -106,6 +106,7 @@ Persistence I/O: the `.grafeo` container format, WAL management and crash safety
 | `wal/` | Write-ahead log: append, replay, truncation, backup cursor |
 
 ```rust
+// Requires the `grafeo-file` feature on `grafeo-storage`.
 use grafeo_storage::file::GrafeoFileManager;
 use grafeo_storage::wal::WalManager;
 ```

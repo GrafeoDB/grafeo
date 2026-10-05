@@ -214,12 +214,15 @@ fn check_pointer(pointer: BlockRef) -> Result<()> {
     Ok(())
 }
 
-/// Follows the chain from `root`, `read(offset, len)` returning the stored
-/// bytes of a block.
+/// Follows the chain from `root`, `read(offset, len)` returning the bytes of
+/// the block at `offset` whose pointer names `len` bytes (for an encrypted
+/// image, the decrypted bytes).
 ///
-/// Returns the entries in order and the pages of the blocks themselves. A
-/// root with length 0 is accepted as an empty directory, although
-/// [`encode_blocks`] never produces one.
+/// Every block is stored `overhead` bytes longer than its pointer's length
+/// (the nonce and tag of an encrypted image, 0 otherwise). Returns the
+/// entries in order and the pages the stored blocks occupy. A root with
+/// length 0 is accepted as an empty directory, although [`encode_blocks`]
+/// never produces one.
 ///
 /// # Errors
 ///
@@ -228,6 +231,7 @@ fn check_pointer(pointer: BlockRef) -> Result<()> {
 /// checks. Errors from `read` are passed through.
 pub fn decode_chain(
     root: BlockRef,
+    overhead: u32,
     mut read: impl FnMut(u64, u32) -> Result<Vec<u8>>,
 ) -> Result<(Vec<DirectoryEntry>, Vec<PageRun>)> {
     let mut entries = Vec::new();
@@ -276,9 +280,10 @@ pub fn decode_chain(
                 Error::Serialization(format!("directory block at offset {offset}: {error}"))
             })?);
         }
+        // Two `u32` values: the sum cannot overflow `u64`.
         runs.push(PageRun {
             first: offset / PAGE_SIZE,
-            count: PageRun::for_bytes(u64::from(pointer.length)),
+            count: PageRun::for_bytes(u64::from(pointer.length) + u64::from(overhead)),
         });
         pointer = BlockRef {
             offset: u64_at(&bytes, 8),
@@ -328,7 +333,7 @@ mod tests {
         .unwrap();
         assert_eq!(blocks.len(), 3);
         let stored: std::collections::HashMap<u64, Vec<u8>> = blocks.into_iter().collect();
-        let (back, runs) = decode_chain(root, |offset, len| {
+        let (back, runs) = decode_chain(root, 0, |offset, len| {
             let b = &stored[&offset];
             assert_eq!(b.len(), len as usize);
             Ok(b.clone())
@@ -338,12 +343,42 @@ mod tests {
         assert_eq!(runs.len(), 3);
     }
 
+    /// An encrypted block is stored with a nonce and a tag around its
+    /// plaintext: the runs cover the stored bytes. A block whose plaintext
+    /// fills two pages exactly (170 entries) takes a third page encrypted.
+    #[test]
+    fn block_runs_cover_the_stored_bytes_with_their_overhead() {
+        let entries: Vec<_> = (0..170).map(entry).collect();
+        let (root, blocks) = encode_blocks(&entries, |_| Ok(12_288)).unwrap();
+        assert_eq!(blocks[0].1.len(), 8192, "the plaintext fills two pages");
+        for (overhead, pages) in [(0, 2), (28, 3)] {
+            let (back, runs) = decode_chain(root, overhead, |offset, length| {
+                assert_eq!(
+                    (offset, length),
+                    (12_288, root.length),
+                    "the read is asked for the plaintext length"
+                );
+                Ok(blocks[0].1.clone())
+            })
+            .unwrap();
+            assert_eq!(back, entries);
+            assert_eq!(
+                runs,
+                [PageRun {
+                    first: 3,
+                    count: pages
+                }],
+                "overhead {overhead}: the stored block's pages"
+            );
+        }
+    }
+
     #[test]
     fn a_damaged_block_fails_with_its_offset() {
         let entries = vec![entry(0)];
         let (root, mut blocks) = encode_blocks(&entries, |_| Ok(12_288)).unwrap();
         blocks[0].1[40] ^= 1;
-        let error = decode_chain(root, |_, _| Ok(blocks[0].1.clone()))
+        let error = decode_chain(root, 0, |_, _| Ok(blocks[0].1.clone()))
             .unwrap_err()
             .to_string();
         assert!(error.contains("12288"), "{error}");
@@ -388,7 +423,7 @@ mod tests {
                 length: 80,
                 crc: 0,
             };
-            let error = decode_chain(root, |_, _| panic!("must not read"))
+            let error = decode_chain(root, 0, |_, _| panic!("must not read"))
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(&offset.to_string()), "{error}");
@@ -408,7 +443,7 @@ mod tests {
                 length,
                 crc: 0,
             };
-            let error = decode_chain(root, |_, _| panic!("must not read"))
+            let error = decode_chain(root, 0, |_, _| panic!("must not read"))
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("12288"), "{error}");
@@ -441,7 +476,7 @@ mod tests {
             length: len32(head.len()),
             crc: crc32fast::hash(&head),
         };
-        let error = decode_chain(root, |offset, _| {
+        let error = decode_chain(root, 0, |offset, _| {
             Ok(if offset == first {
                 head.clone()
             } else {
@@ -545,7 +580,7 @@ mod tests {
             length: len32(block.len()),
             crc: crc32fast::hash(&block),
         };
-        let (entries, _) = decode_chain(root, |offset, _| {
+        let (entries, _) = decode_chain(root, 0, |offset, _| {
             Ok(if offset == 12_288 {
                 block.clone()
             } else {
@@ -582,7 +617,7 @@ mod tests {
                 crc: crc32fast::hash(&blocks[0].1),
             }
         );
-        let (entries, runs) = decode_chain(root, |offset, _| {
+        let (entries, runs) = decode_chain(root, 0, |offset, _| {
             assert_eq!(offset, 12_288);
             Ok(blocks[0].1.clone())
         })
@@ -594,7 +629,7 @@ mod tests {
     #[test]
     fn a_zero_length_root_still_decodes_as_a_directory_without_chunks() {
         let (entries, runs) =
-            decode_chain(BlockRef::default(), |_, _| panic!("must not read")).unwrap();
+            decode_chain(BlockRef::default(), 0, |_, _| panic!("must not read")).unwrap();
         assert!(entries.is_empty() && runs.is_empty());
     }
 }

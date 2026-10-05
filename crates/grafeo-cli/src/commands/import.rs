@@ -532,7 +532,7 @@ mod tests {
     fn import_csv_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nonexistent.csv");
-        let db_path = dir.path().join("test.db");
+        let db_path = dir.path().join("test.grafeo");
 
         let result = import_csv(&missing, &db_path, true, None, "Node", true);
         assert!(result.is_err());
@@ -547,7 +547,7 @@ mod tests {
     fn import_jsonl_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nonexistent.jsonl");
-        let db_path = dir.path().join("test.db");
+        let db_path = dir.path().join("test.grafeo");
 
         let result = import_jsonl(&missing, &db_path, "Node", true);
         assert!(result.is_err());
@@ -565,7 +565,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let csv_path = dir.path().join("people.csv");
         std::fs::write(&csv_path, "name,age\nAlix,30\nGus,25\n").unwrap();
-        let db_path = dir.path().join("test.db");
+        let db_path = dir.path().join("test.grafeo");
 
         import_csv(&csv_path, &db_path, true, None, "Person", true).unwrap();
 
@@ -580,7 +580,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let csv_path = dir.path().join("data.tsv");
         std::fs::write(&csv_path, "name\tcity\nAlix\tAmsterdam\nGus\tBerlin\n").unwrap();
-        let db_path = dir.path().join("test.db");
+        let db_path = dir.path().join("test.grafeo");
 
         import_csv(&csv_path, &db_path, true, Some("\\t"), "Citizen", true).unwrap();
 
@@ -595,7 +595,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let csv_path = dir.path().join("raw.csv");
         std::fs::write(&csv_path, "Alix,30\nGus,25\nVincent,35\n").unwrap();
-        let db_path = dir.path().join("test.db");
+        let db_path = dir.path().join("test.grafeo");
 
         import_csv(&csv_path, &db_path, false, None, "RawRow", true).unwrap();
 
@@ -610,7 +610,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let csv_path = dir.path().join("empty.csv");
         std::fs::write(&csv_path, "").unwrap();
-        let db_path = dir.path().join("test.db");
+        let db_path = dir.path().join("test.grafeo");
 
         import_csv(&csv_path, &db_path, true, None, "Empty", true).unwrap();
 
@@ -629,7 +629,7 @@ mod tests {
             writeln!(f, r#"{{"name": "Alix", "city": "Amsterdam"}}"#).unwrap();
             writeln!(f, r#"{{"name": "Gus", "city": "Berlin"}}"#).unwrap();
         }
-        let db_path = dir.path().join("test.db");
+        let db_path = dir.path().join("test.grafeo");
 
         import_jsonl(&jsonl_path, &db_path, "Resident", true).unwrap();
 
@@ -644,7 +644,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let jsonl_path = dir.path().join("empty.jsonl");
         std::fs::write(&jsonl_path, "").unwrap();
-        let db_path = dir.path().join("test.db");
+        let db_path = dir.path().join("test.grafeo");
 
         import_jsonl(&jsonl_path, &db_path, "Ghost", true).unwrap();
 

@@ -320,7 +320,7 @@ mod tests {
     }
 
     fn overlap(a: PageRun, b: PageRun) -> bool {
-        a.first < b.end() && b.first < a.end()
+        a.first < b.end().unwrap() && b.first < a.end().unwrap()
     }
 
     /// Writes image A, then image B while A is active, and checks that B never
@@ -355,7 +355,7 @@ mod tests {
             assert_eq!(sorted(reader.used_runs()), sorted(a_runs.clone()));
         }
         let a_bytes = std::fs::read(dir.path().join("x")).unwrap();
-        let a_end = a_runs.iter().map(|run| run.end()).max().unwrap();
+        let a_end = a_runs.iter().map(|run| run.end().unwrap()).max().unwrap();
         assert_eq!(a_end, 12, "A uses pages 8..12");
 
         let pages = PageAllocator::from_used(a_runs.clone()).unwrap();
@@ -376,8 +376,8 @@ mod tests {
 
         let now = std::fs::read(dir.path().join("x")).unwrap();
         for run in &a_runs {
-            let start = usize::try_from(run.offset()).unwrap();
-            let end = usize::try_from(run.end() * PAGE_SIZE)
+            let start = usize::try_from(run.offset().unwrap()).unwrap();
+            let end = usize::try_from(run.end().unwrap() * PAGE_SIZE)
                 .unwrap()
                 .min(a_bytes.len());
             assert_eq!(

@@ -68,7 +68,8 @@ sha1 = "0.11"
 sha2 = "0.11"
 
 # Encryption (optional, behind `encryption` feature flag)
-aes-gcm = "0.11"
+# `zeroize` wipes the expanded AES round keys and the GHASH key when a cipher is dropped.
+aes-gcm = { version = "0.11.1", features = ["zeroize"] }
 hkdf = "0.13"
 argon2 = "0.6"
 zeroize = { version = "1", features = ["derive"] }

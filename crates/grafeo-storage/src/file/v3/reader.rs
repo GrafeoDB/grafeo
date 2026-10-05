@@ -81,19 +81,16 @@ impl<'f> ImageReader<'f> {
         cipher: Option<&'f ChunkCipher>,
     ) -> Result<Self> {
         let file: &'f File = file;
+        // An encrypted block is stored with its nonce and tag around it.
         let extra = if cipher.is_some() {
             ENCRYPTION_OVERHEAD
         } else {
             0
         };
-        let mut runs = Vec::new();
-        let (entries, _) = decode_chain(root, |offset, length| {
-            // The pages a block occupies are those of its stored length, which
-            // an encrypted block extends by the nonce and tag.
-            runs.push(PageRun {
-                first: offset / PAGE_SIZE,
-                count: PageRun::for_bytes(u64::from(length) + extra as u64),
-            });
+        let overhead = u32::try_from(extra).map_err(|_| {
+            Error::Internal(format!("encryption overhead {extra} does not fit a u32"))
+        })?;
+        let (entries, runs) = decode_chain(root, overhead, |offset, length| {
             let stored = read_at(file, offset, length as usize + extra).map_err(|error| {
                 Error::Serialization(format!("directory block at offset {offset}: {error}"))
             })?;

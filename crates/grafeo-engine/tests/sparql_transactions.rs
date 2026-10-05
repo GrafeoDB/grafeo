@@ -12,6 +12,14 @@
 
 #![allow(missing_docs)]
 
+#[cfg(all(
+    feature = "sparql",
+    feature = "triple-store",
+    feature = "wal",
+    feature = "grafeo-file"
+))]
+mod common;
+
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 mod tests {
     use grafeo_common::types::Value;
@@ -164,9 +172,10 @@ mod tests {
         assert!(default_graph(&db.session()).is_empty(), "expected empty");
     }
 
-    #[cfg(feature = "wal")]
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     mod durability {
         use super::*;
+        use crate::common::replay::reopened_after_crash;
         use grafeo_engine::config::StorageFormat;
         use std::path::Path;
 
@@ -174,9 +183,17 @@ mod tests {
             GrafeoDB::with_config(
                 Config::persistent(path)
                     .with_graph_model(GraphModel::Rdf)
-                    .with_storage_format(StorageFormat::WalDirectory),
+                    .with_storage_format(StorageFormat::SingleFile),
             )
             .unwrap()
+        }
+
+        /// The default graph and graph `<g>` after [`SEED`], in memory.
+        fn seeded() -> (Vec<(String, String)>, Vec<(String, String)>) {
+            let db = rdf_db();
+            let session = db.session();
+            session.execute_sparql(SEED).unwrap();
+            (default_graph(&session), named_graph(&session))
         }
 
         /// Seeds in an explicit transaction, so the WAL holds a commit marker
@@ -189,21 +206,26 @@ mod tests {
 
         #[test]
         fn rolled_back_updates_stay_gone_after_reopen() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("db");
-            let (default_before, named_before) = {
-                let db = open(&path);
-                let mut session = db.session();
-                seed_committed(&mut session);
-                let before = (default_graph(&session), named_graph(&session));
-                session.begin_transaction().unwrap();
-                run_all_update_forms(&session);
-                session.rollback().unwrap();
-                db.close().unwrap();
-                before
-            };
+            let (default_before, named_before) = seeded();
+            let (_dir, db) = reopened_after_crash(
+                "tests::durability::rolled_back_updates_stay_gone_after_reopen",
+                open,
+                |db| {
+                    let mut session = db.session();
+                    seed_committed(&mut session);
+                    session.begin_transaction().unwrap();
+                    run_all_update_forms(&session);
+                    session.rollback().unwrap();
+                    // What the writer sees is what replay must rebuild.
+                    assert_eq!(
+                        default_graph(&session),
+                        default_before,
+                        "live default graph"
+                    );
+                    assert_eq!(named_graph(&session), named_before, "live graph <g>");
+                },
+            );
 
-            let db = open(&path);
             let session = db.session();
             assert_eq!(default_graph(&session), default_before);
             assert_eq!(named_graph(&session), named_before);
@@ -216,39 +238,49 @@ mod tests {
         #[test]
         #[ignore = "WAL recovery groups records globally, not per transaction; fixed by the WAL commit-grouping work"]
         fn auto_committed_write_survives_later_rollback_and_reopen() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("db");
-            let before = {
-                let db = open(&path);
-                let mut session = db.session();
-                session.execute_sparql(SEED).unwrap();
-                let before = default_graph(&session);
-                session.begin_transaction().unwrap();
-                run_all_update_forms(&session);
-                session.rollback().unwrap();
-                db.close().unwrap();
-                before
-            };
+            let (before, _) = seeded();
+            let (_dir, db) = reopened_after_crash(
+                "tests::durability::auto_committed_write_survives_later_rollback_and_reopen",
+                open,
+                |db| {
+                    let mut session = db.session();
+                    session.execute_sparql(SEED).unwrap();
+                    session.begin_transaction().unwrap();
+                    run_all_update_forms(&session);
+                    session.rollback().unwrap();
+                    // What the writer sees is what replay must rebuild.
+                    assert_eq!(default_graph(&session), before, "live default graph");
+                },
+            );
 
-            let db = open(&path);
             assert_eq!(default_graph(&db.session()), before);
         }
 
         #[test]
         fn committed_updates_survive_reopen() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("db");
-            {
-                let db = open(&path);
-                let mut session = db.session();
-                seed_committed(&mut session);
-                session.begin_transaction().unwrap();
-                run_all_update_forms(&session);
-                session.commit().unwrap();
-                db.close().unwrap();
-            }
+            let (_dir, db) = reopened_after_crash(
+                "tests::durability::committed_updates_survive_reopen",
+                open,
+                |db| {
+                    let mut session = db.session();
+                    seed_committed(&mut session);
+                    session.begin_transaction().unwrap();
+                    run_all_update_forms(&session);
+                    session.commit().unwrap();
+                    // What the writer sees is what replay must rebuild.
+                    assert_eq!(
+                        default_graph(&session),
+                        expected_default_after_updates(),
+                        "live default graph"
+                    );
+                    assert_eq!(
+                        named_graph(&session),
+                        expected_named_after_updates(),
+                        "live graph <g>"
+                    );
+                },
+            );
 
-            let db = open(&path);
             let session = db.session();
             assert_eq!(default_graph(&session), expected_default_after_updates());
             assert_eq!(named_graph(&session), expected_named_after_updates());

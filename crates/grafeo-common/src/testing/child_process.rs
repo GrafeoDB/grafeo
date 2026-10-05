@@ -11,12 +11,23 @@
 //! taken, and the storage layer takes its locks through [`take_lock`], which
 //! waits while a child starts. Outside tests nothing starts children this
 //! way, so the guard is never contended and a held lock fails at once.
+//!
+//! A child that runs longer than [`DEADLINE`] (or the deadline given to
+//! [`run_with_deadline`] or [`output_with_deadline`]) is killed and the call
+//! fails, so a hung child fails its test instead of blocking the run.
 
-use std::io;
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::io::{self, Read};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{PoisonError, RwLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+/// How long [`run`] and [`output`] let a child run before they kill it.
+pub const DEADLINE: Duration = Duration::from_secs(120);
+
+/// How often a waiting call checks whether its child has exited.
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Held for writing while a child starts, for reading while a lock is taken.
 static CHILD_START: RwLock<()> = RwLock::new(());
@@ -28,42 +39,114 @@ static CHILDREN_STARTED: AtomicBool = AtomicBool::new(false);
 /// children.
 const RETRY_WINDOW: Duration = Duration::from_millis(250);
 
-/// Starts `command` and waits for it, like [`Command::status`].
+/// Starts `command` and waits for it, like [`Command::status`], for at most
+/// [`DEADLINE`].
 ///
 /// # Errors
 ///
-/// Returns the error of starting the child or of waiting for it.
+/// Returns the error of starting the child or of waiting for it, and an
+/// error of kind [`io::ErrorKind::TimedOut`] naming the command when the
+/// child ran past the deadline (it is killed).
 pub fn run(command: &mut Command) -> io::Result<ExitStatus> {
-    let mut child = {
-        let _starting = CHILD_START.write().unwrap_or_else(PoisonError::into_inner);
-        // `spawn` reports a failed exec, so it returns only once the child
-        // runs its own program, which closes the copies (Rust opens files
-        // close-on-exec), give or take the moment `take_lock` allows for.
-        let child = command.spawn()?;
-        CHILDREN_STARTED.store(true, Ordering::Relaxed);
-        child
-    };
-    child.wait()
+    run_with_deadline(command, DEADLINE)
+}
+
+/// [`run`] with its own deadline, for a child that needs longer (or, in a
+/// test of the deadline, less).
+///
+/// # Errors
+///
+/// As [`run`].
+pub fn run_with_deadline(command: &mut Command, deadline: Duration) -> io::Result<ExitStatus> {
+    let mut child = start(command)?;
+    wait_until(&mut child, command, deadline)
 }
 
 /// Starts `command` with its output captured and waits for it, like
-/// [`Command::output`].
+/// [`Command::output`], for at most [`DEADLINE`].
 ///
 /// # Errors
 ///
-/// Returns the error of starting the child or of waiting for it.
+/// As [`run`], and the error of reading the output of the child.
 pub fn output(command: &mut Command) -> io::Result<Output> {
-    let child = {
-        let _starting = CHILD_START.write().unwrap_or_else(PoisonError::into_inner);
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        CHILDREN_STARTED.store(true, Ordering::Relaxed);
-        child
-    };
-    child.wait_with_output()
+    output_with_deadline(command, DEADLINE)
+}
+
+/// [`output`] with its own deadline.
+///
+/// # Errors
+///
+/// As [`output`].
+pub fn output_with_deadline(command: &mut Command, deadline: Duration) -> io::Result<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = start(command)?;
+    // Read both pipes while waiting: a child that fills a pipe nobody reads
+    // blocks, and would only end at the deadline.
+    let stdout = read_to_end(child.stdout.take());
+    let stderr = read_to_end(child.stderr.take());
+    let status = wait_until(&mut child, command, deadline)?;
+    Ok(Output {
+        status,
+        stdout: joined(stdout)?,
+        stderr: joined(stderr)?,
+    })
+}
+
+/// Starts `command` while no database lock is being taken.
+fn start(command: &mut Command) -> io::Result<Child> {
+    let _starting = CHILD_START.write().unwrap_or_else(PoisonError::into_inner);
+    // `spawn` reports a failed exec, so it returns only once the child runs
+    // its own program, which closes the copies (Rust opens files
+    // close-on-exec), give or take the moment `take_lock` allows for.
+    let child = command.spawn()?;
+    CHILDREN_STARTED.store(true, Ordering::Relaxed);
+    Ok(child)
+}
+
+/// Waits for `child`, started from `command`, for at most `deadline`, and
+/// kills it once the deadline has passed.
+fn wait_until(child: &mut Child, command: &Command, deadline: Duration) -> io::Result<ExitStatus> {
+    let until = Instant::now() + deadline;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= until {
+            if let Err(error) = child.kill() {
+                // It exited after the last check: its status stands.
+                return child.try_wait()?.ok_or(error);
+            }
+            child.wait()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "the child process {command:?} ran longer than {deadline:?} and was killed"
+                ),
+            ));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Reads `pipe` to its end on another thread.
+fn read_to_end(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            pipe.read_to_end(&mut bytes)?;
+        }
+        Ok(bytes)
+    })
+}
+
+/// The bytes a [`read_to_end`] thread read.
+fn joined(reader: JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| io::Error::other("the thread reading the output of the child panicked"))?
 }
 
 /// Takes a database lock with `try_lock` while no child starts, so no
@@ -117,6 +200,60 @@ mod tests {
         assert!(run(&mut list_tests()).unwrap().success());
         let failing = run(list_tests().arg("--no-such-option")).unwrap();
         assert!(!failing.success());
+    }
+
+    /// Tells [`sleeping_child`] to sleep.
+    const SLEEP_VAR: &str = "GRAFEO_CHILD_PROCESS_SLEEP";
+
+    /// Child-process entry for [`a_child_past_its_deadline_is_killed`]: sleeps
+    /// far past the deadline; a no-op when run directly.
+    #[test]
+    fn sleeping_child() {
+        if std::env::var_os(SLEEP_VAR).is_some() {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    fn sleeper() -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "testing::child_process::tests::sleeping_child",
+                "--nocapture",
+            ])
+            .env(SLEEP_VAR, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    /// A child that runs past its deadline is killed, and the call fails with
+    /// an error naming the test the child runs, long before the child would
+    /// have ended.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot start child processes")]
+    fn a_child_past_its_deadline_is_killed() {
+        let short = Duration::from_millis(300);
+        let started = Instant::now();
+        let error = run_with_deadline(&mut sleeper(), short).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert!(error.to_string().contains("sleeping_child"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "run waited {:?}",
+            started.elapsed()
+        );
+
+        let started = Instant::now();
+        let error = output_with_deadline(&mut sleeper(), short).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert!(error.to_string().contains("sleeping_child"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "output waited {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

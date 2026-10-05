@@ -150,9 +150,18 @@ def write(path: Path, *, close_at_end: bool) -> None:
         os._exit(0)
 
 
+USAGE = "usage: released_fixtures.py [--unflushed <path>]"
+
+
 def main() -> None:
-    if len(sys.argv) == 3 and sys.argv[1] == "--unflushed":
-        write(Path(sys.argv[2]), close_at_end=False)
+    arguments = sys.argv[1:]
+    if arguments:
+        # Anything but the child mode exits before a file is touched: a
+        # regeneration first deletes the committed fixtures of the version.
+        if len(arguments) != 2 or arguments[0] != "--unflushed":
+            print(USAGE, file=sys.stderr)
+            sys.exit(2)
+        write(Path(arguments[1]), close_at_end=False)
         return
     out = OUT / grafeo.__version__
     if out.exists():

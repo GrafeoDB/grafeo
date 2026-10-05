@@ -31,7 +31,8 @@ pub enum OnDisk {
 ///
 /// Byte 4 of a file is `0x01` for a 0.5.x bincode header and `3` (followed by
 /// three zero bytes) for container v3. A directory holding `wal/` is a WAL
-/// directory.
+/// directory. Anything that is neither a regular file nor a directory (a
+/// FIFO, a socket, a device) is [`OnDisk::Unknown`] without being opened.
 ///
 /// # Errors
 ///
@@ -66,6 +67,11 @@ pub fn detect(path: &Path) -> Result<OnDisk> {
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(OnDisk::Unknown),
             Err(source) => Err(io_error(source)),
         };
+    }
+    // Anything else that is not a regular file (a FIFO, a socket, a device)
+    // is never opened: opening a FIFO blocks until a writer comes.
+    if !metadata.is_file() {
+        return Ok(OnDisk::Unknown);
     }
 
     let mut prefix = [0u8; 8];
@@ -219,6 +225,30 @@ mod tests {
         } else {
             assert_eq!(detected.unwrap(), OnDisk::Current);
         }
+    }
+
+    /// A FIFO at the path is neither a database file nor a directory: it is
+    /// unknown, decided from its metadata, never opened (opening a FIFO blocks
+    /// until a writer comes).
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_unknown_and_never_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("paris.grafeo");
+        match std::process::Command::new("mkfifo").arg(&path).status() {
+            Ok(status) if status.success() => {}
+            outcome => {
+                eprintln!("skipped: `mkfifo` is not available to create a FIFO ({outcome:?})");
+                return;
+            }
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let fifo = path.clone();
+        std::thread::spawn(move || sender.send(detect(&fifo).map_err(|e| e.to_string())));
+        let detected = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("detect returns without waiting for a writer to the FIFO");
+        assert_eq!(detected, Ok(OnDisk::Unknown));
     }
 
     #[test]

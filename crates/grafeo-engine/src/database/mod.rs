@@ -490,33 +490,39 @@ impl GrafeoDB {
                 // A 0.5.x file is read into memory as it is, with its sidecar
                 // WAL: nothing keeps it open, and nothing migrates it.
                 OnDisk::LegacyFile => {
-                    // It is never encrypted, and only a read-write open
-                    // migrates it into an encrypted file.
-                    if keys.is_encrypted() {
-                        return Err(Error::InvalidValue(format!(
-                            "the database is not encrypted, open it without a key: {} \
-                             (written by 0.5.x; a read-write open with the key migrates it \
-                             into an encrypted 0.6 file)",
-                            db_path.display()
-                        )));
-                    }
-                    grafeo_common::grafeo_info!(
-                        "{} was written by Grafeo 0.5.x and is read in place; a read-write \
-                         open migrates it to the 0.6 format (and keeps the 0.5.x files as \
-                         {}.pre-0.6)",
-                        db_path.display(),
-                        db_path.display()
-                    );
+                    // The 0.5.x reader loads into the LPG store: a build
+                    // without it would open an empty database.
+                    #[cfg(not(feature = "lpg"))]
+                    return Err(legacy_file_needs_lpg(db_path));
                     #[cfg(feature = "lpg")]
-                    Self::load_legacy_file(
-                        db_path,
-                        &store,
-                        &catalog,
-                        #[cfg(feature = "triple-store")]
-                        &rdf_store,
-                        &mut loaded_sections,
-                    )?;
-                    None
+                    {
+                        // It is never encrypted, and only a read-write open
+                        // migrates it into an encrypted file.
+                        if keys.is_encrypted() {
+                            return Err(Error::InvalidValue(format!(
+                                "the database is not encrypted, open it without a key: {} \
+                                 (written by 0.5.x; a read-write open with the key migrates \
+                                 it into an encrypted 0.6 file)",
+                                db_path.display()
+                            )));
+                        }
+                        grafeo_common::grafeo_info!(
+                            "{} was written by Grafeo 0.5.x and is read in place; a read-write \
+                             open migrates it to the 0.6 format (and keeps the 0.5.x files as \
+                             {}.pre-0.6)",
+                            db_path.display(),
+                            db_path.display()
+                        );
+                        Self::load_legacy_file(
+                            db_path,
+                            &store,
+                            &catalog,
+                            #[cfg(feature = "triple-store")]
+                            &rdf_store,
+                            &mut loaded_sections,
+                        )?;
+                        None
+                    }
                 }
                 // The manager says what is wrong with a file it cannot read.
                 OnDisk::Current | OnDisk::Unknown if db_path.is_file() => {
@@ -600,9 +606,10 @@ impl GrafeoDB {
                             keys.container_cipher(id)
                         })?
                     }
-                    // Without the migration the manager refuses a 0.5.x file.
+                    // The migration reads the old database into the LPG
+                    // store, so a build without it cannot migrate.
                     #[cfg(not(feature = "lpg"))]
-                    OnDisk::LegacyFile => GrafeoFileManager::open(db_path, None)?,
+                    OnDisk::LegacyFile => return Err(legacy_file_needs_lpg(db_path)),
                     // For any other file the manager says what is wrong.
                     OnDisk::Current | OnDisk::Unknown if db_path.is_file() => {
                         GrafeoFileManager::open_with_cipher_for(db_path, |id| {
@@ -1100,7 +1107,8 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the conversion fails (e.g. more than 32,767
-    /// distinct labels or edge types).
+    /// distinct labels or edge types), or after a commit that did not
+    /// complete (see [`TransactionManager`]).
     ///
     /// [`CompactStore`]: grafeo_core::graph::compact::CompactStore
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
@@ -1111,14 +1119,24 @@ impl GrafeoDB {
     /// Runs `change`, which replaces the store, with the periodic checkpoint
     /// timer stopped (a checkpoint running meanwhile would write the old
     /// store), then restarts the timer on the new state, also when `change`
-    /// fails.
+    /// fails. `change` runs with commits held off (see
+    /// [`TransactionManager::hold_commits`]), taken once the timer is
+    /// stopped: the new store holds every commit whole, and nothing runs
+    /// after a commit that did not complete (the new store would be built
+    /// from its stamped part).
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
     fn with_checkpoint_timer_paused(&mut self, change: fn(&mut Self) -> Result<()>) -> Result<()> {
         #[cfg(feature = "grafeo-file")]
         self.stop_checkpoint_timer();
-        let result = change(self);
+        let transaction_manager = Arc::clone(&self.transaction_manager);
+        let result = transaction_manager
+            .hold_commits()
+            .and_then(|_commits| change(self));
+        // After a commit that did not complete the timer could never write.
         #[cfg(feature = "grafeo-file")]
-        self.start_checkpoint_timer();
+        if !transaction_manager.has_incomplete_commit() {
+            self.start_checkpoint_timer();
+        }
         result
     }
 
@@ -1195,7 +1213,10 @@ impl GrafeoDB {
 
         // Phase 5c: register the overlay consumer so growing-overlay
         // pressure triggers an automatic merge-into-base.
-        let overlay_consumer = Arc::new(section_consumer::OverlayConsumer::new(&layered));
+        let overlay_consumer = Arc::new(section_consumer::OverlayConsumer::new(
+            &layered,
+            &self.transaction_manager,
+        ));
         self.buffer_manager.register_consumer(overlay_consumer);
 
         self.layered_store = Some(layered);
@@ -1216,8 +1237,8 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the database was not previously compacted, or if
-    /// the merge fails.
+    /// Returns an error if the database was not previously compacted, if
+    /// the merge fails, or after a commit that did not complete.
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
     pub fn recompact(&mut self) -> Result<()> {
         self.with_checkpoint_timer_paused(Self::merge_overlay_into_base)
@@ -1284,7 +1305,10 @@ impl GrafeoDB {
 
         // Phase 5c: re-register overlay consumer for the new layered store.
         self.buffer_manager.unregister_consumer("overlay:LpgStore");
-        let overlay_consumer = Arc::new(section_consumer::OverlayConsumer::new(&new_layered));
+        let overlay_consumer = Arc::new(section_consumer::OverlayConsumer::new(
+            &new_layered,
+            &self.transaction_manager,
+        ));
         self.buffer_manager.register_consumer(overlay_consumer);
 
         self.layered_store = Some(new_layered);
@@ -1697,7 +1721,10 @@ impl GrafeoDB {
             self.compact_tiered = Some(tiered);
         }
 
-        let overlay_consumer = Arc::new(section_consumer::OverlayConsumer::new(&layered));
+        let overlay_consumer = Arc::new(section_consumer::OverlayConsumer::new(
+            &layered,
+            &self.transaction_manager,
+        ));
         self.buffer_manager.register_consumer(overlay_consumer);
 
         self.layered_store = Some(layered);
@@ -2339,6 +2366,13 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the WAL can't be flushed (check disk space/permissions).
+    /// After a commit that did not complete (see
+    /// [`TransactionManager`]), it
+    /// writes no checkpoint, keeps the WAL, releases the database, and
+    /// returns that commit's error. The next open shows the database without
+    /// the failed commit when it failed before its WAL records were written;
+    /// after them, the WAL holds the whole commit, and the next open replays
+    /// it whole.
     pub fn close(&self) -> Result<()> {
         let mut is_open = self.is_open.write();
         if !*is_open {
@@ -2371,6 +2405,31 @@ impl GrafeoDB {
             }
             *is_open = false;
             return Ok(());
+        }
+
+        // After a commit that did not complete, the store holds its stamped
+        // part, which no checkpoint may write. The WAL holds every complete
+        // commit, and the failed one only as a complete group (when it failed
+        // after writing it): it stays for the next open to replay, the file
+        // keeps its last checkpoint, and both are released.
+        if self.transaction_manager.has_incomplete_commit() {
+            #[cfg(feature = "wal")]
+            if let Some(ref wal) = self.wal {
+                if let Err(e) = wal.sync() {
+                    grafeo_common::grafeo_warn!("failed to sync the WAL while closing: {e}");
+                }
+                wal.close_active_log();
+            }
+            #[cfg(feature = "grafeo-file")]
+            if let Some(ref fm) = self.file_manager
+                && let Err(e) = fm.close()
+            {
+                grafeo_common::grafeo_warn!("failed to release the database file: {e}");
+            }
+            #[cfg(feature = "wal")]
+            drop(self.directory_lock.lock().take());
+            *is_open = false;
+            return self.transaction_manager.check_no_incomplete_commit();
         }
 
         // For single-file format: checkpoint to .grafeo file, then clean up sidecar WAL.
@@ -2938,15 +2997,9 @@ impl GrafeoDB {
     /// separately after this returns.
     #[cfg(feature = "grafeo-file")]
     fn checkpoint_to_file(&self, fm: &GrafeoFileManager) -> Result<flush::FlushResult> {
-        let sources = self.checkpoint_sources();
-        let sections = sources.sections();
-        let section_refs: Vec<&dyn grafeo_common::storage::Section> =
-            sections.iter().map(|s| s.as_ref()).collect();
-
         flush::flush(
             fm,
-            &section_refs,
-            &sources.context(),
+            &self.checkpoint_sources(),
             #[cfg(feature = "wal")]
             self.wal.as_deref(),
         )
@@ -2958,6 +3011,19 @@ impl GrafeoDB {
     pub fn file_manager(&self) -> Option<&Arc<GrafeoFileManager>> {
         self.file_manager.as_ref()
     }
+}
+
+/// The error of a build without the `lpg` feature for a file written by
+/// 0.5.x: it can neither read it (the 0.5.x reader loads into the LPG store)
+/// nor migrate it.
+#[cfg(all(feature = "grafeo-file", not(feature = "lpg")))]
+fn legacy_file_needs_lpg(path: &std::path::Path) -> Error {
+    Error::InvalidValue(format!(
+        "{} was written by Grafeo 0.5.x, and this build cannot read or migrate it (it lacks \
+         the `lpg` feature): open it read-write once with a build that has the `lpg` feature, \
+         which migrates it to the 0.6 file format",
+        path.display()
+    ))
 }
 
 impl Drop for GrafeoDB {
@@ -3360,13 +3426,13 @@ mod tests {
 
     /// `DurabilityMode::Adaptive` syncs the WAL from a background flusher.
     /// None was started, so an adaptive database never synced its WAL.
-    #[cfg(feature = "wal")]
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     #[test]
     fn adaptive_durability_syncs_the_wal_in_the_background() {
         let dir = tempfile::tempdir().unwrap();
         let db = GrafeoDB::with_config(
-            Config::persistent(dir.path().join("db"))
-                .with_storage_format(crate::config::StorageFormat::WalDirectory)
+            Config::persistent(dir.path().join("db.grafeo"))
+                .with_storage_format(crate::config::StorageFormat::SingleFile)
                 .with_wal_durability(crate::config::DurabilityMode::Adaptive {
                     target_interval_ms: 10,
                 }),
@@ -3424,14 +3490,14 @@ mod tests {
         // Session should be created successfully
     }
 
-    #[cfg(feature = "wal")]
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     #[test]
     fn test_persistent_database_recovery() {
         use grafeo_common::types::Value;
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test_db");
+        let db_path = dir.path().join("test_db.grafeo");
 
         // Create database and add some data
         {
@@ -3447,11 +3513,11 @@ mod tests {
 
             let _edge = db.create_edge(alix, gus, "KNOWS").unwrap();
 
-            // Explicitly close to flush WAL
+            // close() checkpoints: the file holds everything written
             db.close().unwrap();
         }
 
-        // Reopen and verify data was recovered
+        // Reopen and verify the data was read back from the file
         {
             let db = GrafeoDB::open(&db_path).unwrap();
 
@@ -3467,13 +3533,13 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "wal")]
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     #[test]
     fn test_wal_logging() {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("wal_test_db");
+        let db_path = dir.path().join("wal_test_db.grafeo");
 
         let db = GrafeoDB::open(&db_path).unwrap();
 
@@ -3489,33 +3555,56 @@ mod tests {
         db.close().unwrap();
     }
 
-    #[cfg(feature = "wal")]
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     #[test]
     fn test_wal_recovery_multiple_sessions() {
-        // Tests that WAL recovery works correctly across multiple open/close cycles
+        // Tests that WAL recovery works correctly across multiple open/crash
+        // cycles: sessions 1 and 2 run in child processes that exit without
+        // close(), so nothing is checkpointed and each open replays the WAL.
         use grafeo_common::types::Value;
         use tempfile::tempdir;
 
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("multi_session_db");
+        const SESSION_VAR: &str = "GRAFEO_MULTI_SESSION_TEST_SESSION";
+        const PATH_VAR: &str = "GRAFEO_MULTI_SESSION_TEST_PATH";
 
-        // Session 1: Create initial data
+        if let (Ok(session), Some(path)) = (std::env::var(SESSION_VAR), std::env::var_os(PATH_VAR))
         {
-            let db = GrafeoDB::open(&db_path).unwrap();
-            let alix = db.create_node(&["Person"]).unwrap();
-            db.set_node_property(alix, "name", Value::from("Alix"))
-                .unwrap();
-            db.close().unwrap();
+            let db = GrafeoDB::open(&path).unwrap();
+            match session.as_str() {
+                // Session 1: Create initial data
+                "1" => {
+                    let alix = db.create_node(&["Person"]).unwrap();
+                    db.set_node_property(alix, "name", Value::from("Alix"))
+                        .unwrap();
+                }
+                // Session 2: Add more data
+                "2" => {
+                    assert_eq!(db.node_count(), 1); // Previous data recovered
+                    let gus = db.create_node(&["Person"]).unwrap();
+                    db.set_node_property(gus, "name", Value::from("Gus"))
+                        .unwrap();
+                }
+                other => panic!("unknown session {other}"),
+            }
+            // Crash: no close(), no checkpoint, no destructors.
+            std::process::exit(0);
         }
 
-        // Session 2: Add more data
-        {
-            let db = GrafeoDB::open(&db_path).unwrap();
-            assert_eq!(db.node_count(), 1); // Previous data recovered
-            let gus = db.create_node(&["Person"]).unwrap();
-            db.set_node_property(gus, "name", Value::from("Gus"))
-                .unwrap();
-            db.close().unwrap();
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("multi_session_db.grafeo");
+        for session in ["1", "2"] {
+            let status = grafeo_common::testing::child_process::run(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "database::tests::test_wal_recovery_multiple_sessions",
+                        "--nocapture",
+                    ])
+                    .env(SESSION_VAR, session)
+                    .env(PATH_VAR, &db_path),
+            )
+            .unwrap();
+            assert!(status.success(), "session {session} failed");
         }
 
         // Session 3: Verify all data
@@ -3532,7 +3621,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "wal")]
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     #[test]
     fn test_database_consistency_after_mutations() {
         // Tests that database remains consistent after a series of create/delete operations
@@ -3540,7 +3629,7 @@ mod tests {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("consistency_db");
+        let db_path = dir.path().join("consistency_db.grafeo");
 
         {
             let db = GrafeoDB::open(&db_path).unwrap();
@@ -3585,14 +3674,14 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "wal")]
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     #[test]
     fn test_close_is_idempotent() {
         // Calling close() multiple times should not cause errors
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("close_test_db");
+        let db_path = dir.path().join("close_test_db.grafeo");
 
         let db = GrafeoDB::open(&db_path).unwrap();
         db.create_node(&["Test"]).unwrap();

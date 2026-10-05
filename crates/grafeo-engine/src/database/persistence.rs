@@ -585,8 +585,10 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the save operation fails, or if an encrypted
-    /// database is saved to a path that is not a `.grafeo` file.
+    /// Returns an error if the save operation fails, if an encrypted
+    /// database is saved to a path that is not a `.grafeo` file, or after a
+    /// commit that did not complete (see
+    /// [`TransactionManager`](crate::transaction::TransactionManager)).
     ///
     /// Requires the `wal` feature for persistence support.
     #[cfg(feature = "wal")]
@@ -598,6 +600,11 @@ impl super::GrafeoDB {
         if path.extension().is_some_and(|ext| ext == "grafeo") {
             return self.save_as_grafeo_file(path);
         }
+
+        // The copy holds every commit whole, and none that did not complete
+        // (whose stamped part the store holds); refused before the target
+        // exists.
+        let _commits = self.transaction_manager.hold_commits()?;
 
         // Create target database with WAL enabled; with a key, its open
         // refuses the WAL-directory format instead of writing plaintext.
@@ -809,8 +816,11 @@ impl super::GrafeoDB {
         use grafeo_storage::file::GrafeoFileManager;
         use grafeo_storage::file::v3::header::new_database_id;
 
+        // Commits held off until the image is written: it holds every commit
+        // whole, and none that did not complete.
+        let commits = self.transaction_manager.hold_commits()?;
         let sources = self.checkpoint_sources();
-        let sections = sources.sections();
+        let sections = sources.sections(&commits);
         let section_refs: Vec<&dyn grafeo_common::storage::Section> =
             sections.iter().map(AsRef::as_ref).collect();
         let database_id = new_database_id();
@@ -819,9 +829,9 @@ impl super::GrafeoDB {
             database_id,
             keys.container_cipher(database_id),
         )?;
-        let written = fm
-            .write_checkpoint(&section_refs, &sources.context().checkpoint_header())
-            .and_then(|()| fm.close());
+        let written = fm.write_checkpoint(&section_refs, &sources.context().checkpoint_header());
+        drop(commits);
+        let written = written.and_then(|()| fm.close());
         if written.is_err() {
             drop(fm);
             // Best effort: the error that matters is the one returned.
@@ -855,19 +865,26 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the copy operation fails.
+    /// Returns an error if the copy operation fails, or after a commit that
+    /// did not complete.
     pub fn to_memory(&self) -> Result<Self> {
         use grafeo_common::storage::SectionType;
 
         let mut target = Self::with_config(Config::in_memory())?;
         let mut sections: Vec<(SectionType, Option<Vec<u8>>)> = Vec::new();
-        for section in self.checkpoint_sources().sections() {
-            // The LPG section holds the store's nodes and edges (the overlay's,
-            // after `compact()`): copy them instead, in the section's place.
-            if section.section_type() == SectionType::LpgStore {
-                copy_graph_data(self.lpg_store(), target.lpg_store())?;
-            } else {
-                sections.push((section.section_type(), Some(section.serialize()?)));
+        {
+            // The copy holds every commit whole, and none that did not
+            // complete.
+            let commits = self.transaction_manager.hold_commits()?;
+            for section in self.checkpoint_sources().sections(&commits) {
+                // The LPG section holds the store's nodes and edges (the
+                // overlay's, after `compact()`): copy them instead, in the
+                // section's place.
+                if section.section_type() == SectionType::LpgStore {
+                    copy_graph_data(self.lpg_store(), target.lpg_store())?;
+                } else {
+                    sections.push((section.section_type(), Some(section.serialize()?)));
+                }
             }
         }
 
@@ -963,8 +980,12 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if serialization fails.
+    /// Returns an error if serialization fails, or after a commit that did
+    /// not complete.
     pub fn export_snapshot(&self) -> Result<Vec<u8>> {
+        // The snapshot holds every commit whole, and none that did not
+        // complete (whose stamped part the store holds).
+        let _commits = self.transaction_manager.hold_commits()?;
         let nodes = collect_snapshot_nodes(self.lpg_store());
         let edges = collect_snapshot_edges(self.lpg_store());
 
@@ -1131,8 +1152,11 @@ impl super::GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the snapshot is invalid, contains dangling edge
-    /// references, has duplicate IDs, or deserialization fails.
+    /// references, has duplicate IDs, or deserialization fails, or after a
+    /// commit that did not complete (the restored database could never be
+    /// checkpointed, see [`TransactionManager`](crate::transaction::TransactionManager)).
     pub fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
+        self.transaction_manager.check_no_incomplete_commit()?;
         if data.is_empty() {
             return Err(Error::Internal("empty snapshot data".to_string()));
         }
@@ -1211,18 +1235,30 @@ impl super::GrafeoDB {
     // ADMIN API: Iteration
     // =========================================================================
 
-    /// Returns an iterator over all nodes in the database.
+    /// Returns an iterator over all nodes in the database, as of the current
+    /// epoch (see [`current_epoch`](Self::current_epoch)), in id order.
     ///
     /// Useful for dump/export operations.
     pub fn iter_nodes(&self) -> impl Iterator<Item = grafeo_core::graph::lpg::Node> + '_ {
-        self.lpg_store().all_nodes()
+        let epoch = self.read_epoch();
+        let store = self.lpg_store();
+        store
+            .all_node_ids()
+            .into_iter()
+            .filter_map(move |id| store.get_node_at_epoch(id, epoch))
     }
 
-    /// Returns an iterator over all edges in the database.
+    /// Returns an iterator over all edges in the database, as of the current
+    /// epoch (see [`current_epoch`](Self::current_epoch)), in id order.
     ///
     /// Useful for dump/export operations.
     pub fn iter_edges(&self) -> impl Iterator<Item = grafeo_core::graph::lpg::Edge> + '_ {
-        self.lpg_store().all_edges()
+        let epoch = self.read_epoch();
+        let store = self.lpg_store();
+        // The store numbers its edges densely.
+        (0..store.next_edge_id()).filter_map(move |id| {
+            store.get_edge_at_epoch(grafeo_common::types::EdgeId::new(id), epoch)
+        })
     }
 }
 

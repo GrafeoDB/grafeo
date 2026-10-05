@@ -91,11 +91,12 @@ impl super::GrafeoDB {
     ) -> Vec<grafeo_common::types::NodeId> {
         // The index also holds nodes created by transactions that have not
         // committed yet; return only what a reader at the current epoch sees.
+        let epoch = self.read_epoch();
         let Ok(store) = self.read_store(super::direct::DirectTarget::Current) else {
             return Vec::new();
         };
         let candidates = store.find_nodes_by_property(property, value);
-        store.filter_visible_node_ids(&candidates, store.current_epoch())
+        store.filter_visible_node_ids(&candidates, epoch)
     }
 
     // =========================================================================

@@ -218,7 +218,7 @@ fn a_write_during_a_commit_to_what_it_wrote_conflicts() {
 // WAL order: a crashed child process, then a reopen that replays the WAL
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "wal")]
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod wal {
     use super::*;
     use grafeo_common::testing::child_process;
@@ -227,38 +227,27 @@ mod wal {
 
     const SCENARIO_VAR: &str = "GRAFEO_COMMIT_COMPLETION_SCENARIO";
     const PATH_VAR: &str = "GRAFEO_COMMIT_COMPLETION_PATH";
-    const FORMAT_VAR: &str = "GRAFEO_COMMIT_COMPLETION_FORMAT";
 
-    fn formats(dir: &Path) -> Vec<(&'static str, PathBuf)> {
-        let mut formats = vec![("wal-directory", dir.join("dir-db"))];
-        #[cfg(feature = "grafeo-file")]
-        formats.push(("single-file", dir.join("single.grafeo")));
-        formats
-    }
-
-    fn open(path: &Path, format: &str) -> GrafeoDB {
-        let format = match format {
-            "wal-directory" => StorageFormat::WalDirectory,
-            "single-file" => StorageFormat::SingleFile,
-            other => panic!("unknown format {other}"),
-        };
-        GrafeoDB::with_config(Config::persistent(path).with_storage_format(format)).unwrap()
+    fn open(path: &Path) -> GrafeoDB {
+        GrafeoDB::with_config(
+            Config::persistent(path).with_storage_format(StorageFormat::SingleFile),
+        )
+        .unwrap()
     }
 
     /// Runs `scenario` in a child process that exits without closing the
     /// database, then reopens it and returns the hub's `by` (the hub is the
     /// first node the scenario creates).
-    fn by_after_crash(scenario: &str, path: &Path, format: &str) -> Option<Value> {
+    fn by_after_crash(scenario: &str, path: &Path) -> Option<Value> {
         let status = child_process::run(
             std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "wal::crash_child", "--nocapture"])
                 .env(SCENARIO_VAR, scenario)
-                .env(PATH_VAR, path)
-                .env(FORMAT_VAR, format),
+                .env(PATH_VAR, path),
         )
         .unwrap();
-        assert!(status.success(), "{format}: scenario {scenario} failed");
-        let db = open(path, format);
+        assert!(status.success(), "scenario {scenario} failed");
+        let db = open(path);
         let hub = db.execute("MATCH (h:Hub) RETURN id(h)").unwrap().rows()[0][0].clone();
         let Value::Int64(hub) = hub else {
             panic!("no hub: {hub:?}");
@@ -273,7 +262,7 @@ mod wal {
             return;
         };
         let path = PathBuf::from(std::env::var_os(PATH_VAR).unwrap());
-        let db = Arc::new(open(&path, &std::env::var(FORMAT_VAR).unwrap()));
+        let db = Arc::new(open(&path));
         let hub = db.create_node(&["Hub"]).unwrap();
         match scenario.as_str() {
             "direct_write" => {
@@ -303,13 +292,10 @@ mod wal {
     #[test]
     fn a_direct_write_during_a_commit_is_replayed_after_it() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            assert_eq!(
-                by_after_crash("direct_write", &path, format),
-                Some(Value::from("later")),
-                "{format}"
-            );
-        }
+        assert_eq!(
+            by_after_crash("direct_write", &dir.path().join("single.grafeo")),
+            Some(Value::from("later"))
+        );
     }
 
     /// A transaction that begins and commits while another commits is
@@ -317,12 +303,9 @@ mod wal {
     #[test]
     fn a_transaction_during_a_commit_is_replayed_after_it() {
         let dir = tempfile::tempdir().unwrap();
-        for (format, path) in formats(dir.path()) {
-            assert_eq!(
-                by_after_crash("transaction", &path, format),
-                Some(Value::from("later")),
-                "{format}"
-            );
-        }
+        assert_eq!(
+            by_after_crash("transaction", &dir.path().join("single.grafeo")),
+            Some(Value::from("later"))
+        );
     }
 }

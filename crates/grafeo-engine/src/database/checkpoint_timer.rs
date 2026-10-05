@@ -116,6 +116,15 @@ impl CheckpointTimer {
                 #[cfg(feature = "wal")]
                 wal,
             ) {
+                // After a commit that did not complete, no checkpoint can
+                // ever succeed (it would write the commit's stamped part):
+                // say so once and stop.
+                if sources.transaction_manager.has_incomplete_commit() {
+                    grafeo_common::grafeo_error!(
+                        "periodic checkpoints stop: {e}; the file keeps its last checkpoint"
+                    );
+                    break;
+                }
                 eprintln!("periodic checkpoint failed: {e}");
             }
         }
@@ -127,14 +136,9 @@ impl CheckpointTimer {
         sources: &CheckpointSources,
         #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::LpgWal>,
     ) -> Result<()> {
-        let sections = sources.sections();
-        let section_refs: Vec<&dyn grafeo_common::storage::Section> =
-            sections.iter().map(|s| s.as_ref()).collect();
-
         super::flush::flush(
             file_manager,
-            &section_refs,
-            &sources.context(),
+            sources,
             #[cfg(feature = "wal")]
             wal,
         )

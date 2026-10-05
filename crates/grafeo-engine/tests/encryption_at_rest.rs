@@ -606,7 +606,7 @@ fn an_encrypted_database_has_no_spill_path() {
 /// Under memory pressure an unencrypted database moves its compacted base to
 /// a spill file next to it; an encrypted one keeps it in memory and writes
 /// nothing next to its file but the file and its sidecar WAL.
-#[cfg(feature = "compact-store")]
+#[cfg(all(feature = "compact-store", feature = "spill", feature = "mmap"))]
 #[test]
 fn an_encrypted_database_spills_nothing_to_disk() {
     let dir = tempfile::tempdir().unwrap();

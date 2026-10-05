@@ -1,8 +1,8 @@
 //! A transaction reads the edges it created, with their type, on every kind
-//! of store: in memory, with CDC, in a `.grafeo` file, in a WAL directory and
-//! after `compact()`. Persistent databases used to read the type of a new
-//! edge at the committed state, so `-[:KNOWS]->` missed it and `type(r)` was
-//! null until the commit.
+//! of store: in memory, with CDC, in a `.grafeo` file, in a single file
+//! without that extension and after `compact()`. Persistent databases used
+//! to read the type of a new edge at the committed state, so `-[:KNOWS]->`
+//! missed it and `type(r)` was null until the commit.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test transaction_edge_reads
@@ -96,12 +96,16 @@ fn in_a_grafeo_file_with_cdc() {
     db.close().unwrap();
 }
 
-#[cfg(feature = "wal")]
+#[cfg(feature = "grafeo-file")]
 #[test]
-fn in_a_wal_directory() {
+fn in_a_file_without_the_grafeo_extension() {
     let dir = tempfile::tempdir().unwrap();
-    let db = GrafeoDB::open(dir.path().join("edges")).unwrap();
-    reads_its_new_edge(&db, "a WAL directory");
+    let db = GrafeoDB::with_config(
+        Config::persistent(dir.path().join("edges"))
+            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
+    )
+    .unwrap();
+    reads_its_new_edge(&db, "a file without the .grafeo extension");
     db.close().unwrap();
 }
 

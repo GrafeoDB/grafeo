@@ -680,6 +680,84 @@ fn interrupted_migrations_resume_from_the_files_present() {
     }
 }
 
+/// A power loss can keep a later rename of a migration and lose an earlier one:
+/// the sidecar WAL (or the pending checkpoint image) under its kept name while
+/// the 0.5.x file is still `<p>`, next to the image. The next read-write open
+/// moves the side file back and migrates again, so the migrated database holds
+/// the side file's changes, and the files are kept as after any migration.
+#[test]
+fn a_side_file_kept_before_its_database_file_moved_is_moved_back() {
+    for (kept, side, kept_side) in [
+        (fixture_kept(), ".wal", ".pre-0.6.wal"),
+        (pending_kept(), ".checkpoint", ".pre-0.6.checkpoint"),
+    ] {
+        let expected = kept_contents(&kept);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        arrange_kept(&kept, &path);
+        std::fs::rename(with_suffix(&path, side), with_suffix(&path, kept_side)).unwrap();
+        write_v3(&with_suffix(&path, ".migrating"), &["Vincent"]);
+        std::fs::write(with_suffix(&path, ".migrate.lock"), b"").unwrap();
+        assert_migrated(
+            &path,
+            &expected,
+            &kept,
+            &format!("<p>{kept_side} without <p>.pre-0.6"),
+        );
+    }
+}
+
+/// In the same state a read-only open (and `open_in_memory`) would read the
+/// 0.5.x file without its sidecar WAL or pending checkpoint image: it fails,
+/// saying a read-write open finishes the migration, and changes nothing.
+#[test]
+fn a_read_only_open_refuses_a_side_file_kept_before_its_database_file_moved() {
+    for (kept, side, kept_side) in [
+        (fixture_kept(), ".wal", ".pre-0.6.wal"),
+        (pending_kept(), ".checkpoint", ".pre-0.6.checkpoint"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        arrange_kept(&kept, &path);
+        std::fs::rename(with_suffix(&path, side), with_suffix(&path, kept_side)).unwrap();
+        write_v3(&with_suffix(&path, ".migrating"), &["Vincent"]);
+        let before = files(dir.path());
+        for (open, error) in [
+            ("read-only", read_only_error(&path)),
+            ("in-memory", in_memory_error(&path)),
+        ] {
+            assert!(
+                error.contains(&with_suffix(&path, kept_side).display().to_string())
+                    && error.contains("a read-write open finishes the migration"),
+                "<p>{kept_side}: the {open} error names the kept file and says a read-write \
+                 open finishes the migration: {error}"
+            );
+            assert!(
+                files(dir.path()) == before,
+                "<p>{kept_side}: the {open} open changes nothing"
+            );
+        }
+    }
+}
+
+/// The same leftovers next to a 0.6 `<p>` (a stale image and a kept WAL of an
+/// earlier migration) are no part of a migration: a read-only open reads the
+/// 0.6 file.
+#[test]
+fn a_read_only_open_of_a_0_6_file_ignores_a_stale_image_and_a_kept_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.grafeo");
+    write_v3(&path, &["Vincent"]);
+    write_v3(&with_suffix(&path, ".migrating"), &["Mia"]);
+    copy(
+        &with_suffix(&fixture(), ".wal"),
+        &with_suffix(&path, ".pre-0.6.wal"),
+    );
+    let db = GrafeoDB::open_read_only(&path).unwrap();
+    assert_eq!(people(&db), names(&["Vincent"]), "the 0.6 file is read");
+    db.close().unwrap();
+}
+
 /// A database that was migrated but whose 0.6 file is missing (only a kept
 /// copy is left) is never recreated as an empty database: every open fails with
 /// an error naming the kept copy, and nothing is created.

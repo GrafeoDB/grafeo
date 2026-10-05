@@ -12,7 +12,9 @@
 //!    are logged once it is in place).
 //! 2. Move the old file to `<path>.pre-0.6`, its sidecar WAL `<path>.wal` to
 //!    `<path>.pre-0.6.wal` and a checkpoint image 0.5.44 left pending,
-//!    `<path>.checkpoint`, to `<path>.pre-0.6.checkpoint`.
+//!    `<path>.checkpoint`, to `<path>.pre-0.6.checkpoint`, syncing the
+//!    directory after each move: a power loss keeps the first moves, never a
+//!    later one without an earlier one.
 //! 3. Rename `<path>.migrating` to `<path>` and sync the directory.
 //!
 //! The old files are kept byte for byte. To go back to 0.5.x, move the 0.6
@@ -45,7 +47,8 @@
 //! | Files present | Next read-write open |
 //! | --- | --- |
 //! | `<path>` (0.5.x) and `<path>.migrating` | removes the image, which may be incomplete, and migrates again |
-//! | `<path>.pre-0.6` and `<path>.migrating`, no `<path>` | moves a 0.5.x sidecar WAL or checkpoint image still under the old names to the kept names, syncs, then renames the image to `<path>` |
+//! | `<path>` (0.5.x), `<path>.migrating` and a side file under its kept name (`<path>.pre-0.6.wal` or `<path>.pre-0.6.checkpoint`), no `<path>.pre-0.6` | moves the side file back to its 0.5.x name and syncs, then as above (left by a power loss where the side file's move reached the disk and the database file's did not) |
+//! | `<path>.pre-0.6` and `<path>.migrating`, no `<path>` | moves a 0.5.x sidecar WAL or checkpoint image still under the old names to the kept names, syncing after each move, then renames the image to `<path>` |
 //! | `<path>.migrating`, no `<path>` and no `<path>.pre-0.6` | fails with an error naming the files: the old database is missing, and nothing is guessed |
 //! | `<path>` (0.6) and `<path>.pre-0.6` | nothing to do |
 //!
@@ -67,7 +70,8 @@
 //!
 //! A read-only open (and `open_in_memory`) never migrates and never changes
 //! these files: it reads a 0.5.x `<path>` in place, and fails for a state
-//! without `<path>` ([`check_read_only`]).
+//! without `<path>` and for a 0.5.x `<path>` whose side file a cut-off
+//! migration moved to its kept name ([`check_read_only`]).
 //!
 //! ## The lock
 //!
@@ -278,14 +282,13 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
         remove_after_failure(&migrating);
         return Err(error);
     }
+    // The move of the old file is durable before a side file moves: a power
+    // loss that kept a side file's move without it would leave a 0.5.x
+    // `<path>` without its sidecar WAL.
+    sync_parent_dir(path)?;
     // The side files go before the image comes: a 0.6 database next to the
     // 0.5.x sidecar WAL would replay it.
-    for (from, to, point) in side_files {
-        if exists(from)? {
-            rename(from, to, point)?;
-        }
-    }
-    sync_parent_dir(path)?;
+    move_side_files(path, side_files)?;
     maybe_crash("migrate:after_old");
     maybe_pause("migrate:after_old");
 
@@ -328,15 +331,37 @@ fn image_counts(image: &Path, keys: &DatabaseKeys) -> Result<(u64, u64)> {
 }
 
 /// Refuses a read-only open of a database whose migration was cut off after
-/// the old file was moved away (only a read-write open finishes it), or whose
-/// migrated file is missing next to its kept copy.
+/// the old file or one of its side files was moved away (only a read-write
+/// open finishes it), or whose migrated file is missing next to its kept copy.
 ///
 /// # Errors
 ///
 /// Returns an error if `<path>` is missing and `<path>.migrating` or a kept
-/// copy exists, or a file cannot be inspected.
+/// copy exists, if a 0.5.x `<path>` exists next to `<path>.migrating` while
+/// one of its side files is under its kept name (the 0.5.x database would be
+/// read without it, see [`move_side_files_back`]), or a file cannot be
+/// inspected.
 pub(super) fn check_read_only(path: &Path) -> Result<()> {
     if exists(path)? {
+        // Only a 0.5.x `<path>` can be part of a cut-off migration (as in
+        // `resolve`): next to a 0.6 file, the leftovers are left alone.
+        if !exists(&migrating_path(path))? || detect(path)? != OnDisk::LegacyFile {
+            return Ok(());
+        }
+        let [(_, kept_file, _), side_files @ ..] = &kept_names(path);
+        if exists(kept_file)? {
+            return Ok(());
+        }
+        for (_, kept, _) in side_files {
+            if exists(kept)? {
+                return Err(Error::Internal(format!(
+                    "{} cannot be read: its migration to the 0.6 format was interrupted after \
+                     {} was moved away from it; a read-write open finishes the migration",
+                    path.display(),
+                    kept.display()
+                )));
+            }
+        }
         return Ok(());
     }
     if !exists(&migrating_path(path))? {
@@ -383,27 +408,20 @@ fn resolve(path: &Path) -> Result<()> {
         return Ok(());
     }
     match detect(path)? {
-        // The image may be incomplete: the migration runs again.
-        OnDisk::LegacyFile => remove_file(&migrating),
+        // The image may be incomplete: the migration runs again, with the
+        // side files back under their 0.5.x names.
+        OnDisk::LegacyFile => {
+            move_side_files_back(path)?;
+            remove_file(&migrating)
+        }
         // The old database was moved after the image was complete. Its side
-        // files go before the image comes, as in `migrate`.
+        // files go before the image comes, as in `migrate`. The move of the
+        // old file may not be durable yet (an error, not a crash, may have
+        // stopped the migration in this process): it is made so first.
         OnDisk::Missing if exists(&pre_06_path(path))? => {
-            let [_, side_files @ ..] = &kept_names(path);
-            for (from, to, point) in side_files {
-                if !exists(from)? {
-                    continue;
-                }
-                if exists(to)? {
-                    return Err(Error::Internal(format!(
-                        "cannot finish the migration of {}: both {} and {} exist",
-                        path.display(),
-                        from.display(),
-                        to.display()
-                    )));
-                }
-                rename(from, to, point)?;
-            }
             sync_parent_dir(path)?;
+            let [_, side_files @ ..] = &kept_names(path);
+            move_side_files(path, side_files)?;
             rename(&migrating, path, INSTALLED)?;
             sync_parent_dir(path)
         }
@@ -419,6 +437,87 @@ fn resolve(path: &Path) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Moves each 0.5.x side file of `side_files` (the sidecar WAL and a pending
+/// checkpoint image, with their kept names and crash points, from
+/// [`kept_names`]) that exists to its kept name, syncing the directory of
+/// `path` after each move, so a power loss keeps the first moves and never a
+/// later one without an earlier one. The caller has moved the database file
+/// and synced the directory.
+///
+/// # Errors
+///
+/// Returns an error if a side file and its kept name both exist, or a file
+/// cannot be inspected, renamed or synced.
+fn move_side_files(path: &Path, side_files: &[(PathBuf, PathBuf, &'static str)]) -> Result<()> {
+    for (from, to, point) in side_files {
+        if !exists(from)? {
+            continue;
+        }
+        if exists(to)? {
+            return Err(Error::Internal(format!(
+                "cannot finish the migration of {}: both {} and {} exist",
+                path.display(),
+                from.display(),
+                to.display()
+            )));
+        }
+        rename(from, to, point)?;
+        sync_parent_dir(path)?;
+    }
+    Ok(())
+}
+
+/// Moves the 0.5.x side files (sidecar WAL, pending checkpoint image) found
+/// under their kept names back to their 0.5.x names while the database file is
+/// still `<path>`: a power loss kept their move and lost the earlier move of
+/// the database file. The 0.5.x database is then whole again for the
+/// migration to run again. Nothing moves while `<path>.pre-0.6` exists (a kept
+/// copy that is no part of this state, which `migrate` refuses to replace).
+///
+/// # Errors
+///
+/// Returns an error if a side file exists under both names, or a file cannot
+/// be inspected, renamed or synced.
+fn move_side_files_back(path: &Path) -> Result<()> {
+    let [(_, kept_file, _), side_files @ ..] = &kept_names(path);
+    if exists(kept_file)? {
+        return Ok(());
+    }
+    let mut moved = false;
+    for (original, kept, _) in side_files {
+        if !exists(kept)? {
+            continue;
+        }
+        if exists(original)? {
+            return Err(Error::Internal(format!(
+                "cannot finish the migration of {}: both {} and {} exist",
+                path.display(),
+                original.display(),
+                kept.display()
+            )));
+        }
+        fs::rename(kept, original).map_err(|error| {
+            Error::Internal(format!(
+                "cannot move {} back to {}: {error}",
+                kept.display(),
+                original.display()
+            ))
+        })?;
+        grafeo_warn!(
+            "{} was moved to {} by a migration whose move of {} was lost; it is moved back \
+             and the migration runs again",
+            original.display(),
+            kept.display(),
+            path.display()
+        );
+        moved = true;
+    }
+    if moved {
+        sync_parent_dir(path)?;
+    }
+    Ok(())
 }
 
 /// Adds that `error` happened while migrating `path` to its message, keeping its

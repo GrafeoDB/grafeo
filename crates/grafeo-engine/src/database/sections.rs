@@ -10,6 +10,8 @@ use grafeo_common::storage::SectionType;
 #[cfg(feature = "lpg")]
 use grafeo_common::utils::error::Result;
 
+use crate::transaction::CommitsHeld;
+
 #[cfg(feature = "lpg")]
 use super::catalog_section::{CatalogSection, GraphIndexes};
 #[cfg(feature = "lpg")]
@@ -37,8 +39,13 @@ pub(super) struct CheckpointSources {
 }
 
 impl CheckpointSources {
-    /// Builds every section of the database.
-    pub fn sections(&self) -> Vec<Box<dyn Section>> {
+    /// Builds every section of the database. The caller holds commits off
+    /// (`_commits`, see
+    /// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager)):
+    /// no commit is in the middle of being written while the sections are
+    /// built and serialized, so they hold every commit whole, and none that
+    /// did not complete.
+    pub fn sections(&self, _commits: &CommitsHeld<'_>) -> Vec<Box<dyn Section>> {
         #[cfg_attr(
             not(any(feature = "lpg", feature = "triple-store")),
             expect(
@@ -477,9 +484,10 @@ mod tests {
             .execute("CREATE VECTOR INDEX model_emb ON :Doc(emb)")
             .unwrap();
 
+        let commits = db.transaction_manager.hold_commits().unwrap();
         let mut sections: Vec<(SectionType, Vec<u8>)> = db
             .checkpoint_sources()
-            .sections()
+            .sections(&commits)
             .iter()
             .map(|section| (section.section_type(), section.serialize().unwrap()))
             .collect();

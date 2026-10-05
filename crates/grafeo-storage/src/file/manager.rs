@@ -741,12 +741,10 @@ fn write_page(file: &mut File, offset: u64, bytes: &[u8]) -> Result<()> {
 
 /// The end of the last page an image uses, where the file is cut.
 fn image_end(runs: &[PageRun]) -> Result<u64> {
-    let end_page = runs
-        .iter()
-        .map(|run| run.end())
-        .max()
-        .unwrap_or(DATA_START_PAGE)
-        .max(DATA_START_PAGE);
+    let mut end_page = DATA_START_PAGE;
+    for run in runs {
+        end_page = end_page.max(run.end()?);
+    }
     end_page.checked_mul(PAGE_SIZE).ok_or_else(|| {
         Error::Internal(format!(
             "image ends at page {end_page}, beyond the file offset range"
@@ -918,8 +916,8 @@ mod tests {
     #[cfg(feature = "testing-crash-injection")]
     fn assert_runs_unchanged(now: &[u8], before: &[u8], runs: &[PageRun], what: &str) {
         for run in runs {
-            let start = usize::try_from(run.offset()).unwrap();
-            let end = usize::try_from(run.end() * PAGE_SIZE).unwrap();
+            let start = usize::try_from(run.offset().unwrap()).unwrap();
+            let end = usize::try_from(run.end().unwrap() * PAGE_SIZE).unwrap();
             assert!(before.get(start..end).is_some(), "{what}: run {run:?}");
             assert!(
                 now.get(start..end) == before.get(start..end),

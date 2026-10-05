@@ -11,34 +11,21 @@
 
 #![allow(missing_docs)]
 
-#[cfg(feature = "wal")]
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod tests {
+    use grafeo_common::testing::child_process;
     use grafeo_common::types::Value;
     use grafeo_engine::config::StorageFormat;
     use grafeo_engine::{Config, GrafeoDB};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    fn configs(dir: &Path) -> Vec<(&'static str, Config)> {
-        let mut configs = vec![
-            (
-                "wal directory",
-                Config::persistent(dir.join("dir-db"))
-                    .with_storage_format(StorageFormat::WalDirectory),
-            ),
-            (
-                "wal directory + cdc",
-                Config::persistent(dir.join("dir-cdc-db"))
-                    .with_storage_format(StorageFormat::WalDirectory)
-                    .with_cdc(),
-            ),
-        ];
-        #[cfg(feature = "grafeo-file")]
-        configs.push((
-            "single file",
-            Config::persistent(dir.join("single.grafeo"))
-                .with_storage_format(StorageFormat::SingleFile),
-        ));
-        configs
+    /// The persistent databases the tests run on: a name, and whether the
+    /// database records changes (CDC).
+    const VARIANTS: [(&str, bool); 2] = [("single file", false), ("single file + cdc", true)];
+
+    fn config(path: &Path, cdc: bool) -> Config {
+        let config = Config::persistent(path).with_storage_format(StorageFormat::SingleFile);
+        if cdc { config.with_cdc() } else { config }
     }
 
     /// Node and edge state as `(labels, n.v, n.w, n.x, r.weight, r.note)`.
@@ -85,11 +72,96 @@ mod tests {
         }
     }
 
+    /// Seeds, changes everything in a transaction, and commits it or rolls
+    /// it back.
+    fn write(db: &GrafeoDB, commit: bool) {
+        seed(db);
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        change_everything(&session);
+        if commit {
+            session.commit().unwrap();
+        } else {
+            session.rollback().unwrap();
+        }
+    }
+
+    /// The state [`write`] leaves, from an in-memory database: the seed alone
+    /// after a rollback (the in-memory control checks that rollback), the
+    /// changed state after a commit.
+    fn expected(commit: bool) -> Vec<Value> {
+        let db = GrafeoDB::new_in_memory();
+        if commit {
+            write(&db, true);
+        } else {
+            seed(&db);
+        }
+        state(&db)
+    }
+
+    /// [`write`], then a check that the writer sees the state a reopen must
+    /// rebuild.
+    fn write_and_check(db: &GrafeoDB, commit: bool) {
+        write(db, commit);
+        assert_eq!(state(db), expected(commit), "live state");
+    }
+
+    /// How the process that wrote a database ends before the reopen.
+    #[derive(Clone, Copy, Debug)]
+    enum End {
+        /// `close()` checkpoints: the reopen reads the file.
+        Close,
+        /// The process exits without `close()` (a child process), so nothing
+        /// is checkpointed: the reopen replays the sidecar WAL.
+        Crash,
+    }
+
+    const PATH_VAR: &str = "GRAFEO_PERSISTENT_ROLLBACK_PATH";
+    const CDC_VAR: &str = "GRAFEO_PERSISTENT_ROLLBACK_CDC";
+    const COMMIT_VAR: &str = "GRAFEO_PERSISTENT_ROLLBACK_COMMIT";
+
+    /// Runs [`write`] on a new database at `path` and ends the process that
+    /// wrote it as `end` says.
+    fn write_then(end: End, path: &Path, cdc: bool, commit: bool) {
+        match end {
+            End::Close => {
+                let db = GrafeoDB::with_config(config(path, cdc)).unwrap();
+                write_and_check(&db, commit);
+                db.close().unwrap();
+            }
+            End::Crash => {
+                let status = child_process::run(
+                    std::process::Command::new(std::env::current_exe().unwrap())
+                        .args(["--exact", "tests::crash_child", "--nocapture"])
+                        .env(PATH_VAR, path)
+                        .env(CDC_VAR, cdc.to_string())
+                        .env(COMMIT_VAR, commit.to_string()),
+                )
+                .unwrap();
+                assert!(status.success(), "the child process failed");
+            }
+        }
+    }
+
+    /// Child-process entry for [`write_then`]; a no-op when run directly.
+    #[test]
+    fn crash_child() {
+        let Some(path) = std::env::var_os(PATH_VAR) else {
+            return;
+        };
+        let flag = |var: &str| std::env::var(var).unwrap() == "true";
+        let db = GrafeoDB::with_config(config(&PathBuf::from(path), flag(CDC_VAR))).unwrap();
+        write_and_check(&db, flag(COMMIT_VAR));
+        // Crash: no close(), no checkpoint, no destructors.
+        std::process::exit(0);
+    }
+
     #[test]
     fn rollback_restores_properties_and_labels() {
         let dir = tempfile::tempdir().unwrap();
-        for (name, config) in configs(dir.path()) {
-            let db = GrafeoDB::with_config(config).unwrap();
+        for (name, cdc) in VARIANTS {
+            let path = dir.path().join(format!("cdc-{cdc}.grafeo"));
+            let db = GrafeoDB::with_config(config(&path, cdc)).unwrap();
             seed(&db);
             let before = state(&db);
 
@@ -122,47 +194,35 @@ mod tests {
 
     #[test]
     fn rollback_is_not_replayed_after_reopen() {
+        let before = expected(false);
         let dir = tempfile::tempdir().unwrap();
-        for (name, config) in configs(dir.path()) {
-            let before = {
-                let db = GrafeoDB::with_config(config.clone()).unwrap();
-                seed(&db);
-                let before = state(&db);
-                let mut session = db.session();
-                session.begin_transaction().unwrap();
-                change_everything(&session);
-                session.rollback().unwrap();
-                db.close().unwrap();
-                before
-            };
+        for (name, cdc) in VARIANTS {
+            for end in [End::Close, End::Crash] {
+                let path = dir.path().join(format!("{end:?}-cdc-{cdc}.grafeo"));
+                write_then(end, &path, cdc, false);
 
-            let db = GrafeoDB::with_config(config).unwrap();
-            assert_eq!(state(&db), before, "{name}: reopened state");
+                let db = GrafeoDB::with_config(config(&path, cdc)).unwrap();
+                assert_eq!(state(&db), before, "{name}, {end:?}: reopened state");
+            }
         }
     }
 
     #[test]
     fn commit_persists_changes() {
+        let after = expected(true);
         let dir = tempfile::tempdir().unwrap();
-        for (name, config) in configs(dir.path()) {
-            let after = {
-                let db = GrafeoDB::with_config(config.clone()).unwrap();
-                seed(&db);
-                let mut session = db.session();
-                session.begin_transaction().unwrap();
-                change_everything(&session);
-                session.commit().unwrap();
-                let after = state(&db);
-                db.close().unwrap();
-                after
-            };
+        for (name, cdc) in VARIANTS {
+            for end in [End::Close, End::Crash] {
+                let path = dir.path().join(format!("{end:?}-cdc-{cdc}.grafeo"));
+                write_then(end, &path, cdc, true);
 
-            let db = GrafeoDB::with_config(config).unwrap();
-            assert_eq!(
-                state(&db),
-                after,
-                "{name}: committed changes survive reopen"
-            );
+                let db = GrafeoDB::with_config(config(&path, cdc)).unwrap();
+                assert_eq!(
+                    state(&db),
+                    after,
+                    "{name}, {end:?}: committed changes survive reopen"
+                );
+            }
         }
     }
 }

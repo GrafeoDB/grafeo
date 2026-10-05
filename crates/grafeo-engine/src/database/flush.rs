@@ -13,6 +13,8 @@ use grafeo_common::utils::error::Result;
 use grafeo_storage::file::{CheckpointHeader, GrafeoFileManager};
 
 use super::sections::CheckpointSources;
+#[cfg(feature = "grafeo-file")]
+use crate::transaction::CommitsHeld;
 
 /// Context needed by each section during serialization.
 pub(super) struct FlushContext {
@@ -44,11 +46,16 @@ pub(super) struct FlushResult {
     pub sections_written: usize,
 }
 
-/// Executes the unified flush: write every section as a new image, then
-/// truncate the WAL.
+/// Executes the unified flush of `sources`: write every section as a new
+/// image, then truncate the WAL.
 ///
-/// This is the single write path for all persistence operations. With a WAL,
-/// the order is what makes a crash at any point safe (#417):
+/// This is the single write path for all persistence operations. Commits are
+/// held off (see
+/// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager))
+/// from before the sections are built until the image is written: the image
+/// holds every commit whole or not at all, never one that did not complete,
+/// and its header's epoch and counts are those of its sections. With a WAL,
+/// the order of the steps is what makes a crash at any point safe (#417):
 ///
 /// 1. start a new WAL file, so every record logged so far is in an earlier file,
 /// 2. serialize the sections and write them as a new image (the snapshot then
@@ -62,21 +69,53 @@ pub(super) struct FlushResult {
 /// A failed image write keeps the WAL for the same reason: the new header may
 /// have reached the disk, or not.
 ///
+/// Lock order: the file's checkpoint guard, then the commit lock.
+///
 /// # Errors
 ///
-/// Returns an error if serialization or I/O fails.
+/// Returns an error if serialization or I/O fails, or after a commit that
+/// did not complete.
 #[cfg(feature = "grafeo-file")]
 pub(super) fn flush(
+    fm: &GrafeoFileManager,
+    sources: &CheckpointSources,
+    #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::LpgWal>,
+) -> Result<FlushResult> {
+    #[cfg(feature = "testing-statement-injection")]
+    grafeo_common::testing::commit_hook::count_checkpoint(fm.path());
+    // One checkpoint at a time: another one interleaving these steps could
+    // delete WAL files this one relies on.
+    let _checkpoint = fm.checkpoint_guard();
+    let commits = sources.transaction_manager.hold_commits()?;
+    let sections = sources.sections(&commits);
+    let section_refs: Vec<&dyn Section> = sections.iter().map(AsRef::as_ref).collect();
+    let context = sources.context();
+
+    #[cfg(feature = "testing-statement-injection")]
+    grafeo_common::testing::commit_hook::run_during_checkpoint();
+
+    write_sections(
+        fm,
+        &section_refs,
+        &context,
+        #[cfg(feature = "wal")]
+        wal,
+        commits,
+    )
+}
+
+/// Steps 1 to 3 of [`flush`] for `sections`: the caller holds the file's
+/// checkpoint guard, and `commits` until the image is written, when this
+/// releases them.
+#[cfg(feature = "grafeo-file")]
+fn write_sections(
     fm: &GrafeoFileManager,
     sections: &[&dyn Section],
     context: &FlushContext,
     #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::LpgWal>,
+    commits: CommitsHeld<'_>,
 ) -> Result<FlushResult> {
     use grafeo_common::testing::crash::maybe_crash;
-
-    // One checkpoint at a time: another one interleaving these steps could
-    // delete WAL files this one relies on.
-    let _checkpoint = fm.checkpoint_guard();
 
     maybe_crash("flush:before_serialize");
 
@@ -106,6 +145,8 @@ pub(super) fn flush(
     for section in sections {
         section.mark_clean();
     }
+    // The image is written: commits may go on while the WAL is marked.
+    drop(commits);
 
     maybe_crash("flush:after_write");
 
@@ -233,10 +274,13 @@ mod tests {
         sections: &[&dyn Section],
         context: &FlushContext,
     ) -> usize {
+        let manager = crate::transaction::TransactionManager::new();
+        let _checkpoint = fm.checkpoint_guard();
+        let commits = manager.hold_commits().unwrap();
         #[cfg(feature = "wal")]
-        let result = flush(fm, sections, context, None);
+        let result = write_sections(fm, sections, context, None, commits);
         #[cfg(not(feature = "wal"))]
-        let result = flush(fm, sections, context);
+        let result = write_sections(fm, sections, context, commits);
         result.unwrap().sections_written
     }
 

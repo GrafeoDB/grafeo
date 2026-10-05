@@ -4242,6 +4242,11 @@ impl Session {
             }
         };
         let commit_epoch = commit.epoch();
+        // Until the WAL group is written, a panic leaves the commit's records
+        // and events in this session's buffers, from which a later flush of
+        // records outside a transaction (or the session's drop) would write
+        // a commit that never completed: the guard drops them on unwind.
+        let unwritten = UnwrittenCommit::new(self);
 
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_after_commit_epoch();
@@ -4292,12 +4297,18 @@ impl Session {
                 grafeo_common::grafeo_warn!("Failed to write transaction to WAL: {}", e);
             }
         }
+        unwritten.written();
 
-        // The stores' epochs move last, so store-level lookups (edge_type,
-        // get_edge, get_node) see the commit only once it is written. The
-        // database has one epoch: the root store follows every commit, also
-        // one that only touched named graphs (a checkpoint saves the root's
-        // epoch for all of them).
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_after_commit_logged();
+
+        // The touched stores' epochs moved when the versions were stamped
+        // (`finalize_version_epochs`), so a lookup at a store's own epoch
+        // sees the commit from then on; the database's direct reads and
+        // queries read at the published epoch, which moves only once the
+        // commit is complete. The database has one epoch: the root store
+        // follows every commit, also one that only touched named graphs (a
+        // checkpoint saves the root's epoch for all of them).
         self.store.sync_epoch(commit_epoch);
         for graph_name in &touched {
             let store = self.resolve_store(graph_name);
@@ -5707,7 +5718,8 @@ impl Session {
     // ── Change Data Capture ─────────────────────────────────────────────
 
     /// Returns the full change history for an entity (node or edge) of the
-    /// session's current graph.
+    /// session's current graph, up to the current epoch: a commit's events
+    /// are recorded before it is complete, and returned once it is.
     ///
     /// # Errors
     ///
@@ -5718,13 +5730,16 @@ impl Session {
         entity_id: impl Into<crate::cdc::EntityId>,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
         self.require_permission(crate::auth::StatementKind::Read)?;
-        Ok(self
+        let epoch = self.transaction_manager.current_epoch();
+        let mut events = self
             .cdc_log
-            .history_in(self.active_graph_storage_key().as_deref(), entity_id.into()))
+            .history_in(self.active_graph_storage_key().as_deref(), entity_id.into());
+        events.retain(|event| event.epoch <= epoch);
+        Ok(events)
     }
 
     /// Returns change events for an entity of the session's current graph
-    /// since the given epoch.
+    /// since the given epoch, up to the current epoch.
     ///
     /// # Errors
     ///
@@ -5736,15 +5751,18 @@ impl Session {
         since_epoch: EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
         self.require_permission(crate::auth::StatementKind::Read)?;
-        Ok(self.cdc_log.history_since_in(
+        let epoch = self.transaction_manager.current_epoch();
+        let mut events = self.cdc_log.history_since_in(
             self.active_graph_storage_key().as_deref(),
             entity_id.into(),
             since_epoch,
-        ))
+        );
+        events.retain(|event| event.epoch <= epoch);
+        Ok(events)
     }
 
     /// Returns all change events across all entities and graphs in an epoch
-    /// range; each event names its graph.
+    /// range, up to the current epoch; each event names its graph.
     ///
     /// # Errors
     ///
@@ -5756,7 +5774,53 @@ impl Session {
         end_epoch: EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
         self.require_permission(crate::auth::StatementKind::Read)?;
+        let end_epoch = end_epoch.min(self.transaction_manager.current_epoch());
         Ok(self.cdc_log.changes_between(start_epoch, end_epoch))
+    }
+}
+
+/// The WAL records and CDC events of a commit that are not written yet (see
+/// `commit_inner`). Dropped before [`written`](Self::written), which happens
+/// only when the commit unwinds, it drops them from the session's buffers:
+/// written later as records outside a transaction, they would make a commit
+/// that never completed durable.
+#[cfg(feature = "lpg")]
+struct UnwrittenCommit<'a> {
+    session: &'a Session,
+    written: bool,
+}
+
+#[cfg(feature = "lpg")]
+impl<'a> UnwrittenCommit<'a> {
+    fn new(session: &'a Session) -> Self {
+        Self {
+            session,
+            written: false,
+        }
+    }
+
+    /// The commit's records and events are written.
+    fn written(mut self) {
+        self.written = true;
+    }
+}
+
+#[cfg(feature = "lpg")]
+impl Drop for UnwrittenCommit<'_> {
+    fn drop(&mut self) {
+        if self.written {
+            return;
+        }
+        #[cfg(feature = "wal")]
+        if let Some(ref wal) = self.session.wal {
+            wal.clear();
+        }
+        #[cfg(feature = "cdc")]
+        if let Some(ref pending) = self.session.cdc_pending_events {
+            pending.lock().clear();
+        }
+        #[cfg(not(any(feature = "wal", feature = "cdc")))]
+        let _ = self.session;
     }
 }
 

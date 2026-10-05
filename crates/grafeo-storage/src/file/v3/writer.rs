@@ -131,7 +131,8 @@ impl<'a> CheckpointWriter<'a> {
     ///
     /// # Errors
     ///
-    /// Returns an error when a write or an encryption fails, or when the bytes
+    /// Returns an error when a write or an encryption fails, when the pages
+    /// of a block would lie beyond the file offset range, or when the bytes
     /// of a block would not fit the pages allocated for it.
     pub fn finish(mut self) -> Result<(BlockRef, Vec<PageRun>)> {
         // An encrypted block is stored as nonce || ciphertext || tag.
@@ -145,9 +146,9 @@ impl<'a> CheckpointWriter<'a> {
         let (root, blocks) = encode_blocks(&self.entries, |length| {
             let stored = u64::try_from(length + stored_extra)
                 .map_err(|_| Error::Internal("directory block is too large".to_string()))?;
-            let run = pages.allocate(PageRun::for_bytes(stored));
+            let run = pages.allocate(PageRun::for_bytes(stored))?;
             runs.push(run);
-            Ok(run.offset())
+            run.offset()
         })?;
         for (offset, block) in blocks {
             let expected = block.len() + stored_extra;
@@ -190,8 +191,13 @@ impl SectionSink for CheckpointWriter<'_> {
             let expected = bytes.len() + stored_extra;
             let stored_length = u64::try_from(expected)
                 .map_err(|_| Error::Internal("chunk is too large".to_string()))?;
-            let run = self.pages.allocate(PageRun::for_bytes(stored_length));
-            entry.offset = run.offset();
+            let run = self
+                .pages
+                .allocate(PageRun::for_bytes(stored_length))
+                .map_err(|error| {
+                    Error::Internal(format!("chunk of section {section_type:?}: {error}"))
+                })?;
+            entry.offset = run.offset()?;
             debug_assert!(entry.offset.is_multiple_of(PAGE_SIZE));
             entry.length = stored_length;
             #[cfg(feature = "encryption")]
@@ -243,6 +249,36 @@ mod tests {
             .truncate(true)
             .open(dir.path().join("x"))
             .unwrap()
+    }
+
+    /// A chunk whose pages would lie beyond the file offset range fails with
+    /// its section named, before anything is written.
+    #[test]
+    fn a_chunk_beyond_the_offset_range_fails_before_it_is_written() {
+        use grafeo_common::storage::{ChunkMeta, SectionSink, SectionType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = open(&dir);
+        // Every page up to the last whole page of the offset range is in use.
+        let last = u64::MAX / PAGE_SIZE;
+        let pages = PageAllocator::from_used([PageRun {
+            first: DATA_START_PAGE,
+            count: last - DATA_START_PAGE,
+        }])
+        .unwrap();
+        assert!(pages.free_runs().is_empty() && pages.end_page() == last);
+        let mut writer = CheckpointWriter::new(&mut file, pages, None);
+        writer.begin_section(SectionType::LpgStore, 1).unwrap();
+        let error = writer
+            .write_chunk(ChunkMeta::raw(), b"Gus")
+            .expect_err("the chunk's page would end past the last byte offset")
+            .to_string();
+        assert!(
+            error.contains("LpgStore") && error.contains("offset range"),
+            "the error names the section and says why: {error}"
+        );
+        drop(writer);
+        assert_eq!(file.metadata().unwrap().len(), 0, "nothing was written");
     }
 
     #[test]

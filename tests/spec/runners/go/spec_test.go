@@ -145,14 +145,18 @@ func executeQueryWithParams(db *grafeo.Database, language, query, paramsJSON str
 }
 
 // coerceParamsToJSON converts the string-typed params map from gtest files into
-// a JSON string with properly typed values (int, float, bool, or string).
+// a JSON string with properly typed values (a list or map written as JSON, int,
+// float, bool, or string).
 func coerceParamsToJSON(params map[string]string) string {
 	if len(params) == 0 {
 		return ""
 	}
 	typed := make(map[string]interface{}, len(params))
 	for k, v := range params {
-		if n, err := strconv.Atoi(v); err == nil {
+		trimmed := strings.TrimSpace(v)
+		if (strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{")) && json.Valid([]byte(trimmed)) {
+			typed[k] = json.RawMessage(trimmed)
+		} else if n, err := strconv.Atoi(v); err == nil {
 			typed[k] = n
 		} else if f, err := strconv.ParseFloat(v, 64); err == nil {
 			typed[k] = f

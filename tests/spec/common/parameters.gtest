@@ -241,6 +241,38 @@ tests:
   # Gremlin parameter support
   # ---------------------------------------------------------------------------
 
+  # ---------------------------------------------------------------------------
+  # GQL list and map parameters (#574), written as JSON values. GQL only, so
+  # the WASM runner (the edge profile, without Cypher) runs them too; the
+  # rosetta file has the GQL and Cypher pairs.
+  # ---------------------------------------------------------------------------
+
+  - name: gql_list_param_is_returned_as_given
+    query: "RETURN $x AS x, size($x) AS n"
+    params:
+      x: [3, 19, 88]
+    expect:
+      rows:
+        - ["[3, 19, 88]", 3]
+
+  - name: gql_list_param_unwinds_to_its_items
+    query: "UNWIND $x AS v RETURN v"
+    params:
+      x: [3, 19, 88]
+    expect:
+      rows:
+        - [3]
+        - [19]
+        - [88]
+
+  - name: gql_map_param_passes_through_with
+    query: "UNWIND [0] AS i WITH $m AS w RETURN w.city AS city, w.tags AS tags"
+    params:
+      m: {"city": "Amsterdam", "tags": [3, 19]}
+    expect:
+      rows:
+        - [Amsterdam, "[3, 19]"]
+
   - name: gremlin_has_param
     skip: "Gremlin $param in has() not substituted"
     language: gremlin

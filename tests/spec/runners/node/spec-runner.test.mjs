@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
-import { parseGtestFile } from './parser.mjs'
+import { parseGtestFile, coerceParams } from './parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, resultToRows } from './comparator.mjs'
 
 // ---------------------------------------------------------------------------
@@ -65,30 +65,6 @@ async function loadDataset(db, datasetName) {
     if (!trimmed || trimmed.startsWith('#')) continue
     await db.execute(trimmed)
   }
-}
-
-/**
- * Coerce raw param string values to proper JS types.
- * Mirrors the type coercion in crates/grafeo-spec-tests/build.rs.
- */
-function coerceParams(rawParams) {
-  if (!rawParams || Object.keys(rawParams).length === 0) return undefined
-  const result = {}
-  for (const [key, val] of Object.entries(rawParams)) {
-    if (val === 'true') {
-      result[key] = true
-    } else if (val === 'false') {
-      result[key] = false
-    } else {
-      const num = Number(val)
-      if (!isNaN(num) && val.trim() !== '') {
-        result[key] = num
-      } else {
-        result[key] = val
-      }
-    }
-  }
-  return result
 }
 
 /** Execute a query in the specified language. */

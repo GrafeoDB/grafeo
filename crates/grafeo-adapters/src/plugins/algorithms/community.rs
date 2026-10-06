@@ -50,6 +50,28 @@ use super::traits::{ComponentResultBuilder, impl_algorithm};
 pub fn label_propagation(store: &dyn GraphStore, max_iterations: usize) -> FxHashMap<NodeId, u64> {
     let mut nodes = store.node_ids();
     nodes.sort_unstable();
+    label_propagation_in_order(store, &nodes, max_iterations)
+}
+
+/// [`label_propagation`] over `nodes`, in their order: nodes are visited in
+/// that order, a tie between labels goes to the label of the node that comes
+/// first, and communities are numbered 0, 1, 2, ... in the order of their
+/// first node. Given the nodes in the order of a key
+/// ([`order_by_key`](super::order_by_key)), the result does not depend on the
+/// order the nodes and edges were inserted in.
+///
+/// `nodes` must be the nodes of `store`, each once; an edge to a node not in
+/// `nodes` is not followed.
+///
+/// # Panics
+///
+/// Panics if the internal label map is inconsistent (should not happen with a
+/// valid `GraphStore`).
+pub fn label_propagation_in_order(
+    store: &dyn GraphStore,
+    nodes: &[NodeId],
+    max_iterations: usize,
+) -> FxHashMap<NodeId, u64> {
     let n = nodes.len();
 
     if n == 0 {
@@ -71,8 +93,8 @@ pub fn label_propagation(store: &dyn GraphStore, max_iterations: usize) -> FxHas
     for _ in 0..max_iter {
         let mut changed = false;
 
-        // Update labels in random order (here we use insertion order)
-        for &node in &nodes {
+        // Update labels in the order of `nodes`
+        for &node in nodes {
             // Get neighbor labels and their frequencies
             let mut label_counts: FxHashMap<u64, usize> = FxHashMap::default();
 
@@ -122,10 +144,10 @@ pub fn label_propagation(store: &dyn GraphStore, max_iterations: usize) -> FxHas
         }
     }
 
-    // Number communities 0, 1, 2, ... in order of their smallest node id
-    // (`nodes` is sorted), so the same graph gives the same ids every call.
+    // Number communities 0, 1, 2, ... in the order of their first node in
+    // `nodes`, so the same graph gives the same ids every call.
     let mut label_map: FxHashMap<u64, u64> = FxHashMap::default();
-    for node in &nodes {
+    for node in nodes {
         let label = labels[node];
         let next = label_map.len() as u64;
         label_map.entry(label).or_insert(next);
@@ -190,6 +212,24 @@ pub struct LouvainResult {
 pub fn louvain(store: &dyn GraphStore, resolution: f64) -> LouvainResult {
     let mut nodes = store.node_ids();
     nodes.sort_unstable();
+    louvain_in_order(store, &nodes, resolution)
+}
+
+/// [`louvain`] over `nodes`, in their order, at every level: nodes and
+/// super-nodes are visited in that order (a super-node by its first node), a
+/// node that gains equally from several moves joins the community that comes
+/// first, sums run in that order, and communities are numbered 0, 1, 2, ...
+/// in the order of their first node. Given the nodes in the order of a key
+/// ([`order_by_key`](super::order_by_key)), the result does not depend on the
+/// order the nodes and edges were inserted in.
+///
+/// `nodes` must be the nodes of `store`, each once; an edge to a node not in
+/// `nodes` is not followed.
+pub fn louvain_in_order(
+    store: &dyn GraphStore,
+    nodes: &[NodeId],
+    resolution: f64,
+) -> LouvainResult {
     let n = nodes.len();
 
     if n == 0 {
@@ -250,8 +290,8 @@ pub fn louvain(store: &dyn GraphStore, resolution: f64) -> LouvainResult {
         level = aggregate(&level, &renumbered, count);
     }
 
-    // Nodes are sorted and super-nodes are numbered by their first member, so
-    // `membership` already numbers communities by their smallest node id.
+    // Super-nodes are numbered by their first member, so `membership` already
+    // numbers communities in the order of their first node in `nodes`.
     let num_communities = membership.iter().copied().max().map_or(0, |max| max + 1);
     let communities: FxHashMap<NodeId, u64> = nodes
         .iter()

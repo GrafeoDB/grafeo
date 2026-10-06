@@ -27,6 +27,8 @@ mod store;
 pub use edge::{Edge, EdgeFlags, EdgeRecord};
 pub use node::{Node, NodeFlags, NodeRecord};
 #[cfg(not(feature = "temporal"))]
+pub use property::ColumnBacking;
+#[cfg(not(feature = "temporal"))]
 pub use property::DecodedBlock;
 pub use property::{CompareOp, PropertyStorage};
 

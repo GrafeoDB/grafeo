@@ -222,7 +222,7 @@ impl CheckpointSources {
 #[cfg(all(test, feature = "grafeo-file"))]
 mod tests {
     use super::*;
-    use grafeo_common::storage::SectionType;
+    use grafeo_common::storage::{SectionType, legacy_bytes};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A section holding fixed bytes, with its own dirty flag.
@@ -294,8 +294,13 @@ mod tests {
         run_with(fm, sections, &context)
     }
 
+    /// The bytes of a section of the active image, stored as one raw chunk.
     fn stored(fm: &GrafeoFileManager, section_type: SectionType) -> Option<Vec<u8>> {
-        fm.read_section(section_type).unwrap()
+        fm.read_image(|image| match image.section_source(section_type) {
+            Some(section) => Ok(legacy_bytes(&*section)?.map(Vec::from)),
+            None => Ok(None),
+        })
+        .unwrap()
     }
 
     /// The new image's database header records the flush context; it has

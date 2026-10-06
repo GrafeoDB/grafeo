@@ -311,7 +311,8 @@ public class SpecTests : IDisposable
 
     /// <summary>
     /// Coerce raw string parameter values to typed C# objects.
-    /// Mirrors the Rust build.rs coercion order: int, float, bool, string.
+    /// Mirrors the Rust build.rs coercion order: a list or map written as JSON,
+    /// int, float, bool, string.
     /// Returns null when the params dict is empty (so callers can skip it).
     /// </summary>
     private static Dictionary<string, object?>? CoerceParams(Dictionary<string, string> rawParams)
@@ -322,7 +323,13 @@ public class SpecTests : IDisposable
         var coerced = new Dictionary<string, object?>(rawParams.Count);
         foreach (var (key, value) in rawParams)
         {
-            if (long.TryParse(value, System.Globalization.NumberStyles.Integer,
+            var trimmed = value.Trim();
+            if (trimmed.StartsWith('[') || trimmed.StartsWith('{'))
+            {
+                using var doc = JsonDocument.Parse(trimmed);
+                coerced[key] = FromJson(doc.RootElement);
+            }
+            else if (long.TryParse(value, System.Globalization.NumberStyles.Integer,
                     System.Globalization.CultureInfo.InvariantCulture, out var l))
             {
                 coerced[key] = l;
@@ -348,6 +355,23 @@ public class SpecTests : IDisposable
 
         return coerced;
     }
+
+    /// <summary>
+    /// A JSON value as the objects the binding converts: a list, a map with
+    /// string keys, a string, a long or double, a bool, or null.
+    /// </summary>
+    private static object? FromJson(JsonElement element) =>
+        element.ValueKind switch
+        {
+            JsonValueKind.Array => element.EnumerateArray().Select(FromJson).ToList(),
+            JsonValueKind.Object => element.EnumerateObject()
+                .ToDictionary(property => property.Name, property => FromJson(property.Value)),
+            JsonValueKind.String => element.GetString(),
+            JsonValueKind.Number => element.TryGetInt64(out var l) ? l : element.GetDouble(),
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => null,
+        };
 
     /// <summary>Check if a feature (language or capability) is available.</summary>
     private static bool HasFeature(string requirement)

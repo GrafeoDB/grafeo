@@ -241,7 +241,7 @@ impl GrafeoDB {
     /// Otherwise, returns the built-in `LpgStore`.
     ///
     /// Unlike [`graph_store()`](Self::graph_store) (which clones an `Arc`),
-    /// this borrows from `self` — suitable for constructing accessors that
+    /// this borrows from `self`, suitable for constructing accessors that
     /// need `&'a dyn GraphStore` tied to the database lifetime.
     #[cfg(feature = "vector-index")]
     fn graph_store_ref(&self) -> &dyn grafeo_core::graph::GraphStore {
@@ -571,13 +571,15 @@ impl GrafeoDB {
                     Self::refuse_unreplayable_sidecar_wal(db_path)?;
                     #[cfg(feature = "lpg")]
                     {
-                        loaded_sections = sections::load_sections(
-                            &mut |section_type| fm.read_section(section_type),
-                            &store,
-                            &catalog,
-                            #[cfg(feature = "triple-store")]
-                            &rdf_store,
-                        )?;
+                        loaded_sections = fm.read_image(|image| {
+                            sections::load_sections(
+                                image,
+                                &store,
+                                &catalog,
+                                #[cfg(feature = "triple-store")]
+                                &rdf_store,
+                            )
+                        })?;
                     }
                     // A writer that exited without `close()` left its commits
                     // since the last checkpoint in the sidecar WAL. They are
@@ -683,13 +685,15 @@ impl GrafeoDB {
 
             #[cfg(feature = "lpg")]
             {
-                loaded_sections = sections::load_sections(
-                    &mut |section_type| fm.read_section(section_type),
-                    &store,
-                    &catalog,
-                    #[cfg(feature = "triple-store")]
-                    &rdf_store,
-                )?;
+                loaded_sections = fm.read_image(|image| {
+                    sections::load_sections(
+                        image,
+                        &store,
+                        &catalog,
+                        #[cfg(feature = "triple-store")]
+                        &rdf_store,
+                    )
+                })?;
             }
 
             // A sidecar WAL holds the commits since the last checkpoint that a
@@ -1711,9 +1715,10 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be locked or read, a section or
-    /// the snapshot cannot be decoded, or the WAL cannot be recovered; in a
-    /// build without the `wal` feature, also if the sidecar WAL holds files.
+    /// Returns an error if the file cannot be locked or read, lists a section
+    /// twice, a section or the snapshot cannot be decoded, or the WAL cannot
+    /// be recovered; in a build without the `wal` feature, also if the
+    /// sidecar WAL holds files.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     fn load_legacy_file(
         path: &std::path::Path,
@@ -1722,6 +1727,7 @@ impl GrafeoDB {
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
         loaded: &mut sections::LoadedSections,
     ) -> Result<()> {
+        use grafeo_common::storage::{MemoryImage, ServedOnce};
         use grafeo_storage::file::legacy::{LegacyContents, LegacyFile};
 
         // Without the `wal` feature the sidecar WAL cannot be replayed, and
@@ -1737,14 +1743,12 @@ impl GrafeoDB {
                 rdf_store,
                 &data,
             )?,
-            LegacyContents::Sections(mut stored) => {
+            // Each section is served once and freed as soon as it is
+            // loaded: a migration of a large 0.5.x file does not hold the
+            // whole file's sections until the load returns.
+            LegacyContents::Sections(stored) => {
                 *loaded = sections::load_sections(
-                    &mut |section_type| {
-                        Ok(stored
-                            .iter()
-                            .position(|(kind, _)| *kind == section_type)
-                            .map(|at| stored.swap_remove(at).1))
-                    },
+                    &ServedOnce::new(MemoryImage::from_raw(stored)?),
                     store,
                     catalog,
                     #[cfg(feature = "triple-store")]
@@ -3756,6 +3760,46 @@ impl FromValue for bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The 0.5.x loader passes the vector and text sections of a 0.5.44 file
+    /// on: their indexes come back from them, before anything is built from
+    /// the data.
+    #[cfg(all(
+        feature = "grafeo-file",
+        feature = "lpg",
+        feature = "vector-index",
+        feature = "text-index"
+    ))]
+    #[test]
+    fn a_0_5_file_restores_its_search_indexes_from_their_sections() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/released/0.5.44/closed.grafeo");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("closed.grafeo");
+        std::fs::copy(&fixture, &path).unwrap();
+        let store = Arc::new(LpgStore::new().unwrap());
+        let catalog = Arc::new(Catalog::new());
+        #[cfg(feature = "triple-store")]
+        let rdf_store = Arc::new(RdfStore::new());
+        let mut loaded = sections::LoadedSections::default();
+        GrafeoDB::load_legacy_file(
+            &path,
+            &store,
+            &catalog,
+            #[cfg(feature = "triple-store")]
+            &rdf_store,
+            &mut loaded,
+        )
+        .unwrap();
+        assert!(
+            store.get_vector_index("Document", "embedding").is_some(),
+            "the vector index comes from its section"
+        );
+        assert!(
+            store.get_text_index("Document", "content").is_some(),
+            "the text index comes from its section"
+        );
+    }
 
     /// `DurabilityMode::Adaptive` syncs the WAL from a background flusher.
     /// None was started, so an adaptive database never synced its WAL.

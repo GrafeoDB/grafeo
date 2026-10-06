@@ -46,6 +46,8 @@ db.executeGraphql(query);                    // GraphQL shorthand
 db.executeSparql(query);                     // SPARQL shorthand (requires rdf feature)
 db.executeSql(query);                        // SQL/PGQ shorthand
 db.executeRawWithLanguage(query, language);  // raw result with language selection
+db.executeRawWithParams(gql, params);        // raw result with parameter binding
+db.executeRawWithLanguageAndParams(query, language, params);  // raw result, language + params
 ```
 
 ## Properties

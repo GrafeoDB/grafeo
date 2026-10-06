@@ -4,6 +4,8 @@
 //! checkpoint in a `.grafeo` file (grafeo-storage), the sections of a 0.5.x
 //! file, or a copy in memory ([`MemoryImage`]).
 
+use std::cell::RefCell;
+
 use bytes::Bytes;
 
 use crate::storage::chunk::ChunkIdentities;
@@ -116,6 +118,22 @@ impl MemoryImage {
         Ok(image)
     }
 
+    /// Takes the chunks of `section_type` out of the image, or `None` when it
+    /// holds none (as [`section_source`](ImageSource::section_source)
+    /// answers).
+    ///
+    /// The image no longer holds the section: its bytes are freed once the
+    /// section returned is dropped. Taking a section also ends the section
+    /// begun last, so a chunk written afterwards fails with "no section
+    /// begun".
+    pub fn take_section(&mut self, section_type: SectionType) -> Option<MemorySection> {
+        let at = self.sections.iter().position(|section| {
+            section.section_type == section_type && !section.metas.is_empty()
+        })?;
+        self.current = None;
+        Some(self.sections.remove(at))
+    }
+
     /// Whether `section_type` was begun or listed already.
     fn has_section(&self, section_type: SectionType) -> bool {
         self.sections
@@ -194,6 +212,44 @@ impl SectionSource for MemorySection {
 
     fn section_version(&self) -> u8 {
         self.version
+    }
+}
+
+/// A [`MemoryImage`] that serves each section once, for a load that reads
+/// each section once.
+///
+/// Serving a section moves its chunks into the source returned, so its bytes
+/// are freed as soon as the reader drops that source: a load holds the
+/// sections it has not read yet, not those it has loaded already. A second
+/// request for a section answers `None`, as for a section the image never
+/// held.
+#[derive(Debug)]
+pub struct ServedOnce {
+    image: RefCell<MemoryImage>,
+}
+
+impl ServedOnce {
+    /// Serves the sections of `image`, each once.
+    #[must_use]
+    pub fn new(image: MemoryImage) -> Self {
+        Self {
+            image: RefCell::new(image),
+        }
+    }
+
+    /// The section types not served yet, in the order they were begun.
+    #[must_use]
+    pub fn section_types(&self) -> Vec<SectionType> {
+        self.image.borrow().section_types()
+    }
+}
+
+impl ImageSource for ServedOnce {
+    /// Hands the section out, or `None` when the image has none or served it
+    /// already.
+    fn section_source(&self, section_type: SectionType) -> Option<Box<dyn SectionSource + '_>> {
+        let section = self.image.borrow_mut().take_section(section_type)?;
+        Some(Box::new(section))
     }
 }
 
@@ -351,6 +407,121 @@ mod tests {
         // A raw section of no bytes still writes its one raw chunk.
         let image = MemoryImage::from_sections(&[&empty]).unwrap();
         assert_eq!(image.section_types(), [SectionType::RdfStore]);
+    }
+
+    #[test]
+    fn a_taken_section_leaves_the_image() {
+        let catalog = Raw(SectionType::Catalog, b"Alix".to_vec());
+        let store = Raw(SectionType::LpgStore, b"Gus".to_vec());
+        let mut image = MemoryImage::from_sections(&[&catalog, &store]).unwrap();
+        let taken = image.take_section(SectionType::LpgStore).unwrap();
+        assert_eq!(
+            (taken.section_version(), &taken.fetch(0).unwrap()[..]),
+            (1, &b"Gus"[..])
+        );
+        assert_eq!(image.section_types(), [SectionType::Catalog]);
+        assert!(image.section_source(SectionType::LpgStore).is_none());
+        assert!(
+            image.take_section(SectionType::LpgStore).is_none(),
+            "a section is taken once"
+        );
+        assert!(image.take_section(SectionType::RdfStore).is_none());
+
+        // Taking ends the section begun last.
+        let mut image = MemoryImage::new();
+        image.begin_section(SectionType::Catalog, 2).unwrap();
+        image.write_chunk(ChunkMeta::meta(), b"Mia").unwrap();
+        image.take_section(SectionType::Catalog).unwrap();
+        let error = image
+            .write_chunk(ChunkMeta::column(0, 3, 0, 19, 0), b"Vincent")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no section begun"), "{error}");
+    }
+
+    #[test]
+    fn served_once_serves_each_section_once() {
+        let image = ServedOnce::new(
+            MemoryImage::from_raw(vec![
+                (SectionType::Catalog, b"Amsterdam".to_vec()),
+                (SectionType::LpgStore, b"Paris".to_vec()),
+            ])
+            .unwrap(),
+        );
+        let store = image.section_source(SectionType::LpgStore).unwrap();
+        assert_eq!(
+            legacy_bytes(&*store).unwrap().as_deref(),
+            Some(&b"Paris"[..])
+        );
+        assert!(
+            image.section_source(SectionType::LpgStore).is_none(),
+            "a section is served once"
+        );
+        assert_eq!(
+            image.section_types(),
+            [SectionType::Catalog],
+            "the image no longer holds what it served"
+        );
+        assert!(image.section_source(SectionType::RdfStore).is_none());
+    }
+
+    /// The bytes of a served section live in the source handed out, and go
+    /// when the reader drops it.
+    #[test]
+    fn a_served_section_is_freed_when_its_source_drops() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        /// Chunk bytes that note when they are freed.
+        struct Noted(Arc<AtomicBool>);
+
+        impl AsRef<[u8]> for Noted {
+            fn as_ref(&self) -> &[u8] {
+                b"Jules"
+            }
+        }
+
+        impl Drop for Noted {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let freed = Arc::new(AtomicBool::new(false));
+        let mut image = MemoryImage::new();
+        image.sections.push(MemorySection {
+            section_type: SectionType::TextIndex,
+            version: 1,
+            metas: vec![ChunkMeta::raw()],
+            chunks: vec![Bytes::from_owner(Noted(Arc::clone(&freed)))],
+        });
+        let image = ServedOnce::new(image);
+
+        let source = image.section_source(SectionType::TextIndex).unwrap();
+        assert_eq!(&source.fetch(0).unwrap()[..], b"Jules");
+        assert!(
+            !freed.load(Ordering::SeqCst),
+            "the source holds the bytes while it is read"
+        );
+        drop(source);
+        assert!(
+            freed.load(Ordering::SeqCst),
+            "the bytes are freed once the reader drops the source"
+        );
+
+        // A plain image keeps them: its sources borrow the section.
+        let kept = Arc::new(AtomicBool::new(false));
+        let mut image = MemoryImage::new();
+        image.sections.push(MemorySection {
+            section_type: SectionType::TextIndex,
+            version: 1,
+            metas: vec![ChunkMeta::raw()],
+            chunks: vec![Bytes::from_owner(Noted(Arc::clone(&kept)))],
+        });
+        drop(image.section_source(SectionType::TextIndex).unwrap());
+        assert!(!kept.load(Ordering::SeqCst), "the image still holds them");
+        drop(image);
+        assert!(kept.load(Ordering::SeqCst));
     }
 
     #[test]

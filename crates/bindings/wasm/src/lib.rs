@@ -242,36 +242,7 @@ impl Database {
         self.check_open()?;
         let result = self.run_query(query)?;
 
-        let obj = js_sys::Object::new();
-
-        // columns: string[]
-        let cols = Array::new_with_length(result.columns.len() as u32);
-        for (i, col) in result.columns.iter().enumerate() {
-            cols.set(i as u32, JsValue::from_str(col));
-        }
-        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("columns"), &cols);
-
-        // rows: any[][]
-        let rows = Array::new_with_length(result.rows().len() as u32);
-        for (i, row) in result.rows().iter().enumerate() {
-            let js_row = Array::new_with_length(row.len() as u32);
-            for (j, val) in row.iter().enumerate() {
-                js_row.set(j as u32, types::value_to_js(val));
-            }
-            rows.set(i as u32, js_row.into());
-        }
-        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &rows);
-
-        // executionTimeMs?: number
-        if let Some(ms) = result.execution_time_ms {
-            let _ = js_sys::Reflect::set(
-                &obj,
-                &JsValue::from_str("executionTimeMs"),
-                &JsValue::from_f64(ms),
-            );
-        }
-
-        Ok(obj.into())
+        Ok(raw_result_to_js(&result))
     }
 
     /// Returns the number of nodes in the database.
@@ -927,48 +898,65 @@ impl Database {
     ///
     /// # Errors
     ///
-    /// Returns `JsError` if the language is unsupported or the query fails to parse or execute.
+    /// Returns `JsError` if the database is closed, the language is unsupported, or the query
+    /// fails to parse or execute.
     #[wasm_bindgen(js_name = "executeRawWithLanguage")]
     pub fn execute_raw_with_language(
         &self,
         query: &str,
         language: &str,
     ) -> Result<JsValue, JsError> {
-        let result = self
-            .inner
-            .execute_language(query, language, None)
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.check_open()?;
+        // In the open transaction, if there is one, like the other execute methods.
+        let result = self.run_language_query(query, language, None)?;
+        Ok(raw_result_to_js(&result))
+    }
 
-        let obj = js_sys::Object::new();
+    /// Executes a GQL query with parameters and returns raw columns, rows, and
+    /// metadata, like `executeRaw`.
+    ///
+    /// ```js
+    /// const raw = db.executeRawWithParams("RETURN $tags AS tags", { tags: ["a", "b"] });
+    /// // { columns: ["tags"], rows: [[["a", "b"]]], executionTimeMs: 0.1 }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if `params` is not a valid object, or if the query fails to parse or execute.
+    #[wasm_bindgen(js_name = "executeRawWithParams")]
+    pub fn execute_raw_with_params(
+        &self,
+        query: &str,
+        params: JsValue,
+    ) -> Result<JsValue, JsError> {
+        self.execute_raw_with_language_and_params(query, "gql", params)
+    }
 
-        // columns: string[]
-        let cols = Array::new_with_length(result.columns.len() as u32);
-        for (i, col) in result.columns.iter().enumerate() {
-            cols.set(i as u32, JsValue::from_str(col));
-        }
-        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("columns"), &cols);
-
-        // rows: any[][]
-        let rows = Array::new_with_length(result.rows().len() as u32);
-        for (i, row) in result.rows().iter().enumerate() {
-            let js_row = Array::new_with_length(row.len() as u32);
-            for (j, val) in row.iter().enumerate() {
-                js_row.set(j as u32, types::value_to_js(val));
-            }
-            rows.set(i as u32, js_row.into());
-        }
-        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &rows);
-
-        // executionTimeMs?: number
-        if let Some(ms) = result.execution_time_ms {
-            let _ = js_sys::Reflect::set(
-                &obj,
-                &JsValue::from_str("executionTimeMs"),
-                &JsValue::from_f64(ms),
-            );
-        }
-
-        Ok(obj.into())
+    /// Executes a query in a specific language with parameters and returns raw
+    /// columns, rows, and metadata, like `executeRawWithLanguage`.
+    ///
+    /// ```js
+    /// const raw = db.executeRawWithLanguageAndParams(
+    ///   "RETURN $city AS city",
+    ///   "cypher",
+    ///   { city: { name: "Amsterdam" } }
+    /// );
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if `params` is invalid, the language is unsupported, or the query fails.
+    #[wasm_bindgen(js_name = "executeRawWithLanguageAndParams")]
+    pub fn execute_raw_with_language_and_params(
+        &self,
+        query: &str,
+        language: &str,
+        params: JsValue,
+    ) -> Result<JsValue, JsError> {
+        self.check_open()?;
+        let param_map = Self::convert_params(Some(params))?;
+        let result = self.run_language_query(query, language, param_map)?;
+        Ok(raw_result_to_js(&result))
     }
 
     /// Batch-imports LPG (Labeled Property Graph) data from a structured object.
@@ -1433,6 +1421,41 @@ impl Database {
             serde_wasm_bindgen::from_value(js_val).map_err(|e| JsError::new(&e.to_string()))?;
         json_params_to_map(Some(&json_val)).map_err(|e| JsError::new(&e))
     }
+}
+
+/// Converts a query result to `{ columns: string[], rows: any[][], executionTimeMs?: number }`,
+/// the shape of the `executeRaw*` methods.
+fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
+    let obj = js_sys::Object::new();
+
+    // columns: string[]
+    let cols = Array::new_with_length(result.columns.len() as u32);
+    for (i, col) in result.columns.iter().enumerate() {
+        cols.set(i as u32, JsValue::from_str(col));
+    }
+    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("columns"), &cols);
+
+    // rows: any[][]
+    let rows = Array::new_with_length(result.rows().len() as u32);
+    for (i, row) in result.rows().iter().enumerate() {
+        let js_row = Array::new_with_length(row.len() as u32);
+        for (j, val) in row.iter().enumerate() {
+            js_row.set(j as u32, types::value_to_js(val));
+        }
+        rows.set(i as u32, js_row.into());
+    }
+    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &rows);
+
+    // executionTimeMs?: number
+    if let Some(ms) = result.execution_time_ms {
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("executionTimeMs"),
+            &JsValue::from_f64(ms),
+        );
+    }
+
+    obj.into()
 }
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
-import { parseGtestFile } from '../node/parser.mjs'
+import { parseGtestFile, coerceParams } from '../node/parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash } from '../node/comparator.mjs'
 
 // ---------------------------------------------------------------------------
@@ -130,17 +130,19 @@ function toDispatchKey(language) {
 }
 
 /** Execute a query in the specified language, returning a raw result. */
-function executeQueryRaw(db, language, query) {
+function executeQueryRaw(db, language, query, params) {
   const key = toDispatchKey(language)
   if (key === null) throw new Error(`Unsupported language: ${language}`)
+  if (params) return db.executeRawWithLanguageAndParams(query, key, params)
   if (key === 'gql') return db.executeRaw(query)
   return db.executeRawWithLanguage(query, key)
 }
 
 /** Execute a query in the specified language (for setup, returns array of objects). */
-function executeQuery(db, language, query) {
+function executeQuery(db, language, query, params) {
   const key = toDispatchKey(language)
   if (key === null) throw new Error(`Unsupported language: ${language}`)
+  if (params) return db.executeWithLanguageAndParams(query, key, params)
   if (key === 'gql') return db.execute(query)
   return db.executeWithLanguage(query, key)
 }
@@ -209,8 +211,6 @@ for (const filePath of gtestFiles) {
             for (const req of (tc.requires || [])) {
               if (!isAvailable(db, req)) return ctx.skip()
             }
-            // WASM executeRaw does not support params yet
-            if (tc.params && Object.keys(tc.params).length > 0) return ctx.skip()
             const effectiveDataset = tc.dataset || meta.dataset
             if (effectiveDataset && effectiveDataset !== 'empty') {
               loadDataset(db, effectiveDataset)
@@ -248,9 +248,6 @@ for (const filePath of gtestFiles) {
           if (!isAvailable(db, req)) return ctx.skip()
         }
 
-        // WASM executeRaw does not support params yet
-        if (tc.params && Object.keys(tc.params).length > 0) return ctx.skip()
-
         // Load dataset (per-test override takes priority)
         const effectiveDataset = tc.dataset || meta.dataset
         if (effectiveDataset && effectiveDataset !== 'empty') {
@@ -282,13 +279,16 @@ function runTestCase(db, tc, language, setupLanguage) {
   const queries = tc.statements.length > 0 ? tc.statements : (tc.query || exp.error != null) ? [tc.query ?? ''] : []
   if (queries.length === 0) throw new Error(`No query or statements in test '${tc.name}'`)
 
+  // Params apply to every statement of the test, as in the other runners
+  const params = coerceParams(tc.params)
+
   // Error case: execute all-but-last normally, only last should fail
   if (exp.error != null) {
     for (let i = 0; i < queries.length - 1; i++) {
-      executeQuery(db, language, queries[i])
+      executeQuery(db, language, queries[i], params)
     }
     try {
-      executeQuery(db, language, queries[queries.length - 1])
+      executeQuery(db, language, queries[queries.length - 1], params)
       throw new Error(`Expected error containing '${exp.error}' but query succeeded`)
     } catch (err) {
       if (err.message.startsWith('Expected error')) throw err
@@ -300,7 +300,7 @@ function runTestCase(db, tc, language, setupLanguage) {
   // Execute all queries, capture last raw result for assertions
   let rawResult
   for (let i = 0; i < queries.length; i++) {
-    rawResult = executeQueryRaw(db, language, queries[i])
+    rawResult = executeQueryRaw(db, language, queries[i], params)
   }
 
   // Wrap eagerly and release the WASM reference to avoid borrow conflicts on db.free()

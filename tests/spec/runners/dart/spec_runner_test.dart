@@ -99,13 +99,17 @@ QueryResult _executeQuery(
   return db.executeLanguage(lang, query, params: coerced);
 }
 
-/// Coerce string param values to proper Dart types (int, double, bool).
+/// Coerce string param values to proper Dart types (a list or map written as
+/// JSON, int, double, bool).
 Map<String, dynamic>? _coerceParams(Map<String, String>? raw) {
   if (raw == null || raw.isEmpty) return null;
   final result = <String, dynamic>{};
   for (final entry in raw.entries) {
     final v = entry.value;
-    if (v == 'true') {
+    final trimmed = v.trim();
+    if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+      result[entry.key] = jsonDecode(trimmed);
+    } else if (v == 'true') {
       result[entry.key] = true;
     } else if (v == 'false') {
       result[entry.key] = false;

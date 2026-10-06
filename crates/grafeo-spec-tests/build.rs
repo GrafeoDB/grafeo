@@ -1059,7 +1059,17 @@ fn generate_params_hashmap(output: &mut String, params: &HashMap<String, String>
     )
     .unwrap();
     for (key, value) in params {
-        if let Ok(n) = value.parse::<i64>() {
+        let trimmed = value.trim();
+        if trimmed.starts_with('[') || trimmed.starts_with('{') {
+            let code =
+                json_param_to_value_code(trimmed).unwrap_or_else(|e| panic!("param '{key}': {e}"));
+            writeln!(
+                output,
+                "            m.insert(\"{}\".to_string(), {code});",
+                escape_rust_string(key)
+            )
+            .unwrap();
+        } else if let Ok(n) = value.parse::<i64>() {
             writeln!(
                 output,
                 "            m.insert(\"{}\".to_string(), grafeo_common::types::Value::Int64({n}));",
@@ -1092,6 +1102,174 @@ fn generate_params_hashmap(output: &mut String, params: &HashMap<String, String>
     }
     writeln!(output, "            m").unwrap();
     writeln!(output, "        }};").unwrap();
+}
+
+/// Rust code that builds the `Value` for a param written as a JSON list or map
+/// (`[1, 2]`, `{"city": "Amsterdam", "tags": [1, 2]}`). The build script has no
+/// JSON dependency, so this parses JSON values: lists, maps, strings, numbers,
+/// `true`, `false` and `null`.
+fn json_param_to_value_code(text: &str) -> Result<String, String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut pos = 0;
+    let code = json_value_code(&chars, &mut pos)?;
+    skip_json_whitespace(&chars, &mut pos);
+    if pos == chars.len() {
+        Ok(code)
+    } else {
+        Err(format!("text after the JSON value in `{text}`"))
+    }
+}
+
+fn skip_json_whitespace(chars: &[char], pos: &mut usize) {
+    while chars.get(*pos).is_some_and(|c| c.is_whitespace()) {
+        *pos += 1;
+    }
+}
+
+fn json_value_code(chars: &[char], pos: &mut usize) -> Result<String, String> {
+    const VALUE: &str = "grafeo_common::types::Value";
+    skip_json_whitespace(chars, pos);
+    match chars.get(*pos) {
+        Some('[') => {
+            *pos += 1;
+            let mut items = Vec::new();
+            skip_json_whitespace(chars, pos);
+            if chars.get(*pos) == Some(&']') {
+                *pos += 1;
+            } else {
+                loop {
+                    items.push(json_value_code(chars, pos)?);
+                    skip_json_whitespace(chars, pos);
+                    match chars.get(*pos) {
+                        Some(',') => *pos += 1,
+                        Some(']') => {
+                            *pos += 1;
+                            break;
+                        }
+                        _ => return Err(format!("expected ',' or ']' at {pos}")),
+                    }
+                }
+            }
+            Ok(format!(
+                "{VALUE}::List(Vec::<{VALUE}>::from([{}]).into())",
+                items.join(", ")
+            ))
+        }
+        Some('{') => {
+            *pos += 1;
+            let mut entries = Vec::new();
+            skip_json_whitespace(chars, pos);
+            if chars.get(*pos) == Some(&'}') {
+                *pos += 1;
+            } else {
+                loop {
+                    skip_json_whitespace(chars, pos);
+                    let key = json_string(chars, pos)?;
+                    skip_json_whitespace(chars, pos);
+                    if chars.get(*pos) != Some(&':') {
+                        return Err(format!("expected ':' at {pos}"));
+                    }
+                    *pos += 1;
+                    let value = json_value_code(chars, pos)?;
+                    entries.push(format!(
+                        "(grafeo_common::types::PropertyKey::new(\"{}\"), {value})",
+                        escape_rust_string(&key)
+                    ));
+                    skip_json_whitespace(chars, pos);
+                    match chars.get(*pos) {
+                        Some(',') => *pos += 1,
+                        Some('}') => {
+                            *pos += 1;
+                            break;
+                        }
+                        _ => return Err(format!("expected ',' or '}}' at {pos}")),
+                    }
+                }
+            }
+            Ok(format!(
+                "{VALUE}::Map(std::sync::Arc::new(std::collections::BTreeMap::<grafeo_common::types::PropertyKey, {VALUE}>::from([{}])))",
+                entries.join(", ")
+            ))
+        }
+        Some('"') => {
+            let text = json_string(chars, pos)?;
+            Ok(format!(
+                "{VALUE}::String(\"{}\".into())",
+                escape_rust_string(&text)
+            ))
+        }
+        Some(_) => {
+            let start = *pos;
+            while chars
+                .get(*pos)
+                .is_some_and(|c| c.is_alphanumeric() || matches!(c, '-' | '+' | '.'))
+            {
+                *pos += 1;
+            }
+            let word: String = chars[start..*pos].iter().collect();
+            match word.as_str() {
+                "true" | "false" => Ok(format!("{VALUE}::Bool({word})")),
+                "null" => Ok(format!("{VALUE}::Null")),
+                _ => {
+                    if let Ok(n) = word.parse::<i64>() {
+                        Ok(format!("{VALUE}::Int64({n})"))
+                    } else if let Ok(f) = word.parse::<f64>() {
+                        Ok(format!("{VALUE}::Float64({f:?}_f64)"))
+                    } else {
+                        Err(format!("not a JSON value: `{word}`"))
+                    }
+                }
+            }
+        }
+        None => Err("unexpected end of the JSON value".to_string()),
+    }
+}
+
+/// Reads a JSON string starting at the opening quote.
+fn json_string(chars: &[char], pos: &mut usize) -> Result<String, String> {
+    if chars.get(*pos) != Some(&'"') {
+        return Err(format!("expected a string at {pos}"));
+    }
+    *pos += 1;
+    let mut text = String::new();
+    loop {
+        match chars.get(*pos) {
+            None => return Err("unterminated JSON string".to_string()),
+            Some('"') => {
+                *pos += 1;
+                return Ok(text);
+            }
+            Some('\\') => {
+                let escaped = chars.get(*pos + 1).copied();
+                *pos += 2;
+                match escaped {
+                    Some('"') => text.push('"'),
+                    Some('\\') => text.push('\\'),
+                    Some('/') => text.push('/'),
+                    Some('n') => text.push('\n'),
+                    Some('r') => text.push('\r'),
+                    Some('t') => text.push('\t'),
+                    Some('b') => text.push('\u{8}'),
+                    Some('f') => text.push('\u{c}'),
+                    Some('u') => {
+                        let hex: String = chars.get(*pos..*pos + 4).unwrap_or(&[]).iter().collect();
+                        let code = u32::from_str_radix(&hex, 16)
+                            .map_err(|_| format!("bad \\u escape `{hex}`"))?;
+                        text.push(
+                            char::from_u32(code)
+                                .ok_or_else(|| format!("bad \\u escape `{hex}`"))?,
+                        );
+                        *pos += 4;
+                    }
+                    _ => return Err(format!("bad escape at {pos}")),
+                }
+            }
+            Some(&c) => {
+                text.push(c);
+                *pos += 1;
+            }
+        }
+    }
 }
 
 fn generate_execute_and_assert(

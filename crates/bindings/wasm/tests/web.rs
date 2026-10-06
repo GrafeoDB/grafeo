@@ -468,6 +468,42 @@ fn test_close_blocks_subsequent_operations() {
     assert!(db.begin_transaction().is_err(), "begin after close");
 }
 
+/// The first cell of an `executeRaw*` result (`rows[0][0]`) as a number.
+fn first_raw_number(raw: &wasm_bindgen::JsValue) -> f64 {
+    let rows = js_sys::Reflect::get(raw, &"rows".into()).expect("rows");
+    let row = js_sys::Array::from(&rows).get(0);
+    js_sys::Array::from(&row)
+        .get(0)
+        .as_f64()
+        .expect("a number in rows[0][0]")
+}
+
+/// `executeRawWithLanguage` refuses a closed database, like `executeRaw`.
+#[wasm_bindgen_test]
+fn test_execute_raw_with_language_after_close_errors() {
+    let db = Database::new().expect("create db");
+    db.close();
+    assert!(
+        db.execute_raw_with_language("MATCH (n) RETURN count(n) AS c", "gql")
+            .is_err(),
+        "executeRawWithLanguage after close"
+    );
+}
+
+/// `executeRawWithLanguage` runs in the open transaction: it sees the
+/// transaction's own writes before the commit.
+#[wasm_bindgen_test]
+fn test_execute_raw_with_language_runs_in_the_open_transaction() {
+    let db = Database::new().expect("create db");
+    db.begin_transaction().expect("begin");
+    db.execute("CREATE (:T {x: 1})").expect("insert in tx");
+    let raw = db
+        .execute_raw_with_language("MATCH (n:T) RETURN count(n) AS c", "gql")
+        .expect("raw query in tx");
+    assert_eq!(first_raw_number(&raw), 1.0, "the transaction's own write");
+    db.rollback_transaction().expect("rollback");
+}
+
 #[wasm_bindgen_test]
 fn test_close_rolls_back_active_transaction() {
     let db = Database::new().expect("create db");

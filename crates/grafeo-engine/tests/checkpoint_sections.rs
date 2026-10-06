@@ -22,6 +22,7 @@ use grafeo_common::storage::SectionType;
 use grafeo_common::types::Value;
 use grafeo_engine::config::StorageFormat;
 use grafeo_engine::{Config, GrafeoDB};
+use grafeo_storage::file::GrafeoFileManager;
 
 fn config(path: &std::path::Path) -> Config {
     Config::persistent(path).with_storage_format(StorageFormat::Auto)
@@ -29,6 +30,12 @@ fn config(path: &std::path::Path) -> Config {
 
 fn single_value(db: &GrafeoDB, query: &str) -> Value {
     db.session().execute(query).unwrap().rows()[0][0].clone()
+}
+
+/// Whether the active image of the database file holds `section_type`.
+fn holds(fm: &GrafeoFileManager, section_type: SectionType) -> bool {
+    fm.read_image(|image| Ok(image.section_source(section_type).is_some()))
+        .unwrap()
 }
 
 #[test]
@@ -77,7 +84,7 @@ fn a_compacted_database_keeps_its_rdf_section() {
 
     let db = GrafeoDB::with_config(config(&path)).unwrap();
     let fm = db.file_manager().unwrap();
-    assert!(fm.read_section(SectionType::RdfStore).unwrap().is_some());
+    assert!(holds(fm, SectionType::RdfStore));
     // Read the store itself: SPARQL over a compacted database does not see
     // RDF data yet, a separate problem.
     assert_eq!(db.rdf_store().len(), 1, "the triple is in the section");
@@ -129,12 +136,10 @@ fn the_checkpoint_timer_writes_the_compacted_base() {
     }
 
     assert!(
-        fm.read_section(SectionType::CompactStore)
-            .unwrap()
-            .is_some(),
+        holds(&fm, SectionType::CompactStore),
         "the timer's checkpoint contains the compacted base"
     );
-    assert!(fm.read_section(SectionType::Catalog).unwrap().is_some());
+    assert!(holds(&fm, SectionType::Catalog));
     db.close().unwrap();
 }
 
@@ -284,7 +289,7 @@ fn every_kind_of_section_survives_a_reopen() {
         SectionType::TextIndex,
     ] {
         assert!(
-            fm.read_section(section_type).unwrap().is_some(),
+            holds(fm, section_type),
             "the file holds the {section_type:?} section"
         );
     }
@@ -326,7 +331,7 @@ fn a_compacted_base_and_its_deletions_survive_a_reopen() {
         SectionType::OverlayDeletions,
     ] {
         assert!(
-            fm.read_section(section_type).unwrap().is_some(),
+            holds(fm, section_type),
             "the file holds the {section_type:?} section"
         );
     }

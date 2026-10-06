@@ -6,7 +6,12 @@ use super::PropertyUndoEntry;
 use grafeo_common::types::EpochId;
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, TransactionId, Value};
 use grafeo_common::utils::hash::FxHashMap;
+#[cfg(not(feature = "temporal"))]
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
+
+#[cfg(not(feature = "temporal"))]
+use crate::graph::lpg::ColumnBacking;
 
 impl LpgStore {
     /// Sets a property on a node.
@@ -1060,5 +1065,71 @@ impl LpgStore {
     #[cfg(not(feature = "temporal"))]
     pub fn node_properties_mark_spilled(&self, key: &PropertyKey) {
         self.node_properties.mark_column_spilled(key);
+    }
+
+    /// Returns the nodes with a value for `key`, in id order, spilled values
+    /// included.
+    #[must_use]
+    pub fn node_property_column_ids(&self, key: &PropertyKey) -> Vec<NodeId> {
+        self.node_properties.column_ids(key)
+    }
+
+    /// Returns the edges with a value for `key`, in id order.
+    #[must_use]
+    pub fn edge_property_column_ids(&self, key: &PropertyKey) -> Vec<EdgeId> {
+        self.edge_properties.column_ids(key)
+    }
+
+    /// Returns every `(node, value)` of `key`, in id order, spilled values
+    /// included: the snapshot a spill writes to its backing.
+    #[must_use]
+    pub fn node_property_column_entries(&self, key: &PropertyKey) -> Vec<(NodeId, Value)> {
+        self.node_properties.column_entries(key)
+    }
+
+    /// Calls `f` with the vector stored for a node under `key`, without
+    /// copying a spilled vector; `None` when there is no vector.
+    pub fn with_node_vector<R>(
+        &self,
+        id: NodeId,
+        key: &PropertyKey,
+        f: impl FnOnce(&[f32]) -> R,
+    ) -> Option<R> {
+        self.node_properties.with_vector(id, key, f)
+    }
+
+    /// Spills a node property column into `backing`, which holds `snapshot`
+    /// (from [`node_property_column_entries`](Self::node_property_column_entries)).
+    /// See [`PropertyStorage::spill_column`](crate::graph::lpg::PropertyStorage::spill_column).
+    #[cfg(not(feature = "temporal"))]
+    pub fn spill_node_property_column(
+        &self,
+        key: &PropertyKey,
+        backing: Arc<dyn ColumnBacking<NodeId>>,
+        snapshot: &[(NodeId, Value)],
+    ) -> bool {
+        self.node_properties.spill_column(key, backing, snapshot)
+    }
+
+    /// Moves a spilled node property column back onto the heap; `false` when
+    /// it is not spilled.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading a spilled value; the column then stays
+    /// spilled.
+    #[cfg(not(feature = "temporal"))]
+    pub fn reload_node_property_column(
+        &self,
+        key: &PropertyKey,
+    ) -> grafeo_common::utils::error::Result<bool> {
+        self.node_properties.reload_column(key)
+    }
+
+    /// Returns the keys of the spilled node property columns, in key order.
+    #[cfg(not(feature = "temporal"))]
+    #[must_use]
+    pub fn spilled_node_property_columns(&self) -> Vec<PropertyKey> {
+        self.node_properties.spilled_columns()
     }
 }

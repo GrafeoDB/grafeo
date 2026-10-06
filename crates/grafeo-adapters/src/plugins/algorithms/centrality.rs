@@ -145,7 +145,34 @@ pub fn pagerank(
     tolerance: f64,
     directed: bool,
 ) -> FxHashMap<NodeId, f64> {
-    let nodes = store.node_ids();
+    pagerank_in_order(
+        store,
+        &store.node_ids(),
+        damping,
+        max_iterations,
+        tolerance,
+        directed,
+    )
+}
+
+/// [`pagerank`] over `nodes`, in their order: each node's score sums its
+/// incoming contributions, and the dangling mass sums, in the order of
+/// `nodes`. Given the nodes in the order of a key ([`order_by_key`]), the
+/// scores are bit-identical whatever order the nodes and edges were inserted
+/// in; with keys that sort like the node ids, they equal [`pagerank`]'s.
+///
+/// `nodes` must be the nodes of `store`, each once; an edge to a node not in
+/// `nodes` is not followed.
+///
+/// [`order_by_key`]: super::order_by_key
+pub fn pagerank_in_order(
+    store: &dyn GraphStore,
+    nodes: &[NodeId],
+    damping: f64,
+    max_iterations: usize,
+    tolerance: f64,
+    directed: bool,
+) -> FxHashMap<NodeId, f64> {
     let n = nodes.len();
 
     if n == 0 {
@@ -232,9 +259,9 @@ pub fn pagerank(
 
     // Convert back to NodeId map
     nodes
-        .into_iter()
+        .iter()
         .enumerate()
-        .map(|(idx, node)| (node, scores[idx]))
+        .map(|(idx, &node)| (node, scores[idx]))
         .collect()
 }
 

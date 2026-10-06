@@ -170,6 +170,14 @@ Without `projection=`, `db.algorithms` reads the graph `set_graph()` selects,
 like `execute()` and `CALL grafeo.pagerank()`; `db.graph("name").algorithms`
 reads one named graph.
 
+`key=` keys a result by a node property instead of the node id, and makes
+PageRank, Louvain and label propagation independent of the order the graph was
+loaded in (see [Determinism](../../algorithms/index.md#determinism)):
+
+```python
+scores = db.algorithms.pagerank(projection="people", directed=False, key="id")
+```
+
 ## Data Import
 
 Import CSV and JSON Lines files directly as graph nodes:

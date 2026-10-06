@@ -3,7 +3,9 @@
 # A statement that uses a parameter nobody supplied fails with "Missing
 # parameter" before it writes anything, in every path (a write used to store
 # the text "$e"). An unaliased column that reads a parameter is named after
-# the query text ($x), not after the value that replaces it.
+# the query text ($x), not after the value that replaces it. A list or map
+# parameter (written as a JSON value) comes back as given (#574: `RETURN $x`
+# and `WITH $x AS w` returned an empty string).
 #
 # Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): Alix (30),
 # Gus (25), Vincent (40), Jules (35) and Mia (28).
@@ -92,3 +94,71 @@ tests:
       columns: [five]
       rows:
         - [5]
+
+  # ---------------------------------------------------------------------------
+  # List and map parameters (#574)
+  # ---------------------------------------------------------------------------
+
+  # The size tells a list from a string that reads the same.
+  - name: a_list_parameter_is_returned_as_given
+    params:
+      x: [3, 19, 88]
+    variants:
+      gql: "RETURN $x AS x, size($x) AS n"
+      cypher: "RETURN $x AS x, size($x) AS n"
+    expect:
+      rows:
+        - ["[3, 19, 88]", 3]
+
+  - name: a_list_parameter_passes_through_with
+    params:
+      x: [3, 19, 88]
+    variants:
+      gql: "UNWIND [0] AS i WITH $x AS w RETURN w, size(w) AS n"
+      cypher: "UNWIND [0] AS i WITH $x AS w RETURN w, size(w) AS n"
+    expect:
+      rows:
+        - ["[3, 19, 88]", 3]
+
+  - name: a_list_parameter_unwinds_to_its_items
+    params:
+      x: [3, 19, 88]
+    variants:
+      gql: "UNWIND $x AS v RETURN v"
+      cypher: "UNWIND $x AS v RETURN v"
+    expect:
+      rows:
+        - [3]
+        - [19]
+        - [88]
+
+  - name: a_list_parameter_filters_with_in
+    params:
+      names: ["Alix", "Mia"]
+    variants:
+      gql: "MATCH (p:Person) WHERE p.name IN $names RETURN p.name AS n"
+      cypher: "MATCH (p:Person) WHERE p.name IN $names RETURN p.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Mia]
+
+  - name: a_map_parameter_reads_its_entries
+    params:
+      m: {"city": "Amsterdam", "tags": [3, 19]}
+    variants:
+      gql: "RETURN $m.city AS city, $m.tags AS tags"
+      cypher: "RETURN $m.city AS city, $m.tags AS tags"
+    expect:
+      rows:
+        - [Amsterdam, "[3, 19]"]
+
+  - name: a_map_parameter_passes_through_with
+    params:
+      m: {"city": "Amsterdam", "tags": [3, 19]}
+    variants:
+      gql: "UNWIND [0] AS i WITH $m AS w RETURN w.city AS city"
+      cypher: "UNWIND [0] AS i WITH $m AS w RETURN w.city AS city"
+    expect:
+      rows:
+        - [Amsterdam]

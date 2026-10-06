@@ -49,6 +49,35 @@ import { readFileSync } from 'fs'
  * @property {TestCase[]} tests
  */
 
+/**
+ * Coerce raw param string values to proper JS types.
+ * Mirrors the type coercion in crates/grafeo-spec-tests/build.rs: a value
+ * written as a JSON list or map (`[1, 2]`, `{"city": "Amsterdam"}`) becomes
+ * that list or object, then booleans, numbers, and the rest stays a string.
+ */
+export function coerceParams(rawParams) {
+  if (!rawParams || Object.keys(rawParams).length === 0) return undefined
+  const result = {}
+  for (const [key, val] of Object.entries(rawParams)) {
+    const trimmed = val.trim()
+    if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+      result[key] = JSON.parse(trimmed)
+    } else if (val === 'true') {
+      result[key] = true
+    } else if (val === 'false') {
+      result[key] = false
+    } else {
+      const num = Number(val)
+      if (!isNaN(num) && val.trim() !== '') {
+        result[key] = num
+      } else {
+        result[key] = val
+      }
+    }
+  }
+  return result
+}
+
 /** @param {string} filePath @returns {GtestFile} */
 export function parseGtestFile(filePath) {
   const content = readFileSync(filePath, 'utf-8')

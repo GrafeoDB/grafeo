@@ -686,33 +686,11 @@ impl super::GrafeoDB {
     /// Returns an error if the copy operation fails, or after a commit that
     /// did not complete.
     pub fn to_memory(&self) -> Result<Self> {
-        use grafeo_common::storage::SectionType;
-
         let mut target = Self::with_config(Config::in_memory())?;
-        let mut sections: Vec<(SectionType, Option<Vec<u8>>)> = Vec::new();
-        {
-            // The copy holds every commit whole, and none that did not
-            // complete.
-            let commits = self.transaction_manager.hold_commits()?;
-            for section in self.checkpoint_sources().sections(&commits) {
-                // The LPG section holds the store's nodes and edges (the
-                // overlay's, after `compact()`): copy them instead, in the
-                // section's place.
-                if section.section_type() == SectionType::LpgStore {
-                    copy_graph_data(self.lpg_store(), target.lpg_store())?;
-                } else {
-                    sections.push((section.section_type(), Some(section.serialize()?)));
-                }
-            }
-        }
-
+        // Each section is served once and freed as soon as it is loaded.
+        let image = grafeo_common::storage::ServedOnce::new(self.copy_into(&target)?);
         let loaded = super::sections::load_sections(
-            &mut |section_type| {
-                Ok(sections
-                    .iter_mut()
-                    .find(|(stored, _)| *stored == section_type)
-                    .and_then(|(_, data)| data.take()))
-            },
+            &image,
             target.lpg_store(),
             &target.catalog,
             #[cfg(feature = "triple-store")]
@@ -724,6 +702,36 @@ impl super::GrafeoDB {
             .sync_epoch(target.lpg_store().current_epoch());
         target.finish_load(loaded)?;
         Ok(target)
+    }
+
+    /// Copies this database's nodes and edges into `target`, and returns an
+    /// image of every other section of a checkpoint, for
+    /// [`to_memory`](Self::to_memory) to load.
+    ///
+    /// Both are taken under one commit hold, so they hold the same commits:
+    /// every commit whole, and none that did not complete. The LPG section
+    /// (the overlay's, after `compact()`) is left out of the image: its nodes
+    /// and edges are copied from store to store instead, which is much
+    /// faster than encoding them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if commits cannot be held, a section fails to write,
+    /// or the nodes and edges cannot be copied.
+    pub(super) fn copy_into(&self, target: &Self) -> Result<grafeo_common::storage::MemoryImage> {
+        use grafeo_common::storage::{MemoryImage, SectionType};
+
+        let mut image = MemoryImage::new();
+        let commits = self.transaction_manager.hold_commits()?;
+        for section in self.checkpoint_sources().sections(&commits) {
+            if section.section_type() == SectionType::LpgStore {
+                copy_graph_data(self.lpg_store(), target.lpg_store())?;
+            } else {
+                image.begin_section(section.section_type(), section.version())?;
+                section.write_to(&mut image)?;
+            }
+        }
+        Ok(image)
     }
 
     /// Opens a database file and loads it entirely into memory.

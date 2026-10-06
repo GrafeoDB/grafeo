@@ -3,6 +3,93 @@ use crate::graph::Direction;
 use crate::graph::lpg::property::CompareOp;
 use grafeo_common::types::TransactionId;
 
+/// Deleting a node while its embedding column is spilled leaves no value: not
+/// while spilled, not after the reload, and not in the column's ids (#594).
+#[cfg(not(feature = "temporal"))]
+#[test]
+fn deleting_a_node_while_its_column_is_spilled_leaves_no_value() {
+    use crate::graph::lpg::property::test_backing::MemoryBacking;
+
+    let store = LpgStore::new().unwrap();
+    let key = PropertyKey::new("embedding");
+    let alix = store.create_node_with_props(
+        &["Item"],
+        [("embedding", Value::Vector(vec![1.0, 0.0].into()))],
+    );
+    let gus = store.create_node_with_props(
+        &["Item"],
+        [("embedding", Value::Vector(vec![0.0, 1.0].into()))],
+    );
+    let snapshot = store.node_property_column_entries(&key);
+    assert!(store.spill_node_property_column(&key, MemoryBacking::of(&snapshot), &snapshot));
+    assert_eq!(store.spilled_node_property_columns(), vec![key.clone()]);
+    assert_eq!(
+        store.with_node_vector(gus, &key, <[f32]>::to_vec),
+        Some(vec![0.0, 1.0])
+    );
+
+    assert!(store.delete_node(alix));
+    assert_eq!(store.get_node_property(alix, &key), None);
+    assert_eq!(store.node_property_column_ids(&key), vec![gus]);
+
+    assert!(store.reload_node_property_column(&key).unwrap());
+    assert_eq!(
+        store.spilled_node_property_columns(),
+        Vec::<PropertyKey>::new()
+    );
+    assert_eq!(store.get_node_property(alix, &key), None);
+    assert_eq!(
+        store.get_node_property(gus, &key),
+        Some(Value::Vector(vec![0.0, 1.0].into()))
+    );
+    assert_eq!(store.node_property_column_ids(&key), vec![gus]);
+}
+
+/// A rollback while the column is spilled brings back the values the
+/// transaction set, removed or deleted with its node, read through the
+/// backing when the transaction began (#594, the guarantee #522 deferred
+/// tombstones for).
+#[cfg(not(feature = "temporal"))]
+#[test]
+fn a_rollback_while_spilled_restores_the_spilled_values() {
+    use crate::graph::lpg::property::test_backing::MemoryBacking;
+
+    let store = LpgStore::new().unwrap();
+    let key = PropertyKey::new("embedding");
+    let v = |x: f32| Value::Vector(vec![x, 3.0].into());
+    let alix = store.create_node_with_props(&["Item"], [("embedding", v(3.0))]);
+    let gus = store.create_node_with_props(&["Item"], [("embedding", v(19.0))]);
+    let vincent = store.create_node_with_props(&["Item"], [("embedding", v(88.0))]);
+    let snapshot = store.node_property_column_entries(&key);
+    assert!(store.spill_node_property_column(&key, MemoryBacking::of(&snapshot), &snapshot));
+
+    let transaction_id = TransactionId::new(19);
+    let epoch = store.current_epoch();
+    store.set_node_property_versioned(alix, "embedding", v(3.19), transaction_id);
+    assert_eq!(
+        store.remove_node_property_versioned(gus, "embedding", transaction_id),
+        Some(v(19.0))
+    );
+    assert!(store.delete_node_transactional(vincent, epoch, transaction_id));
+    store.rollback_transaction_properties(transaction_id);
+
+    for (id, x) in [(alix, 3.0), (gus, 19.0), (vincent, 88.0)] {
+        assert_eq!(
+            store.get_node_property(id, &key),
+            Some(v(x)),
+            "while spilled"
+        );
+    }
+    assert!(store.reload_node_property_column(&key).unwrap());
+    for (id, x) in [(alix, 3.0), (gus, 19.0), (vincent, 88.0)] {
+        assert_eq!(
+            store.get_node_property(id, &key),
+            Some(v(x)),
+            "after reload"
+        );
+    }
+}
+
 #[test]
 fn test_create_node() {
     let store = LpgStore::new().unwrap();

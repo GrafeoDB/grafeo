@@ -4,7 +4,7 @@
 //! traversals, shortest paths, centrality measures, community detection,
 //! spanning trees, and network flow.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -19,6 +19,88 @@ use grafeo_core::graph::GraphStoreSearch;
 use grafeo_engine::database::GrafeoDB;
 
 use crate::error::PyGrafeoError;
+use crate::types::PyValue;
+
+/// The nodes of a store in the order of a key (`key=`), with their values.
+struct KeyOrder {
+    nodes: Vec<NodeId>,
+    values: HashMap<NodeId, Value>,
+}
+
+/// The order of `key` over `store`, or `None` without a key. A node without
+/// the key, or two with equal values, is an error, raised before the
+/// algorithm runs.
+fn key_order(store: &dyn GraphStoreSearch, key: Option<&str>) -> PyResult<Option<KeyOrder>> {
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    let ordered = algorithms::order_by_key(store, key).map_err(|error| {
+        PyErr::from(PyGrafeoError::from(Error::Query(QueryError::new(
+            QueryErrorKind::Semantic,
+            error.to_string(),
+        ))))
+    })?;
+    let nodes = ordered.iter().map(|(node, _)| *node).collect();
+    Ok(Some(KeyOrder {
+        nodes,
+        values: ordered.into_iter().collect(),
+    }))
+}
+
+/// A per-node result as a dict: by node id in node-id order, or with `key=`
+/// by key value in key order.
+fn node_dict<'py, T>(
+    py: Python<'py>,
+    result: impl IntoIterator<Item = (NodeId, T)>,
+    order: Option<&KeyOrder>,
+) -> PyResult<Py<PyAny>>
+where
+    T: IntoPyObject<'py>,
+{
+    let mut by_node: BTreeMap<NodeId, T> = result.into_iter().collect();
+    let dict = PyDict::new(py);
+    match order {
+        Some(order) => {
+            for node in &order.nodes {
+                if let Some(value) = by_node.remove(node) {
+                    dict.set_item(PyValue::to_py(&order.values[node], py), value)?;
+                }
+            }
+        }
+        None => {
+            for (node, value) in by_node {
+                dict.set_item(node.0, value)?;
+            }
+        }
+    }
+    Ok(dict.into_any().unbind())
+}
+
+/// A set of nodes as a list: node ids in node-id order, or with `key=` key
+/// values in key order.
+fn node_list(
+    py: Python<'_>,
+    nodes: impl IntoIterator<Item = NodeId>,
+    order: Option<&KeyOrder>,
+) -> PyResult<Py<PyAny>> {
+    match order {
+        Some(order) => {
+            let members: HashSet<NodeId> = nodes.into_iter().collect();
+            let values: Vec<Py<PyAny>> = order
+                .nodes
+                .iter()
+                .filter(|node| members.contains(node))
+                .map(|node| PyValue::to_py(&order.values[node], py))
+                .collect();
+            Ok(values.into_pyobject(py)?.into_any().unbind())
+        }
+        None => {
+            let mut ids: Vec<u64> = nodes.into_iter().map(|node| node.0).collect();
+            ids.sort_unstable();
+            Ok(ids.into_pyobject(py)?.into_any().unbind())
+        }
+    }
+}
 
 /// Run graph algorithms at Rust speed from Python.
 ///
@@ -30,7 +112,12 @@ use crate::error::PyGrafeoError;
 /// selects (the default graph when none is selected), like `execute()` and
 /// `CALL grafeo.<algorithm>()`; `db.graph(name).algorithms` reads that graph.
 /// Every method takes a keyword-only `projection=` that names a projection
-/// (`create_projection()`) to read instead.
+/// (`create_projection()`) to read instead. The methods that return a value
+/// per node or a set of nodes also take `key=`: a node property every node in
+/// scope holds once (an id from outside the database), which keys the result
+/// instead of the node id. PageRank, Louvain and label propagation then also
+/// run in key order, so their results do not depend on the order the nodes
+/// and edges were inserted in; the others only change their keys.
 #[pyclass(name = "Algorithms")]
 pub struct PyAlgorithms {
     db: Arc<RwLock<GrafeoDB>>,
@@ -154,14 +241,26 @@ impl PyAlgorithms {
 
     /// Find connected components (treating graph as undirected).
     ///
+    /// Args:
+    ///     key: A node property every node in scope holds, each with its own
+    ///         value (an id from outside the database). The result is keyed by
+    ///         it instead of the node id, in key order. A node without it, or
+    ///         two with equal values, raise GrafeoError.
+    ///
     /// Returns:
-    ///     Dict mapping node ID to component ID
-    #[pyo3(signature = (*, projection=None))]
-    fn connected_components(&self, projection: Option<&str>) -> PyResult<BTreeMap<u64, u64>> {
+    ///     Dict mapping node ID (or key) to component ID
+    #[pyo3(signature = (*, projection=None, key=None))]
+    fn connected_components(
+        &self,
+        projection: Option<&str>,
+        key: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
+        let order = key_order(&*store, key)?;
         let result = algorithms::connected_components(&*store);
-        Ok(result.into_iter().map(|(n, c)| (n.0, c)).collect())
+        node_dict(py, result, order.as_ref())
     }
 
     /// Count the number of connected components.
@@ -463,38 +562,42 @@ impl PyAlgorithms {
     ///
     /// Args:
     ///     normalized: If True, normalize by (n-1) (default: False)
+    ///     key: A node property every node in scope holds, each with its own
+    ///         value (an id from outside the database). The result is keyed by
+    ///         it instead of the node id, in key order. A node without it, or
+    ///         two with equal values, raise GrafeoError.
     ///
     /// Returns:
-    ///     Dict mapping node ID to centrality score
-    #[pyo3(signature = (normalized=false, *, projection=None))]
+    ///     Dict mapping node ID (or key) to centrality score
+    #[pyo3(signature = (normalized=false, *, projection=None, key=None))]
     fn degree_centrality(
         &self,
         normalized: bool,
         projection: Option<&str>,
+        key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
+        let order = key_order(&*store, key)?;
 
         if normalized {
             let result = algorithms::degree_centrality_normalized(&*store);
-            let scores: BTreeMap<u64, f64> = result.into_iter().map(|(n, s)| (n.0, s)).collect();
-            Ok(scores.into_pyobject(py)?.into_any().unbind())
+            node_dict(py, result, order.as_ref())
         } else {
             let result = algorithms::degree_centrality(&*store);
-            let dict = PyDict::new(py);
-            // In node-id order, the same in every process.
-            let totals: BTreeMap<NodeId, usize> = result.total_degree.into_iter().collect();
-            for (node, total) in totals {
+            let mut degrees = Vec::with_capacity(result.total_degree.len());
+            for (&node, &total) in &result.total_degree {
                 let in_d = *result.in_degree.get(&node).unwrap_or(&0);
                 let out_d = *result.out_degree.get(&node).unwrap_or(&0);
                 let node_dict = PyDict::new(py);
                 node_dict.set_item("in_degree", in_d)?;
                 node_dict.set_item("out_degree", out_d)?;
                 node_dict.set_item("total_degree", total)?;
-                dict.set_item(node.0, node_dict)?;
+                degrees.push((node, node_dict));
             }
-            Ok(dict.into_any().unbind())
+            // In node-id (or key) order, the same in every process.
+            node_dict(py, degrees, order.as_ref())
         }
     }
 
@@ -508,10 +611,16 @@ impl PyAlgorithms {
     ///         simple undirected graph: each pair of connected nodes once, in
     ///         both directions, whatever the edge types or count; self-loops
     ///         are ignored.
+    ///     key: A node property every node in scope holds, each with its own
+    ///         value (an id from outside the database). The result is keyed by
+    ///         it instead of the node id, in key order, and the algorithm runs
+    ///         in key order (visits, sums, ties and numbering), so the result
+    ///         does not depend on the order nodes and edges were inserted in.
+    ///         A node without it, or two with equal values, raise GrafeoError.
     ///
     /// Returns:
-    ///     Dict mapping node ID to PageRank score
-    #[pyo3(signature = (damping=0.85, max_iterations=100, tolerance=1e-6, directed=true, *, projection=None))]
+    ///     Dict mapping node ID (or key) to PageRank score
+    #[pyo3(signature = (damping=0.85, max_iterations=100, tolerance=1e-6, directed=true, *, projection=None, key=None))]
     fn pagerank(
         &self,
         damping: f64,
@@ -519,49 +628,77 @@ impl PyAlgorithms {
         tolerance: f64,
         directed: bool,
         projection: Option<&str>,
-    ) -> PyResult<BTreeMap<u64, f64>> {
+        key: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let result = algorithms::pagerank(&*store, damping, max_iterations, tolerance, directed);
-        Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
+        let order = key_order(&*store, key)?;
+        let result = match &order {
+            Some(order) => algorithms::pagerank_in_order(
+                &*store,
+                &order.nodes,
+                damping,
+                max_iterations,
+                tolerance,
+                directed,
+            ),
+            None => algorithms::pagerank(&*store, damping, max_iterations, tolerance, directed),
+        };
+        Python::attach(|py| node_dict(py, result, order.as_ref()))
     }
 
     /// Compute betweenness centrality using Brandes' algorithm.
     ///
     /// Args:
     ///     normalized: If True, normalize scores (default: True)
+    ///     key: A node property every node in scope holds, each with its own
+    ///         value (an id from outside the database). The result is keyed by
+    ///         it instead of the node id, in key order. A node without it, or
+    ///         two with equal values, raise GrafeoError.
+    ///         The scores follow the internal node order either way.
     ///
     /// Returns:
-    ///     Dict mapping node ID to betweenness score
-    #[pyo3(signature = (normalized=true, *, projection=None))]
+    ///     Dict mapping node ID (or key) to betweenness score
+    #[pyo3(signature = (normalized=true, *, projection=None, key=None))]
     fn betweenness_centrality(
         &self,
         normalized: bool,
         projection: Option<&str>,
-    ) -> PyResult<BTreeMap<u64, f64>> {
+        key: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
+        let order = key_order(&*store, key)?;
         let result = algorithms::betweenness_centrality(&*store, normalized);
-        Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
+        node_dict(py, result, order.as_ref())
     }
 
     /// Compute closeness centrality.
     ///
     /// Args:
     ///     wf_improved: Use Wasserman-Faust formula (default: False)
+    ///     key: A node property every node in scope holds, each with its own
+    ///         value (an id from outside the database). The result is keyed by
+    ///         it instead of the node id, in key order. A node without it, or
+    ///         two with equal values, raise GrafeoError.
+    ///         The scores follow the internal node order either way.
     ///
     /// Returns:
-    ///     Dict mapping node ID to closeness score
-    #[pyo3(signature = (wf_improved=false, *, projection=None))]
+    ///     Dict mapping node ID (or key) to closeness score
+    #[pyo3(signature = (wf_improved=false, *, projection=None, key=None))]
     fn closeness_centrality(
         &self,
         wf_improved: bool,
         projection: Option<&str>,
-    ) -> PyResult<BTreeMap<u64, f64>> {
+        key: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
+        let order = key_order(&*store, key)?;
         let result = algorithms::closeness_centrality(&*store, wf_improved);
-        Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
+        node_dict(py, result, order.as_ref())
     }
 
     // ==========================================================================
@@ -572,47 +709,72 @@ impl PyAlgorithms {
     ///
     /// Args:
     ///     max_iterations: Maximum iterations (default: 100, 0 for unlimited)
+    ///     key: A node property every node in scope holds, each with its own
+    ///         value (an id from outside the database). The result is keyed by
+    ///         it instead of the node id, in key order, and the algorithm runs
+    ///         in key order (visits, sums, ties and numbering), so the result
+    ///         does not depend on the order nodes and edges were inserted in.
+    ///         A node without it, or two with equal values, raise GrafeoError.
     ///
     /// Returns:
-    ///     Dict mapping node ID to community ID
-    #[pyo3(signature = (max_iterations=100, *, projection=None))]
+    ///     Dict mapping node ID (or key) to community ID; communities are
+    ///     numbered 0, 1, 2, ... in the order of their smallest node ID (or key)
+    #[pyo3(signature = (max_iterations=100, *, projection=None, key=None))]
     fn label_propagation(
         &self,
         max_iterations: usize,
         projection: Option<&str>,
-    ) -> PyResult<BTreeMap<u64, u64>> {
+        key: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let result = algorithms::label_propagation(&*store, max_iterations);
-        Ok(result.into_iter().map(|(n, c)| (n.0, c)).collect())
+        let order = key_order(&*store, key)?;
+        let result = match &order {
+            Some(order) => {
+                algorithms::label_propagation_in_order(&*store, &order.nodes, max_iterations)
+            }
+            None => algorithms::label_propagation(&*store, max_iterations),
+        };
+        node_dict(py, result, order.as_ref())
     }
 
     /// Detect communities using Louvain algorithm.
     ///
     /// Args:
     ///     resolution: Resolution parameter (default: 1.0)
+    ///     key: A node property every node in scope holds, each with its own
+    ///         value (an id from outside the database). The result is keyed by
+    ///         it instead of the node id, in key order, and the algorithm runs
+    ///         in key order (visits, sums, ties and numbering), so the result
+    ///         does not depend on the order nodes and edges were inserted in.
+    ///         A node without it, or two with equal values, raise GrafeoError.
     ///
     /// Returns:
-    ///     Dict with 'communities', 'modularity', and 'num_communities' keys
-    #[pyo3(signature = (resolution=1.0, *, projection=None))]
+    ///     Dict with 'communities' (node ID or key to community, numbered 0, 1,
+    ///     2, ... in the order of their smallest node ID or key), 'modularity',
+    ///     and 'num_communities' keys
+    #[pyo3(signature = (resolution=1.0, *, projection=None, key=None))]
     fn louvain(
         &self,
         resolution: f64,
         projection: Option<&str>,
+        key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let result = algorithms::louvain(&*store, resolution);
-
-        let communities: BTreeMap<u64, u64> = result
-            .communities
-            .into_iter()
-            .map(|(n, c)| (n.0, c))
-            .collect();
+        let order = key_order(&*store, key)?;
+        let result = match &order {
+            Some(order) => algorithms::louvain_in_order(&*store, &order.nodes, resolution),
+            None => algorithms::louvain(&*store, resolution),
+        };
 
         let dict = PyDict::new(py);
-        dict.set_item("communities", communities.into_pyobject(py)?)?;
+        dict.set_item(
+            "communities",
+            node_dict(py, result.communities, order.as_ref())?,
+        )?;
         dict.set_item("modularity", result.modularity)?;
         dict.set_item("num_communities", result.num_communities)?;
 
@@ -836,14 +998,26 @@ impl PyAlgorithms {
 
     /// Count the number of triangles containing each node.
     ///
+    /// Args:
+    ///     key: A node property every node in scope holds, each with its own
+    ///         value (an id from outside the database). The result is keyed by
+    ///         it instead of the node id, in key order. A node without it, or
+    ///         two with equal values, raise GrafeoError.
+    ///
     /// Returns:
-    ///     Dict mapping node ID to triangle count
-    #[pyo3(signature = (*, projection=None))]
-    fn triangle_count(&self, projection: Option<&str>) -> PyResult<BTreeMap<u64, u64>> {
+    ///     Dict mapping node ID (or key) to triangle count
+    #[pyo3(signature = (*, projection=None, key=None))]
+    fn triangle_count(
+        &self,
+        projection: Option<&str>,
+        key: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
+        let order = key_order(&*store, key)?;
         let result = algorithms::triangle_count(&*store);
-        Ok(result.into_iter().map(|(n, t)| (n.0, t)).collect())
+        node_dict(py, result, order.as_ref())
     }
 
     /// Get the total number of unique triangles in the graph.
@@ -872,17 +1046,27 @@ impl PyAlgorithms {
 
     /// Compute local clustering coefficients for each node.
     ///
+    /// Args:
+    ///     key: A node property every node in scope holds, each with its own
+    ///         value (an id from outside the database). The result is keyed by
+    ///         it instead of the node id, in key order. A node without it, or
+    ///         two with equal values, raise GrafeoError.
+    ///
     /// Returns:
-    ///     Dict mapping node ID to local clustering coefficient (0.0 to 1.0)
-    #[pyo3(signature = (*, projection=None))]
+    ///     Dict mapping node ID (or key) to local clustering coefficient (0.0
+    ///     to 1.0)
+    #[pyo3(signature = (*, projection=None, key=None))]
     fn local_clustering_coefficient(
         &self,
         projection: Option<&str>,
-    ) -> PyResult<BTreeMap<u64, f64>> {
+        key: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
+        let order = key_order(&*store, key)?;
         let result = algorithms::local_clustering_coefficient(&*store);
-        Ok(result.into_iter().map(|(n, c)| (n.0, c)).collect())
+        node_dict(py, result, order.as_ref())
     }
 
     // ==========================================================================
@@ -891,16 +1075,27 @@ impl PyAlgorithms {
 
     /// Find articulation points (cut vertices).
     ///
+    /// Args:
+    ///     key: A node property every node in scope holds, each with its own
+    ///         value (an id from outside the database). The result is keyed by
+    ///         it instead of the node id, in key order. A node without it, or
+    ///         two with equal values, raise GrafeoError.
+    ///
     /// Returns:
-    ///     List of node IDs that are articulation points, in node-id order
-    #[pyo3(signature = (*, projection=None))]
-    fn articulation_points(&self, projection: Option<&str>) -> PyResult<Vec<u64>> {
+    ///     List of node IDs (or keys) that are articulation points, in node-id
+    ///     (or key) order
+    #[pyo3(signature = (*, projection=None, key=None))]
+    fn articulation_points(
+        &self,
+        projection: Option<&str>,
+        key: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
+        let order = key_order(&*store, key)?;
         let result = algorithms::articulation_points(&*store);
-        let mut points: Vec<u64> = result.into_iter().map(|n| n.0).collect();
-        points.sort_unstable();
-        Ok(points)
+        node_list(py, result, order.as_ref())
     }
 
     /// Find bridges (cut edges).
@@ -922,32 +1117,34 @@ impl PyAlgorithms {
     ///
     /// Args:
     ///     k: If provided, return only nodes in the k-core
+    ///     key: A node property every node in scope holds, each with its own
+    ///         value (an id from outside the database). The result is keyed by
+    ///         it instead of the node id, in key order. A node without it, or
+    ///         two with equal values, raise GrafeoError.
     ///
     /// Returns:
-    ///     If k is None: Dict with 'core_numbers' (node ID to core number)
-    ///     and 'max_core' (the largest core number) keys
-    ///     If k is provided: List of node IDs in the k-core
-    #[pyo3(signature = (k=None, *, projection=None))]
+    ///     If k is None: Dict with 'core_numbers' (node ID or key to core
+    ///     number) and 'max_core' (the largest core number) keys
+    ///     If k is provided: List of node IDs (or keys) in the k-core, in
+    ///     node-id (or key) order
+    #[pyo3(signature = (k=None, *, projection=None, key=None))]
     fn kcore(
         &self,
         k: Option<usize>,
         projection: Option<&str>,
+        key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
+        let order = key_order(&*store, key)?;
         let result = algorithms::kcore_decomposition(&*store);
 
         if let Some(k_val) = k {
-            let nodes: Vec<u64> = result.k_core(k_val).into_iter().map(|n| n.0).collect();
-            Ok(nodes.into_pyobject(py)?.into_any().unbind())
+            node_list(py, result.k_core(k_val), order.as_ref())
         } else {
-            let core_numbers = PyDict::new(py);
-            // In node-id order, the same in every process.
-            let by_node: BTreeMap<NodeId, usize> = result.core_numbers.into_iter().collect();
-            for (node, core) in by_node {
-                core_numbers.set_item(node.0, core)?;
-            }
+            // In node-id (or key) order, the same in every process.
+            let core_numbers = node_dict(py, result.core_numbers, order.as_ref())?;
             let dict = PyDict::new(py);
             dict.set_item("core_numbers", core_numbers)?;
             dict.set_item("max_core", result.max_core)?;

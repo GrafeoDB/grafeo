@@ -249,6 +249,32 @@ and articulation points as sets. PageRank agrees up to rounding, and Louvain
 and label propagation can find a different partition, since they visit nodes in
 node-id order.
 
+### Results independent of the load order: `key=`
+
+In Python, the methods of `db.algorithms` that return a value per node or a set
+of nodes take `key=`: a node property every node in scope holds, each with its
+own value (an id from outside the database). The result is then keyed by that
+value instead of the node id, in key order:
+
+```python
+scores = db.algorithms.pagerank(directed=False, key="id")  # {"src/main.py": 0.12, ...}
+communities = db.algorithms.louvain(key="id")["communities"]
+```
+
+PageRank, Louvain and label propagation also run in key order: every sum,
+visit, tie and community number follows the keys instead of the node ids. Their
+results are then bit-identical for the same graph whatever order its nodes and
+edges were loaded in. With keys that sort like the node ids, the results equal
+those without a key. The other methods (degree, betweenness and closeness
+centrality, connected components, triangle counts, the clustering
+coefficients, k-core, articulation points) only change their keys:
+betweenness and closeness still sum in node-id order.
+
+A node in scope without the key, or two nodes whose values are equal (`1` and
+`1.0` too), raise `GrafeoError` before the algorithm runs. Keys of different
+types are allowed; they order as `ORDER BY` orders them. Ordering the nodes
+costs one read of the key per node and a sort, about 1.5 ms for 9,000 nodes.
+
 When a release changes an algorithm's results, its CHANGELOG lists the change
 under "Result changes".
 

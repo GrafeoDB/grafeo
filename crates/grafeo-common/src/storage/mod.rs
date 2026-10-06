@@ -18,7 +18,7 @@ pub mod value_codec;
 pub use chunk::{
     ChunkCaps, ChunkIdentities, ChunkStreamReader, ChunkStreamWriter, read_stream, stream_error,
 };
-pub use image::{ImageSource, MemoryImage, MemorySection};
+pub use image::{ImageSource, MemoryImage, MemorySection, ServedOnce};
 pub use page_fetcher::{AccessHint, PageFetcher};
 pub use section::{
     ChunkKind, ChunkMeta, Section, SectionDirectoryEntry, SectionFlags, SectionMemoryConfig,

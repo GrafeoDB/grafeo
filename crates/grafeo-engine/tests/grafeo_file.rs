@@ -1748,3 +1748,57 @@ fn open_in_memory_changes_nothing_on_disk() {
         "open_in_memory, writes to the copy and its close() leave every file as it was"
     );
 }
+
+/// A text index chunk damaged on disk fails a read-only and a read-write
+/// open, naming the section: the image is damaged, and building the index
+/// from the data would hide that.
+#[cfg(all(feature = "text-index", feature = "lpg"))]
+#[test]
+fn a_damaged_text_index_chunk_fails_the_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mia.grafeo");
+    {
+        let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+        db.execute("INSERT (:Doc {body: 'Prague'})").unwrap();
+        db.create_text_index("Doc", "body").unwrap();
+        db.close().unwrap();
+    }
+    // The text index lowercases its tokens: the LPG store holds `Prague`,
+    // so `prague` is in the text index chunk only.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let found: Vec<usize> = bytes
+        .windows(6)
+        .enumerate()
+        .filter(|(_, window)| *window == b"prague")
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "the token is only in the text index chunk: {found:?}"
+    );
+    bytes[found[0]] ^= 0xFF;
+    std::fs::write(&path, &bytes).unwrap();
+
+    for (open, error) in [
+        (
+            "read-only",
+            GrafeoDB::open_read_only(&path)
+                .map(|_| ())
+                .unwrap_err()
+                .to_string(),
+        ),
+        (
+            "read-write",
+            GrafeoDB::with_config(Config::persistent(&path))
+                .map(|_| ())
+                .unwrap_err()
+                .to_string(),
+        ),
+    ] {
+        assert!(
+            error.contains("TextIndex") && error.contains("checksum"),
+            "the {open} open names the damaged section: {error}"
+        );
+    }
+}

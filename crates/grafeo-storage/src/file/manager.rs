@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use grafeo_common::grafeo_warn;
-use grafeo_common::storage::{ChunkKind, ImageSource, Section, SectionSource, SectionType};
+use grafeo_common::storage::{ImageSource, Section};
 use grafeo_common::testing::child_process;
 use grafeo_common::testing::crash::{maybe_crash, maybe_fail};
 use grafeo_common::utils::error::{Error, Result};
@@ -382,9 +382,8 @@ impl GrafeoFileManager {
     ///
     /// After a failure before the header write, the file holds no image newer
     /// than before the call. After a failure at or after the header write,
-    /// the new header may be on disk: [`active_header`](Self::active_header),
-    /// [`read_image`](Self::read_image) and
-    /// [`read_section`](Self::read_section) keep serving the previous image,
+    /// the new header may be on disk: [`active_header`](Self::active_header)
+    /// and [`read_image`](Self::read_image) keep serving the previous image,
     /// while a reopen may find the new one. The next checkpoint spares
     /// the pages of both. The caller must therefore keep the WAL from the
     /// previous image's `checkpoint_lsn` until a later checkpoint succeeds.
@@ -466,9 +465,13 @@ impl GrafeoFileManager {
     /// lock (decrypted with the file's cipher when it is encrypted), and it
     /// stays that image until `read` returns: a checkpoint takes the same
     /// lock, so it waits. `read` must not call a method of this manager that
-    /// takes the file lock (`read_image`, `image_stats`, `read_section`,
-    /// `write_checkpoint`, `file_size`, `sync`, `copy_to`, `close`): the lock
-    /// is held, and that call would wait for it forever.
+    /// takes the file lock (`read_image`, `image_stats`, `write_checkpoint`,
+    /// `file_size`, `sync`, `copy_to`, `close`): the lock is held, and that
+    /// call would wait for it forever. Nor may it take a lock that a
+    /// checkpoint holds while it waits for the file lock
+    /// ([`checkpoint_guard`](Self::checkpoint_guard), or a hold the caller
+    /// takes around its checkpoints, such as the engine's commit hold): that
+    /// inverts the lock order and deadlocks against a concurrent checkpoint.
     ///
     /// # Errors
     ///
@@ -505,39 +508,6 @@ impl GrafeoFileManager {
         let root = self.active.lock().header.root;
         let reader = ImageReader::open(&mut file, root, self.cipher.as_ref())?;
         read(&reader)
-    }
-
-    /// Reads the bytes of a section of the active image, or `None` when the
-    /// image has no such section.
-    ///
-    /// In this version every section is written as one raw chunk.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the directory or the chunk cannot be read or
-    /// decrypted, fails its checksum, or the section is not exactly one raw
-    /// chunk without a codec.
-    pub fn read_section(&self, section_type: SectionType) -> Result<Option<Vec<u8>>> {
-        let mut file = self.file.lock();
-        let root = self.active.lock().header.root;
-        let reader = ImageReader::open(&mut file, root, self.cipher.as_ref())?;
-        let Some(section) = reader.section(section_type) else {
-            return Ok(None);
-        };
-        match section.chunks() {
-            [meta] if meta.kind == ChunkKind::Raw && meta.codec == 0 => {
-                Ok(Some(Vec::from(section.fetch(0)?)))
-            }
-            [meta] => Err(Error::Serialization(format!(
-                "section {section_type:?} holds one chunk of kind {:?} with codec {}, \
-                 expected one raw chunk without a codec",
-                meta.kind, meta.codec
-            ))),
-            chunks => Err(Error::Serialization(format!(
-                "section {section_type:?} holds {} chunks, expected exactly one raw chunk",
-                chunks.len()
-            ))),
-        }
     }
 
     /// Returns the path for the sidecar WAL directory.
@@ -873,7 +843,7 @@ mod tests {
     #[cfg(feature = "testing-crash-injection")]
     use std::panic::AssertUnwindSafe;
 
-    use grafeo_common::storage::{ChunkMeta, Section, SectionSink, SectionType};
+    use grafeo_common::storage::{ChunkMeta, Section, SectionSink, SectionType, legacy_bytes};
     use tempfile::TempDir;
 
     use super::super::v3::directory::{ENTRY_CHUNK_OPTIONAL, ENTRY_SECTION_OPTIONAL};
@@ -911,7 +881,8 @@ mod tests {
         }
     }
 
-    /// A section that streams two chunks, which this step cannot read back.
+    /// A section that streams two raw chunks, which are not 0.5.x section
+    /// bytes.
     struct TwoChunks;
 
     impl Section for TwoChunks {
@@ -1009,8 +980,20 @@ mod tests {
         manager.write_checkpoint(&sections, &header(epoch))
     }
 
+    /// The bytes of a section of the active image stored as one raw chunk,
+    /// `None` when the image has no such section.
+    fn raw_section(
+        manager: &GrafeoFileManager,
+        section_type: SectionType,
+    ) -> Result<Option<Vec<u8>>> {
+        manager.read_image(|image| match image.section_source(section_type) {
+            Some(section) => Ok(legacy_bytes(&*section)?.map(Vec::from)),
+            None => Ok(None),
+        })
+    }
+
     fn read(manager: &GrafeoFileManager, section_type: SectionType) -> Option<Vec<u8>> {
-        manager.read_section(section_type).unwrap()
+        raw_section(manager, section_type).unwrap()
     }
 
     /// The bytes of the database file, read through the locked handle
@@ -1326,18 +1309,28 @@ mod tests {
         }
     }
 
+    /// A section of two chunks is served as both, in order; it is not the
+    /// one raw chunk of 0.5.x section bytes.
     #[test]
-    fn a_section_of_more_than_one_chunk_is_refused_by_read_section() {
+    fn a_section_of_two_chunks_is_served_as_two_chunks() {
         let dir = test_dir();
         let manager = GrafeoFileManager::create(dir.path().join("hans.grafeo"), None).unwrap();
         manager.write_checkpoint(&[&TwoChunks], &header(1)).unwrap();
-        let error = manager
-            .read_section(SectionType::LpgStore)
+        let chunks = manager
+            .read_image(|image| {
+                let section = image.section_source(SectionType::LpgStore).unwrap();
+                (0..section.chunks().len())
+                    .map(|index| Ok(section.fetch(index)?.to_vec()))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .unwrap();
+        assert_eq!(chunks, [b"Vincent".to_vec(), b"Jules".to_vec()]);
+        let error = raw_section(&manager, SectionType::LpgStore)
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("LpgStore") && error.contains("2 chunks"),
-            "the error names the section and what it found: {error}"
+            error.contains("2 raw chunks"),
+            "two raw chunks are not 0.5.x section bytes: {error}"
         );
     }
 
@@ -1570,7 +1563,7 @@ mod tests {
         assert_eq!(
             logged(),
             warned,
-            "two read_image calls, image_stats and read_section warn about nothing again"
+            "three read_image calls and image_stats warn about nothing again"
         );
         checkpoint(&manager, &[fixed(SectionType::Catalog, "Alix")], 2).unwrap();
         manager.image_stats().unwrap();
@@ -2014,7 +2007,7 @@ mod tests {
                 2,
                 "{point}: the manager serves the previous image"
             );
-            match manager.read_section(SectionType::Catalog) {
+            match raw_section(&manager, SectionType::Catalog) {
                 Ok(Some(bytes)) => assert!(
                     bytes == previous,
                     "{point}: the manager reads {} bytes, not the previous image's section",

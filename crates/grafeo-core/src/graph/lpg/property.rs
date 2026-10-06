@@ -208,6 +208,54 @@ fn missing_backed_value() -> std::io::Error {
     )
 }
 
+#[cfg(all(test, not(feature = "temporal")))]
+thread_local! {
+    /// How many compressed integer or boolean columns this thread decoded:
+    /// tests read it before and after a call to count the call's decodes.
+    static COMPRESSED_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts one decode of a compressed integer or boolean column (tests only).
+#[cfg(not(feature = "temporal"))]
+fn count_compressed_decode() {
+    #[cfg(test)]
+    COMPRESSED_DECODES.set(COMPRESSED_DECODES.get() + 1);
+}
+
+/// The rows of one compressed integer or boolean column, decoded for the
+/// reads of one call. Decoding one row of such a column decodes all of it, so
+/// a batch read keeps the rows for its other ids instead of decoding the
+/// column once per id. Empty until a read needs them; a temporal column is
+/// never compressed, so there it stays empty.
+#[derive(Default)]
+struct DecodedRows {
+    #[cfg(not(feature = "temporal"))]
+    integers: Option<Vec<u64>>,
+    #[cfg(not(feature = "temporal"))]
+    booleans: Option<Vec<bool>>,
+}
+
+#[cfg(not(feature = "temporal"))]
+impl DecodedRows {
+    /// The rows of the integer column `data`, decoded on first use.
+    fn integers(&mut self, data: &CompressedData) -> std::io::Result<&[u64]> {
+        if self.integers.is_none() {
+            count_compressed_decode();
+            self.integers = Some(TypeSpecificCompressor::decompress_integers(data)?);
+        }
+        Ok(self.integers.as_deref().unwrap_or_default())
+    }
+
+    /// The rows of the boolean column `data`, decoded on first use.
+    fn booleans(&mut self, data: &CompressedData) -> std::io::Result<&[bool]> {
+        if self.booleans.is_none() {
+            count_compressed_decode();
+            self.booleans = Some(TypeSpecificCompressor::decompress_booleans(data)?);
+        }
+        Ok(self.booleans.as_deref().unwrap_or_default())
+    }
+}
+
 /// The error of a compressed row that does not decode.
 #[cfg(not(feature = "temporal"))]
 fn undecodable_compressed_row() -> std::io::Error {
@@ -617,7 +665,13 @@ impl<Id: EntityId> PropertyStorage<Id> {
     pub fn get_batch(&self, ids: &[Id], key: &PropertyKey) -> Vec<Option<Value>> {
         let columns = self.columns.read();
         match columns.get(key) {
-            Some(col) => ids.iter().map(|&id| col.get(id)).collect(),
+            Some(col) => {
+                // One decode of a compressed column for the whole batch.
+                let mut decoded = DecodedRows::default();
+                ids.iter()
+                    .map(|&id| col.try_get_decoded(id, &mut decoded).ok().flatten())
+                    .collect()
+            }
             None => vec![None; ids.len()],
         }
     }
@@ -633,10 +687,13 @@ impl<Id: EntityId> PropertyStorage<Id> {
     pub fn try_get_batch(&self, ids: &[Id], key: &PropertyKey) -> Result<Vec<Option<Value>>> {
         let columns = self.columns.read();
         match columns.get(key) {
-            Some(col) => ids
-                .iter()
-                .map(|&id| col.try_get(id).map_err(Error::Io))
-                .collect(),
+            Some(col) => {
+                // One decode of a compressed column for the whole batch.
+                let mut decoded = DecodedRows::default();
+                ids.iter()
+                    .map(|&id| col.try_get_decoded(id, &mut decoded).map_err(Error::Io))
+                    .collect()
+            }
             None => Ok(vec![None; ids.len()]),
         }
     }
@@ -665,12 +722,15 @@ impl<Id: EntityId> PropertyStorage<Id> {
 
         // Pre-allocate result vector with exact capacity (NebulaGraph pattern)
         let mut results = Vec::with_capacity(ids.len());
+        // One decode of each compressed column for the whole batch.
+        let mut decoded: Vec<DecodedRows> =
+            columns.keys().map(|_| DecodedRows::default()).collect();
 
         for &id in ids {
             // Pre-allocate HashMap with expected column count
             let mut result = FxHashMap::with_capacity_and_hasher(column_count, Default::default());
-            for (key, col) in columns.iter() {
-                if let Some(value) = col.get(id) {
+            for ((key, col), decoded) in columns.iter().zip(decoded.iter_mut()) {
+                if let Some(value) = col.try_get_decoded(id, decoded).ok().flatten() {
                     result.insert(key.clone(), value);
                 }
             }
@@ -723,13 +783,18 @@ impl<Id: EntityId> PropertyStorage<Id> {
 
         // Pre-allocate result with exact capacity
         let mut results = Vec::with_capacity(ids.len());
+        // One decode of each compressed column for the whole batch.
+        let mut decoded: Vec<DecodedRows> = requested_columns
+            .iter()
+            .map(|_| DecodedRows::default())
+            .collect();
 
         for &id in ids {
             let mut result =
                 FxHashMap::with_capacity_and_hasher(requested_columns.len(), Default::default());
             // Only iterate requested columns, not all columns
-            for (key, col) in &requested_columns {
-                if let Some(value) = col.get(id) {
+            for ((key, col), decoded) in requested_columns.iter().zip(decoded.iter_mut()) {
+                if let Some(value) = col.try_get_decoded(id, decoded).ok().flatten() {
                     result.insert((*key).clone(), value);
                 }
             }
@@ -1433,7 +1498,8 @@ impl<Id: EntityId> PropertyColumn<Id> {
     /// [`try_get`](Self::try_get) reports it.
     ///
     /// A compressed integer or boolean is decoded with the rest of its
-    /// column, so a read by id of a compressed column costs a pass over it.
+    /// column, so a read by id of a compressed column costs a pass over it;
+    /// the batch reads of [`PropertyStorage`] decode it once per call.
     #[must_use]
     pub fn get(&self, id: Id) -> Option<Value> {
         // A value that cannot be read reads as absent (the backing reports
@@ -1449,20 +1515,27 @@ impl<Id: EntityId> PropertyColumn<Id> {
     /// Returns the error of reading a spilled value or decoding a compressed
     /// one, or of a backing that lists `id` but holds no value for it.
     pub fn try_get(&self, id: Id) -> std::io::Result<Option<Value>> {
+        self.try_get_decoded(id, &mut DecodedRows::default())
+    }
+
+    /// [`try_get`](Self::try_get), decoding the compressed integer or
+    /// boolean rows into `decoded` the first time a read needs them and
+    /// reusing them after: the reads of one call share one decode.
+    fn try_get_decoded(&self, id: Id, decoded: &mut DecodedRows) -> std::io::Result<Option<Value>> {
         if let Some(value) = self.values.get(&id) {
             return Ok(Some(value.clone()));
         }
-        self.stored_value(id)
+        self.stored_value(id, decoded)
     }
 
     /// The value of `id` the column holds outside its hot buffer: a
     /// compressed one, or one in the backing of a spilled column, unless it
     /// was removed.
-    fn stored_value(&self, id: Id) -> std::io::Result<Option<Value>> {
+    fn stored_value(&self, id: Id, decoded: &mut DecodedRows) -> std::io::Result<Option<Value>> {
         if (self.compressed.is_none() && self.backing.is_none()) || self.removed.contains(&id) {
             return Ok(None);
         }
-        if let Some(value) = self.compressed_value(id)? {
+        if let Some(value) = self.compressed_value(id, decoded)? {
             return Ok(Some(value));
         }
         match &self.backing {
@@ -1473,8 +1546,13 @@ impl<Id: EntityId> PropertyColumn<Id> {
         }
     }
 
-    /// The compressed value of `id`, decoded.
-    fn compressed_value(&self, id: Id) -> std::io::Result<Option<Value>> {
+    /// The compressed value of `id`, decoded (integer and boolean rows into
+    /// `decoded`, if they are not there yet).
+    fn compressed_value(
+        &self,
+        id: Id,
+        decoded: &mut DecodedRows,
+    ) -> std::io::Result<Option<Value>> {
         let Some(compressed) = &self.compressed else {
             return Ok(None);
         };
@@ -1482,19 +1560,17 @@ impl<Id: EntityId> PropertyColumn<Id> {
             return Ok(None);
         };
         let value = match compressed {
-            CompressedColumnData::Integers { data, .. } => {
-                TypeSpecificCompressor::decompress_integers(data)?
-                    .get(index)
-                    .map(|&value| Value::Int64(crate::codec::zigzag_decode(value)))
-            }
+            CompressedColumnData::Integers { data, .. } => decoded
+                .integers(data)?
+                .get(index)
+                .map(|&value| Value::Int64(crate::codec::zigzag_decode(value))),
             CompressedColumnData::Strings { encoding, .. } => encoding
                 .get(index)
                 .map(|value| Value::String(ArcStr::from(value))),
-            CompressedColumnData::Booleans { data, .. } => {
-                TypeSpecificCompressor::decompress_booleans(data)?
-                    .get(index)
-                    .map(|&value| Value::Bool(value))
-            }
+            CompressedColumnData::Booleans { data, .. } => decoded
+                .booleans(data)?
+                .get(index)
+                .map(|&value| Value::Bool(value)),
         };
         value.map(Some).ok_or_else(undecodable_compressed_row)
     }
@@ -1507,6 +1583,7 @@ impl<Id: EntityId> PropertyColumn<Id> {
         let ids = compressed.ids();
         let values: Vec<Value> = match compressed {
             CompressedColumnData::Integers { data, .. } => {
+                count_compressed_decode();
                 TypeSpecificCompressor::decompress_integers(data)?
                     .into_iter()
                     .map(|value| Value::Int64(crate::codec::zigzag_decode(value)))
@@ -1521,6 +1598,7 @@ impl<Id: EntityId> PropertyColumn<Id> {
                 })
                 .collect::<std::io::Result<_>>()?,
             CompressedColumnData::Booleans { data, .. } => {
+                count_compressed_decode();
                 TypeSpecificCompressor::decompress_booleans(data)?
                     .into_iter()
                     .map(Value::Bool)
@@ -1551,7 +1629,7 @@ impl<Id: EntityId> PropertyColumn<Id> {
                 Some(value)
             }
             None => {
-                let value = self.stored_value(id)?;
+                let value = self.stored_value(id, &mut DecodedRows::default())?;
                 if value.is_some() {
                     self.removed.insert(id);
                 }
@@ -2344,6 +2422,16 @@ impl<Id: EntityId> PropertyColumn<Id> {
     )]
     pub fn try_get(&self, id: Id) -> std::io::Result<Option<Value>> {
         Ok(self.get(id))
+    }
+
+    /// [`try_get`](Self::try_get): a temporal column is never compressed, so
+    /// a batch read has nothing to decode once.
+    fn try_get_decoded(
+        &self,
+        id: Id,
+        _decoded: &mut DecodedRows,
+    ) -> std::io::Result<Option<Value>> {
+        self.try_get(id)
     }
 
     /// [`entries`](Self::entries); never fails.
@@ -3821,6 +3909,67 @@ mod tests {
                 Some(&entries[3].1)
             );
             assert_eq!(storage.columns.read()[&key].len(), 100);
+        }
+    }
+
+    /// Decoding one row of a compressed integer or boolean column decodes
+    /// all of it, so a batch read decodes the column once per call, not once
+    /// per id; a single read decodes it once.
+    #[test]
+    fn a_batch_read_decodes_a_compressed_column_once() {
+        let columns: [Vec<(NodeId, Value)>; 2] = [
+            (0..100)
+                .map(|i| {
+                    (
+                        NodeId::new(i),
+                        Value::Int64(1000 + i64::try_from(i).unwrap()),
+                    )
+                })
+                .collect(),
+            (0..100)
+                .map(|i| (NodeId::new(i), Value::Bool(i % 3 == 0)))
+                .collect(),
+        ];
+        let decodes = |read: &dyn Fn()| {
+            let before = COMPRESSED_DECODES.get();
+            read();
+            COMPRESSED_DECODES.get() - before
+        };
+        for entries in columns {
+            let (storage, key) = compressed(&entries);
+            let kind = format!("{:?}", entries[0].1);
+            let ids: Vec<NodeId> = entries.iter().map(|(id, _)| *id).collect();
+            let values: Vec<Option<Value>> = entries
+                .iter()
+                .map(|(_, value)| Some(value.clone()))
+                .collect();
+            let maps: Vec<FxHashMap<PropertyKey, Value>> = entries
+                .iter()
+                .map(|(_, value)| [(key.clone(), value.clone())].into_iter().collect())
+                .collect();
+
+            let get_batch = decodes(&|| assert_eq!(storage.get_batch(&ids, &key), values));
+            assert_eq!(get_batch, 1, "get_batch of {kind}");
+            let try_get_batch =
+                decodes(&|| assert_eq!(storage.try_get_batch(&ids, &key).unwrap(), values));
+            assert_eq!(try_get_batch, 1, "try_get_batch of {kind}");
+            let get_all_batch = decodes(&|| assert_eq!(storage.get_all_batch(&ids), maps));
+            assert_eq!(get_all_batch, 1, "get_all_batch of {kind}");
+            let selective = decodes(&|| {
+                assert_eq!(
+                    storage.get_selective_batch(&ids, std::slice::from_ref(&key)),
+                    maps
+                );
+            });
+            assert_eq!(selective, 1, "get_selective_batch of {kind}");
+            let entries_read = decodes(&|| {
+                assert_eq!(storage.try_column_entries(&key).unwrap(), entries);
+            });
+            assert_eq!(entries_read, 1, "try_column_entries of {kind}");
+            let single = decodes(&|| {
+                assert_eq!(storage.get(NodeId::new(19), &key), values[19]);
+            });
+            assert_eq!(single, 1, "a single get of {kind}");
         }
     }
 

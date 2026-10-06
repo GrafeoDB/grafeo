@@ -101,7 +101,7 @@ mod filter_hybrid;
 mod join;
 mod mutation;
 mod project;
-mod scan;
+pub(crate) mod scan;
 pub(crate) mod seek;
 mod subquery;
 
@@ -755,7 +755,7 @@ impl Planner {
         match op {
             LogicalOperator::NodeScan(scan) => {
                 let estimate = if let Some(label) = &scan.label {
-                    self.store.nodes_by_label(label).len() as f64
+                    self.store.nodes_by_label_count(label) as f64
                 } else {
                     self.store.node_count() as f64
                 };
@@ -860,7 +860,7 @@ impl Planner {
         match op {
             LogicalOperator::NodeScan(scan) => {
                 if let Some(label) = &scan.label {
-                    self.store.nodes_by_label(label).len() as f64
+                    self.store.nodes_by_label_count(label) as f64
                 } else {
                     self.store.node_count() as f64
                 }
@@ -953,6 +953,15 @@ impl Planner {
 
     /// Plans a single logical operator.
     fn plan_operator(&self, op: &LogicalOperator) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // A chain of filters over a node scan reads the label with the fewest
+        // nodes (see `scan.rs`); PROFILE then shows the plan that runs.
+        let reordered = match op {
+            LogicalOperator::Filter(filter) => self
+                .scan_smallest_label(filter)
+                .map(LogicalOperator::Filter),
+            _ => None,
+        };
+        let op = reordered.as_ref().unwrap_or(op);
         let result = match op {
             LogicalOperator::NodeScan(scan) => self.plan_node_scan(scan),
             LogicalOperator::Expand(expand) => {

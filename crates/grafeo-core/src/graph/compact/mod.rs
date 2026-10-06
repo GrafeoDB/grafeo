@@ -195,6 +195,23 @@ impl CompactStore {
             .unwrap_or_default()
     }
 
+    /// Whether `nodes_by_label(label)` holds `id`: the node is a row of the
+    /// table of `label` (a node with several labels is in the table of their
+    /// combined key, not in those of each label).
+    #[must_use]
+    pub(crate) fn node_in_label(&self, id: NodeId, label: &str) -> bool {
+        let Some(&table_id) = self.label_to_table_id.get(label) else {
+            return false;
+        };
+        self.resolve_node(id).is_some_and(|(table, offset)| {
+            table == table_id
+                && self
+                    .resolve_node_table(table)
+                    .zip(usize::try_from(offset).ok())
+                    .is_some_and(|(rows, row)| row < rows.len())
+        })
+    }
+
     /// Returns the label for a given table ID, if valid.
     #[must_use]
     pub fn label_for_table_id(&self, table_id: u16) -> Option<&ArcStr> {

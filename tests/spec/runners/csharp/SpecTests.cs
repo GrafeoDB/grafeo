@@ -380,11 +380,25 @@ public class SpecTests : IDisposable
             JsonValueKind.Object => element.EnumerateObject()
                 .ToDictionary(property => property.Name, property => FromJson(property.Value)),
             JsonValueKind.String => element.GetString(),
-            JsonValueKind.Number => element.TryGetInt64(out var l) ? l : element.GetDouble(),
+            JsonValueKind.Number => JsonNumber(element),
             JsonValueKind.True => true,
             JsonValueKind.False => false,
             _ => null,
         };
+
+    /// <summary>
+    /// A JSON number by the rule of a bare one: a long when it is an integer
+    /// that fits, else a double, an error past the double range
+    /// (<c>1e400</c>, which the Rust runner refuses too).
+    /// </summary>
+    private static object JsonNumber(JsonElement element)
+    {
+        if (element.TryGetInt64(out var l))
+            return l;
+        if (element.TryGetDouble(out var d) && double.IsFinite(d))
+            return d;
+        throw new FormatException($"parameter {element.GetRawText()} is out of the f64 range");
+    }
 
     /// <summary>Check if a feature (language or capability) is available.</summary>
     private static bool HasFeature(string requirement)
@@ -868,5 +882,36 @@ public class SpecTests : IDisposable
         // Fallback: relative from source file location
         return Path.GetFullPath(Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", ".."));
+    }
+}
+
+/// <summary>
+/// The typing of parameter values that no .gtest file can hold: a number past
+/// the double range fails the Rust runner's build, so this runner tests it.
+/// </summary>
+public class ParamValueTests
+{
+    [Fact]
+    public void AJsonIntegerThatFits64BitsIsALong()
+    {
+        var values = Assert.IsType<List<object?>>(SpecTests.ParamValue("[3, -5000000000, 9223372036854775807]"));
+        Assert.Equal(new object?[] { 3L, -5000000000L, 9223372036854775807L }, values);
+    }
+
+    [Fact]
+    public void AJsonIntegerPast64BitsIsADouble()
+    {
+        var values = Assert.IsType<List<object?>>(SpecTests.ParamValue("[9223372036854775808]"));
+        Assert.Equal(9223372036854775808.0, Assert.IsType<double>(values[0]));
+    }
+
+    [Theory]
+    [InlineData("[1e400]")]
+    [InlineData("{\"tiny\": [-1e400]}")]
+    [InlineData("1e999")]
+    public void ANumberPastTheDoubleRangeIsAnError(string text)
+    {
+        var error = Assert.Throws<FormatException>(() => SpecTests.ParamValue(text));
+        Assert.Contains("out of the f64 range", error.Message);
     }
 }

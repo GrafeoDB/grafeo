@@ -376,27 +376,56 @@ mod tests {
     /// spill file creates the directory in the working directory.
     #[test]
     fn a_one_component_relative_directory_spills() {
-        /// Removes the directory even when an assert fails, so a failing run
-        /// leaves nothing in the working directory.
-        struct RemoveOnDrop(PathBuf);
-        impl Drop for RemoveOnDrop {
+        // Process id, clock and a counter: no other run or test picks it.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let name = format!(
+            "grafeo_spill_relative_{}_{nanos}_{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        spills_into_a_new_relative_directory(&name);
+    }
+
+    /// Spills into `name`, a one-component directory in the working
+    /// directory that the manager must create. Its creation is exclusive
+    /// (`create_dir`), so a directory that was already there fails the test
+    /// and is left as it was: only a directory this test created is removed,
+    /// also when an assert fails.
+    fn spills_into_a_new_relative_directory(name: &str) {
+        /// Removes the directory on drop, if this test created it.
+        struct RemoveIfCreated {
+            path: PathBuf,
+            created: bool,
+        }
+        impl Drop for RemoveIfCreated {
             fn drop(&mut self) {
-                if self.0.exists()
-                    && let Err(error) = std::fs::remove_dir_all(&self.0)
+                if self.created
+                    && self.path.exists()
+                    && let Err(error) = std::fs::remove_dir_all(&self.path)
                 {
-                    eprintln!("cannot remove {}: {error}", self.0.display());
+                    eprintln!("cannot remove {}: {error}", self.path.display());
                 }
             }
         }
 
-        let name = format!("grafeo_spill_relative_{}", std::process::id());
-        let relative = PathBuf::from(&name);
+        let relative = PathBuf::from(name);
         assert_eq!(relative.parent(), Some(Path::new("")));
-        let _cleanup = RemoveOnDrop(relative.clone());
+        let mut cleanup = RemoveIfCreated {
+            path: relative.clone(),
+            created: false,
+        };
         {
             let manager = SpillManager::new(&relative).unwrap().with_owned_dir();
             let file = manager.create_file("sort").unwrap();
-            assert!(relative.is_dir(), "the first spill file creates {name}");
+            cleanup.created = manager.dir_created.load(Ordering::Acquire);
+            assert!(
+                cleanup.created,
+                "the first spill file creates {name}, which was not there before"
+            );
+            assert!(relative.is_dir());
             assert!(file.path().starts_with(&relative));
         }
         assert!(

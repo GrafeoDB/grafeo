@@ -327,7 +327,8 @@ fn parse_single_test(lines: &[&str], idx: &mut usize) -> Result<TestCase, String
                 }
                 "params" => {
                     *idx += 1;
-                    tc.params = parse_params(lines, idx);
+                    tc.params =
+                        parse_params(lines, idx).map_err(|e| format!("test '{}': {e}", tc.name))?;
                 }
                 "expect" => {
                     *idx += 1;
@@ -468,7 +469,10 @@ fn parse_string_list(lines: &[&str], idx: &mut usize) -> Vec<String> {
     items
 }
 
-fn parse_params(lines: &[&str], idx: &mut usize) -> HashMap<String, ParamText> {
+/// Parses the `params` map. A block scalar (`|`, `>` and their variants) is
+/// an error: a param is written on one line, and its lines would otherwise
+/// be read as more params (`Amsterdam: 3` as a param `Amsterdam`).
+fn parse_params(lines: &[&str], idx: &mut usize) -> Result<HashMap<String, ParamText>, String> {
     let mut params = HashMap::new();
 
     while *idx < lines.len() {
@@ -483,6 +487,13 @@ fn parse_params(lines: &[&str], idx: &mut usize) -> HashMap<String, ParamText> {
             let indent = lines[*idx].len() - lines[*idx].trim_start().len();
             if indent >= 6 {
                 // Still in params
+                if is_block_scalar_indicator(value) {
+                    return Err(format!(
+                        "param '{key}' at line {} is a block scalar (`{value}`), which params do \
+                         not support: write the value on one line, as JSON for a list or map",
+                        *idx + 1
+                    ));
+                }
                 let text = if is_quoted(value) {
                     ParamText::Quoted(unquote(value))
                 } else {
@@ -498,7 +509,16 @@ fn parse_params(lines: &[&str], idx: &mut usize) -> HashMap<String, ParamText> {
         }
     }
 
-    params
+    Ok(params)
+}
+
+/// `|` or `>`, with an optional chomping indicator (`+`, `-`) and
+/// indentation digit: the value of a YAML block scalar starts on the next
+/// line.
+fn is_block_scalar_indicator(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some('|' | '>'))
+        && chars.all(|c| c == '+' || c == '-' || c.is_ascii_digit())
 }
 
 fn parse_variants(lines: &[&str], idx: &mut usize) -> HashMap<String, String> {

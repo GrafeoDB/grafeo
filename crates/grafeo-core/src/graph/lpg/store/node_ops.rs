@@ -10,6 +10,16 @@ use grafeo_common::mvcc::VersionChain;
 #[cfg(feature = "tiered-storage")]
 use grafeo_common::mvcc::{HotVersionRef, VersionIndex, VersionRef};
 
+/// The error of a node whose record cannot be read (a cold one that does not
+/// decode).
+#[cfg(feature = "tiered-storage")]
+fn unreadable_node_record(id: NodeId) -> grafeo_common::utils::error::Error {
+    grafeo_common::utils::error::Error::Internal(format!(
+        "the record of node {} cannot be read",
+        id.as_u64()
+    ))
+}
+
 impl LpgStore {
     /// Creates a new node with the given labels.
     ///
@@ -768,7 +778,10 @@ impl LpgStore {
     /// # Errors
     ///
     /// Returns an error, and deletes nothing, when a property of the node
-    /// cannot be read (a spilled value whose file cannot be read).
+    /// cannot be read (a spilled value whose file cannot be read), or the
+    /// version the transaction sees is a record that cannot be read (a cold
+    /// one that does not decode): the node is there, so `false` would be a
+    /// wrong answer.
     #[cfg(feature = "tiered-storage")]
     pub(crate) fn delete_node_transactional(
         &self,
@@ -778,13 +791,21 @@ impl LpgStore {
     ) -> grafeo_common::utils::error::Result<bool> {
         // A node the transaction cannot see is not deleted, and none of its
         // values are read: one that cannot be read must not fail the call.
-        let visible = self
-            .node_versions
-            .read()
-            .get(&id)
-            .and_then(|index| index.visible_to(epoch, transaction_id))
-            .and_then(|version_ref| self.read_node_record(&version_ref))
-            .is_some_and(|record| !record.is_deleted());
+        let visible = {
+            // The record is read under the versions lock, so a freeze of its
+            // epoch cannot move it meanwhile.
+            let versions = self.node_versions.read();
+            match versions
+                .get(&id)
+                .and_then(|index| index.visible_to(epoch, transaction_id))
+            {
+                Some(version_ref) => !self
+                    .read_node_record(&version_ref)
+                    .ok_or_else(|| unreadable_node_record(id))?
+                    .is_deleted(),
+                None => false,
+            }
+        };
         if !visible {
             return Ok(false);
         }
@@ -797,11 +818,10 @@ impl LpgStore {
         let mut versions = self.node_versions.write();
         if let Some(index) = versions.get_mut(&id) {
             if let Some(version_ref) = index.visible_to(epoch, transaction_id) {
-                if let Some(record) = self.read_node_record(&version_ref) {
-                    if record.is_deleted() {
-                        return Ok(false);
-                    }
-                } else {
+                let record = self
+                    .read_node_record(&version_ref)
+                    .ok_or_else(|| unreadable_node_record(id))?;
+                if record.is_deleted() {
                     return Ok(false);
                 }
             } else {
@@ -1317,12 +1337,9 @@ impl LpgStore {
             let Some(version_ref) = index.visible_at(epoch) else {
                 continue;
             };
-            let record = self.read_node_record(&version_ref).ok_or_else(|| {
-                grafeo_common::utils::error::Error::Internal(format!(
-                    "the record of node {} cannot be read",
-                    id.as_u64()
-                ))
-            })?;
+            let record = self
+                .read_node_record(&version_ref)
+                .ok_or_else(|| unreadable_node_record(*id))?;
             if !record.is_deleted() {
                 ids.push(*id);
             }

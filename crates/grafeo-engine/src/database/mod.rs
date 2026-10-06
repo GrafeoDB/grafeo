@@ -3268,10 +3268,11 @@ impl GrafeoDB {
 /// `data/./db` name the same databases as `db` and `data/db`). A path that
 /// ends in `.` or `..` (or is a root) is resolved to the directory it names:
 /// side-file names (`<path>.wal`, `<path>.pre-0.6`, ...) are appended to the
-/// path, and `..pre-0.6` would name a file inside the directory `.` names. It
-/// is resolved through the file system when it exists (so `link/..` is the
-/// parent of the symlink's target, as the file system reads it), and
-/// lexically, from the current directory, when it does not.
+/// path, and `..pre-0.6` would name a file inside the directory `.` names.
+/// Its longest existing prefix is resolved through the file system (so
+/// `link/..` is the parent of the symlink's target, as the file system reads
+/// it, also in `link/../new/..`), and only the components past that prefix,
+/// which do not exist, lexically.
 ///
 /// # Errors
 ///
@@ -3283,17 +3284,39 @@ pub(crate) fn normalize_path(path: &std::path::Path) -> Result<std::path::PathBu
     if matches!(path.components().next_back(), Some(Component::Normal(_))) {
         return Ok(path.components().collect());
     }
-    if let Ok(resolved) = std::fs::canonicalize(path) {
-        return Ok(resolved);
-    }
     let absolute = std::path::absolute(path).map_err(|error| {
         Error::InvalidValue(format!(
             "cannot resolve the database path {:?}: {error}",
             path.display()
         ))
     })?;
-    let mut resolved = std::path::PathBuf::new();
-    for component in absolute.components() {
+    Ok(resolve_through_longest_existing_prefix(
+        &absolute,
+        |prefix| std::fs::canonicalize(prefix),
+    ))
+}
+
+/// `absolute` with its longest prefix that `canonicalize` resolves replaced
+/// by that resolution, and the components past it resolved lexically (`.`
+/// dropped, `..` removing the component before it). A component past that
+/// prefix does not exist, so the lexical reading is the only one there is.
+fn resolve_through_longest_existing_prefix(
+    absolute: &std::path::Path,
+    canonicalize: impl Fn(&std::path::Path) -> std::io::Result<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+
+    let components: Vec<Component<'_>> = absolute.components().collect();
+    let (mut resolved, rest) = (1..=components.len())
+        .rev()
+        .find_map(|split| {
+            let prefix: PathBuf = components[..split].iter().collect();
+            canonicalize(&prefix)
+                .ok()
+                .map(|resolved| (resolved, &components[split..]))
+        })
+        .unwrap_or((PathBuf::new(), &components[..]));
+    for component in rest {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
@@ -3302,7 +3325,7 @@ pub(crate) fn normalize_path(path: &std::path::Path) -> Result<std::path::PathBu
             other => resolved.push(other),
         }
     }
-    Ok(resolved)
+    resolved
 }
 
 /// The error of a build without the `lpg` feature for a database written by
@@ -4939,10 +4962,13 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod normalize_path_tests {
+    use std::path::{Path, PathBuf};
+
     /// A path ending in `..` names the directory the file system reads:
     /// through a symlink, the parent of its target, not the lexical parent.
+    #[cfg(unix)]
     #[test]
     fn a_path_ending_in_parent_follows_a_symlink_as_the_file_system_does() {
         let dir = tempfile::tempdir().unwrap();
@@ -4957,5 +4983,104 @@ mod normalize_path_tests {
             std::fs::canonicalize(dir.path().join("amsterdam")).unwrap(),
             "link/.. is the parent of the link's target"
         );
+    }
+
+    /// A component that does not exist after a symlink does not make the
+    /// whole path lexical: `link/..` still goes through the link, and only
+    /// `new/..` (which the file system cannot read) resolves lexically.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_component_after_a_symlink_keeps_the_link_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("amsterdam").join("berlin");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let resolved = super::normalize_path(&link.join("..").join("paris").join("..")).unwrap();
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(dir.path().join("amsterdam")).unwrap(),
+            "link/../paris/.. is the parent of the link's target, paris does not exist"
+        );
+    }
+
+    /// Windows reads `..` lexically, before a junction is followed, so
+    /// `junction\..\paris\..` is the directory that holds the junction.
+    #[cfg(windows)]
+    #[test]
+    fn windows_reads_parent_before_a_junction() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("amsterdam").join("berlin");
+        std::fs::create_dir_all(&target).unwrap();
+        let junction = dir.path().join("junction");
+        let created = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !created {
+            eprintln!("skipped: this system cannot create a junction with mklink /J");
+            return;
+        }
+
+        let resolved =
+            super::normalize_path(&junction.join("..").join("paris").join("..")).unwrap();
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(dir.path()).unwrap(),
+            "junction\\..\\paris\\.. is the directory that holds the junction"
+        );
+    }
+
+    /// The part of the path that exists is resolved by the file system (on
+    /// Windows that gives the `\\?\` form, on macOS `/private/var` for
+    /// `/var`), the rest lexically: the spelling is the same whether or not
+    /// the last components exist.
+    #[test]
+    fn a_missing_tail_is_appended_to_the_resolved_existing_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("amsterdam");
+        std::fs::create_dir_all(&existing).unwrap();
+
+        let resolved =
+            super::normalize_path(&existing.join("paris").join("prague").join("..")).unwrap();
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&existing).unwrap().join("paris"),
+            "amsterdam is resolved by the file system, paris/prague/.. lexically"
+        );
+    }
+
+    /// The prefix logic, with a file system that holds one link: only the
+    /// components past the longest prefix it can resolve are resolved
+    /// lexically.
+    #[test]
+    fn only_the_part_past_the_longest_resolvable_prefix_is_lexical() {
+        let path = |text: &str| -> PathBuf { Path::new(text).components().collect() };
+        // `/data/link` links to `/real/amsterdam/berlin`; nothing else exists.
+        let canonicalize = |prefix: &Path| -> std::io::Result<PathBuf> {
+            if prefix == path("/data/link/..") {
+                Ok(path("/real/amsterdam"))
+            } else if prefix == path("/data/link") {
+                Ok(path("/real/amsterdam/berlin"))
+            } else if prefix == path("/data") || prefix == path("/") {
+                Ok(prefix.to_path_buf())
+            } else {
+                Err(std::io::ErrorKind::NotFound.into())
+            }
+        };
+        let resolve =
+            |text: &str| super::resolve_through_longest_existing_prefix(&path(text), canonicalize);
+
+        assert_eq!(resolve("/data/link/../paris/.."), path("/real/amsterdam"));
+        assert_eq!(
+            resolve("/data/link/paris/../.."),
+            path("/real/amsterdam"),
+            "paris does not exist: the rest pops from the link's target"
+        );
+        assert_eq!(resolve("/data/gone/prague/.."), path("/data/gone"));
+        assert_eq!(resolve("/data/.."), path("/"));
     }
 }

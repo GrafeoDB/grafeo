@@ -109,13 +109,22 @@ final _decimalNumber =
 /// The value of a parameter written as [text] in a .gtest file, by the rule of
 /// the Rust reference runner that every runner follows: a quoted value is a
 /// string, whatever it reads like; a bare value starting with `[` or `{` is
-/// JSON; a bare decimal integer that fits 64 bits is an int and any other bare
-/// decimal number a double; a bare `true` or `false` is a bool; any other bare
+/// JSON, whose numbers follow the rule of bare ones; a bare decimal integer
+/// that fits 64 bits is an int and any other bare decimal number a double, an
+/// error past the f64 range; a bare `true` or `false` is a bool; any other bare
 /// value is a string.
 dynamic _paramValue(String text) {
   text = text.trim();
   if (_isQuoted(text)) return _unquote(text);
-  if (text.startsWith('[') || text.startsWith('{')) return jsonDecode(text);
+  if (text.startsWith('[') || text.startsWith('{')) {
+    // jsonDecode makes an integer past 64 bits a double already, and a
+    // number past the f64 range (1e400) infinity, which is an error.
+    final value = jsonDecode(text);
+    if (_hasInfinity(value)) {
+      throw FormatException('a number in parameter $text is out of the f64 range');
+    }
+    return value;
+  }
   if (_decimalInteger.hasMatch(text)) {
     // null past the 64-bit range: then it is a double, as in Rust.
     final integer = int.tryParse(text);
@@ -130,6 +139,14 @@ dynamic _paramValue(String text) {
   }
   if (text == 'true' || text == 'false') return text == 'true';
   return text;
+}
+
+/// Whether a decoded JSON [value] holds a number past the f64 range.
+bool _hasInfinity(dynamic value) {
+  if (value is double) return value.isInfinite;
+  if (value is List) return value.any(_hasInfinity);
+  if (value is Map) return value.values.any(_hasInfinity);
+  return false;
 }
 
 /// Type each parameter by [_paramValue]; null when there are none.
@@ -1076,6 +1093,27 @@ void _runErrorTest(
 // =============================================================================
 
 void main() {
+  // The typing of parameter values that no .gtest file can hold: a number
+  // past the f64 range fails the Rust runner's build, so it is tested here.
+  group('parameter values', () {
+    test('a JSON integer that fits 64 bits is an int', () {
+      expect(_paramValue('[3, -5000000000, 9223372036854775807]'),
+          [3, -5000000000, 9223372036854775807]);
+    });
+    test('a JSON integer past 64 bits is a double', () {
+      expect(_paramValue('[9223372036854775808]').single, isA<double>());
+    });
+    test('a number past the f64 range is an error', () {
+      for (final text in ['[1e400]', '{"tiny": [-1e400]}', '1e999']) {
+        expect(
+            () => _paramValue(text),
+            throwsA(isA<FormatException>().having(
+                (error) => error.message, 'message', contains('out of the f64 range'))),
+            reason: text);
+      }
+    });
+  });
+
   final gtestFiles = _findGtestFiles(_specDir);
 
   if (gtestFiles.isEmpty) {

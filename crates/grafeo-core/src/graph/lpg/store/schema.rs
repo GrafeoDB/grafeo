@@ -182,6 +182,23 @@ impl LpgStore {
             .map_or(0, |set| set.len())
     }
 
+    /// Whether [`nodes_by_label`](Self::nodes_by_label) holds `id` for
+    /// `label`, in O(1) through the label index. Like `nodes_by_label`, it
+    /// reads the labels nodes have now, whatever the transaction or epoch.
+    /// The compacted store's label counts use it.
+    #[cfg(feature = "compact-store")]
+    #[must_use]
+    pub(crate) fn node_in_label(&self, id: NodeId, label: &str) -> bool {
+        let reg = self.label_registry.read();
+        let Some(label_id) = reg.get_id(label) else {
+            return false;
+        };
+        self.label_index
+            .read()
+            .get(label_id as usize)
+            .is_some_and(|set| set.contains_key(&id))
+    }
+
     /// Returns the number of distinct labels in the store.
     #[must_use]
     pub fn label_count(&self) -> usize {

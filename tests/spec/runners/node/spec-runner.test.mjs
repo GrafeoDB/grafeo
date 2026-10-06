@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
-import { parseGtestFile, coerceParams } from './parser.mjs'
+import { parseGtestFile, coerceParams, paramValue } from './parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, resultToRows } from './comparator.mjs'
 
 // ---------------------------------------------------------------------------
@@ -118,6 +118,41 @@ function isAvailable(db, requirement) {
   }
   return getFeatures(db).has(key) || RUNNER_CAPABILITIES.has(key)
 }
+
+// ---------------------------------------------------------------------------
+// Parameter typing (shared with the WASM runner). A .gtest file cannot pass a
+// number past the f64 range (the Rust runner refuses it when it builds), so
+// that case is tested here.
+// ---------------------------------------------------------------------------
+
+describe('parameter values', () => {
+  it('keeps a JSON integer that fits 64 bits exact', () => {
+    expect(paramValue('[3, -5000000000, 9007199254740993, 9223372036854775807]')).toEqual([
+      3,
+      -5000000000n,
+      9007199254740993n,
+      9223372036854775807n,
+    ])
+    expect(paramValue('{"min": -9223372036854775808}')).toEqual({ min: -9223372036854775808n })
+  })
+
+  it('makes a JSON integer past 64 bits a float', () => {
+    expect(paramValue('[9223372036854775808, {"big": 18446744073709551616}]')).toEqual([
+      9223372036854775808,
+      { big: 18446744073709551616 },
+    ])
+  })
+
+  it('refuses a JSON number past the f64 range', () => {
+    for (const text of ['[1e400]', '{"tiny": [-1e400]}', `[1${'0'.repeat(400)}]`]) {
+      expect(() => paramValue(text)).toThrow('out of the f64 range')
+    }
+  })
+
+  it('refuses a bare number past the f64 range', () => {
+    expect(() => paramValue('1e999')).toThrow('out of the f64 range')
+  })
+})
 
 // ---------------------------------------------------------------------------
 // Discover and register tests

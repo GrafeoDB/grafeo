@@ -57,33 +57,61 @@ const DECIMAL_INTEGER = /^[+-]?[0-9]+$/
 const DECIMAL_NUMBER = /^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/
 const I64_MIN = -(2n ** 63n)
 const I64_MAX = 2n ** 63n - 1n
+// The whole numbers a binding takes as integers from a JS number: napi-rs
+// (Node.js) makes one from i32::MIN to u32::MAX an integer and any other a
+// float, so an integer past that range goes as a BigInt, which both bindings
+// read as an i64.
+const NUMBER_INTEGER_MIN = -(2n ** 31n)
+const NUMBER_INTEGER_MAX = 2n ** 32n - 1n
 
 /**
  * The value of a parameter written as `text` in a .gtest file, by the rule of
  * the Rust reference runner that every runner follows: a quoted value is a
  * string, whatever it reads like; a bare value starting with `[` or `{` is
- * JSON; a bare decimal integer that fits i64 is an integer (a BigInt past
- * 2^53, where a number would round it) and any other bare decimal number a
- * float; a bare `true` or `false` is a boolean; any other bare value is a
- * string.
+ * JSON, whose numbers follow the rule of bare ones; a bare decimal integer
+ * that fits i64 is an integer (a BigInt past 32 bits, which a number would
+ * turn into a float or round) and any other bare decimal number a float, an
+ * error past the f64 range; a bare `true` or `false` is a boolean; any other
+ * bare value is a string.
  */
 export function paramValue(text) {
   text = text.trim()
   if (isQuoted(text)) return unquote(text)
-  if (text.startsWith('[') || text.startsWith('{')) return JSON.parse(text)
+  if (text.startsWith('[') || text.startsWith('{')) return JSON.parse(text, jsonNumber)
+  if (DECIMAL_INTEGER.test(text) || DECIMAL_NUMBER.test(text)) return numberValue(text)
+  if (text === 'true' || text === 'false') return text === 'true'
+  return text
+}
+
+/**
+ * A decimal number written as `text`: an integer when it is one that fits
+ * i64, else a float, which must be finite.
+ */
+function numberValue(text) {
   if (DECIMAL_INTEGER.test(text)) {
     const integer = BigInt(text)
     if (integer >= I64_MIN && integer <= I64_MAX) {
-      return Number.isSafeInteger(Number(integer)) ? Number(integer) : integer
+      return integer >= NUMBER_INTEGER_MIN && integer <= NUMBER_INTEGER_MAX
+        ? Number(integer)
+        : integer
     }
   }
-  if (DECIMAL_NUMBER.test(text)) {
-    const number = Number(text)
-    if (!Number.isFinite(number)) throw new Error(`parameter ${text} is out of the f64 range`)
-    return number
+  const number = Number(text)
+  if (!Number.isFinite(number)) throw new Error(`parameter ${text} is out of the f64 range`)
+  return number
+}
+
+/**
+ * `JSON.parse` reviver: a number is read from its source text by the rule of
+ * a bare one, as `JSON.parse` alone rounds an integer past 2^53 and reads
+ * `1e400` as Infinity.
+ */
+function jsonNumber(key, value, context) {
+  if (typeof value !== 'number') return value
+  if (context?.source === undefined) {
+    throw new Error('a JSON parameter needs JSON.parse source text access (Node.js 22 or later)')
   }
-  if (text === 'true' || text === 'false') return text === 'true'
-  return text
+  return numberValue(context.source)
 }
 
 /** Type each parameter by `paramValue`; undefined when there are none. */

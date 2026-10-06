@@ -252,6 +252,25 @@ impl MergeOperator {
         Ok(out)
     }
 
+    /// The label whose nodes MERGE reads when no property index applies: the
+    /// pattern's label with the fewest nodes (`nodes_by_label_count`), and of
+    /// labels with as many nodes the first written. Each node read is checked
+    /// for all the labels, so the matches are the same whichever label is
+    /// read, in the same (ID) order.
+    fn scan_label(&self) -> Option<&str> {
+        match self.config.labels.as_slice() {
+            [] => None,
+            [label] => Some(label),
+            labels => {
+                let store = self.writer.store();
+                labels
+                    .iter()
+                    .map(String::as_str)
+                    .min_by_key(|label| store.nodes_by_label_count(label))
+            }
+        }
+    }
+
     /// The nodes that match the given resolved properties (every one, as in
     /// openCypher, where MERGE binds each match).
     fn find_matching_nodes(&self, resolved_match_props: &[(String, Value)]) -> Vec<NodeId> {
@@ -268,8 +287,8 @@ impl MergeOperator {
                 .map(|(k, v)| (k.as_str(), v.clone()))
                 .collect();
             self.writer.store().find_nodes_by_properties(&conditions)
-        } else if let Some(first_label) = self.config.labels.first() {
-            self.writer.store().nodes_by_label(first_label)
+        } else if let Some(label) = self.scan_label() {
+            self.writer.store().nodes_by_label(label)
         } else {
             self.writer.store().node_ids()
         };
@@ -1719,5 +1738,49 @@ mod tests {
         );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<MergeOperator>().is_ok());
+    }
+
+    /// A pattern with several labels reads the nodes of the label with the
+    /// fewest; of labels with as many nodes, the first written (#457).
+    #[test]
+    fn merge_reads_the_label_with_the_fewest_nodes() {
+        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        for i in 0..19 {
+            if i < 3 {
+                store.create_node(&["Graph", "Repository"]);
+            } else {
+                store.create_node(&["Graph"]);
+            }
+        }
+        for _ in 0..3 {
+            store.create_node(&["Tag"]);
+        }
+        let merge = |labels: &[&str]| {
+            MergeOperator::new(
+                Arc::clone(&store),
+                None,
+                MergeConfig {
+                    variable: "n".to_string(),
+                    labels: labels.iter().map(ToString::to_string).collect(),
+                    match_properties: const_props(vec![("id", Value::from("r1"))]),
+                    on_create_properties: vec![],
+                    on_match_properties: vec![],
+                    output_schema: vec![LogicalType::Node],
+                    output_column: 0,
+                    bound_variable_column: None,
+                },
+            )
+        };
+        for (labels, expected) in [
+            (&["Graph", "Repository"][..], Some("Repository")),
+            (&["Repository", "Graph"][..], Some("Repository")),
+            (&["Repository", "Tag"][..], Some("Repository")),
+            (&["Tag", "Repository"][..], Some("Tag")),
+            (&["Graph", "Missing"][..], Some("Missing")),
+            (&["Tag"][..], Some("Tag")),
+            (&[][..], None),
+        ] {
+            assert_eq!(merge(labels).scan_label(), expected, "{labels:?}");
+        }
     }
 }

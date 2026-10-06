@@ -7,7 +7,9 @@ import (
 	"bufio"
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -158,9 +160,10 @@ var (
 // paramValue returns the value of a parameter written as text in a .gtest
 // file, by the rule of the Rust reference runner that every runner follows: a
 // quoted value is a string, whatever it reads like; a bare value starting with
-// [ or { is JSON; a bare decimal integer that fits int64 is an integer and any
-// other bare decimal number a float; a bare true or false is a boolean; any
-// other bare value is a string.
+// [ or { is JSON, whose numbers follow the rule of bare ones; a bare decimal
+// integer that fits int64 is an integer and any other bare decimal number a
+// float, an error past the float64 range; a bare true or false is a boolean;
+// any other bare value is a string.
 func paramValue(text string) (interface{}, error) {
 	text = strings.TrimSpace(text)
 	if isQuoted(text) {
@@ -170,6 +173,11 @@ func paramValue(text string) (interface{}, error) {
 		if !json.Valid([]byte(text)) {
 			return nil, fmt.Errorf("parameter %s is not valid JSON", text)
 		}
+		if err := checkJSONNumbers(text); err != nil {
+			return nil, err
+		}
+		// The binding reads the numbers as written: an integer that fits
+		// int64 as one, any other number as a float64.
 		return json.RawMessage(text), nil
 	}
 	if decimalInteger.MatchString(text) {
@@ -188,6 +196,45 @@ func paramValue(text string) (interface{}, error) {
 		return text == "true", nil
 	}
 	return text, nil
+}
+
+// checkJSONNumbers returns an error for a number in the JSON text past the
+// float64 range (1e400), which the Rust reference runner refuses too.
+func checkJSONNumbers(text string) error {
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("parameter %s is not valid JSON: %w", text, err)
+		}
+		if number, ok := token.(json.Number); ok {
+			if f, err := strconv.ParseFloat(number.String(), 64); err != nil && math.IsInf(f, 0) {
+				return fmt.Errorf("parameter %s is out of the f64 range", number)
+			}
+		}
+	}
+}
+
+// TestSpecParamValues checks the typing of parameter values that no .gtest
+// file can hold: a number past the float64 range fails the Rust runner's
+// build. (Named TestSpec... so CI's -run TestSpec runs it.)
+func TestSpecParamValues(t *testing.T) {
+	for _, text := range []string{"[1e400]", `{"tiny": [-1e400]}`, "[1" + strings.Repeat("0", 400) + "]", "1e999"} {
+		if _, err := paramValue(text); err == nil || !strings.Contains(err.Error(), "out of the f64 range") {
+			t.Errorf("paramValue(%.20s...) = %v, want an out of the f64 range error", text, err)
+		}
+	}
+	value, err := paramValue("[3, 9223372036854775807, 9223372036854775808]")
+	if err != nil {
+		t.Fatalf("a list of integers: %v", err)
+	}
+	if raw, ok := value.(json.RawMessage); !ok || string(raw) != "[3, 9223372036854775807, 9223372036854775808]" {
+		t.Errorf("a JSON list goes to the binding as written, got %#v", value)
+	}
 }
 
 // coerceParamsToJSON types each parameter by paramValue and returns them as a

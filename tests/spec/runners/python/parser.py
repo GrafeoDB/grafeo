@@ -554,17 +554,37 @@ def param_value(text: str) -> object:
     if _is_quoted(text):
         return _unquote(text)
     if text.startswith(("[", "{")):
-        return json.loads(text, parse_constant=_reject_json_constant)
+        return json.loads(
+            text,
+            parse_int=_json_integer,
+            parse_float=_finite_float,
+            parse_constant=_reject_json_constant,
+        )
     if _DECIMAL_INTEGER.fullmatch(text) and _I64_MIN <= int(text) <= _I64_MAX:
         return int(text)
     if _DECIMAL_NUMBER.fullmatch(text):
-        number = float(text)
-        if not math.isfinite(number):
-            raise ValueError(f"parameter {text!r} is out of the f64 range")
-        return number
+        return _finite_float(text)
     if text in ("true", "false"):
         return text == "true"
     return text
+
+
+def _json_integer(text: str) -> int | float:
+    """A JSON integer, by the rule of a bare one: an int when it fits i64, a
+    float when it does not (``json.loads`` alone keeps any size)."""
+    number = int(text)
+    if _I64_MIN <= number <= _I64_MAX:
+        return number
+    return _finite_float(text)
+
+
+def _finite_float(text: str) -> float:
+    """``text`` as a float; past the f64 range (``1e400``, which ``float``
+    reads as infinity) it is an error, as in every runner."""
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError(f"parameter {text!r} is out of the f64 range")
+    return number
 
 
 def _reject_json_constant(name: str) -> object:

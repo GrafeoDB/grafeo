@@ -257,6 +257,51 @@ fn reading_every_node_fails_on_a_cold_record_it_cannot_read() {
     assert!(store.node_ids().contains(&gus));
 }
 
+/// A transactional delete of a node whose visible version is a cold record
+/// that cannot be read is an error, as `try_node_ids` reports it: `false`
+/// would tell the caller there is no such node.
+#[cfg(feature = "tiered-storage")]
+#[test]
+fn deleting_a_node_whose_cold_record_cannot_be_read_is_an_error() {
+    use grafeo_common::mvcc::{ColdVersionRef, OptionalEpochId};
+
+    let store = LpgStore::new().unwrap();
+    let epoch = store.current_epoch();
+    let alix = store.create_node(&["Person"]);
+    let gus = store.create_node(&["Person"]);
+    // Alix's version points into a cold block the cold store does not hold.
+    store
+        .node_versions
+        .write()
+        .get_mut(&alix)
+        .unwrap()
+        .freeze_epoch(
+            epoch,
+            std::iter::once(ColdVersionRef {
+                epoch,
+                block_offset: 19,
+                length: 88,
+                created_by: TransactionId::SYSTEM,
+                deleted_epoch: OptionalEpochId::NONE,
+                deleted_by: None,
+            }),
+        );
+
+    let transaction_id = TransactionId::new(3);
+    let result = store.delete_node_transactional(alix, epoch, transaction_id);
+    assert!(
+        result.is_err(),
+        "Alix exists and her record cannot be read, so the delete fails: {result:?}"
+    );
+    assert_eq!(
+        store
+            .delete_node_transactional(gus, epoch, transaction_id)
+            .ok(),
+        Some(true),
+        "a node with a readable record is deleted"
+    );
+}
+
 /// A transactional delete of a node the transaction cannot see (another
 /// transaction's uncommitted node) is `false`: it reads none of the node's
 /// values, so one that cannot be read does not fail it (#594).

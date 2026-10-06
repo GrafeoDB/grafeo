@@ -87,7 +87,44 @@ def empty(grafeo):
     return grafeo.GrafeoDB()
 
 
-FIXTURES = {"social": social, "chain": chain, "empty": empty}
+def labels(grafeo, indexed=False):
+    """Skewed labels: 1,988 `Graph` nodes (`g0` to `g1987`), three nodes with `Graph`
+    and `Repository` (`r0` to `r2`) and 19 `Repository` nodes (`p0` to `p18`), each with
+    `id` and `n` (its number); every `r<i>` HAS `g<i>`. `Tag` and `Topic` have three nodes
+    each, `t0` has both. With `indexed`, a property index on `id`."""
+    db = grafeo.GrafeoDB()
+    if indexed:
+        db.create_property_index("id")
+    for label, prefix, count in [
+        ("Graph", "g", 1988),
+        ("Graph:Repository", "r", 3),
+        ("Repository", "p", 19),
+    ]:
+        db.execute(
+            f"UNWIND range(0, {count - 1}) AS i "
+            f"INSERT (:{label} {{id: '{prefix}' + toString(i), n: i, w: 100 + i}})"
+        )
+    db.execute(
+        "MATCH (r:Repository), (g:Graph) WHERE r.id STARTS WITH 'r' "
+        "AND g.id = 'g' + toString(r.n) INSERT (r)-[:HAS {w: r.n}]->(g)"
+    )
+    db.execute("INSERT (:Tag:Topic {id: 't0'}), (:Tag {id: 't1'}), (:Tag {id: 't2'})")
+    db.execute("INSERT (:Topic {id: 'u1'}), (:Topic {id: 'u2'})")
+    return db
+
+
+def labels_indexed(grafeo):
+    """`labels` with a property index on `id`."""
+    return labels(grafeo, indexed=True)
+
+
+FIXTURES = {
+    "social": social,
+    "chain": chain,
+    "empty": empty,
+    "labels": labels,
+    "labels_indexed": labels_indexed,
+}
 
 CASES: list[Case] = []
 
@@ -596,5 +633,37 @@ for case_id, query in [
     ("AF4", "MATCH (p:Person) WHERE VALUE { MATCH (p)-[:KNOWS]->(f) RETURN f.name ORDER BY f.name LIMIT 1 } IS NOT NULL RETURN p.name AS p"),
 ]:
     case(case_id, query, GQL)
+
+# AG: node patterns with several labels (the label with the fewest nodes is scanned) and
+#     lookups of a labeled node by an indexed property, on skewed labels; AG101 to AG123
+#     are AG1 to AG23 with an index on `id`. AG21 to AG23: a label under NOT or OR is
+#     no requirement of the node, so the scan keeps the pattern's label
+for fixture, offset in [("labels", 0), ("labels_indexed", 100)]:
+    for number, query, is_ordered in [
+        (1, "MATCH (n:Graph:Repository) RETURN n.id AS id", False),
+        (2, "MATCH (n:Repository:Graph) RETURN n.id AS id", False),
+        (3, "MATCH (n:Repository:Graph) RETURN n.id AS id ORDER BY id DESC", True),
+        (4, "MATCH (n:Graph:Repository) RETURN count(n) AS c", False),
+        (5, "MATCH (n:Graph:Repository {id: 'r1'}) RETURN n.id AS id", False),
+        (6, "MATCH (n:Repository:Graph {id: 'r1'}) RETURN n.id AS id", False),
+        (7, "MATCH (n:Graph:Repository {id: 'g3'}) RETURN n.id AS id", False),
+        (8, "MATCH (n:Repository:Graph {id: 'p3'}) RETURN n.id AS id", False),
+        (9, "MATCH (n:Graph {id: 'r2'}) RETURN n.id AS id", False),
+        (10, "MATCH (n:Graph {id: 'p3'}) RETURN n.id AS id", False),
+        (11, "MATCH (n:Graph) WHERE n.id IN ['g19', 'r0', 'p3', 'missing', 'r2'] RETURN n.id AS id", False),
+        (12, "MATCH (n:Repository:Graph) WHERE n.id IN ['g19', 'r0', 'p3', 'missing', 'r2'] RETURN n.id AS id", False),
+        (13, "MATCH (n:Graph:Repository {n: 2}) RETURN n.id AS id", False),
+        (14, "MATCH (n:Graph:Repository) WHERE n.n > 0 RETURN n.id AS id", False),
+        (15, "MATCH (n:Graph) WHERE n:Repository RETURN n.id AS id", False),
+        (16, "MATCH (n:Repository:Graph)-[r:HAS]->(m) RETURN n.id AS n, r.w AS w, m.id AS m", False),
+        (17, "MATCH (a:Graph {id: 'g88'}) MATCH (n:Graph:Repository) RETURN a.id AS a, n.id AS n", False),
+        (18, "MATCH (a:Graph {id: 'g88'}) OPTIONAL MATCH (n:Graph:Repository {id: 'p1'}) RETURN a.id AS a, n.id AS n", False),
+        (19, "MATCH (n:Tag:Topic) RETURN n.id AS id", False),
+        (20, "MATCH (n:Topic:Tag) RETURN n.id AS id", False),
+        (21, "MATCH (n:Graph) WHERE NOT n:Repository RETURN count(n) AS c", False),
+        (22, "MATCH (n:Graph) WHERE n:Repository OR n.n = 5 RETURN count(n) AS c", False),
+        (23, "MATCH (n:Graph) WHERE NOT (n:Repository AND n.n = 1) RETURN count(n) AS c", False),
+    ]:
+        case(f"AG{offset + number}", query, BOTH, fixture, is_ordered)
 
 # fmt: on

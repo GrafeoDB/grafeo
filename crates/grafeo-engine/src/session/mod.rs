@@ -3032,7 +3032,11 @@ impl Session {
             #[cfg(feature = "lpg")]
             self.check_graph_access(optimized_plan.root.has_mutations())?;
             let mut plan = optimized_plan;
-            annotate_pushdown_hints(&mut plan.root, active.as_ref());
+            annotate_pushdown_hints(
+                &mut plan.root,
+                active.as_ref(),
+                self.may_choose_scan_label(),
+            );
             return Ok(explain_result(&plan));
         }
 
@@ -3544,7 +3548,11 @@ impl Session {
             #[cfg(feature = "lpg")]
             self.check_graph_access(optimized_plan.root.has_mutations())?;
             let mut plan = optimized_plan;
-            annotate_pushdown_hints(&mut plan.root, active.as_ref());
+            annotate_pushdown_hints(
+                &mut plan.root,
+                active.as_ref(),
+                self.may_choose_scan_label(),
+            );
             return Ok(explain_result(&plan));
         }
 
@@ -5126,6 +5134,19 @@ impl Session {
             // No transaction: use current epoch
             (self.transaction_manager.current_epoch(), None)
         }
+    }
+
+    /// Whether the planner may scan another of a pattern's labels than the
+    /// one written, as it decides for this session's reads (see
+    /// [`may_choose_scan_label`](crate::query::planner::lpg::scan::may_choose_scan_label)):
+    /// `EXPLAIN` shows the label that runs.
+    fn may_choose_scan_label(&self) -> bool {
+        let (viewing_epoch, transaction_id) = self.get_transaction_context();
+        crate::query::planner::lpg::scan::may_choose_scan_label(
+            viewing_epoch,
+            transaction_id,
+            Some(self.transaction_manager.current_epoch()),
+        )
     }
 
     /// Creates a planner with transaction context and constraint validator.

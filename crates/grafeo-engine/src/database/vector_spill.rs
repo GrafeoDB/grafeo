@@ -71,26 +71,7 @@ impl VectorSpillFile {
             NEXT.fetch_add(1, Ordering::Relaxed),
             super::spill_directory::random_u64()
         ));
-        let written = write_file(&path, vectors).and_then(|()| {
-            let file = File::open(&path)?;
-            // SAFETY: the file is this process's own (it is in the open's
-            // cache directory, named uniquely, written above and never
-            // written again), so nothing changes it while it is mapped; an
-            // outside process truncating it is the caveat of every mapping.
-            #[allow(
-                unsafe_code,
-                reason = "mapping a file only this process writes, written before it is mapped"
-            )]
-            let map = unsafe { Mmap::map(&file) }?;
-            Ok(map)
-        });
-        let map = match written {
-            Ok(map) => map,
-            Err(error) => {
-                let _ = std::fs::remove_file(&path);
-                return Err(error);
-            }
-        };
+        let map = write_new(&path, vectors)?;
         let floats = vectors.iter().map(|(_, vector)| vector.len()).sum();
         let spill = Self {
             path,
@@ -218,8 +199,35 @@ impl Drop for VectorSpillFile {
 /// Writes the layout of the module docs to `path`.
 /// The file is created new (`create_new`): an existing file, which someone
 /// may have mapped, is never truncated.
-fn write_file(path: &std::path::Path, vectors: &[(NodeId, Arc<[f32]>)]) -> io::Result<()> {
+/// Writes `vectors` into a new file at `path` and maps it. Nothing is left
+/// behind on an error, and a file already at `path` (whose name a clash
+/// gave twice) is neither written over nor removed: it is not this call's.
+fn write_new(path: &std::path::Path, vectors: &[(NodeId, Arc<[f32]>)]) -> io::Result<Mmap> {
     let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let written = write_file(file, vectors).and_then(|()| {
+        let file = File::open(path)?;
+        // SAFETY: the file is this process's own (it is in the open's
+        // cache directory, named uniquely, written above and never
+        // written again), so nothing changes it while it is mapped; an
+        // outside process truncating it is the caveat of every mapping.
+        #[allow(
+            unsafe_code,
+            reason = "mapping a file only this process writes, written before it is mapped"
+        )]
+        let map = unsafe { Mmap::map(&file) }?;
+        Ok(map)
+    });
+    match written {
+        Ok(map) => Ok(map),
+        Err(error) => {
+            let _ = std::fs::remove_file(path);
+            Err(error)
+        }
+    }
+}
+
+/// Writes the layout (see the module docs) into `file`.
+fn write_file(file: File, vectors: &[(NodeId, Arc<[f32]>)]) -> io::Result<()> {
     let mut out = BufWriter::new(file);
     let floats: usize = vectors.iter().map(|(_, vector)| vector.len()).sum();
     out.write_all(&MAGIC)?;
@@ -282,6 +290,19 @@ mod tests {
         ]
     }
 
+    /// A cache file is always new: a file already at the name (which another
+    /// open may map) is neither truncated nor removed; the write fails and
+    /// leaves it as it was (#594).
+    #[test]
+    fn a_taken_name_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vectors_taken.bin");
+        std::fs::write(&path, b"Vincent's").unwrap();
+        let error = write_new(&path, &vectors()).map(|_| ()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"Vincent's");
+    }
+
     #[test]
     fn reads_back_what_it_wrote() {
         let dir = tempfile::tempdir().unwrap();
@@ -314,18 +335,6 @@ mod tests {
                 .with_vector(NodeId::new(319), &mut |_| panic!("no vector"))
                 .unwrap()
         );
-    }
-
-    /// A cache file is always new: an existing file of that name (which
-    /// another open may map) is refused, not truncated.
-    #[test]
-    fn writing_never_truncates_an_existing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vectors_taken.bin");
-        std::fs::write(&path, b"mapped elsewhere").unwrap();
-        let error = write_file(&path, &vectors()).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(std::fs::read(&path).unwrap(), b"mapped elsewhere");
     }
 
     /// Once the database closed, a spill writes no file.

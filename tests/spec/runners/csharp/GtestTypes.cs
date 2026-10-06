@@ -35,6 +35,10 @@ public sealed class TestCase
     public string? Query { get; set; }
     public List<string> Statements { get; set; } = [];
     public List<string> Setup { get; set; } = [];
+    /// <summary>
+    /// Each parameter value as the file writes it, quotes included: whether it
+    /// was quoted decides its type (see <c>SpecTests.ParamValue</c>).
+    /// </summary>
     public Dictionary<string, string> Params { get; set; } = new();
     public List<string> Tags { get; set; } = [];
     public List<string> Requires { get; set; } = [];

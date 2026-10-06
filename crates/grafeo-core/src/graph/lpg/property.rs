@@ -208,6 +208,15 @@ fn missing_backed_value() -> std::io::Error {
     )
 }
 
+/// The error of a compressed row that does not decode.
+#[cfg(not(feature = "temporal"))]
+fn undecodable_compressed_row() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "a compressed property column lists an id but holds no value for it",
+    )
+}
+
 /// An in-memory [`ColumnBacking`] for tests: it counts the values copied out
 /// of it, can fail its reads, and can run a hook the next time its ids are
 /// read.
@@ -484,11 +493,31 @@ impl<Id: EntityId> PropertyStorage<Id> {
         }
     }
 
-    /// Removes a property value for an entity.
+    /// Removes a property value for an entity, returning it. A compressed or
+    /// spilled value is read before it is hidden, so the caller can log and
+    /// undo the removal.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading the value (a spilled value whose file
+    /// cannot be read); nothing changes then.
     #[cfg(not(feature = "temporal"))]
-    pub fn remove(&self, id: Id, key: &PropertyKey) -> Option<Value> {
+    pub fn remove(&self, id: Id, key: &PropertyKey) -> Result<Option<Value>> {
         let mut columns = self.columns.write();
-        columns.get_mut(key).and_then(|col| col.remove(id))
+        match columns.get_mut(key) {
+            Some(col) => col.remove(id).map_err(Error::Io),
+            None => Ok(None),
+        }
+    }
+
+    /// Removes a property value for an entity without reading it, so it
+    /// never fails: for a removal that does not need the value, such as the
+    /// rollback of a write.
+    #[cfg(not(feature = "temporal"))]
+    pub fn discard(&self, id: Id, key: &PropertyKey) {
+        if let Some(col) = self.columns.write().get_mut(key) {
+            col.discard(id);
+        }
     }
 
     /// Removes a property value for an entity (temporal: appends tombstone at epoch).
@@ -721,27 +750,19 @@ impl<Id: EntityId> PropertyStorage<Id> {
     }
 
     /// Returns every `(id, value)` of `key`, in id order, read under one lock
-    /// acquisition. A spilled column is read through its backing; a value that
-    /// cannot be read is left out (the backing reports the error).
+    /// acquisition: compressed values and those of a spilled column included.
+    /// A value that cannot be read is an error, never left out, so a snapshot
+    /// or a copy of the column is complete.
     ///
     /// This holds the storage lock (every column of the entity kind) and
     /// loads the whole column: a checkpoint of a large spilled column streams
     /// it with [`column_ids`](Self::column_ids) and
     /// [`try_get_batch`](Self::try_get_batch) instead.
-    #[must_use]
-    pub fn column_entries(&self, key: &PropertyKey) -> Vec<(Id, Value)> {
-        self.columns
-            .read()
-            .get(key)
-            .map_or_else(Vec::new, PropertyColumn::entries)
-    }
-
-    /// [`column_entries`](Self::column_entries) as a fallible read: a spilled
-    /// value that cannot be read is an error, never left out.
     ///
     /// # Errors
     ///
-    /// Returns the error of reading a spilled value.
+    /// Returns the error of reading a spilled value or decoding a compressed
+    /// one.
     pub fn try_column_entries(&self, key: &PropertyKey) -> Result<Vec<(Id, Value)>> {
         self.columns
             .read()
@@ -819,7 +840,7 @@ impl<Id: EntityId> PropertyStorage<Id> {
     // ── Column-level spill / reload ────────────────────────────────
 
     /// Spills the column `key` into `backing`, which holds the entries of
-    /// `snapshot`: the column as [`column_entries`](Self::column_entries)
+    /// `snapshot`: the column as [`try_column_entries`](Self::try_column_entries)
     /// returned it before the backing was written, without the lock held.
     /// A value changed since the snapshot stays in the column and one removed
     /// since stays removed; the other values leave the heap.
@@ -1166,6 +1187,16 @@ pub enum CompressedColumnData {
 
 #[cfg(not(feature = "temporal"))]
 impl CompressedColumnData {
+    /// The ids of the compressed rows, in id order: row `i` belongs to the
+    /// `i`-th.
+    fn ids(&self) -> &[u64] {
+        match self {
+            Self::Integers { index_to_id, .. }
+            | Self::Strings { index_to_id, .. }
+            | Self::Booleans { index_to_id, .. } => index_to_id,
+        }
+    }
+
     /// Returns the memory usage of the compressed data in bytes.
     #[must_use]
     pub fn memory_usage(&self) -> usize {
@@ -1395,90 +1426,175 @@ impl<Id: EntityId> PropertyColumn<Id> {
         }
     }
 
-    /// Gets a value for an entity.
+    /// Gets a value for an entity: the column's own value (the hot buffer)
+    /// first, then a compressed one, then the backing of a spilled column. A
+    /// value that cannot be read (a spilled value whose file cannot be read)
+    /// reads as `None` (the backing reports the error);
+    /// [`try_get`](Self::try_get) reports it.
     ///
-    /// First checks the hot buffer (uncompressed values), then the backing
-    /// of a spilled column. A spilled value that cannot be read reads as
-    /// `None` (the backing reports the error); [`try_get`](Self::try_get)
-    /// reports it.
+    /// A compressed integer or boolean is decoded with the rest of its
+    /// column, so a read by id of a compressed column costs a pass over it.
     #[must_use]
     pub fn get(&self, id: Id) -> Option<Value> {
-        // First check hot buffer
-        if let Some(value) = self.values.get(&id) {
-            return Some(value.clone());
-        }
-
-        // For now, compressed data lookup is not implemented for sparse access
-        // because the compressed format stores values by index, not by entity ID.
-        // This would require maintaining an ID -> index map in CompressedColumnData.
-        // The compressed data is primarily useful for bulk/scan operations.
-        match &self.backing {
-            // A value that cannot be read reads as absent (the backing
-            // reports the error).
-            Some(backing) if !self.removed.contains(&id) => backing.get(id).ok().flatten(),
-            _ => None,
-        }
+        // A value that cannot be read reads as absent (the backing reports
+        // the error).
+        self.try_get(id).ok().flatten()
     }
 
-    /// [`get`](Self::get) as a fallible read: a spilled value that cannot be
-    /// read is an error.
+    /// [`get`](Self::get) as a fallible read: a value that cannot be read is
+    /// an error.
     ///
     /// # Errors
     ///
-    /// Returns the error of reading a spilled value.
+    /// Returns the error of reading a spilled value or decoding a compressed
+    /// one, or of a backing that lists `id` but holds no value for it.
     pub fn try_get(&self, id: Id) -> std::io::Result<Option<Value>> {
         if let Some(value) = self.values.get(&id) {
             return Ok(Some(value.clone()));
         }
+        self.stored_value(id)
+    }
+
+    /// The value of `id` the column holds outside its hot buffer: a
+    /// compressed one, or one in the backing of a spilled column, unless it
+    /// was removed.
+    fn stored_value(&self, id: Id) -> std::io::Result<Option<Value>> {
+        if (self.compressed.is_none() && self.backing.is_none()) || self.removed.contains(&id) {
+            return Ok(None);
+        }
+        if let Some(value) = self.compressed_value(id)? {
+            return Ok(Some(value));
+        }
         match &self.backing {
-            Some(backing) if !self.removed.contains(&id) => backing.get(id),
+            Some(backing) if backing.contains(id) => {
+                backing.get(id)?.map(Some).ok_or_else(missing_backed_value)
+            }
             _ => Ok(None),
         }
     }
 
-    /// Removes a value for an entity, returning it. A spilled value that
-    /// cannot be read is still removed, and returned as `None` (the backing reports the error).
-    pub fn remove(&mut self, id: Id) -> Option<Value> {
+    /// The compressed value of `id`, decoded.
+    fn compressed_value(&self, id: Id) -> std::io::Result<Option<Value>> {
+        let Some(compressed) = &self.compressed else {
+            return Ok(None);
+        };
+        let Ok(index) = compressed.ids().binary_search(&id.as_u64()) else {
+            return Ok(None);
+        };
+        let value = match compressed {
+            CompressedColumnData::Integers { data, .. } => {
+                TypeSpecificCompressor::decompress_integers(data)?
+                    .get(index)
+                    .map(|&value| Value::Int64(crate::codec::zigzag_decode(value)))
+            }
+            CompressedColumnData::Strings { encoding, .. } => encoding
+                .get(index)
+                .map(|value| Value::String(ArcStr::from(value))),
+            CompressedColumnData::Booleans { data, .. } => {
+                TypeSpecificCompressor::decompress_booleans(data)?
+                    .get(index)
+                    .map(|&value| Value::Bool(value))
+            }
+        };
+        value.map(Some).ok_or_else(undecodable_compressed_row)
+    }
+
+    /// The compressed rows, decoded, in id order, removed ones included.
+    fn decode_compressed(&self) -> std::io::Result<Vec<(Id, Value)>> {
+        let Some(compressed) = &self.compressed else {
+            return Ok(Vec::new());
+        };
+        let ids = compressed.ids();
+        let values: Vec<Value> = match compressed {
+            CompressedColumnData::Integers { data, .. } => {
+                TypeSpecificCompressor::decompress_integers(data)?
+                    .into_iter()
+                    .map(|value| Value::Int64(crate::codec::zigzag_decode(value)))
+                    .collect()
+            }
+            CompressedColumnData::Strings { encoding, .. } => (0..ids.len())
+                .map(|index| {
+                    encoding
+                        .get(index)
+                        .map(|value| Value::String(ArcStr::from(value)))
+                        .ok_or_else(undecodable_compressed_row)
+                })
+                .collect::<std::io::Result<_>>()?,
+            CompressedColumnData::Booleans { data, .. } => {
+                TypeSpecificCompressor::decompress_booleans(data)?
+                    .into_iter()
+                    .map(Value::Bool)
+                    .collect()
+            }
+        };
+        if values.len() < ids.len() {
+            return Err(undecodable_compressed_row());
+        }
+        Ok(ids
+            .iter()
+            .zip(values)
+            .map(|(&id, value)| (Id::from_u64(id), value))
+            .collect())
+    }
+
+    /// Removes a value for an entity, returning it. A compressed or spilled
+    /// value is read before it is hidden, so the caller can log and undo the
+    /// removal: when it cannot be read, nothing changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading the value, as [`try_get`](Self::try_get).
+    pub fn remove(&mut self, id: Id) -> std::io::Result<Option<Value>> {
         let removed = match self.values.remove(&id) {
             Some(value) => {
-                self.hide_backed(id);
+                self.hide_stored(id);
                 Some(value)
             }
-            None if self.hide_backed(id) => self
-                .backing
-                .as_ref()
-                .and_then(|backing| backing.get(id).ok().flatten()),
-            None => None,
+            None => {
+                let value = self.stored_value(id)?;
+                if value.is_some() {
+                    self.removed.insert(id);
+                }
+                value
+            }
         };
         if removed.is_some() {
             // Mark zone map as dirty - would need full rebuild for accurate min/max
             self.zone_map_dirty = true;
         }
-        removed
+        Ok(removed)
     }
 
-    /// Removes a value for an entity without returning it, so a spilled value
-    /// is not read from its backing.
+    /// Removes a value for an entity without returning it, so a compressed
+    /// or spilled value is not read.
     fn discard(&mut self, id: Id) {
         let from_values = self.values.remove(&id).is_some();
-        let from_backing = self.hide_backed(id);
-        if from_values || from_backing {
+        let from_store = self.hide_stored(id);
+        if from_values || from_store {
             self.zone_map_dirty = true;
         }
     }
 
-    /// Hides the backed value of `id`, returning whether one was visible.
-    fn hide_backed(&mut self, id: Id) -> bool {
-        match &self.backing {
-            Some(backing) if backing.contains(id) => self.removed.insert(id),
-            _ => false,
-        }
+    /// Hides the compressed or backed value of `id`, returning whether one
+    /// was visible.
+    fn hide_stored(&mut self, id: Id) -> bool {
+        self.is_stored(id) && self.removed.insert(id)
     }
 
-    /// Returns the ids with a value, in id order, each once.
+    /// Returns the ids with a value, in id order, each once: compressed and
+    /// spilled values included.
     #[must_use]
     pub fn ids(&self) -> Vec<Id> {
         let mut ids: Vec<Id> = self.values.keys().copied().collect();
+        if let Some(compressed) = &self.compressed {
+            ids.extend(
+                compressed
+                    .ids()
+                    .iter()
+                    .map(|&id| Id::from_u64(id))
+                    .filter(|id| !self.removed.contains(id)),
+            );
+        }
         if let Some(backing) = &self.backing {
             ids.extend(
                 backing
@@ -1492,31 +1608,37 @@ impl<Id: EntityId> PropertyColumn<Id> {
         ids
     }
 
-    /// Returns every `(id, value)`, in id order. A spilled value that cannot
-    /// be read is left out (the backing reports the error); [`try_entries`](Self::try_entries)
-    /// reports it.
-    #[must_use]
-    pub fn entries(&self) -> Vec<(Id, Value)> {
-        self.ids()
-            .into_iter()
-            .filter_map(|id| self.get(id).map(|value| (id, value)))
-            .collect()
-    }
-
-    /// [`entries`](Self::entries) as a fallible read.
+    /// Returns every `(id, value)`, in id order, compressed and spilled
+    /// values included: a snapshot or a copy never leaves a value out.
     ///
     /// # Errors
     ///
-    /// Returns the error of reading a spilled value, or of a backing that
-    /// lists an id it holds no value for.
+    /// Returns the error of reading a spilled value or decoding a compressed
+    /// one, or of a backing that lists an id it holds no value for.
     pub fn try_entries(&self) -> std::io::Result<Vec<(Id, Value)>> {
-        self.ids()
-            .into_iter()
-            .map(|id| match self.try_get(id)? {
-                Some(value) => Ok((id, value)),
-                None => Err(missing_backed_value()),
-            })
-            .collect()
+        let mut entries: Vec<(Id, Value)> = self
+            .values
+            .iter()
+            .map(|(id, value)| (*id, value.clone()))
+            .collect();
+        entries.extend(
+            self.decode_compressed()?
+                .into_iter()
+                .filter(|(id, _)| !self.removed.contains(id) && !self.values.contains_key(id)),
+        );
+        if let Some(backing) = &self.backing {
+            for id in backing.ids() {
+                if self.removed.contains(&id) || self.values.contains_key(&id) {
+                    continue;
+                }
+                let value = backing.get(id)?.ok_or_else(missing_backed_value)?;
+                entries.push((id, value));
+            }
+        }
+        entries.sort_unstable_by_key(|(id, _)| id.as_u64());
+        // A backing that lists an id twice reads it twice.
+        entries.dedup_by_key(|(id, _)| id.as_u64());
+        Ok(entries)
     }
 
     /// Where the vector of `id` is: the column's own value first (a value
@@ -1534,9 +1656,18 @@ impl<Id: EntityId> PropertyColumn<Id> {
 
     /// Hands the values over to `backing`, which holds the entries of
     /// `snapshot` it contains (see [`PropertyStorage::spill_column`]).
-    /// Returns `false` when the column is spilled already.
+    /// Returns `false` when the column is spilled already, or compressed
+    /// rows that do not decode.
+    ///
+    /// A compressed column is decompressed first: its rows are in the
+    /// snapshot, so they leave the heap with the others, and a column is
+    /// never compressed and spilled at once.
     fn spill(&mut self, backing: Arc<dyn ColumnBacking<Id>>, snapshot: &[(Id, Value)]) -> bool {
         if self.backing.is_some() {
+            return false;
+        }
+        self.decompress_all();
+        if self.compressed.is_some() {
             return false;
         }
         for (id, taken) in snapshot {
@@ -1578,19 +1709,29 @@ impl<Id: EntityId> PropertyColumn<Id> {
     /// backed), each counted once.
     #[must_use]
     pub fn len(&self) -> usize {
-        let hot = self.values.len() + self.compressed_count;
-        match &self.backing {
-            None => hot,
-            Some(backing) => {
-                let shadowing = self
-                    .values
-                    .keys()
-                    .filter(|id| backing.contains(**id))
-                    .count();
-                // Saturating: a backing must not shrink while installed.
-                hot - shadowing + backing.len().saturating_sub(self.removed.len())
-            }
-        }
+        let stored = match (&self.compressed, &self.backing) {
+            (None, None) => return self.values.len(),
+            // A column is never compressed and spilled at once (see `spill`).
+            (Some(_), _) => self.compressed_count,
+            (None, Some(backing)) => backing.len(),
+        };
+        // Each removed id is a stored one (never a hot one), and a hot value
+        // over a stored one counts once.
+        let shadowing = self.values.keys().filter(|id| self.is_stored(**id)).count();
+        // Saturating: a backing must not shrink while installed.
+        self.values.len() - shadowing + stored.saturating_sub(self.removed.len())
+    }
+
+    /// Whether the column holds a value for `id` outside its hot buffer
+    /// (compressed, or in the backing), removed or not.
+    fn is_stored(&self, id: Id) -> bool {
+        self.compressed
+            .as_ref()
+            .is_some_and(|compressed| compressed.ids().binary_search(&id.as_u64()).is_ok())
+            || self
+                .backing
+                .as_ref()
+                .is_some_and(|backing| backing.contains(id))
     }
 
     /// Returns true if this column is empty.
@@ -1838,57 +1979,25 @@ impl<Id: EntityId> PropertyColumn<Id> {
         self.values = non_bool_values;
     }
 
-    /// Decompresses all values back to the hot buffer.
+    /// Decompresses all values back to the hot buffer. A value written over
+    /// a compressed one wins, and a removed one stays removed. Rows that do
+    /// not decode stay compressed rather than be dropped.
     fn decompress_all(&mut self) {
-        let Some(compressed) = self.compressed.take() else {
+        if self.compressed.is_none() {
+            return;
+        }
+        let Ok(rows) = self.decode_compressed() else {
             return;
         };
-
-        match compressed {
-            CompressedColumnData::Integers {
-                data, index_to_id, ..
-            } => {
-                if let Ok(values) = TypeSpecificCompressor::decompress_integers(&data) {
-                    // Convert back to signed using zigzag decoding
-                    let signed: Vec<i64> = values
-                        .iter()
-                        .map(|&v| crate::codec::zigzag_decode(v))
-                        .collect();
-
-                    for (i, id_u64) in index_to_id.iter().enumerate() {
-                        if let Some(&value) = signed.get(i) {
-                            let id = Id::from_u64(*id_u64);
-                            self.values.insert(id, Value::Int64(value));
-                        }
-                    }
-                }
-            }
-            CompressedColumnData::Strings {
-                encoding,
-                index_to_id,
-                ..
-            } => {
-                for (i, id_u64) in index_to_id.iter().enumerate() {
-                    if let Some(s) = encoding.get(i) {
-                        let id = Id::from_u64(*id_u64);
-                        self.values.insert(id, Value::String(ArcStr::from(s)));
-                    }
-                }
-            }
-            CompressedColumnData::Booleans {
-                data, index_to_id, ..
-            } => {
-                if let Ok(values) = TypeSpecificCompressor::decompress_booleans(&data) {
-                    for (i, id_u64) in index_to_id.iter().enumerate() {
-                        if let Some(&value) = values.get(i) {
-                            let id = Id::from_u64(*id_u64);
-                            self.values.insert(id, Value::Bool(value));
-                        }
-                    }
-                }
+        for (id, value) in rows {
+            if !self.removed.contains(&id) {
+                self.values.entry(id).or_insert(value);
             }
         }
-
+        // A compressed column has no backing (see `spill`), so every removed
+        // id was a compressed one.
+        self.removed = FxHashSet::default();
+        self.compressed = None;
         self.compressed_count = 0;
         self.block_zone_maps.clear();
     }
@@ -2040,17 +2149,25 @@ impl<Id: EntityId> PropertyColumn<Id> {
         }
     }
 
-    /// Rebuilds zone map from current values.
+    /// Rebuilds zone map from current values, compressed ones included.
     ///
     /// A spilled column keeps its zone map: it still covers the values only
-    /// the backing holds, which a rebuild from the heap would drop.
+    /// the backing holds, which a rebuild from the heap would drop. So does a
+    /// column whose compressed rows do not decode.
     pub fn rebuild_zone_map(&mut self) {
         if self.backing.is_some() {
             return;
         }
+        let Ok(compressed) = self.decode_compressed() else {
+            return;
+        };
         let mut zone_map = ZoneMapEntry::new();
 
-        for value in self.values.values() {
+        let stored = compressed
+            .iter()
+            .filter(|(id, _)| !self.removed.contains(id) && !self.values.contains_key(id))
+            .map(|(_, value)| value);
+        for value in self.values.values().chain(stored) {
             zone_map.row_count += 1;
 
             if matches!(value, Value::Null) {
@@ -2608,7 +2725,7 @@ mod tests {
         storage.set(node, key.clone(), "Alix".into());
         assert!(storage.get(node, &key).is_some());
 
-        let removed = storage.remove(node, &key);
+        let removed = storage.remove(node, &key).unwrap();
         assert!(removed.is_some());
         assert!(storage.get(node, &key).is_none());
     }
@@ -2652,7 +2769,10 @@ mod tests {
 
         assert_eq!(col.get(NodeId::new(1)), Some(Value::String("Alix".into())));
 
-        col.remove(NodeId::new(1));
+        assert_eq!(
+            col.remove(NodeId::new(1)).unwrap(),
+            Some(Value::String("Alix".into()))
+        );
         assert!(col.get(NodeId::new(1)).is_none());
         assert_eq!(col.len(), 1);
     }
@@ -3206,7 +3326,7 @@ mod tests {
         for (id, value) in entries {
             storage.set(*id, key.clone(), value.clone());
         }
-        let snapshot = storage.column_entries(&key);
+        let snapshot = storage.try_column_entries(&key).unwrap();
         let backing = MemoryBacking::of(&snapshot);
         assert!(storage.spill_column(&key, backing.clone(), &snapshot));
         (storage, key, backing)
@@ -3263,7 +3383,7 @@ mod tests {
             Some(&vector(&[88.0, 3.19]))
         );
         assert_eq!(storage.column_ids(&key), vec![alix, gus]);
-        assert_eq!(storage.column_entries(&key).len(), 2);
+        assert_eq!(storage.try_column_entries(&key).unwrap().len(), 2);
         assert_eq!(storage.try_column_entries(&key).unwrap().len(), 2);
     }
 
@@ -3294,8 +3414,11 @@ mod tests {
         let (storage, key, _backing) =
             spilled(&[(alix, vector(&[3.0, 19.0])), (gus, vector(&[88.0, 3.19]))]);
 
-        assert_eq!(storage.remove(alix, &key), Some(vector(&[3.0, 19.0])));
-        assert_eq!(storage.remove(alix, &key), None);
+        assert_eq!(
+            storage.remove(alix, &key).unwrap(),
+            Some(vector(&[3.0, 19.0]))
+        );
+        assert_eq!(storage.remove(alix, &key).unwrap(), None);
         assert_eq!(storage.get(alix, &key), None);
         assert!(!storage.get_all(alix).contains_key(&key));
         assert_eq!(storage.column_ids(&key), vec![gus]);
@@ -3332,11 +3455,11 @@ mod tests {
         for (id, x) in ids.iter().zip([3.0, 19.0, 88.0, 319.0]) {
             storage.set(*id, key.clone(), vector(&[x, 3.19]));
         }
-        let snapshot = storage.column_entries(&key);
+        let snapshot = storage.try_column_entries(&key).unwrap();
         assert_eq!(snapshot.len(), 4);
 
         storage.set(ids[0], key.clone(), vector(&[1988.0, 1988.0]));
-        storage.remove(ids[1], &key);
+        storage.remove(ids[1], &key).unwrap();
         storage.set(ids[2], key.clone(), snapshot[2].1.clone());
         storage.set(ids[4], key.clone(), vector(&[3.19, 3.19]));
         assert!(storage.spill_column(&key, MemoryBacking::of(&snapshot), &snapshot));
@@ -3367,7 +3490,7 @@ mod tests {
         let key = PropertyKey::new("embedding");
         storage.set(alix, key.clone(), vector(&[3.0, 19.0]));
         storage.set(gus, key.clone(), "not a vector".into());
-        let snapshot = storage.column_entries(&key);
+        let snapshot = storage.try_column_entries(&key).unwrap();
         let vectors: Vec<(NodeId, Value)> = snapshot
             .iter()
             .filter(|(_, value)| matches!(value, Value::Vector(_)))
@@ -3389,7 +3512,7 @@ mod tests {
 
         assert_eq!(storage.column_ids(&key), ids(&[3, 5, 19, 88]));
         assert_eq!(
-            storage.column_entries(&key),
+            storage.try_column_entries(&key).unwrap(),
             ints(&[(3, 319), (5, 1988), (19, 19), (88, 88)])
         );
         assert_eq!(
@@ -3414,9 +3537,9 @@ mod tests {
         assert_eq!(len(), 3, "a write over a spilled value");
         storage.set(NodeId::new(4), key.clone(), Value::Int64(1988));
         assert_eq!(len(), 4, "a new value");
-        storage.remove(NodeId::new(2), &key);
+        storage.remove(NodeId::new(2), &key).unwrap();
         assert_eq!(len(), 3, "a removed spilled value");
-        storage.remove(NodeId::new(1), &key);
+        storage.remove(NodeId::new(1), &key).unwrap();
         assert_eq!(len(), 2, "a removed value written over a spilled one");
         storage.set(NodeId::new(2), key.clone(), Value::Int64(19));
         assert_eq!(len(), 3, "a value written again after its removal");
@@ -3431,8 +3554,8 @@ mod tests {
     fn removing_a_value_the_backing_never_held_leaves_no_tombstone() {
         let (storage, key, _backing) = spilled(&ints(&[(3, 3)]));
         storage.set(NodeId::new(19), key.clone(), Value::Int64(19));
-        storage.remove(NodeId::new(19), &key);
-        storage.remove(NodeId::new(88), &key);
+        storage.remove(NodeId::new(19), &key).unwrap();
+        storage.remove(NodeId::new(88), &key).unwrap();
         assert_eq!(storage.columns.read()[&key].len(), 1);
         assert!(
             storage.columns.read()[&key].removed.is_empty(),
@@ -3445,7 +3568,7 @@ mod tests {
     #[test]
     fn a_reload_moves_the_backing_back_into_the_column() {
         let (storage, key, backing) = spilled(&ints(&[(1, 3), (2, 19)]));
-        storage.remove(NodeId::new(2), &key);
+        storage.remove(NodeId::new(2), &key).unwrap();
 
         assert!(storage.reload_column(&key).unwrap());
         assert_eq!(storage.spilled_columns(), Vec::<PropertyKey>::new());
@@ -3465,7 +3588,7 @@ mod tests {
         let key = PropertyKey::new("city");
         storage.set(alix, key.clone(), "Amsterdam".into());
         storage.set(gus, key.clone(), "Berlin".into());
-        let snapshot = storage.column_entries(&key);
+        let snapshot = storage.try_column_entries(&key).unwrap();
         let backing = MemoryBacking::of(&snapshot);
         assert!(storage.spill_column(&key, backing.clone(), &snapshot));
 
@@ -3473,7 +3596,7 @@ mod tests {
         let during_key = key.clone();
         backing.on_ids(move || {
             during.set(alix, during_key.clone(), "Paris".into());
-            during.remove(gus, &during_key);
+            during.remove(gus, &during_key).unwrap();
         });
         assert!(storage.reload_column(&key).unwrap());
 
@@ -3491,7 +3614,7 @@ mod tests {
         let key = PropertyKey::new("city");
         storage.set(alix, key.clone(), "Amsterdam".into());
         storage.set(gus, key.clone(), "Berlin".into());
-        let snapshot = storage.column_entries(&key);
+        let snapshot = storage.try_column_entries(&key).unwrap();
         let first = MemoryBacking::of(&snapshot);
         assert!(storage.spill_column(&key, first.clone(), &snapshot));
 
@@ -3499,9 +3622,9 @@ mod tests {
         let during_key = key.clone();
         first.on_ids(move || {
             assert!(during.reload_column(&during_key).unwrap());
-            during.remove(gus, &during_key);
+            during.remove(gus, &during_key).unwrap();
             during.set(vincent, during_key.clone(), "Prague".into());
-            let snapshot = during.column_entries(&during_key);
+            let snapshot = during.try_column_entries(&during_key).unwrap();
             assert!(during.spill_column(&during_key, MemoryBacking::of(&snapshot), &snapshot));
         });
         assert!(
@@ -3555,7 +3678,7 @@ mod tests {
         let storage = PropertyStorage::new();
         let key = PropertyKey::new("embedding");
         storage.set(alix, key.clone(), vector(&[3.0, 19.0]));
-        let snapshot = storage.column_entries(&key);
+        let snapshot = storage.try_column_entries(&key).unwrap();
         let backing = MemoryBacking::listing(&snapshot, &[vincent, alix]);
         assert!(storage.spill_column(&key, backing, &snapshot));
 
@@ -3587,7 +3710,7 @@ mod tests {
         for name in ["embedding", "city", "name", "age"] {
             let key = PropertyKey::new(name);
             storage.set(NodeId::new(1), key.clone(), Value::Int64(19));
-            let snapshot = storage.column_entries(&key);
+            let snapshot = storage.try_column_entries(&key).unwrap();
             assert!(storage.spill_column(&key, MemoryBacking::of(&snapshot), &snapshot));
         }
         assert_eq!(
@@ -3605,7 +3728,7 @@ mod tests {
             .collect();
         let (storage, key, _backing) = spilled(&entries);
         storage.set(NodeId::new(200), key.clone(), Value::Int64(1988));
-        storage.remove(NodeId::new(3), &key);
+        storage.remove(NodeId::new(3), &key).unwrap();
 
         storage.rebuild_zone_maps();
         assert!(storage.might_match(&key, CompareOp::Eq, &Value::Int64(88)));
@@ -3632,6 +3755,132 @@ mod tests {
             Some(Value::Int64(1088))
         );
         assert_eq!(storage.column_ids(&key).len(), 101);
+    }
+
+    /// A storage whose `key` column holds `entries`, compressed.
+    fn compressed(entries: &[(NodeId, Value)]) -> (PropertyStorage, PropertyKey) {
+        let storage = PropertyStorage::new();
+        let key = PropertyKey::new("score");
+        for (id, value) in entries {
+            storage.set(*id, key.clone(), value.clone());
+        }
+        storage.enable_compression(&key, CompressionMode::Eager);
+        storage.force_compress_all();
+        assert!(
+            storage.columns.read()[&key].is_compressed(),
+            "the column compressed"
+        );
+        (storage, key)
+    }
+
+    /// Integers, strings and booleans compressed in a column stay part of it:
+    /// the enumerators that snapshots and checkpoints read list them, and
+    /// they read by id.
+    #[test]
+    fn compressed_rows_are_read_by_every_reader() {
+        let columns: [Vec<(NodeId, Value)>; 3] = [
+            (0..100)
+                .map(|i| {
+                    (
+                        NodeId::new(i),
+                        Value::Int64(1000 + i64::try_from(i).unwrap()),
+                    )
+                })
+                .collect(),
+            (0..100)
+                .map(|i| {
+                    let city =
+                        ["Amsterdam", "Berlin", "Paris", "Prague"][usize::try_from(i % 4).unwrap()];
+                    (NodeId::new(i), Value::from(city))
+                })
+                .collect(),
+            (0..100)
+                .map(|i| (NodeId::new(i), Value::Bool(i % 3 == 0)))
+                .collect(),
+        ];
+        for entries in columns {
+            let (storage, key) = compressed(&entries);
+            let ids: Vec<NodeId> = entries.iter().map(|(id, _)| *id).collect();
+            assert_eq!(storage.column_ids(&key), ids, "{:?}", entries[0].1);
+            assert_eq!(
+                storage.try_column_entries(&key).unwrap(),
+                entries,
+                "{:?}",
+                entries[0].1
+            );
+            assert_eq!(
+                storage.get(NodeId::new(19), &key),
+                Some(entries[19].1.clone())
+            );
+            assert_eq!(
+                storage.try_get(NodeId::new(88), &key).unwrap(),
+                Some(entries[88].1.clone())
+            );
+            assert_eq!(
+                storage.get_all(NodeId::new(3)).get(&key),
+                Some(&entries[3].1)
+            );
+            assert_eq!(storage.columns.read()[&key].len(), 100);
+        }
+    }
+
+    /// A write over a compressed row wins, a removal hides it (and returns
+    /// it), and decompressing keeps both changes.
+    #[test]
+    fn writes_over_compressed_rows_win() {
+        let entries = ints(
+            &(0..100)
+                .map(|i| (i, 1000 + i64::try_from(i).unwrap()))
+                .collect::<Vec<_>>(),
+        );
+        let (storage, key) = compressed(&entries);
+        let (alix, gus, vincent) = (NodeId::new(3), NodeId::new(19), NodeId::new(88));
+
+        storage.set(alix, key.clone(), Value::Int64(319));
+        assert_eq!(storage.get(alix, &key), Some(Value::Int64(319)));
+        assert_eq!(storage.remove(gus, &key).unwrap(), Some(Value::Int64(1019)));
+        assert_eq!(storage.get(gus, &key), None);
+        storage.remove_all(vincent);
+        assert_eq!(storage.get(vincent, &key), None);
+        let len = || storage.columns.read()[&key].len();
+        assert_eq!(len(), 98);
+        assert_eq!(storage.column_ids(&key).len(), 98);
+        let entries = storage.try_column_entries(&key).unwrap();
+        assert!(entries.contains(&(alix, Value::Int64(319))));
+        assert!(!entries.iter().any(|(id, _)| *id == gus || *id == vincent));
+        storage.rebuild_zone_maps();
+        assert!(
+            storage.might_match(&key, CompareOp::Eq, &Value::Int64(1050)),
+            "a zone map rebuild without the compressed rows"
+        );
+
+        storage.enable_compression(&key, CompressionMode::None);
+        assert!(!storage.columns.read()[&key].is_compressed());
+        assert_eq!(storage.get(alix, &key), Some(Value::Int64(319)));
+        assert_eq!(storage.get(gus, &key), None);
+        assert_eq!(storage.get(vincent, &key), None);
+        assert_eq!(len(), 98);
+    }
+
+    /// A compressed column spills whole: its snapshot holds the compressed
+    /// rows, which then read through the backing.
+    #[test]
+    fn a_compressed_column_spills_whole() {
+        let entries = ints(
+            &(0..100)
+                .map(|i| (i, 1000 + i64::try_from(i).unwrap()))
+                .collect::<Vec<_>>(),
+        );
+        let (storage, key) = compressed(&entries);
+        let snapshot = storage.try_column_entries(&key).unwrap();
+        assert_eq!(snapshot, entries);
+        assert!(storage.spill_column(&key, MemoryBacking::of(&snapshot), &snapshot));
+
+        assert_eq!(storage.column_ids(&key).len(), 100);
+        assert_eq!(storage.columns.read()[&key].len(), 100);
+        assert_eq!(storage.get(NodeId::new(19), &key), Some(Value::Int64(1019)));
+        assert!(storage.reload_column(&key).unwrap());
+        assert_eq!(storage.try_column_entries(&key).unwrap(), entries);
     }
 
     /// A vector read hands out the spilled vector without copying it out of
@@ -3708,7 +3957,7 @@ mod tests {
         let (storage, key, _backing) = spilled(&ints(&[(1, 3), (2, 19)]));
         let heap = || storage.columns.read()[&key].heap_memory_bytes();
         assert_eq!(heap(), MemoryBacking::HEAP_BYTES);
-        storage.remove(NodeId::new(2), &key);
+        storage.remove(NodeId::new(2), &key).unwrap();
         assert!(heap() > MemoryBacking::HEAP_BYTES, "the tombstone counts");
     }
 
@@ -3733,7 +3982,7 @@ mod tests {
             let cycles = Arc::clone(&cycles);
             std::thread::spawn(move || {
                 while !stop.load(AtomicOrdering::Relaxed) {
-                    let snapshot = storage.column_entries(&key);
+                    let snapshot = storage.try_column_entries(&key).unwrap();
                     if storage.spill_column(&key, MemoryBacking::of(&snapshot), &snapshot) {
                         cycles.fetch_add(1, AtomicOrdering::Relaxed);
                     }
@@ -3775,7 +4024,7 @@ mod tests {
             if state.is_multiple_of(3) {
                 let expected = model.remove(&id).map(Value::Int64);
                 assert_eq!(
-                    storage.remove(NodeId::new(id), &key),
+                    storage.remove(NodeId::new(id), &key).unwrap(),
                     expected,
                     "step {step}"
                 );
@@ -3811,7 +4060,7 @@ mod tests {
 mod temporal_tests {
     use super::*;
 
-    /// `column_ids` and `column_entries` list the live values in id order,
+    /// `column_ids` and `try_column_entries` list the live values in id order,
     /// and `with_vector` reads the latest vector (#594).
     #[test]
     fn column_reads_see_the_latest_live_values() {
@@ -3842,7 +4091,7 @@ mod temporal_tests {
             (NodeId::new(5), Value::Vector(vec![319.0].into())),
             (NodeId::new(7), Value::Vector(vec![3.0].into())),
         ];
-        assert_eq!(storage.column_entries(&key), expected);
+        assert_eq!(storage.try_column_entries(&key).unwrap(), expected);
         assert_eq!(storage.try_column_entries(&key).unwrap(), expected);
         let first = |id| storage.with_vector(NodeId::new(id), &key, |v: &[f32]| v[0]);
         assert_eq!(first(5), Some(319.0));

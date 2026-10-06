@@ -303,7 +303,9 @@ impl VectorIndexConsumer {
     ) -> Result<usize, SpillError> {
         // Snapshot under the read lock; the file is written without it, and
         // what changes meanwhile wins when the backing is installed.
-        let snapshot = store.node_property_column_entries(property);
+        let snapshot = store
+            .node_property_column_entries(property)
+            .map_err(|e| SpillError::IoError(e.to_string()))?;
         let vectors: Vec<(grafeo_common::types::NodeId, Arc<[f32]>)> = snapshot
             .iter()
             .filter_map(|(id, value)| match value {
@@ -322,13 +324,21 @@ impl VectorIndexConsumer {
             .sum();
         // Refused when another spill got there first; the file then goes
         // with the refused backing.
-        Ok(
-            if store.spill_node_property_column(property, Arc::new(file), &snapshot) {
-                bytes
-            } else {
-                0
-            },
-        )
+        if !store.spill_node_property_column(property, Arc::new(file), &snapshot) {
+            return Ok(0);
+        }
+        // An index dropped since the column was chosen reloaded nothing (the
+        // column was not spilled yet), and no index, so no reload, would
+        // bring the column back: it comes back now. The drop removes the
+        // index before it reloads, and this checks after the install, so one
+        // of the two sees the other.
+        if !Self::indexed_properties(store).contains(property) {
+            store
+                .reload_node_property_column(property)
+                .map_err(|e| SpillError::IoError(e.to_string()))?;
+            return Ok(0);
+        }
+        Ok(bytes)
     }
 }
 
@@ -850,6 +860,56 @@ mod tests {
 
     // Spilling writes a file, which needs the `wal` feature's I/O.
     #[cfg(feature = "wal")]
+    /// A column whose vector index is dropped while the column spills (the
+    /// spill chose it, then the drop's reload found it not spilled yet) does
+    /// not stay spilled: no index, and so no reload, would bring it back
+    /// (#594).
+    #[cfg(all(
+        feature = "lpg",
+        feature = "vector-index",
+        feature = "mmap",
+        not(feature = "temporal")
+    ))]
+    #[test]
+    fn a_column_unindexed_while_it_spills_comes_back() {
+        use grafeo_common::types::Value;
+        use grafeo_core::graph::lpg::LpgStore;
+        use grafeo_core::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndexKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node_with_props(
+            &["Item"],
+            [("embedding", Value::Vector(vec![3.0, 19.0].into()))],
+        );
+        store.add_vector_index(
+            "Item",
+            "embedding",
+            Arc::new(VectorIndexKind::Hnsw(HnswIndex::new(HnswConfig::new(
+                2,
+                DistanceMetric::Euclidean,
+            )))),
+        );
+        let cache =
+            super::super::spill_directory::SpillLayout::for_open(Some(dir.path()), None, false)
+                .vector_cache
+                .unwrap();
+        let consumer = VectorIndexConsumer::new(&store, Some(Arc::clone(&cache)));
+        let property = PropertyKey::new("embedding");
+
+        assert!(store.remove_vector_index("Item", "embedding"));
+        consumer.spill_column(&store, &cache, &property).unwrap();
+        assert_eq!(
+            store.spilled_node_property_columns(),
+            Vec::<PropertyKey>::new(),
+            "a spilled column no index reads"
+        );
+        assert_eq!(
+            store.get_node_property(alix, &property),
+            Some(Value::Vector(vec![3.0, 19.0].into()))
+        );
+    }
+
     #[test]
     fn alix_spill_writes_serialized_bytes_through_swap_to_mmap() {
         let dir = tempfile::tempdir().expect("tempdir");

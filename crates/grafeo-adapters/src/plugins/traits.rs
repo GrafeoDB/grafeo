@@ -209,19 +209,76 @@ impl AlgorithmResult {
     }
 
     /// Puts the rows in the order of their first `columns` integer columns
-    /// (a node id, or the source and target of an edge). A result built by
-    /// iterating a hash map, whose order changes from call to call, then comes
-    /// out the same every time.
+    /// (a node id, or the source and target of an edge), and rows with the
+    /// same ids in the order of all their values, as `ORDER BY` orders them. A
+    /// result built by iterating a hash map, whose order changes from call to
+    /// call, then comes out the same every time, also with several rows per
+    /// node or edge.
     pub fn sort_by_id_columns(&mut self, columns: usize) {
-        let key = |row: &Vec<grafeo_common::types::Value>| -> Vec<i64> {
-            row.iter()
-                .take(columns)
-                .map(|value| match value {
-                    grafeo_common::types::Value::Int64(id) => *id,
-                    _ => i64::MIN,
-                })
-                .collect()
+        use grafeo_common::types::Value;
+        use grafeo_core::execution::operators::value_utils::compare_values_total;
+
+        let id = |row: &[Value], column: usize| match row.get(column) {
+            Some(Value::Int64(id)) => *id,
+            _ => i64::MIN,
         };
-        self.rows.sort_by_cached_key(key);
+        self.rows.sort_by(|a, b| {
+            (0..columns)
+                .map(|column| id(a, column).cmp(&id(b, column)))
+                .find(|order| order.is_ne())
+                .unwrap_or_else(|| {
+                    a.iter()
+                        .zip(b)
+                        .map(|(a, b)| compare_values_total(a, b))
+                        .find(|order| order.is_ne())
+                        .unwrap_or_else(|| a.len().cmp(&b.len()))
+                })
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use grafeo_common::types::Value;
+    use grafeo_common::utils::hash::FxHashSet;
+
+    use super::AlgorithmResult;
+
+    /// Rows with several per id, added in the order of a hash set (which
+    /// changes from set to set), then sorted.
+    fn sorted_rows_from_a_hash_set() -> Vec<Vec<Value>> {
+        let pairs: FxHashSet<(i64, u32)> = [3_i64, 19, 88]
+            .into_iter()
+            .flat_map(|id| (0..19).map(move |weight| (id, weight)))
+            .collect();
+        let mut result = AlgorithmResult::new(vec!["node_id".to_string(), "weight".to_string()]);
+        for (id, weight) in pairs {
+            result.add_row(vec![Value::Int64(id), Value::Float64(f64::from(weight))]);
+        }
+        result.sort_by_id_columns(1);
+        result.rows
+    }
+
+    /// Rows with the same id are ordered by their other columns, so a result
+    /// with several rows per node or edge comes out the same every time too
+    /// (#592).
+    #[test]
+    fn rows_with_the_same_id_are_ordered_by_their_other_columns() {
+        let first = sorted_rows_from_a_hash_set();
+        let pairs: Vec<(i64, f64)> = first
+            .iter()
+            .map(|row| match (&row[0], &row[1]) {
+                (Value::Int64(id), Value::Float64(weight)) => (*id, *weight),
+                other => panic!("unexpected row {other:?}"),
+            })
+            .collect();
+        assert!(
+            pairs.windows(2).all(|w| w[0] < w[1]),
+            "not ordered by id, then weight: {:?}",
+            &pairs[..pairs.len().min(19)]
+        );
+        for _ in 0..3 {
+            assert_eq!(sorted_rows_from_a_hash_set(), first);
+        }
     }
 }

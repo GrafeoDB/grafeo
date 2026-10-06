@@ -20,7 +20,7 @@ fn deleting_a_node_while_its_column_is_spilled_leaves_no_value() {
         &["Item"],
         [("embedding", Value::Vector(vec![88.0, 3.19].into()))],
     );
-    let snapshot = store.node_property_column_entries(&key);
+    let snapshot = store.node_property_column_entries(&key).unwrap();
     assert!(store.spill_node_property_column(&key, MemoryBacking::of(&snapshot), &snapshot));
     assert_eq!(store.spilled_node_property_columns(), vec![key.clone()]);
     assert_eq!(
@@ -60,7 +60,7 @@ fn a_rollback_while_spilled_restores_the_spilled_values() {
     let alix = store.create_node_with_props(&["Item"], [("embedding", v(3.0))]);
     let gus = store.create_node_with_props(&["Item"], [("embedding", v(19.0))]);
     let vincent = store.create_node_with_props(&["Item"], [("embedding", v(88.0))]);
-    let snapshot = store.node_property_column_entries(&key);
+    let snapshot = store.node_property_column_entries(&key).unwrap();
     assert!(store.spill_node_property_column(&key, MemoryBacking::of(&snapshot), &snapshot));
 
     let transaction_id = TransactionId::new(19);
@@ -112,7 +112,7 @@ fn a_write_whose_old_value_cannot_be_read_is_refused() {
     let alix = store.create_node_with_props(&["Item"], [("embedding", v(3.0))]);
     let gus = store.create_node_with_props(&["Item"], [("embedding", v(19.0))]);
     let vincent = store.create_node_with_props(&["Item"], [("embedding", v(88.0))]);
-    let snapshot = store.node_property_column_entries(&key);
+    let snapshot = store.node_property_column_entries(&key).unwrap();
     let backing = MemoryBacking::of(&snapshot);
     assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
 
@@ -158,11 +158,168 @@ fn a_write_whose_old_value_cannot_be_read_is_refused() {
     }
 }
 
+/// A removal outside a transaction whose value cannot be read (a spilled
+/// value whose file cannot be read) changes nothing: hiding the value while
+/// reporting it absent would keep the removal out of the WAL and the change
+/// feed (#594).
+#[cfg(not(feature = "temporal"))]
+#[test]
+fn a_removal_whose_value_cannot_be_read_changes_nothing() {
+    use crate::graph::lpg::property::test_backing::MemoryBacking;
+
+    let store = LpgStore::new().unwrap();
+    let key = PropertyKey::new("embedding");
+    let v = |x: f32| Value::Vector(vec![x, 3.0].into());
+    let alix = store.create_node_with_props(&["Item"], [("embedding", v(3.0))]);
+    let gus = store.create_node_with_props(&["Item"], [("embedding", v(19.0))]);
+    let snapshot = store.node_property_column_entries(&key).unwrap();
+    let backing = MemoryBacking::of(&snapshot);
+    assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
+
+    backing.fail_reads(true);
+    assert!(
+        store.remove_node_property(alix, "embedding").is_err(),
+        "a removal of a value it cannot read"
+    );
+    assert_eq!(
+        store.node_property_column_ids(&key),
+        vec![alix, gus],
+        "the removal hid a value it could not read"
+    );
+
+    backing.fail_reads(false);
+    assert_eq!(store.get_node_property(alix, &key), Some(v(3.0)));
+}
+
+/// A rollback takes back a value its transaction set where there was none,
+/// also when the value was spilled meanwhile and cannot be read: the removal
+/// does not need it (#594).
+#[cfg(not(feature = "temporal"))]
+#[test]
+fn a_rollback_takes_back_a_set_value_it_cannot_read() {
+    use crate::graph::lpg::property::test_backing::MemoryBacking;
+
+    let store = LpgStore::new().unwrap();
+    let key = PropertyKey::new("embedding");
+    let v = |x: f32| Value::Vector(vec![x, 3.0].into());
+    let alix = store.create_node_with_props(&["Item"], [("embedding", v(3.0))]);
+    let gus = store.create_node(&["Item"]);
+    let transaction_id = TransactionId::new(19);
+    store
+        .set_node_property_versioned(gus, "embedding", v(88.0), transaction_id)
+        .unwrap();
+    let snapshot = store.node_property_column_entries(&key).unwrap();
+    let backing = MemoryBacking::of(&snapshot);
+    assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
+
+    backing.fail_reads(true);
+    store.rollback_transaction_properties(transaction_id);
+    assert_eq!(store.node_property_column_ids(&key), vec![alix]);
+    backing.fail_reads(false);
+    assert_eq!(store.get_node_property(gus, &key), None);
+    assert_eq!(store.get_node_property(alix, &key), Some(v(3.0)));
+}
+
+/// A durable read of every node (checkpoints, copies) fails on a node whose
+/// cold record cannot be read, instead of leaving the node out (#594).
+#[cfg(feature = "tiered-storage")]
+#[test]
+fn reading_every_node_fails_on_a_cold_record_it_cannot_read() {
+    use grafeo_common::mvcc::{ColdVersionRef, OptionalEpochId};
+
+    let store = LpgStore::new().unwrap();
+    let epoch = store.current_epoch();
+    let alix = store.create_node(&["Person"]);
+    let gus = store.create_node(&["Person"]);
+    // Alix's version points into a cold block the cold store does not hold.
+    store
+        .node_versions
+        .write()
+        .get_mut(&alix)
+        .unwrap()
+        .freeze_epoch(
+            epoch,
+            std::iter::once(ColdVersionRef {
+                epoch,
+                block_offset: 19,
+                length: 88,
+                created_by: TransactionId::SYSTEM,
+                deleted_epoch: OptionalEpochId::NONE,
+                deleted_by: None,
+            }),
+        );
+
+    assert!(
+        store.try_all_nodes().is_err(),
+        "a checkpoint or copy without Alix"
+    );
+    assert!(store.try_node_ids().is_err());
+    assert!(store.node_ids().contains(&gus));
+}
+
+/// A transactional delete of a node the transaction cannot see (another
+/// transaction's uncommitted node) is `false`: it reads none of the node's
+/// values, so one that cannot be read does not fail it (#594).
+#[cfg(not(feature = "temporal"))]
+#[test]
+fn deleting_a_node_the_transaction_cannot_see_reads_nothing() {
+    use crate::graph::lpg::property::test_backing::MemoryBacking;
+
+    let store = LpgStore::new().unwrap();
+    let key = PropertyKey::new("embedding");
+    let epoch = store.current_epoch();
+    let (writer, deleter) = (TransactionId::new(19), TransactionId::new(88));
+    let mia = store.create_node_versioned(&["Item"], epoch, writer);
+    store
+        .set_node_property_versioned(mia, "embedding", Value::Vector(vec![3.0].into()), writer)
+        .unwrap();
+    let snapshot = store.node_property_column_entries(&key).unwrap();
+    let backing = MemoryBacking::of(&snapshot);
+    assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
+
+    backing.fail_reads(true);
+    assert!(
+        !store
+            .delete_node_transactional(mia, epoch, deleter)
+            .expect("a node it cannot see is not read"),
+        "a node it cannot see is not deleted"
+    );
+}
+
+/// A column snapshot (what a spill writes to its backing) never leaves out a
+/// value it cannot read (#594).
+#[cfg(not(feature = "temporal"))]
+#[test]
+fn a_column_snapshot_does_not_leave_out_a_value_it_cannot_read() {
+    use crate::graph::lpg::property::test_backing::MemoryBacking;
+
+    let store = LpgStore::new().unwrap();
+    let key = PropertyKey::new("embedding");
+    let alix = store.create_node_with_props(
+        &["Item"],
+        [("embedding", Value::Vector(vec![3.0, 19.0].into()))],
+    );
+    let snapshot = store.node_property_column_entries(&key).unwrap();
+    let backing = MemoryBacking::of(&snapshot);
+    assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
+
+    backing.fail_reads(true);
+    assert!(
+        store.node_property_column_entries(&key).is_err(),
+        "a snapshot without the value it could not read"
+    );
+    backing.fail_reads(false);
+    assert_eq!(
+        store.node_property_column_entries(&key).unwrap(),
+        vec![(alix, Value::Vector(vec![3.0, 19.0].into()))]
+    );
+}
+
 /// Filling values from an old spill file sets only what is missing: a node
 /// that has a value keeps it, a deleted or unknown node gets nothing, and a
-/// second fill changes nothing (#594). A node of another label (one that took
-/// a deleted node's id) gets nothing. A property index on the key sees the
-/// filled values.
+/// second fill changes nothing (#594). A node of another label that took a
+/// deleted node's id gets nothing: the old value was the deleted node's. A
+/// property index on the key sees the filled values.
 #[test]
 fn filling_missing_values_sets_only_what_is_missing() {
     let store = LpgStore::new().unwrap();
@@ -173,17 +330,31 @@ fn filling_missing_values_sets_only_what_is_missing() {
     let gus = store.create_node_with_props(&["Item"], [("embedding", v(1988.0))]);
     let vincent = store.create_node(&["Item"]);
     assert!(store.delete_node(vincent));
-    let mia = store.create_node(&["Person"]);
+    let jules = store.create_node(&["Item"]);
+    assert!(store.delete_node(jules));
+    // Mia takes the id of Jules, whose old value is still in the file.
+    let mia = jules;
+    store.create_node_with_id(mia, &["Person"]).unwrap();
+    assert!(
+        store
+            .get_node(mia)
+            .is_some_and(|node| node.has_label("Person"))
+    );
     let unknown = NodeId::new(88);
 
     let old = [
         (alix, v(3.0)),
         (gus, v(19.0)),
         (vincent, v(88.0)),
-        (mia, v(319.0)),
+        (jules, v(319.0)),
         (unknown, v(3.19)),
     ];
-    assert_eq!(store.fill_missing_node_values("Item", &key, old.clone()), 1);
+    assert_eq!(
+        store
+            .fill_missing_node_values("Item", &key, old.clone())
+            .unwrap(),
+        1
+    );
     assert_eq!(store.get_node_property(alix, &key), Some(v(3.0)));
     assert_eq!(
         store.get_node_property(gus, &key),
@@ -199,9 +370,40 @@ fn filling_missing_values_sets_only_what_is_missing() {
         "the property index holds the filled value"
     );
     assert_eq!(
-        store.fill_missing_node_values("Item", &key, old),
+        store.fill_missing_node_values("Item", &key, old).unwrap(),
         0,
         "a second fill"
+    );
+}
+
+/// A fill never overwrites a value it cannot read (a spilled value whose
+/// file cannot be read): read as absent, the old value would replace it, and
+/// the fold's checkpoint would make that durable (#594).
+#[cfg(not(feature = "temporal"))]
+#[test]
+fn a_fill_never_overwrites_a_value_it_cannot_read() {
+    use crate::graph::lpg::property::test_backing::MemoryBacking;
+
+    let store = LpgStore::new().unwrap();
+    let key = PropertyKey::new("embedding");
+    let v = |x: f32| Value::Vector(vec![x, 3.0].into());
+    let alix = store.create_node_with_props(&["Item"], [("embedding", v(1988.0))]);
+    let snapshot = store.node_property_column_entries(&key).unwrap();
+    let backing = MemoryBacking::of(&snapshot);
+    assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
+
+    backing.fail_reads(true);
+    assert!(
+        store
+            .fill_missing_node_values("Item", &key, [(alix, v(3.0))])
+            .is_err(),
+        "a fill over a value it cannot read"
+    );
+    backing.fail_reads(false);
+    assert_eq!(
+        store.get_node_property(alix, &key),
+        Some(v(1988.0)),
+        "the old value replaced the stored one"
     );
 }
 
@@ -245,11 +447,13 @@ fn a_filled_vector_of_another_size_takes_its_node_out_of_the_index() {
         &[(gus, [3.0, 19.0, 88.0]), (alix, [19.0, 88.0, 3.0])],
     );
 
-    let filled = store.fill_missing_node_values(
-        "Item",
-        &key,
-        [(alix, Value::Vector(vec![3.0, 19.0].into()))],
-    );
+    let filled = store
+        .fill_missing_node_values(
+            "Item",
+            &key,
+            [(alix, Value::Vector(vec![3.0, 19.0].into()))],
+        )
+        .unwrap();
     assert_eq!(filled, 1);
     assert!(
         !index.contains(alix),
@@ -278,6 +482,45 @@ fn a_set_vector_of_another_size_takes_its_node_out_of_the_index() {
     assert_eq!(index.search(&[3.0, 19.0, 88.0], 1, &accessor), Vec::new());
 }
 
+/// The fallible batch read reads what the batch read reads, and reports a
+/// spilled value it cannot read where the batch read reads it as absent
+/// (#566 `key=`).
+#[cfg(not(feature = "temporal"))]
+#[test]
+fn the_fallible_batch_read_reports_a_spilled_value_it_cannot_read() {
+    use crate::graph::lpg::property::test_backing::MemoryBacking;
+    use crate::graph::traits::GraphStore;
+
+    let store = LpgStore::new().unwrap();
+    let key = PropertyKey::new("city");
+    let alix = store.create_node_with_props(&["Person"], [("city", Value::from("Amsterdam"))]);
+    let gus = store.create_node(&["Person"]);
+    let snapshot = store.node_property_column_entries(&key).unwrap();
+    let backing = MemoryBacking::of(&snapshot);
+    assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
+    let both = [alix, gus];
+    assert_eq!(
+        store.try_get_node_property_batch(&both, &key).unwrap(),
+        vec![Some(Value::from("Amsterdam")), None]
+    );
+
+    store.set_node_property(gus, "city", Value::from("Berlin"));
+
+    backing.fail_reads(true);
+    assert_eq!(
+        store.get_node_property_batch(&both, &key),
+        vec![None, Some(Value::from("Berlin"))],
+        "the batch read reads Alix's city as absent"
+    );
+    assert!(store.try_get_node_property_batch(&both, &key).is_err());
+    assert!(GraphStore::try_get_node_property_batch(&store, &both, &key).is_err());
+    assert_eq!(
+        store.try_get_node_property_batch(&[gus], &key).unwrap(),
+        vec![Some(Value::from("Berlin"))],
+        "a value written after the spill needs no read"
+    );
+}
+
 /// A durable read of every node (checkpoints, copies) reads each spilled
 /// value once (#594).
 #[cfg(not(feature = "temporal"))]
@@ -291,7 +534,7 @@ fn reading_every_node_reads_each_spilled_value_once() {
     for x in [3.0, 19.0, 88.0] {
         store.create_node_with_props(&["Item"], [("embedding", Value::Vector(vec![x].into()))]);
     }
-    let snapshot = store.node_property_column_entries(&key);
+    let snapshot = store.node_property_column_entries(&key).unwrap();
     let backing = MemoryBacking::of(&snapshot);
     assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
 
@@ -473,7 +716,7 @@ fn test_node_properties() {
     assert!(matches!(name, Some(Value::String(s)) if s.as_str() == "Gus"));
 
     // Remove property
-    let old = store.remove_node_property(id, "name");
+    let old = store.remove_node_property(id, "name").unwrap();
     assert!(matches!(old, Some(Value::String(s)) if s.as_str() == "Gus"));
 
     // Property should be gone
@@ -481,7 +724,7 @@ fn test_node_properties() {
     assert!(name.is_none());
 
     // Remove non-existent property
-    let none = store.remove_node_property(id, "nonexistent");
+    let none = store.remove_node_property(id, "nonexistent").unwrap();
     assert!(none.is_none());
 }
 
@@ -498,7 +741,7 @@ fn test_edge_properties() {
     assert_eq!(since.and_then(|v| v.as_int64()), Some(2020));
 
     // Remove property
-    let old = store.remove_edge_property(edge_id, "since");
+    let old = store.remove_edge_property(edge_id, "since").unwrap();
     assert_eq!(old.and_then(|v| v.as_int64()), Some(2020));
 
     let since = store.get_edge_property(edge_id, &"since".into());
@@ -1362,7 +1605,7 @@ fn test_property_index_maintained_on_remove() {
     assert_eq!(found.len(), 1);
 
     // Remove the property
-    store.remove_node_property(node, "tag");
+    assert!(store.remove_node_property(node, "tag").unwrap().is_some());
 
     // Should no longer find it
     let found = store.find_nodes_by_property("tag", &Value::from("important"));
@@ -2015,7 +2258,7 @@ mod graph_store_traits {
 
         // Property mutation
         store.set_node_property(node, "key", Value::from("val"));
-        let removed = store.remove_node_property(node, "key");
+        let removed = store.remove_node_property(node, "key").unwrap();
         assert_eq!(removed, Some(Value::from("val")));
 
         // Deletion

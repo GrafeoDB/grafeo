@@ -751,18 +751,18 @@ impl GraphWriter {
     }
 
     fn remove_value(&self, entity: Entity, key: &str) -> Result<(), OperatorError> {
-        let removed = match (entity, self.transaction_id) {
-            (Entity::Node(id), Some(transaction_id)) => self
-                .store
-                .remove_node_property_versioned(id, key, transaction_id)
-                .map_err(refused)?,
-            (Entity::Node(id), None) => self.store.remove_node_property(id, key),
-            (Entity::Edge(id), Some(transaction_id)) => {
-                self.store
-                    .remove_edge_property_versioned(id, key, transaction_id)
+        let removed =
+            match (entity, self.transaction_id) {
+                (Entity::Node(id), Some(transaction_id)) => self
+                    .store
+                    .remove_node_property_versioned(id, key, transaction_id),
+                (Entity::Node(id), None) => self.store.remove_node_property(id, key),
+                (Entity::Edge(id), Some(transaction_id)) => self
+                    .store
+                    .remove_edge_property_versioned(id, key, transaction_id),
+                (Entity::Edge(id), None) => self.store.remove_edge_property(id, key),
             }
-            (Entity::Edge(id), None) => self.store.remove_edge_property(id, key),
-        };
+            .map_err(refused)?;
         self.count(|c| &c.properties_set, usize::from(removed.is_some()));
         Ok(())
     }

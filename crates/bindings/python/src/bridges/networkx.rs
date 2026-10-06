@@ -416,7 +416,8 @@ impl PyNetworkXAdapter {
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
-    /// Find connected components (NetworkX-compatible).
+    /// Find connected components (NetworkX-compatible), each a list of node
+    /// IDs in node-id order.
     fn connected_components(&self) -> PyResult<Vec<Vec<u64>>> {
         use grafeo_adapters::plugins::algorithms;
 
@@ -424,13 +425,20 @@ impl PyNetworkXAdapter {
         let store = db.store();
         let components = algorithms::connected_components(&**store);
 
-        // Group by component
+        // Group by component, each in node-id order (the result is a hash map,
+        // whose order changes from call to call).
         let mut grouped: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         for (node, comp) in components {
             grouped.entry(comp).or_default().push(node.0);
         }
 
-        Ok(grouped.into_values().collect())
+        Ok(grouped
+            .into_values()
+            .map(|mut component| {
+                component.sort_unstable();
+                component
+            })
+            .collect())
     }
 
     /// Compute shortest path using Dijkstra (NetworkX-compatible).

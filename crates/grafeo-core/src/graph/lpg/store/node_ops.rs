@@ -89,7 +89,7 @@ impl LpgStore {
     }
 
     /// A `Node` with the current labels of `id` and no properties yet.
-    fn node_with_labels(&self, id: NodeId) -> Node {
+    pub(super) fn node_with_labels(&self, id: NodeId) -> Node {
         let mut node = Node::new(id);
 
         let registry = self.label_registry.read();
@@ -649,9 +649,21 @@ impl LpgStore {
         epoch: EpochId,
         transaction_id: TransactionId,
     ) -> grafeo_common::utils::error::Result<bool> {
+        // A node the transaction cannot see is not deleted, and none of its
+        // values are read: one that cannot be read must not fail the call.
+        let visible = self
+            .nodes
+            .read()
+            .get(&id)
+            .and_then(|chain| chain.visible_to(epoch, transaction_id))
+            .is_some_and(|record| !record.is_deleted());
+        if !visible {
+            return Ok(false);
+        }
         // Capture the properties for the undo log before anything changes: a
         // value that cannot be read (a spilled value whose file cannot be read)
-        // refuses the delete, as a rollback could not restore it.
+        // refuses the delete, as a rollback could not restore it. The lock is
+        // not held for the read; the check below runs again under it.
         let properties: Vec<(PropertyKey, Value)> =
             self.node_properties.try_get_all(id)?.into_iter().collect();
         let mut nodes = self.nodes.write();
@@ -764,9 +776,22 @@ impl LpgStore {
         epoch: EpochId,
         transaction_id: TransactionId,
     ) -> grafeo_common::utils::error::Result<bool> {
+        // A node the transaction cannot see is not deleted, and none of its
+        // values are read: one that cannot be read must not fail the call.
+        let visible = self
+            .node_versions
+            .read()
+            .get(&id)
+            .and_then(|index| index.visible_to(epoch, transaction_id))
+            .and_then(|version_ref| self.read_node_record(&version_ref))
+            .is_some_and(|record| !record.is_deleted());
+        if !visible {
+            return Ok(false);
+        }
         // Capture the properties for the undo log before anything changes: a
         // value that cannot be read (a spilled value whose file cannot be read)
-        // refuses the delete, as a rollback could not restore it.
+        // refuses the delete, as a rollback could not restore it. The lock is
+        // not held for the read; the check below runs again under it.
         let properties: Vec<(PropertyKey, Value)> =
             self.node_properties.try_get_all(id)?.into_iter().collect();
         let mut versions = self.node_versions.write();
@@ -1261,6 +1286,49 @@ impl LpgStore {
             .collect();
         ids.sort_unstable();
         ids
+    }
+
+    /// [`node_ids`](Self::node_ids) for the readers that must not lose a
+    /// node (checkpoints, copies). Every record of this build is in memory,
+    /// so it never fails.
+    ///
+    /// # Errors
+    ///
+    /// None in this build; see the tiered storage version.
+    #[cfg(not(feature = "tiered-storage"))]
+    pub fn try_node_ids(&self) -> grafeo_common::utils::error::Result<Vec<NodeId>> {
+        Ok(self.node_ids())
+    }
+
+    /// [`node_ids`](Self::node_ids) for the readers that must not lose a
+    /// node (checkpoints, copies): a record that cannot be read (a cold one
+    /// that does not decode) is an error, never left out.
+    /// (Tiered storage version)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the first node whose record cannot be read.
+    #[cfg(feature = "tiered-storage")]
+    pub fn try_node_ids(&self) -> grafeo_common::utils::error::Result<Vec<NodeId>> {
+        let epoch = self.current_epoch();
+        let versions = self.node_versions.read();
+        let mut ids = Vec::with_capacity(versions.len());
+        for (id, index) in versions.iter() {
+            let Some(version_ref) = index.visible_at(epoch) else {
+                continue;
+            };
+            let record = self.read_node_record(&version_ref).ok_or_else(|| {
+                grafeo_common::utils::error::Error::Internal(format!(
+                    "the record of node {} cannot be read",
+                    id.as_u64()
+                ))
+            })?;
+            if !record.is_deleted() {
+                ids.push(*id);
+            }
+        }
+        ids.sort_unstable();
+        Ok(ids)
     }
 
     /// Returns all node IDs including uncommitted/PENDING versions.

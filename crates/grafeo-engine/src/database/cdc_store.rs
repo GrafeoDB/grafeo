@@ -302,6 +302,14 @@ impl GraphStore for CdcGraphStore {
         self.inner.get_node_property_batch(ids, key)
     }
 
+    fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+    ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
+        self.inner.try_get_node_property_batch(ids, key)
+    }
+
     fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
         self.inner.get_nodes_properties_batch(ids)
     }
@@ -894,8 +902,13 @@ impl GraphStoreMut for CdcGraphStore {
         self.buffer_event(event);
     }
 
-    fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
-        let removed = self.inner.remove_node_property(id, key);
+    fn remove_node_property(
+        &self,
+        id: NodeId,
+        key: &str,
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
+        // A refused removal records no event.
+        let removed = self.inner.remove_node_property(id, key)?;
         if let Some(ref old_val) = removed {
             let epoch = self.inner.current_epoch();
             let mut event = make_event(
@@ -909,11 +922,15 @@ impl GraphStoreMut for CdcGraphStore {
             event.before = Some(before);
             self.record_directly(event);
         }
-        removed
+        Ok(removed)
     }
 
-    fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value> {
-        let removed = self.inner.remove_edge_property(id, key);
+    fn remove_edge_property(
+        &self,
+        id: EdgeId,
+        key: &str,
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
+        let removed = self.inner.remove_edge_property(id, key)?;
         if let Some(ref old_val) = removed {
             let epoch = self.inner.current_epoch();
             let mut event = make_event(
@@ -927,7 +944,7 @@ impl GraphStoreMut for CdcGraphStore {
             event.before = Some(before);
             self.record_directly(event);
         }
-        removed
+        Ok(removed)
     }
 
     fn remove_node_property_versioned(
@@ -961,10 +978,10 @@ impl GraphStoreMut for CdcGraphStore {
         id: EdgeId,
         key: &str,
         transaction_id: TransactionId,
-    ) -> Option<Value> {
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let removed = self
             .inner
-            .remove_edge_property_versioned(id, key, transaction_id);
+            .remove_edge_property_versioned(id, key, transaction_id)?;
         if let Some(ref old_val) = removed {
             let epoch = self.inner.current_epoch();
             let mut event = make_event(
@@ -978,7 +995,7 @@ impl GraphStoreMut for CdcGraphStore {
             event.before = Some(before);
             self.buffer_event(event);
         }
-        removed
+        Ok(removed)
     }
 
     // --- Label mutation ---
@@ -1601,7 +1618,7 @@ mod tests {
         let (cdc, log) = setup();
         let id = cdc.create_node(&[]);
         cdc.set_node_property(id, "x", Value::Int64(42));
-        let removed = cdc.remove_node_property(id, "x");
+        let removed = cdc.remove_node_property(id, "x").unwrap();
         assert_eq!(removed, Some(Value::Int64(42)));
 
         let events = log.history(EntityId::Node(id));
@@ -1618,7 +1635,7 @@ mod tests {
     fn remove_node_property_no_event_when_missing() {
         let (cdc, log) = setup();
         let id = cdc.create_node(&[]);
-        let removed = cdc.remove_node_property(id, "nope");
+        let removed = cdc.remove_node_property(id, "nope").unwrap();
         assert!(removed.is_none());
         // Only the Create event, no Update
         let events = log.history(EntityId::Node(id));
@@ -1632,7 +1649,7 @@ mod tests {
         let b = cdc.create_node(&[]);
         let eid = cdc.create_edge(a, b, "E");
         cdc.set_edge_property(eid, "w", Value::Float64(19.88));
-        let removed = cdc.remove_edge_property(eid, "w");
+        let removed = cdc.remove_edge_property(eid, "w").unwrap();
         assert_eq!(removed, Some(Value::Float64(19.88)));
 
         let events = log.history(EntityId::Edge(eid));
@@ -1650,7 +1667,7 @@ mod tests {
         let a = cdc.create_node(&[]);
         let b = cdc.create_node(&[]);
         let eid = cdc.create_edge(a, b, "E");
-        let removed = cdc.remove_edge_property(eid, "nope");
+        let removed = cdc.remove_edge_property(eid, "nope").unwrap();
         assert!(removed.is_none());
         // Only Create event
         let events = log.history(EntityId::Edge(eid));
@@ -1913,7 +1930,7 @@ mod tests {
         cdc.set_edge_property(eid, "w", Value::Int64(7));
 
         let tx = TransactionId::new(1);
-        let removed = cdc.remove_edge_property_versioned(eid, "w", tx);
+        let removed = cdc.remove_edge_property_versioned(eid, "w", tx).unwrap();
         assert_eq!(removed, Some(Value::Int64(7)));
 
         let pending = cdc.pending_events().lock().clone();
@@ -1935,7 +1952,7 @@ mod tests {
         let b = cdc.create_node(&[]);
         let eid = cdc.create_edge(a, b, "E");
         let tx = TransactionId::new(1);
-        let removed = cdc.remove_edge_property_versioned(eid, "nope", tx);
+        let removed = cdc.remove_edge_property_versioned(eid, "nope", tx).unwrap();
         assert!(removed.is_none());
         assert!(cdc.pending_events().lock().is_empty());
     }

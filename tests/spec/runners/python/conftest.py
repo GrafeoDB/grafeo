@@ -11,18 +11,15 @@ result.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
 import pytest
 
-# Make sure the runner package is importable
-_runner_dir = Path(__file__).resolve().parent
-if str(_runner_dir) not in sys.path:
-    sys.path.insert(0, str(_runner_dir))
+# Make sure the runner modules are importable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from comparator import (  # noqa: E402
+from comparator import (
     assert_columns,
     assert_count,
     assert_empty,
@@ -32,7 +29,7 @@ from comparator import (  # noqa: E402
     assert_rows_sorted,
     assert_rows_with_precision,
 )
-from parser import GtestFile, TestCase, parse_gtest_file  # noqa: E402
+from parser import GtestFile, TestCase, coerce_params, parse_gtest_file
 
 # ---------------------------------------------------------------------------
 # Grafeo availability
@@ -210,8 +207,8 @@ class GtestItem(pytest.Item):
 
         expect = tc.expect
 
-        # Coerce params (only applied to the last query)
-        params = _coerce_params(tc.params)
+        # Type the params (every statement gets them)
+        params = coerce_params(tc.params)
 
         # Error tests
         if expect.error is not None:
@@ -297,53 +294,6 @@ def _load_dataset(db, dataset_name: str) -> None:
         if not trimmed or trimmed.startswith("#"):
             continue
         db.execute(trimmed)
-
-
-def _coerce_params(raw_params: dict[str, object]) -> dict[str, object] | None:
-    """Convert string param values to typed Python values.
-
-    Mirrors the Rust build.rs coercion order: a JSON list or map, then int,
-    float, bool, string. Returns None when the params dict is empty (so callers
-    can skip it).
-    """
-    if not raw_params:
-        return None
-    coerced: dict[str, object] = {}
-    for key, value in raw_params.items():
-        # Already typed (YAML parser returns bool/int/float/list/dict directly)
-        # Check bool first because bool is a subclass of int in Python
-        if isinstance(value, (bool, list, dict)):
-            coerced[key] = value
-            continue
-        if isinstance(value, (int, float)):
-            coerced[key] = value
-            continue
-        # A list or map written as JSON (the line-based parser keeps it as text)
-        if isinstance(value, str) and value.lstrip().startswith(("[", "{")):
-            coerced[key] = json.loads(value)
-            continue
-        # String coercion: int first
-        try:
-            coerced[key] = int(value)
-            continue
-        except (ValueError, TypeError):
-            pass  # not an int, try next coercion type
-        # float second
-        try:
-            coerced[key] = float(value)
-            continue
-        except (ValueError, TypeError):
-            pass  # not a float, try next coercion type
-        # bool third
-        if value == "true":
-            coerced[key] = True
-            continue
-        if value == "false":
-            coerced[key] = False
-            continue
-        # fall back to string
-        coerced[key] = value
-    return coerced
 
 
 def _execute(db, language: str, query: str, params=None):

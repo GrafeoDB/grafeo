@@ -143,11 +143,14 @@ pub fn articulation_points(store: &dyn GraphStore) -> FxHashSet<NodeId> {
 ///
 /// # Arguments
 ///
-/// * `store` - The graph store (treated as undirected)
+/// * `store` - The graph store, treated as simple and undirected: edge
+///   direction is ignored, parallel edges count as one and self-loops are
+///   ignored
 ///
 /// # Returns
 ///
-/// List of bridges as (source, target) pairs, in node-id order.
+/// List of bridges as (source, target) pairs, the smaller node id first, in
+/// node-id order.
 ///
 /// # Panics
 ///
@@ -155,7 +158,7 @@ pub fn articulation_points(store: &dyn GraphStore) -> FxHashSet<NodeId> {
 ///
 /// # Complexity
 ///
-/// O(V + E)
+/// O(V + E), the bridges put in node-id order by counting sort.
 pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
     let nodes = store.node_ids();
     let n = nodes.len();
@@ -164,24 +167,7 @@ pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
         return Vec::new();
     }
 
-    // Build node index mapping
-    let mut node_to_idx: FxHashMap<NodeId, usize> = FxHashMap::default();
-    let mut idx_to_node: Vec<NodeId> = Vec::with_capacity(n);
-    for (idx, &node) in nodes.iter().enumerate() {
-        node_to_idx.insert(node, idx);
-        idx_to_node.push(node);
-    }
-
-    // Build undirected adjacency list
-    let mut adj: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); n];
-    for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
-            if let Some(&j) = node_to_idx.get(&neighbor) {
-                adj[i].insert(j);
-                adj[j].insert(i);
-            }
-        }
-    }
+    let adj = simple_undirected_adjacency(store, &nodes);
 
     let mut visited = vec![false; n];
     let mut disc = vec![0usize; n];
@@ -195,6 +181,7 @@ pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
             continue;
         }
 
+        // (node, index of its next neighbour to visit)
         let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
 
         while let Some(&(u, idx)) = stack.last() {
@@ -205,10 +192,7 @@ pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
                 time += 1;
             }
 
-            let neighbors: Vec<usize> = adj[u].iter().copied().collect();
-
-            if idx < neighbors.len() {
-                let v = neighbors[idx];
+            if let Some(&v) = adj[u].get(idx) {
                 stack.last_mut().expect("DFS: stack non-empty").1 += 1;
 
                 if !visited[v] {
@@ -232,14 +216,77 @@ pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
         }
     }
 
-    // In node-id order: the DFS above walks hash sets, whose order changes
-    // from call to call.
-    let mut bridges: Vec<(NodeId, NodeId)> = bridge_list
+    // `node_ids` is in node-id order, so the index pairs in index order are
+    // the bridges in node-id order.
+    sort_index_pairs(&mut bridge_list, n);
+    bridge_list
         .into_iter()
-        .map(|(i, j)| (idx_to_node[i], idx_to_node[j]))
+        .map(|(i, j)| (nodes[i], nodes[j]))
+        .collect()
+}
+
+/// The simple undirected graph of `nodes` (in the order of `node_ids`) as
+/// adjacency lists of indices into `nodes`: edge direction is ignored, each
+/// neighbour is listed once however many edges join the two, and self-loops
+/// are left out. O(V + E).
+fn simple_undirected_adjacency(store: &dyn GraphStore, nodes: &[NodeId]) -> Vec<Vec<usize>> {
+    let n = nodes.len();
+    let node_to_idx: FxHashMap<NodeId, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, &node)| (node, i))
         .collect();
-    bridges.sort_unstable();
-    bridges
+
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, &node) in nodes.iter().enumerate() {
+        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+            if let Some(&j) = node_to_idx.get(&neighbor)
+                && j != i
+            {
+                adj[i].push(j);
+                adj[j].push(i);
+            }
+        }
+    }
+    // Drop parallel edges in linear time: `last_seen[u]` is the last vertex
+    // whose list kept u, so a second u in the same list is a duplicate.
+    let mut last_seen = vec![usize::MAX; n];
+    for (v, neighbors) in adj.iter_mut().enumerate() {
+        neighbors.retain(|&u| {
+            let first = last_seen[u] != v;
+            last_seen[u] = v;
+            first
+        });
+    }
+    adj
+}
+
+/// Sorts pairs of indices below `n` by first, then second index, in
+/// O(n + pairs) with two stable counting-sort passes (least significant index
+/// first), where a comparison sort would take O(pairs log pairs).
+fn sort_index_pairs(pairs: &mut Vec<(usize, usize)>, n: usize) {
+    fn by_index(
+        pairs: &[(usize, usize)],
+        n: usize,
+        index: impl Fn(&(usize, usize)) -> usize,
+    ) -> Vec<(usize, usize)> {
+        let mut start = vec![0usize; n + 1];
+        for pair in pairs {
+            start[index(pair) + 1] += 1;
+        }
+        for i in 0..n {
+            start[i + 1] += start[i];
+        }
+        let mut sorted = vec![(0, 0); pairs.len()];
+        for pair in pairs {
+            let slot = &mut start[index(pair)];
+            sorted[*slot] = *pair;
+            *slot += 1;
+        }
+        sorted
+    }
+    let by_second = by_index(pairs, n, |&(_, second)| second);
+    *pairs = by_index(&by_second, n, |&(first, _)| first);
 }
 
 // ============================================================================
@@ -307,34 +354,8 @@ pub fn kcore_decomposition(store: &dyn GraphStore) -> KCoreResult {
     let nodes = store.node_ids();
     let n = nodes.len();
 
-    let node_to_idx: FxHashMap<NodeId, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(i, &node)| (node, i))
-        .collect();
-
     // Simple undirected adjacency: no self-loops, each neighbour once.
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
-            if let Some(&j) = node_to_idx.get(&neighbor)
-                && j != i
-            {
-                adj[i].push(j);
-                adj[j].push(i);
-            }
-        }
-    }
-    // Drop parallel edges in linear time: `last_seen[u]` is the last vertex
-    // whose list kept u, so a second u in the same list is a duplicate.
-    let mut last_seen = vec![usize::MAX; n];
-    for (v, neighbors) in adj.iter_mut().enumerate() {
-        neighbors.retain(|&u| {
-            let first = last_seen[u] != v;
-            last_seen[u] = v;
-            first
-        });
-    }
+    let adj = simple_undirected_adjacency(store, &nodes);
 
     // `degree[v]` starts as the degree and ends as the core number of v.
     let mut degree: Vec<usize> = adj.iter().map(Vec::len).collect();
@@ -1531,5 +1552,104 @@ mod tests {
         assert!(lpg_result.core_numbers.values().all(|&core| core == 3));
         assert_eq!(rdf_result.max_core, 3);
         assert_eq!(lpg_result.max_core, 3);
+    }
+
+    /// The bridges of `store` by definition: the simple undirected edges whose
+    /// removal disconnects their two ends, in node-id order.
+    fn bridges_by_definition(store: &LpgStore) -> Vec<(NodeId, NodeId)> {
+        let mut edges: std::collections::BTreeSet<(NodeId, NodeId)> =
+            std::collections::BTreeSet::new();
+        for node in store.node_ids() {
+            for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+                if neighbor != node {
+                    edges.insert((node.min(neighbor), node.max(neighbor)));
+                }
+            }
+        }
+        let connected_without = |removed: (NodeId, NodeId)| {
+            let mut seen = std::collections::BTreeSet::from([removed.0]);
+            let mut stack = vec![removed.0];
+            while let Some(u) = stack.pop() {
+                for &(a, b) in &edges {
+                    if (a, b) == removed {
+                        continue;
+                    }
+                    let next = if a == u {
+                        b
+                    } else if b == u {
+                        a
+                    } else {
+                        continue;
+                    };
+                    if seen.insert(next) {
+                        stack.push(next);
+                    }
+                }
+            }
+            seen.contains(&removed.1)
+        };
+        edges
+            .iter()
+            .copied()
+            .filter(|&edge| !connected_without(edge))
+            .collect()
+    }
+
+    /// Bridges are the edges whose removal disconnects the graph, in node-id
+    /// order, on graphs with parallel edges (which count once), self-loops
+    /// and several components.
+    #[test]
+    fn bridges_match_the_definition_in_node_id_order() {
+        let mut state: u64 = 0x0003_0019_0088;
+        let mut next = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        for round in 0..19 {
+            let store = LpgStore::new().unwrap();
+            let nodes: Vec<NodeId> = (0..40).map(|_| store.create_node(&["Node"])).collect();
+            for _ in 0..(30 + round * 2) {
+                let a = nodes[usize::try_from(next(40)).unwrap()];
+                let b = nodes[usize::try_from(next(40)).unwrap()];
+                store.create_edge(a, b, "EDGE");
+                if next(19) == 0 {
+                    store.create_edge(b, a, "EDGE");
+                }
+            }
+            assert_eq!(
+                bridges(&store),
+                bridges_by_definition(&store),
+                "round {round}"
+            );
+        }
+    }
+
+    /// Bridges stay O(V + E) at a node of high degree: a star of 50,000
+    /// leaves (every edge a bridge) takes milliseconds. A search that copied a
+    /// node's neighbours at every step took O(degree squared) there.
+    #[test]
+    fn bridges_of_a_high_degree_star_take_milliseconds() {
+        let store = LpgStore::new().unwrap();
+        let hub = store.create_node(&["Node"]);
+        for leaf in 0..50_000 {
+            // With `tiered-storage` (on under the workspace's --all-features),
+            // the records of one epoch must fit its arena chunk.
+            if leaf % 1_000 == 0 {
+                store.new_epoch();
+            }
+            let leaf = store.create_node(&["Node"]);
+            store.create_edge(hub, leaf, "EDGE");
+        }
+        let started = std::time::Instant::now();
+        let found = bridges(&store);
+        let elapsed = started.elapsed();
+        assert_eq!(found.len(), 50_000);
+        assert!(found.windows(2).all(|w| w[0] < w[1]), "in node-id order");
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "bridges of a 50,000-leaf star took {elapsed:?}"
+        );
     }
 }

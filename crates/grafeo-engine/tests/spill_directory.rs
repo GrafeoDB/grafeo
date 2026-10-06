@@ -114,3 +114,47 @@ fn a_read_only_open_spills_into_the_temp_directory() {
     assert!(!spill.exists(), "the temp directory went with the database");
     assert!(!dir.path().join("barcelona.grafeo.spill").exists());
 }
+
+/// A query of a read-only open that spills (an ORDER BY over more rows than
+/// the memory limit holds) writes its files into a directory of its own in
+/// the open's temp directory, and removes them and that directory when it
+/// ends; the temp directory goes with the database (#594).
+#[test]
+fn a_spilling_query_of_a_read_only_open_leaves_nothing() {
+    use grafeo_engine::config::Config;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paris.grafeo");
+    {
+        let db = GrafeoDB::open(&path).unwrap();
+        db.execute("INSERT (:City {name: 'Paris'})").unwrap();
+        db.close().unwrap();
+    }
+
+    // A memory limit of one byte: every query is under pressure, and spills.
+    let db = GrafeoDB::with_config(Config::read_only(&path).with_memory_limit(1)).unwrap();
+    let spill = db
+        .buffer_manager()
+        .config()
+        .spill_path
+        .clone()
+        .expect("a read-only open can spill");
+    // The open made the directory, empty; a spilling query makes it again,
+    // which shows that it spilled.
+    std::fs::remove_dir(&spill).unwrap();
+    let rows = db
+        .execute("UNWIND range(1, 3000) AS i RETURN i ORDER BY i DESC")
+        .unwrap();
+    assert_eq!(rows.rows().len(), 3000);
+    assert_eq!(rows.rows()[0][0], Value::Int64(3000));
+    assert!(spill.is_dir(), "the query spilled into {}", spill.display());
+    let left: Vec<_> = std::fs::read_dir(&spill)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert!(left.is_empty(), "the query left {left:?}");
+    drop(db);
+    assert!(!spill.exists(), "the temp directory went with the database");
+    assert!(!dir.path().join("paris.grafeo.spill").exists());
+}

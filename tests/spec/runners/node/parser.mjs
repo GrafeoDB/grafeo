@@ -36,7 +36,8 @@ import { readFileSync } from 'fs'
  * @property {string|null} query
  * @property {string[]} statements
  * @property {string[]} setup
- * @property {Object<string,string>} params
+ * @property {Object<string,string>} params Each value as the file writes it,
+ *   quotes included: whether it was quoted decides its type (see `paramValue`).
  * @property {string[]} tags
  * @property {string|null} skip
  * @property {Expect} expect
@@ -49,31 +50,48 @@ import { readFileSync } from 'fs'
  * @property {TestCase[]} tests
  */
 
+// The number syntax of the Rust reference runner (crates/grafeo-spec-tests/
+// build.rs): decimal only. `Number` alone would also read `0x1F`, `0b11`,
+// `Infinity` and `''`, which the reference runner keeps as strings.
+const DECIMAL_INTEGER = /^[+-]?[0-9]+$/
+const DECIMAL_NUMBER = /^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/
+const I64_MIN = -(2n ** 63n)
+const I64_MAX = 2n ** 63n - 1n
+
 /**
- * Coerce raw param string values to proper JS types.
- * Mirrors the type coercion in crates/grafeo-spec-tests/build.rs: a value
- * written as a JSON list or map (`[1, 2]`, `{"city": "Amsterdam"}`) becomes
- * that list or object, then booleans, numbers, and the rest stays a string.
+ * The value of a parameter written as `text` in a .gtest file, by the rule of
+ * the Rust reference runner that every runner follows: a quoted value is a
+ * string, whatever it reads like; a bare value starting with `[` or `{` is
+ * JSON; a bare decimal integer that fits i64 is an integer (a BigInt past
+ * 2^53, where a number would round it) and any other bare decimal number a
+ * float; a bare `true` or `false` is a boolean; any other bare value is a
+ * string.
  */
+export function paramValue(text) {
+  text = text.trim()
+  if (isQuoted(text)) return unquote(text)
+  if (text.startsWith('[') || text.startsWith('{')) return JSON.parse(text)
+  if (DECIMAL_INTEGER.test(text)) {
+    const integer = BigInt(text)
+    if (integer >= I64_MIN && integer <= I64_MAX) {
+      return Number.isSafeInteger(Number(integer)) ? Number(integer) : integer
+    }
+  }
+  if (DECIMAL_NUMBER.test(text)) {
+    const number = Number(text)
+    if (!Number.isFinite(number)) throw new Error(`parameter ${text} is out of the f64 range`)
+    return number
+  }
+  if (text === 'true' || text === 'false') return text === 'true'
+  return text
+}
+
+/** Type each parameter by `paramValue`; undefined when there are none. */
 export function coerceParams(rawParams) {
   if (!rawParams || Object.keys(rawParams).length === 0) return undefined
   const result = {}
-  for (const [key, val] of Object.entries(rawParams)) {
-    const trimmed = val.trim()
-    if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
-      result[key] = JSON.parse(trimmed)
-    } else if (val === 'true') {
-      result[key] = true
-    } else if (val === 'false') {
-      result[key] = false
-    } else {
-      const num = Number(val)
-      if (!isNaN(num) && val.trim() !== '') {
-        result[key] = num
-      } else {
-        result[key] = val
-      }
-    }
+  for (const [key, text] of Object.entries(rawParams)) {
+    result[key] = paramValue(text)
   }
   return result
 }
@@ -187,7 +205,7 @@ function parseSingleTest(ctx) {
       case 'requires':
         tc.requires = parseYamlList(value); ctx.idx++; break
       case 'params':
-        ctx.idx++; tc.params = parseMap(ctx, 6); break
+        ctx.idx++; tc.params = parseParams(ctx); break
       case 'expect':
         ctx.idx++; tc.expect = parseExpectBlock(ctx); break
       case 'variants':
@@ -270,9 +288,16 @@ function parseKV(s) {
   return null
 }
 
+/** Whether `s` is written in single or double quotes. */
+function isQuoted(s) {
+  s = s.trim()
+  return s.length >= 2 &&
+    ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))
+}
+
 function unquote(s) {
   s = s.trim()
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+  if (isQuoted(s)) {
     // Only unescape YAML-level escapes (quotes and backslashes).
     // Do NOT process \n or \t: those are GQL string escapes handled by the engine.
     return s.slice(1, -1)
@@ -351,6 +376,23 @@ function parseMap(ctx, minIndent) {
     }
   }
   return map
+}
+
+/** Params entries sit at indent 6 or deeper; each value keeps its quotes. */
+function parseParams(ctx) {
+  const params = {}
+  while (ctx.idx < ctx.lines.length) {
+    const line = ctx.lines[ctx.idx]
+    const trimmed = line.trim()
+    if (trimmed.startsWith('#') || !trimmed) { ctx.idx++; continue }
+    const indent = line.length - line.trimStart().length
+    if (indent < 6) break
+    const kv = parseKV(trimmed)
+    if (!kv) break
+    params[kv[0]] = kv[1]
+    ctx.idx++
+  }
+  return params
 }
 
 function parseBlockScalar(ctx) {

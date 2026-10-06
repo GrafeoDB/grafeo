@@ -114,6 +114,14 @@ impl GraphStore for WalGraphStore {
         self.inner.get_node_property_batch(ids, key)
     }
 
+    fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+    ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
+        self.inner.try_get_node_property_batch(ids, key)
+    }
+
     fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
         self.inner.get_nodes_properties_batch(ids)
     }
@@ -551,26 +559,35 @@ impl GraphStoreMut for WalGraphStore {
         });
     }
 
-    fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
-        let removed = self.inner.remove_node_property(id, key);
+    fn remove_node_property(
+        &self,
+        id: NodeId,
+        key: &str,
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
+        // A refused removal is not logged.
+        let removed = self.inner.remove_node_property(id, key)?;
         if removed.is_some() {
             self.log_with_context(WalRecord::RemoveNodeProperty {
                 id,
                 key: key.to_string(),
             });
         }
-        removed
+        Ok(removed)
     }
 
-    fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value> {
-        let removed = self.inner.remove_edge_property(id, key);
+    fn remove_edge_property(
+        &self,
+        id: EdgeId,
+        key: &str,
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
+        let removed = self.inner.remove_edge_property(id, key)?;
         if removed.is_some() {
             self.log_with_context(WalRecord::RemoveEdgeProperty {
                 id,
                 key: key.to_string(),
             });
         }
-        removed
+        Ok(removed)
     }
 
     fn add_label(&self, node_id: NodeId, label: &str) -> bool {
@@ -657,17 +674,17 @@ impl GraphStoreMut for WalGraphStore {
         id: EdgeId,
         key: &str,
         transaction_id: TransactionId,
-    ) -> Option<Value> {
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let removed = self
             .inner
-            .remove_edge_property_versioned(id, key, transaction_id);
+            .remove_edge_property_versioned(id, key, transaction_id)?;
         if removed.is_some() {
             self.log_with_context(WalRecord::RemoveEdgeProperty {
                 id,
                 key: key.to_string(),
             });
         }
-        removed
+        Ok(removed)
     }
 
     fn add_label_versioned(
@@ -748,6 +765,33 @@ mod tests {
         let epoch = ws.inner.current_epoch();
         assert!(ws.delete_node_versioned(alix, epoch, transaction).is_err());
         assert_eq!(wal.len(), logged, "a refused write was logged");
+    }
+
+    /// A removal outside a transaction whose value the store cannot read
+    /// changes nothing and is not logged: a hidden value without its
+    /// `RemoveNodeProperty` record would come back with a replay (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn a_refused_removal_is_not_logged() {
+        use super::super::test_backing::{Unreadable, spill};
+
+        let (ws, wal) = setup();
+        let alix = ws.create_node(&["Item"]);
+        ws.set_node_property(alix, "embedding", Value::Vector(vec![3.0, 19.0].into()));
+        spill(&ws.inner, "embedding", Arc::new(Unreadable(alix)));
+        let logged = wal.len();
+
+        assert!(
+            ws.remove_node_property(alix, "embedding").is_err(),
+            "a removal of a value the store cannot read"
+        );
+        assert!(
+            ws.inner
+                .node_property_column_ids(&PropertyKey::new("embedding"))
+                .contains(&alix),
+            "the removal hid the value"
+        );
+        assert_eq!(wal.len(), logged, "a refused removal was logged");
     }
 
     #[test]
@@ -841,11 +885,14 @@ mod tests {
         assert_eq!(wal.len(), 2);
 
         // Remove nonexistent: no log
-        assert!(ws.remove_node_property(id, "missing").is_none());
+        assert!(ws.remove_node_property(id, "missing").unwrap().is_none());
         assert_eq!(wal.len(), 2);
 
         // Remove real property: logs
-        assert_eq!(ws.remove_node_property(id, "age"), Some(Value::Int64(30)));
+        assert_eq!(
+            ws.remove_node_property(id, "age").unwrap(),
+            Some(Value::Int64(30))
+        );
         assert_eq!(wal.len(), 3);
 
         // Edge property variant
@@ -855,10 +902,13 @@ mod tests {
         ws.set_edge_property(eid, "w", Value::Int64(1));
         let before = wal.len();
 
-        assert!(ws.remove_edge_property(eid, "missing").is_none());
+        assert!(ws.remove_edge_property(eid, "missing").unwrap().is_none());
         assert_eq!(wal.len(), before);
 
-        assert_eq!(ws.remove_edge_property(eid, "w"), Some(Value::Int64(1)));
+        assert_eq!(
+            ws.remove_edge_property(eid, "w").unwrap(),
+            Some(Value::Int64(1))
+        );
         assert_eq!(wal.len(), before + 1);
     }
 
@@ -1005,7 +1055,7 @@ mod tests {
         );
         ws.set_edge_property_versioned(e, "w", Value::Int64(9), tx);
         assert_eq!(
-            ws.remove_edge_property_versioned(e, "note", tx),
+            ws.remove_edge_property_versioned(e, "note", tx).unwrap(),
             Some(Value::from("n"))
         );
         assert!(ws.add_label_versioned(a, "Extra", tx));

@@ -6,9 +6,11 @@ the Python runner exercises the exact same test definitions.
 
 from __future__ import annotations
 
+import json
+import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # Try PyYAML first, fall back to our own line-based parser
@@ -33,44 +35,46 @@ class Meta:
     section: str = ""
     title: str = ""
     dataset: str = "empty"
-    requires: List[str] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
-    iso: List[str] = field(default_factory=list)
+    requires: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    iso: list[str] = field(default_factory=list)
 
 
 @dataclass
 class Expect:
-    rows: List[List[str]] = field(default_factory=list)
+    rows: list[list[str]] = field(default_factory=list)
     ordered: bool = False
-    count: Optional[int] = None
+    count: int | None = None
     empty: bool = False
-    error: Optional[str] = None
-    hash: Optional[str] = None
-    precision: Optional[int] = None
-    columns: List[str] = field(default_factory=list)
+    error: str | None = None
+    hash: str | None = None
+    precision: int | None = None
+    columns: list[str] = field(default_factory=list)
 
 
 @dataclass
 class TestCase:
     name: str = ""
-    query: Optional[str] = None
-    statements: List[str] = field(default_factory=list)
-    setup: List[str] = field(default_factory=list)
-    params: Dict[str, object] = field(default_factory=dict)
-    tags: List[str] = field(default_factory=list)
-    requires: List[str] = field(default_factory=list)
-    iso: List[str] = field(default_factory=list)
-    skip: Optional[str] = None
+    query: str | None = None
+    statements: list[str] = field(default_factory=list)
+    setup: list[str] = field(default_factory=list)
+    # Each value as the file writes it, quotes included: whether it was quoted
+    # decides its type (see ``coerce_params``).
+    params: dict[str, str] = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)
+    requires: list[str] = field(default_factory=list)
+    iso: list[str] = field(default_factory=list)
+    skip: str | None = None
     expect: Expect = field(default_factory=Expect)
-    variants: Dict[str, str] = field(default_factory=dict)
-    language: Optional[str] = None
-    dataset: Optional[str] = None
+    variants: dict[str, str] = field(default_factory=dict)
+    language: str | None = None
+    dataset: str | None = None
 
 
 @dataclass
 class GtestFile:
     meta: Meta
-    tests: List[TestCase]
+    tests: list[TestCase]
 
 
 # ---------------------------------------------------------------------------
@@ -89,10 +93,10 @@ def parse_gtest_file(path: Path) -> GtestFile:
     if HAS_YAML:
         try:
             return _parse_with_yaml(content, path)
-        except Exception:
+        except (_yaml.YAMLError, TypeError):
             # .gtest files may contain bare strings with colons that YAML
-            # rejects.  Fall through to the line-based parser.
-            pass
+            # rejects: the line-based parser reads them.
+            return _parse_line_based(content, path)
     return _parse_line_based(content, path)
 
 
@@ -104,14 +108,52 @@ def parse_gtest_file(path: Path) -> GtestFile:
 def _parse_with_yaml(content: str, path: Path) -> GtestFile:
     data = _yaml.safe_load(content)
     if not isinstance(data, dict):
-        raise ValueError(f"Expected a YAML mapping at top level in {path}")
+        raise TypeError(f"Expected a YAML mapping at top level in {path}")
 
     meta = _parse_meta_dict(data.get("meta", {}))
     raw_tests = data.get("tests", [])
-    tests: List[TestCase] = []
-    for raw in raw_tests:
-        tests.append(_parse_test_dict(raw))
+    param_texts = _yaml_param_texts(content)
+    tests: list[TestCase] = []
+    for position, raw in enumerate(raw_tests):
+        tc = _parse_test_dict(raw)
+        tc.params = param_texts[position]
+        tests.append(tc)
     return GtestFile(meta=meta, tests=tests)
+
+
+def _yaml_param_texts(content: str) -> list[dict[str, str]]:
+    """The params of each test as the file writes them, quotes included.
+
+    ``safe_load`` types a value by YAML's rules (``0x1F`` and ``1_000`` become
+    ints, a quoted ``"[3]"`` loses its quotes, a surrogate pair stays two
+    halves), so the value text is cut from the source at the node's position
+    and typed by ``coerce_params``, as the other runners do.
+    """
+    root = _yaml.compose(content, Loader=_yaml.SafeLoader)
+    tests_node = _mapping_value(root, "tests")
+    if not isinstance(tests_node, _yaml.SequenceNode):
+        return []
+    texts: list[dict[str, str]] = []
+    for test_node in tests_node.value:
+        params: dict[str, str] = {}
+        params_node = _mapping_value(test_node, "params")
+        if isinstance(params_node, _yaml.MappingNode):
+            for key_node, value_node in params_node.value:
+                start = value_node.start_mark.index
+                end = value_node.end_mark.index
+                params[str(key_node.value)] = content[start:end].strip()
+        texts.append(params)
+    return texts
+
+
+def _mapping_value(node, key: str):
+    """The value node under ``key`` in a YAML mapping node, or None."""
+    if not isinstance(node, _yaml.MappingNode):
+        return None
+    for key_node, value_node in node.value:
+        if isinstance(key_node, _yaml.ScalarNode) and key_node.value == key:
+            return value_node
+    return None
 
 
 def _parse_meta_dict(d: dict) -> Meta:
@@ -148,11 +190,7 @@ def _parse_test_dict(d: dict) -> TestCase:
     tc.setup = _as_string_list(d.get("setup", []))
     tc.statements = _as_string_list(d.get("statements", []))
 
-    # params: keep original types from YAML (bool, int, float) so
-    # _coerce_params can pass them through without lossy str() conversion
-    raw_params = d.get("params", {})
-    if isinstance(raw_params, dict):
-        tc.params = {str(k): v for k, v in raw_params.items()}
+    # params: the caller sets them from the source text (_yaml_param_texts)
 
     # per-test language override (e.g. "graphql-rdf")
     lang = d.get("language")
@@ -237,7 +275,7 @@ def _parse_line_based(content: str, path: Path) -> GtestFile:
     return GtestFile(meta=meta, tests=tests)
 
 
-def _lb_parse_meta(lines: List[str], idx: int) -> tuple:
+def _lb_parse_meta(lines: list[str], idx: int) -> tuple:
     meta = Meta()
     if idx < len(lines) and lines[idx].strip() == "meta:":
         idx += 1
@@ -270,8 +308,8 @@ def _lb_parse_meta(lines: List[str], idx: int) -> tuple:
     return meta, idx
 
 
-def _lb_parse_tests(lines: List[str], idx: int) -> tuple:
-    tests: List[TestCase] = []
+def _lb_parse_tests(lines: list[str], idx: int) -> tuple:
+    tests: list[TestCase] = []
     if idx < len(lines) and lines[idx].strip() == "tests:":
         idx += 1
     while idx < len(lines):
@@ -287,7 +325,7 @@ def _lb_parse_tests(lines: List[str], idx: int) -> tuple:
     return tests, idx
 
 
-def _lb_parse_single_test(lines: List[str], idx: int) -> tuple:
+def _lb_parse_single_test(lines: list[str], idx: int) -> tuple:
     tc = TestCase()
     first = lines[idx].strip()
     # "- name: foo"
@@ -347,7 +385,7 @@ def _lb_parse_single_test(lines: List[str], idx: int) -> tuple:
     return tc, idx
 
 
-def _lb_parse_expect(lines: List[str], idx: int) -> tuple:
+def _lb_parse_expect(lines: list[str], idx: int) -> tuple:
     e = Expect()
     while idx < len(lines):
         trimmed = lines[idx].strip()
@@ -389,8 +427,8 @@ def _lb_parse_expect(lines: List[str], idx: int) -> tuple:
     return e, idx
 
 
-def _lb_parse_rows(lines: List[str], idx: int) -> tuple:
-    rows: List[List[str]] = []
+def _lb_parse_rows(lines: list[str], idx: int) -> tuple:
+    rows: list[list[str]] = []
     while idx < len(lines):
         trimmed = lines[idx].strip()
         if not trimmed or trimmed.startswith("#"):
@@ -406,8 +444,8 @@ def _lb_parse_rows(lines: List[str], idx: int) -> tuple:
     return rows, idx
 
 
-def _lb_parse_string_list(lines: List[str], idx: int) -> tuple:
-    items: List[str] = []
+def _lb_parse_string_list(lines: list[str], idx: int) -> tuple:
+    items: list[str] = []
     while idx < len(lines):
         trimmed = lines[idx].strip()
         if not trimmed or trimmed.startswith("#"):
@@ -426,25 +464,26 @@ def _lb_parse_string_list(lines: List[str], idx: int) -> tuple:
     return items, idx
 
 
-def _lb_parse_params(lines: List[str], idx: int) -> tuple:
-    params: Dict[str, str] = {}
+def _lb_parse_params(lines: list[str], idx: int) -> tuple:
+    """Params entries sit at indent 6 or deeper; each value keeps its quotes."""
+    params: dict[str, str] = {}
     while idx < len(lines):
         trimmed = lines[idx].strip()
         if not trimmed or trimmed.startswith("#"):
             idx += 1
             continue
         indent = len(lines[idx]) - len(lines[idx].lstrip())
-        if indent < 6 and not trimmed.startswith("- name:"):
+        if indent >= 6:
             key, value = _lb_parse_kv(trimmed)
-            params[key] = _unquote(value)
+            params[key] = value
             idx += 1
         else:
             break
     return params, idx
 
 
-def _lb_parse_variants(lines: List[str], idx: int) -> tuple:
-    variants: Dict[str, str] = {}
+def _lb_parse_variants(lines: list[str], idx: int) -> tuple:
+    variants: dict[str, str] = {}
     while idx < len(lines):
         trimmed = lines[idx].strip()
         if not trimmed or trimmed.startswith("#"):
@@ -464,13 +503,13 @@ def _lb_parse_variants(lines: List[str], idx: int) -> tuple:
     return variants, idx
 
 
-def _lb_parse_block_scalar(lines: List[str], idx: int) -> tuple:
+def _lb_parse_block_scalar(lines: list[str], idx: int) -> tuple:
     """Parse a YAML block scalar (line ending with ``|``)."""
     idx += 1  # skip the ``|`` line
     if idx >= len(lines):
         return "", idx
     block_indent = len(lines[idx]) - len(lines[idx].lstrip())
-    parts: List[str] = []
+    parts: list[str] = []
     while idx < len(lines):
         line = lines[idx]
         trimmed = line.strip()
@@ -488,11 +527,64 @@ def _lb_parse_block_scalar(lines: List[str], idx: int) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Parameter values
+# ---------------------------------------------------------------------------
+
+# The number syntax of the Rust reference runner (crates/grafeo-spec-tests/
+# build.rs): decimal only, so ``0x1F``, ``1_000``, ``inf`` and ``NaN`` are not
+# numbers. ``[0-9]``, not ``\d``, which also matches other scripts' digits.
+_DECIMAL_INTEGER = re.compile(r"[+-]?[0-9]+")
+_DECIMAL_NUMBER = re.compile(
+    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+)
+_I64_MIN = -(2**63)
+_I64_MAX = 2**63 - 1
+
+
+def param_value(text: str) -> object:
+    """The value of a parameter written as ``text`` in a .gtest file.
+
+    The rule of the Rust reference runner, which every runner follows: a
+    quoted value is a string, whatever it reads like; a bare value starting
+    with ``[`` or ``{`` is JSON; a bare decimal integer that fits i64 is an
+    int and any other bare decimal number a float; a bare ``true`` or
+    ``false`` is a bool; any other bare value is a string.
+    """
+    text = text.strip()
+    if _is_quoted(text):
+        return _unquote(text)
+    if text.startswith(("[", "{")):
+        return json.loads(text, parse_constant=_reject_json_constant)
+    if _DECIMAL_INTEGER.fullmatch(text) and _I64_MIN <= int(text) <= _I64_MAX:
+        return int(text)
+    if _DECIMAL_NUMBER.fullmatch(text):
+        number = float(text)
+        if not math.isfinite(number):
+            raise ValueError(f"parameter {text!r} is out of the f64 range")
+        return number
+    if text in ("true", "false"):
+        return text == "true"
+    return text
+
+
+def _reject_json_constant(name: str) -> object:
+    """``json.loads`` reads ``NaN`` and ``Infinity``; JSON (and Rust) do not."""
+    raise ValueError(f"{name} is not a JSON value")
+
+
+def coerce_params(raw_params: dict[str, str]) -> dict[str, object] | None:
+    """Type each parameter by ``param_value``; None when there are none."""
+    if not raw_params:
+        return None
+    return {key: param_value(text) for key, text in raw_params.items()}
+
+
+# ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
 
-def _skip_blank_and_comments(lines: List[str], idx: int) -> int:
+def _skip_blank_and_comments(lines: list[str], idx: int) -> int:
     while idx < len(lines):
         trimmed = lines[idx].strip()
         if not trimmed or trimmed.startswith("#"):
@@ -519,6 +611,14 @@ def _lb_parse_kv(s: str) -> tuple:
     return s.strip(), ""
 
 
+def _is_quoted(s: str) -> bool:
+    """Whether ``s`` is written in single or double quotes."""
+    s = s.strip()
+    return len(s) >= 2 and (
+        (s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")
+    )
+
+
 def _unquote(s: str) -> str:
     """Strip surrounding quotes and unescape YAML-level escapes only.
 
@@ -526,9 +626,7 @@ def _unquote(s: str) -> str:
     that the engine's parser handles via ``unescape_string()``.
     """
     s = s.strip()
-    if len(s) >= 2 and (
-        (s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")
-    ):
+    if _is_quoted(s):
         inner = s[1:-1]
         # Use a sentinel to avoid order-dependent replacement issues
         return (
@@ -540,7 +638,7 @@ def _unquote(s: str) -> str:
     return s
 
 
-def _lb_parse_yaml_list(s: str) -> List[str]:
+def _lb_parse_yaml_list(s: str) -> list[str]:
     s = s.strip()
     if s == "[]" or not s:
         return []
@@ -550,15 +648,15 @@ def _lb_parse_yaml_list(s: str) -> List[str]:
     return [_unquote(s)]
 
 
-def _lb_parse_inline_list(s: str) -> List[str]:
+def _lb_parse_inline_list(s: str) -> list[str]:
     """Parse ``[a, b, c]`` respecting nested brackets and quotes."""
     s = s.strip()
     if not s.startswith("[") or not s.endswith("]"):
         return [_unquote(s)]
     inner = s[1:-1]
 
-    items: List[str] = []
-    current: List[str] = []
+    items: list[str] = []
+    current: list[str] = []
     depth = 0
     in_single = False
     in_double = False
@@ -589,7 +687,7 @@ def _lb_parse_inline_list(s: str) -> List[str]:
     return items
 
 
-def _as_string_list(val) -> List[str]:
+def _as_string_list(val) -> list[str]:
     """Coerce a YAML value to a list of strings."""
     if val is None:
         return []
@@ -612,7 +710,7 @@ def _value_to_string(val) -> str:
     if isinstance(val, int):
         return str(val)
     if isinstance(val, float):
-        if val != val:  # NaN
+        if math.isnan(val):
             return "NaN"
         if val == float("inf"):
             return "Infinity"

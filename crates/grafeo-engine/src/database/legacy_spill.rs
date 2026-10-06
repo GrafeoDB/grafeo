@@ -37,8 +37,8 @@
 //! read stays too, warned with its cost: until it can be read or is removed,
 //! every open finds it again, rebuilds its index and (read-write) writes a
 //! checkpoint. A file a later open would find no better is kept instead,
-//! warned with why: one that is not an old spill file or is shorter than its
-//! header says, one whose vectors have another number of dimensions than the
+//! warned with why: one that is not an old spill file or whose length is not
+//! what its header says, one whose vectors have another number of dimensions than the
 //! index (a foreign or damaged file), and one read through that held records
 //! of nodes without the index's label (a node that lost the label while
 //! spilled has its embedding only there). A read-write open moves each to
@@ -133,8 +133,8 @@ impl OldFile {
     /// # Errors
     ///
     /// Returns the error of opening or reading it (naming the file), or
-    /// `InvalidData` for a file that is not an old spill file or is shorter
-    /// than its header says.
+    /// `InvalidData` for a file that is not an old spill file or whose length
+    /// is not what its header says.
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
         let named = |error: io::Error| {
             io::Error::new(
@@ -169,11 +169,18 @@ impl OldFile {
         let (dimensions, count) = (number(8)?, number(16)?);
         let record =
             Self::record_bytes(dimensions).ok_or_else(|| invalid("dimensions out of range"))?;
-        count
+        // Exactly the records the header counts: bytes past them would be
+        // left out of the fold, and lost with the file it deletes.
+        let size = count
             .checked_mul(record)
             .and_then(|size| u64::try_from(size).ok())
-            .filter(|size| *size <= body)
             .ok_or_else(|| invalid("shorter than its header says"))?;
+        if size < body {
+            return Err(invalid("longer than its header says"));
+        }
+        if size > body {
+            return Err(invalid("shorter than its header says"));
+        }
         Ok(Self {
             reader,
             path: path.to_path_buf(),
@@ -258,7 +265,8 @@ impl WithoutLabel {
 /// would find again (the same bytes fold in no more).
 #[derive(Debug)]
 pub(crate) enum KeptBecause {
-    /// It is not an old spill file, or is shorter than its header says.
+    /// It is not an old spill file, or its length is not what its header
+    /// says.
     Invalid(io::Error),
     /// Its vectors have `file` dimensions, the vector index `index`.
     Dimensions {
@@ -495,13 +503,22 @@ fn fill_from(
         }
         read.batches += 1;
         let ids: Vec<NodeId> = batch.iter().map(|(id, _)| *id).collect();
-        read.filled += store.fill_missing_node_values(
+        // A stored value that cannot be read stops the read: filling over it
+        // would replace it, so the file stays (what this batch filled before
+        // stays too, uncounted).
+        match store.fill_missing_node_values(
             &file.label,
             &file.property,
             batch
                 .into_iter()
                 .map(|(id, vector)| (id, Value::Vector(vector.into()))),
-        );
+        ) {
+            Ok(filled) => read.filled += filled,
+            Err(error) => {
+                read.stopped = Some(io::Error::other(error.to_string()));
+                return read;
+            }
+        }
         for id in ids {
             if store.get_node_property(id, &file.property).is_none()
                 && store
@@ -605,7 +622,9 @@ pub(crate) fn directories(
         });
     }
     if let Some(spill_path) = spill_path
-        && directories.iter().all(|known| known.path != spill_path)
+        && directories
+            .iter()
+            .all(|known| !same_directory(&known.path, spill_path))
     {
         directories.push(SpillDirectory {
             path: spill_path.to_path_buf(),
@@ -613,6 +632,19 @@ pub(crate) fn directories(
         });
     }
     directories
+}
+
+/// Whether `a` and `b` name one directory: the same path once resolved
+/// (links, `.` and `..`, a relative path), or, when one cannot be resolved
+/// (it does not exist, so it holds no files), the same absolute path.
+fn same_directory(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => match (std::path::absolute(a), std::path::absolute(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => a == b,
+        },
+    }
 }
 
 /// Moves the old file at `path` into `kept/` beside it, under its own name
@@ -827,6 +859,30 @@ mod tests {
         );
         assert_eq!(directories(Some(&database), Some(&derived)).len(), 1);
         assert_eq!(directories(None, Some(shared)), Vec::new(), "in memory");
+    }
+
+    /// A configured spill path that names the derived directory in another
+    /// spelling (through `..`) is that directory: it is listed once, as the
+    /// same spelling is, so its files are read once (#594).
+    #[test]
+    fn a_spill_path_that_names_the_derived_directory_is_listed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("paris.grafeo");
+        let derived = dir.path().join("paris.grafeo.spill");
+        std::fs::create_dir_all(&derived).unwrap();
+        std::fs::create_dir_all(dir.path().join("berlin")).unwrap();
+        let alias = dir
+            .path()
+            .join("berlin")
+            .join("..")
+            .join("paris.grafeo.spill");
+        assert_eq!(
+            directories(Some(&database), Some(&alias)),
+            vec![SpillDirectory {
+                path: derived,
+                derived: true
+            }]
+        );
     }
 
     #[test]
@@ -1102,6 +1158,70 @@ mod tests {
         db.create_vector_index("Item", "embedding", Some(2), None, None, None, None)
             .unwrap();
         (db, ids)
+    }
+
+    /// A file with a record past the count its header gives is refused like
+    /// a short one, and kept: folding the counted records and deleting the
+    /// file would lose the others (#594).
+    #[test]
+    fn a_file_longer_than_its_header_says_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, ids) = items(2);
+        let path = dir.path().join("vectors_Item%3Aembedding.bin");
+        write_old(&path, 2, &[(ids[0].as_u64(), vec![3.0, 19.0])]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(&ids[1].as_u64().to_le_bytes());
+        for value in [88.0_f32, 3.19] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert!(read(&path).is_err(), "longer than its header says");
+        let folded = fold_in(db.lpg_store(), &find(dir.path(), true));
+        assert!(folded.files.is_empty(), "the file is to be deleted");
+        assert_eq!(folded.kept.len(), 1);
+        assert!(
+            matches!(folded.kept[0].because, KeptBecause::Invalid(_)),
+            "{:?}",
+            folded.kept[0].because
+        );
+        assert_eq!(folded.filled, 0);
+    }
+
+    /// A stored value the fold cannot read (a spilled value whose file cannot
+    /// be read) stops the file's read and keeps the file: the old value is
+    /// not filled over it (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn a_stored_value_the_fold_cannot_read_keeps_the_file() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (db, ids) = items(1);
+        let alix = ids[0];
+        db.set_node_property(alix, "embedding", Value::Vector(vec![19.0, 88.0].into()))
+            .unwrap();
+        let store = db.lpg_store();
+        super::super::test_backing::spill(
+            store,
+            "embedding",
+            Arc::new(super::super::test_backing::Unreadable(alix)),
+        );
+        write_old(
+            &dir.path().join("vectors_Item%3Aembedding.bin"),
+            2,
+            &[(alix.as_u64(), vec![3.0, 19.0])],
+        );
+
+        let folded = fold_in(store, &find(dir.path(), true));
+        assert!(folded.files.is_empty(), "the file is to be deleted");
+        assert!(folded.kept.is_empty());
+        assert_eq!(folded.filled, 0);
+        assert_eq!(
+            store.node_property_column_ids(&PropertyKey::new("embedding")),
+            vec![alix],
+            "the stored value is still there"
+        );
     }
 
     /// The fold reads a file in batches of bounded size: five records of 16

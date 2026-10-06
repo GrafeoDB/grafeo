@@ -116,40 +116,46 @@ struct SnapshotEdge {
 ///
 /// With `temporal`: stores full property version history.
 /// Without: wraps each current value as a single-entry version list at epoch 0.
-/// The nodes of `store` as a snapshot holds them. A spilled property value
-/// that cannot be read fails the export instead of leaving the copy without
-/// it.
+/// The nodes of `store` as a snapshot holds them, read one at a time. A node
+/// record or a spilled property value that cannot be read fails the export
+/// instead of leaving the copy without it.
 fn collect_snapshot_nodes(store: &grafeo_core::graph::lpg::LpgStore) -> Result<Vec<SnapshotNode>> {
-    let mut nodes: Vec<SnapshotNode> = store
-        .try_all_nodes()?
-        .into_iter()
-        .map(|n| {
-            #[cfg(feature = "temporal")]
-            let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = store
-                .node_property_history(n.id)
-                .into_iter()
-                .map(|(k, entries)| (k.to_string(), entries))
-                .collect();
+    // With `temporal` the snapshot holds each property's history, read
+    // below: the current values are not read.
+    #[cfg(feature = "temporal")]
+    let source = store
+        .try_nodes_without_properties()?
+        .map(Ok::<_, grafeo_common::utils::error::Error>);
+    #[cfg(not(feature = "temporal"))]
+    let source = store.try_nodes()?;
+    let mut nodes: Vec<SnapshotNode> = Vec::new();
+    for n in source {
+        let n = n?;
+        #[cfg(feature = "temporal")]
+        let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = store
+            .node_property_history(n.id)
+            .into_iter()
+            .map(|(k, entries)| (k.to_string(), entries))
+            .collect();
 
-            #[cfg(not(feature = "temporal"))]
-            let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = n
-                .properties
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), vec![(EpochId::new(0), v)]))
-                .collect();
+        #[cfg(not(feature = "temporal"))]
+        let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = n
+            .properties
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), vec![(EpochId::new(0), v)]))
+            .collect();
 
-            properties.sort_by(|(a, _), (b, _)| a.cmp(b));
+        properties.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-            let mut labels: Vec<String> = n.labels.iter().map(|l| l.to_string()).collect();
-            labels.sort();
+        let mut labels: Vec<String> = n.labels.iter().map(|l| l.to_string()).collect();
+        labels.sort();
 
-            SnapshotNode {
-                id: n.id,
-                labels,
-                properties,
-            }
-        })
-        .collect();
+        nodes.push(SnapshotNode {
+            id: n.id,
+            labels,
+            properties,
+        });
+    }
     nodes.sort_by_key(|n| n.id);
     Ok(nodes)
 }
@@ -392,9 +398,19 @@ fn copy_graph_data(
     source: &grafeo_core::graph::lpg::LpgStore,
     target: &grafeo_core::graph::lpg::LpgStore,
 ) -> Result<()> {
-    // A spilled value that cannot be read fails the copy instead of leaving
-    // it out.
-    for node in source.try_all_nodes()? {
+    // A node record or a spilled value that cannot be read fails the copy
+    // instead of leaving it out. The nodes are read one at a time, each just
+    // before it is written, so the copy never holds them all. With
+    // `temporal` each property's history is copied: the current values are
+    // not read.
+    #[cfg(feature = "temporal")]
+    let nodes = source
+        .try_nodes_without_properties()?
+        .map(Ok::<_, grafeo_common::utils::error::Error>);
+    #[cfg(not(feature = "temporal"))]
+    let nodes = source.try_nodes()?;
+    for node in nodes {
+        let node = node?;
         let labels: Vec<&str> = node.labels.iter().map(|label| &**label).collect();
         target.create_node_with_id(node.id, &labels)?;
         #[cfg(feature = "temporal")]
@@ -1135,7 +1151,7 @@ mod tests {
         assert!(db.export_snapshot().is_ok());
         let key = PropertyKey::new("embedding");
         let store = db.lpg_store();
-        let snapshot = store.node_property_column_entries(&key);
+        let snapshot = store.node_property_column_entries(&key).unwrap();
         assert!(store.spill_node_property_column(
             &key,
             std::sync::Arc::new(super::super::test_backing::Unreadable(alix)),
@@ -1177,6 +1193,89 @@ mod tests {
         assert!(db.get_node(alix).is_some(), "Alix was not deleted");
         db.execute("MATCH (n:Item {name: 'Gus'}) SET n.embedding = vector([88.0, 3.19])")
             .unwrap();
+    }
+
+    /// A copy takes the nodes in one at a time: it reads a node's values just
+    /// before it writes the node, so it never holds every node of the source
+    /// at once (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn a_copy_reads_each_node_just_before_it_writes_it() {
+        use std::sync::Arc;
+
+        use grafeo_common::types::PropertyKey;
+        use grafeo_core::graph::lpg::{ColumnBacking, LpgStore};
+        use parking_lot::Mutex;
+
+        /// A backing that notes how many nodes the copy's target holds at
+        /// each read.
+        struct Watching {
+            values: std::collections::HashMap<NodeId, Value>,
+            target: Arc<LpgStore>,
+            seen: Mutex<Vec<usize>>,
+        }
+        impl ColumnBacking<NodeId> for Watching {
+            fn get(&self, id: NodeId) -> std::io::Result<Option<Value>> {
+                self.seen.lock().push(self.target.node_count());
+                Ok(self.values.get(&id).cloned())
+            }
+            fn contains(&self, id: NodeId) -> bool {
+                self.values.contains_key(&id)
+            }
+            fn ids(&self) -> Vec<NodeId> {
+                self.values.keys().copied().collect()
+            }
+            fn len(&self) -> usize {
+                self.values.len()
+            }
+            fn heap_bytes(&self) -> usize {
+                0
+            }
+        }
+
+        let source = LpgStore::new().unwrap();
+        for x in [3.0, 19.0, 88.0] {
+            source
+                .create_node_with_props(&["Item"], [("embedding", Value::Vector(vec![x].into()))]);
+        }
+        let key = PropertyKey::new("embedding");
+        let snapshot = source.node_property_column_entries(&key).unwrap();
+        let target = Arc::new(LpgStore::new().unwrap());
+        let backing = Arc::new(Watching {
+            values: snapshot.iter().cloned().collect(),
+            target: Arc::clone(&target),
+            seen: Mutex::new(Vec::new()),
+        });
+        assert!(source.spill_node_property_column(&key, backing.clone(), &snapshot));
+
+        super::copy_graph_data(&source, &target).unwrap();
+        assert_eq!(
+            *backing.seen.lock(),
+            vec![0, 1, 2],
+            "nodes the target held at each read"
+        );
+        assert_eq!(target.node_count(), 3);
+    }
+
+    /// A direct call that removes a spilled value it cannot read (setting it
+    /// to null, outside a transaction) errors and changes nothing: it hid the
+    /// value and reported success while its WAL record and change event were
+    /// left out (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn a_direct_removal_of_a_spilled_value_it_cannot_read_errors() {
+        use grafeo_common::types::PropertyKey;
+
+        let (db, alix) = with_an_unreadable_embedding();
+        let result = db.set_node_property(alix, "embedding", Value::Null);
+        assert!(
+            db.lpg_store()
+                .node_property_column_ids(&PropertyKey::new("embedding"))
+                .contains(&alix),
+            "the call hid the value"
+        );
+        let error = result.expect_err("a removal of a value it cannot read");
+        assert!(error.to_string().contains("cannot be read"), "{error}");
     }
 
     #[test]

@@ -159,17 +159,51 @@ impl LpgStore {
     }
 
     /// [`all_nodes`](Self::all_nodes) for the readers that must not lose a
-    /// value (checkpoints, copies): a spilled property value that cannot be
-    /// read is an error, never left out. Each value is read once.
+    /// node or a value (checkpoints, copies): a record or a spilled property
+    /// value that cannot be read is an error, never left out. Each value is
+    /// read once. The nodes are built one at a time, as the iterator is
+    /// advanced, so a reader that takes them in one by one never holds them
+    /// all.
     ///
     /// # Errors
     ///
-    /// Returns the error of reading a spilled value.
-    pub fn try_all_nodes(&self) -> grafeo_common::utils::error::Result<Vec<Node>> {
-        self.node_ids()
+    /// Returns the error of reading a node's record; each item, the error of
+    /// reading a spilled value.
+    pub fn try_nodes(
+        &self,
+    ) -> grafeo_common::utils::error::Result<
+        impl Iterator<Item = grafeo_common::utils::error::Result<Node>> + '_,
+    > {
+        Ok(self
+            .try_node_ids()?
             .into_iter()
-            .map(|id| self.try_build_node(id))
-            .collect()
+            .map(|id| self.try_build_node(id)))
+    }
+
+    /// [`try_nodes`](Self::try_nodes) without the property values: each
+    /// node with its labels only, for the readers that take the values from
+    /// elsewhere (the property histories a temporal checkpoint or copy
+    /// writes), so no current value is read only to be dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading a node's record.
+    pub fn try_nodes_without_properties(
+        &self,
+    ) -> grafeo_common::utils::error::Result<impl Iterator<Item = Node> + '_> {
+        Ok(self
+            .try_node_ids()?
+            .into_iter()
+            .map(|id| self.node_with_labels(id)))
+    }
+
+    /// [`try_nodes`](Self::try_nodes), collected.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading a node's record or a spilled value.
+    pub fn try_all_nodes(&self) -> grafeo_common::utils::error::Result<Vec<Node>> {
+        self.try_nodes()?.collect()
     }
 
     /// Returns an iterator over all edges in the database.

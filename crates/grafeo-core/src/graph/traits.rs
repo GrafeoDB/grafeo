@@ -102,6 +102,22 @@ pub trait GraphStore: Send + Sync {
     /// Gets a property for multiple nodes in a single batch operation.
     fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>>;
 
+    /// [`get_node_property_batch`](Self::get_node_property_batch) for the
+    /// readers that must tell a value that cannot be read from no value (the
+    /// key of an algorithm's `key=`): a spilled value that cannot be read is
+    /// an error, where the batch read reads it as absent. A store with
+    /// nothing to read from a file returns its batch read; a store that
+    /// wraps another forwards to the inner store's fallible read.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading a spilled value.
+    fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+    ) -> Result<Vec<Option<Value>>>;
+
     /// Gets all properties for multiple nodes in a single batch operation.
     fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>>;
 
@@ -627,10 +643,21 @@ pub trait GraphStoreMut: GraphStoreSearch {
     }
 
     /// Removes a property from a node. Returns the previous value if it existed.
-    fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value>;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the value cannot be read
+    /// (a spilled value whose file cannot be read): the caller logs the
+    /// removal, and a hidden value reported absent would not be logged.
+    fn remove_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>>;
 
     /// Removes a property from an edge. Returns the previous value if it existed.
-    fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value>;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the value cannot be read,
+    /// as [`remove_node_property`](Self::remove_node_property) does.
+    fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<Option<Value>>;
 
     /// Removes a node property within a transaction, recording the previous value
     /// so it can be restored on rollback. Returns the previous value if it
@@ -648,19 +675,24 @@ pub trait GraphStoreMut: GraphStoreSearch {
         key: &str,
         _transaction_id: TransactionId,
     ) -> Result<Option<Value>> {
-        Ok(self.remove_node_property(id, key))
+        self.remove_node_property(id, key)
     }
 
     /// Removes an edge property within a transaction, recording the previous value
     /// so it can be restored on rollback.
     ///
     /// Default delegates to [`remove_edge_property`](Self::remove_edge_property).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the previous value cannot
+    /// be read.
     fn remove_edge_property_versioned(
         &self,
         id: EdgeId,
         key: &str,
         _transaction_id: TransactionId,
-    ) -> Option<Value> {
+    ) -> Result<Option<Value>> {
         self.remove_edge_property(id, key)
     }
 
@@ -770,6 +802,13 @@ impl GraphStore for NullGraphStore {
     }
     fn get_node_property_batch(&self, ids: &[NodeId], _: &PropertyKey) -> Vec<Option<Value>> {
         vec![None; ids.len()]
+    }
+    fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        _: &PropertyKey,
+    ) -> Result<Vec<Option<Value>>> {
+        Ok(vec![None; ids.len()])
     }
     fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
         vec![FxHashMap::default(); ids.len()]
@@ -1106,6 +1145,13 @@ mod tests {
                 .map(|id| self.get_node_property(*id, key))
                 .collect()
         }
+        fn try_get_node_property_batch(
+            &self,
+            ids: &[NodeId],
+            key: &PropertyKey,
+        ) -> Result<Vec<Option<Value>>> {
+            Ok(self.get_node_property_batch(ids, key))
+        }
         fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
             ids.iter()
                 .map(|id| {
@@ -1285,21 +1331,21 @@ mod tests {
                 edge.set_property(key, value);
             }
         }
-        fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
+        fn remove_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {
             let mut inner = self.inner.lock().unwrap();
-            inner
+            Ok(inner
                 .nodes
                 .iter_mut()
                 .find(|n| n.id == id)
-                .and_then(|n| n.remove_property(key))
+                .and_then(|n| n.remove_property(key)))
         }
-        fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value> {
+        fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<Option<Value>> {
             let mut inner = self.inner.lock().unwrap();
-            inner
+            Ok(inner
                 .edges
                 .iter_mut()
                 .find(|e| e.id == id)
-                .and_then(|e| e.remove_property(key))
+                .and_then(|e| e.remove_property(key)))
         }
         fn add_label(&self, node_id: NodeId, label: &str) -> bool {
             let mut inner = self.inner.lock().unwrap();
@@ -1379,9 +1425,13 @@ mod tests {
         let dst = store.create_node(&["Person"]);
         let edge_id = store.create_edge(src, dst, "KNOWS");
         store.set_edge_property(edge_id, "weight", Value::Int64(42));
-        let removed_edge = store.remove_edge_property_versioned(edge_id, "weight", txn);
+        let removed_edge = store
+            .remove_edge_property_versioned(edge_id, "weight", txn)
+            .unwrap();
         assert_eq!(removed_edge, Some(Value::Int64(42)));
-        let removed_again = store.remove_edge_property_versioned(edge_id, "weight", txn);
+        let removed_again = store
+            .remove_edge_property_versioned(edge_id, "weight", txn)
+            .unwrap();
         assert!(removed_again.is_none());
     }
 

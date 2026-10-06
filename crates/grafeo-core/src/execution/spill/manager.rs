@@ -371,6 +371,40 @@ mod tests {
         );
     }
 
+    /// A spill directory given as one relative component (`spill`) has an
+    /// empty parent, which `create_dir_all` takes as already there: the first
+    /// spill file creates the directory in the working directory.
+    #[test]
+    fn a_one_component_relative_directory_spills() {
+        /// Removes the directory even when an assert fails, so a failing run
+        /// leaves nothing in the working directory.
+        struct RemoveOnDrop(PathBuf);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                if self.0.exists()
+                    && let Err(error) = std::fs::remove_dir_all(&self.0)
+                {
+                    eprintln!("cannot remove {}: {error}", self.0.display());
+                }
+            }
+        }
+
+        let name = format!("grafeo_spill_relative_{}", std::process::id());
+        let relative = PathBuf::from(&name);
+        assert_eq!(relative.parent(), Some(Path::new("")));
+        let _cleanup = RemoveOnDrop(relative.clone());
+        {
+            let manager = SpillManager::new(&relative).unwrap().with_owned_dir();
+            let file = manager.create_file("sort").unwrap();
+            assert!(relative.is_dir(), "the first spill file creates {name}");
+            assert!(file.path().starts_with(&relative));
+        }
+        assert!(
+            !relative.exists(),
+            "the owned directory is removed with the manager"
+        );
+    }
+
     #[test]
     fn owned_dir_preserved_when_unexpected_contents_remain() {
         // remove_dir is non-recursive on purpose: if something the manager

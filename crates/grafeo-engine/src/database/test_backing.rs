@@ -100,7 +100,7 @@ impl ColumnBacking<NodeId> for Counting {
 /// snapshot.
 pub(crate) fn spill(store: &LpgStore, key: &str, backing: Arc<dyn ColumnBacking<NodeId>>) {
     let key = PropertyKey::new(key);
-    let snapshot = store.node_property_column_entries(&key);
+    let snapshot = store.node_property_column_entries(&key).unwrap();
     assert!(store.spill_node_property_column(&key, backing, &snapshot));
 }
 
@@ -133,8 +133,11 @@ mod tests {
         db.create_vector_index("Item", "embedding", Some(2), None, None, None, None)
             .unwrap();
         let store = db.lpg_store();
-        let backing =
-            Counting::of(&store.node_property_column_entries(&PropertyKey::new("embedding")));
+        let backing = Counting::of(
+            &store
+                .node_property_column_entries(&PropertyKey::new("embedding"))
+                .unwrap(),
+        );
         spill(store, "embedding", backing.clone());
 
         let hits = db
@@ -204,8 +207,11 @@ mod decorator_tests {
                 index.insert(*id, &vector, &accessor);
             }
         }
-        let backing =
-            Counting::of(&store.node_property_column_entries(&PropertyKey::new("embedding")));
+        let backing = Counting::of(
+            &store
+                .node_property_column_entries(&PropertyKey::new("embedding"))
+                .unwrap(),
+        );
         spill(&store, "embedding", backing.clone());
         (store, ids[0], index, backing)
     }
@@ -249,5 +255,80 @@ mod decorator_tests {
         ));
         assert_eq!(join_rows(wrapped, left, index), 3);
         assert_eq!(backing.copies(), 0, "the join through the CDC store copied");
+    }
+}
+
+/// Ordering the nodes by a key (`key=` of the algorithms, #566) reads the key
+/// fallibly: a spilled value that cannot be read is a read error, never a node
+/// without the key, through every store the algorithms read.
+#[cfg(feature = "algos")]
+mod key_order_tests {
+    use std::sync::Arc;
+
+    use grafeo_adapters::plugins::algorithms::{KeyOrderError, order_by_key};
+    use grafeo_common::types::{NodeId, Value};
+    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::{GraphStore, ProjectionSpec};
+
+    use super::{Unreadable, spill};
+    use crate::GrafeoDB;
+
+    /// Alix, whose `id` is spilled and cannot be read, and Gus, whose `id`
+    /// was written after the spill (so the column holds it).
+    fn with_an_unreadable_key(store: &LpgStore) -> NodeId {
+        let alix = store.create_node_with_props(&["Person"], [("id", Value::from("alix"))]);
+        spill(store, "id", Arc::new(Unreadable(alix)));
+        store.create_node_with_props(&["Person"], [("id", Value::from("gus"))]);
+        alix
+    }
+
+    fn assert_read_error(store: &dyn GraphStore, through: &str) {
+        let error = order_by_key(store, "id").expect_err(through);
+        assert!(
+            matches!(&error, KeyOrderError::Read { key, .. } if key == "id"),
+            "{through}: {error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            concat!(
+                "the values of the key 'id' cannot be read: ",
+                "GRAFEO-X003: I/O error: the spill file cannot be read"
+            ),
+            "{through}"
+        );
+    }
+
+    #[test]
+    fn a_key_that_cannot_be_read_is_a_read_error() {
+        let db = GrafeoDB::new_in_memory();
+        with_an_unreadable_key(db.lpg_store());
+        assert_read_error(&**db.lpg_store(), "the store");
+        assert_read_error(&*db.selected_graph_store().unwrap(), "the selected graph");
+        assert!(
+            db.create_projection("people", ProjectionSpec::new().with_node_labels(["Person"]))
+                .unwrap()
+        );
+        assert_read_error(&*db.projection("people").unwrap(), "a projection");
+    }
+
+    /// The WAL and CDC decorators forward the fallible read.
+    #[cfg(all(feature = "wal", feature = "cdc", feature = "grafeo-file"))]
+    #[test]
+    fn a_key_that_cannot_be_read_is_a_read_error_through_the_decorators() {
+        use grafeo_core::graph::GraphStoreMut;
+
+        let store = Arc::new(LpgStore::new().unwrap());
+        with_an_unreadable_key(&store);
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(crate::transaction::wal_buffer::WalBuffer::new(Arc::new(
+            grafeo_storage::wal::TypedWal::open(dir.path()).unwrap(),
+        )));
+        let wal_store = super::super::wal_store::WalGraphStore::new(Arc::clone(&store), wal);
+        assert_read_error(&wal_store, "the WAL store");
+        let cdc_store = super::super::cdc_store::CdcGraphStore::new(
+            store as Arc<dyn GraphStoreMut>,
+            Arc::new(crate::cdc::CdcLog::new()),
+        );
+        assert_read_error(&cdc_store, "the CDC store");
     }
 }

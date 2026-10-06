@@ -4,9 +4,11 @@
 // parameterized xUnit tests that execute queries and assert expected results.
 
 using System;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 using Grafeo;
 
@@ -309,11 +311,52 @@ public class SpecTests : IDisposable
         return result;
     }
 
+    // The number syntax of the Rust reference runner (crates/grafeo-spec-tests/
+    // build.rs): decimal only. double.TryParse also reads "Infinity" and "NaN",
+    // which the reference runner keeps as strings.
+    private static readonly Regex DecimalInteger = new(@"^[+-]?[0-9]+\z");
+    private static readonly Regex DecimalNumber =
+        new(@"^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?\z");
+
     /// <summary>
-    /// Coerce raw string parameter values to typed C# objects.
-    /// Mirrors the Rust build.rs coercion order: a list or map written as JSON,
-    /// int, float, bool, string.
-    /// Returns null when the params dict is empty (so callers can skip it).
+    /// The value of a parameter written as <paramref name="text"/> in a .gtest
+    /// file, by the rule of the Rust reference runner that every runner
+    /// follows: a quoted value is a string, whatever it reads like; a bare
+    /// value starting with <c>[</c> or <c>{</c> is JSON; a bare decimal integer
+    /// that fits a long is a long and any other bare decimal number a double; a
+    /// bare <c>true</c> or <c>false</c> is a bool; any other bare value is a
+    /// string.
+    /// </summary>
+    internal static object? ParamValue(string text)
+    {
+        text = text.Trim();
+        if (GtestParser.IsQuoted(text))
+            return GtestParser.Unquote(text);
+        if (text.StartsWith('[') || text.StartsWith('{'))
+        {
+            using var doc = JsonDocument.Parse(text);
+            return FromJson(doc.RootElement);
+        }
+        if (DecimalInteger.IsMatch(text) &&
+            long.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var l))
+        {
+            return l;
+        }
+        if (DecimalNumber.IsMatch(text))
+        {
+            var d = double.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture);
+            if (!double.IsFinite(d))
+                throw new FormatException($"parameter {text} is out of the f64 range");
+            return d;
+        }
+        if (text is "true" or "false")
+            return text == "true";
+        return text;
+    }
+
+    /// <summary>
+    /// Type each parameter by <see cref="ParamValue"/>. Returns null when there
+    /// are none (so callers can skip them).
     /// </summary>
     private static Dictionary<string, object?>? CoerceParams(Dictionary<string, string> rawParams)
     {
@@ -321,38 +364,8 @@ public class SpecTests : IDisposable
             return null;
 
         var coerced = new Dictionary<string, object?>(rawParams.Count);
-        foreach (var (key, value) in rawParams)
-        {
-            var trimmed = value.Trim();
-            if (trimmed.StartsWith('[') || trimmed.StartsWith('{'))
-            {
-                using var doc = JsonDocument.Parse(trimmed);
-                coerced[key] = FromJson(doc.RootElement);
-            }
-            else if (long.TryParse(value, System.Globalization.NumberStyles.Integer,
-                    System.Globalization.CultureInfo.InvariantCulture, out var l))
-            {
-                coerced[key] = l;
-            }
-            else if (double.TryParse(value, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var d))
-            {
-                coerced[key] = d;
-            }
-            else if (value == "true")
-            {
-                coerced[key] = true;
-            }
-            else if (value == "false")
-            {
-                coerced[key] = false;
-            }
-            else
-            {
-                coerced[key] = value;
-            }
-        }
-
+        foreach (var (key, text) in rawParams)
+            coerced[key] = ParamValue(text);
         return coerced;
     }
 

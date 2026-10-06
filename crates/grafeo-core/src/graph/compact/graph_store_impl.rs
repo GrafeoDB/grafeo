@@ -101,6 +101,15 @@ impl GraphStore for CompactStore {
             .collect()
     }
 
+    // The columns are in memory or in a mapped file: no read can fail.
+    fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+    ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
+        Ok(self.get_node_property_batch(ids, key))
+    }
+
     fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
         ids.iter()
             .map(|id| {

@@ -122,65 +122,66 @@ impl LpgStore {
     /// Removes a property from a node.
     ///
     /// Returns the previous value if it existed, or None if the property didn't exist.
-    #[cfg(not(feature = "tiered-storage"))]
-    pub fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the value cannot be read
+    /// (a spilled value whose file cannot be read): hidden unread, it would
+    /// read as absent, so the removal would go unlogged and could not be
+    /// undone.
+    pub fn remove_node_property(
+        &self,
+        id: NodeId,
+        key: &str,
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let prop_key: PropertyKey = key.into();
 
-        // Update property index before removing (needs to read old value)
-        self.update_property_index_on_remove(id, &prop_key);
-
-        // Sync text index if applicable
-        #[cfg(feature = "text-index")]
-        self.update_text_index_on_remove(id, key);
-
+        // The value is read and hidden in one step, before the indexes change.
         #[cfg(not(feature = "temporal"))]
-        let result = self.node_properties.remove(id, &prop_key);
+        let removed = self.node_properties.remove(id, &prop_key)?;
         #[cfg(feature = "temporal")]
-        let result = self
+        let removed = self
             .node_properties
             .remove(id, &prop_key, self.current_epoch());
-        #[cfg(feature = "vector-index")]
-        self.sync_vector_indexes_for_property(id, key);
-
-        result
+        self.update_indexes_on_remove(id, key, removed.as_ref());
+        Ok(removed)
     }
 
-    /// Removes a property from a node.
-    /// (Tiered storage version)
-    #[cfg(feature = "tiered-storage")]
-    pub fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
-        let prop_key: PropertyKey = key.into();
-
-        // Update property index before removing (needs to read old value)
-        self.update_property_index_on_remove(id, &prop_key);
-
-        // Sync text index if applicable
+    /// Brings the indexes in line with the removal of `key` from a node,
+    /// whose value was `removed`.
+    fn update_indexes_on_remove(&self, id: NodeId, key: &str, removed: Option<&Value>) {
+        if let Some(old_value) = removed {
+            self.update_property_index_on_remove(id, &PropertyKey::new(key), old_value);
+        }
         #[cfg(feature = "text-index")]
         self.update_text_index_on_remove(id, key);
-
-        #[cfg(not(feature = "temporal"))]
-        let result = self.node_properties.remove(id, &prop_key);
-        #[cfg(feature = "temporal")]
-        let result = self
-            .node_properties
-            .remove(id, &prop_key, self.current_epoch());
         #[cfg(feature = "vector-index")]
         self.sync_vector_indexes_for_property(id, key);
-        result
     }
 
     /// Removes a property from an edge.
     ///
     /// Returns the previous value if it existed, or None if the property didn't exist.
-    pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the value cannot be read,
+    /// as [`remove_node_property`](Self::remove_node_property) does (edge
+    /// columns are not spilled today).
+    pub fn remove_edge_property(
+        &self,
+        id: EdgeId,
+        key: &str,
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
         #[cfg(not(feature = "temporal"))]
         {
             self.edge_properties.remove(id, &key.into())
         }
         #[cfg(feature = "temporal")]
         {
-            self.edge_properties
-                .remove(id, &key.into(), self.current_epoch())
+            Ok(self
+                .edge_properties
+                .remove(id, &key.into(), self.current_epoch()))
         }
     }
 
@@ -242,6 +243,21 @@ impl LpgStore {
     #[must_use]
     pub fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
         self.node_properties.get_batch(ids, key)
+    }
+
+    /// [`get_node_property_batch`](Self::get_node_property_batch) as a
+    /// fallible read: a spilled value that cannot be read is an error, not
+    /// `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading a spilled value.
+    pub fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+    ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
+        self.node_properties.try_get_batch(ids, key)
     }
 
     /// Gets all properties for multiple nodes in a single batch operation.
@@ -402,77 +418,97 @@ impl LpgStore {
         key: &str,
         transaction_id: TransactionId,
     ) -> grafeo_common::utils::error::Result<Option<Value>> {
-        let prop_key: PropertyKey = key.into();
+        // Without temporal, the value the undo log records is the one the
+        // removal read and hid in the same step.
+        #[cfg(not(feature = "temporal"))]
+        let removed = self.remove_node_property(id, key)?;
 
-        // Capture the current value before removing
-        let old_value = self.node_properties.try_get(id, &prop_key)?;
+        // Temporal: the tombstone is this transaction's write, PENDING
+        // until it commits.
+        #[cfg(feature = "temporal")]
+        let removed = {
+            let removed = self.node_properties.remove(
+                id,
+                &key.into(),
+                grafeo_common::types::EpochId::PENDING,
+            );
+            self.update_indexes_on_remove(id, key, removed.as_ref());
+            removed
+        };
 
-        // Only record if the property actually exists
-        if old_value.is_some() {
+        // Only record if the property actually existed
+        if let Some(old_value) = &removed {
             self.property_undo_log
                 .write()
                 .entry(transaction_id)
                 .or_default()
                 .push(PropertyUndoEntry::NodeProperty {
                     node_id: id,
-                    key: prop_key.clone(),
-                    old_value: old_value.clone(),
+                    key: key.into(),
+                    old_value: Some(old_value.clone()),
                 });
         }
-
-        // Temporal: the tombstone is this transaction's write, PENDING
-        // until it commits.
-        #[cfg(feature = "temporal")]
-        {
-            self.update_property_index_on_remove(id, &prop_key);
-            #[cfg(feature = "text-index")]
-            self.update_text_index_on_remove(id, key);
-            let removed =
-                self.node_properties
-                    .remove(id, &prop_key, grafeo_common::types::EpochId::PENDING);
-            #[cfg(feature = "vector-index")]
-            self.sync_vector_indexes_for_property(id, key);
-            Ok(removed)
-        }
-        #[cfg(not(feature = "temporal"))]
-        Ok(self.remove_node_property(id, key))
+        Ok(removed)
     }
 
     /// Removes an edge property within a transaction, recording the previous value
     /// in the undo log so it can be restored on rollback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the current value cannot
+    /// be read, as [`remove_node_property_versioned`](Self::remove_node_property_versioned)
+    /// does.
     pub fn remove_edge_property_versioned(
         &self,
         id: EdgeId,
         key: &str,
         transaction_id: TransactionId,
-    ) -> Option<Value> {
-        let prop_key: PropertyKey = key.into();
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
+        #[cfg(not(feature = "temporal"))]
+        let removed = self.remove_edge_property(id, key)?;
 
-        // Capture the current value before removing
-        let old_value = self.edge_properties.get(id, &prop_key);
+        // Temporal: the tombstone is this transaction's write, PENDING
+        // until it commits.
+        #[cfg(feature = "temporal")]
+        let removed =
+            self.edge_properties
+                .remove(id, &key.into(), grafeo_common::types::EpochId::PENDING);
 
-        // Only record if the property actually exists
-        if old_value.is_some() {
+        // Only record if the property actually existed
+        if let Some(old_value) = &removed {
             self.property_undo_log
                 .write()
                 .entry(transaction_id)
                 .or_default()
                 .push(PropertyUndoEntry::EdgeProperty {
                     edge_id: id,
-                    key: prop_key.clone(),
-                    old_value: old_value.clone(),
+                    key: key.into(),
+                    old_value: Some(old_value.clone()),
                 });
         }
+        Ok(removed)
+    }
 
-        // Temporal: the tombstone is this transaction's write, PENDING
-        // until it commits.
-        #[cfg(feature = "temporal")]
-        {
-            self.edge_properties
-                .remove(id, &prop_key, grafeo_common::types::EpochId::PENDING)
+    /// Takes back a node property that a rolled back write set where there
+    /// was none. The value is not needed, so one that cannot be read (spilled
+    /// meanwhile, to a file that cannot be read) is hidden all the same; a
+    /// property index on the key then keeps its entry for the node, as the
+    /// value it was filed under is unknown.
+    #[cfg(not(feature = "temporal"))]
+    fn undo_node_property_set(&self, id: NodeId, key: &PropertyKey) {
+        if self.remove_node_property(id, key.as_str()).is_err() {
+            self.node_properties.discard(id, key);
+            self.update_indexes_on_remove(id, key.as_str(), None);
         }
-        #[cfg(not(feature = "temporal"))]
-        self.remove_edge_property(id, key)
+    }
+
+    /// [`undo_node_property_set`](Self::undo_node_property_set) for an edge.
+    #[cfg(not(feature = "temporal"))]
+    fn undo_edge_property_set(&self, id: EdgeId, key: &PropertyKey) {
+        if self.remove_edge_property(id, key.as_str()).is_err() {
+            self.edge_properties.discard(id, key);
+        }
     }
 
     /// Replays the undo log for a transaction in reverse order, restoring
@@ -502,7 +538,7 @@ impl LpgStore {
                             self.set_node_property(node_id, key.as_str(), value);
                         } else {
                             // Property did not exist before: remove it
-                            self.remove_node_property(node_id, key.as_str());
+                            self.undo_node_property_set(node_id, &key);
                         }
                     }
                     PropertyUndoEntry::EdgeProperty {
@@ -513,7 +549,7 @@ impl LpgStore {
                         if let Some(value) = old_value {
                             self.set_edge_property(edge_id, key.as_str(), value);
                         } else {
-                            self.remove_edge_property(edge_id, key.as_str());
+                            self.undo_edge_property_set(edge_id, &key);
                         }
                     }
                     PropertyUndoEntry::LabelAdded { node_id, label } => {
@@ -733,7 +769,7 @@ impl LpgStore {
                         if let Some(value) = old_value {
                             self.set_node_property(node_id, key.as_str(), value);
                         } else {
-                            self.remove_node_property(node_id, key.as_str());
+                            self.undo_node_property_set(node_id, &key);
                         }
                     }
                     PropertyUndoEntry::EdgeProperty {
@@ -744,7 +780,7 @@ impl LpgStore {
                         if let Some(value) = old_value {
                             self.set_edge_property(edge_id, key.as_str(), value);
                         } else {
-                            self.remove_edge_property(edge_id, key.as_str());
+                            self.undo_edge_property_set(edge_id, &key);
                         }
                     }
                     PropertyUndoEntry::LabelAdded { node_id, label } => {
@@ -1052,14 +1088,20 @@ impl LpgStore {
     /// changes nothing. A vector index on the property that lacks a filled
     /// node (one rebuilt from the data before the fill) gets it. Returns how
     /// many values were filled.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading a stored value (a spilled value whose
+    /// file cannot be read), which would read as missing and be overwritten;
+    /// the values filled before it stay.
     pub fn fill_missing_node_values(
         &self,
         label: &str,
         key: &PropertyKey,
         values: impl IntoIterator<Item = (NodeId, Value)>,
-    ) -> usize {
+    ) -> grafeo_common::utils::error::Result<usize> {
         let Some(label_id) = self.label_registry.read().get_id(label) else {
-            return 0;
+            return Ok(0);
         };
         let epoch = self.current_epoch();
         let mut filled = 0;
@@ -1071,7 +1113,7 @@ impl LpgStore {
                 .is_some_and(|members| members.contains_key(&id));
             if !has_label
                 || !self.is_node_visible_at_epoch(id, epoch)
-                || self.node_properties.get(id, key).is_some()
+                || self.node_properties.try_get(id, key)?.is_some()
             {
                 continue;
             }
@@ -1084,7 +1126,7 @@ impl LpgStore {
             self.index_vector_if_missing(id, key);
             filled += 1;
         }
-        filled
+        Ok(filled)
     }
 
     /// Returns the nodes with a value for `key`, in id order, spilled values
@@ -1102,9 +1144,16 @@ impl LpgStore {
 
     /// Returns every `(node, value)` of `key`, in id order, spilled values
     /// included: the snapshot a spill writes to its backing.
-    #[must_use]
-    pub fn node_property_column_entries(&self, key: &PropertyKey) -> Vec<(NodeId, Value)> {
-        self.node_properties.column_entries(key)
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading a spilled value: a snapshot never leaves
+    /// one out.
+    pub fn node_property_column_entries(
+        &self,
+        key: &PropertyKey,
+    ) -> grafeo_common::utils::error::Result<Vec<(NodeId, Value)>> {
+        self.node_properties.try_column_entries(key)
     }
 
     /// Calls `f` with the vector stored for a node under `key`, without

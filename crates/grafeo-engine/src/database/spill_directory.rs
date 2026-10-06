@@ -146,22 +146,23 @@ impl SpillLayout {
     /// The layout of an open with an explicit `spill_path`, or one derived
     /// from `database` (`None` for an in-memory database, or one that must
     /// not spill). A read-only open's directory is created here, in the
-    /// system temp directory.
+    /// system temp directory, which only that open asks for: on wasm32 the
+    /// call panics, and an in-memory database never makes it.
     pub(crate) fn for_open(
         spill_path: Option<&Path>,
         database: Option<&Path>,
         read_only: bool,
     ) -> Self {
-        Self::for_open_in(&std::env::temp_dir(), spill_path, database, read_only)
+        Self::for_open_in(std::env::temp_dir, spill_path, database, read_only)
     }
 
     /// [`for_open`](Self::for_open) with the directory a read-only open
-    /// creates its own in. When that fails (the temp directory is missing or
+    /// creates its own in, asked for only by that open. When that fails (the temp directory is missing or
     /// read-only, or every name tried was taken), the open warns and spills
     /// nothing, as an in-memory database without a spill path: it never
     /// falls back to a directory it did not create.
     fn for_open_in(
-        temp_parent: &Path,
+        temp_parent: impl FnOnce() -> PathBuf,
         spill_path: Option<&Path>,
         database: Option<&Path>,
         read_only: bool,
@@ -208,7 +209,8 @@ impl SpillLayout {
             )) {
                 return Self::none();
             }
-            let created = match create_private_dir(temp_parent, || unique_name(&name, ".spill")) {
+            let temp_parent = temp_parent();
+            let created = match create_private_dir(&temp_parent, || unique_name(&name, ".spill")) {
                 Ok(created) => created,
                 Err(error) => {
                     grafeo_common::grafeo_warn!(
@@ -305,6 +307,19 @@ fn create_private_dir(
 /// (another process still maps it) stays: names never repeat, so nothing
 /// mistakes it for one of this open's files.
 pub(crate) fn remove_stale_cache(cache: &Path) {
+    // An open makes `cache` a directory: a link there (a symbolic link, or a
+    // junction on Windows) is not one it left, and reading through it would
+    // delete the files it points at. The link itself goes, never followed.
+    if std::fs::symlink_metadata(cache).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        // A link to a directory is removed as a directory on Windows.
+        if let Err(error) = std::fs::remove_file(cache).or_else(|_| std::fs::remove_dir(cache)) {
+            grafeo_common::grafeo_warn!(
+                "could not remove the link {} at the spill cache: {error}",
+                cache.display()
+            );
+        }
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(cache) else {
         return;
     };
@@ -429,6 +444,30 @@ mod tests {
         assert!(!root.exists());
     }
 
+    /// Only a read-only open of a file database without a spill path asks for
+    /// the system temp directory: on wasm32 that call panics ("no filesystem
+    /// on this platform"), so an in-memory database must never make it.
+    #[test]
+    fn only_a_read_only_file_open_asks_for_the_temp_directory() {
+        let no_temp = || -> PathBuf { panic!("this open needs no temp directory") };
+        let database = Some(Path::new("db/amsterdam.grafeo"));
+        for read_only in [false, true] {
+            let layout = SpillLayout::for_open_in(no_temp, None, None, read_only);
+            assert!(
+                layout.root.is_none(),
+                "an in-memory database spills nowhere"
+            );
+        }
+        let layout = SpillLayout::for_open_in(no_temp, None, database, false);
+        assert_eq!(
+            layout.root.as_deref(),
+            Some(Path::new("db/amsterdam.grafeo.spill"))
+        );
+        let explicit = Path::new("berlin-spill");
+        let layout = SpillLayout::for_open_in(no_temp, Some(explicit), database, true);
+        assert_eq!(layout.root.as_deref(), Some(explicit));
+    }
+
     /// A read-only open that cannot create its directory (here the temp
     /// directory is missing) spills nothing instead of failing the open, and
     /// creates nothing.
@@ -436,8 +475,12 @@ mod tests {
     fn a_read_only_open_without_a_usable_temp_directory_spills_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("no-temp");
-        let layout =
-            SpillLayout::for_open_in(&missing, None, Some(Path::new("db/amsterdam.grafeo")), true);
+        let layout = SpillLayout::for_open_in(
+            || missing.clone(),
+            None,
+            Some(Path::new("db/amsterdam.grafeo")),
+            true,
+        );
         assert!(layout.root.is_none());
         assert!(layout.root_guard.is_none());
         assert!(layout.vector_cache.is_none());
@@ -525,6 +568,66 @@ mod tests {
         assert_eq!(
             std::fs::read(spill.join("vectors_Item%3Aembedding.bin")).unwrap(),
             b"old"
+        );
+    }
+
+    /// A symbolic link at the cache path is not followed: the stale-cache
+    /// removal takes the link away and leaves every file it points at.
+    #[test]
+    fn the_stale_cache_removal_does_not_follow_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill = dir.path().join("amsterdam.grafeo.spill");
+        let cache = spill.join("cache");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&spill).unwrap();
+        std::fs::create_dir_all(elsewhere.join("nested")).unwrap();
+        std::fs::write(elsewhere.join("gus.txt"), b"keep").unwrap();
+        std::fs::write(elsewhere.join("nested").join("mia.txt"), b"keep").unwrap();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&elsewhere, &cache);
+        // Windows creates symbolic links only with the privilege to (or in
+        // developer mode); a junction, which directory reads follow as well,
+        // needs none.
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&elsewhere, &cache).or_else(|_| {
+            let made = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(&cache)
+                .arg(&elsewhere)
+                .output()?;
+            if made.status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(
+                    String::from_utf8_lossy(&made.stderr).into_owned(),
+                ))
+            }
+        });
+        #[cfg(not(any(unix, windows)))]
+        let linked: std::io::Result<()> = Err(std::io::Error::other("no symbolic links"));
+        if let Err(error) = linked {
+            eprintln!("skipped: this platform or user cannot create a directory link: {error}");
+            return;
+        }
+        assert!(
+            std::fs::symlink_metadata(&cache)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the cache path is a link"
+        );
+
+        remove_stale_cache(&cache);
+        assert_eq!(std::fs::read(elsewhere.join("gus.txt")).unwrap(), b"keep");
+        assert_eq!(
+            std::fs::read(elsewhere.join("nested").join("mia.txt")).unwrap(),
+            b"keep"
+        );
+        assert!(
+            std::fs::symlink_metadata(&cache).is_err(),
+            "the link itself is gone"
         );
     }
 

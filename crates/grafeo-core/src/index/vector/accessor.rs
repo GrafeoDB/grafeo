@@ -208,7 +208,7 @@ mod borrowed_read_tests {
         for (id, vector) in ids.iter().zip(vectors) {
             index.insert(*id, &vector, &accessor);
         }
-        let snapshot = store.node_property_column_entries(&key);
+        let snapshot = store.node_property_column_entries(&key).unwrap();
         let backing = MemoryBacking::of(&snapshot);
         assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
 

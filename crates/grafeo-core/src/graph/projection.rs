@@ -191,6 +191,34 @@ impl GraphStore for GraphProjection {
             .and_then(|_| self.inner.get_edge_property(id, key))
     }
 
+    fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+    ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
+        // The nodes in the projection read through the inner store's
+        // fallible read; the others have no value here.
+        let inside: Vec<NodeId> = ids
+            .iter()
+            .copied()
+            .filter(|&id| self.node_id_matches(id))
+            .collect();
+        let mut values = self
+            .inner
+            .try_get_node_property_batch(&inside, key)?
+            .into_iter();
+        Ok(ids
+            .iter()
+            .map(|&id| {
+                if self.node_id_matches(id) {
+                    values.next().flatten()
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+
     fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
         let filtered: Vec<_> = ids
             .iter()
@@ -825,6 +853,50 @@ mod tests {
     }
 
     // 5. get_node_property_batch for mixed in/out of projection nodes
+
+    #[test]
+    fn try_get_node_property_batch_mixed() {
+        let (store, nodes, _) = setup_social_graph_with_ids();
+        let spec = ProjectionSpec::new().with_node_labels(["Person"]);
+        let proj = GraphProjection::new(store, spec);
+
+        let key = PropertyKey::from("name");
+        // Alix (Person), Amsterdam (City), Gus (Person)
+        let ids = vec![nodes[0], nodes[2], nodes[1]];
+        assert_eq!(
+            proj.try_get_node_property_batch(&ids, &key).unwrap(),
+            proj.get_node_property_batch(&ids, &key)
+        );
+    }
+
+    /// The projection reads its nodes through the inner store's fallible
+    /// read: a spilled value that cannot be read is an error, not a missing
+    /// value. A node outside the projection is not read (#566 `key=`).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn try_get_node_property_batch_reports_a_value_it_cannot_read() {
+        use crate::graph::lpg::test_backing::MemoryBacking;
+
+        let (store, nodes, _) = setup_social_graph_with_ids();
+        let key = PropertyKey::from("name");
+        let snapshot = store.node_property_column_entries(&key).unwrap();
+        let backing = MemoryBacking::of(&snapshot);
+        assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
+        let spec = ProjectionSpec::new().with_node_labels(["Person"]);
+        let proj = GraphProjection::new(store, spec);
+
+        backing.fail_reads(true);
+        // Alix (Person), Amsterdam (City)
+        assert!(
+            proj.try_get_node_property_batch(&[nodes[0], nodes[2]], &key)
+                .is_err()
+        );
+        assert_eq!(
+            proj.try_get_node_property_batch(&[nodes[2]], &key).unwrap(),
+            vec![None],
+            "Amsterdam is outside the projection"
+        );
+    }
 
     #[test]
     fn get_node_property_batch_mixed() {

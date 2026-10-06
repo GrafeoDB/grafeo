@@ -70,7 +70,7 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 | `statements` | List of queries: all execute, last captures result |
 | `setup` | List of queries to run before the test (always in the file's `language`) |
 | `skip` | Reason string: test is ignored with this message |
-| `params` | Key-value map for parameterized queries |
+| `params` | Key-value map for parameterized queries (see "Parameter values") |
 | `variants` | Rosetta map: `{gql: "...", cypher: "..."}` runs the same test in multiple languages |
 | `expect` | Assertion block (see below) |
 
@@ -86,6 +86,19 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 | `columns` | Expected column names: `[name, age]` |
 | `hash` | MD5 hex digest of sorted pipe-delimited rows |
 | `precision` | Float tolerance: cells compared within `10^(-precision)` |
+
+### Parameter values
+
+Every runner types a `params` value by the same rule, so a parameter has the same type in every binding:
+
+| Written as | Type | Example |
+|------------|------|---------|
+| Quoted (single or double) | String, whatever it reads like | `"Alix"`, `"[Amsterdam]"`, `"88"` |
+| Bare, starting with `[` or `{` | JSON list or map (must be valid JSON) | `[3, 19, 88]`, `{"city": "Amsterdam"}` |
+| Bare decimal integer that fits 64 bits | Integer | `88`, `-3`, `+19` |
+| Other bare decimal number | Float | `3.5`, `.5e1`, `19.` |
+| Bare `true` or `false` | Boolean | `true` |
+| Any other bare value | String | `Alix`, `0x1F`, `1_000`, `inf` |
 
 ### Value types in rows
 

@@ -1516,10 +1516,10 @@ impl GrafeoDB {
                     target_store.remove_label(*id, label);
                 }
                 WalRecord::RemoveNodeProperty { id, key } => {
-                    target_store.remove_node_property(*id, key);
+                    target_store.remove_node_property(*id, key)?;
                 }
                 WalRecord::RemoveEdgeProperty { id, key } => {
-                    target_store.remove_edge_property(*id, key);
+                    target_store.remove_edge_property(*id, key)?;
                 }
 
                 // --- Schema DDL replay (always on root catalog) ---

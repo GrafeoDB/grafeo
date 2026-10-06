@@ -232,8 +232,9 @@ same Grafeo version, in any process, on any platform and with any number of
 threads:
 
 - Results come in node-id order: `CALL` rows (edge results by source, then
-  target), the dicts and lists of `db.algorithms`, and the lists the Rust
-  functions return. Results whose order is the answer (paths, BFS and DFS
+  target), the dicts and lists of `db.algorithms` (the nodes of each
+  component too), and the lists the Rust functions return (flow edges by
+  source, then target). Results whose order is the answer (paths, BFS and DFS
   order, topological order, spanning tree edges) keep their own order.
 - Ties are broken by node id. Louvain and label propagation visit nodes in
   node-id order, a node that gains equally from several communities joins the
@@ -251,10 +252,10 @@ node-id order.
 
 ### Results independent of the load order: `key=`
 
-In Python, the methods of `db.algorithms` that return a value per node or a set
-of nodes take `key=`: a node property every node in scope holds, each with its
-own value (an id from outside the database). The result is then keyed by that
-value instead of the node id, in key order:
+In Python, the methods of `db.algorithms` that return a value per node, and
+`articulation_points()` and `kcore()`, take `key=`: a node property every node
+in scope holds, each with its own value (an id from outside the database). The
+result is then keyed by that value instead of the node id, in key order:
 
 ```python
 scores = db.algorithms.pagerank(directed=False, key="id")  # {"src/main.py": 0.12, ...}
@@ -270,10 +271,16 @@ centrality, connected components, triangle counts, the clustering
 coefficients, k-core, articulation points) only change their keys:
 betweenness and closeness still sum in node-id order.
 
-A node in scope without the key, or two nodes whose values are equal (`1` and
+Every node in scope needs a non-null value of the key, and no two nodes can
+share one: a node without it, or two nodes whose values are equal (`1` and
 `1.0` too), raise `GrafeoError` before the algorithm runs. Keys of different
-types are allowed; they order as `ORDER BY` orders them. Ordering the nodes
-costs one read of the key per node and a sort, about 1.5 ms for 9,000 nodes.
+types are allowed; they order as `ORDER BY` orders them. The values must also
+work as Python dict keys: strings, numbers, booleans, bytes, dates, times and
+datetimes do. A list, a map, a vector or a duration raises `GrafeoError`, and
+so do two values Python treats as the same key, such as `True` and `1`, or two
+times within the same microsecond (Python times hold microseconds). Ordering the
+nodes costs one read of the key per node and a sort, about 1.5 ms for 9,000
+nodes.
 
 When a release changes an algorithm's results, its CHANGELOG lists the change
 under "Result changes".

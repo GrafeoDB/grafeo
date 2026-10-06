@@ -542,6 +542,41 @@ impl GraphStore for LayeredStore {
             .collect()
     }
 
+    // As `get_node_property` per node, reading the overlay (which a spill may
+    // hold in a file) through its fallible read, in one batch.
+    fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+    ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
+        let base = self.base.load();
+        let mut values: Vec<Option<Value>> = Vec::with_capacity(ids.len());
+        // The positions whose value is the overlay's.
+        let mut from_overlay: Vec<usize> = Vec::new();
+        for (position, &id) in ids.iter().enumerate() {
+            let value = if self.is_node_deleted_from_base(id) {
+                None
+            } else if self.is_node_dirty(id) {
+                from_overlay.push(position);
+                None
+            } else {
+                let value = base.get_node_property(id, key);
+                if value.is_none() {
+                    from_overlay.push(position);
+                }
+                value
+            };
+            values.push(value);
+        }
+        let overlay_ids: Vec<NodeId> = from_overlay.iter().map(|&position| ids[position]).collect();
+        let overlay_values =
+            GraphStore::try_get_node_property_batch(&**self.overlay.load(), &overlay_ids, key)?;
+        for (position, value) in from_overlay.into_iter().zip(overlay_values) {
+            values[position] = value;
+        }
+        Ok(values)
+    }
+
     fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
         ids.iter()
             .map(|id| {
@@ -1386,7 +1421,11 @@ impl GraphStoreMut for LayeredStore {
             .set_edge_property_versioned(id, key, value, transaction_id);
     }
 
-    fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
+    fn remove_node_property(
+        &self,
+        id: NodeId,
+        key: &str,
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let _guard = self.merge_guard.read();
         self.ensure_in_overlay(id);
         self.overlay.load().remove_node_property(id, key)
@@ -1405,7 +1444,11 @@ impl GraphStoreMut for LayeredStore {
             .remove_node_property_versioned(id, key, transaction_id)
     }
 
-    fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value> {
+    fn remove_edge_property(
+        &self,
+        id: EdgeId,
+        key: &str,
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let _guard = self.merge_guard.read();
         self.ensure_edge_in_overlay(id);
         self.overlay.load().remove_edge_property(id, key)
@@ -1416,7 +1459,7 @@ impl GraphStoreMut for LayeredStore {
         id: EdgeId,
         key: &str,
         transaction_id: TransactionId,
-    ) -> Option<Value> {
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let _guard = self.merge_guard.read();
         self.ensure_edge_in_overlay(id);
         self.overlay
@@ -1572,6 +1615,52 @@ mod tests {
             .unwrap_or(0);
         let max_eid = 10u64; // edges start at 0 in LpgStore
         LayeredStore::new(compact, max_nid, max_eid).unwrap()
+    }
+
+    /// The fallible batch read reads what the batch read reads, from the
+    /// base and the overlay, and reports an overlay value spilled into a file
+    /// that cannot be read where the batch read reads it as absent (#566
+    /// `key=`).
+    #[cfg(all(feature = "lpg", not(feature = "temporal")))]
+    #[test]
+    fn the_fallible_batch_read_reports_an_overlay_value_it_cannot_read() {
+        use crate::graph::lpg::test_backing::MemoryBacking;
+
+        let layered = build_test_layered();
+        let persons = layered.nodes_by_label("Person");
+        let vincent = layered.create_node(&["Person"]);
+        layered.set_node_property(vincent, "name", Value::from("Vincent"));
+        let key = PropertyKey::new("name");
+        let ids = [persons[0], vincent, persons[1]];
+        let expected = vec![
+            Some(Value::from("Alix")),
+            Some(Value::from("Vincent")),
+            Some(Value::from("Gus")),
+        ];
+        assert_eq!(layered.get_node_property_batch(&ids, &key), expected);
+        assert_eq!(
+            layered.try_get_node_property_batch(&ids, &key).unwrap(),
+            expected
+        );
+
+        let overlay = layered.overlay_store();
+        let snapshot = overlay.node_property_column_entries(&key).unwrap();
+        let backing = MemoryBacking::of(&snapshot);
+        assert!(overlay.spill_node_property_column(&key, backing.clone(), &snapshot));
+        backing.fail_reads(true);
+        assert_eq!(
+            layered.get_node_property_batch(&ids, &key)[1],
+            None,
+            "the batch read reads Vincent's name as absent"
+        );
+        assert!(layered.try_get_node_property_batch(&ids, &key).is_err());
+        assert_eq!(
+            layered
+                .try_get_node_property_batch(&[persons[0], persons[1]], &key)
+                .unwrap(),
+            vec![Some(Value::from("Alix")), Some(Value::from("Gus"))],
+            "the base needs no read from the overlay's file"
+        );
     }
 
     #[test]
@@ -1852,7 +1941,7 @@ mod tests {
         );
 
         // Remove it (promotes to overlay first).
-        let removed = layered.remove_node_property(first, "age");
+        let removed = layered.remove_node_property(first, "age").unwrap();
         assert!(removed.is_some());
 
         // Should be gone now.
@@ -1871,7 +1960,7 @@ mod tests {
         let (_, eid) = edges[0];
 
         // Remove edge property (promotes edge and endpoints).
-        let removed = layered.remove_edge_property(eid, "since");
+        let removed = layered.remove_edge_property(eid, "since").unwrap();
         assert!(removed.is_some());
 
         // Should be gone now.
@@ -3469,7 +3558,9 @@ mod tests {
         let eid = layered.create_edge(django, paris, "VISITS");
         layered.set_edge_property(eid, "year", Value::Int64(2024));
 
-        let removed = layered.remove_edge_property_versioned(eid, "year", txn_id);
+        let removed = layered
+            .remove_edge_property_versioned(eid, "year", txn_id)
+            .unwrap();
         assert_eq!(removed, Some(Value::Int64(2024)));
         assert!(
             layered

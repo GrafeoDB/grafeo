@@ -172,7 +172,10 @@ reads one named graph.
 
 `key=` keys a result by a node property instead of the node id, and makes
 PageRank, Louvain and label propagation independent of the order the graph was
-loaded in (see [Determinism](../../algorithms/index.md#determinism)):
+loaded in (see [Determinism](../../algorithms/index.md#determinism)). Every
+node in scope (here every node of the projection) needs its own non-null value
+of the property: a node without one, or two nodes with the same value, raise
+`GrafeoError` before the algorithm runs:
 
 ```python
 scores = db.algorithms.pagerank(projection="people", directed=False, key="id")

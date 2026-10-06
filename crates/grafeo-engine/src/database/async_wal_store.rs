@@ -251,9 +251,10 @@ impl AsyncWalGraphStore {
     ///
     /// # Errors
     ///
-    /// Returns an error if WAL logging fails.
+    /// Returns an error if the value cannot be read (nothing changes then)
+    /// or WAL logging fails.
     pub async fn remove_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {
-        let removed = self.inner.remove_node_property(id, key);
+        let removed = self.inner.remove_node_property(id, key)?;
         if removed.is_some() {
             self.log_with_context(&WalRecord::RemoveNodeProperty {
                 id,
@@ -268,9 +269,10 @@ impl AsyncWalGraphStore {
     ///
     /// # Errors
     ///
-    /// Returns an error if WAL logging fails.
+    /// Returns an error if the value cannot be read (nothing changes then)
+    /// or WAL logging fails.
     pub async fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<Option<Value>> {
-        let removed = self.inner.remove_edge_property(id, key);
+        let removed = self.inner.remove_edge_property(id, key)?;
         if removed.is_some() {
             self.log_with_context(&WalRecord::RemoveEdgeProperty {
                 id,

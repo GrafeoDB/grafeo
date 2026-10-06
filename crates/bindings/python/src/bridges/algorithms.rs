@@ -11,9 +11,8 @@ use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use grafeo_adapters::plugins::algorithms;
-use grafeo_common::types::NodeId;
-use grafeo_common::types::Value;
+use grafeo_adapters::plugins::algorithms::{self, KeyOrderError};
+use grafeo_common::types::{NodeId, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 use grafeo_core::graph::GraphStoreSearch;
 use grafeo_engine::database::GrafeoDB;
@@ -21,30 +20,76 @@ use grafeo_engine::database::GrafeoDB;
 use crate::error::PyGrafeoError;
 use crate::types::PyValue;
 
-/// The nodes of a store in the order of a key (`key=`), with their values.
+/// The nodes of a store in the order of a key (`key=`), with their keys as
+/// Python objects.
 struct KeyOrder {
     nodes: Vec<NodeId>,
-    values: HashMap<NodeId, Value>,
+    keys: HashMap<NodeId, Py<PyAny>>,
 }
 
-/// The order of `key` over `store`, or `None` without a key. A node without
-/// the key, or two with equal values, is an error, raised before the
-/// algorithm runs.
-fn key_order(store: &dyn GraphStoreSearch, key: Option<&str>) -> PyResult<Option<KeyOrder>> {
+/// A `key=` that cannot order the nodes, as a `GrafeoError`.
+fn key_error(message: String) -> PyErr {
+    PyGrafeoError::from(Error::Query(QueryError::new(
+        QueryErrorKind::Semantic,
+        message,
+    )))
+    .into()
+}
+
+/// The order of `key` over `store`, or `None` without a key. Raised before
+/// the algorithm runs: a node without the key, two with equal values, a
+/// value Python cannot use as a dict key (a list, a map, a vector, a
+/// duration), and two values Python treats as the same key (`True` and `1`),
+/// whose results would otherwise land on one key. A value that cannot be read
+/// raises the read's error.
+fn key_order(
+    py: Python<'_>,
+    store: &dyn GraphStoreSearch,
+    key: Option<&str>,
+) -> PyResult<Option<KeyOrder>> {
     let Some(key) = key else {
         return Ok(None);
     };
-    let ordered = algorithms::order_by_key(store, key).map_err(|error| {
-        PyErr::from(PyGrafeoError::from(Error::Query(QueryError::new(
-            QueryErrorKind::Semantic,
-            error.to_string(),
-        ))))
+    let ordered = algorithms::order_by_key(store, key).map_err(|error| match &error {
+        KeyOrderError::Read { source, .. } => PyGrafeoError::Database {
+            message: error.to_string(),
+            code: Some(source.error_code()),
+        }
+        .into(),
+        KeyOrderError::Missing { .. } | KeyOrderError::Repeated { .. } => {
+            key_error(error.to_string())
+        }
     })?;
-    let nodes = ordered.iter().map(|(node, _)| *node).collect();
-    Ok(Some(KeyOrder {
-        nodes,
-        values: ordered.into_iter().collect(),
-    }))
+    // Each Python key, with the node that holds it.
+    let seen = PyDict::new(py);
+    let mut nodes = Vec::with_capacity(ordered.len());
+    let mut keys: HashMap<NodeId, Py<PyAny>> = HashMap::with_capacity(ordered.len());
+    for (node, value) in ordered {
+        let python_key = PyValue::to_py(&value, py).into_bound(py);
+        if python_key.hash().is_err() {
+            return Err(key_error(format!(
+                "node {} has a value for the key '{key}' that Python cannot use as a key ({}): \
+                 {value}",
+                node.as_u64(),
+                python_key.get_type().name()?
+            )));
+        }
+        if let Some(other) = seen.get_item(&python_key)? {
+            let other = NodeId::new(other.extract()?);
+            return Err(key_error(format!(
+                "nodes {} and {} have values for the key '{key}' that Python treats as the same \
+                 key: {} and {}",
+                other.as_u64(),
+                node.as_u64(),
+                keys[&other].bind(py).repr()?,
+                python_key.repr()?
+            )));
+        }
+        seen.set_item(&python_key, node.as_u64())?;
+        nodes.push(node);
+        keys.insert(node, python_key.unbind());
+    }
+    Ok(Some(KeyOrder { nodes, keys }))
 }
 
 /// A per-node result as a dict: by node id in node-id order, or with `key=`
@@ -63,7 +108,7 @@ where
         Some(order) => {
             for node in &order.nodes {
                 if let Some(value) = by_node.remove(node) {
-                    dict.set_item(PyValue::to_py(&order.values[node], py), value)?;
+                    dict.set_item(order.keys[node].bind(py), value)?;
                 }
             }
         }
@@ -90,7 +135,7 @@ fn node_list(
                 .nodes
                 .iter()
                 .filter(|node| members.contains(node))
-                .map(|node| PyValue::to_py(&order.values[node], py))
+                .map(|node| order.keys[node].clone_ref(py))
                 .collect();
             Ok(values.into_pyobject(py)?.into_any().unbind())
         }
@@ -113,11 +158,15 @@ fn node_list(
 /// `CALL grafeo.<algorithm>()`; `db.graph(name).algorithms` reads that graph.
 /// Every method takes a keyword-only `projection=` that names a projection
 /// (`create_projection()`) to read instead. The methods that return a value
-/// per node or a set of nodes also take `key=`: a node property every node in
-/// scope holds once (an id from outside the database), which keys the result
-/// instead of the node id. PageRank, Louvain and label propagation then also
-/// run in key order, so their results do not depend on the order the nodes
-/// and edges were inserted in; the others only change their keys.
+/// per node, the articulation points and the k-core also take `key=`: a node
+/// property every node in scope holds once (an id from outside the database),
+/// which keys the result instead of the node id. PageRank, Louvain and label
+/// propagation then also run in key order, so their results do not depend on
+/// the order the nodes and edges were inserted in; the others only change
+/// their keys. The key values must work as Python dict keys: strings,
+/// numbers, booleans, bytes, dates, times and datetimes do; a list, a map, a
+/// vector or a duration raises `GrafeoError`, and so do two values Python
+/// treats as the same key (`True` and `1`).
 #[pyclass(name = "Algorithms")]
 pub struct PyAlgorithms {
     db: Arc<RwLock<GrafeoDB>>,
@@ -258,7 +307,7 @@ impl PyAlgorithms {
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let order = key_order(&*store, key)?;
+        let order = key_order(py, &*store, key)?;
         let result = algorithms::connected_components(&*store);
         node_dict(py, result, order.as_ref())
     }
@@ -274,20 +323,28 @@ impl PyAlgorithms {
     /// Find strongly connected components.
     ///
     /// Returns:
-    ///     List of lists, each inner list is a strongly connected component
+    ///     List of lists, each inner list is a strongly connected component in
+    ///     node-id order
     #[pyo3(signature = (*, projection=None))]
     fn strongly_connected_components(&self, projection: Option<&str>) -> PyResult<Vec<Vec<u64>>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
         let result = algorithms::strongly_connected_components(&*store);
 
-        // Group nodes by component ID
+        // Group nodes by component ID, each component in node-id order (the
+        // result is a hash map, whose order changes from call to call).
         let mut grouped: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         for (node, comp_id) in result {
             grouped.entry(comp_id).or_default().push(node.0);
         }
 
-        Ok(grouped.into_values().collect())
+        Ok(grouped
+            .into_values()
+            .map(|mut component| {
+                component.sort_unstable();
+                component
+            })
+            .collect())
     }
 
     /// Topological sort of the graph.
@@ -579,7 +636,7 @@ impl PyAlgorithms {
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let order = key_order(&*store, key)?;
+        let order = key_order(py, &*store, key)?;
 
         if normalized {
             let result = algorithms::degree_centrality_normalized(&*store);
@@ -632,7 +689,7 @@ impl PyAlgorithms {
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let order = key_order(&*store, key)?;
+        let order = Python::attach(|py| key_order(py, &*store, key))?;
         let result = match &order {
             Some(order) => algorithms::pagerank_in_order(
                 &*store,
@@ -669,7 +726,7 @@ impl PyAlgorithms {
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let order = key_order(&*store, key)?;
+        let order = key_order(py, &*store, key)?;
         let result = algorithms::betweenness_centrality(&*store, normalized);
         node_dict(py, result, order.as_ref())
     }
@@ -696,7 +753,7 @@ impl PyAlgorithms {
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let order = key_order(&*store, key)?;
+        let order = key_order(py, &*store, key)?;
         let result = algorithms::closeness_centrality(&*store, wf_improved);
         node_dict(py, result, order.as_ref())
     }
@@ -729,7 +786,7 @@ impl PyAlgorithms {
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let order = key_order(&*store, key)?;
+        let order = key_order(py, &*store, key)?;
         let result = match &order {
             Some(order) => {
                 algorithms::label_propagation_in_order(&*store, &order.nodes, max_iterations)
@@ -764,7 +821,7 @@ impl PyAlgorithms {
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let order = key_order(&*store, key)?;
+        let order = key_order(py, &*store, key)?;
         let result = match &order {
             Some(order) => algorithms::louvain_in_order(&*store, &order.nodes, resolution),
             None => algorithms::louvain(&*store, resolution),
@@ -956,19 +1013,26 @@ impl PyAlgorithms {
     ///
     /// Args:
     ///     parallel: Enable parallel computation (default: True)
+    ///     key: A node property every node in scope holds, each with its own
+    ///         value (an id from outside the database). The per-node results
+    ///         are keyed by it instead of the node id, in key order. A node
+    ///         without it, or two with equal values, raise GrafeoError.
     ///
     /// Returns:
-    ///     Dict with 'coefficients', 'triangle_counts', 'total_triangles',
-    ///     and 'global_coefficient' keys
-    #[pyo3(signature = (parallel=true, *, projection=None))]
+    ///     Dict with 'coefficients' and 'triangle_counts' (node ID or key to
+    ///     value, in node-id or key order), 'total_triangles', and
+    ///     'global_coefficient' keys
+    #[pyo3(signature = (parallel=true, *, projection=None, key=None))]
     fn clustering_coefficient(
         &self,
         parallel: bool,
         projection: Option<&str>,
+        key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
+        let order = key_order(py, &*store, key)?;
 
         let result = if parallel {
             algorithms::clustering_coefficient_parallel(&*store, 50)
@@ -976,20 +1040,15 @@ impl PyAlgorithms {
             algorithms::clustering_coefficient(&*store)
         };
 
-        let coefficients: BTreeMap<u64, f64> = result
-            .coefficients
-            .into_iter()
-            .map(|(n, c)| (n.0, c))
-            .collect();
-        let triangle_counts: BTreeMap<u64, u64> = result
-            .triangle_counts
-            .into_iter()
-            .map(|(n, t)| (n.0, t))
-            .collect();
-
         let dict = PyDict::new(py);
-        dict.set_item("coefficients", coefficients.into_pyobject(py)?)?;
-        dict.set_item("triangle_counts", triangle_counts.into_pyobject(py)?)?;
+        dict.set_item(
+            "coefficients",
+            node_dict(py, result.coefficients, order.as_ref())?,
+        )?;
+        dict.set_item(
+            "triangle_counts",
+            node_dict(py, result.triangle_counts, order.as_ref())?,
+        )?;
         dict.set_item("total_triangles", result.total_triangles)?;
         dict.set_item("global_coefficient", result.global_coefficient)?;
 
@@ -1015,7 +1074,7 @@ impl PyAlgorithms {
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let order = key_order(&*store, key)?;
+        let order = key_order(py, &*store, key)?;
         let result = algorithms::triangle_count(&*store);
         node_dict(py, result, order.as_ref())
     }
@@ -1064,7 +1123,7 @@ impl PyAlgorithms {
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let order = key_order(&*store, key)?;
+        let order = key_order(py, &*store, key)?;
         let result = algorithms::local_clustering_coefficient(&*store);
         node_dict(py, result, order.as_ref())
     }
@@ -1093,7 +1152,7 @@ impl PyAlgorithms {
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let order = key_order(&*store, key)?;
+        let order = key_order(py, &*store, key)?;
         let result = algorithms::articulation_points(&*store);
         node_list(py, result, order.as_ref())
     }
@@ -1137,7 +1196,7 @@ impl PyAlgorithms {
     ) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
-        let order = key_order(&*store, key)?;
+        let order = key_order(py, &*store, key)?;
         let result = algorithms::kcore_decomposition(&*store);
 
         if let Some(k_val) = k {

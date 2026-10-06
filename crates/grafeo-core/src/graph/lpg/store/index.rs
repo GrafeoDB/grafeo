@@ -398,14 +398,17 @@ impl LpgStore {
         }
     }
 
-    /// Updates property indexes when a property is removed.
-    pub(super) fn update_property_index_on_remove(&self, node_id: NodeId, key: &PropertyKey) {
+    /// Updates property indexes when a property whose value was `old_value`
+    /// is removed.
+    pub(super) fn update_property_index_on_remove(
+        &self,
+        node_id: NodeId,
+        key: &PropertyKey,
+        old_value: &Value,
+    ) {
         let indexes = self.property_indexes.read();
         if let Some(index) = indexes.get(key) {
-            // Get old value to remove from index
-            if let Some(old_value) = self.node_properties.get(node_id, key) {
-                Self::remove_index_entry(index, &HashableValue::new(old_value), node_id);
-            }
+            Self::remove_index_entry(index, &HashableValue::new(old_value.clone()), node_id);
         }
     }
 

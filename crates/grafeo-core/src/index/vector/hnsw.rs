@@ -754,11 +754,9 @@ impl HnswIndex {
         let ef_search = ef.max(k);
         let candidates = self.search_layer(&nodes, accessor, query, current_ep, ef_search, 0);
 
-        // Return top k, never a node without a vector (a topology saved while
-        // its values could not be read can still name one, #594)
+        // Return top k: the results hold only nodes with a vector (#594)
         candidates
             .into_iter()
-            .filter(|n| accessor.with_vector(n.id, &mut |_| {}))
             .take(k)
             .map(|n| (n.id, n.distance))
             .collect()
@@ -850,10 +848,9 @@ impl HnswIndex {
         let candidates = self
             .search_layer_filtered(&nodes, accessor, query, current_ep, ef_search, 0, allowlist);
 
-        // Return top k, never a node without a vector (#594)
+        // Return top k: the results hold only nodes with a vector (#594)
         candidates
             .into_iter()
-            .filter(|n| accessor.with_vector(n.id, &mut |_| {}))
             .take(k)
             .map(|n| (n.id, n.distance))
             .collect()
@@ -948,21 +945,22 @@ impl HnswIndex {
         ef: usize,
         layer: usize,
     ) -> Vec<Neighbor> {
-        let ep_dist = self.node_distance(accessor, query, ep);
+        // A node without a vector is explored (its links lead on) but never
+        // a result: the search reads no result twice to tell (#594).
+        let ep_dist = self.distance_to(accessor, query, ep);
 
         // Min-heap of candidates to explore
         let mut candidates: BinaryHeap<Neighbor> = BinaryHeap::new();
         candidates.push(Neighbor {
             id: ep,
-            distance: ep_dist,
+            distance: ep_dist.unwrap_or(f32::MAX),
         });
 
         // Max-heap of current best (furthest = top)
         let mut results: BinaryHeap<FurthestCandidate> = BinaryHeap::new();
-        results.push(FurthestCandidate {
-            id: ep,
-            distance: ep_dist,
-        });
+        if let Some(distance) = ep_dist {
+            results.push(FurthestCandidate { id: ep, distance });
+        }
 
         let mut visited: HashSet<NodeId> =
             HashSet::with_capacity(nodes.len().min(ef.saturating_mul(2)));
@@ -985,7 +983,17 @@ impl HnswIndex {
                     }
                     visited.insert(neighbor);
 
-                    let dist = self.node_distance(accessor, query, neighbor);
+                    let Some(dist) = self.distance_to(accessor, query, neighbor) else {
+                        // No vector: explored while there is room, as the
+                        // furthest of all, never a result.
+                        if results.len() < ef {
+                            candidates.push(Neighbor {
+                                id: neighbor,
+                                distance: f32::MAX,
+                            });
+                        }
+                        continue;
+                    };
 
                     // Add to results if closer than furthest, or if we have room
                     let should_add =
@@ -1038,7 +1046,9 @@ impl HnswIndex {
         layer: usize,
         allowlist: &HashSet<NodeId>,
     ) -> Vec<Neighbor> {
-        let ep_dist = self.node_distance(accessor, query, ep);
+        // A node without a vector is explored but never a result (#594).
+        let ep_vector = self.distance_to(accessor, query, ep);
+        let ep_dist = ep_vector.unwrap_or(f32::MAX);
 
         // Min-heap of candidates to explore
         let mut candidates: BinaryHeap<Neighbor> = BinaryHeap::new();
@@ -1056,7 +1066,7 @@ impl HnswIndex {
 
         // results only holds allowlisted nodes
         let mut results: BinaryHeap<FurthestCandidate> = BinaryHeap::new();
-        if allowlist.contains(&ep) {
+        if ep_vector.is_some() && allowlist.contains(&ep) {
             results.push(FurthestCandidate {
                 id: ep,
                 distance: ep_dist,
@@ -1084,7 +1094,8 @@ impl HnswIndex {
                     }
                     visited.insert(neighbor);
 
-                    let dist = self.node_distance(accessor, query, neighbor);
+                    let vector = self.distance_to(accessor, query, neighbor);
+                    let dist = vector.unwrap_or(f32::MAX);
 
                     // Update best_seen for traversal guidance
                     let should_explore = best_seen.len() < ef
@@ -1104,8 +1115,8 @@ impl HnswIndex {
                         }
                     }
 
-                    // Only add to results if in allowlist
-                    if allowlist.contains(&neighbor) {
+                    // Only add to results if in allowlist, with a vector
+                    if vector.is_some() && allowlist.contains(&neighbor) {
                         let should_add = results.len() < ef
                             || results.peek().map_or(true, |f| dist < f.distance);
                         if should_add {
@@ -1198,9 +1209,21 @@ impl HnswIndex {
     /// Computes the distance between a query vector and a stored node, reading
     /// the stored vector in place ([`VectorAccessor::with_vector`]).
     fn node_distance(&self, accessor: &impl VectorAccessor, query: &[f32], id: NodeId) -> f32 {
-        let mut distance = f32::MAX;
+        self.distance_to(accessor, query, id).unwrap_or(f32::MAX)
+    }
+
+    /// The distance from `query` to the vector of `id`, or `None` when the
+    /// node has no vector (a topology saved while its values could not be
+    /// read can still name one, #594): one read tells both.
+    fn distance_to(
+        &self,
+        accessor: &impl VectorAccessor,
+        query: &[f32],
+        id: NodeId,
+    ) -> Option<f32> {
+        let mut distance = None;
         accessor.with_vector(id, &mut |vector| {
-            distance = self.vector_distance(query, vector);
+            distance = Some(self.vector_distance(query, vector));
         });
         distance
     }
@@ -1464,6 +1487,71 @@ mod tests {
     /// Builds an accessor backed by a HashMap.
     fn make_accessor(map: &HashMap<NodeId, Arc<[f32]>>) -> impl VectorAccessor + '_ {
         move |id: NodeId| -> Option<Arc<[f32]>> { map.get(&id).cloned() }
+    }
+
+    /// A search reads each vector it returns once: the read that gives a
+    /// candidate its distance also tells whether it has a vector, so no
+    /// result is read again (a spilled vector is a read of its file, #594).
+    #[test]
+    fn a_search_reads_each_returned_vector_once() {
+        let mut config = HnswConfig::new(2, DistanceMetric::Euclidean);
+        // Every node on layer 0, where a search reads each node once.
+        config.ml = 0.0;
+        let index = HnswIndex::with_seed(config, 3);
+        let map: HashMap<NodeId, Arc<[f32]>> = (1..=19_u64)
+            .map(|i| (NodeId::new(i), vec![i as f32, 3.0].into()))
+            .collect();
+        let reads = std::sync::Mutex::new(HashMap::<NodeId, usize>::new());
+        let counting = |id: NodeId| -> Option<Arc<[f32]>> {
+            *reads.lock().unwrap().entry(id).or_default() += 1;
+            map.get(&id).cloned()
+        };
+        for (id, vector) in &map {
+            index.insert(*id, vector, &counting);
+        }
+        reads.lock().unwrap().clear();
+
+        let hits = index.search(&[3.0, 3.0], 3, &counting);
+        assert_eq!(hits.len(), 3);
+        let reads = reads.lock().unwrap();
+        for (id, _) in &hits {
+            assert_eq!(reads[id], 1, "{id:?} was read more than once");
+        }
+    }
+
+    /// A node the topology names but whose vector is gone (a topology saved
+    /// while its values could not be read) is never a result, in a plain or
+    /// a filtered search, and takes no result's place (#594).
+    #[test]
+    fn a_node_without_a_vector_is_never_a_result() {
+        let mut config = HnswConfig::new(2, DistanceMetric::Euclidean);
+        config.ml = 0.0;
+        let index = HnswIndex::with_seed(config, 19);
+        let mut map: HashMap<NodeId, Arc<[f32]>> = (1..=19_u64)
+            .map(|i| (NodeId::new(i), vec![i as f32, 3.0].into()))
+            .collect();
+        {
+            let accessor = make_accessor(&map);
+            for (id, vector) in &map {
+                index.insert(*id, vector, &accessor);
+            }
+        }
+        map.remove(&NodeId::new(3));
+        let accessor = make_accessor(&map);
+
+        let hits = index.search(&[3.0, 3.0], 3, &accessor);
+        let ids: Vec<u64> = hits.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids.len(), 3, "{ids:?}");
+        assert!(!ids.contains(&3), "{ids:?}");
+
+        let allowlist: HashSet<NodeId> = [2, 3, 4].into_iter().map(NodeId::new).collect();
+        let mut filtered: Vec<u64> = index
+            .search_with_filter(&[3.0, 3.0], 3, &allowlist, &accessor)
+            .iter()
+            .map(|(id, _)| id.as_u64())
+            .collect();
+        filtered.sort_unstable();
+        assert_eq!(filtered, vec![2, 4]);
     }
 
     #[test]

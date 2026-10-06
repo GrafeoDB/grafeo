@@ -20,40 +20,46 @@ const LPG_SECTION_VERSION: u8 = 2;
 
 // ── Collection helpers ──────────────────────────────────────────────
 
-/// The nodes of `store` as the section writes them. A spilled property value
-/// that cannot be read fails the checkpoint instead of leaving the file
-/// without it.
+/// The nodes of `store` as the section writes them, read one at a time. A
+/// node record or a spilled property value that cannot be read fails the
+/// checkpoint instead of leaving the file without it.
 fn collect_block_nodes(store: &LpgStore) -> Result<Vec<BlockNode>> {
-    let mut nodes: Vec<BlockNode> = store
-        .try_all_nodes()?
-        .into_iter()
-        .map(|n| {
-            #[cfg(feature = "temporal")]
-            let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = store
-                .node_property_history(n.id)
-                .into_iter()
-                .map(|(k, entries)| (k.to_string(), entries))
-                .collect();
+    // With `temporal` the section holds each property's history, read below:
+    // the current values are not read.
+    #[cfg(feature = "temporal")]
+    let source = store
+        .try_nodes_without_properties()?
+        .map(Ok::<_, grafeo_common::utils::error::Error>);
+    #[cfg(not(feature = "temporal"))]
+    let source = store.try_nodes()?;
+    let mut nodes: Vec<BlockNode> = Vec::new();
+    for n in source {
+        let n = n?;
+        #[cfg(feature = "temporal")]
+        let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = store
+            .node_property_history(n.id)
+            .into_iter()
+            .map(|(k, entries)| (k.to_string(), entries))
+            .collect();
 
-            #[cfg(not(feature = "temporal"))]
-            let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = n
-                .properties
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), vec![(EpochId::new(0), v)]))
-                .collect();
+        #[cfg(not(feature = "temporal"))]
+        let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = n
+            .properties
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), vec![(EpochId::new(0), v)]))
+            .collect();
 
-            properties.sort_by(|(a, _), (b, _)| a.cmp(b));
+        properties.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-            let mut labels: Vec<String> = n.labels.iter().map(|l| l.to_string()).collect();
-            labels.sort();
+        let mut labels: Vec<String> = n.labels.iter().map(|l| l.to_string()).collect();
+        labels.sort();
 
-            BlockNode {
-                id: n.id,
-                labels,
-                properties,
-            }
-        })
-        .collect();
+        nodes.push(BlockNode {
+            id: n.id,
+            labels,
+            properties,
+        });
+    }
     nodes.sort_by_key(|n| n.id);
     Ok(nodes)
 }
@@ -245,7 +251,7 @@ mod tests {
             &["Item"],
             [("embedding", Value::Vector(vec![3.0, 19.0].into()))],
         );
-        let snapshot = store.node_property_column_entries(&key);
+        let snapshot = store.node_property_column_entries(&key).unwrap();
         let backing = MemoryBacking::of(&snapshot);
         assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
 

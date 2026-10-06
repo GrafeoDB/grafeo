@@ -86,3 +86,32 @@ def test_communities_are_numbered_by_their_smallest_node():
     for _ in range(5):
         labels = db.algorithms.label_propagation()
         assert [labels[node] for node in ids] == [0, 1, 0, 1, 0, 1]
+
+
+def two_rings():
+    """Two rings of 19 nodes, each strongly connected (a step of 3 visits every
+    node of a ring of 19), and so also two connected components."""
+    db = grafeo.GrafeoDB()
+    for _ in range(2):
+        ids = [db.create_node(["N"], {}).id for _ in range(19)]
+        for i in range(19):
+            db.create_edge(ids[i], ids[(i + 3) % 19], "E", {})
+    return db
+
+
+def test_component_node_lists_come_in_node_id_order():
+    """The node list of each component is in node-id order, the same every
+    call, not in the order of the hash map the components come from."""
+    db = two_rings()
+    first = db.algorithms.strongly_connected_components()
+    assert sorted(len(component) for component in first) == [19, 19]
+    for _ in range(3):
+        components = db.algorithms.strongly_connected_components()
+        assert components == first
+        assert all(component == sorted(component) for component in components), components
+    weak = db.as_networkx().connected_components()
+    assert [len(component) for component in weak] == [19, 19]
+    for _ in range(3):
+        again = db.as_networkx().connected_components()
+        assert again == weak
+        assert all(component == sorted(component) for component in again), again

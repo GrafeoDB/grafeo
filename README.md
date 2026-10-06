@@ -1,5 +1,5 @@
-[![CI](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml/badge.svg)](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml)
-[![grafeo.dev](https://github.com/GrafeoDB/grafeo/actions/workflows/docs.yml/badge.svg)](https://grafeo.dev)
+[![CI](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![grafeo.dev](https://github.com/GrafeoDB/grafeo/actions/workflows/docs.yml/badge.svg?branch=main&event=push)](https://grafeo.dev)
 [![codecov](https://codecov.io/gh/GrafeoDB/grafeo/graph/badge.svg)](https://codecov.io/gh/GrafeoDB/grafeo)
 [![CodSpeed Badge](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/GrafeoDB/grafeo?utm_source=badge)
 [![Crates.io](https://img.shields.io/crates/v/grafeo.svg?color=00ADD8)](https://crates.io/crates/grafeo)

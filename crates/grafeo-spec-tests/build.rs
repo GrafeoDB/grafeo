@@ -87,7 +87,7 @@ struct TestCase {
     query: Option<String>,
     statements: Vec<String>,
     setup: Vec<String>,
-    params: HashMap<String, String>,
+    params: HashMap<String, ParamText>,
     tags: Vec<String>,
     requires: Vec<String>,
     iso: Vec<String>,
@@ -96,6 +96,18 @@ struct TestCase {
     skip: Option<String>,
     expect: Expect,
     variants: HashMap<String, String>,
+}
+
+/// A parameter value as the .gtest file writes it. Whether it was quoted
+/// decides its type, so the quotes are not simply dropped: see
+/// `param_value_code` for the rule every runner follows.
+#[derive(Debug)]
+enum ParamText {
+    /// Written in quotes: a string, whatever it reads like. Holds the text
+    /// without the quotes, YAML-level escapes resolved.
+    Quoted(String),
+    /// Written bare: JSON, a number, a boolean or a string.
+    Bare(String),
 }
 
 #[derive(Debug, Default)]
@@ -456,7 +468,7 @@ fn parse_string_list(lines: &[&str], idx: &mut usize) -> Vec<String> {
     items
 }
 
-fn parse_params(lines: &[&str], idx: &mut usize) -> HashMap<String, String> {
+fn parse_params(lines: &[&str], idx: &mut usize) -> HashMap<String, ParamText> {
     let mut params = HashMap::new();
 
     while *idx < lines.len() {
@@ -471,7 +483,12 @@ fn parse_params(lines: &[&str], idx: &mut usize) -> HashMap<String, String> {
             let indent = lines[*idx].len() - lines[*idx].trim_start().len();
             if indent >= 6 {
                 // Still in params
-                params.insert(key.to_string(), unquote(value));
+                let text = if is_quoted(value) {
+                    ParamText::Quoted(unquote(value))
+                } else {
+                    ParamText::Bare(value.to_string())
+                };
+                params.insert(key.to_string(), text);
                 *idx += 1;
             } else {
                 break;
@@ -539,9 +556,16 @@ fn parse_kv(s: &str) -> Option<(&str, &str)> {
     None
 }
 
+/// Whether `s` is written in single or double quotes.
+fn is_quoted(s: &str) -> bool {
+    let s = s.trim();
+    s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+}
+
 fn unquote(s: &str) -> String {
     let s = s.trim();
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+    if is_quoted(s) {
         let inner = &s[1..s.len() - 1];
         // Only unescape YAML-level escapes (quotes and backslashes).
         // Do NOT process \n or \t here: those are GQL string escapes
@@ -1017,7 +1041,7 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
         // Build params once before the loop so fire-and-forget statements
         // can use them too (e.g. INSERT/SET with $param).
         if has_params {
-            generate_params_hashmap(output, &tc.params);
+            generate_params_hashmap(output, tc);
         }
 
         // Execute all but last (with params so $param in INSERT/SET works)
@@ -1051,57 +1075,95 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
     writeln!(output).unwrap();
 }
 
-fn generate_params_hashmap(output: &mut String, params: &HashMap<String, String>) {
+fn generate_params_hashmap(output: &mut String, tc: &TestCase) {
     writeln!(output, "        let params = {{").unwrap();
     writeln!(
         output,
         "            let mut m = std::collections::HashMap::new();"
     )
     .unwrap();
-    for (key, value) in params {
-        let trimmed = value.trim();
-        if trimmed.starts_with('[') || trimmed.starts_with('{') {
-            let code =
-                json_param_to_value_code(trimmed).unwrap_or_else(|e| panic!("param '{key}': {e}"));
-            writeln!(
-                output,
-                "            m.insert(\"{}\".to_string(), {code});",
-                escape_rust_string(key)
-            )
-            .unwrap();
-        } else if let Ok(n) = value.parse::<i64>() {
-            writeln!(
-                output,
-                "            m.insert(\"{}\".to_string(), grafeo_common::types::Value::Int64({n}));",
-                escape_rust_string(key)
-            )
-            .unwrap();
-        } else if let Ok(f) = value.parse::<f64>() {
-            writeln!(
-                output,
-                "            m.insert(\"{}\".to_string(), grafeo_common::types::Value::Float64({f}_f64));",
-                escape_rust_string(key)
-            )
-            .unwrap();
-        } else if value == "true" || value == "false" {
-            writeln!(
-                output,
-                "            m.insert(\"{}\".to_string(), grafeo_common::types::Value::Bool({value}));",
-                escape_rust_string(key)
-            )
-            .unwrap();
-        } else {
-            writeln!(
-                output,
-                "            m.insert(\"{}\".to_string(), grafeo_common::types::Value::String(\"{}\".into()));",
-                escape_rust_string(key),
-                escape_rust_string(value)
-            )
-            .unwrap();
-        }
+    for (key, text) in &tc.params {
+        let code = param_value_code(text)
+            .unwrap_or_else(|e| panic!("test '{}', param '{key}': {e}", tc.name));
+        writeln!(
+            output,
+            "            m.insert(\"{}\".to_string(), {code});",
+            escape_rust_string(key)
+        )
+        .unwrap();
     }
     writeln!(output, "            m").unwrap();
     writeln!(output, "        }};").unwrap();
+}
+
+/// Rust code that builds the `Value` for a parameter, by the rule every runner
+/// follows (this runner is the reference): a quoted value is a string, whatever
+/// it reads like; a bare value starting with `[` or `{` is JSON; a bare decimal
+/// integer that fits `i64` is an `Int64` and any other bare decimal number a
+/// `Float64`; a bare `true` or `false` is a `Bool`; any other bare value is a
+/// string. `inf`, `NaN`, `0x1F` and `1_000` are strings: none of them is a
+/// decimal number.
+fn param_value_code(param: &ParamText) -> Result<String, String> {
+    const VALUE: &str = "grafeo_common::types::Value";
+    let text = match param {
+        ParamText::Quoted(text) => {
+            return Ok(format!(
+                "{VALUE}::String(\"{}\".into())",
+                escape_rust_string(text)
+            ));
+        }
+        ParamText::Bare(text) => text.trim(),
+    };
+    if text.starts_with('[') || text.starts_with('{') {
+        return json_param_to_value_code(text);
+    }
+    if is_decimal_integer(text)
+        && let Ok(n) = text.parse::<i64>()
+    {
+        return Ok(format!("{VALUE}::Int64({n})"));
+    }
+    if is_decimal_number(text) {
+        let f: f64 = text
+            .parse()
+            .map_err(|e| format!("`{text}` is not a number: {e}"))?;
+        if !f.is_finite() {
+            return Err(format!("`{text}` is out of the f64 range"));
+        }
+        return Ok(format!("{VALUE}::Float64({f:?}_f64)"));
+    }
+    if text == "true" || text == "false" {
+        return Ok(format!("{VALUE}::Bool({text})"));
+    }
+    Ok(format!(
+        "{VALUE}::String(\"{}\".into())",
+        escape_rust_string(text)
+    ))
+}
+
+/// `[+-]?[0-9]+`: an integer as every runner reads it (no `_`, no hex prefix).
+fn is_decimal_integer(text: &str) -> bool {
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?`: a number as every
+/// runner reads it. It leaves out the `inf`, `infinity` and `NaN` that
+/// `f64::from_str` also accepts.
+fn is_decimal_number(text: &str) -> bool {
+    let all_digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
+        Some(at) => (&unsigned[..at], Some(&unsigned[at + 1..])),
+        None => (unsigned, None),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let mantissa_ok =
+        (!whole.is_empty() || !fraction.is_empty()) && all_digits(whole) && all_digits(fraction);
+    let exponent_ok = exponent.is_none_or(|e| {
+        let digits = e.strip_prefix(['+', '-']).unwrap_or(e);
+        !digits.is_empty() && all_digits(digits)
+    });
+    mantissa_ok && exponent_ok
 }
 
 /// Rust code that builds the `Value` for a param written as a JSON list or map
@@ -1210,19 +1272,41 @@ fn json_value_code(chars: &[char], pos: &mut usize) -> Result<String, String> {
             match word.as_str() {
                 "true" | "false" => Ok(format!("{VALUE}::Bool({word})")),
                 "null" => Ok(format!("{VALUE}::Null")),
-                _ => {
+                _ if is_json_number(&word) => {
                     if let Ok(n) = word.parse::<i64>() {
                         Ok(format!("{VALUE}::Int64({n})"))
-                    } else if let Ok(f) = word.parse::<f64>() {
-                        Ok(format!("{VALUE}::Float64({f:?}_f64)"))
                     } else {
-                        Err(format!("not a JSON value: `{word}`"))
+                        match word.parse::<f64>() {
+                            Ok(f) if f.is_finite() => Ok(format!("{VALUE}::Float64({f:?}_f64)")),
+                            _ => Err(format!("`{word}` is out of the f64 range")),
+                        }
                     }
                 }
+                _ => Err(format!("not a JSON value: `{word}`")),
             }
         }
         None => Err("unexpected end of the JSON value".to_string()),
     }
+}
+
+/// `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`: a JSON number. Stricter
+/// than `is_decimal_number` (no `+`, no bare `.`, no leading zero), so a list
+/// this runner accepts parses in every runner's JSON reader too.
+fn is_json_number(word: &str) -> bool {
+    let all_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let unsigned = word.strip_prefix('-').unwrap_or(word);
+    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
+        Some(at) => (&unsigned[..at], Some(&unsigned[at + 1..])),
+        None => (unsigned, None),
+    };
+    let (whole, fraction) = match mantissa.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (mantissa, None),
+    };
+    let whole_ok = all_digits(whole) && (whole == "0" || !whole.starts_with('0'));
+    let fraction_ok = fraction.is_none_or(all_digits);
+    let exponent_ok = exponent.is_none_or(|e| all_digits(e.strip_prefix(['+', '-']).unwrap_or(e)));
+    whole_ok && fraction_ok && exponent_ok
 }
 
 /// Reads a JSON string starting at the opening quote.
@@ -1251,16 +1335,7 @@ fn json_string(chars: &[char], pos: &mut usize) -> Result<String, String> {
                     Some('t') => text.push('\t'),
                     Some('b') => text.push('\u{8}'),
                     Some('f') => text.push('\u{c}'),
-                    Some('u') => {
-                        let hex: String = chars.get(*pos..*pos + 4).unwrap_or(&[]).iter().collect();
-                        let code = u32::from_str_radix(&hex, 16)
-                            .map_err(|_| format!("bad \\u escape `{hex}`"))?;
-                        text.push(
-                            char::from_u32(code)
-                                .ok_or_else(|| format!("bad \\u escape `{hex}`"))?,
-                        );
-                        *pos += 4;
-                    }
+                    Some('u') => text.push(json_unicode_escape(chars, pos)?),
                     _ => return Err(format!("bad escape at {pos}")),
                 }
             }
@@ -1270,6 +1345,48 @@ fn json_string(chars: &[char], pos: &mut usize) -> Result<String, String> {
             }
         }
     }
+}
+
+/// Reads the four hex digits of a `\u` escape at `pos` (just past the `u`).
+/// JSON writes a character outside the Basic Multilingual Plane as a UTF-16
+/// surrogate pair (`\uD83C\uDF37`): a high surrogate must be followed by a
+/// `\u` escape of a low one, and the two make one character.
+fn json_unicode_escape(chars: &[char], pos: &mut usize) -> Result<char, String> {
+    let high = json_hex4(chars, pos)?;
+    let code = match high {
+        0xD800..=0xDBFF => {
+            if chars.get(*pos) != Some(&'\\') || chars.get(*pos + 1) != Some(&'u') {
+                return Err(format!(
+                    "\\u{high:04X} is a high surrogate without a low one after it"
+                ));
+            }
+            *pos += 2;
+            let low = json_hex4(chars, pos)?;
+            if !(0xDC00..=0xDFFF).contains(&low) {
+                return Err(format!(
+                    "\\u{high:04X} is followed by \\u{low:04X}, not by a low surrogate"
+                ));
+            }
+            0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+        }
+        0xDC00..=0xDFFF => {
+            return Err(format!(
+                "\\u{high:04X} is a low surrogate without a high one before it"
+            ));
+        }
+        _ => high,
+    };
+    char::from_u32(code).ok_or_else(|| format!("\\u escape {code:X} is not a character"))
+}
+
+/// Reads four hex digits at `pos` and moves past them.
+fn json_hex4(chars: &[char], pos: &mut usize) -> Result<u32, String> {
+    let hex: String = chars.get(*pos..*pos + 4).unwrap_or(&[]).iter().collect();
+    if hex.len() != 4 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("bad \\u escape `{hex}`"));
+    }
+    *pos += 4;
+    u32::from_str_radix(&hex, 16).map_err(|_| format!("bad \\u escape `{hex}`"))
 }
 
 fn generate_execute_and_assert(
@@ -1286,7 +1403,7 @@ fn generate_execute_and_assert(
     // Build params HashMap if test has parameters and not already emitted
     // (multi-statement tests emit params before the fire-and-forget loop).
     if has_params && !params_already_emitted {
-        generate_params_hashmap(output, &tc.params);
+        generate_params_hashmap(output, tc);
     }
 
     // Error case

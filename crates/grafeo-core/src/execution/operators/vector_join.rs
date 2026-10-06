@@ -503,7 +503,7 @@ mod tests {
             }
         }
         let key = PropertyKey::new("embedding");
-        let snapshot = lpg.node_property_column_entries(&key);
+        let snapshot = lpg.node_property_column_entries(&key).unwrap();
         let backing = MemoryBacking::of(&snapshot);
         assert!(lpg.spill_node_property_column(&key, backing.clone(), &snapshot));
 

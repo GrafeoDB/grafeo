@@ -160,7 +160,9 @@ impl GrafeoDB {
     /// Returns the number of triples that were newly inserted.
     ///
     /// While it changes the store, commits, new transactions and checkpoints
-    /// wait for it; `triples` is collected before, without blocking anything.
+    /// wait for it; `triples` is collected before, without blocking anything,
+    /// and only once the database takes the insert: a refused call never
+    /// pulls the iterator.
     ///
     /// # Errors
     ///
@@ -172,8 +174,10 @@ impl GrafeoDB {
         &self,
         triples: impl IntoIterator<Item = grafeo_core::graph::rdf::Triple>,
     ) -> Result<usize> {
-        // Collected before commits are held off: the caller's iterator may
-        // parse or compute the triples.
+        // Refused before the iterator is pulled: it may parse or compute the
+        // triples, which a refused call should not wait for.
+        self.check_import_allowed()?;
+        // Collected before commits are held off, for the same reason.
         let triples: Vec<_> = triples.into_iter().collect();
         let _held = self.hold_commits_for_import()?;
         Ok(self.rdf_store.batch_insert(triples))

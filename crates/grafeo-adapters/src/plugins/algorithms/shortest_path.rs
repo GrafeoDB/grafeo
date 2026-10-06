@@ -681,6 +681,7 @@ impl GraphAlgorithm for DijkstraAlgorithm {
                 result.add_row(vec![Value::Int64(node.0 as i64), Value::Float64(distance)]);
             }
 
+            result.sort_by_id_columns(1);
             Ok(result)
         }
     }
@@ -766,6 +767,7 @@ impl GraphAlgorithm for SsspAlgorithm {
             result.add_row(vec![Value::Int64(node.0 as i64), Value::Float64(distance)]);
         }
 
+        result.sort_by_id_columns(1);
         Ok(result)
     }
 }
@@ -828,6 +830,7 @@ impl_algorithm! {
             ]);
         }
 
+        result.sort_by_id_columns(1);
         Ok(result)
     }
 }

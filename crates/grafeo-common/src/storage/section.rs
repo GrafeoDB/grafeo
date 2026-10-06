@@ -85,6 +85,30 @@ impl SectionType {
         }
     }
 
+    /// Whether a reader that does not know this section type may skip it (and
+    /// its next checkpoint drop it). `false` for every type of this release:
+    /// they are all required.
+    ///
+    /// The container writes this into the directory entry of every chunk of
+    /// the section, so a reader that does not know the type decides from the
+    /// entry alone. A type added later says here whether an older reader may
+    /// open a file without it.
+    #[must_use]
+    pub const fn is_optional(self) -> bool {
+        // No wildcard: a new section type must say which it is.
+        match self {
+            Self::Catalog
+            | Self::LpgStore
+            | Self::RdfStore
+            | Self::CompactStore
+            | Self::OverlayDeletions
+            | Self::VectorStore
+            | Self::TextIndex
+            | Self::RdfRing
+            | Self::PropertyIndex => false,
+        }
+    }
+
     /// Decodes a section type from its on-disk byte, or `None` for an unknown one.
     #[must_use]
     pub const fn from_u8(byte: u8) -> Option<Self> {
@@ -247,6 +271,19 @@ impl ChunkKind {
     #[must_use]
     pub const fn to_byte(self) -> u8 {
         self as u8
+    }
+
+    /// Whether a reader that knows the section but not this chunk kind may
+    /// skip the chunk. `false` for every kind of this release.
+    ///
+    /// The container writes this into the chunk's directory entry, so a
+    /// reader that does not know the kind decides from the entry alone.
+    #[must_use]
+    pub const fn is_optional(self) -> bool {
+        // No wildcard: a new chunk kind must say which it is.
+        match self {
+            Self::Raw | Self::Meta | Self::Column | Self::History | Self::Stream => false,
+        }
     }
 
     /// Decodes an on-disk byte, or `None` for an unknown kind.
@@ -713,6 +750,22 @@ mod tests {
             EVERY_SECTION_TYPE.len(),
             "exactly one byte per section type decodes"
         );
+    }
+
+    #[test]
+    fn every_current_section_type_and_chunk_kind_is_required() {
+        for section_type in EVERY_SECTION_TYPE {
+            assert!(!section_type.is_optional(), "{section_type:?}");
+        }
+        for kind in [
+            ChunkKind::Raw,
+            ChunkKind::Meta,
+            ChunkKind::Column,
+            ChunkKind::History,
+            ChunkKind::Stream,
+        ] {
+            assert!(!kind.is_optional(), "{kind:?}");
+        }
     }
 
     #[test]

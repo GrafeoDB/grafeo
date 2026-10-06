@@ -1,8 +1,10 @@
-//! Tests for label mutation rollback behavior.
+//! Tests for label mutations in transactions.
 //!
 //! Verifies that ADD/REMOVE label operations are correctly undone
-//! when a transaction is rolled back.
+//! when a transaction is rolled back, and that they reach a node
+//! created in the same transaction.
 
+use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
 #[test]
@@ -171,4 +173,103 @@ fn test_label_remove_undo_on_transaction_rollback() {
         1,
         "Label should be restored after rollback"
     );
+}
+
+// ============================================================================
+// Label changes on a node created in the same transaction
+// ============================================================================
+
+/// The labels of the node named `name`, sorted.
+fn labels_of(session: &grafeo_engine::Session, name: &str) -> Vec<Value> {
+    let result = session
+        .execute(&format!(
+            "MATCH (p {{name: '{name}'}}) UNWIND labels(p) AS label RETURN label ORDER BY label"
+        ))
+        .unwrap();
+    result.rows().iter().map(|row| row[0].clone()).collect()
+}
+
+/// `SET p:Label` on a node the transaction created sticks. Without the
+/// `temporal` feature (the Python and Node.js packages) the label was
+/// dropped, as the store looked for the node among the committed ones.
+#[test]
+fn a_label_set_on_a_node_created_in_the_same_transaction_is_committed() {
+    let db = GrafeoDB::new_in_memory();
+    let mut session = db.session();
+
+    session.begin_transaction().unwrap();
+    session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    session
+        .execute("MATCH (p:Person {name: 'Alix'}) SET p:Admin")
+        .unwrap();
+    assert_eq!(
+        labels_of(&session, "Alix"),
+        [Value::from("Admin"), Value::from("Person")],
+        "the transaction sees the label it set"
+    );
+    session.commit().unwrap();
+
+    assert_eq!(
+        labels_of(&session, "Alix"),
+        [Value::from("Admin"), Value::from("Person")]
+    );
+    let admins = session.execute("MATCH (p:Admin) RETURN p.name").unwrap();
+    assert_eq!(admins.rows(), [vec![Value::from("Alix")]]);
+}
+
+/// `REMOVE p:Label` on a node the transaction created sticks too.
+#[test]
+fn a_label_removed_from_a_node_created_in_the_same_transaction_stays_removed() {
+    let db = GrafeoDB::new_in_memory();
+    let mut session = db.session();
+
+    session.begin_transaction().unwrap();
+    session
+        .execute("INSERT (:Person:Guest {name: 'Gus'})")
+        .unwrap();
+    session
+        .execute("MATCH (p:Person {name: 'Gus'}) REMOVE p:Guest")
+        .unwrap();
+    session.commit().unwrap();
+
+    assert_eq!(labels_of(&session, "Gus"), [Value::from("Person")]);
+    let guests = session.execute("MATCH (p:Guest) RETURN p.name").unwrap();
+    assert_eq!(guests.row_count(), 0, "{:?}", guests.rows());
+}
+
+/// A statement outside a transaction runs in one of its own, so a statement
+/// that creates a node and labels it took the same path and lost the label.
+#[test]
+fn one_statement_that_creates_and_labels_a_node_keeps_the_label() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+
+    session
+        .execute("INSERT (p:Person {name: 'Vincent'}) SET p:New")
+        .unwrap();
+
+    assert_eq!(
+        labels_of(&session, "Vincent"),
+        [Value::from("New"), Value::from("Person")]
+    );
+}
+
+/// A rolled-back transaction leaves nothing of a node it created and
+/// labeled: no node, and no entry under either label.
+#[test]
+fn a_rollback_drops_a_created_node_with_the_labels_set_on_it() {
+    let db = GrafeoDB::new_in_memory();
+    let mut session = db.session();
+
+    session.begin_transaction().unwrap();
+    session.execute("INSERT (:Person {name: 'Mia'})").unwrap();
+    session
+        .execute("MATCH (p:Person {name: 'Mia'}) SET p:Admin")
+        .unwrap();
+    session.rollback().unwrap();
+
+    for query in ["MATCH (p:Person) RETURN p", "MATCH (p:Admin) RETURN p"] {
+        let result = session.execute(query).unwrap();
+        assert_eq!(result.row_count(), 0, "{query}: {:?}", result.rows());
+    }
 }

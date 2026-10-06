@@ -24,9 +24,14 @@ use grafeo_common::utils::error::{Error, TransactionError};
 use grafeo_engine::{Config, GrafeoDB};
 
 #[cfg(feature = "testing-statement-injection")]
+#[path = "common/image.rs"]
+mod image;
+#[cfg(feature = "testing-statement-injection")]
 #[path = "common/started.rs"]
 mod started;
 
+#[cfg(feature = "testing-statement-injection")]
+use image::image_holds;
 #[cfg(feature = "testing-statement-injection")]
 use started::Started;
 
@@ -715,33 +720,6 @@ fn a_graph_command_refused_for_another_reason_says_so_after_close() {
     );
 }
 
-/// Whether a section of the last checkpoint image of `db`'s file holds
-/// `needle` (the catalog for a constraint, the LPG store for a graph, the RDF
-/// store for a triple, an index section for an index). Read through the
-/// database's own file handle, which on Windows is the only one that can read
-/// a locked file.
-#[cfg(feature = "testing-statement-injection")]
-fn image_holds(db: &GrafeoDB, needle: &str) -> bool {
-    use grafeo_common::storage::SectionType;
-
-    let fm = db.file_manager().expect("a database file");
-    [
-        SectionType::Catalog,
-        SectionType::LpgStore,
-        SectionType::RdfStore,
-        SectionType::VectorStore,
-        SectionType::TextIndex,
-        SectionType::PropertyIndex,
-    ]
-    .into_iter()
-    .filter_map(|section| fm.read_section(section).unwrap())
-    .any(|bytes| {
-        bytes
-            .windows(needle.len())
-            .any(|window| window == needle.as_bytes())
-    })
-}
-
 /// The schema statements and graph commands the hold tests run, with what
 /// each leaves in the database.
 #[cfg(feature = "testing-statement-injection")]
@@ -955,6 +933,58 @@ fn imports_and_restores_after_close_fail() {
     }
     assert_eq!(people(&db), vec![Value::from("Alix")], "nothing changed");
     assert_eq!(db.node_count(), 1);
+}
+
+/// After `close()` an RDF batch insert refuses before it pulls the caller's
+/// iterator (which may parse or compute the triples), and an import before it
+/// opens its file or parses its data: a refused call does no work, and a
+/// missing file or malformed data still gets the database-closed error.
+#[test]
+fn imports_after_close_fail_before_reading_their_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("amsterdam.grafeo");
+    database_with_alix(&path);
+    let missing = dir.path().join("missing.tsv");
+    assert!(!missing.exists(), "the input file does not exist");
+
+    let db = open(&path);
+    db.close().unwrap();
+    #[cfg(feature = "triple-store")]
+    {
+        use grafeo_core::graph::rdf::{Term, Triple};
+        let pulled = std::cell::Cell::new(false);
+        let triples = std::iter::once_with(|| {
+            pulled.set(true);
+            Triple::new(
+                Term::iri("http://ex.org/gus"),
+                Term::iri("http://ex.org/city"),
+                Term::literal("Berlin"),
+            )
+        });
+        assert_closed_error("batch_insert_rdf", db.batch_insert_rdf(triples));
+        assert!(
+            !pulled.get(),
+            "the refused batch insert pulled the caller's iterator"
+        );
+        assert_closed_error(
+            "import_tsv_rdf of a missing file",
+            db.import_tsv_rdf(&missing, "http://ex.org/knows", "http://ex.org/"),
+        );
+        assert_eq!(db.rdf_store().len(), 0, "no triple was added");
+    }
+    assert_closed_error(
+        "import_tsv of a missing file",
+        db.import_tsv(&missing, "KNOWS", true),
+    );
+    assert_closed_error(
+        "import_mmio of a missing file",
+        db.import_mmio(dir.path().join("missing.mtx"), "KNOWS"),
+    );
+    assert_closed_error(
+        "import_tsv_str of malformed data",
+        db.import_tsv_str("Alix\tGus\n", "KNOWS", true),
+    );
+    assert_eq!(people(&db), vec![Value::from("Alix")], "nothing changed");
 }
 
 /// A bulk import or an RDF batch insert, by name, given a directory for its

@@ -147,7 +147,7 @@ pub fn articulation_points(store: &dyn GraphStore) -> FxHashSet<NodeId> {
 ///
 /// # Returns
 ///
-/// List of bridges as (source, target) pairs.
+/// List of bridges as (source, target) pairs, in node-id order.
 ///
 /// # Panics
 ///
@@ -232,10 +232,14 @@ pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
         }
     }
 
-    bridge_list
+    // In node-id order: the DFS above walks hash sets, whose order changes
+    // from call to call.
+    let mut bridges: Vec<(NodeId, NodeId)> = bridge_list
         .into_iter()
         .map(|(i, j)| (idx_to_node[i], idx_to_node[j]))
-        .collect()
+        .collect();
+    bridges.sort_unstable();
+    bridges
 }
 
 // ============================================================================
@@ -252,22 +256,30 @@ pub struct KCoreResult {
 }
 
 impl KCoreResult {
-    /// Returns nodes in the k-core (nodes with core number >= k).
+    /// Returns nodes in the k-core (nodes with core number >= k), in node-id
+    /// order.
     pub fn k_core(&self, k: usize) -> Vec<NodeId> {
-        self.core_numbers
+        let mut nodes: Vec<NodeId> = self
+            .core_numbers
             .iter()
             .filter(|&(_, core)| *core >= k)
             .map(|(&node, _)| node)
-            .collect()
+            .collect();
+        nodes.sort_unstable();
+        nodes
     }
 
-    /// Returns the k-shell (nodes with core number exactly k).
+    /// Returns the k-shell (nodes with core number exactly k), in node-id
+    /// order.
     pub fn k_shell(&self, k: usize) -> Vec<NodeId> {
-        self.core_numbers
+        let mut nodes: Vec<NodeId> = self
+            .core_numbers
             .iter()
             .filter(|&(_, core)| *core == k)
             .map(|(&node, _)| node)
-            .collect()
+            .collect();
+        nodes.sort_unstable();
+        nodes
     }
 }
 
@@ -404,13 +416,17 @@ pub struct KTrussResult {
 }
 
 impl KTrussResult {
-    /// Returns edges in the k-truss (edges with truss number >= k).
+    /// Returns edges in the k-truss (edges with truss number >= k), in node-id
+    /// order.
     pub fn k_truss(&self, k: usize) -> Vec<(NodeId, NodeId)> {
-        self.truss_numbers
+        let mut edges: Vec<(NodeId, NodeId)> = self
+            .truss_numbers
             .iter()
             .filter(|&(_, &truss)| truss >= k)
             .map(|(&edge, _)| edge)
-            .collect()
+            .collect();
+        edges.sort_unstable();
+        edges
     }
 }
 
@@ -668,6 +684,7 @@ impl_algorithm! {
             result.add_row(vec![Value::Int64(node.0 as i64)]);
         }
 
+        result.sort_by_id_columns(1);
         Ok(result)
     }
 }
@@ -698,6 +715,7 @@ impl_algorithm! {
             result.add_row(vec![Value::Int64(src.0 as i64), Value::Int64(dst.0 as i64)]);
         }
 
+        result.sort_by_id_columns(2);
         Ok(result)
     }
 }
@@ -759,6 +777,7 @@ impl GraphAlgorithm for KCoreAlgorithm {
                 result.add_row(vec![Value::Int64(node.0 as i64), Value::Bool(true)]);
             }
 
+            result.sort_by_id_columns(1);
             Ok(result)
         } else {
             // Return full decomposition
@@ -776,6 +795,7 @@ impl GraphAlgorithm for KCoreAlgorithm {
                 ]);
             }
 
+            result.sort_by_id_columns(1);
             Ok(result)
         }
     }
@@ -838,6 +858,7 @@ impl GraphAlgorithm for KTrussAlgorithm {
                 result.add_row(vec![Value::Int64(src.0 as i64), Value::Int64(dst.0 as i64)]);
             }
 
+            result.sort_by_id_columns(2);
             Ok(result)
         } else {
             // Return full decomposition
@@ -855,6 +876,7 @@ impl GraphAlgorithm for KTrussAlgorithm {
                 ]);
             }
 
+            result.sort_by_id_columns(2);
             Ok(result)
         }
     }

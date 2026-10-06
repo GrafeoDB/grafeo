@@ -2721,13 +2721,41 @@ impl GrafeoDB {
         Ok(open)
     }
 
+    /// Fails when an import or an RDF batch insert would be refused now, with
+    /// the errors of [`hold_commits_for_import`](Self::hold_commits_for_import),
+    /// without holding commits off: an import calls this before it reads or
+    /// parses its input (or pulls the caller's iterator), so a refused call
+    /// does no work first. The answer can change before the import holds
+    /// commits off (another thread may close the database or fail a commit
+    /// meanwhile): `hold_commits_for_import` checks again, under the hold.
+    ///
+    /// # Errors
+    ///
+    /// The database-closed error after `close()` of a persistent database
+    /// (read-only or not), the read-only error on a read-only database, and
+    /// the incomplete-commit error after a commit that did not complete.
+    #[cfg(any(feature = "lpg", feature = "triple-store"))]
+    fn check_import_allowed(&self) -> Result<()> {
+        // A read-only `close()` sets no closed state for `check_open`: the
+        // open state refuses a closed handle of either kind.
+        drop(self.hold_open()?);
+        if self.read_only {
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::ReadOnly,
+            ));
+        }
+        self.transaction_manager.check_no_incomplete_commit()?;
+        self.transaction_manager.check_open()
+    }
+
     /// Holds commits off while an import or an RDF batch insert changes the
     /// store, for as long as the guard lives (see
     /// [`TransactionManager::hold_commits_for_change`](crate::transaction::TransactionManager)):
     /// they write no WAL record, so only a checkpoint persists them, and a
     /// checkpoint or `close()` waits and holds all of the change or none of
     /// it. Meanwhile commits, new transactions, writes outside a transaction
-    /// and checkpoints wait; the input is parsed before, outside the hold.
+    /// and checkpoints wait; the input is parsed before, outside the hold,
+    /// once [`check_import_allowed`](Self::check_import_allowed) has passed.
     ///
     /// Nothing would persist the change on a read-only database or after
     /// `close()`, so it fails with the read-only error on a read-only
@@ -2739,14 +2767,9 @@ impl GrafeoDB {
     /// checkpoint runs any more).
     #[cfg(any(feature = "lpg", feature = "triple-store"))]
     fn hold_commits_for_import(&self) -> Result<crate::transaction::CommitsHeld<'_>> {
-        // A read-only `close()` sets no closed state for `check_open`: the
-        // open state refuses a closed handle of either kind.
-        drop(self.hold_open()?);
-        if self.read_only {
-            return Err(Error::Transaction(
-                grafeo_common::utils::error::TransactionError::ReadOnly,
-            ));
-        }
+        self.check_import_allowed()?;
+        // Checks the incomplete-commit and closed states again, under the
+        // hold: they may have changed since.
         let held = self.transaction_manager.hold_commits_for_change()?;
         // Tests start a checkpoint or `close()` here, which must wait.
         #[cfg(feature = "testing-statement-injection")]

@@ -27,7 +27,11 @@ pub struct SpillManager {
     total_spilled_bytes: AtomicU64,
     /// Whether `Drop` should remove `spill_dir` itself (non-recursive).
     owns_dir: bool,
-    /// Whether this manager created `spill_dir` (on its first spill file).
+    /// Whether `spill_dir` is known to exist (checked with the first spill
+    /// file).
+    dir_ready: AtomicBool,
+    /// Whether this manager created `spill_dir` (on its first spill file);
+    /// a directory that was already there is never removed.
     dir_created: AtomicBool,
 }
 
@@ -51,6 +55,7 @@ impl SpillManager {
             active_files: Mutex::new(Vec::new()),
             total_spilled_bytes: AtomicU64::new(0),
             owns_dir: false,
+            dir_ready: AtomicBool::new(false),
             dir_created: AtomicBool::new(false),
         })
     }
@@ -94,11 +99,19 @@ impl SpillManager {
     ///
     /// Returns an error if the directory or the file cannot be created.
     pub fn create_file(&self, prefix: &str) -> std::io::Result<SpillFile> {
-        if !self.dir_created.load(Ordering::Acquire) {
-            // `create_dir_all` succeeds when the directory exists, so two
-            // threads creating their first files at once are both fine.
-            std::fs::create_dir_all(&self.spill_dir)?;
-            self.dir_created.store(true, Ordering::Release);
+        if !self.dir_ready.load(Ordering::Acquire) {
+            if let Some(parent) = self.spill_dir.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            // Only the call that creates the directory marks it as this
+            // manager's: one that existed before, or that another thread of
+            // this manager created first, is `AlreadyExists` here.
+            match std::fs::create_dir(&self.spill_dir) {
+                Ok(()) => self.dir_created.store(true, Ordering::Release),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+            self.dir_ready.store(true, Ordering::Release);
         }
         let file_id = self.next_file_id.fetch_add(1, Ordering::Relaxed);
         let file_name = format!("{prefix}_{file_id}.spill");
@@ -318,6 +331,24 @@ mod tests {
             std::fs::create_dir(&query_dir).unwrap();
         }
         assert!(query_dir.exists());
+    }
+
+    #[test]
+    fn an_owned_directory_that_already_existed_survives_a_spill() {
+        // The manager removes only a directory its own first spill file
+        // created: one that was there before is someone else's, empty or not.
+        let temp_dir = TempDir::new().unwrap();
+        let query_dir = temp_dir.path().join("query_19");
+        std::fs::create_dir(&query_dir).unwrap();
+        {
+            let manager = SpillManager::new(&query_dir).unwrap().with_owned_dir();
+            let _file = manager.create_file("sort").unwrap();
+            let _second = manager.create_file("sort").unwrap();
+        }
+        assert!(
+            query_dir.is_dir(),
+            "the directory that existed before the spill is left in place"
+        );
     }
 
     #[test]

@@ -20,7 +20,10 @@ mod tests {
     use grafeo_common::storage::{ChunkMeta, SectionSink, SectionSource, SectionType};
 
     use super::alloc::{PageAllocator, PageRun};
-    use super::directory::{DirectoryEntry, encode_blocks};
+    use super::directory::{
+        DirectoryEntry, ENTRY_CHUNK_OPTIONAL, ENTRY_SECTION_OPTIONAL, ENTRY_SIZE, encode_blocks,
+        encode_blocks_raw,
+    };
     use super::header::{BlockRef, PAGE_SIZE};
     use super::{CheckpointWriter, ChunkCipher, ImageReader};
 
@@ -44,6 +47,18 @@ mod tests {
         use std::io::{Seek, SeekFrom, Write};
         let at = file.metadata().unwrap().len().next_multiple_of(PAGE_SIZE);
         let (root, blocks) = encode_blocks(entries, |_| Ok(at)).unwrap();
+        assert_eq!(blocks.len(), 1);
+        file.seek(SeekFrom::Start(at)).unwrap();
+        file.write_all(&blocks[0].1).unwrap();
+        root
+    }
+
+    /// Writes encoded entries as a directory at the end of the file and
+    /// returns its root.
+    fn write_raw_directory(file: &mut File, entries: &[[u8; ENTRY_SIZE]]) -> BlockRef {
+        use std::io::{Seek, SeekFrom, Write};
+        let at = file.metadata().unwrap().len().next_multiple_of(PAGE_SIZE);
+        let (root, blocks) = encode_blocks_raw(entries, |_| Ok(at)).unwrap();
         assert_eq!(blocks.len(), 1);
         file.seek(SeekFrom::Start(at)).unwrap();
         file.write_all(&blocks[0].1).unwrap();
@@ -287,8 +302,13 @@ mod tests {
         let mut writer = CheckpointWriter::new(file, pages, cipher);
         for (section_type, chunks) in image {
             writer.begin_section(*section_type, 1).unwrap();
-            for chunk in chunks {
-                writer.write_chunk(ChunkMeta::raw(), chunk).unwrap();
+            // Each chunk of a section has an identity of its own.
+            for (row_start, chunk) in (0..).zip(chunks) {
+                let meta = ChunkMeta {
+                    row_start,
+                    ..ChunkMeta::raw()
+                };
+                writer.write_chunk(meta, chunk).unwrap();
             }
         }
         writer.finish().unwrap()
@@ -531,13 +551,283 @@ mod tests {
         writer.begin_section(SectionType::LpgStore, 1).unwrap();
         // 170 entries: a 8192 byte block, stored as 8220 bytes over three pages.
         for i in 0..170u32 {
-            writer
-                .write_chunk(ChunkMeta::raw(), &i.to_le_bytes())
-                .unwrap();
+            let meta = ChunkMeta {
+                row_start: u64::from(i),
+                ..ChunkMeta::raw()
+            };
+            writer.write_chunk(meta, &i.to_le_bytes()).unwrap();
         }
         let (root, runs) = writer.finish().unwrap();
         let reader = ImageReader::open(&mut file, root, Some(&alix)).unwrap();
         assert_eq!(sorted(reader.used_runs()), sorted(runs));
+    }
+
+    /// An image with a section of a newer version (type 250, optional) and a
+    /// chunk of a newer kind in a known section (LpgStore, kind 250,
+    /// optional), next to two known chunks.
+    fn image_with_foreign_entries(
+        file: &mut File,
+        cipher: Option<&ChunkCipher>,
+        section_flags: u8,
+        kind_flags: u8,
+    ) -> BlockRef {
+        let mut writer = CheckpointWriter::new(file, PageAllocator::from_used([]).unwrap(), cipher);
+        writer.begin_section(SectionType::Catalog, 2).unwrap();
+        writer.write_chunk(ChunkMeta::meta(), b"Alix").unwrap();
+        writer
+            .write_foreign_chunk(250, 0, section_flags, &vec![19u8; 9000])
+            .unwrap();
+        writer.begin_section(SectionType::LpgStore, 3).unwrap();
+        writer.write_chunk(ChunkMeta::meta(), b"Gus").unwrap();
+        writer
+            .write_foreign_chunk(SectionType::LpgStore.to_u8(), 250, kind_flags, b"Vincent")
+            .unwrap();
+        writer.finish().unwrap().0
+    }
+
+    #[test]
+    fn an_image_with_unknown_optional_entries_opens_and_spares_their_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = open(&dir);
+        let root = image_with_foreign_entries(
+            &mut file,
+            None,
+            ENTRY_SECTION_OPTIONAL,
+            ENTRY_CHUNK_OPTIONAL,
+        );
+        let reader = ImageReader::open(&mut file, root, None).unwrap();
+        assert_eq!(
+            &reader
+                .section(SectionType::Catalog)
+                .unwrap()
+                .fetch(0)
+                .unwrap()[..],
+            b"Alix"
+        );
+        assert_eq!(
+            reader.section(SectionType::LpgStore).unwrap().chunks(),
+            [ChunkMeta::meta()],
+            "the section reader never sees the skipped chunk"
+        );
+        let skipped: Vec<(u8, u8)> = reader
+            .skipped()
+            .iter()
+            .map(|e| (e.section_type, e.kind))
+            .collect();
+        assert_eq!(skipped, [(250, 0), (2, 250)]);
+        let pages: u64 = reader.used_runs().iter().map(|run| run.count).sum();
+        assert_eq!(
+            pages,
+            1 + 3 + 1 + 1 + 1,
+            "two known chunks, the two skipped ones and the directory block"
+        );
+        let mut next = PageAllocator::from_used(reader.used_runs()).unwrap();
+        assert!(
+            next.free_runs().is_empty(),
+            "the skipped chunks leave no free page in the image"
+        );
+        // One page: it would fit the gap a skipped chunk left out of the
+        // used pages would leave.
+        let run = next.allocate(1).unwrap();
+        assert!(
+            reader.skipped().iter().all(|e| {
+                let used = e.run();
+                used.first + used.count <= run.first || run.first + run.count <= used.first
+            }),
+            "a checkpoint never writes over a skipped chunk while its image is active"
+        );
+        assert!(
+            reader.entries().iter().all(|entry| entry.flags == 0),
+            "the writer of this release marks every entry required"
+        );
+    }
+
+    #[test]
+    fn an_unknown_required_entry_is_refused_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = open(&dir);
+        let root = image_with_foreign_entries(&mut file, None, 0, ENTRY_CHUNK_OPTIONAL);
+        let error = ImageReader::open(&mut file, root, None)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("section type 250") && error.contains("required"),
+            "{error}"
+        );
+        let mut file = open(&dir);
+        let root = image_with_foreign_entries(&mut file, None, ENTRY_SECTION_OPTIONAL, 0);
+        let error = ImageReader::open(&mut file, root, None)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("chunk kind 250") && error.contains("LpgStore"),
+            "{error}"
+        );
+    }
+
+    /// A skipped chunk is held to the placement rules of a known one: page
+    /// aligned, in the data area, inside the file and on pages of its own.
+    #[test]
+    fn a_misplaced_skipped_chunk_is_refused_when_the_image_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = open(&dir);
+        let root = image_with_foreign_entries(
+            &mut file,
+            None,
+            ENTRY_SECTION_OPTIONAL,
+            ENTRY_CHUNK_OPTIONAL,
+        );
+        let (known, foreign) = {
+            let reader = ImageReader::open(&mut file, root, None).unwrap();
+            (reader.entries().to_vec(), reader.skipped()[0])
+        };
+        let file_length = file.metadata().unwrap().len();
+        for (offset, length, expected) in [
+            (foreign.offset + 1, foreign.length, "misplaced"),
+            (PAGE_SIZE, foreign.length, "misplaced"),
+            (foreign.offset, 1 << 40, "beyond the end of the file"),
+            (known[0].offset, foreign.length, "overlaps"),
+        ] {
+            let mut raw: Vec<[u8; ENTRY_SIZE]> = known
+                .iter()
+                .map(|entry| {
+                    let mut bytes = [0u8; ENTRY_SIZE];
+                    entry.encode(&mut bytes);
+                    bytes
+                })
+                .collect();
+            let mut moved = [0u8; ENTRY_SIZE];
+            moved[0] = foreign.section_type;
+            moved[2] = foreign.kind;
+            moved[24..32].copy_from_slice(&offset.to_le_bytes());
+            moved[32..40].copy_from_slice(&length.to_le_bytes());
+            moved[44] = foreign.flags;
+            raw.push(moved);
+            let root = write_raw_directory(&mut file, &raw);
+            let error = ImageReader::open(&mut file, root, None)
+                .map(|_| ())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "skipped chunk at offset {offset}, length {length} (file {file_length} bytes): \
+                 {error}"
+            );
+        }
+    }
+
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn the_optional_bits_survive_an_encrypted_image() {
+        use grafeo_common::encryption::PageEncryptor;
+        let alix = PageEncryptor::new(&[3u8; 32]);
+        let gus = PageEncryptor::new(&[19u8; 32]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = open(&dir);
+        let root = image_with_foreign_entries(
+            &mut file,
+            Some(&alix),
+            ENTRY_SECTION_OPTIONAL,
+            ENTRY_CHUNK_OPTIONAL,
+        );
+        let reader = ImageReader::open(&mut file, root, Some(&alix)).unwrap();
+        // The bits come back from the decrypted directory block: they are part
+        // of the entry, which the block's authentication covers, not of the
+        // chunk's payload.
+        assert_eq!(
+            reader.skipped().iter().map(|e| e.flags).collect::<Vec<_>>(),
+            [ENTRY_SECTION_OPTIONAL, ENTRY_CHUNK_OPTIONAL]
+        );
+        assert_eq!(
+            &reader
+                .section(SectionType::Catalog)
+                .unwrap()
+                .fetch(0)
+                .unwrap()[..],
+            b"Alix"
+        );
+        drop(reader);
+        let mut file = open(&dir);
+        let root = image_with_foreign_entries(&mut file, Some(&alix), 0, ENTRY_CHUNK_OPTIONAL);
+        let error = ImageReader::open(&mut file, root, Some(&alix))
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("section type 250"), "{error}");
+        let error = ImageReader::open(&mut file, root, Some(&gus))
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("decrypt"), "{error}");
+    }
+
+    /// A foreign chunk of an encrypted image is encrypted as a newer version
+    /// would encrypt it: with the associated data of its on-disk numbers.
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn a_foreign_chunk_is_encrypted_with_the_associated_data_of_its_numbers() {
+        use grafeo_common::encryption::PageEncryptor;
+
+        use super::cipher::chunk_aad_parts;
+
+        let alix = PageEncryptor::new(&[3u8; 32]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = open(&dir);
+        let root = image_with_foreign_entries(
+            &mut file,
+            Some(&alix),
+            ENTRY_SECTION_OPTIONAL,
+            ENTRY_CHUNK_OPTIONAL,
+        );
+        let foreign = ImageReader::open(&mut file, root, Some(&alix))
+            .unwrap()
+            .skipped()[1];
+        let bytes = std::fs::read(dir.path().join("x")).unwrap();
+        let start = usize::try_from(foreign.offset).unwrap();
+        let stored = &bytes[start..start + usize::try_from(foreign.length).unwrap()];
+        assert_eq!(
+            alix.decrypt(stored, &chunk_aad_parts(2, 250, 0, 0, 0))
+                .unwrap(),
+            b"Vincent"
+        );
+    }
+
+    /// The writer binds a chunk to its section type, kind, graph, column and
+    /// first row in exactly the bytes every encrypted image written so far
+    /// uses: the stored chunk decrypts with the literal associated data.
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn the_writer_encrypts_a_chunk_with_the_associated_data_of_its_place() {
+        use grafeo_common::encryption::PageEncryptor;
+
+        let alix = PageEncryptor::new(&[3u8; 32]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = open(&dir);
+        let meta = ChunkMeta::column(3, 19, 88, 2, 0);
+        let mut writer = CheckpointWriter::new(
+            &mut file,
+            PageAllocator::from_used([]).unwrap(),
+            Some(&alix),
+        );
+        writer.begin_section(SectionType::LpgStore, 3).unwrap();
+        writer.write_chunk(meta, b"Prague").unwrap();
+        let (root, _) = writer.finish().unwrap();
+        let reader = ImageReader::open(&mut file, root, Some(&alix)).unwrap();
+        let section = reader.section(SectionType::LpgStore).unwrap();
+        assert_eq!(section.chunks(), [meta]);
+        assert_eq!(&section.fetch(0).unwrap()[..], b"Prague", "it reads back");
+        let entry = reader.entries()[0];
+        drop(reader);
+        let bytes = std::fs::read(dir.path().join("x")).unwrap();
+        let start = usize::try_from(entry.offset).unwrap();
+        let stored = &bytes[start..start + usize::try_from(entry.length).unwrap()];
+        assert_eq!(
+            alix.decrypt(stored, b"grafeo-chunk:2:2:3:19:88").unwrap(),
+            b"Prague",
+            "section type 2, kind 2 (column), graph 3, column 19, first row 88"
+        );
     }
 
     #[cfg(feature = "encryption")]

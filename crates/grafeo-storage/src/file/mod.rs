@@ -44,4 +44,4 @@ pub mod manager;
 pub mod v3;
 
 pub use format::{DbHeader, FileHeader, MAGIC};
-pub use manager::{CheckpointHeader, GrafeoFileManager};
+pub use manager::{CheckpointHeader, GrafeoFileManager, ImageStats};

@@ -4,7 +4,7 @@
 //! traversals, shortest paths, centrality measures, community detection,
 //! spanning trees, and network flow.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -157,7 +157,7 @@ impl PyAlgorithms {
     /// Returns:
     ///     Dict mapping node ID to component ID
     #[pyo3(signature = (*, projection=None))]
-    fn connected_components(&self, projection: Option<&str>) -> PyResult<HashMap<u64, u64>> {
+    fn connected_components(&self, projection: Option<&str>) -> PyResult<BTreeMap<u64, u64>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
         let result = algorithms::connected_components(&*store);
@@ -183,7 +183,7 @@ impl PyAlgorithms {
         let result = algorithms::strongly_connected_components(&*store);
 
         // Group nodes by component ID
-        let mut grouped: HashMap<u64, Vec<u64>> = HashMap::new();
+        let mut grouped: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         for (node, comp_id) in result {
             grouped.entry(comp_id).or_default().push(node.0);
         }
@@ -251,7 +251,7 @@ impl PyAlgorithms {
             }
         } else {
             let result = algorithms::dijkstra(&*store, NodeId::new(source), weight);
-            let distances: HashMap<u64, f64> = result
+            let distances: BTreeMap<u64, f64> = result
                 .distances
                 .into_iter()
                 .map(|(n, d)| (n.0, d))
@@ -307,7 +307,7 @@ impl PyAlgorithms {
         let result = algorithms::dijkstra(&*store, source_id, weight_attr);
 
         // Map node IDs to names (falling back to string ID)
-        let distances: HashMap<String, f64> = result
+        let distances: BTreeMap<String, f64> = result
             .distances
             .into_iter()
             .map(|(node, dist)| {
@@ -403,12 +403,12 @@ impl PyAlgorithms {
 
         let result = algorithms::bellman_ford(&*store, NodeId::new(source), weight);
 
-        let distances: HashMap<u64, f64> = result
+        let distances: BTreeMap<u64, f64> = result
             .distances
             .into_iter()
             .map(|(n, d)| (n.0, d))
             .collect();
-        let predecessors: HashMap<u64, u64> = result
+        let predecessors: BTreeMap<u64, u64> = result
             .predecessors
             .into_iter()
             .map(|(n, p)| (n.0, p.0))
@@ -478,12 +478,14 @@ impl PyAlgorithms {
 
         if normalized {
             let result = algorithms::degree_centrality_normalized(&*store);
-            let scores: HashMap<u64, f64> = result.into_iter().map(|(n, s)| (n.0, s)).collect();
+            let scores: BTreeMap<u64, f64> = result.into_iter().map(|(n, s)| (n.0, s)).collect();
             Ok(scores.into_pyobject(py)?.into_any().unbind())
         } else {
             let result = algorithms::degree_centrality(&*store);
             let dict = PyDict::new(py);
-            for (node, total) in result.total_degree {
+            // In node-id order, the same in every process.
+            let totals: BTreeMap<NodeId, usize> = result.total_degree.into_iter().collect();
+            for (node, total) in totals {
                 let in_d = *result.in_degree.get(&node).unwrap_or(&0);
                 let out_d = *result.out_degree.get(&node).unwrap_or(&0);
                 let node_dict = PyDict::new(py);
@@ -517,7 +519,7 @@ impl PyAlgorithms {
         tolerance: f64,
         directed: bool,
         projection: Option<&str>,
-    ) -> PyResult<HashMap<u64, f64>> {
+    ) -> PyResult<BTreeMap<u64, f64>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
         let result = algorithms::pagerank(&*store, damping, max_iterations, tolerance, directed);
@@ -536,7 +538,7 @@ impl PyAlgorithms {
         &self,
         normalized: bool,
         projection: Option<&str>,
-    ) -> PyResult<HashMap<u64, f64>> {
+    ) -> PyResult<BTreeMap<u64, f64>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
         let result = algorithms::betweenness_centrality(&*store, normalized);
@@ -555,7 +557,7 @@ impl PyAlgorithms {
         &self,
         wf_improved: bool,
         projection: Option<&str>,
-    ) -> PyResult<HashMap<u64, f64>> {
+    ) -> PyResult<BTreeMap<u64, f64>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
         let result = algorithms::closeness_centrality(&*store, wf_improved);
@@ -578,7 +580,7 @@ impl PyAlgorithms {
         &self,
         max_iterations: usize,
         projection: Option<&str>,
-    ) -> PyResult<HashMap<u64, u64>> {
+    ) -> PyResult<BTreeMap<u64, u64>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
         let result = algorithms::label_propagation(&*store, max_iterations);
@@ -603,7 +605,7 @@ impl PyAlgorithms {
         let store = self.store_for(&db, projection)?;
         let result = algorithms::louvain(&*store, resolution);
 
-        let communities: HashMap<u64, u64> = result
+        let communities: BTreeMap<u64, u64> = result
             .communities
             .into_iter()
             .map(|(n, c)| (n.0, c))
@@ -812,12 +814,12 @@ impl PyAlgorithms {
             algorithms::clustering_coefficient(&*store)
         };
 
-        let coefficients: HashMap<u64, f64> = result
+        let coefficients: BTreeMap<u64, f64> = result
             .coefficients
             .into_iter()
             .map(|(n, c)| (n.0, c))
             .collect();
-        let triangle_counts: HashMap<u64, u64> = result
+        let triangle_counts: BTreeMap<u64, u64> = result
             .triangle_counts
             .into_iter()
             .map(|(n, t)| (n.0, t))
@@ -837,7 +839,7 @@ impl PyAlgorithms {
     /// Returns:
     ///     Dict mapping node ID to triangle count
     #[pyo3(signature = (*, projection=None))]
-    fn triangle_count(&self, projection: Option<&str>) -> PyResult<HashMap<u64, u64>> {
+    fn triangle_count(&self, projection: Option<&str>) -> PyResult<BTreeMap<u64, u64>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
         let result = algorithms::triangle_count(&*store);
@@ -876,7 +878,7 @@ impl PyAlgorithms {
     fn local_clustering_coefficient(
         &self,
         projection: Option<&str>,
-    ) -> PyResult<HashMap<u64, f64>> {
+    ) -> PyResult<BTreeMap<u64, f64>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
         let result = algorithms::local_clustering_coefficient(&*store);
@@ -890,13 +892,15 @@ impl PyAlgorithms {
     /// Find articulation points (cut vertices).
     ///
     /// Returns:
-    ///     List of node IDs that are articulation points
+    ///     List of node IDs that are articulation points, in node-id order
     #[pyo3(signature = (*, projection=None))]
     fn articulation_points(&self, projection: Option<&str>) -> PyResult<Vec<u64>> {
         let db = self.db.read();
         let store = self.store_for(&db, projection)?;
         let result = algorithms::articulation_points(&*store);
-        Ok(result.into_iter().map(|n| n.0).collect())
+        let mut points: Vec<u64> = result.into_iter().map(|n| n.0).collect();
+        points.sort_unstable();
+        Ok(points)
     }
 
     /// Find bridges (cut edges).
@@ -939,7 +943,9 @@ impl PyAlgorithms {
             Ok(nodes.into_pyobject(py)?.into_any().unbind())
         } else {
             let core_numbers = PyDict::new(py);
-            for (node, core) in result.core_numbers {
+            // In node-id order, the same in every process.
+            let by_node: BTreeMap<NodeId, usize> = result.core_numbers.into_iter().collect();
+            for (node, core) in by_node {
                 core_numbers.set_item(node.0, core)?;
             }
             let dict = PyDict::new(py);

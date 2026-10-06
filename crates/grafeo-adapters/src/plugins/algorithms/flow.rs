@@ -481,6 +481,7 @@ impl_algorithm! {
             ]);
         }
 
+        output.sort_by_id_columns(2);
         Ok(output)
     }
 }
@@ -569,6 +570,7 @@ impl_algorithm! {
             ]);
         }
 
+        output.sort_by_id_columns(2);
         Ok(output)
     }
 }

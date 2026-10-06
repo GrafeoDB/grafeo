@@ -597,11 +597,13 @@ impl<Id: EntityId> PropertyStorage<Id> {
         self.columns.read().get(key).map(|col| col.block_count())
     }
 
-    /// Decodes a single compressed block of a property column.
+    /// Decodes a single compressed block of a property column into
+    /// `(id, value)` pairs: exactly the rows that the entry of
+    /// [`block_zone_maps_for`](Self::block_zone_maps_for) at the same index
+    /// describes.
     ///
-    /// See [`PropertyColumn::decode_block`] for semantics. Returns `None`
-    /// when the column doesn't exist, the column is uncompressed, or
-    /// `block_idx` is out of range.
+    /// Returns `None` when the column doesn't exist, the column is
+    /// uncompressed, or `block_idx` is out of range.
     #[cfg(not(feature = "temporal"))]
     #[must_use]
     pub fn decode_block_for(
@@ -2326,7 +2328,7 @@ mod tests {
         let key = PropertyKey::new("any");
 
         let values = storage.get_batch(&[], &key);
-        assert!(values.is_empty());
+        assert_eq!(values, Vec::<Option<Value>>::new());
     }
 
     #[test]
@@ -2365,7 +2367,7 @@ mod tests {
         let storage: PropertyStorage<NodeId> = PropertyStorage::new();
 
         let all_props = storage.get_all_batch(&[]);
-        assert!(all_props.is_empty());
+        assert_eq!(all_props, Vec::<FxHashMap<PropertyKey, Value>>::new());
     }
 
     // ── Phase 2d: per-block zone maps ─────────────────────────────────

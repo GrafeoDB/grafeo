@@ -280,6 +280,7 @@ fn directory_kept() -> Kept {
 /// The same for the 0.5.43 WAL directory, which has no `LOCK` file (0.5.43
 /// took no lock): the migration creates one while it holds the directory, and
 /// removes it once the directory has moved (on Windows right before it moves).
+#[cfg(feature = "testing-crash-injection")]
 fn directory_0_5_43_kept() -> Kept {
     Kept {
         file: Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1588,8 +1589,10 @@ fn a_read_write_open_of_a_kept_copy_is_refused() {
 
 /// A kept copy whose name is not valid UTF-8 (a byte that is not UTF-8 on
 /// Unix, an unpaired surrogate on Windows) is refused the same way: it is
-/// recognized by the bytes of its name, not by a UTF-8 reading of it.
-#[cfg(any(unix, windows))]
+/// recognized by the bytes of its name, not by a UTF-8 reading of it. Not on
+/// macOS, whose file systems refuse a name that is not UTF-8, so no such kept
+/// copy can exist there.
+#[cfg(any(all(unix, not(target_os = "macos")), windows))]
 #[test]
 fn a_read_write_open_of_a_kept_copy_with_a_non_utf8_name_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -1610,7 +1613,7 @@ fn a_read_write_open_of_a_kept_copy_with_a_non_utf8_name_is_refused() {
 
 /// `prefix`, a byte (Unix) or a UTF-16 code unit (Windows) that is not valid
 /// UTF-8 or UTF-16, then `suffix`: a file name `to_str()` cannot read.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn non_utf8_name(prefix: &str, suffix: &str) -> std::ffi::OsString {
     use std::os::unix::ffi::OsStringExt;
 

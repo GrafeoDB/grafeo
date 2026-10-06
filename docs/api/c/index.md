@@ -113,7 +113,7 @@ void            grafeo_free_database(GrafeoDatabase* db);    /* free handle */
 const char*     grafeo_version(void);                        /* library version (static) */
 ```
 
-A persistent database is a single file at rest, whatever the extension of its path. While it is open for writing it also has a WAL, the `<path>.wal/` directory next to it, which `grafeo_close` writes into the file and removes. A database written by 0.5.x is migrated on its first read-write open (see [Upgrading from 0.5](../../user-guide/persistence/persistent.md#upgrading-from-05)).
+A persistent database is a single file at rest, whatever the extension of its path. While it is open for writing it also has a WAL, the `<path>.wal/` directory next to it, which a successful `grafeo_close` writes into the file and removes. A close that fails (a checkpoint error, or after a commit that did not complete) keeps the WAL, and the next open recovers from it. A database written by 0.5.x is migrated on its first read-write open (see [Upgrading from 0.5](../../user-guide/persistence/persistent.md#upgrading-from-05)).
 
 All `grafeo_open*` functions return `NULL` on error. Always call `grafeo_close` before `grafeo_free_database` to flush pending writes.
 

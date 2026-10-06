@@ -247,6 +247,70 @@ fn after_a_commit_that_does_not_complete_no_commit_publishes_part_of_it() {
     assert_eq!(db.current_epoch(), before);
 }
 
+/// After a commit that did not complete, an RDF batch insert refuses before
+/// it pulls the caller's iterator (which may parse or compute the triples),
+/// and an import before it opens its file or parses its data: a refused call
+/// does no work, and a missing file or malformed data still gets the
+/// incomplete-commit error.
+#[test]
+fn after_a_commit_that_does_not_complete_imports_refuse_before_reading_their_input() {
+    use grafeo_common::utils::error::{Error, TransactionError};
+
+    #[track_caller]
+    fn incomplete<T: std::fmt::Debug>(what: &str, result: grafeo_common::utils::error::Result<T>) {
+        match result {
+            Err(Error::Transaction(TransactionError::IncompleteCommit)) => {}
+            other => panic!("{what}: the incomplete-commit error, got {other:?}"),
+        }
+    }
+
+    let db = GrafeoDB::new_in_memory();
+    let alix = db
+        .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
+        .unwrap();
+    fail_a_commit(&db, alix);
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.tsv");
+    assert!(!missing.exists(), "the input file does not exist");
+
+    #[cfg(feature = "triple-store")]
+    {
+        use grafeo_core::graph::rdf::{Term, Triple};
+        let pulled = std::cell::Cell::new(false);
+        let triples = std::iter::once_with(|| {
+            pulled.set(true);
+            Triple::new(
+                Term::iri("http://ex.org/gus"),
+                Term::iri("http://ex.org/city"),
+                Term::literal("Berlin"),
+            )
+        });
+        incomplete("batch_insert_rdf", db.batch_insert_rdf(triples));
+        assert!(
+            !pulled.get(),
+            "the refused batch insert pulled the caller's iterator"
+        );
+        incomplete(
+            "import_tsv_rdf of a missing file",
+            db.import_tsv_rdf(&missing, "http://ex.org/knows", "http://ex.org/"),
+        );
+        assert!(db.rdf_store().is_empty(), "no triple was added");
+    }
+    incomplete(
+        "import_tsv of a missing file",
+        db.import_tsv(&missing, "KNOWS", true),
+    );
+    incomplete(
+        "import_mmio of a missing file",
+        db.import_mmio(dir.path().join("missing.mtx"), "KNOWS"),
+    );
+    incomplete(
+        "import_tsv_str of malformed data",
+        db.import_tsv_str("Alix\tGus\n", "KNOWS", true),
+    );
+    assert_eq!(people(&db), [Value::from("Alix")], "nothing was imported");
+}
+
 /// A bulk import or an RDF batch insert, which write no WAL record, by name.
 type Import = (
     &'static str,

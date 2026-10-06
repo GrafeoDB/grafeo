@@ -4,10 +4,13 @@
 //! operations into a single transaction. This is 10-100x faster than calling
 //! `create_node`/`create_edge` in a loop for large graphs.
 //!
-//! An import reads and parses its input first, without blocking anything.
-//! While it then changes the store, commits, new transactions, writes outside
-//! a transaction and checkpoints wait for it: a checkpoint or `close()` holds
-//! all of the import or none of it. Reads outside a transaction go on.
+//! An import first checks that the database takes it: on a read-only
+//! database, after `close()` and after a commit that did not complete it
+//! refuses before it opens or parses anything. It then reads and parses its
+//! input, without blocking anything. While it then changes the store,
+//! commits, new transactions, writes outside a transaction and checkpoints
+//! wait for it: a checkpoint or `close()` holds all of the import or none of
+//! it. Reads outside a transaction go on.
 //!
 //! # Supported Formats
 //!
@@ -45,7 +48,8 @@ impl super::GrafeoDB {
     /// All nodes get the label `"_Imported"` and all edges get the given `edge_type`.
     ///
     /// While it changes the store, commits, new transactions and checkpoints
-    /// wait for it; the file is read before, without blocking anything.
+    /// wait for it; the file is read before, without blocking anything, and
+    /// only once the database takes the import: a refused call opens nothing.
     ///
     /// # Arguments
     ///
@@ -71,6 +75,8 @@ impl super::GrafeoDB {
         edge_type: &str,
         directed: bool,
     ) -> Result<(usize, usize)> {
+        // Refused before the file is opened: a refused import does no work.
+        self.check_import_allowed()?;
         let path = path.as_ref();
         let file = std::fs::File::open(path)
             .map_err(|e| Error::Internal(format!("failed to open {}: {}", path.display(), e)))?;
@@ -87,7 +93,8 @@ impl super::GrafeoDB {
     /// instead of a file. Useful for tests and embedded data.
     ///
     /// While it changes the store, commits, new transactions and checkpoints
-    /// wait for it; the string is read before, without blocking anything.
+    /// wait for it; the string is parsed before, without blocking anything,
+    /// and only once the database takes the import.
     ///
     /// # Errors
     ///
@@ -101,6 +108,7 @@ impl super::GrafeoDB {
         edge_type: &str,
         directed: bool,
     ) -> Result<(usize, usize)> {
+        self.check_import_allowed()?;
         let reader = BufReader::new(data.as_bytes());
         let edges = parse_edge_list(reader)?;
         self.import_edge_list(&edges, edge_type, directed)
@@ -119,7 +127,8 @@ impl super::GrafeoDB {
     /// Symmetric matrices automatically create edges in both directions.
     ///
     /// While it changes the store, commits, new transactions and checkpoints
-    /// wait for it; the file is read before, without blocking anything.
+    /// wait for it; the file is read before, without blocking anything, and
+    /// only once the database takes the import: a refused call opens nothing.
     ///
     /// # Arguments
     ///
@@ -138,6 +147,7 @@ impl super::GrafeoDB {
     /// (read-only or not), and the incomplete-commit error after a commit
     /// that did not complete.
     pub fn import_mmio(&self, path: impl AsRef<Path>, edge_type: &str) -> Result<(usize, usize)> {
+        self.check_import_allowed()?;
         let path = path.as_ref();
         let file = std::fs::File::open(path)
             .map_err(|e| Error::Internal(format!("failed to open {}: {}", path.display(), e)))?;
@@ -147,7 +157,9 @@ impl super::GrafeoDB {
         self.import_edge_list(&edges, edge_type, !symmetric)
     }
 
-    /// Bulk-imports a pre-parsed edge list into the LPG store.
+    /// Bulk-imports a pre-parsed edge list into the LPG store. The public
+    /// imports call [`check_import_allowed`](Self::check_import_allowed)
+    /// before they read their input; this checks again, under the hold.
     fn import_edge_list(
         &self,
         edges: &[(u64, u64)],
@@ -204,7 +216,8 @@ impl super::GrafeoDB {
     /// `<{base_uri}{src}> <{predicate_uri}> <{base_uri}{dst}>`
     ///
     /// While it changes the store, commits, new transactions and checkpoints
-    /// wait for it; the file is read before, without blocking anything.
+    /// wait for it; the file is read before, without blocking anything, and
+    /// only once the database takes the import: a refused call opens nothing.
     ///
     /// # Arguments
     ///
@@ -232,6 +245,8 @@ impl super::GrafeoDB {
     ) -> Result<(usize, usize)> {
         use grafeo_core::graph::rdf::{Term, Triple};
 
+        // Refused before the file is opened: a refused import does no work.
+        self.check_import_allowed()?;
         let path = path.as_ref();
         let file = std::fs::File::open(path)
             .map_err(|e| Error::Internal(format!("failed to open {}: {}", path.display(), e)))?;

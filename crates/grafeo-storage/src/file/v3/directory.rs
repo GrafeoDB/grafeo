@@ -12,6 +12,11 @@
 //! reserved field is written as zero and ignored by readers. The CRC of a
 //! block is kept by whoever points at it (the database header or the previous
 //! block).
+//!
+//! An entry's flags byte says whether a reader that does not know its section
+//! type ([`ENTRY_SECTION_OPTIONAL`]) or its chunk kind
+//! ([`ENTRY_CHUNK_OPTIONAL`]) may skip it. Such an entry decodes as a
+//! [`SkippedEntry`]; an unknown entry without its bit is refused.
 
 use std::collections::HashSet;
 
@@ -30,6 +35,19 @@ pub const MAX_BLOCK_SIZE: usize = 64 * 1024;
 /// Largest number of entries in one directory block.
 pub const ENTRIES_PER_BLOCK: usize = (MAX_BLOCK_SIZE - BLOCK_HEADER_SIZE) / ENTRY_SIZE;
 
+/// Flag bit 0: a reader that does not know the entry's section type skips the entry.
+pub const ENTRY_SECTION_OPTIONAL: u8 = 0x01;
+/// Flag bit 1: a reader that knows the section type but not the chunk kind skips the entry.
+pub const ENTRY_CHUNK_OPTIONAL: u8 = 0x02;
+/// Bits 0 to 3 change how an entry is read, so a reader refuses one it does not know; bits 4 to
+/// 7 do not, and a reader ignores them (the same split as the file header's feature flags).
+pub const ENTRY_INCOMPATIBLE_FLAGS: u8 = 0x0F;
+/// The flag bits among bits 0 to 3 this version knows.
+const KNOWN_INCOMPATIBLE_FLAGS: u8 = ENTRY_SECTION_OPTIONAL | ENTRY_CHUNK_OPTIONAL;
+
+/// Byte of an entry that holds its flags.
+const FLAGS_AT: usize = 44;
+
 /// Magic bytes at the start of every directory block.
 const BLOCK_MAGIC: [u8; 4] = *b"GDIR";
 
@@ -38,8 +56,8 @@ const BLOCK_MAGIC: [u8; 4] = *b"GDIR";
 /// Layout (48 bytes, little-endian): `0 section type u8`,
 /// `1 section version u8`, `2 chunk kind u8`, `3 codec u8`, `4 graph id u32`,
 /// `8 column id u32`, `12 row count u32`, `16 row start u64`, `24 offset u64`,
-/// `32 length u64`, `40 crc u32`, `44 reserved u32`. The reserved field is
-/// written as zero and ignored by readers.
+/// `32 length u64`, `40 crc u32`, `44 flags u8`, `45 reserved [u8; 3]`. The
+/// reserved bytes are written as zero and ignored by readers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirectoryEntry {
     /// Section the chunk belongs to.
@@ -54,9 +72,28 @@ pub struct DirectoryEntry {
     pub length: u64,
     /// CRC-32 of the stored chunk.
     pub crc: u32,
+    /// [`ENTRY_SECTION_OPTIONAL`] and [`ENTRY_CHUNK_OPTIONAL`], which tell a
+    /// reader that does not know the section type or the chunk kind whether
+    /// it may skip the entry; see [`flags_for`](Self::flags_for). A decoded
+    /// entry keeps the byte as read, bits 4 to 7 included.
+    pub flags: u8,
 }
 
 impl DirectoryEntry {
+    /// The flags a writer sets for a chunk: bit 0 from `section_type.is_optional()`, bit 1 from
+    /// `kind.is_optional()`.
+    #[must_use]
+    pub const fn flags_for(section_type: SectionType, kind: ChunkKind) -> u8 {
+        let mut flags = 0;
+        if section_type.is_optional() {
+            flags |= ENTRY_SECTION_OPTIONAL;
+        }
+        if kind.is_optional() {
+            flags |= ENTRY_CHUNK_OPTIONAL;
+        }
+        flags
+    }
+
     /// Encodes the entry into its 48-byte form.
     pub fn encode(&self, out: &mut [u8; ENTRY_SIZE]) {
         out.fill(0);
@@ -71,28 +108,65 @@ impl DirectoryEntry {
         out[24..32].copy_from_slice(&self.offset.to_le_bytes());
         out[32..40].copy_from_slice(&self.length.to_le_bytes());
         out[40..44].copy_from_slice(&self.crc.to_le_bytes());
+        out[FLAGS_AT] = self.flags;
     }
 
-    /// Decodes an entry, refusing an unknown section type or chunk kind.
+    /// Decodes an entry. An unknown section type or chunk kind is `Skipped` when its bit is
+    /// set, else an error naming it with the word "required"; the section bit never covers an
+    /// unknown kind of a known section. An unknown flag among bits 0 to 3 is an error.
+    ///
+    /// The flags are checked first, so an entry with an unknown flag among
+    /// bits 0 to 3 is refused also when it would be skipped. Bits 4 to 7 are
+    /// ignored.
     ///
     /// # Errors
     ///
-    /// Returns an error when the section type byte or the chunk kind byte is
-    /// not known to this build.
-    pub fn decode(bytes: &[u8; ENTRY_SIZE]) -> Result<Self> {
-        let section_type = SectionType::from_u8(bytes[0]).ok_or_else(|| {
-            Error::Serialization(format!(
-                "directory entry has unknown section type {}",
-                bytes[0]
-            ))
-        })?;
-        let kind = ChunkKind::from_byte(bytes[2]).ok_or_else(|| {
-            Error::Serialization(format!(
-                "directory entry has unknown chunk kind {}",
-                bytes[2]
-            ))
-        })?;
-        Ok(Self {
+    /// Returns [`Error::Serialization`] when the flags hold a bit among 0 to
+    /// 3 this version does not know, or when the section type byte, or the
+    /// chunk kind byte of a known section, is not known to this version and
+    /// the entry's optional bit for it is not set. The message names the byte
+    /// as stored.
+    pub fn decode(bytes: &[u8; ENTRY_SIZE]) -> Result<DecodedEntry> {
+        let flags = bytes[FLAGS_AT];
+        let unknown = flags & ENTRY_INCOMPATIBLE_FLAGS & !KNOWN_INCOMPATIBLE_FLAGS;
+        if unknown != 0 {
+            return Err(Error::Serialization(format!(
+                "directory entry has flags {flags:#04x}, with the unknown flag bits \
+                 {unknown:#04x}: they change how the entry is read, and this version does \
+                 not know them"
+            )));
+        }
+        let (type_byte, kind_byte) = (bytes[0], bytes[2]);
+        let skipped = || {
+            DecodedEntry::Skipped(SkippedEntry {
+                section_type: type_byte,
+                kind: kind_byte,
+                flags,
+                offset: u64_at(bytes, 24),
+                length: u64_at(bytes, 32),
+            })
+        };
+        let Some(section_type) = SectionType::from_u8(type_byte) else {
+            if flags & ENTRY_SECTION_OPTIONAL != 0 {
+                return Ok(skipped());
+            }
+            return Err(Error::Serialization(format!(
+                "directory entry has section type {type_byte}, which this version does not \
+                 know, and the section is required (its optional bit is not set): the file \
+                 was written by a newer version"
+            )));
+        };
+        let Some(kind) = ChunkKind::from_byte(kind_byte) else {
+            if flags & ENTRY_CHUNK_OPTIONAL != 0 {
+                return Ok(skipped());
+            }
+            return Err(Error::Serialization(format!(
+                "directory entry of section {section_type:?} has chunk kind {kind_byte}, which \
+                 this version does not know, and the chunk is required (its optional bit is \
+                 not set): the file was written by a newer version"
+            )));
+        };
+        Ok(DecodedEntry::Known(Self {
             section_type,
             section_version: bytes[1],
             meta: ChunkMeta {
@@ -106,7 +180,8 @@ impl DirectoryEntry {
             offset: u64_at(bytes, 24),
             length: u64_at(bytes, 32),
             crc: u32_at(bytes, 40),
-        })
+            flags,
+        }))
     }
 
     /// Pages occupied by the chunk (a zero-length chunk has an empty run).
@@ -117,6 +192,46 @@ impl DirectoryEntry {
             count: PageRun::for_bytes(self.length),
         }
     }
+}
+
+/// An entry this reader does not know and may skip. Its pages stay in use until a checkpoint,
+/// which does not write it again.
+///
+/// Only where the chunk lies is kept: it is never fetched, decrypted or
+/// handed to a section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkippedEntry {
+    /// The section type byte, as stored.
+    pub section_type: u8,
+    /// The chunk kind byte, as stored.
+    pub kind: u8,
+    /// The flags byte, as stored.
+    pub flags: u8,
+    /// Byte offset of the chunk in the file.
+    pub offset: u64,
+    /// Length of the stored chunk in bytes.
+    pub length: u64,
+}
+
+impl SkippedEntry {
+    /// Pages occupied by the chunk (a zero-length chunk has an empty run).
+    #[must_use]
+    pub fn run(&self) -> PageRun {
+        PageRun {
+            first: self.offset / PAGE_SIZE,
+            count: PageRun::for_bytes(self.length),
+        }
+    }
+}
+
+/// A decoded directory entry: one this version knows, or one it may skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodedEntry {
+    /// An entry of a section type and chunk kind this version knows.
+    Known(DirectoryEntry),
+    /// An entry of an unknown section type or chunk kind whose optional bit
+    /// is set.
+    Skipped(SkippedEntry),
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
@@ -131,8 +246,8 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(array)
 }
 
-/// Encodes one block holding `entries` and naming `next`.
-fn encode_block(entries: &[DirectoryEntry], next: BlockRef) -> Result<Vec<u8>> {
+/// Encodes one block holding the encoded `entries` and naming `next`.
+fn encode_block(entries: &[[u8; ENTRY_SIZE]], next: BlockRef) -> Result<Vec<u8>> {
     let count = u32::try_from(entries.len())
         .map_err(|_| Error::Internal("directory block has too many entries".to_string()))?;
     let mut bytes = vec![0u8; BLOCK_HEADER_SIZE + entries.len() * ENTRY_SIZE];
@@ -143,7 +258,7 @@ fn encode_block(entries: &[DirectoryEntry], next: BlockRef) -> Result<Vec<u8>> {
     bytes[20..24].copy_from_slice(&next.crc.to_le_bytes());
     let (slots, _) = bytes[BLOCK_HEADER_SIZE..].as_chunks_mut::<ENTRY_SIZE>();
     for (entry, slot) in entries.iter().zip(slots) {
-        entry.encode(slot);
+        slot.copy_from_slice(entry);
     }
     Ok(bytes)
 }
@@ -165,9 +280,33 @@ fn encode_block(entries: &[DirectoryEntry], next: BlockRef) -> Result<Vec<u8>> {
 /// Returns an error when `place` fails.
 pub fn encode_blocks(
     entries: &[DirectoryEntry],
+    place: impl FnMut(usize) -> Result<u64>,
+) -> Result<(BlockRef, Vec<(u64, Vec<u8>)>)> {
+    let encoded: Vec<[u8; ENTRY_SIZE]> = entries
+        .iter()
+        .map(|entry| {
+            let mut bytes = [0u8; ENTRY_SIZE];
+            entry.encode(&mut bytes);
+            bytes
+        })
+        .collect();
+    encode_blocks_raw(&encoded, place)
+}
+
+/// `encode_blocks` over entries already encoded; `encode_blocks` encodes and calls it.
+///
+/// The bytes of each entry are written as given, so entries this version
+/// cannot describe as a [`DirectoryEntry`] (those of a newer version, in
+/// tests) go into the directory too.
+///
+/// # Errors
+///
+/// Returns an error when `place` fails.
+pub fn encode_blocks_raw(
+    entries: &[[u8; ENTRY_SIZE]],
     mut place: impl FnMut(usize) -> Result<u64>,
 ) -> Result<(BlockRef, Vec<(u64, Vec<u8>)>)> {
-    let groups: Vec<&[DirectoryEntry]> = if entries.is_empty() {
+    let groups: Vec<&[[u8; ENTRY_SIZE]]> = if entries.is_empty() {
         vec![&[]]
     } else {
         entries.chunks(ENTRIES_PER_BLOCK).collect()
@@ -219,25 +358,28 @@ fn check_pointer(pointer: BlockRef) -> Result<()> {
 /// image, the decrypted bytes).
 ///
 /// Every block is stored `overhead` bytes longer than its pointer's length
-/// (the nonce and tag of an encrypted image, 0 otherwise). Returns the
-/// entries in order and the pages the stored blocks occupy. A root with
-/// length 0 is accepted as an empty directory, although [`encode_blocks`]
-/// never produces one.
+/// (the nonce and tag of an encrypted image, 0 otherwise). Returns the known
+/// entries in order, the skipped entries (see [`DirectoryEntry::decode`]) in
+/// order, and the pages the stored blocks occupy. A root with length 0 is
+/// accepted as an empty directory, although [`encode_blocks`] never produces
+/// one.
 ///
 /// # Errors
 ///
 /// Returns an error naming the block offset when a pointer is misaligned, out
-/// of range or revisited, or when a block fails its CRC, magic or length
-/// checks. Errors from `read` are passed through.
+/// of range or revisited, when a block fails its CRC, magic or length
+/// checks, or when one of its entries is refused. Errors from `read` are
+/// passed through.
 pub fn decode_chain(
     root: BlockRef,
     overhead: u32,
     mut read: impl FnMut(u64, u32) -> Result<Vec<u8>>,
-) -> Result<(Vec<DirectoryEntry>, Vec<PageRun>)> {
+) -> Result<(Vec<DirectoryEntry>, Vec<SkippedEntry>, Vec<PageRun>)> {
     let mut entries = Vec::new();
+    let mut skipped = Vec::new();
     let mut runs = Vec::new();
     if root.length == 0 {
-        return Ok((entries, runs));
+        return Ok((entries, skipped, runs));
     }
     let mut visited = HashSet::new();
     let mut pointer = root;
@@ -276,9 +418,13 @@ pub fn decode_chain(
         }
         let (slots, _) = bytes[BLOCK_HEADER_SIZE..].as_chunks::<ENTRY_SIZE>();
         for slot in slots {
-            entries.push(DirectoryEntry::decode(slot).map_err(|error| {
+            let decoded = DirectoryEntry::decode(slot).map_err(|error| {
                 Error::Serialization(format!("directory block at offset {offset}: {error}"))
-            })?);
+            })?;
+            match decoded {
+                DecodedEntry::Known(entry) => entries.push(entry),
+                DecodedEntry::Skipped(entry) => skipped.push(entry),
+            }
         }
         // Two `u32` values: the sum cannot overflow `u64`.
         runs.push(PageRun {
@@ -291,7 +437,7 @@ pub fn decode_chain(
             crc: u32_at(&bytes, 20),
         };
         if pointer.length == 0 {
-            return Ok((entries, runs));
+            return Ok((entries, skipped, runs));
         }
     }
 }
@@ -316,6 +462,7 @@ mod tests {
             offset: (3 + i) * 4096,
             length: 4096,
             crc: u32::try_from(i).unwrap(),
+            flags: 0,
         }
     }
 
@@ -333,14 +480,87 @@ mod tests {
         .unwrap();
         assert_eq!(blocks.len(), 3);
         let stored: std::collections::HashMap<u64, Vec<u8>> = blocks.into_iter().collect();
-        let (back, runs) = decode_chain(root, 0, |offset, len| {
+        let (back, skipped, runs) = decode_chain(root, 0, |offset, len| {
             let b = &stored[&offset];
             assert_eq!(b.len(), len as usize);
             Ok(b.clone())
         })
         .unwrap();
         assert_eq!(back, entries);
+        assert!(skipped.is_empty(), "every entry is known");
         assert_eq!(runs.len(), 3);
+    }
+
+    /// The encoded form of `entry`.
+    fn encoded(entry: &DirectoryEntry) -> [u8; ENTRY_SIZE] {
+        let mut bytes = [0u8; ENTRY_SIZE];
+        entry.encode(&mut bytes);
+        bytes
+    }
+
+    /// Entries a newer version wrote come back apart from the known ones, in
+    /// directory order, across blocks.
+    #[test]
+    fn a_chain_returns_the_skipped_entries_apart_from_the_known_ones() {
+        let mut foreign_section = encoded(&entry(1));
+        foreign_section[0] = 250;
+        foreign_section[44] = ENTRY_SECTION_OPTIONAL;
+        let mut foreign_kind = encoded(&entry(2));
+        foreign_kind[2] = 88;
+        foreign_kind[44] = ENTRY_CHUNK_OPTIONAL;
+        let mut raw: Vec<[u8; ENTRY_SIZE]> = (3..3 + ENTRIES_PER_BLOCK as u64)
+            .map(|i| encoded(&entry(i)))
+            .collect();
+        raw.insert(0, encoded(&entry(0)));
+        raw.insert(1, foreign_section);
+        raw.push(foreign_kind);
+        let mut next = 245 * PAGE_SIZE;
+        let (root, blocks) = encode_blocks_raw(&raw, |len| {
+            let at = next;
+            next += PageRun::for_bytes(len as u64) * PAGE_SIZE;
+            Ok(at)
+        })
+        .unwrap();
+        assert_eq!(
+            blocks.len(),
+            2,
+            "the last foreign entry is in the second block"
+        );
+        let stored: std::collections::HashMap<u64, Vec<u8>> = blocks.into_iter().collect();
+        let (known, skipped, runs) =
+            decode_chain(root, 0, |offset, _| Ok(stored[&offset].clone())).unwrap();
+        assert_eq!(known.len(), ENTRIES_PER_BLOCK + 1);
+        assert_eq!(known[0], entry(0));
+        assert_eq!(
+            known[1],
+            entry(3),
+            "the skipped entry is not among the known"
+        );
+        assert_eq!(
+            skipped,
+            [
+                SkippedEntry {
+                    section_type: 250,
+                    kind: 0,
+                    flags: ENTRY_SECTION_OPTIONAL,
+                    offset: entry(1).offset,
+                    length: entry(1).length,
+                },
+                SkippedEntry {
+                    section_type: SectionType::LpgStore.to_u8(),
+                    kind: 88,
+                    flags: ENTRY_CHUNK_OPTIONAL,
+                    offset: entry(2).offset,
+                    length: entry(2).length,
+                },
+            ]
+        );
+        assert_eq!(runs.len(), 2);
+        assert_eq!(
+            skipped[0].run(),
+            entry(1).run(),
+            "a skipped entry names its pages as a known one does"
+        );
     }
 
     /// An encrypted block is stored with a nonce and a tag around its
@@ -352,7 +572,7 @@ mod tests {
         let (root, blocks) = encode_blocks(&entries, |_| Ok(12_288)).unwrap();
         assert_eq!(blocks[0].1.len(), 8192, "the plaintext fills two pages");
         for (overhead, pages) in [(0, 2), (28, 3)] {
-            let (back, runs) = decode_chain(root, overhead, |offset, length| {
+            let (back, _, runs) = decode_chain(root, overhead, |offset, length| {
                 assert_eq!(
                     (offset, length),
                     (12_288, root.length),
@@ -385,14 +605,162 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_section_type_or_chunk_kind_is_refused() {
+    fn unknown_entries_are_skipped_when_optional_and_refused_when_required() {
         let mut bytes = [0u8; ENTRY_SIZE];
-        entry(0).encode(&mut bytes);
-        bytes[0] = 250;
-        assert!(DirectoryEntry::decode(&bytes).is_err());
-        entry(0).encode(&mut bytes);
-        bytes[2] = 250;
-        assert!(DirectoryEntry::decode(&bytes).is_err());
+        entry(0).encode(&mut bytes); // an LpgStore entry
+        assert_eq!(bytes[44], 0, "every entry of this release is required");
+        let mut foreign_section = bytes;
+        foreign_section[0] = 250;
+        let error = DirectoryEntry::decode(&foreign_section)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("section type 250") && error.contains("required"),
+            "{error}"
+        );
+        foreign_section[44] = ENTRY_SECTION_OPTIONAL;
+        assert!(matches!(
+            DirectoryEntry::decode(&foreign_section).unwrap(),
+            DecodedEntry::Skipped(SkippedEntry {
+                section_type: 250,
+                ..
+            })
+        ));
+        let mut foreign_kind = bytes;
+        foreign_kind[2] = 250;
+        let error = DirectoryEntry::decode(&foreign_kind)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("chunk kind 250")
+                && error.contains("LpgStore")
+                && error.contains("required"),
+            "{error}"
+        );
+        foreign_kind[44] = ENTRY_SECTION_OPTIONAL;
+        assert!(
+            DirectoryEntry::decode(&foreign_kind).is_err(),
+            "the section bit does not cover a kind of a known section"
+        );
+        foreign_kind[44] = ENTRY_CHUNK_OPTIONAL;
+        assert!(matches!(
+            DirectoryEntry::decode(&foreign_kind).unwrap(),
+            DecodedEntry::Skipped(SkippedEntry { kind: 250, .. })
+        ));
+    }
+
+    #[test]
+    fn entry_flags_round_trip_and_unknown_incompatible_bits_are_refused() {
+        let flagged = DirectoryEntry {
+            flags: ENTRY_SECTION_OPTIONAL | ENTRY_CHUNK_OPTIONAL,
+            ..entry(3)
+        };
+        let mut bytes = [0u8; ENTRY_SIZE];
+        flagged.encode(&mut bytes);
+        assert_eq!(
+            DirectoryEntry::decode(&bytes).unwrap(),
+            DecodedEntry::Known(flagged),
+            "a known entry keeps its flags"
+        );
+        bytes[44] = 0x04;
+        assert!(
+            DirectoryEntry::decode(&bytes)
+                .unwrap_err()
+                .to_string()
+                .contains("flag"),
+            "bit 2 is not known"
+        );
+        bytes[44] = 0x10;
+        assert!(
+            matches!(
+                DirectoryEntry::decode(&bytes).unwrap(),
+                DecodedEntry::Known(_)
+            ),
+            "bits 4 to 7 are ignored"
+        );
+    }
+
+    /// An unknown bit among 0 to 3 is refused also on an entry that would
+    /// be skipped, and every one of bits 4 to 7 is ignored.
+    #[test]
+    fn every_incompatible_bit_is_refused_and_every_other_bit_ignored() {
+        let mut foreign_section = encoded(&entry(0));
+        foreign_section[0] = 250;
+        for bit in 2..4 {
+            foreign_section[44] = ENTRY_SECTION_OPTIONAL | (1 << bit);
+            let error = DirectoryEntry::decode(&foreign_section)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("flag"), "bit {bit}: {error}");
+        }
+        for bit in 4..8 {
+            let mut bytes = encoded(&entry(0));
+            bytes[44] = 1 << bit;
+            assert!(
+                matches!(
+                    DirectoryEntry::decode(&bytes).unwrap(),
+                    DecodedEntry::Known(_)
+                ),
+                "bit {bit} is ignored"
+            );
+            foreign_section[44] = ENTRY_SECTION_OPTIONAL | (1 << bit);
+            assert!(
+                matches!(
+                    DirectoryEntry::decode(&foreign_section).unwrap(),
+                    DecodedEntry::Skipped(_)
+                ),
+                "bit {bit} is ignored on a skipped entry"
+            );
+        }
+        assert_eq!(ENTRY_INCOMPATIBLE_FLAGS, 0x0F);
+    }
+
+    /// For every flags byte: only bit 0 lets an unknown section type be
+    /// skipped, only bit 1 an unknown kind of a known section; bits 2 and 3
+    /// are refused, and bits 4 to 7 never make an entry skippable.
+    #[test]
+    fn only_its_own_bit_lets_an_unknown_entry_be_skipped() {
+        let known = encoded(&entry(0));
+        for flags in 0..=u8::MAX {
+            let readable = flags & 0x0C == 0;
+            for (at, bit, what) in [
+                (0, ENTRY_SECTION_OPTIONAL, "section type"),
+                (2, ENTRY_CHUNK_OPTIONAL, "chunk kind"),
+            ] {
+                let mut foreign = known;
+                foreign[at] = 250;
+                foreign[44] = flags;
+                let decoded = DirectoryEntry::decode(&foreign);
+                if readable && flags & bit != 0 {
+                    assert!(
+                        matches!(decoded, Ok(DecodedEntry::Skipped(_))),
+                        "unknown {what}, flags {flags:#04x}: skipped, not {decoded:?}"
+                    );
+                } else {
+                    assert!(
+                        decoded.is_err(),
+                        "unknown {what}, flags {flags:#04x}: refused, not {decoded:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_writer_sets_no_optional_bit_for_a_section_of_this_release() {
+        for section_type in [
+            SectionType::Catalog,
+            SectionType::LpgStore,
+            SectionType::PropertyIndex,
+        ] {
+            for kind in [ChunkKind::Raw, ChunkKind::Meta, ChunkKind::Stream] {
+                assert_eq!(
+                    DirectoryEntry::flags_for(section_type, kind),
+                    0,
+                    "{section_type:?}, {kind:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -400,7 +768,10 @@ mod tests {
         let original = entry(19);
         let mut bytes = [0u8; ENTRY_SIZE];
         original.encode(&mut bytes);
-        assert_eq!(DirectoryEntry::decode(&bytes).unwrap(), original);
+        assert_eq!(
+            DirectoryEntry::decode(&bytes).unwrap(),
+            DecodedEntry::Known(original)
+        );
         assert_eq!(
             original.run(),
             PageRun {
@@ -463,7 +834,7 @@ mod tests {
         )
         .unwrap();
         let head = encode_block(
-            &[entry(0)],
+            &[encoded(&entry(0))],
             BlockRef {
                 offset: second,
                 length: len32(tail.len()),
@@ -506,12 +877,16 @@ mod tests {
             offset: 0x0000_0003_1988_3000,
             length: 0x0000_0001_0000_2328,
             crc: 0x1988_0319,
+            flags: 0,
         }
     }
 
     #[test]
     fn a_directory_entry_has_its_documented_byte_layout() {
-        let entry = fixed_entry();
+        let entry = DirectoryEntry {
+            flags: 0x33,
+            ..fixed_entry()
+        };
         let mut bytes = [0xAA; ENTRY_SIZE];
         entry.encode(&mut bytes);
         assert_eq!(bytes[0], 3, "section type byte");
@@ -537,12 +912,20 @@ mod tests {
             "length"
         );
         assert_eq!(bytes[40..44], [0x19, 0x03, 0x88, 0x19], "crc");
-        assert_eq!(bytes[44..48], [0, 0, 0, 0], "reserved, written as zero");
-        bytes[44..48].copy_from_slice(&[3, 19, 88, 1]);
+        assert_eq!(bytes[44], 0x33, "flags");
+        assert_eq!(bytes[45..48], [0, 0, 0], "reserved, written as zero");
+        // Bits 2, 3, 6 and 7: a reserved byte read into the flags would set
+        // an incompatible bit and the entry would be refused.
+        bytes[45..48].copy_from_slice(&[0xCC, 0xCC, 0xCC]);
         assert_eq!(
             DirectoryEntry::decode(&bytes).unwrap(),
-            entry,
+            DecodedEntry::Known(entry),
             "readers ignore the reserved bytes"
+        );
+        assert_eq!(
+            encoded(&fixed_entry())[44],
+            0,
+            "an entry without flags writes 0"
         );
     }
 
@@ -553,7 +936,7 @@ mod tests {
             length: 0x0000_0050,
             crc: 0xC0FF_EE19,
         };
-        let mut block = encode_block(&[fixed_entry()], next).unwrap();
+        let mut block = encode_block(&[encoded(&fixed_entry())], next).unwrap();
         assert_eq!(block.len(), 80, "header and one entry");
         assert_eq!(&block[0..4], b"GDIR", "magic");
         assert_eq!(block[4..8], [1, 0, 0, 0], "entry count");
@@ -580,7 +963,7 @@ mod tests {
             length: len32(block.len()),
             crc: crc32fast::hash(&block),
         };
-        let (entries, _) = decode_chain(root, 0, |offset, _| {
+        let (entries, _, _) = decode_chain(root, 0, |offset, _| {
             Ok(if offset == 12_288 {
                 block.clone()
             } else {
@@ -617,19 +1000,22 @@ mod tests {
                 crc: crc32fast::hash(&blocks[0].1),
             }
         );
-        let (entries, runs) = decode_chain(root, 0, |offset, _| {
+        let (entries, skipped, runs) = decode_chain(root, 0, |offset, _| {
             assert_eq!(offset, 12_288);
             Ok(blocks[0].1.clone())
         })
         .unwrap();
-        assert!(entries.is_empty(), "a block without entries");
+        assert!(
+            entries.is_empty() && skipped.is_empty(),
+            "a block without entries"
+        );
         assert_eq!(runs, [PageRun { first: 3, count: 1 }], "the block's page");
     }
 
     #[test]
     fn a_zero_length_root_still_decodes_as_a_directory_without_chunks() {
-        let (entries, runs) =
+        let (entries, skipped, runs) =
             decode_chain(BlockRef::default(), 0, |_, _| panic!("must not read")).unwrap();
-        assert!(entries.is_empty() && runs.is_empty());
+        assert!(entries.is_empty() && skipped.is_empty() && runs.is_empty());
     }
 }

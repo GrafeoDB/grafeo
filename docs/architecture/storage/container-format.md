@@ -126,11 +126,36 @@ entries, the CRC and the magic, and that the chain never visits a block twice.
 | 24 | 8 | `u64` | `offset` | Byte offset of the chunk (page-aligned; 0 for a chunk without bytes) |
 | 32 | 8 | `u64` | `length` | Stored length of the chunk |
 | 40 | 4 | `u32` | `crc` | CRC-32 of the stored chunk |
-| 44 | 4 | `u32` | (reserved) | Zero |
+| 44 | 1 | `u8` | `flags` | Bit 0: a reader that does not know the section type skips the entry; bit 1: a reader that knows the section type but not the chunk kind skips it (see below) |
+| 45 | 3 | - | (reserved) | Written as zero, ignored by readers |
 
-A reader refuses an entry with a section type or chunk kind it does not know.
-An open also checks that every chunk is page-aligned, lies within the file, and
-shares no page with another chunk or directory block.
+**Unknown entries.** A newer version may add section types and chunk kinds.
+The flags of each entry tell an older reader what to do with one it does not
+know:
+
+- Bit 0 (`0x01`, section optional): a reader that does not know the section
+  type skips the entry.
+- Bit 1 (`0x02`, chunk optional): a reader that knows the section type but not
+  the chunk kind skips the entry. Bit 0 never covers an unknown kind of a known
+  section, so an optional section can still add a required chunk kind.
+- An entry of an unknown section type or chunk kind without its bit is
+  refused: the error names the type or kind and says it is required.
+- Bits 0 to 3 change how an entry is read, so a reader refuses an entry that
+  sets one of them it does not know. Bits 4 to 7 do not, and a reader ignores
+  them (the same split as the feature flags of the file header).
+
+Every section type and chunk kind of this release is required: its entries
+have flags 0.
+
+A skipped chunk is never read, decrypted or handed to a section. Its place is
+checked as a known chunk's, and its pages stay in use while its image is
+active, so no checkpoint writes over them. A checkpoint writes only the section
+types and chunk kinds it knows, so the next one drops the skipped chunks, and
+their pages become free once its image is active.
+
+An open also checks that every chunk, a skipped one included, is page-aligned,
+lies within the file, and shares no page with another chunk or directory
+block.
 
 ---
 
@@ -154,8 +179,8 @@ shares no page with another chunk or directory block.
 - 10-19: Index sections (derived, can be rebuilt from data)
 - 20+: Acceleration structures
 
-**Optional sections without data** (indexes, RDF data, overlay deletions) are
-left out of the image: if no RDF data exists, there is no `RDF_STORE` chunk. The
+**Sections without data** (indexes, RDF data, overlay deletions) are left out
+of the image: if no RDF data exists, there is no `RDF_STORE` chunk. The
 `CATALOG` and `LPG_STORE` sections are always written.
 
 ---
@@ -243,8 +268,10 @@ Open database:
      takes the migration path instead, see below)
   2. Read both database header slots and select the active one
   3. Read the directory chain from the active header's root, checking every
-     block (and decrypting it in an encrypted file)
-  4. Check that every chunk lies within the file and that no pages overlap
+     block (and decrypting it in an encrypted file); set optional entries of
+     an unknown section type or chunk kind apart, and refuse required ones
+  4. Check that every chunk (a skipped one included) lies within the file and
+     that no pages overlap
   5. Read each section's chunks, verify their CRC-32 (and decrypt them), and
      load the section into RAM
   6. If a sidecar WAL exists: replay the changes committed since the last
@@ -256,7 +283,9 @@ A read-only open takes a shared lock instead and goes through the same steps, th
 replay included, but only into memory: it writes nothing, so a torn tail stays until
 the next read-write open. With the WAL enabled, that open seals the tail before it
 logs anything new; with `wal_enabled` off, it writes the replayed changes to the file
-and removes the WAL, the torn tail with it.
+and removes the WAL, the torn tail with it. A build without the `wal` feature cannot
+replay: it refuses to open a database whose sidecar WAL holds commits (a non-empty log
+file), read-only or not, and leaves the WAL as it is.
 
 ---
 

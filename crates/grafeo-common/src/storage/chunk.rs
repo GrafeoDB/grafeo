@@ -790,12 +790,18 @@ mod tests {
 
     #[test]
     fn a_joined_stream_holds_no_spare_capacity() {
-        // 4 MiB and 1 byte in default pieces: a buffer grown by doubling would hold 8 MiB.
-        let mut stream = vec![19u8; 4 << 20];
+        // Four full pieces and 1 byte: a buffer grown by doubling would hold 128 bytes for
+        // these 65. Small pieces keep the test fast under Miri; the joining does not depend
+        // on the piece size.
+        let caps = ChunkCaps {
+            max_rows: 65_536,
+            max_bytes: 16,
+        };
+        let mut stream = vec![19u8; 4 * 16];
         stream.push(88);
         let mut image = MemoryImage::new();
         image.begin_section(SectionType::CompactStore, 5).unwrap();
-        let mut writer = ChunkStreamWriter::new(&mut image, 0, 0, ChunkCaps::DEFAULT);
+        let mut writer = ChunkStreamWriter::new(&mut image, 0, 0, caps);
         std::io::Write::write_all(&mut writer, &stream).unwrap();
         assert_eq!(writer.finish().unwrap(), stream.len() as u64);
         assert_eq!(image.chunk_count(), 5);

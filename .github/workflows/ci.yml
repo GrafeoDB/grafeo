@@ -26,6 +26,14 @@ env:
 #    bindings each pull in "full" through their crate dependencies.
 #    Used by: python-test, node-test, go-test.
 #
+# 4. Shipped profile (grafeo-engine's "full", which leaves out "temporal"):
+#    the Rust side of what the Python and Node.js packages build. Profile 1
+#    turns "temporal" on, which compiles every cfg(not(feature = "temporal"))
+#    path out, so clippy and rustdoc for grafeo-core and grafeo-engine, and the
+#    grafeo-engine tests, run once more with exactly these features (the
+#    feature matrix already runs grafeo-core's tests with them).
+#    Used by: shipped-features.
+#
 # Note: the "embed" feature (ONNX embeddings, ~17 MB) is never included in
 # "full" and is not tested here. It is opt-in only.
 
@@ -390,6 +398,65 @@ jobs:
 
       - name: Test 0.5.x files without the lpg feature
         run: cargo nextest run -p grafeo-engine --no-default-features --features gql,grafeo-file,wal --test legacy_without_lpg
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+  # The shipped profile (4 above): grafeo-engine's `full` features, which the
+  # Python and Node.js packages build, without `temporal`. --all-features turns
+  # `temporal` on and so leaves out code these packages run: this job lints and
+  # documents it, and runs the engine's tests (rust-feature-matrix already runs
+  # grafeo-core's tests with this set). One OS and a debug build, as the code differs by
+  # feature, not by platform. `grafeo-engine/full` also sets grafeo-core's
+  # features, so both crates build with exactly the shipped set.
+  shipped-features:
+    name: Shipped Features
+    needs: [rust-check]
+    runs-on: ubuntu-latest
+    steps:
+      # The engine's test binaries in a debug build nearly fill an ubuntu
+      # runner's disk (see rust-test): remove preinstalled SDKs that this job
+      # does not use.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: clippy
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Run clippy (shipped profile)
+        run: cargo clippy -p grafeo-core -p grafeo-engine --all-targets --features grafeo-engine/full -- -D warnings
+
+      - name: Check docs (shipped profile)
+        run: cargo doc --no-deps -p grafeo-core -p grafeo-engine --features grafeo-engine/full
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Run tests (shipped profile)
+        run: cargo nextest run -p grafeo-engine --features grafeo-engine/full
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
@@ -1148,6 +1215,7 @@ jobs:
       - rust-test
       - rust-test-release
       - minimal-features
+      - shipped-features
       - rust-feature-matrix
       - miri
       - python-test

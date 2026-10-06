@@ -249,26 +249,24 @@ fn test_info_empty_database() {
 // ============================================================================
 
 #[test]
-fn test_property_with_null_value() {
+fn setting_a_property_to_null_removes_it() {
     let db = GrafeoDB::new_in_memory();
     let n = db.create_node(&["Test"]).unwrap();
+    db.set_node_property(n, "key", Value::from("Amsterdam"))
+        .unwrap();
     db.set_node_property(n, "key", Value::Null).unwrap();
+    db.set_node_property(n, "never_set", Value::Null).unwrap();
 
-    // In temporal mode, Null acts as a tombstone and is filtered out.
-    // In non-temporal mode, Null is stored and returned.
+    // A property with a null value does not exist, with or without the
+    // `temporal` feature, as for `SET n.key = NULL`.
     let node = db.get_node(n).unwrap();
-    #[cfg(feature = "temporal")]
+    assert_eq!(node.get_property("key"), None, "null removes the property");
     assert_eq!(
-        node.get_property("key"),
+        node.get_property("never_set"),
         None,
-        "Temporal: Null acts as tombstone"
+        "null on a missing property stores nothing"
     );
-    #[cfg(not(feature = "temporal"))]
-    assert_eq!(
-        node.get_property("key"),
-        Some(&Value::Null),
-        "Should store Null value"
-    );
+    assert!(node.properties.is_empty(), "{:?}", node.properties);
 }
 
 #[test]

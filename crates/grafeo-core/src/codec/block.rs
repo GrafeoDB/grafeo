@@ -7,8 +7,8 @@
 //! summary statistics.
 //!
 //! This module lives in `codec` rather than under any particular store
-//! because both [`graph::compact::ColumnCodec`](crate::graph::compact::column::ColumnCodec)
-//! (the read-only columnar base) and the LPG store's `PropertyColumn`
+//! because both `graph::compact::ColumnCodec` (the read-only columnar base,
+//! feature `compact-store`) and the LPG store's `PropertyColumn`
 //! (the mutable in-memory store, modernized later in Phase 2) describe
 //! their data using the same block descriptors.
 //!

@@ -47,8 +47,9 @@ use crate::utils::error::{Error, Result};
 /// Deepest nesting of lists, maps and paths a decode accepts.
 ///
 /// A list of scalars is 1 deep, a list holding that list 2 deep.
-/// [`encode_value`] refuses a value nested deeper.
-pub const MAX_VALUE_DEPTH: usize = 64;
+/// [`encode_value`] refuses a value nested deeper. 128 is the nesting the
+/// GQL parser accepts.
+pub const MAX_VALUE_DEPTH: usize = 128;
 
 const TAG_NULL: u8 = 0;
 const TAG_BOOL: u8 = 1;
@@ -776,6 +777,18 @@ mod tests {
                 pos: counter(&[("Mia", 88)]),
                 neg: counter(&[("Jules", 3)]),
             },
+            Value::Bool(false),
+            Value::Time(Time::from_nanos(88).unwrap().with_offset(0)),
+            Value::Path {
+                nodes: Arc::from(vec![
+                    map(vec![("_id", Value::Int64(3))]),
+                    map(vec![("_id", Value::Int64(19))]),
+                ]),
+                edges: Arc::from(vec![map(vec![("_id", Value::Int64(88))])]),
+            },
+            list(vec![Value::Null]),
+            map(vec![("", Value::Null)]),
+            Value::GCounter(counter(&[("", 0)])),
         ]
     }
 
@@ -893,7 +906,8 @@ mod tests {
         assert_eq!(
             tags,
             [
-                0, 1, 2, 2, 3, 3, 4, 4, 5, 6, 7, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+                0, 1, 2, 2, 3, 3, 4, 4, 5, 6, 7, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1, 7, 14, 11,
+                12, 15
             ],
             "one tag per kind, in the order of every_kind"
         );
@@ -1054,13 +1068,19 @@ mod tests {
         let mut bytes = vec![7];
         bytes.extend_from_slice(&86_400_000_000_000u64.to_le_bytes());
         bytes.extend_from_slice(&[0, 0, 0, 0, 0]);
-        assert!(decode_value(&bytes, &mut 0).is_err());
+        let error = decode_value(&bytes, &mut 0).unwrap_err().to_string();
+        assert!(
+            error.contains("byte 1:") && error.contains("not within a day"),
+            "{error}"
+        );
     }
 
     #[test]
     fn malformed_fields_are_refused_with_their_offset() {
         let refused = |bytes: &[u8], at: usize| {
-            let error = decode_value(bytes, &mut 0).unwrap_err().to_string();
+            let error = decode_value(bytes, &mut 0).unwrap_err();
+            assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+            let error = error.to_string();
             assert!(error.contains(&format!("byte {at}:")), "{bytes:?}: {error}");
         };
         refused(&[1, 2], 1);
@@ -1144,6 +1164,47 @@ mod tests {
             error.contains("\"Alix\"") && error.contains("\"Gus\"") && error.contains("byte 20:"),
             "{error}"
         );
+
+        let on_counter_of = |negative: [&str; 2]| {
+            let mut bytes = vec![16, 1, 0, 0, 0, 4, 0, 0, 0];
+            bytes.extend_from_slice(b"Alix");
+            bytes.extend_from_slice(&3u64.to_le_bytes());
+            bytes.extend_from_slice(&counter_of(negative)[1..]);
+            bytes
+        };
+        assert!(
+            decode_value(&on_counter_of(["Alix", "Gus"]), &mut 0).is_ok(),
+            "increasing negative replicas decode"
+        );
+        let error = decode_value(&on_counter_of(["Gus", "Alix"]), &mut 0)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("\"Alix\"") && error.contains("\"Gus\"") && error.contains("byte 40:"),
+            "the second negative replica: {error}"
+        );
+    }
+
+    #[test]
+    fn containers_side_by_side_do_not_count_as_nesting() {
+        let path = || Value::Path {
+            nodes: Arc::from(vec![
+                map(vec![("city", Value::from("Paris"))]),
+                map(vec![("city", Value::from("Prague"))]),
+            ]),
+            edges: Arc::from(vec![list(vec![Value::Int64(19)])]),
+        };
+        let wide = list((0..=MAX_VALUE_DEPTH).map(|_| path()).collect());
+        let bytes = encoded(&wide);
+        assert_eq!(encoded_len(&wide), bytes.len());
+        let mut pos = 0;
+        let back = decode_value(&bytes, &mut pos).unwrap();
+        assert!(
+            same(&wide, &back),
+            "a list of {} paths is 3 deep",
+            MAX_VALUE_DEPTH + 1
+        );
+        assert_eq!(pos, bytes.len());
     }
 
     #[test]
@@ -1155,15 +1216,50 @@ mod tests {
         assert!(same(&deepest, &back), "{MAX_VALUE_DEPTH} deep round trips");
 
         let mut out = vec![3, 19, 88];
-        let error = encode_value(&nested(MAX_VALUE_DEPTH + 1), &mut out)
-            .unwrap_err()
-            .to_string();
+        let error = encode_value(&nested(MAX_VALUE_DEPTH + 1), &mut out).unwrap_err();
+        assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+        let error = error.to_string();
         assert!(error.contains("deeper"), "{error}");
         assert_eq!(out, [3, 19, 88], "a refused value appends nothing");
 
         let one_deeper = [&[11u8, 1, 0, 0, 0][..], &bytes].concat();
         let error = decode_value(&one_deeper, &mut 0).unwrap_err().to_string();
         assert!(error.contains("deeper"), "{error}");
+    }
+
+    /// Every `Time` is within a day, the decoder's condition, so the encoder
+    /// writes no time the decoder refuses: a stored value (the WAL, the 0.5.x
+    /// readers) holding a time outside a day is refused when serde reads it.
+    #[test]
+    fn a_stored_value_with_a_time_outside_a_day_is_refused_by_serde() {
+        #[derive(serde::Serialize)]
+        struct RawTime {
+            nanos: u64,
+            offset: Option<i32>,
+        }
+        let config = bincode::config::standard();
+        let stored = |nanos: u64| {
+            let valid = Value::Time(Time::from_nanos(88).unwrap());
+            let variant = bincode::serde::encode_to_vec(&valid, config).unwrap()[0];
+            let mut bytes = vec![variant];
+            let raw = RawTime {
+                nanos,
+                offset: None,
+            };
+            bytes.extend(bincode::serde::encode_to_vec(&raw, config).unwrap());
+            bytes
+        };
+        let (back, _): (Value, _) = bincode::serde::decode_from_slice(&stored(88), config).unwrap();
+        assert!(
+            same(&back, &Value::Time(Time::from_nanos(88).unwrap())),
+            "the raw form is a stored time: {back:?}"
+        );
+        let result: std::result::Result<(Value, usize), _> =
+            bincode::serde::decode_from_slice(&stored(86_400_000_000_000), config);
+        let error = result
+            .expect_err("a stored time of a full day is refused")
+            .to_string();
+        assert!(error.contains("not within a day"), "{error}");
     }
 
     #[derive(serde::Serialize, serde::Deserialize)]

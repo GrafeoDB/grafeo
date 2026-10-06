@@ -6,13 +6,21 @@
 
 use std::fs::File;
 
-use grafeo_common::storage::{ChunkMeta, SectionSink, SectionType};
+use grafeo_common::storage::{ChunkIdentities, ChunkMeta, SectionSink, SectionType};
 use grafeo_common::utils::error::{Error, Result};
 
 use super::alloc::{PageAllocator, PageRun};
-use super::cipher::{ChunkCipher, ENCRYPTION_OVERHEAD};
-use super::directory::{DirectoryEntry, encode_blocks};
+use super::cipher::{ChunkCipher, ENCRYPTION_OVERHEAD, chunk_aad_for};
+use super::directory::{DirectoryEntry, ENTRY_SIZE, encode_blocks_raw};
 use super::header::{BlockRef, PAGE_SIZE};
+
+/// Where a stored chunk lies: offset, stored length and CRC of the stored
+/// bytes.
+struct Stored {
+    offset: u64,
+    length: u64,
+    crc: u32,
+}
 
 /// An I/O error that names the write it belongs to.
 #[cfg(any(unix, windows))]
@@ -84,6 +92,12 @@ pub struct CheckpointWriter<'a> {
     current: Option<(SectionType, u8)>,
     /// Section types begun so far, in order.
     begun: Vec<SectionType>,
+    /// The identities the current section has used.
+    identities: ChunkIdentities,
+    /// Encoded entries of a newer version's chunks, which `finish` appends
+    /// after the known entries.
+    #[cfg(test)]
+    foreign: Vec<[u8; ENTRY_SIZE]>,
 }
 
 impl<'a> CheckpointWriter<'a> {
@@ -99,18 +113,23 @@ impl<'a> CheckpointWriter<'a> {
             runs: Vec::new(),
             current: None,
             begun: Vec::new(),
+            identities: ChunkIdentities::default(),
+            #[cfg(test)]
+            foreign: Vec::new(),
         }
     }
 
-    /// Starts a section; the chunks written next belong to it.
+    /// Starts a section; the chunks written next belong to it, and their
+    /// identities are checked against each other only.
     ///
     /// # Errors
     ///
     /// Returns an error when `section_type` was already begun in this
     /// writer: the reader gathers every chunk of a type into one section, so
-    /// a repeated type would mix two streams, possibly of different versions.
-    /// After the error no section is current, so chunks are refused until the
-    /// next successful `begin_section`.
+    /// a repeated type would mix two streams, possibly of different versions,
+    /// and the identities of its second stream would be checked from
+    /// scratch. After the error no section is current, so chunks are refused
+    /// until the next successful `begin_section`.
     pub fn begin_section(&mut self, section_type: SectionType, version: u8) -> Result<()> {
         if self.begun.contains(&section_type) {
             self.current = None;
@@ -120,6 +139,7 @@ impl<'a> CheckpointWriter<'a> {
         }
         self.begun.push(section_type);
         self.current = Some((section_type, version));
+        self.identities = ChunkIdentities::default();
         Ok(())
     }
 
@@ -141,9 +161,20 @@ impl<'a> CheckpointWriter<'a> {
         } else {
             0
         };
+        let encoded: Vec<[u8; ENTRY_SIZE]> = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let mut bytes = [0u8; ENTRY_SIZE];
+                entry.encode(&mut bytes);
+                bytes
+            })
+            .collect();
+        #[cfg(test)]
+        let encoded = [encoded, std::mem::take(&mut self.foreign)].concat();
         let pages = &mut self.pages;
         let runs = &mut self.runs;
-        let (root, blocks) = encode_blocks(&self.entries, |length| {
+        let (root, blocks) = encode_blocks_raw(&encoded, |length| {
             let stored = u64::try_from(length + stored_extra)
                 .map_err(|_| Error::Internal("directory block is too large".to_string()))?;
             let run = pages.allocate(PageRun::for_bytes(stored))?;
@@ -167,67 +198,140 @@ impl<'a> CheckpointWriter<'a> {
         }
         Ok((root, self.runs))
     }
+
+    /// Stores the bytes of one chunk in new pages, encrypted with the
+    /// associated data `aad` builds when the writer has a cipher (it is not
+    /// called otherwise), and records the pages among the image's runs. Empty
+    /// bytes take no page: offset 0, length 0 and the CRC of nothing. `what`
+    /// names the chunk in errors.
+    fn store(&mut self, what: &str, aad: impl FnOnce() -> Vec<u8>, bytes: &[u8]) -> Result<Stored> {
+        if bytes.is_empty() {
+            return Ok(Stored {
+                offset: 0,
+                length: 0,
+                crc: crc32fast::hash(&[]),
+            });
+        }
+        let stored_extra = if self.cipher.is_some() {
+            ENCRYPTION_OVERHEAD
+        } else {
+            0
+        };
+        let expected = bytes.len() + stored_extra;
+        let stored_length =
+            u64::try_from(expected).map_err(|_| Error::Internal(format!("{what} is too large")))?;
+        let run = self
+            .pages
+            .allocate(PageRun::for_bytes(stored_length))
+            .map_err(|error| Error::Internal(format!("{what}: {error}")))?;
+        let offset = run.offset()?;
+        debug_assert!(offset.is_multiple_of(PAGE_SIZE));
+        #[cfg(feature = "encryption")]
+        let encrypted;
+        let stored: &[u8] = match self.cipher {
+            #[cfg(feature = "encryption")]
+            Some(cipher) => {
+                let nonce = grafeo_common::encryption::random_nonce();
+                encrypted = cipher
+                    .encrypt(bytes, &nonce, &aad())
+                    .map_err(|error| Error::Internal(format!("{what}: {error}")))?;
+                &encrypted
+            }
+            #[cfg(not(feature = "encryption"))]
+            Some(cipher) => match *cipher {},
+            None => bytes,
+        };
+        #[cfg(not(feature = "encryption"))]
+        let _ = aad;
+        check_stored_length(what, offset, stored.len(), expected)?;
+        let crc = crc32fast::hash(stored);
+        write_at(self.file, offset, stored)?;
+        self.runs.push(run);
+        Ok(Stored {
+            offset,
+            length: stored_length,
+            crc,
+        })
+    }
+
+    /// Stands in for a writer of a newer version in tests: writes `bytes` as
+    /// a chunk of section type byte `section_type` and chunk kind byte
+    /// `kind`, which this version need not know, with the entry flags
+    /// `flags`.
+    ///
+    /// The bytes go into new pages, encrypted with the associated data of
+    /// those numbers (graph, column and first row 0) when the writer has a
+    /// cipher. The entry carries the current section's version when
+    /// `section_type` is its byte, else version 1, and zero in every other
+    /// field; `finish` appends it after the known entries. No section needs
+    /// to be current, and no identity is checked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when allocating, encrypting or writing the chunk
+    /// fails.
+    #[cfg(test)]
+    pub(crate) fn write_foreign_chunk(
+        &mut self,
+        section_type: u8,
+        kind: u8,
+        flags: u8,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let what = format!("chunk of section type {section_type}, kind {kind}");
+        let stored = self.store(
+            &what,
+            || super::cipher::chunk_aad_parts(section_type, kind, 0, 0, 0),
+            bytes,
+        )?;
+        let version = match self.current {
+            Some((current, version)) if current.to_u8() == section_type => version,
+            _ => 1,
+        };
+        let mut entry = [0u8; ENTRY_SIZE];
+        entry[0] = section_type;
+        entry[1] = version;
+        entry[2] = kind;
+        entry[24..32].copy_from_slice(&stored.offset.to_le_bytes());
+        entry[32..40].copy_from_slice(&stored.length.to_le_bytes());
+        entry[40..44].copy_from_slice(&stored.crc.to_le_bytes());
+        entry[44] = flags;
+        self.foreign.push(entry);
+        Ok(())
+    }
 }
 
 impl SectionSink for CheckpointWriter<'_> {
+    /// Writes the chunk into free pages of the current section.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no section is current, when the section wrote
+    /// a chunk with the same identity ([`ChunkMeta::identity`]) already, or
+    /// when allocating, encrypting or writing the chunk fails. A chunk
+    /// refused for its identity takes no page and writes nothing.
     fn write_chunk(&mut self, meta: ChunkMeta, bytes: &[u8]) -> Result<()> {
         let (section_type, section_version) = self
             .current
             .ok_or_else(|| Error::Internal("chunk written before a section began".to_string()))?;
-        let mut entry = DirectoryEntry {
+        // Before a page is allocated or a byte encrypted, so a refused chunk
+        // changes nothing.
+        self.identities.insert(section_type, &meta)?;
+        // The reader rebuilds the same associated data from the entry.
+        let stored = self.store(
+            &format!("chunk of section {section_type:?}"),
+            || chunk_aad_for(section_type, &meta),
+            bytes,
+        )?;
+        self.entries.push(DirectoryEntry {
             section_type,
             section_version,
             meta,
-            offset: 0,
-            length: 0,
-            crc: crc32fast::hash(&[]),
-        };
-        if !bytes.is_empty() {
-            let stored_extra = if self.cipher.is_some() {
-                ENCRYPTION_OVERHEAD
-            } else {
-                0
-            };
-            let expected = bytes.len() + stored_extra;
-            let stored_length = u64::try_from(expected)
-                .map_err(|_| Error::Internal("chunk is too large".to_string()))?;
-            let run = self
-                .pages
-                .allocate(PageRun::for_bytes(stored_length))
-                .map_err(|error| {
-                    Error::Internal(format!("chunk of section {section_type:?}: {error}"))
-                })?;
-            entry.offset = run.offset()?;
-            debug_assert!(entry.offset.is_multiple_of(PAGE_SIZE));
-            entry.length = stored_length;
-            #[cfg(feature = "encryption")]
-            let encrypted;
-            let stored: &[u8] = match self.cipher {
-                #[cfg(feature = "encryption")]
-                Some(cipher) => {
-                    let nonce = grafeo_common::encryption::random_nonce();
-                    encrypted = cipher
-                        .encrypt(bytes, &nonce, &super::cipher::chunk_aad(&entry))
-                        .map_err(|error| {
-                            Error::Internal(format!("section {section_type:?}: {error}"))
-                        })?;
-                    &encrypted
-                }
-                #[cfg(not(feature = "encryption"))]
-                Some(cipher) => match *cipher {},
-                None => bytes,
-            };
-            check_stored_length(
-                format_args!("chunk of section {section_type:?}"),
-                entry.offset,
-                stored.len(),
-                expected,
-            )?;
-            entry.crc = crc32fast::hash(stored);
-            write_at(self.file, entry.offset, stored)?;
-            self.runs.push(run);
-        }
-        self.entries.push(entry);
+            offset: stored.offset,
+            length: stored.length,
+            crc: stored.crc,
+            flags: DirectoryEntry::flags_for(section_type, meta.kind),
+        });
         Ok(())
     }
 }
@@ -239,7 +343,7 @@ mod tests {
     use super::super::ImageReader;
     use super::super::alloc::{PageAllocator, PageRun};
     use super::super::header::{DATA_START_PAGE, PAGE_SIZE};
-    use super::{CheckpointWriter, check_stored_length, write_at};
+    use super::{CheckpointWriter, Error, check_stored_length, write_at};
 
     fn open(dir: &tempfile::TempDir) -> File {
         File::options()
@@ -279,6 +383,97 @@ mod tests {
         );
         drop(writer);
         assert_eq!(file.metadata().unwrap().len(), 0, "nothing was written");
+    }
+
+    /// A chunk whose identity its section used already is refused before it
+    /// takes a page or writes a byte; another section may use the identity.
+    #[test]
+    fn a_repeated_chunk_identity_is_refused_before_it_is_written() {
+        use grafeo_common::storage::{ChunkMeta, SectionSink, SectionSource, SectionType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = open(&dir);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
+        writer.begin_section(SectionType::LpgStore, 3).unwrap();
+        writer
+            .write_chunk(ChunkMeta::column(0, 16, 0, 3, 7), b"Alix")
+            .unwrap();
+        let error = writer
+            .write_chunk(ChunkMeta::column(0, 16, 0, 3, 7), b"Gus")
+            .unwrap_err();
+        assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+        let error = error.to_string();
+        assert!(
+            error.contains("LpgStore") && error.contains("two chunks"),
+            "{error}"
+        );
+        writer.begin_section(SectionType::RdfStore, 3).unwrap();
+        // Another section: allowed.
+        writer
+            .write_chunk(ChunkMeta::column(0, 16, 0, 3, 7), b"Mia")
+            .unwrap();
+        let (root, runs) = writer.finish().unwrap();
+        assert_eq!(
+            runs.iter().map(|run| run.count).sum::<u64>(),
+            1 + 1 + 1,
+            "two chunks and one directory block: the refused chunk took no page"
+        );
+        assert_eq!(
+            runs.iter().map(|run| run.end().unwrap()).max(),
+            Some(DATA_START_PAGE + 3),
+            "the three pages follow each other: the refused chunk left no gap"
+        );
+        let bytes = std::fs::read(dir.path().join("x")).unwrap();
+        assert!(
+            !bytes.windows(3).any(|window| window == b"Gus"),
+            "the refused chunk's bytes were not written"
+        );
+        let reader = ImageReader::open(&mut file, root, None).unwrap();
+        let store = reader.section(SectionType::LpgStore).unwrap();
+        assert_eq!(store.chunks(), [ChunkMeta::column(0, 16, 0, 3, 7)]);
+        assert_eq!(
+            &store.fetch(0).unwrap()[..],
+            b"Alix",
+            "the first chunk stays"
+        );
+        let rdf = reader.section(SectionType::RdfStore).unwrap();
+        assert_eq!(&rdf.fetch(0).unwrap()[..], b"Mia");
+    }
+
+    /// A chunk without bytes is held to the identity rule too, so every
+    /// image the writer finishes opens.
+    #[test]
+    fn a_repeated_identity_of_chunks_without_bytes_is_refused() {
+        use grafeo_common::storage::{ChunkMeta, SectionSink, SectionType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = open(&dir);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
+        writer.begin_section(SectionType::LpgStore, 3).unwrap();
+        writer.write_chunk(ChunkMeta::meta(), b"").unwrap();
+        let error = writer
+            .write_chunk(ChunkMeta::meta(), b"")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("LpgStore") && error.contains("two chunks"),
+            "{error}"
+        );
+        let (root, runs) = writer.finish().unwrap();
+        assert_eq!(
+            runs.iter().map(|run| run.count).sum::<u64>(),
+            1,
+            "the directory block only: chunks without bytes take no page"
+        );
+        let reader = ImageReader::open(&mut file, root, None)
+            .expect("every image the writer finishes opens");
+        assert_eq!(
+            reader.entries().len(),
+            1,
+            "the refused chunk left no entry in the directory"
+        );
     }
 
     #[test]

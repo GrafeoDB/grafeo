@@ -174,9 +174,16 @@ pub fn pagerank(
         }
     }
     if !directed {
-        for neighbors in &mut out_edges {
-            neighbors.sort_unstable();
-            neighbors.dedup();
+        // Drop parallel edges in linear time: `last_seen[j]` is the last node
+        // whose list kept j. The scores do not depend on the list order, as
+        // `new_scores[j]` adds its contributions in the order of the nodes.
+        let mut last_seen = vec![usize::MAX; n];
+        for (i, neighbors) in out_edges.iter_mut().enumerate() {
+            neighbors.retain(|&j| {
+                let first = last_seen[j] != i;
+                last_seen[j] = i;
+                first
+            });
         }
     }
     let out_degree: Vec<usize> = out_edges.iter().map(Vec::len).collect();
@@ -497,7 +504,9 @@ impl_algorithm! {
             builder.push(node, Value::Float64(score));
         }
 
-        Ok(builder.build())
+        let mut result = builder.build();
+        result.sort_by_id_columns(1);
+        Ok(result)
     }
 }
 
@@ -534,7 +543,9 @@ impl_algorithm! {
             builder.push(node, Value::Float64(score));
         }
 
-        Ok(builder.build())
+        let mut result = builder.build();
+        result.sort_by_id_columns(1);
+        Ok(result)
     }
 }
 
@@ -572,7 +583,9 @@ impl_algorithm! {
             builder.push(node, Value::Float64(score));
         }
 
-        Ok(builder.build())
+        let mut result = builder.build();
+        result.sort_by_id_columns(1);
+        Ok(result)
     }
 }
 
@@ -618,7 +631,9 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
             for (node, score) in scores {
                 builder.push(node, Value::Float64(score));
             }
-            Ok(builder.build())
+            let mut result = builder.build();
+            result.sort_by_id_columns(1);
+            Ok(result)
         } else {
             let result = degree_centrality(store);
 
@@ -643,6 +658,7 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
                 ]);
             }
 
+            output.sort_by_id_columns(1);
             Ok(output)
         }
     }

@@ -6,8 +6,8 @@
 //!
 //! A section streams out and in as chunks ([`section`]), cut by the caps and
 //! byte streams of [`chunk`]; an image ([`image`]) serves the sections of one
-//! checkpoint, from a file or from memory. Values inside chunks use the
-//! lossless codec of [`value_codec`].
+//! checkpoint, from a file or from memory. [`value_codec`] is a lossless
+//! codec for property values, for the chunked sections to encode them with.
 
 pub mod chunk;
 pub mod image;

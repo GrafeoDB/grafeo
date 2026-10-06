@@ -195,7 +195,7 @@ GrafeoStatus grafeo_find_nodes_by_property(GrafeoDatabase* db, const char* prope
 /* Return 1 (created / dropped), 0 (name taken / no such projection), -1 on error (grafeo_last_error). */
 int32_t      grafeo_create_projection(GrafeoDatabase* db, const char* name, const char* const* node_labels, size_t num_labels, const char* const* edge_types, size_t num_types);
 int32_t      grafeo_drop_projection(GrafeoDatabase* db, const char* name);
-char*        grafeo_list_projections(GrafeoDatabase* db);
+char*        grafeo_list_projections(GrafeoDatabase* db);   /* JSON array of names, NULL on error; free with grafeo_free_string */
 void         grafeo_free_node_ids(uint64_t* ids, size_t count);
 
 /* ---- Vector operations --------------------------------------------------- */

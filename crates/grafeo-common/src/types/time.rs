@@ -16,6 +16,10 @@ const NANOS_PER_SECOND: u64 = 1_000_000_000;
 /// Stored as nanoseconds since midnight plus an optional UTC offset in seconds.
 /// Without an offset, this is a "local time."
 ///
+/// The nanoseconds are always within a day (below 86,400,000,000,000): every
+/// constructor and `Deserialize` keep them there, and the
+/// [value codec](crate::storage::value_codec) relies on it.
+///
 /// # Examples
 ///
 /// ```
@@ -30,11 +34,35 @@ const NANOS_PER_SECOND: u64 = 1_000_000_000;
 /// assert_eq!(tz.to_string(), "14:30:00+01:00");
 /// ```
 #[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(try_from = "TimeFields")]
 pub struct Time {
     /// Nanoseconds since midnight (0..86_400_000_000_000).
     nanos: u64,
     /// UTC offset in seconds, or None for local time.
     offset: Option<i32>,
+}
+
+/// What a [`Time`] deserializes from: its fields, under its name, in its
+/// order, so the serialized form is unchanged. A time of day that
+/// [`Time::from_nanos`] refuses is refused here too.
+#[derive(Deserialize)]
+#[serde(rename = "Time")]
+struct TimeFields {
+    nanos: u64,
+    offset: Option<i32>,
+}
+
+impl TryFrom<TimeFields> for Time {
+    type Error = String;
+
+    fn try_from(fields: TimeFields) -> Result<Self, Self::Error> {
+        let time = Self::from_nanos(fields.nanos)
+            .ok_or_else(|| format!("a time of {} nanoseconds is not within a day", fields.nanos))?;
+        Ok(match fields.offset {
+            Some(offset) => time.with_offset(offset),
+            None => time,
+        })
+    }
 }
 
 impl Time {
@@ -547,5 +575,62 @@ mod tests {
         let result = t.add_duration(&dur);
         assert_eq!(result.hour(), 12);
         assert_eq!(result.minute(), 0);
+    }
+
+    /// `Time`'s serde fields, written as they were before deserializing
+    /// checked them.
+    #[derive(serde::Serialize)]
+    struct RawTime {
+        nanos: u64,
+        offset: Option<i32>,
+    }
+
+    #[test]
+    fn a_valid_time_keeps_its_bincode_bytes() {
+        let config = bincode::config::standard();
+        let offset_time = Time::from_nanos(3_600_000_000_019)
+            .unwrap()
+            .with_offset(3600);
+        let mut pinned = vec![253];
+        pinned.extend_from_slice(&3_600_000_000_019u64.to_le_bytes());
+        pinned.extend_from_slice(&[1, 251, 0x20, 0x1C]);
+        let local_time = Time::from_nanos(88).unwrap();
+        for (time, pinned) in [(offset_time, pinned), (local_time, vec![88, 0])] {
+            let bytes = bincode::serde::encode_to_vec(time, config).unwrap();
+            assert_eq!(bytes, pinned, "{time}: the stored bytes of a time");
+            let raw = RawTime {
+                nanos: time.as_nanos(),
+                offset: time.offset_seconds(),
+            };
+            assert_eq!(
+                bincode::serde::encode_to_vec(&raw, config).unwrap(),
+                pinned,
+                "{time}: the same fields in the same order"
+            );
+            let (back, read): (Time, usize) =
+                bincode::serde::decode_from_slice(&bytes, config).unwrap();
+            assert_eq!(read, bytes.len());
+            assert_eq!(
+                (back.as_nanos(), back.offset_seconds()),
+                (time.as_nanos(), time.offset_seconds()),
+                "{time} came back as {back}"
+            );
+        }
+    }
+
+    #[test]
+    fn deserializing_refuses_a_time_outside_a_day() {
+        let config = bincode::config::standard();
+        let raw = RawTime {
+            nanos: 86_400_000_000_000,
+            offset: Some(3600),
+        };
+        let bytes = bincode::serde::encode_to_vec(&raw, config).unwrap();
+        let result: std::result::Result<(Time, usize), _> =
+            bincode::serde::decode_from_slice(&bytes, config);
+        let error = result
+            .expect_err("a time of a full day is refused")
+            .to_string();
+        assert!(error.contains("not within a day"), "{error}");
     }
 }

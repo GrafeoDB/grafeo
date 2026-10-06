@@ -940,6 +940,54 @@ fn test_discard_uncommitted_versions() {
     );
 }
 
+/// Labels a transaction adds to or removes from a node it created itself
+/// reach that node. Without `temporal` the change looked for the node among
+/// the committed ones, did not find it and was dropped.
+#[test]
+fn label_changes_reach_a_node_the_transaction_created() {
+    let store = LpgStore::new().unwrap();
+    // Not `new(1)`: that is `TransactionId::SYSTEM`, whose writes are
+    // committed at once.
+    let transaction_id = TransactionId::new(19);
+    let id =
+        store.create_node_versioned(&["Person", "Guest"], store.current_epoch(), transaction_id);
+
+    assert!(
+        store.add_label_versioned(id, "Admin", transaction_id),
+        "the transaction sees the node it created"
+    );
+    assert!(
+        store.remove_label_versioned(id, "Guest", transaction_id),
+        "the transaction sees the node it created"
+    );
+
+    let node = store
+        .get_node_versioned(id, store.current_epoch(), transaction_id)
+        .expect("the transaction sees the node it created");
+    let mut labels: Vec<&str> = node.labels.iter().map(|label| label.as_str()).collect();
+    labels.sort_unstable();
+    assert_eq!(labels, ["Admin", "Person"]);
+    assert_eq!(store.nodes_by_label("Admin"), [id]);
+    assert_eq!(store.nodes_by_label("Guest"), Vec::<NodeId>::new());
+}
+
+/// A transaction changes no labels of a node it does not see: one another
+/// transaction created and has not committed, or one that does not exist.
+#[test]
+fn label_changes_skip_a_node_the_transaction_does_not_see() {
+    let store = LpgStore::new().unwrap();
+    let id =
+        store.create_node_versioned(&["Person"], store.current_epoch(), TransactionId::new(19));
+    let other = TransactionId::new(88);
+
+    assert!(!store.add_label_versioned(id, "Admin", other));
+    assert!(!store.remove_label_versioned(id, "Person", other));
+    assert!(!store.add_label_versioned(NodeId::new(3_888), "Admin", other));
+
+    assert_eq!(store.nodes_by_label("Admin"), Vec::<NodeId>::new());
+    assert_eq!(store.nodes_by_label("Person"), [id]);
+}
+
 // === Property Index Tests ===
 
 #[test]

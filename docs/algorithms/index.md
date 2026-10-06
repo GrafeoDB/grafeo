@@ -225,6 +225,33 @@ Works the same way across all three languages:
 | `grafeo.stochastic_block_partition()` | Community | node_id, block_id, description_length |
 | `grafeo.subgraph_isomorphism()` | Structure | count |
 
+## Determinism
+
+The same graph, loaded in the same order, gives bit-identical results with the
+same Grafeo version, in any process, on any platform and with any number of
+threads:
+
+- Results come in node-id order: `CALL` rows (edge results by source, then
+  target), the dicts and lists of `db.algorithms`, and the lists the Rust
+  functions return. Results whose order is the answer (paths, BFS and DFS
+  order, topological order, spanning tree edges) keep their own order.
+- Ties are broken by node id. Louvain and label propagation visit nodes in
+  node-id order, a node that gains equally from several communities joins the
+  one with the smallest index, and communities are numbered 0, 1, 2, ... in
+  order of their smallest node id.
+- Floating-point sums run in a fixed order, and averages over many nodes (the
+  clustering coefficient) use compensated summation, so the parallel and the
+  sequential paths agree.
+
+Loaded in a different order, the results that do not depend on node ids stay
+identical: core numbers, degrees, triangle counts, and connected components
+and articulation points as sets. PageRank agrees up to rounding, and Louvain
+and label propagation can find a different partition, since they visit nodes in
+node-id order.
+
+When a release changes an algorithm's results, its CHANGELOG lists the change
+under "Result changes".
+
 ## NetworkX Integration
 
 For additional algorithms, use the NetworkX adapter:

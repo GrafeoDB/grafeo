@@ -12,14 +12,17 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
-use grafeo_common::storage::{ChunkKind, Section, SectionSource, SectionType};
+use grafeo_common::grafeo_warn;
+use grafeo_common::storage::{ChunkKind, ImageSource, Section, SectionSource, SectionType};
 use grafeo_common::testing::child_process;
 use grafeo_common::testing::crash::{maybe_crash, maybe_fail};
 use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::utils::hash::FxHashSet;
 use parking_lot::Mutex;
 
 use super::format::MAGIC;
 use super::v3::alloc::{PageAllocator, PageRun};
+use super::v3::directory::SkippedEntry;
 use super::v3::header::{
     DATA_START_PAGE, DbHeaderV3, FileHeaderV3, PAGE_SIZE, active_header, new_database_id,
 };
@@ -44,6 +47,21 @@ pub struct CheckpointHeader {
     pub edge_count: u64,
 }
 
+/// What the active image holds, counted from its directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageStats {
+    /// Chunks of all sections this version knows, zero-length chunks
+    /// included. Chunks skipped as optional (written by a newer version) are
+    /// not counted.
+    pub chunks: usize,
+    /// Blocks of the chained directory (at least one).
+    pub directory_blocks: usize,
+    /// Pages the chunks (skipped ones included) and the directory blocks
+    /// use. The file header and the two database headers are not counted:
+    /// they belong to the file, not to an image.
+    pub pages: u64,
+}
+
 /// The image the active database header points at.
 struct ActiveImage {
     /// The active database header.
@@ -54,6 +72,43 @@ struct ActiveImage {
     /// plus those of any failed checkpoint whose header may have reached the
     /// disk (a reopen could find that image active).
     runs: Vec<PageRun>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every skipped-entry warning logged on this thread, in order, so a test
+    /// can count them.
+    static WARNINGS_LOGGED: std::cell::RefCell<Vec<(u8, u8)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Logs one warning per distinct (section type, chunk kind) of the entries
+/// the active image skips.
+///
+/// The manager calls it once, when it opens the file. Every reader it opens
+/// later reads that image or one its own checkpoint wrote, which holds no
+/// skipped entries (a checkpoint writes only the section types and chunk
+/// kinds it knows), so nothing would be warned about again.
+fn warn_skipped(skipped: &[SkippedEntry]) {
+    for (section_type, kind) in skipped_kinds(skipped) {
+        grafeo_warn!(
+            "skipping chunks of section type {section_type}, kind {kind}, written by a newer \
+             version: they are optional, and the next checkpoint drops them"
+        );
+        #[cfg(test)]
+        WARNINGS_LOGGED.with_borrow_mut(|logged| logged.push((section_type, kind)));
+    }
+}
+
+/// The distinct (section type, chunk kind) pairs of `skipped`, in the order
+/// they first appear.
+fn skipped_kinds(skipped: &[SkippedEntry]) -> Vec<(u8, u8)> {
+    let mut seen = FxHashSet::default();
+    skipped
+        .iter()
+        .map(|entry| (entry.section_type, entry.kind))
+        .filter(|pair| seen.insert(*pair))
+        .collect()
 }
 
 /// Manages a single `.grafeo` database file in container format v3.
@@ -321,13 +376,16 @@ impl GrafeoFileManager {
     /// # Errors
     ///
     /// Returns an error if the manager is read-only, a section fails to
-    /// serialize or repeats a section type, or a write or sync fails.
+    /// serialize, repeats a section type or writes two chunks with one
+    /// identity ([`ChunkMeta::identity`](grafeo_common::storage::ChunkMeta::identity))
+    /// in one section, or a write or sync fails.
     ///
     /// After a failure before the header write, the file holds no image newer
     /// than before the call. After a failure at or after the header write,
-    /// the new header may be on disk: [`active_header`](Self::active_header)
-    /// and [`read_section`](Self::read_section) keep serving the previous
-    /// image, while a reopen may find the new one. The next checkpoint spares
+    /// the new header may be on disk: [`active_header`](Self::active_header),
+    /// [`read_image`](Self::read_image) and
+    /// [`read_section`](Self::read_section) keep serving the previous image,
+    /// while a reopen may find the new one. The next checkpoint spares
     /// the pages of both. The caller must therefore keep the WAL from the
     /// previous image's `checkpoint_lsn` until a later checkpoint succeeds.
     pub fn write_checkpoint(
@@ -400,6 +458,53 @@ impl GrafeoFileManager {
             runs,
         };
         Ok(())
+    }
+
+    /// Runs `read` on the active image under the file lock.
+    ///
+    /// The image is the one the active header names when the call takes the
+    /// lock (decrypted with the file's cipher when it is encrypted), and it
+    /// stays that image until `read` returns: a checkpoint takes the same
+    /// lock, so it waits. `read` must not call a method of this manager that
+    /// takes the file lock (`read_image`, `image_stats`, `read_section`,
+    /// `write_checkpoint`, `file_size`, `sync`, `copy_to`, `close`): the lock
+    /// is held, and that call would wait for it forever.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory of the active image cannot be
+    /// read or fails its checks, or the error `read` returns.
+    pub fn read_image<T>(&self, read: impl FnOnce(&dyn ImageSource) -> Result<T>) -> Result<T> {
+        self.with_active_reader(|reader| read(reader))
+    }
+
+    /// Chunk, directory block and page counts of the active image.
+    ///
+    /// The pages are those of its chunks and directory blocks (see
+    /// [`ImageStats::pages`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory of the active image cannot be
+    /// read or fails its checks.
+    pub fn image_stats(&self) -> Result<ImageStats> {
+        self.with_active_reader(|reader| {
+            Ok(ImageStats {
+                chunks: reader.entries().len(),
+                directory_blocks: reader.directory_runs().len(),
+                pages: reader.used_runs().iter().map(|run| run.count).sum(),
+            })
+        })
+    }
+
+    /// Opens the reader of the active image under the file lock and runs
+    /// `read` on it. The lock order (the file, then the active image for as
+    /// long as it takes to read its root) is the order of `write_checkpoint`.
+    fn with_active_reader<T>(&self, read: impl FnOnce(&ImageReader<'_>) -> Result<T>) -> Result<T> {
+        let mut file = self.file.lock();
+        let root = self.active.lock().header.root;
+        let reader = ImageReader::open(&mut file, root, self.cipher.as_ref())?;
+        read(&reader)
     }
 
     /// Reads the bytes of a section of the active image, or `None` when the
@@ -648,15 +753,17 @@ fn read_active_image(
             header.iteration
         )));
     }
-    let runs = ImageReader::open(file, header.root, cipher.as_ref())
-        .map_err(|error| {
-            Error::Serialization(format!(
-                "cannot read the active image of {} (iteration {}): {error}",
-                path.display(),
-                header.iteration
-            ))
-        })?
-        .used_runs();
+    let reader = ImageReader::open(file, header.root, cipher.as_ref()).map_err(|error| {
+        Error::Serialization(format!(
+            "cannot read the active image of {} (iteration {}): {error}",
+            path.display(),
+            header.iteration
+        ))
+    })?;
+    // The only warning: later readers see this image or one without
+    // skipped entries.
+    warn_skipped(reader.skipped());
+    let runs = reader.used_runs();
     Ok((file_header, ActiveImage { header, slot, runs }, cipher))
 }
 
@@ -769,6 +876,7 @@ mod tests {
     use grafeo_common::storage::{ChunkMeta, Section, SectionSink, SectionType};
     use tempfile::TempDir;
 
+    use super::super::v3::directory::{ENTRY_CHUNK_OPTIONAL, ENTRY_SECTION_OPTIONAL};
     use super::super::v3::header::HeaderSlot;
     use super::*;
 
@@ -838,6 +946,40 @@ mod tests {
 
         fn memory_usage(&self) -> usize {
             0
+        }
+    }
+
+    /// A section writing `n` one-byte stream pieces, each a chunk of its own.
+    struct Pieces(usize);
+
+    impl Section for Pieces {
+        fn section_type(&self) -> SectionType {
+            SectionType::LpgStore
+        }
+
+        fn serialize(&self) -> Result<Vec<u8>> {
+            Ok(vec![19u8; self.0])
+        }
+
+        fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            for offset in 0..u64::try_from(self.0).unwrap() {
+                sink.write_chunk(ChunkMeta::stream_piece(0, 3, offset), &[19])?;
+            }
+            Ok(())
+        }
+
+        fn is_dirty(&self) -> bool {
+            true
+        }
+
+        fn mark_clean(&self) {}
+
+        fn memory_usage(&self) -> usize {
+            self.0
         }
     }
 
@@ -1196,6 +1338,405 @@ mod tests {
         assert!(
             error.contains("LpgStore") && error.contains("2 chunks"),
             "the error names the section and what it found: {error}"
+        );
+    }
+
+    #[test]
+    fn read_image_serves_the_sections_of_the_active_image() {
+        let dir = test_dir();
+        let manager = GrafeoFileManager::create(dir.path().join("db.grafeo"), None).unwrap();
+        assert_eq!(
+            manager.image_stats().unwrap(),
+            ImageStats {
+                chunks: 0,
+                directory_blocks: 1,
+                pages: 1
+            },
+            "a new database: one directory block, no header pages counted"
+        );
+        checkpoint(
+            &manager,
+            &[
+                fixed(SectionType::Catalog, "Alix"),
+                fixed(SectionType::LpgStore, "Gus"),
+            ],
+            3,
+        )
+        .unwrap();
+        manager
+            .read_image(|image| {
+                let catalog = image.section_source(SectionType::Catalog).unwrap();
+                assert_eq!(
+                    (catalog.section_version(), &catalog.fetch(0)?[..]),
+                    (1, &b"Alix"[..])
+                );
+                assert!(image.section_source(SectionType::RdfStore).is_none());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            manager.image_stats().unwrap(),
+            ImageStats {
+                chunks: 2,
+                directory_blocks: 1,
+                pages: 3
+            }
+        );
+    }
+
+    #[test]
+    fn image_stats_count_every_directory_block() {
+        use super::super::v3::directory::ENTRIES_PER_BLOCK;
+
+        let dir = test_dir();
+        let manager = GrafeoFileManager::create(dir.path().join("db.grafeo"), None).unwrap();
+        let pieces = Pieces(ENTRIES_PER_BLOCK + 1);
+        manager.write_checkpoint(&[&pieces], &header(3)).unwrap();
+        let stats = manager.image_stats().unwrap();
+        assert_eq!(
+            (stats.chunks, stats.directory_blocks),
+            (ENTRIES_PER_BLOCK + 1, 2)
+        );
+    }
+
+    /// An error the closure returns comes back from `read_image`.
+    #[test]
+    fn read_image_returns_the_error_of_its_closure() {
+        let dir = test_dir();
+        let manager = GrafeoFileManager::create(dir.path().join("db.grafeo"), None).unwrap();
+        let error = manager
+            .read_image(|_| -> Result<()> { Err(Error::Internal("Vincent".to_string())) })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Vincent"), "{error}");
+    }
+
+    #[test]
+    fn image_stats_count_a_chunk_without_bytes_and_no_page_for_it() {
+        let dir = test_dir();
+        let manager = GrafeoFileManager::create(dir.path().join("db.grafeo"), None).unwrap();
+        checkpoint(&manager, &[fixed(SectionType::Catalog, "")], 3).unwrap();
+        assert_eq!(
+            manager.image_stats().unwrap(),
+            ImageStats {
+                chunks: 1,
+                directory_blocks: 1,
+                pages: 1
+            },
+            "an empty chunk counts as a chunk and takes no page"
+        );
+    }
+
+    /// Writes a newer version's checkpoint through the file itself, as
+    /// iteration 1 in slot 1 over the image `create` wrote: the catalog chunk
+    /// "Alix" and, after it, the `foreign` chunks as (section type byte, chunk
+    /// kind byte, flags, bytes). Returns the entries a reader skips.
+    fn checkpoint_as_a_newer_version(
+        path: &Path,
+        foreign: &[(u8, u8, u8, &[u8])],
+    ) -> Vec<SkippedEntry> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let prefix = read_prefix(&mut file, DATA_START_PAGE * PAGE_SIZE).unwrap();
+        let (active_slot, active) = active_slot_of(&prefix);
+        assert_eq!((active_slot, active.iteration), (0, 0));
+        let active_runs = ImageReader::open(&mut file, active.root, None)
+            .unwrap()
+            .used_runs();
+        let mut writer = CheckpointWriter::new(
+            &mut file,
+            PageAllocator::from_used(active_runs).unwrap(),
+            None,
+        );
+        writer.begin_section(SectionType::Catalog, 1).unwrap();
+        writer.write_chunk(ChunkMeta::raw(), b"Alix").unwrap();
+        for (section_type, kind, flags, bytes) in foreign {
+            writer
+                .write_foreign_chunk(*section_type, *kind, *flags, bytes)
+                .unwrap();
+        }
+        let (root, _) = writer.finish().unwrap();
+        let next = DbHeaderV3 {
+            iteration: 1,
+            root,
+            ..DbHeaderV3::default()
+        };
+        write_page(&mut file, slot_offset(1), &next.encode()).unwrap();
+        file.sync_all().unwrap();
+        ImageReader::open(&mut file, root, None)
+            .unwrap()
+            .skipped()
+            .to_vec()
+    }
+
+    /// A file a newer version checkpointed with an optional section this
+    /// version does not know opens; the section's pages stay spared while its
+    /// image is active, and the next checkpoint, which cannot write the
+    /// section, drops it.
+    #[test]
+    fn a_file_with_an_unknown_optional_section_opens_and_its_next_checkpoint_drops_it() {
+        let dir = test_dir();
+        let path = dir.path().join("amsterdam.grafeo");
+        drop(GrafeoFileManager::create(&path, None).unwrap());
+        let skipped = checkpoint_as_a_newer_version(
+            &path,
+            &[(250, 0, ENTRY_SECTION_OPTIONAL, &[19u8; 9000])],
+        );
+        assert_eq!(skipped.len(), 1);
+        let foreign = skipped[0];
+
+        let manager = GrafeoFileManager::open(&path, None).unwrap();
+        assert_eq!(manager.active_header().iteration, 1);
+        manager
+            .read_image(|image| {
+                let catalog = image.section_source(SectionType::Catalog).unwrap();
+                assert_eq!(&catalog.fetch(0)?[..], b"Alix");
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(read(&manager, SectionType::Catalog), Some(b"Alix".to_vec()));
+        let with_foreign = manager.image_stats().unwrap();
+        assert_eq!(
+            with_foreign,
+            ImageStats {
+                chunks: 1,
+                directory_blocks: 1,
+                pages: 1 + 3 + 1
+            },
+            "the chunks count the known chunk; the pages count the skipped section's three"
+        );
+
+        checkpoint(&manager, &[fixed(SectionType::Catalog, "Alix")], 2).unwrap();
+        drop(manager);
+        let bytes = fs::read(&path).unwrap();
+        let start = usize::try_from(foreign.offset).unwrap();
+        assert_eq!(
+            bytes.get(start..start + 9000),
+            Some(&[19u8; 9000][..]),
+            "the checkpoint wrote no page of the skipped section while its image was active"
+        );
+
+        let manager = GrafeoFileManager::open(&path, None).unwrap();
+        assert_eq!(manager.active_header().iteration, 2);
+        assert_eq!(read(&manager, SectionType::Catalog), Some(b"Alix".to_vec()));
+        assert_eq!(
+            manager.image_stats().unwrap().pages,
+            with_foreign.pages - 3,
+            "the skipped section was not written again"
+        );
+    }
+
+    /// The open warns about each skipped section type and chunk kind once;
+    /// reads of the image after it, and a checkpoint, do not warn again.
+    #[test]
+    fn each_skipped_section_type_and_kind_is_warned_about_once_at_open() {
+        let dir = test_dir();
+        let path = dir.path().join("berlin.grafeo");
+        drop(GrafeoFileManager::create(&path, None).unwrap());
+        let skipped = checkpoint_as_a_newer_version(
+            &path,
+            &[
+                (250, 0, ENTRY_SECTION_OPTIONAL, b"Vincent"),
+                (250, 0, ENTRY_SECTION_OPTIONAL, b"Jules"),
+                (
+                    SectionType::Catalog.to_u8(),
+                    250,
+                    ENTRY_CHUNK_OPTIONAL,
+                    b"Mia",
+                ),
+            ],
+        );
+        assert_eq!(skipped.len(), 3, "three skipped entries, two pairs");
+        // Every warning logged on this thread, whichever record logged it.
+        WARNINGS_LOGGED.with_borrow_mut(Vec::clear);
+        let logged = || WARNINGS_LOGGED.with_borrow(Clone::clone);
+        let manager = GrafeoFileManager::open(&path, None).unwrap();
+        let warned = vec![(250, 0), (1, 250)];
+        assert_eq!(logged(), warned, "the open warns about each pair once");
+        for _ in 0..2 {
+            manager
+                .read_image(|image| {
+                    let catalog = image.section_source(SectionType::Catalog).unwrap();
+                    assert_eq!(&catalog.fetch(0)?[..], b"Alix");
+                    Ok(())
+                })
+                .unwrap();
+        }
+        manager.image_stats().unwrap();
+        assert_eq!(read(&manager, SectionType::Catalog), Some(b"Alix".to_vec()));
+        assert_eq!(
+            logged(),
+            warned,
+            "two read_image calls, image_stats and read_section warn about nothing again"
+        );
+        checkpoint(&manager, &[fixed(SectionType::Catalog, "Alix")], 2).unwrap();
+        manager.image_stats().unwrap();
+        assert_eq!(logged(), warned, "nor does a checkpoint or a read after it");
+    }
+
+    /// One warning per distinct section type and kind, in the order the
+    /// directory lists them.
+    #[test]
+    fn each_skipped_section_type_and_kind_is_named_once() {
+        let entry = |section_type, kind| SkippedEntry {
+            section_type,
+            kind,
+            flags: ENTRY_SECTION_OPTIONAL,
+            offset: 12_288,
+            length: 19,
+        };
+        let image = [
+            entry(250, 0),
+            entry(250, 0),
+            entry(2, 250),
+            entry(250, 3),
+            entry(2, 250),
+        ];
+        assert_eq!(
+            skipped_kinds(&image),
+            [(250, 0), (2, 250), (250, 3)],
+            "a repeated pair is named once, a new kind of the same type again"
+        );
+        assert_eq!(
+            skipped_kinds(&[]),
+            Vec::<(u8, u8)>::new(),
+            "no skipped entry, no warning"
+        );
+    }
+
+    /// `read_image` on one thread and checkpoints on another take turns, and
+    /// every read is served the image the active header names, whole. A
+    /// deadlock between them fails the test after 60 seconds instead of
+    /// hanging it.
+    #[test]
+    fn read_image_serves_the_active_image_while_checkpoints_run() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration;
+
+        /// Sets its flag when dropped, also when its thread panics.
+        struct SetOnDrop(Arc<AtomicBool>);
+
+        impl Drop for SetOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        fn round(n: u64) -> [Fixed; 2] {
+            let name = format!("Amsterdam {n}");
+            [
+                fixed(SectionType::Catalog, name.clone()),
+                fixed(SectionType::LpgStore, name),
+            ]
+        }
+
+        let dir = test_dir();
+        let manager =
+            Arc::new(GrafeoFileManager::create(dir.path().join("db.grafeo"), None).unwrap());
+        checkpoint(&manager, &round(0), 0).unwrap();
+        let checkpoints_done = Arc::new(AtomicBool::new(false));
+        let (finished, finishes) = mpsc::channel();
+        // Plain threads, not scoped ones: a scope joins its threads even while
+        // it unwinds, so a deadlock would hang the test.
+        let checkpoints = {
+            let manager = Arc::clone(&manager);
+            let done = SetOnDrop(Arc::clone(&checkpoints_done));
+            let finished = finished.clone();
+            std::thread::spawn(move || {
+                let _done = done;
+                for n in 1..=19 {
+                    checkpoint(&manager, &round(n), n).unwrap();
+                }
+                finished.send(()).unwrap();
+            })
+        };
+        let reads = {
+            let manager = Arc::clone(&manager);
+            std::thread::spawn(move || {
+                let mut count = 0u32;
+                // The reads go on for as long as the checkpoints do, so the
+                // two overlap.
+                while count < 88 || !checkpoints_done.load(Ordering::Acquire) {
+                    manager
+                        .read_image(|image| {
+                            let catalog = image
+                                .section_source(SectionType::Catalog)
+                                .unwrap()
+                                .fetch(0)?;
+                            let store = image
+                                .section_source(SectionType::LpgStore)
+                                .unwrap()
+                                .fetch(0)?;
+                            let active = format!("Amsterdam {}", manager.active_header().epoch);
+                            assert_eq!(
+                                String::from_utf8_lossy(&catalog),
+                                active,
+                                "the image served is the active one"
+                            );
+                            assert_eq!(catalog, store, "both sections come from one image");
+                            Ok(())
+                        })
+                        .unwrap();
+                    count += 1;
+                }
+                finished.send(()).unwrap();
+            })
+        };
+        for _ in 0..2 {
+            match finishes.recv_timeout(Duration::from_secs(60)) {
+                Ok(()) => {}
+                // A thread panicked: its join below reports why.
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => panic!(
+                    "read_image and write_checkpoint did not finish within 60 seconds: they \
+                     deadlock"
+                ),
+            }
+        }
+        for thread in [checkpoints, reads] {
+            if let Err(panic) = thread.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        assert_eq!(manager.active_header().epoch, 19);
+    }
+
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn read_image_on_an_encrypted_file_serves_the_plaintext() {
+        let dir = test_dir();
+        let path = dir.path().join("prague.grafeo");
+        let manager = GrafeoFileManager::create(&path, key(3)).unwrap();
+        checkpoint(
+            &manager,
+            &[fixed(SectionType::Catalog, "Mia lives in Prague")],
+            1,
+        )
+        .unwrap();
+        let served = |manager: &GrafeoFileManager| {
+            manager
+                .read_image(|image| image.section_source(SectionType::Catalog).unwrap().fetch(0))
+                .unwrap()
+        };
+        assert_eq!(&served(&manager)[..], b"Mia lives in Prague");
+        drop(manager);
+        assert!(
+            !fs::read(&path)
+                .unwrap()
+                .windows(6)
+                .any(|window| window == b"Prague"),
+            "the file holds no plaintext"
+        );
+        let reader = GrafeoFileManager::open_read_only(&path, key(3)).unwrap();
+        assert_eq!(
+            &served(&reader)[..],
+            b"Mia lives in Prague",
+            "a reopen decrypts with the key"
         );
     }
 

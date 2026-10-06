@@ -33,9 +33,12 @@ use grafeo_common::testing::commit_hook::{
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
+#[path = "common/image.rs"]
+mod image;
 #[path = "common/started.rs"]
 mod started;
 
+use image::image_holds;
 use started::Started;
 
 /// The names of the people in `db`, sorted.
@@ -347,24 +350,6 @@ fn a_checkpoint_holds_a_commit_over_two_graphs_whole() {
         ),
         "the reopened database holds the whole commit, in both graphs"
     );
-}
-
-/// Whether the image the database file holds now (its active header and the
-/// sections it names) contains `needle`: the catalog for a constraint, the
-/// LPG store for a named graph. Read through the database's own file handle,
-/// which on Windows is the only one that can read a locked file.
-fn image_holds(db: &GrafeoDB, needle: &str) -> bool {
-    use grafeo_common::storage::SectionType;
-
-    let fm = db.file_manager().expect("a database file");
-    [SectionType::Catalog, SectionType::LpgStore]
-        .into_iter()
-        .filter_map(|section| fm.read_section(section).unwrap())
-        .any(|bytes| {
-            bytes
-                .windows(needle.len())
-                .any(|window| window == needle.as_bytes())
-        })
 }
 
 /// Schema changes and graph commands take effect at once and log their own

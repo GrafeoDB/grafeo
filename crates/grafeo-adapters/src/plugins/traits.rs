@@ -207,4 +207,21 @@ impl AlgorithmResult {
     pub fn row_count(&self) -> usize {
         self.rows.len()
     }
+
+    /// Puts the rows in the order of their first `columns` integer columns
+    /// (a node id, or the source and target of an edge). A result built by
+    /// iterating a hash map, whose order changes from call to call, then comes
+    /// out the same every time.
+    pub fn sort_by_id_columns(&mut self, columns: usize) {
+        let key = |row: &Vec<grafeo_common::types::Value>| -> Vec<i64> {
+            row.iter()
+                .take(columns)
+                .map(|value| match value {
+                    grafeo_common::types::Value::Int64(id) => *id,
+                    _ => i64::MIN,
+                })
+                .collect()
+        };
+        self.rows.sort_by_cached_key(key);
+    }
 }

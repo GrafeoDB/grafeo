@@ -32,7 +32,13 @@ use super::traits::{ComponentResultBuilder, impl_algorithm};
 ///
 /// # Returns
 ///
-/// A map from node ID to community (label) ID.
+/// A map from node ID to community (label) ID. Communities are numbered 0, 1,
+/// 2, ... in increasing order of their smallest node id.
+///
+/// # Determinism
+///
+/// Nodes are visited in node id order, and a tie between labels goes to the
+/// smallest, so the same graph always gives the same communities and ids.
 ///
 /// # Panics
 ///
@@ -42,7 +48,8 @@ use super::traits::{ComponentResultBuilder, impl_algorithm};
 ///
 /// O(iterations × E)
 pub fn label_propagation(store: &dyn GraphStore, max_iterations: usize) -> FxHashMap<NodeId, u64> {
-    let nodes = store.node_ids();
+    let mut nodes = store.node_ids();
+    nodes.sort_unstable();
     let n = nodes.len();
 
     if n == 0 {
@@ -115,11 +122,13 @@ pub fn label_propagation(store: &dyn GraphStore, max_iterations: usize) -> FxHas
         }
     }
 
-    // Normalize labels to be contiguous starting from 0
-    let unique_labels: FxHashSet<u64> = labels.values().copied().collect();
+    // Number communities 0, 1, 2, ... in order of their smallest node id
+    // (`nodes` is sorted), so the same graph gives the same ids every call.
     let mut label_map: FxHashMap<u64, u64> = FxHashMap::default();
-    for (idx, label) in unique_labels.into_iter().enumerate() {
-        label_map.insert(label, idx as u64);
+    for node in &nodes {
+        let label = labels[node];
+        let next = label_map.len() as u64;
+        label_map.entry(label).or_insert(next);
     }
 
     labels
@@ -868,7 +877,9 @@ impl_algorithm! {
             builder.push(node, community_id);
         }
 
-        Ok(builder.build())
+        let mut result = builder.build();
+        result.sort_by_id_columns(1);
+        Ok(result)
     }
 }
 
@@ -1002,6 +1013,7 @@ impl_algorithm! {
             ]);
         }
 
+        output.sort_by_id_columns(1);
         Ok(output)
     }
 }

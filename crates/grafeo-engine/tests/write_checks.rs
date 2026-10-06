@@ -4,6 +4,9 @@
 
 use grafeo_engine::GrafeoDB;
 
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+mod common;
+
 /// MERGE did not record its writes, so two transactions could both update
 /// the same node through `ON MATCH SET` without a write-write conflict.
 #[test]
@@ -172,25 +175,26 @@ fn a_failed_edge_merge_in_a_transaction_leaves_nothing() {
 }
 
 /// The undone statement's WAL records are dropped too: a reopen replays only
-/// what committed.
-#[cfg(feature = "wal")]
+/// what committed. The writes run in a child process that exits without
+/// `close()`, so nothing is checkpointed and the reopen replays the WAL.
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
 #[test]
 fn a_failed_statement_is_not_replayed() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("docs");
-    {
-        let db = GrafeoDB::open(&path).unwrap();
-        db.execute("CREATE NODE TYPE Doc (id INTEGER, tag STRING)")
-            .unwrap();
-        let mut session = db.session();
-        session.begin_transaction().unwrap();
-        session.execute("INSERT (:Doc {id: 1})").unwrap();
-        session
-            .execute("UNWIND [5, 'x'] AS v INSERT (:Doc {id: v})")
-            .unwrap_err();
-        session.commit().unwrap();
-        db.close().unwrap();
-    }
+    let (_dir, db) = common::replay::reopened_after_crash(
+        "a_failed_statement_is_not_replayed",
+        |path| GrafeoDB::open(path).unwrap(),
+        |db| {
+            db.execute("CREATE NODE TYPE Doc (id INTEGER, tag STRING)")
+                .unwrap();
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session.execute("INSERT (:Doc {id: 1})").unwrap();
+            session
+                .execute("UNWIND [5, 'x'] AS v INSERT (:Doc {id: v})")
+                .unwrap_err();
+            session.commit().unwrap();
+        },
+    );
 
-    assert_eq!(doc_ids(&GrafeoDB::open(&path).unwrap()), ids(&[1]));
+    assert_eq!(doc_ids(&db), ids(&[1]));
 }

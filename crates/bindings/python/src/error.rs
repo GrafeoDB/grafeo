@@ -7,7 +7,8 @@
 //!
 //! `GrafeoError` inherits from `RuntimeError`, so existing code that catches
 //! `RuntimeError` continues to work. New code can catch `GrafeoError`
-//! specifically and inspect `e.error_code` / `e.is_retryable`.
+//! specifically and inspect `e.error_code` / `e.is_retryable`. A write to a
+//! closed database raises `DatabaseClosedError`, a subclass of `GrafeoError`.
 
 use grafeo_common::utils::error::ErrorCode;
 use pyo3::create_exception;
@@ -20,6 +21,13 @@ create_exception!(
     GrafeoError,
     PyRuntimeError,
     "Grafeo-specific runtime error with machine-readable `error_code` and `is_retryable` attributes."
+);
+
+create_exception!(
+    grafeo,
+    DatabaseClosedError,
+    GrafeoError,
+    "Raised by a write to a database whose `close()` started (persistent databases only). Open it again to write."
 );
 
 /// Grafeo errors that translate to Python exceptions.
@@ -45,6 +53,9 @@ pub enum PyGrafeoError {
         message: String,
         code: Option<ErrorCode>,
     },
+
+    #[error("Database closed: {message}")]
+    DatabaseClosed { message: String },
 
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
@@ -88,6 +99,11 @@ impl From<PyGrafeoError> for PyErr {
             PyGrafeoError::Database { message, code }
             | PyGrafeoError::Query { message, code }
             | PyGrafeoError::Transaction { message, code } => build_grafeo_error(message, code),
+            PyGrafeoError::DatabaseClosed { message } => Python::attach(|py| {
+                let err = DatabaseClosedError::new_err(message);
+                set_code(&err, py, ErrorCode::DatabaseClosed);
+                err
+            }),
         }
     }
 }
@@ -99,12 +115,16 @@ impl From<PyGrafeoError> for PyErr {
 fn build_grafeo_error(message: String, code: Option<ErrorCode>) -> PyErr {
     Python::attach(|py| {
         let err = GrafeoError::new_err(message);
-        let code = code.unwrap_or(ErrorCode::Internal);
-        let inst = err.value(py);
-        let _ = inst.setattr("error_code", code.as_str());
-        let _ = inst.setattr("is_retryable", code.is_retryable());
+        set_code(&err, py, code.unwrap_or(ErrorCode::Internal));
         err
     })
+}
+
+/// Sets the `error_code` and `is_retryable` attributes of a `GrafeoError`.
+fn set_code(err: &PyErr, py: Python<'_>, code: ErrorCode) {
+    let inst = err.value(py);
+    let _ = inst.setattr("error_code", code.as_str());
+    let _ = inst.setattr("is_retryable", code.is_retryable());
 }
 
 impl From<grafeo_common::utils::error::Error> for PyGrafeoError {
@@ -115,6 +135,7 @@ impl From<grafeo_common::utils::error::Error> for PyGrafeoError {
         match classify_error(&err) {
             ErrorCategory::Query => PyGrafeoError::Query { message, code },
             ErrorCategory::Transaction => PyGrafeoError::Transaction { message, code },
+            ErrorCategory::DatabaseClosed => PyGrafeoError::DatabaseClosed { message },
             _ => PyGrafeoError::Database { message, code },
         }
     }

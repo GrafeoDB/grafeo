@@ -117,7 +117,9 @@ impl JsGrafeoDB {
     /// Open an existing database in read-only mode.
     ///
     /// Uses a shared file lock, so multiple processes can read the same
-    /// .grafeo file concurrently. Mutations will throw an error.
+    /// database file concurrently. Mutations will throw an error. A database
+    /// written by 0.5.x (a file, or a WAL directory) is read in place and not
+    /// migrated.
     #[napi(factory)]
     pub fn open_read_only(path: String) -> Result<Self> {
         let config = Config::read_only(path);
@@ -563,7 +565,8 @@ impl JsGrafeoDB {
     ///
     /// If in-memory, creates a new persistent database at the given path.
     /// If file-backed, creates a copy at the new path.
-    /// The original database remains unchanged.
+    /// The copy is a single file, whatever the extension; fails if `path`
+    /// exists. The original database remains unchanged.
     #[napi]
     pub fn save(&self, path: String) -> Result<()> {
         let db = self.inner.read();
@@ -648,15 +651,17 @@ impl JsGrafeoDB {
     /// Creates a named graph projection. Returns `true` if created, `false`
     /// if a projection with that name already exists.
     ///
-    /// A projection is a read-only, filtered view of the default graph.
-    /// Only nodes with matching labels and edges with matching types are visible.
+    /// A projection is a read-only, filtered view of the graph selected when
+    /// it is created (the default graph when none is selected). Only nodes
+    /// with matching labels and edges with matching types are visible.
+    /// Throws if the selected graph no longer exists.
     #[napi(js_name = "createProjection")]
     pub fn create_projection(
         &self,
         name: String,
         node_labels: Option<Vec<String>>,
         edge_types: Option<Vec<String>>,
-    ) -> bool {
+    ) -> Result<bool> {
         use grafeo_core::graph::ProjectionSpec;
 
         let mut spec = ProjectionSpec::new();
@@ -666,7 +671,11 @@ impl JsGrafeoDB {
         if let Some(types) = edge_types.filter(|t| !t.is_empty()) {
             spec = spec.with_edge_types(types);
         }
-        self.inner.read().create_projection(name, spec)
+        Ok(self
+            .inner
+            .read()
+            .create_projection(name, spec)
+            .map_err(NodeGrafeoError::from)?)
     }
 
     /// Drops a named graph projection. Returns `true` if it existed.
@@ -695,7 +704,9 @@ impl JsGrafeoDB {
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let db = db.read();
-            Ok(db.drop_vector_index(&label, &property))
+            db.drop_vector_index(&label, &property)
+                .map_err(NodeGrafeoError::from)
+                .map_err(napi::Error::from)
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?
@@ -844,7 +855,9 @@ impl JsGrafeoDB {
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let db = db.read();
-            Ok(db.drop_text_index(&label, &property))
+            db.drop_text_index(&label, &property)
+                .map_err(NodeGrafeoError::from)
+                .map_err(napi::Error::from)
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?

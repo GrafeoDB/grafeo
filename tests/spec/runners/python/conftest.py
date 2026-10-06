@@ -13,17 +13,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import pytest
 
-# Make sure the runner package is importable
-_runner_dir = Path(__file__).resolve().parent
-if str(_runner_dir) not in sys.path:
-    sys.path.insert(0, str(_runner_dir))
+# Make sure the runner modules are importable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from parser import GtestFile, TestCase, parse_gtest_file  # noqa: E402
-from comparator import (  # noqa: E402
+from comparator import (
     assert_columns,
     assert_count,
     assert_empty,
@@ -33,20 +29,21 @@ from comparator import (  # noqa: E402
     assert_rows_sorted,
     assert_rows_with_precision,
 )
+from parser import GtestFile, TestCase, coerce_params, parse_gtest_file
 
 # ---------------------------------------------------------------------------
 # Grafeo availability
 # ---------------------------------------------------------------------------
 
 try:
-    import grafeo  # noqa: F401
+    import grafeo
 
     GRAFEO_AVAILABLE = True
 except ImportError:
     GRAFEO_AVAILABLE = False
 
 # Languages that require a separate execute method
-_LANGUAGE_METHODS: Dict[str, str] = {
+_LANGUAGE_METHODS: dict[str, str] = {
     "gql": "execute",
     "cypher": "execute_cypher",
     "gremlin": "execute_gremlin",
@@ -60,7 +57,7 @@ _LANGUAGE_METHODS: Dict[str, str] = {
 _RUNNER_CAPABILITIES = {"int64-safe"}
 
 # Cached set of compiled feature flags from db.info()["features"]
-_compiled_features: Optional[set] = None
+_compiled_features: set | None = None
 
 
 def _get_compiled_features() -> set:
@@ -142,8 +139,8 @@ class GtestItem(pytest.Item):
         parent: GtestFileCollector,
         gtest_file: GtestFile,
         test_case: TestCase,
-        variant_lang: Optional[str],
-        variant_query: Optional[str],
+        variant_lang: str | None,
+        variant_query: str | None,
     ):
         super().__init__(name, parent)
         self.gtest_file = gtest_file
@@ -210,8 +207,8 @@ class GtestItem(pytest.Item):
 
         expect = tc.expect
 
-        # Coerce params (only applied to the last query)
-        params = _coerce_params(tc.params)
+        # Type the params (every statement gets them)
+        params = coerce_params(tc.params)
 
         # Error tests
         if expect.error is not None:
@@ -250,7 +247,7 @@ class GtestItem(pytest.Item):
         self,
         db,
         language: str,
-        queries: List[str],
+        queries: list[str],
         expected_substr: str,
         params=None,
     ) -> None:
@@ -261,7 +258,9 @@ class GtestItem(pytest.Item):
         # Last query should fail (with params if present)
         try:
             _execute(db, language, queries[-1], params)
-        except Exception as exc:
+        # Any error the binding raises counts (a GrafeoError, or a TypeError
+        # or ValueError from converting a parameter): the message decides.
+        except Exception as exc:  # noqa: BLE001
             assert_error(exc, expected_substr)
         else:
             pytest.fail(
@@ -295,48 +294,6 @@ def _load_dataset(db, dataset_name: str) -> None:
         if not trimmed or trimmed.startswith("#"):
             continue
         db.execute(trimmed)
-
-
-def _coerce_params(raw_params: Dict[str, object]) -> Optional[Dict[str, object]]:
-    """Convert string param values to typed Python values.
-
-    Mirrors the Rust build.rs coercion order: int, float, bool, string.
-    Returns None when the params dict is empty (so callers can skip it).
-    """
-    if not raw_params:
-        return None
-    coerced: Dict[str, object] = {}
-    for key, value in raw_params.items():
-        # Already typed (YAML parser returns bool/int/float directly)
-        # Check bool first because bool is a subclass of int in Python
-        if isinstance(value, bool):
-            coerced[key] = value
-            continue
-        if isinstance(value, (int, float)):
-            coerced[key] = value
-            continue
-        # String coercion: int first
-        try:
-            coerced[key] = int(value)
-            continue
-        except (ValueError, TypeError):
-            pass  # not an int, try next coercion type
-        # float second
-        try:
-            coerced[key] = float(value)
-            continue
-        except (ValueError, TypeError):
-            pass  # not a float, try next coercion type
-        # bool third
-        if value == "true":
-            coerced[key] = True
-            continue
-        if value == "false":
-            coerced[key] = False
-            continue
-        # fall back to string
-        coerced[key] = value
-    return coerced
 
 
 def _execute(db, language: str, query: str, params=None):

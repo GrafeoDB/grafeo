@@ -43,6 +43,14 @@ use crate::transaction::TransactionManager;
 /// Auto-created by `CREATE SCHEMA` and auto-dropped by `DROP SCHEMA`.
 const SCHEMA_DEFAULT_GRAPH: &str = "__default__";
 
+/// The database's named graph projections, shared by its sessions.
+#[cfg(feature = "lpg")]
+pub(crate) type ProjectionRegistry = Arc<
+    parking_lot::RwLock<
+        std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
+    >,
+>;
+
 /// The storage key of `graph` in `schema`, as graphs are stored in the root
 /// store: `None` is the default graph.
 pub(crate) fn graph_storage_key(schema: Option<&str>, graph: Option<&str>) -> Option<String> {
@@ -836,7 +844,38 @@ impl Session {
                 grafeo_common::utils::error::TransactionError::ReadOnly,
             ));
         }
-        Ok(())
+        // After `close()` the commit would fail (see
+        // `TransactionManager::check_open`): fail before writing, also a
+        // write outside a transaction, which has no commit.
+        self.transaction_manager.check_open()
+    }
+
+    /// Holds commits off for a change that takes effect at once and logs its
+    /// own WAL group, outside any commit (a schema or graph command), for as
+    /// long as the guard lives: a checkpoint, a copy or `close()` sees all of
+    /// it or none of it. Waits for a commit or checkpoint in progress, then
+    /// fails once the database is closed or after a commit that did not
+    /// complete.
+    fn hold_commits_for_change(&self) -> Result<crate::transaction::CommitsHeld<'_>> {
+        self.transaction_manager.hold_commits_for_change()
+    }
+
+    /// What an RDF update needs before it runs: it fails once the database is
+    /// closed (also for an admin identity, which skips the other write
+    /// checks), and outside a transaction it holds commits off until the
+    /// returned guard drops, as a schema change does (see
+    /// [`hold_commits_for_change`](Self::hold_commits_for_change)): it changes
+    /// the store at once and logs its own WAL group. Inside a transaction the
+    /// commit writes it, and checks again.
+    #[cfg(feature = "triple-store")]
+    pub(super) fn hold_for_rdf_update(
+        &self,
+    ) -> Result<Option<crate::transaction::CommitsHeld<'_>>> {
+        if self.current_transaction.lock().is_some() {
+            self.transaction_manager.check_open()?;
+            return Ok(None);
+        }
+        self.hold_commits_for_change().map(Some)
     }
 
     /// Executes a session or transaction command, returning an empty result.
@@ -850,16 +889,17 @@ impl Session {
         use grafeo_adapters::query::gql::ast::TransactionIsolationLevel;
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
-        // Check role-based permission for graph management commands
-        match &cmd {
+        // Check role-based permission for graph management commands.
+        if matches!(
+            cmd,
             SessionCommand::CreateGraph { .. }
-            | SessionCommand::DropGraph { .. }
-            | SessionCommand::CreateProjection { .. }
-            | SessionCommand::DropProjection { .. } => {
-                self.require_permission(crate::auth::StatementKind::Write)?;
-            }
-            _ => {} // Session state + transaction control: always allowed
+                | SessionCommand::DropGraph { .. }
+                | SessionCommand::CreateProjection { .. }
+                | SessionCommand::DropProjection { .. }
+        ) {
+            self.require_permission(crate::auth::StatementKind::Write)?;
         }
+        // Session state + transaction control: always allowed
 
         // Check per-graph grants for graph-scoped commands
         if self.identity.has_grants() {
@@ -895,6 +935,24 @@ impl Session {
                 }
                 _ => {} // Session state + transaction control allowed
             }
+        }
+
+        // Graph commands change the store at once and log their own WAL
+        // group: once the checks above passed, they hold commits off until
+        // they return, and fail once the database is closed (see
+        // `hold_commits_for_change`). Projections change only this session's
+        // state, which nothing persists.
+        let graph_command = matches!(
+            cmd,
+            SessionCommand::CreateGraph { .. } | SessionCommand::DropGraph { .. }
+        );
+        let _held = graph_command
+            .then(|| self.hold_commits_for_change())
+            .transpose()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        if graph_command {
+            grafeo_common::testing::commit_hook::run_during_held_change();
         }
 
         match cmd {
@@ -1272,6 +1330,30 @@ impl Session {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
         #[cfg(feature = "wal")]
         use grafeo_storage::wal::WalRecord;
+
+        // A schema change takes effect at once and logs its own WAL group,
+        // outside any commit: it holds commits off until it returns (see
+        // `hold_commits_for_change`), and fails once the database is closed.
+        let changes = !matches!(
+            cmd,
+            SchemaStatement::ShowConstraints
+                | SchemaStatement::ShowIndexes
+                | SchemaStatement::ShowNodeTypes
+                | SchemaStatement::ShowEdgeTypes
+                | SchemaStatement::ShowGraphTypes
+                | SchemaStatement::ShowGraphType(_)
+                | SchemaStatement::ShowCurrentGraphType
+                | SchemaStatement::ShowGraphs
+                | SchemaStatement::ShowSchemas
+        );
+        let _held = changes
+            .then(|| self.hold_commits_for_change())
+            .transpose()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        if changes {
+            grafeo_common::testing::commit_hook::run_during_held_change();
+        }
 
         /// Logs a WAL record for schema changes. Compiles to nothing without `wal`.
         macro_rules! wal_log {
@@ -2950,7 +3032,11 @@ impl Session {
             #[cfg(feature = "lpg")]
             self.check_graph_access(optimized_plan.root.has_mutations())?;
             let mut plan = optimized_plan;
-            annotate_pushdown_hints(&mut plan.root, active.as_ref());
+            annotate_pushdown_hints(
+                &mut plan.root,
+                active.as_ref(),
+                self.may_choose_scan_label(),
+            );
             return Ok(explain_result(&plan));
         }
 
@@ -3462,7 +3548,11 @@ impl Session {
             #[cfg(feature = "lpg")]
             self.check_graph_access(optimized_plan.root.has_mutations())?;
             let mut plan = optimized_plan;
-            annotate_pushdown_hints(&mut plan.root, active.as_ref());
+            annotate_pushdown_hints(
+                &mut plan.root,
+                active.as_ref(),
+                self.may_choose_scan_label(),
+            );
             return Ok(explain_result(&plan));
         }
 
@@ -4213,8 +4303,13 @@ impl Session {
         // track_graph_touch() for this transaction (it checks current_transaction
         // first), so this is safe.
         let touched = std::mem::take(&mut *self.touched_graphs.lock());
-        let commit_epoch = match self.transaction_manager.commit(transaction_id) {
-            Ok(epoch) => epoch,
+        // Until `commit.complete()`, the commit holds its writes, readers do
+        // not see its epoch, and no other commit, transaction start or write
+        // outside a transaction can run: the versions, events and WAL records
+        // below are complete before anything that comes after the commit
+        // (#548).
+        let commit = match self.transaction_manager.start_commit(transaction_id) {
+            Ok(commit) => commit,
             Err(e) => {
                 // Conflict detected: abort the transaction completely so its
                 // entities are released and its versions discarded (#409).
@@ -4236,16 +4331,21 @@ impl Session {
                 return Err(e);
             }
         };
+        let commit_epoch = commit.epoch();
+        // Until the WAL group is written, a panic leaves the commit's records
+        // and events in this session's buffers, from which a later flush of
+        // records outside a transaction (or the session's drop) would write
+        // a commit that never completed: the guard drops them on unwind.
+        let unwritten = UnwrittenCommit::new(self);
+
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_after_commit_epoch();
 
         // Finalize PENDING epochs: make uncommitted versions visible at the commit epoch.
         for graph_name in &touched {
             let store = self.resolve_store(graph_name);
             store.finalize_version_epochs(transaction_id, commit_epoch);
         }
-        // The database has one epoch: the root store follows every commit,
-        // also one that only touched named graphs (a checkpoint saves the
-        // root's epoch for all of them).
-        self.store.sync_epoch(commit_epoch);
 
         // Commit succeeded: discard undo logs (make changes permanent)
         #[cfg(feature = "triple-store")]
@@ -4255,6 +4355,9 @@ impl Session {
             let store = self.resolve_store(graph_name);
             store.commit_transaction_properties(transaction_id);
         }
+
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_after_commit_stamped();
 
         // Flush buffered CDC events now that the transaction is committed.
         // All buffered events have PENDING epoch; assign the real commit_epoch.
@@ -4284,19 +4387,31 @@ impl Session {
                 grafeo_common::grafeo_warn!("Failed to write transaction to WAL: {}", e);
             }
         }
+        unwritten.written();
 
-        // Sync epoch for all touched graphs so that convenience lookups
-        // (edge_type, get_edge, get_node) can see versions at the latest epoch.
-        let current_epoch = self.transaction_manager.current_epoch();
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_after_commit_logged();
+
+        // The touched stores' epochs moved when the versions were stamped
+        // (`finalize_version_epochs`), so a lookup at a store's own epoch
+        // sees the commit from then on; the database's direct reads and
+        // queries read at the published epoch, which moves only once the
+        // commit is complete. The database has one epoch: the root store
+        // follows every commit, also one that only touched named graphs (a
+        // checkpoint saves the root's epoch for all of them).
+        self.store.sync_epoch(commit_epoch);
         for graph_name in &touched {
             let store = self.resolve_store(graph_name);
-            store.sync_epoch(current_epoch);
+            store.sync_epoch(commit_epoch);
         }
 
-        // Reset read-only flag and clear savepoints.
-        // touched_graphs was already emptied by mem::take above.
+        // Reset read-only flag and clear savepoints before completing the
+        // commit: a transaction this session begins next waits for the commit
+        // and sets its own flag after it. touched_graphs was already emptied
+        // by mem::take above.
         *self.read_only_tx.lock() = self.db_read_only;
         self.savepoints.lock().clear();
+        commit.complete();
 
         // Auto-GC: periodically prune old MVCC versions
         if self.gc_interval > 0 {
@@ -4925,12 +5040,15 @@ impl Session {
     fn make_operator_memory_context(
         &self,
     ) -> Option<grafeo_core::execution::OperatorMemoryContext> {
+        // Numbers the per-query spill directories. Not the commit counter: that
+        // one paces garbage collection, and a query is not a commit (#565).
+        static NEXT_QUERY_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
         let bm = self.buffer_manager.as_ref()?;
         let spill_path = bm.config().spill_path.as_ref()?;
-        // Per-query isolation: create a unique subdirectory
-        let query_id = self
-            .commit_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Per-query isolation: a unique subdirectory, created only if the
+        // query spills (see `SpillManager::create_file`).
+        let query_id = NEXT_QUERY_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let query_dir = spill_path.join(format!("query_{query_id}"));
         let sm = std::sync::Arc::new(
             grafeo_core::execution::SpillManager::new(&query_dir)
@@ -5018,6 +5136,19 @@ impl Session {
         }
     }
 
+    /// Whether the planner may scan another of a pattern's labels than the
+    /// one written, as it decides for this session's reads (see
+    /// [`may_choose_scan_label`](crate::query::planner::lpg::scan::may_choose_scan_label)):
+    /// `EXPLAIN` shows the label that runs.
+    fn may_choose_scan_label(&self) -> bool {
+        let (viewing_epoch, transaction_id) = self.get_transaction_context();
+        crate::query::planner::lpg::scan::may_choose_scan_label(
+            viewing_epoch,
+            transaction_id,
+            Some(self.transaction_manager.current_epoch()),
+        )
+    }
+
     /// Creates a planner with transaction context and constraint validator.
     ///
     /// The `store` parameter is the graph store to plan against (use
@@ -5079,6 +5210,11 @@ impl Session {
         #[cfg(feature = "lpg")]
         if matches!(self.lpg_backend, LpgBackend::Active) {
             planner = planner.with_lpg_store(Arc::clone(&self.store));
+        }
+
+        #[cfg(feature = "lpg")]
+        {
+            planner = planner.with_projections(Arc::clone(&self.projections));
         }
 
         // Attach the constraint validator for schema enforcement and property size limits
@@ -5458,17 +5594,37 @@ impl Session {
         }
     }
 
-    /// Creates an index on a node property of the session's graph.
+    /// Creates an index on a node property of the session's graph. Commits
+    /// are held off while it is built, as for `CREATE INDEX`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database-closed error after `close()` of a persistent
+    /// database, and the incomplete-commit error after a commit that did not
+    /// complete.
     #[cfg(feature = "lpg")]
-    pub fn create_property_index(&self, property: &str) {
+    pub fn create_property_index(&self, property: &str) -> Result<()> {
+        let _held = self.hold_commits_for_change()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
         self.active_lpg_store().create_property_index(property);
+        Ok(())
     }
 
     /// Drops the index on a node property of the session's graph. Returns
     /// whether there was one.
+    ///
+    /// # Errors
+    ///
+    /// As [`create_property_index`](Self::create_property_index).
     #[cfg(feature = "lpg")]
-    pub fn drop_property_index(&self, property: &str) -> bool {
-        self.active_lpg_store().drop_property_index(property)
+    pub fn drop_property_index(&self, property: &str) -> Result<bool> {
+        let _held = self.hold_commits_for_change()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
+        Ok(self.active_lpg_store().drop_property_index(property))
     }
 
     /// Returns whether a node property of the session's graph has an index.
@@ -5693,7 +5849,8 @@ impl Session {
     // ── Change Data Capture ─────────────────────────────────────────────
 
     /// Returns the full change history for an entity (node or edge) of the
-    /// session's current graph.
+    /// session's current graph, up to the current epoch: a commit's events
+    /// are recorded before it is complete, and returned once it is.
     ///
     /// # Errors
     ///
@@ -5704,13 +5861,16 @@ impl Session {
         entity_id: impl Into<crate::cdc::EntityId>,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
         self.require_permission(crate::auth::StatementKind::Read)?;
-        Ok(self
+        let epoch = self.transaction_manager.current_epoch();
+        let mut events = self
             .cdc_log
-            .history_in(self.active_graph_storage_key().as_deref(), entity_id.into()))
+            .history_in(self.active_graph_storage_key().as_deref(), entity_id.into());
+        events.retain(|event| event.epoch <= epoch);
+        Ok(events)
     }
 
     /// Returns change events for an entity of the session's current graph
-    /// since the given epoch.
+    /// since the given epoch, up to the current epoch.
     ///
     /// # Errors
     ///
@@ -5722,15 +5882,18 @@ impl Session {
         since_epoch: EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
         self.require_permission(crate::auth::StatementKind::Read)?;
-        Ok(self.cdc_log.history_since_in(
+        let epoch = self.transaction_manager.current_epoch();
+        let mut events = self.cdc_log.history_since_in(
             self.active_graph_storage_key().as_deref(),
             entity_id.into(),
             since_epoch,
-        ))
+        );
+        events.retain(|event| event.epoch <= epoch);
+        Ok(events)
     }
 
     /// Returns all change events across all entities and graphs in an epoch
-    /// range; each event names its graph.
+    /// range, up to the current epoch; each event names its graph.
     ///
     /// # Errors
     ///
@@ -5742,7 +5905,53 @@ impl Session {
         end_epoch: EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
         self.require_permission(crate::auth::StatementKind::Read)?;
+        let end_epoch = end_epoch.min(self.transaction_manager.current_epoch());
         Ok(self.cdc_log.changes_between(start_epoch, end_epoch))
+    }
+}
+
+/// The WAL records and CDC events of a commit that are not written yet (see
+/// `commit_inner`). Dropped before [`written`](Self::written), which happens
+/// only when the commit unwinds, it drops them from the session's buffers:
+/// written later as records outside a transaction, they would make a commit
+/// that never completed durable.
+#[cfg(feature = "lpg")]
+struct UnwrittenCommit<'a> {
+    session: &'a Session,
+    written: bool,
+}
+
+#[cfg(feature = "lpg")]
+impl<'a> UnwrittenCommit<'a> {
+    fn new(session: &'a Session) -> Self {
+        Self {
+            session,
+            written: false,
+        }
+    }
+
+    /// The commit's records and events are written.
+    fn written(mut self) {
+        self.written = true;
+    }
+}
+
+#[cfg(feature = "lpg")]
+impl Drop for UnwrittenCommit<'_> {
+    fn drop(&mut self) {
+        if self.written {
+            return;
+        }
+        #[cfg(feature = "wal")]
+        if let Some(ref wal) = self.session.wal {
+            wal.clear();
+        }
+        #[cfg(feature = "cdc")]
+        if let Some(ref pending) = self.session.cdc_pending_events {
+            pending.lock().clear();
+        }
+        #[cfg(not(any(feature = "wal", feature = "cdc")))]
+        let _ = self.session;
     }
 }
 
@@ -6079,6 +6288,27 @@ mod tests {
     #[cfg(feature = "gql")]
     mod gql_tests {
         use super::*;
+
+        /// A statement's spill directory took its id from the commit counter,
+        /// which also paces garbage collection (#565): every query, reads
+        /// included, counted as a commit.
+        #[cfg(feature = "spill")]
+        #[test]
+        fn queries_do_not_count_as_commits() {
+            use std::sync::atomic::Ordering;
+
+            let dir = tempfile::tempdir().unwrap();
+            let config =
+                crate::config::Config::in_memory().with_spill_path(dir.path().join("spill"));
+            let db = GrafeoDB::with_config(config).unwrap();
+            let session = db.session();
+            let before = session.commit_counter.load(Ordering::Relaxed);
+            for _ in 0..5 {
+                session.execute("MATCH (n) RETURN count(n) AS c").unwrap();
+            }
+            assert_eq!(session.commit_counter.load(Ordering::Relaxed), before);
+            assert!(!dir.path().join("spill").exists());
+        }
 
         #[test]
         fn test_gql_query_execution() {
@@ -6497,7 +6727,7 @@ mod tests {
 
             // No edges of this type
             let no_neighbors = session.get_neighbors_outgoing_by_type(alix, "LIKES");
-            assert!(no_neighbors.is_empty());
+            assert!(no_neighbors.is_empty(), "{no_neighbors:?}");
         }
 
         #[test]
@@ -6656,12 +6886,19 @@ mod tests {
 
             let lonely = session.create_node(&["Person"]).unwrap();
 
-            assert!(session.get_neighbors_outgoing(lonely).is_empty());
-            assert!(session.get_neighbors_incoming(lonely).is_empty());
+            assert!(
+                session.get_neighbors_outgoing(lonely).is_empty(),
+                "expected empty"
+            );
+            assert!(
+                session.get_neighbors_incoming(lonely).is_empty(),
+                "expected empty"
+            );
             assert!(
                 session
                     .get_neighbors_outgoing_by_type(lonely, "KNOWS")
-                    .is_empty()
+                    .is_empty(),
+                "expected no neighbors"
             );
         }
     }
@@ -7062,7 +7299,7 @@ mod tests {
             session.execute("ROLLBACK").unwrap();
 
             let result = session.execute("MATCH (n:Person) RETURN n.name").unwrap();
-            assert!(result.rows.is_empty());
+            assert!(result.rows.is_empty(), "{:?}", result.rows);
         }
 
         #[test]
@@ -7274,7 +7511,7 @@ mod tests {
         db.create_graph("model").unwrap();
         let session = db.session();
         session.use_graph("model");
-        assert!(db.drop_graph("model"));
+        assert!(db.drop_graph("model").unwrap());
 
         assert_eq!(session.active_store().node_count(), 0);
         assert!(session.active_write_store().is_none());

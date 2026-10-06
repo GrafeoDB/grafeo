@@ -538,7 +538,7 @@ impl LpgStore {
         let id_val = id.as_u64();
         let _ = self
             .next_node_id
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
                 if id_val >= current {
                     Some(id_val + 1)
                 } else {
@@ -586,7 +586,7 @@ impl LpgStore {
         let id_val = id.as_u64();
         let _ = self
             .next_node_id
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
                 if id_val >= current {
                     Some(id_val + 1)
                 } else {
@@ -633,7 +633,7 @@ impl LpgStore {
         let id_val = id.as_u64();
         let _ = self
             .next_edge_id
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
                 if id_val >= current {
                     Some(id_val + 1)
                 } else {
@@ -689,7 +689,7 @@ impl LpgStore {
         let id_val = id.as_u64();
         let _ = self
             .next_edge_id
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
                 if id_val >= current {
                     Some(id_val + 1)
                 } else {

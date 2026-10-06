@@ -295,8 +295,16 @@ mod tests {
         let mut roundtrip = OverlayDeletionsSection::empty();
         roundtrip.deserialize(&bytes).unwrap();
         assert!(roundtrip.is_empty());
-        assert!(roundtrip.deleted_node_ids().is_empty());
-        assert!(roundtrip.deleted_edge_ids().is_empty());
+        assert!(
+            roundtrip.deleted_node_ids().is_empty(),
+            "{:?}",
+            roundtrip.deleted_node_ids()
+        );
+        assert!(
+            roundtrip.deleted_edge_ids().is_empty(),
+            "{:?}",
+            roundtrip.deleted_edge_ids()
+        );
     }
 
     #[test]

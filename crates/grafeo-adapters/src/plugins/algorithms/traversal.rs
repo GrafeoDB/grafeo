@@ -487,7 +487,7 @@ mod tests {
         let store = create_test_graph();
         let visited = bfs(&store, NodeId::new(0));
 
-        assert!(!visited.is_empty());
+        assert!(!visited.is_empty(), "visited is empty");
         assert_eq!(visited[0], NodeId::new(0));
         // Node 0 should be first
     }
@@ -497,7 +497,7 @@ mod tests {
         let store = create_test_graph();
         let layers = bfs_layers(&store, NodeId::new(0));
 
-        assert!(!layers.is_empty());
+        assert!(!layers.is_empty(), "layers is empty");
         assert_eq!(layers[0], vec![NodeId::new(0)]);
         // Distance 0: just the start node
     }
@@ -507,7 +507,7 @@ mod tests {
         let store = create_test_graph();
         let finished = dfs(&store, NodeId::new(0));
 
-        assert!(!finished.is_empty());
+        assert!(!finished.is_empty(), "finished is empty");
         // Post-order means leaves are finished first
     }
 
@@ -515,14 +515,14 @@ mod tests {
     fn test_bfs_nonexistent_start() {
         let store = LpgStore::new().unwrap();
         let visited = bfs(&store, NodeId::new(999));
-        assert!(visited.is_empty());
+        assert!(visited.is_empty(), "{visited:?}");
     }
 
     #[test]
     fn test_dfs_nonexistent_start() {
         let store = LpgStore::new().unwrap();
         let finished = dfs(&store, NodeId::new(999));
-        assert!(finished.is_empty());
+        assert!(finished.is_empty(), "{finished:?}");
     }
 
     #[test]
@@ -568,7 +568,7 @@ mod tests {
     fn test_bfs_layers_empty_graph() {
         let store = LpgStore::new().unwrap();
         let layers = bfs_layers(&store, NodeId::new(0));
-        assert!(layers.is_empty());
+        assert!(layers.is_empty(), "{layers:?}");
     }
 
     #[test]
@@ -632,7 +632,7 @@ mod tests {
         });
 
         // There's at least one non-tree edge (3->4 or 1->4)
-        assert!(!non_tree_edges.is_empty());
+        assert!(!non_tree_edges.is_empty(), "non_tree_edges is empty");
     }
 
     #[test]
@@ -739,7 +739,7 @@ mod tests {
     fn test_dfs_all_empty_graph() {
         let store = LpgStore::new().unwrap();
         let finished = dfs_all(&store);
-        assert!(finished.is_empty());
+        assert!(finished.is_empty(), "{finished:?}");
     }
 
     #[test]

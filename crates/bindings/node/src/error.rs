@@ -21,6 +21,9 @@ pub enum NodeGrafeoError {
     #[error("Transaction error: {0}")]
     Transaction(String),
 
+    #[error("Database closed: {0}")]
+    DatabaseClosed(String),
+
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 }
@@ -33,7 +36,8 @@ impl From<NodeGrafeoError> for napi::Error {
             }
             NodeGrafeoError::Database(_)
             | NodeGrafeoError::Query(_)
-            | NodeGrafeoError::Transaction(_) => {
+            | NodeGrafeoError::Transaction(_)
+            | NodeGrafeoError::DatabaseClosed(_) => {
                 napi::Error::new(Status::GenericFailure, err.to_string())
             }
         }
@@ -47,6 +51,7 @@ impl From<grafeo_common::utils::error::Error> for NodeGrafeoError {
         match classify_error(&err) {
             ErrorCategory::Query => NodeGrafeoError::Query(msg),
             ErrorCategory::Transaction => NodeGrafeoError::Transaction(msg),
+            ErrorCategory::DatabaseClosed => NodeGrafeoError::DatabaseClosed(msg),
             _ => NodeGrafeoError::Database(msg),
         }
     }

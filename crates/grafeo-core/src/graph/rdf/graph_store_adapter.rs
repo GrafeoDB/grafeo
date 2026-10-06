@@ -335,6 +335,15 @@ impl GraphStore for RdfGraphStoreAdapter {
             .collect()
     }
 
+    // The triples are in memory: no read can fail.
+    fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+    ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
+        Ok(self.get_node_property_batch(ids, key))
+    }
+
     fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
         ids.iter()
             .map(|id| {
@@ -709,7 +718,7 @@ mod tests {
         let adapter = RdfGraphStoreAdapter::new(&store);
         assert_eq!(adapter.node_count(), 0);
         assert_eq!(adapter.edge_count(), 0);
-        assert!(adapter.node_ids().is_empty());
+        assert!(adapter.node_ids().is_empty(), "{:?}", adapter.node_ids());
     }
 
     #[test]
@@ -733,7 +742,10 @@ mod tests {
         assert_eq!(inc, vec![alix]);
 
         // No outgoing from Gus
-        assert!(adapter.neighbors(gus, Direction::Outgoing).is_empty());
+        assert!(
+            adapter.neighbors(gus, Direction::Outgoing).is_empty(),
+            "expected empty"
+        );
     }
 
     #[test]

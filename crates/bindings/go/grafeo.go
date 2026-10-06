@@ -70,23 +70,14 @@ func Open(path string) (*Database, error) {
 	return db, nil
 }
 
-// OpenSingleFile opens or creates a persistent database in single-file
-// `.grafeo` format at the given path, bypassing the Auto storage-format
-// detection based on path extension.
+// OpenSingleFile opens or creates a persistent database at the given path,
+// as Open does: since 0.6 every database is a single file, whatever the
+// extension of its path.
+//
+// Deprecated: use Open, which does the same since 0.6.0. OpenSingleFile is
+// removed in 0.7.0.
 func OpenSingleFile(path string) (*Database, error) {
-	cPath := C.CString(path)
-	defer C.free(unsafe.Pointer(cPath))
-	runtime.LockOSThread()
-	h := C.grafeo_open_single_file(cPath)
-	if h == nil {
-		err := lastError()
-		runtime.UnlockOSThread()
-		return nil, err
-	}
-	runtime.UnlockOSThread()
-	db := &Database{handle: h}
-	runtime.SetFinalizer(db, (*Database).free)
-	return db, nil
+	return Open(path)
 }
 
 // Close flushes any pending writes and releases the database handle.
@@ -355,13 +346,23 @@ func (db *Database) ExecuteLanguage(language, query, paramsJSON string) (*QueryR
 }
 
 // DropVectorIndex drops a vector index for the given label and property.
-// Returns true if the index existed and was removed.
-func (db *Database) DropVectorIndex(label, property string) bool {
+// Returns true if the index existed and was removed, and an error when the
+// database refuses the change (for example after a commit that did not
+// complete).
+func (db *Database) DropVectorIndex(label, property string) (bool, error) {
 	cLabel := C.CString(label)
 	defer C.free(unsafe.Pointer(cLabel))
 	cProp := C.CString(property)
 	defer C.free(unsafe.Pointer(cProp))
-	return C.grafeo_drop_vector_index(db.handle, cLabel, cProp) != 0
+	runtime.LockOSThread()
+	result := int(C.grafeo_drop_vector_index(db.handle, cLabel, cProp))
+	if result < 0 {
+		err := lastError()
+		runtime.UnlockOSThread()
+		return false, err
+	}
+	runtime.UnlockOSThread()
+	return result == 1, nil
 }
 
 // RebuildVectorIndex drops and recreates a vector index, rescanning all

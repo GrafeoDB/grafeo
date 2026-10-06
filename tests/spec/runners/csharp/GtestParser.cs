@@ -157,7 +157,7 @@ public static class GtestParser
                 case "requires":
                     tc.Requires = ParseYamlList(value); ctx.Idx++; break;
                 case "params":
-                    ctx.Idx++; tc.Params = ParseMap(ctx, 6); break;
+                    ctx.Idx++; tc.Params = ParseParams(ctx); break;
                 case "expect":
                     ctx.Idx++; tc.Expect = ParseExpectBlock(ctx); break;
                 case "variants":
@@ -274,6 +274,14 @@ public static class GtestParser
         return null;
     }
 
+    /// <summary>Whether <paramref name="s"/> is written in single or double quotes.</summary>
+    internal static bool IsQuoted(string s)
+    {
+        s = s.Trim();
+        return s.Length >= 2 &&
+            ((s[0] == '"' && s[^1] == '"') || (s[0] == '\'' && s[^1] == '\''));
+    }
+
     /// <summary>
     /// Strip surrounding quotes and unescape YAML-level escapes only.
     /// Does NOT process \n or \t: those are GQL string escapes handled
@@ -282,8 +290,7 @@ public static class GtestParser
     internal static string Unquote(string s)
     {
         s = s.Trim();
-        if (s.Length >= 2 &&
-            ((s[0] == '"' && s[^1] == '"') || (s[0] == '\'' && s[^1] == '\'')))
+        if (IsQuoted(s))
         {
             return s[1..^1]
                 .Replace("\\\\", "\x00")
@@ -445,6 +452,33 @@ public static class GtestParser
             }
         }
         return map;
+    }
+
+    /// <summary>
+    /// Parse the params entries (indent 6 or deeper). Each value keeps its
+    /// quotes, so <c>SpecTests.ParamValue</c> can tell a quoted string from a
+    /// bare value.
+    /// </summary>
+    private static Dictionary<string, string> ParseParams(ParseContext ctx)
+    {
+        var parameters = new Dictionary<string, string>();
+        while (!ctx.AtEnd)
+        {
+            var line = ctx.Lines[ctx.Idx];
+            var trimmed = line.Trim();
+
+            if (trimmed.StartsWith('#') || string.IsNullOrEmpty(trimmed))
+            { ctx.Idx++; continue; }
+
+            var indent = line.Length - line.TrimStart().Length;
+            if (indent < 6) break;
+
+            var kv = ParseKV(trimmed);
+            if (kv == null) break;
+            parameters[kv.Value.Key] = kv.Value.Value;
+            ctx.Idx++;
+        }
+        return parameters;
     }
 
     /// <summary>

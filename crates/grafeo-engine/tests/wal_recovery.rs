@@ -7,8 +7,12 @@
 //! cargo test -p grafeo-engine --features full --test wal_recovery
 //! ```
 
-#[cfg(feature = "wal")]
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+mod common;
+
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod wal {
+    use crate::common::replay::reopened_after_crash;
     use grafeo_common::types::Value;
     use grafeo_engine::GrafeoDB;
 
@@ -665,22 +669,21 @@ mod wal {
     // T1-06: Schema DDL Persistence (WAL Replay)
     // =========================================================================
 
+    /// Opens the database at `path` for [`reopened_after_crash`].
+    fn open(path: &std::path::Path) -> GrafeoDB {
+        GrafeoDB::open(path).expect("open")
+    }
+
     #[test]
     fn test_create_node_type_persists() {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let path = dir.path().join("ddl_node_type");
-
-        {
-            let db = GrafeoDB::open(&path).expect("open");
+        let (_dir, db) = reopened_after_crash("wal::test_create_node_type_persists", open, |db| {
             let session = db.session();
             session
                 .execute("CREATE NODE TYPE Vehicle (make STRING NOT NULL, year INTEGER)")
                 .unwrap();
-            db.close().expect("close");
-        }
+        });
 
         {
-            let db = GrafeoDB::open(&path).expect("reopen");
             let session = db.session();
             let result = session.execute("SHOW NODE TYPES").unwrap();
             let type_names: Vec<&str> = result
@@ -701,20 +704,14 @@ mod wal {
 
     #[test]
     fn test_create_edge_type_persists() {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let path = dir.path().join("ddl_edge_type");
-
-        {
-            let db = GrafeoDB::open(&path).expect("open");
+        let (_dir, db) = reopened_after_crash("wal::test_create_edge_type_persists", open, |db| {
             let session = db.session();
             session
                 .execute("CREATE EDGE TYPE SUPPLIES (quantity INTEGER)")
                 .unwrap();
-            db.close().expect("close");
-        }
+        });
 
         {
-            let db = GrafeoDB::open(&path).expect("reopen");
             let session = db.session();
             let result = session.execute("SHOW EDGE TYPES").unwrap();
             let type_names: Vec<&str> = result
@@ -735,21 +732,18 @@ mod wal {
 
     #[test]
     fn test_drop_node_type_persists() {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let path = dir.path().join("ddl_drop_type");
-
-        {
-            let db = GrafeoDB::open(&path).expect("open");
+        let (_dir, db) = reopened_after_crash("wal::test_drop_node_type_persists", open, |db| {
             let session = db.session();
             session
                 .execute("CREATE NODE TYPE Temp (name STRING)")
                 .unwrap();
             session.execute("DROP NODE TYPE Temp").unwrap();
-            db.close().expect("close");
-        }
+            session
+                .execute("CREATE NODE TYPE Kept (name STRING)")
+                .unwrap();
+        });
 
         {
-            let db = GrafeoDB::open(&path).expect("reopen");
             let session = db.session();
             let result = session.execute("SHOW NODE TYPES").unwrap();
             let type_names: Vec<&str> = result
@@ -764,17 +758,17 @@ mod wal {
                 !type_names.contains(&"Temp"),
                 "Dropped node type should not survive WAL replay, got: {type_names:?}"
             );
+            assert!(
+                type_names.contains(&"Kept"),
+                "Node type created after the drop should survive WAL replay, got: {type_names:?}"
+            );
             db.close().expect("close");
         }
     }
 
     #[test]
     fn test_schema_with_data_persists() {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let path = dir.path().join("ddl_with_data");
-
-        {
-            let db = GrafeoDB::open(&path).expect("open");
+        let (_dir, db) = reopened_after_crash("wal::test_schema_with_data_persists", open, |db| {
             let session = db.session();
             session
                 .execute("CREATE NODE TYPE Person (name STRING NOT NULL, age INTEGER)")
@@ -785,11 +779,9 @@ mod wal {
             session
                 .execute("INSERT (:Person {name: 'Gus', age: 25})")
                 .unwrap();
-            db.close().expect("close");
-        }
+        });
 
         {
-            let db = GrafeoDB::open(&path).expect("reopen");
             let session = db.session();
 
             // Schema should be present

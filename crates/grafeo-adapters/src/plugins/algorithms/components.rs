@@ -384,7 +384,9 @@ impl_algorithm! {
             builder.push(node, component);
         }
 
-        Ok(builder.build())
+        let mut result = builder.build();
+        result.sort_by_id_columns(1);
+        Ok(result)
     }
 }
 
@@ -404,7 +406,9 @@ impl_algorithm! {
             builder.push(node, component);
         }
 
-        Ok(builder.build())
+        let mut result = builder.build();
+        result.sort_by_id_columns(1);
+        Ok(result)
     }
 }
 

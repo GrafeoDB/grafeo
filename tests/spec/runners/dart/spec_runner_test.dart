@@ -99,31 +99,60 @@ QueryResult _executeQuery(
   return db.executeLanguage(lang, query, params: coerced);
 }
 
-/// Coerce string param values to proper Dart types (int, double, bool).
+// The number syntax of the Rust reference runner (crates/grafeo-spec-tests/
+// build.rs): decimal only. int.tryParse and double.tryParse also read `0x1F`,
+// `Infinity` and `NaN`, which the reference runner keeps as strings.
+final _decimalInteger = RegExp(r'^[+-]?[0-9]+$');
+final _decimalNumber =
+    RegExp(r'^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$');
+
+/// The value of a parameter written as [text] in a .gtest file, by the rule of
+/// the Rust reference runner that every runner follows: a quoted value is a
+/// string, whatever it reads like; a bare value starting with `[` or `{` is
+/// JSON, whose numbers follow the rule of bare ones; a bare decimal integer
+/// that fits 64 bits is an int and any other bare decimal number a double, an
+/// error past the f64 range; a bare `true` or `false` is a bool; any other bare
+/// value is a string.
+dynamic _paramValue(String text) {
+  text = text.trim();
+  if (_isQuoted(text)) return _unquote(text);
+  if (text.startsWith('[') || text.startsWith('{')) {
+    // jsonDecode makes an integer past 64 bits a double already, and a
+    // number past the f64 range (1e400) infinity, which is an error.
+    final value = jsonDecode(text);
+    if (_hasInfinity(value)) {
+      throw FormatException('a number in parameter $text is out of the f64 range');
+    }
+    return value;
+  }
+  if (_decimalInteger.hasMatch(text)) {
+    // null past the 64-bit range: then it is a double, as in Rust.
+    final integer = int.tryParse(text);
+    if (integer != null) return integer;
+  }
+  if (_decimalNumber.hasMatch(text)) {
+    final number = double.parse(text);
+    if (!number.isFinite) {
+      throw FormatException('parameter $text is out of the f64 range');
+    }
+    return number;
+  }
+  if (text == 'true' || text == 'false') return text == 'true';
+  return text;
+}
+
+/// Whether a decoded JSON [value] holds a number past the f64 range.
+bool _hasInfinity(dynamic value) {
+  if (value is double) return value.isInfinite;
+  if (value is List) return value.any(_hasInfinity);
+  if (value is Map) return value.values.any(_hasInfinity);
+  return false;
+}
+
+/// Type each parameter by [_paramValue]; null when there are none.
 Map<String, dynamic>? _coerceParams(Map<String, String>? raw) {
   if (raw == null || raw.isEmpty) return null;
-  final result = <String, dynamic>{};
-  for (final entry in raw.entries) {
-    final v = entry.value;
-    if (v == 'true') {
-      result[entry.key] = true;
-    } else if (v == 'false') {
-      result[entry.key] = false;
-    } else {
-      final asInt = int.tryParse(v);
-      if (asInt != null) {
-        result[entry.key] = asInt;
-      } else {
-        final asDouble = double.tryParse(v);
-        if (asDouble != null) {
-          result[entry.key] = asDouble;
-        } else {
-          result[entry.key] = v;
-        }
-      }
-    }
-  }
-  return result;
+  return raw.map((key, text) => MapEntry(key, _paramValue(text)));
 }
 
 /// Load a .setup dataset file into [db] using GQL.
@@ -439,6 +468,9 @@ class _TestCase {
   Map<String, String> variants;
   List<String> tags;
   List<String> requires;
+
+  /// Each parameter value as the file writes it, quotes included: whether it
+  /// was quoted decides its type (see [_paramValue]).
   Map<String, String> params;
 
   _TestCase({
@@ -609,7 +641,7 @@ _TestCase _parseSingleTest(_ParseContext ctx) {
         ctx.idx++;
       case 'params':
         ctx.idx++;
-        tc.params = _parseMap(ctx, 6);
+        tc.params = _parseParams(ctx);
       case 'expect':
         ctx.idx++;
         tc.expect = _parseExpectBlock(ctx);
@@ -725,14 +757,20 @@ List<List<String>> _parseRows(_ParseContext ctx) {
   return null;
 }
 
-/// Strip surrounding quotes and process escape sequences.
+/// Whether [s] is written in single or double quotes.
+bool _isQuoted(String s) {
+  s = s.trim();
+  return s.length >= 2 &&
+      ((s.startsWith('"') && s.endsWith('"')) ||
+          (s.startsWith("'") && s.endsWith("'")));
+}
+
 /// Strip surrounding quotes and unescape YAML-level escapes only.
 /// Do NOT process `\n` or `\t`: those are GQL string escapes handled
 /// by the engine's parser.
 String _unquote(String s) {
   s = s.trim();
-  if ((s.startsWith('"') && s.endsWith('"')) ||
-      (s.startsWith("'") && s.endsWith("'"))) {
+  if (_isQuoted(s)) {
     return s
         .substring(1, s.length - 1)
         .replaceAll(r'\\', '\x00')
@@ -847,6 +885,27 @@ Map<String, String> _parseMap(_ParseContext ctx, int minIndent) {
     }
   }
   return map;
+}
+
+/// Parse the params entries (indent 6 or deeper). Each value keeps its quotes,
+/// so [_paramValue] can tell a quoted string from a bare value.
+Map<String, String> _parseParams(_ParseContext ctx) {
+  final params = <String, String>{};
+  while (ctx.idx < ctx.lines.length) {
+    final line = ctx.lines[ctx.idx];
+    final trimmed = line.trim();
+    if (trimmed.startsWith('#') || trimmed.isEmpty) {
+      ctx.idx++;
+      continue;
+    }
+    final indent = line.length - line.trimLeft().length;
+    if (indent < 6) break;
+    final kv = _parseKV(trimmed);
+    if (kv == null) break;
+    params[kv.$1] = kv.$2;
+    ctx.idx++;
+  }
+  return params;
 }
 
 /// Parse a YAML block scalar (lines after `|`).
@@ -1034,6 +1093,27 @@ void _runErrorTest(
 // =============================================================================
 
 void main() {
+  // The typing of parameter values that no .gtest file can hold: a number
+  // past the f64 range fails the Rust runner's build, so it is tested here.
+  group('parameter values', () {
+    test('a JSON integer that fits 64 bits is an int', () {
+      expect(_paramValue('[3, -5000000000, 9223372036854775807]'),
+          [3, -5000000000, 9223372036854775807]);
+    });
+    test('a JSON integer past 64 bits is a double', () {
+      expect(_paramValue('[9223372036854775808]').single, isA<double>());
+    });
+    test('a number past the f64 range is an error', () {
+      for (final text in ['[1e400]', '{"tiny": [-1e400]}', '1e999']) {
+        expect(
+            () => _paramValue(text),
+            throwsA(isA<FormatException>().having(
+                (error) => error.message, 'message', contains('out of the f64 range'))),
+            reason: text);
+      }
+    });
+  });
+
   final gtestFiles = _findGtestFiles(_specDir);
 
   if (gtestFiles.isEmpty) {

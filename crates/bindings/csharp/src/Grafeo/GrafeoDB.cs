@@ -579,11 +579,13 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     // Projections
     // =========================================================================
 
-    /// <summary>Create a named graph projection that includes the specified node labels and edge types.</summary>
+    /// <summary>Create a named graph projection over the graph selected now (the default graph
+    /// when none is selected) that includes the specified node labels and edge types.</summary>
     /// <param name="name">Unique name for the projection.</param>
     /// <param name="nodeLabels">Node labels to include (null or empty for all).</param>
     /// <param name="edgeTypes">Edge types to include (null or empty for all).</param>
-    /// <returns><c>true</c> if the projection was created.</returns>
+    /// <returns><c>true</c> if the projection was created, <c>false</c> if the name exists.</returns>
+    /// <exception cref="GrafeoException">The selected graph no longer exists.</exception>
     public bool CreateProjection(string name, IEnumerable<string>? nodeLabels = null, IEnumerable<string>? edgeTypes = null)
     {
         ThrowIfDisposed();
@@ -603,10 +605,13 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
                 fixed (nint* lp = labelPtrs.Length > 0 ? labelPtrs : null)
                 fixed (nint* tp = typePtrs.Length > 0 ? typePtrs : null)
                 {
-                    return NativeMethods.grafeo_create_projection(
+                    var result = NativeMethods.grafeo_create_projection(
                         Handle, namePtr,
                         (nint)lp, (nuint)labels.Length,
                         (nint)tp, (nuint)types.Length);
+                    if (result < 0)
+                        throw GrafeoException.FromLastError();
+                    return result == 1;
                 }
             }
         }
@@ -623,7 +628,10 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     public bool DropProjection(string name)
     {
         ThrowIfDisposed();
-        return NativeMethods.grafeo_drop_projection(Handle, name);
+        var result = NativeMethods.grafeo_drop_projection(Handle, name);
+        if (result < 0)
+            throw GrafeoException.FromLastError();
+        return result == 1;
     }
 
     /// <summary>List all named graph projections as a JSON array.</summary>

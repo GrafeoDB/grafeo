@@ -9,7 +9,7 @@
 //! ## Modules
 //!
 //! - [`wal`] - Write-ahead log for durability
-//! - [`lock`] - Exclusive lock for WAL-directory databases
+//! - [`lock`] - Exclusive lock for 0.5.x WAL-directory databases
 //! - [`mod@file`] - Single-file `.grafeo` format with crash-safe dual headers
 
 #![deny(unsafe_code)]

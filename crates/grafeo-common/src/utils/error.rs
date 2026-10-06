@@ -58,6 +58,11 @@ pub enum ErrorCode {
     TransactionSerialization,
     /// Deadlock detected.
     TransactionDeadlock,
+    /// The database is closed: it takes no more writes.
+    DatabaseClosed,
+    /// A commit did not complete: nothing commits, checkpoints or saves until
+    /// the database is reopened.
+    IncompleteCommit,
 
     // Storage errors (S)
     /// Memory or disk limit reached.
@@ -108,6 +113,8 @@ impl ErrorCode {
             Self::TransactionInvalidState => "GRAFEO-T004",
             Self::TransactionSerialization => "GRAFEO-T005",
             Self::TransactionDeadlock => "GRAFEO-T006",
+            Self::DatabaseClosed => "GRAFEO-T007",
+            Self::IncompleteCommit => "GRAFEO-T008",
 
             Self::StorageFull => "GRAFEO-S001",
             Self::StorageCorrupted => "GRAFEO-S002",
@@ -288,6 +295,17 @@ pub enum TransactionError {
 
     /// Invalid transaction state.
     InvalidState(String),
+
+    /// The database is closed: `close()` of a persistent database started,
+    /// so it takes no more writes. Open it again to write.
+    DatabaseClosed,
+
+    /// An earlier commit did not complete (it panicked between its commit
+    /// epoch and its completion), so the store may hold part of it: no
+    /// transaction commits and nothing is checkpointed, saved or copied
+    /// until the database is reopened. Reads still see every commit
+    /// published before it.
+    IncompleteCommit,
 }
 
 impl TransactionError {
@@ -303,6 +321,8 @@ impl TransactionError {
             Self::Timeout => ErrorCode::TransactionTimeout,
             Self::ReadOnly => ErrorCode::TransactionReadOnly,
             Self::InvalidState(_) => ErrorCode::TransactionInvalidState,
+            Self::DatabaseClosed => ErrorCode::DatabaseClosed,
+            Self::IncompleteCommit => ErrorCode::IncompleteCommit,
         }
     }
 }
@@ -320,6 +340,16 @@ impl fmt::Display for TransactionError {
             TransactionError::Timeout => write!(f, "Transaction timeout"),
             TransactionError::ReadOnly => write!(f, "Cannot write in read-only transaction"),
             TransactionError::InvalidState(msg) => write!(f, "Invalid transaction state: {msg}"),
+            TransactionError::DatabaseClosed => write!(
+                f,
+                "the database is closed, so it takes no more writes: open it again to write"
+            ),
+            TransactionError::IncompleteCommit => write!(
+                f,
+                "an earlier commit did not complete, so no transaction can commit and nothing \
+                 can be checkpointed, saved or copied: reopen the database (reads still see \
+                 every commit published before it)"
+            ),
         }
     }
 }
@@ -589,6 +619,35 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "GRAFEO-V006: Type mismatch: expected INT64, found STRING"
+        );
+    }
+
+    #[test]
+    fn database_closed_has_its_own_code_and_is_not_retryable() {
+        let err = Error::Transaction(TransactionError::DatabaseClosed);
+        assert_eq!(err.error_code(), ErrorCode::DatabaseClosed);
+        assert_eq!(err.error_code().as_str(), "GRAFEO-T007");
+        assert!(!err.error_code().is_retryable());
+        assert_eq!(
+            err.to_string(),
+            "GRAFEO-T007: the database is closed, so it takes no more writes: open it again to write"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_commit_has_its_own_code_and_is_not_retryable() {
+        let err = Error::Transaction(TransactionError::IncompleteCommit);
+        assert_eq!(err.error_code(), ErrorCode::IncompleteCommit);
+        assert_eq!(err.error_code().as_str(), "GRAFEO-T008");
+        assert!(
+            !err.error_code().is_retryable(),
+            "only a reopen helps, never a retry"
+        );
+        assert_eq!(
+            err.to_string(),
+            "GRAFEO-T008: an earlier commit did not complete, so no transaction can commit and \
+             nothing can be checkpointed, saved or copied: reopen the database (reads still see \
+             every commit published before it)"
         );
     }
 

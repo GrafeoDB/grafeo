@@ -8,7 +8,7 @@
 //! | [`hash`] | Point lookups by exact value | O(1) average |
 //! | [`trie`] | Multi-way joins | Worst-case optimal |
 //! | [`zone_map`] | Skipping chunks during scans | O(1) per chunk |
-//! | [`ring`] | RDF triples (3x space reduction) | O(log σ) |
+//! | `ring` | RDF triples (3x space reduction, feature-gated: `ring-index`) | O(log σ) |
 //! | [`vector`] | Similarity search (k-NN) | O(n) brute-force, O(log n) HNSW |
 //! | [`text`] | Full-text search (BM25 scoring) | O(terms × postings) |
 //!

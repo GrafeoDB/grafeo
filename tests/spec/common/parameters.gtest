@@ -241,6 +241,84 @@ tests:
   # Gremlin parameter support
   # ---------------------------------------------------------------------------
 
+  # ---------------------------------------------------------------------------
+  # GQL list and map parameters (#574), written as JSON values. GQL only, so
+  # the WASM runner (the edge profile, without Cypher) runs them too; the
+  # rosetta file has the GQL and Cypher pairs.
+  # ---------------------------------------------------------------------------
+
+  - name: gql_list_param_is_returned_as_given
+    query: "RETURN $x AS x, size($x) AS n"
+    params:
+      x: [3, 19, 88]
+    expect:
+      rows:
+        - ["[3, 19, 88]", 3]
+
+  - name: gql_list_param_unwinds_to_its_items
+    query: "UNWIND $x AS v RETURN v"
+    params:
+      x: [3, 19, 88]
+    expect:
+      rows:
+        - [3]
+        - [19]
+        - [88]
+
+  - name: gql_map_param_passes_through_with
+    query: "UNWIND [0] AS i WITH $m AS w RETURN w.city AS city, w.tags AS tags"
+    params:
+      m: {"city": "Amsterdam", "tags": [3, 19]}
+    expect:
+      rows:
+        - [Amsterdam, "[3, 19]"]
+
+  # A number inside a JSON param follows the rule of a bare one: an integer
+  # that fits 64 bits is an integer, kept exactly (also past 2^32 and 2^53),
+  # and a larger one a float. A number past the float range is an error in
+  # every runner, so no test can pass one (each runner tests that itself).
+  - name: gql_list_param_integer_past_32_bits_is_an_integer
+    query: "UNWIND $x AS v RETURN v, v IS TYPED INT64 AS int"
+    params:
+      x: [-5000000000, 5000000000]
+    expect:
+      rows:
+        - [-5000000000, true]
+        - [5000000000, true]
+
+  - name: gql_list_param_integers_fit_64_bits_or_are_floats
+    requires: [int64-safe]
+    query: "UNWIND $x AS v RETURN v IS TYPED INT64 AS int, v IS TYPED FLOAT64 AS float"
+    params:
+      x: [3, 5000000000, 9007199254740993, 9223372036854775807, 9223372036854775808]
+    expect:
+      rows:
+        - [true, false]
+        - [true, false]
+        - [true, false]
+        - [true, false]
+        - [false, true]
+
+  - name: gql_list_param_keeps_64_bit_integers_exact
+    requires: [int64-safe]
+    query: "UNWIND $x AS v RETURN v"
+    params:
+      x: [-5000000000, 9007199254740993, 9223372036854775807]
+    expect:
+      rows:
+        - [-5000000000]
+        - [9007199254740993]
+        - [9223372036854775807]
+
+  - name: gql_map_param_integer_past_64_bits_is_a_float
+    requires: [int64-safe]
+    query: "UNWIND [0] AS i WITH $m AS w RETURN w.big IS TYPED FLOAT64 AS float, w.small AS small"
+    params:
+      m: {"big": 18446744073709551616, "small": -9223372036854775808}
+    expect:
+      rows:
+        - [true, -9223372036854775808]
+
   - name: gremlin_has_param
     skip: "Gremlin $param in has() not substituted"
     language: gremlin

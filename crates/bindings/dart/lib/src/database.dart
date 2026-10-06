@@ -66,23 +66,16 @@ class GrafeoDB implements Finalizable {
     }
   }
 
-  /// Open or create a single-file `.grafeo` database at [path].
+  /// Open or create a persistent database at [path] (a single file).
   ///
-  /// Recommended for embedded use (desktop apps, mobile apps). All data is
-  /// stored in one file with a sidecar WAL for crash safety, similar to
-  /// DuckDB's `.duckdb` format.
-  static GrafeoDB openSingleFile(String path, {String? libraryPath}) {
-    final lib = loadNativeLibrary(libraryPath);
-    final bindings = GrafeoBindings(lib);
-    final pathPtr = path.toNativeUtf8(allocator: malloc);
-    try {
-      final ptr = bindings.grafeoOpenSingleFile(pathPtr);
-      if (ptr == nullptr) throwLastError(bindings);
-      return GrafeoDB._(ptr, bindings);
-    } finally {
-      malloc.free(pathPtr);
-    }
-  }
+  /// All data is stored in one file with a sidecar WAL for crash safety,
+  /// similar to DuckDB's `.duckdb` format. Since 0.6 every database is a
+  /// single file, whatever the extension of its path, so this is the same
+  /// as [open].
+  @Deprecated('Use GrafeoDB.open, which does the same since 0.6.0; '
+      'openSingleFile is removed in 0.7.0')
+  static GrafeoDB openSingleFile(String path, {String? libraryPath}) =>
+      open(path, libraryPath: libraryPath);
 
   /// Open an existing database at [path] in read-only mode.
   ///
@@ -880,7 +873,8 @@ class GrafeoDB implements Finalizable {
     }
   }
 
-  /// Drop a vector index. Returns true if the index existed.
+  /// Drop a vector index. Returns true if the index existed; throws when the
+  /// database refuses the change.
   bool dropVectorIndex(String label, String property) {
     _checkOpen();
     final labelPtr = label.toNativeUtf8(allocator: malloc);
@@ -891,7 +885,9 @@ class GrafeoDB implements Finalizable {
         labelPtr,
         propertyPtr,
       );
-      return result != 0;
+      // -1: the database refused the change (see grafeo_last_error).
+      if (result < 0) throwLastError(_bindings);
+      return result == 1;
     } finally {
       malloc.free(labelPtr);
       malloc.free(propertyPtr);

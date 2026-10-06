@@ -14,7 +14,7 @@ use grafeo_common::types::TransactionId;
 use grafeo_common::utils::error::{Error, Result};
 
 use super::WalRecord;
-use super::log::{CheckpointMetadata, DurabilityMode, WalConfig, WalManager};
+use super::log::{CheckpointMetadata, DurabilityMode, WalCipher, WalConfig, WalManager};
 use super::record::WalEntry;
 
 /// A type-safe wrapper around [`WalManager`] that constrains record types
@@ -65,6 +65,24 @@ impl<R: WalEntry> TypedWal<R> {
     pub fn with_config(dir: impl AsRef<Path>, config: WalConfig) -> Result<Self> {
         Ok(Self {
             manager: WalManager::with_config(dir, config)?,
+            _record: PhantomData,
+        })
+    }
+
+    /// Opens or creates a typed WAL with custom configuration that encrypts
+    /// every record with `cipher`, from the first one on (see
+    /// [`WalManager::with_config_and_cipher`]); `None` writes plaintext.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created or accessed.
+    pub fn with_config_and_cipher(
+        dir: impl AsRef<Path>,
+        config: WalConfig,
+        cipher: Option<WalCipher>,
+    ) -> Result<Self> {
+        Ok(Self {
+            manager: WalManager::with_config_and_cipher(dir, config, cipher)?,
             _record: PhantomData,
         })
     }
@@ -289,6 +307,51 @@ mod tests {
     use grafeo_common::types::NodeId;
     use tempfile::tempdir;
 
+    /// A WAL created with a cipher encrypts from its first record on, the
+    /// torn-tail seal included: nothing can be logged before the cipher is
+    /// in place.
+    #[cfg(all(feature = "encryption", not(miri)))]
+    #[test]
+    fn a_wal_created_with_a_cipher_encrypts_its_first_record() {
+        use grafeo_common::encryption::KeyChain;
+
+        let dir = tempdir().unwrap();
+        let chain = KeyChain::new([3; 32]);
+        let cipher = || Some(chain.encryptor_for("grafeo-wal", &19u128.to_le_bytes()));
+        let wal: LpgWal =
+            TypedWal::with_config_and_cipher(dir.path(), WalConfig::default(), cipher()).unwrap();
+        wal.seal_torn_tail().unwrap();
+        wal.log_batch(&[
+            WalRecord::CreateNode {
+                id: NodeId::new(88),
+                labels: vec!["Amsterdam".to_string()],
+            },
+            WalRecord::TransactionCommit {
+                transaction_id: TransactionId::new(3),
+            },
+        ])
+        .unwrap();
+        wal.flush().unwrap();
+        drop(wal);
+
+        for file in std::fs::read_dir(dir.path()).unwrap() {
+            let bytes = std::fs::read(file.unwrap().path()).unwrap();
+            assert!(
+                !bytes.windows(9).any(|window| window == b"Amsterdam"),
+                "no record is written in plaintext"
+            );
+        }
+        let recovered = super::super::WalRecovery::with_cipher(dir.path(), cipher())
+            .recover()
+            .unwrap();
+        assert!(
+            recovered
+                .iter()
+                .any(|record| matches!(record, WalRecord::CreateNode { id, .. } if *id == NodeId::new(88))),
+            "the cipher reads the records back: {recovered:?}"
+        );
+    }
+
     #[test]
     fn test_typed_wal_write() {
         let dir = tempdir().unwrap();
@@ -362,7 +425,7 @@ mod tests {
         assert!(wal.last_checkpoint_timestamp().is_none());
 
         let files = wal.log_files().unwrap();
-        assert!(!files.is_empty());
+        assert!(!files.is_empty(), "files is empty");
 
         let _path = wal.path();
         let _mode = wal.durability_mode();

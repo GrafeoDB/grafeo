@@ -482,7 +482,7 @@ mod tests {
     fn empty_catalog_roundtrip() {
         let section = make_section();
         let bytes = section.serialize().expect("serialize empty catalog");
-        assert!(!bytes.is_empty());
+        assert!(!bytes.is_empty(), "bytes is empty");
 
         let catalog2 = Arc::new(Catalog::new());
         let store2 = Arc::new(grafeo_core::graph::lpg::LpgStore::new().unwrap());
@@ -533,7 +533,8 @@ mod tests {
                 .get_node_type("City")
                 .unwrap()
                 .constraints
-                .is_empty()
+                .is_empty(),
+            "expected no constraints"
         );
     }
 

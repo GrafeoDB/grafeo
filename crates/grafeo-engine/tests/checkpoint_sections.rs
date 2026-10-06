@@ -22,13 +22,20 @@ use grafeo_common::storage::SectionType;
 use grafeo_common::types::Value;
 use grafeo_engine::config::StorageFormat;
 use grafeo_engine::{Config, GrafeoDB};
+use grafeo_storage::file::GrafeoFileManager;
 
 fn config(path: &std::path::Path) -> Config {
-    Config::persistent(path).with_storage_format(StorageFormat::SingleFile)
+    Config::persistent(path).with_storage_format(StorageFormat::Auto)
 }
 
 fn single_value(db: &GrafeoDB, query: &str) -> Value {
     db.session().execute(query).unwrap().rows()[0][0].clone()
+}
+
+/// Whether the active image of the database file holds `section_type`.
+fn holds(fm: &GrafeoFileManager, section_type: SectionType) -> bool {
+    fm.read_image(|image| Ok(image.section_source(section_type).is_some()))
+        .unwrap()
 }
 
 #[test]
@@ -76,13 +83,8 @@ fn a_compacted_database_keeps_its_rdf_section() {
     }
 
     let db = GrafeoDB::with_config(config(&path)).unwrap();
-    let directory = db
-        .file_manager()
-        .unwrap()
-        .read_section_directory()
-        .unwrap()
-        .unwrap();
-    assert!(directory.find(SectionType::RdfStore).is_some());
+    let fm = db.file_manager().unwrap();
+    assert!(holds(fm, SectionType::RdfStore));
     // Read the store itself: SPARQL over a compacted database does not see
     // RDF data yet, a separate problem.
     assert_eq!(db.rdf_store().len(), 1, "the triple is in the section");
@@ -133,11 +135,277 @@ fn the_checkpoint_timer_writes_the_compacted_base() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    let directory = fm.read_section_directory().unwrap().unwrap();
     assert!(
-        directory.find(SectionType::CompactStore).is_some(),
+        holds(&fm, SectionType::CompactStore),
         "the timer's checkpoint contains the compacted base"
     );
-    assert!(directory.find(SectionType::Catalog).is_some());
+    assert!(holds(&fm, SectionType::Catalog));
     db.close().unwrap();
+}
+
+/// Writes data into every kind of section: the default graph and a named
+/// graph (LPG store), a triple (RDF store), a vector and a text index, and a
+/// constraint (catalog).
+#[cfg(all(feature = "sparql", feature = "vector-index", feature = "text-index"))]
+fn write_every_kind_of_section(db: &GrafeoDB) {
+    db.execute("CREATE CONSTRAINT person_email FOR (p:Person) ON (p.email) UNIQUE")
+        .unwrap();
+    db.execute(
+        "INSERT (:Person {name: 'Alix', email: 'alix@example.org', bio: 'jazz in Amsterdam', \
+         embedding: vector([3.0, 19.0, 88.0])})-[:KNOWS]->\
+         (:Person {name: 'Gus', email: 'gus@example.org', bio: 'cycling in Berlin', \
+         embedding: vector([88.0, 19.0, 3.0])})",
+    )
+    .unwrap();
+    db.create_vector_index("Person", "embedding", None, None, None, None, None)
+        .unwrap();
+    db.create_text_index("Person", "bio").unwrap();
+    db.create_graph("trips").unwrap();
+    db.graph("trips")
+        .unwrap()
+        .execute("INSERT (:City {name: 'Paris'})-[:ROUTE {km: 1030}]->(:City {name: 'Prague'})")
+        .unwrap();
+    db.execute_sparql(
+        "INSERT DATA { <http://example.org/alix> <http://example.org/knows> \
+         <http://example.org/gus> }",
+    )
+    .unwrap();
+}
+
+/// Checks everything [`write_every_kind_of_section`] wrote. `what` names the
+/// database in failures.
+#[cfg(all(feature = "sparql", feature = "vector-index", feature = "text-index"))]
+fn assert_every_kind_of_section(db: &GrafeoDB, what: &str) {
+    let rows = |query: &str| {
+        db.execute(query)
+            .unwrap_or_else(|error| panic!("{what}: {query}: {error}"))
+            .rows()
+            .to_vec()
+    };
+    assert_eq!(
+        rows("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name"),
+        [vec![Value::from("Alix"), Value::from("Gus")]],
+        "{what}: the default graph"
+    );
+    let trips = db
+        .graph("trips")
+        .unwrap_or_else(|error| panic!("{what}: trips: {error}"));
+    assert_eq!(
+        trips
+            .execute("MATCH (a)-[r:ROUTE]->(b) RETURN a.name, r.km, b.name")
+            .unwrap()
+            .rows(),
+        [vec![
+            Value::from("Paris"),
+            Value::Int64(1030),
+            Value::from("Prague")
+        ]],
+        "{what}: the named graph"
+    );
+    assert_eq!(
+        db.execute_sparql("SELECT ?s ?o WHERE { ?s <http://example.org/knows> ?o }")
+            .unwrap()
+            .rows(),
+        [vec![
+            Value::from("http://example.org/alix"),
+            Value::from("http://example.org/gus")
+        ]],
+        "{what}: the triple"
+    );
+
+    let alix = rows("MATCH (p:Person {name: 'Alix'}) RETURN id(p)")[0][0].clone();
+    let ids = |found: Vec<grafeo_common::types::NodeId>| -> Vec<Value> {
+        found
+            .into_iter()
+            .map(|node| Value::Int64(i64::try_from(node.as_u64()).unwrap()))
+            .collect()
+    };
+    let nearest = db
+        .vector_search("Person", "embedding", &[3.0, 19.0, 88.0], 1, None, None)
+        .unwrap_or_else(|error| panic!("{what}: vector search: {error}"));
+    assert_eq!(
+        ids(nearest.into_iter().map(|(node, _)| node).collect()),
+        std::slice::from_ref(&alix),
+        "{what}: vector search"
+    );
+    let matches = db
+        .text_search("Person", "bio", "jazz", 3)
+        .unwrap_or_else(|error| panic!("{what}: text search: {error}"));
+    assert_eq!(
+        ids(matches.into_iter().map(|(node, _)| node).collect()),
+        [alix],
+        "{what}: text search"
+    );
+
+    // A read-only database refuses writes and the SHOW commands (they run as
+    // schema commands): check the constraint on a copy of what it loaded.
+    let copy = db.is_read_only().then(|| db.to_memory().unwrap());
+    let unrestricted = copy.as_ref().unwrap_or(db);
+    assert_eq!(
+        unrestricted
+            .execute("SHOW CONSTRAINTS")
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| row[0].clone())
+            .collect::<Vec<_>>(),
+        [Value::from("person_email")],
+        "{what}: constraints"
+    );
+    let duplicate = unrestricted
+        .execute("INSERT (:Person {name: 'Vincent', email: 'alix@example.org'})")
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        duplicate.contains("UNIQUE"),
+        "{what}: the constraint holds: {duplicate}"
+    );
+}
+
+/// A database file is written in container v3, and every kind of section
+/// comes back from it.
+#[test]
+#[cfg(all(feature = "sparql", feature = "vector-index", feature = "text-index"))]
+fn every_kind_of_section_survives_a_reopen() {
+    use grafeo_storage::file::detect::{OnDisk, detect};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.grafeo");
+    {
+        let db = GrafeoDB::with_config(config(&path)).unwrap();
+        write_every_kind_of_section(&db);
+        db.close().unwrap();
+    }
+    assert_eq!(detect(&path).unwrap(), OnDisk::Current, "a v3 file");
+
+    let db = GrafeoDB::with_config(config(&path)).unwrap();
+    let fm = db.file_manager().unwrap();
+    for section_type in [
+        SectionType::Catalog,
+        SectionType::LpgStore,
+        SectionType::RdfStore,
+        SectionType::VectorStore,
+        SectionType::TextIndex,
+    ] {
+        assert!(
+            holds(fm, section_type),
+            "the file holds the {section_type:?} section"
+        );
+    }
+    assert_every_kind_of_section(&db, "reopened");
+    db.close().unwrap();
+}
+
+/// A compacted database's v3 file holds the compacted base and the
+/// overlay's deletions next to the other sections, and they come back.
+///
+/// `compact()` drops the vector and text indexes (the database has none
+/// right after it), so this file has no sections for them;
+/// `every_kind_of_section_survives_a_reopen` covers those.
+#[test]
+#[cfg(all(feature = "sparql", feature = "vector-index", feature = "text-index"))]
+fn a_compacted_base_and_its_deletions_survive_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.grafeo");
+    {
+        let mut db = GrafeoDB::with_config(config(&path)).unwrap();
+        write_every_kind_of_section(&db);
+        // Mia goes into the compacted base, and her deletion into the
+        // overlay's deletions.
+        db.execute("INSERT (:Person {name: 'Mia', email: 'mia@example.org'})")
+            .unwrap();
+        db.compact().unwrap();
+        db.execute("MATCH (p:Person {name: 'Mia'}) DELETE p")
+            .unwrap();
+        db.close().unwrap();
+    }
+
+    let db = GrafeoDB::with_config(config(&path)).unwrap();
+    let fm = db.file_manager().unwrap();
+    for section_type in [
+        SectionType::Catalog,
+        SectionType::LpgStore,
+        SectionType::RdfStore,
+        SectionType::CompactStore,
+        SectionType::OverlayDeletions,
+    ] {
+        assert!(
+            holds(fm, section_type),
+            "the file holds the {section_type:?} section"
+        );
+    }
+    let rows = |query: &str| db.execute(query).unwrap().rows().to_vec();
+    assert_eq!(
+        rows("MATCH (p:Person) RETURN p.name ORDER BY p.name"),
+        [vec![Value::from("Alix")], vec![Value::from("Gus")]],
+        "the base holds Alix and Gus; Mia, deleted from it, stays deleted"
+    );
+    assert_eq!(
+        rows("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name"),
+        [vec![Value::from("Alix"), Value::from("Gus")]],
+        "the base's edge"
+    );
+    assert_eq!(
+        db.graph("trips")
+            .unwrap()
+            .execute("MATCH (a)-[r:ROUTE]->(b) RETURN a.name, r.km, b.name")
+            .unwrap()
+            .rows(),
+        [vec![
+            Value::from("Paris"),
+            Value::Int64(1030),
+            Value::from("Prague")
+        ]],
+        "the named graph"
+    );
+    // SPARQL over a compacted database does not see RDF data yet (see
+    // `a_compacted_database_keeps_its_rdf_section`): read the store.
+    assert_eq!(db.rdf_store().len(), 1, "the triple");
+    assert_eq!(
+        rows("SHOW CONSTRAINTS")
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect::<Vec<_>>(),
+        [Value::from("person_email")],
+        "the constraint"
+    );
+    db.close().unwrap();
+}
+
+/// `save()` to a `.grafeo` path writes a v3 file that holds everything,
+/// without a sidecar WAL, and opens read-write and read-only.
+#[test]
+#[cfg(all(
+    feature = "wal",
+    feature = "sparql",
+    feature = "vector-index",
+    feature = "text-index"
+))]
+fn save_writes_a_v3_file_with_every_section() {
+    use grafeo_storage::file::detect::{OnDisk, detect, sidecar_wal_path};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("saved.grafeo");
+    let db = GrafeoDB::new_in_memory();
+    write_every_kind_of_section(&db);
+    db.save(&path).unwrap();
+    assert_eq!(detect(&path).unwrap(), OnDisk::Current, "a v3 file");
+    assert!(
+        !sidecar_wal_path(&path).exists(),
+        "the saved file holds everything, without a WAL"
+    );
+
+    {
+        let reader = GrafeoDB::open_read_only(&path).unwrap();
+        assert!(
+            std::fs::File::open(&path).unwrap().try_lock().is_err(),
+            "a read-only open of a v3 file holds its shared lock"
+        );
+        assert_every_kind_of_section(&reader, "saved, read-only");
+        reader.close().unwrap();
+    }
+    let saved = GrafeoDB::with_config(config(&path)).unwrap();
+    assert_every_kind_of_section(&saved, "saved");
+    saved.close().unwrap();
 }

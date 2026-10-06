@@ -157,7 +157,7 @@ fn zone_map_or_branch_evaluates_without_crashing() {
 #[test]
 fn indexed_equality_plus_range_uses_remaining_predicate_path() {
     let db = social_graph();
-    db.create_property_index("city");
+    db.create_property_index("city").unwrap();
     let session = db.session();
 
     // city = 'Amsterdam' should be pushed down through the index; the age
@@ -476,7 +476,7 @@ fn range_predicate_only_gt_literal_on_left() {
 #[test]
 fn equality_with_null_literal_is_not_pushed_down() {
     let db = social_graph();
-    db.create_property_index("city");
+    db.create_property_index("city").unwrap();
     let session = db.session();
 
     // `n.city = NULL` is always UNKNOWN, so no rows. The important thing is
@@ -485,7 +485,7 @@ fn equality_with_null_literal_is_not_pushed_down() {
     let result = session
         .execute("MATCH (n:Person) WHERE n.city = NULL RETURN n.name")
         .unwrap();
-    assert!(result.rows().is_empty());
+    assert!(result.rows().is_empty(), "{:?}", result.rows());
 }
 
 // ---------------------------------------------------------------------------

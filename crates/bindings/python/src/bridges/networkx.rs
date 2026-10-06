@@ -5,7 +5,7 @@
 //! or tap into NetworkX's algorithm library. You can also import NetworkX graphs
 //! into Grafeo for faster querying.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -381,20 +381,22 @@ impl PyNetworkXAdapter {
     // NetworkX-style algorithm methods
     // ==========================================================================
 
-    /// Compute PageRank (NetworkX-compatible).
+    /// Compute PageRank (NetworkX-compatible). An undirected view
+    /// (`as_networkx(directed=False)`) walks each pair of connected nodes once,
+    /// in both directions.
     #[pyo3(signature = (alpha=0.85, max_iter=100, tol=1e-6))]
-    fn pagerank(&self, alpha: f64, max_iter: usize, tol: f64) -> PyResult<HashMap<u64, f64>> {
+    fn pagerank(&self, alpha: f64, max_iter: usize, tol: f64) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
         let db = self.db.read();
         let store = db.store();
-        let result = algorithms::pagerank(&**store, alpha, max_iter, tol);
+        let result = algorithms::pagerank(&**store, alpha, max_iter, tol, self.directed);
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
     /// Compute betweenness centrality (NetworkX-compatible).
     #[pyo3(signature = (normalized=true))]
-    fn betweenness_centrality(&self, normalized: bool) -> PyResult<HashMap<u64, f64>> {
+    fn betweenness_centrality(&self, normalized: bool) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
         let db = self.db.read();
@@ -405,7 +407,7 @@ impl PyNetworkXAdapter {
 
     /// Compute closeness centrality (NetworkX-compatible).
     #[pyo3(signature = (wf_improved=false))]
-    fn closeness_centrality(&self, wf_improved: bool) -> PyResult<HashMap<u64, f64>> {
+    fn closeness_centrality(&self, wf_improved: bool) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
         let db = self.db.read();
@@ -414,7 +416,8 @@ impl PyNetworkXAdapter {
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
-    /// Find connected components (NetworkX-compatible).
+    /// Find connected components (NetworkX-compatible), each a list of node
+    /// IDs in node-id order.
     fn connected_components(&self) -> PyResult<Vec<Vec<u64>>> {
         use grafeo_adapters::plugins::algorithms;
 
@@ -422,13 +425,20 @@ impl PyNetworkXAdapter {
         let store = db.store();
         let components = algorithms::connected_components(&**store);
 
-        // Group by component
-        let mut grouped: HashMap<u64, Vec<u64>> = HashMap::new();
+        // Group by component, each in node-id order (the result is a hash map,
+        // whose order changes from call to call).
+        let mut grouped: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         for (node, comp) in components {
             grouped.entry(comp).or_default().push(node.0);
         }
 
-        Ok(grouped.into_values().collect())
+        Ok(grouped
+            .into_values()
+            .map(|mut component| {
+                component.sort_unstable();
+                component
+            })
+            .collect())
     }
 
     /// Compute shortest path using Dijkstra (NetworkX-compatible).
@@ -500,7 +510,7 @@ impl PyNetworkXAdapter {
             }
         } else {
             let result = algorithms::dijkstra(&**store, NodeId::new(source), weight);
-            let distances: HashMap<u64, f64> = result
+            let distances: BTreeMap<u64, f64> = result
                 .distances
                 .into_iter()
                 .map(|(n, d)| (n.0, d))

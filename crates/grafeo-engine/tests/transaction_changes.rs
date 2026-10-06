@@ -52,7 +52,7 @@ fn alix_knows_gus() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
         .unwrap();
-    db.create_property_index("name");
+    db.create_property_index("name").unwrap();
     db
 }
 
@@ -91,7 +91,8 @@ fn rollback_restores_counts_and_statistics() {
     assert_eq!(int(&db, "MATCH (n:Admin) RETURN count(n)"), 0);
     assert!(
         db.find_nodes_by_property("name", &Value::from("Vincent"))
-            .is_empty()
+            .is_empty(),
+        "expected no nodes"
     );
     assert_eq!(
         db.execute("MATCH (a:Person {name: 'Alix'}) RETURN a.age")

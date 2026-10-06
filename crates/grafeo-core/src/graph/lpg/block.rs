@@ -1837,7 +1837,7 @@ mod tests {
 
         read_blocks(&data, &mut |decoded, _, _, _| {
             assert_eq!(decoded.len(), 2);
-            assert!(decoded[0].labels.is_empty());
+            assert!(decoded[0].labels.is_empty(), "expected empty");
             assert_eq!(decoded[1].labels.len(), 3);
             Ok(())
         })

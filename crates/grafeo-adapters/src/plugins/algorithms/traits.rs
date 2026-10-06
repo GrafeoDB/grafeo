@@ -615,7 +615,7 @@ mod tests {
     fn node_value_result_builder_empty() {
         let b = NodeValueResultBuilder::with_capacity("val", 0);
         let result = b.build();
-        assert!(result.rows.is_empty());
+        assert!(result.rows.is_empty(), "{:?}", result.rows);
     }
 
     // ---- ComponentResultBuilder ----
@@ -643,6 +643,6 @@ mod tests {
     fn component_result_builder_default() {
         let b: ComponentResultBuilder = Default::default();
         let result = b.build();
-        assert!(result.rows.is_empty());
+        assert!(result.rows.is_empty(), "{:?}", result.rows);
     }
 }

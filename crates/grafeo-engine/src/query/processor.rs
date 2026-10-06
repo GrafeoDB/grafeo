@@ -322,7 +322,16 @@ impl QueryProcessor {
         // 4a. EXPLAIN: annotate pushdown hints and return the plan tree
         if optimized_plan.explain {
             let mut plan = optimized_plan;
-            annotate_pushdown_hints(&mut plan.root, self.graph_store.as_ref());
+            let (epoch, transaction_id) = match self.transaction_context {
+                Some((epoch, transaction_id)) => (epoch, Some(transaction_id)),
+                None => (self.transaction_manager.current_epoch(), None),
+            };
+            let choose_labels = crate::query::planner::lpg::scan::may_choose_scan_label(
+                epoch,
+                transaction_id,
+                Some(self.transaction_manager.current_epoch()),
+            );
+            annotate_pushdown_hints(&mut plan.root, self.graph_store.as_ref(), choose_labels);
             return Ok(explain_result(&plan));
         }
 
@@ -569,62 +578,41 @@ impl QueryProcessor {
 
 /// Annotates filter operators in the plan with pushdown hints.
 ///
-/// Walks the plan tree looking for `Filter -> NodeScan` patterns and checks
-/// whether a property index exists for equality predicates.
+/// Walks the whole plan tree looking for `Filter -> NodeScan` patterns and
+/// checks whether a property index exists for equality predicates. With
+/// `choose_labels` (see
+/// [`may_choose_scan_label`](crate::query::planner::lpg::scan::may_choose_scan_label)),
+/// a node scan below filters that require more of its labels shows the label
+/// the planner scans, below any operator, as the planner chooses it for every
+/// filter it plans (see
+/// [`with_smallest_scan_label`](crate::query::planner::lpg::scan::with_smallest_scan_label)).
 pub(crate) fn annotate_pushdown_hints(
     op: &mut LogicalOperator,
-    store: &dyn grafeo_core::graph::GraphStore,
+    store: &dyn grafeo_core::graph::GraphStoreSearch,
+    choose_labels: bool,
 ) {
-    #[allow(clippy::wildcard_imports)]
-    use crate::query::plan::*;
+    if let LogicalOperator::Filter(filter) = op {
+        // The label the planner scans, chosen at the top of a chain of filters
+        if choose_labels
+            && let Some(reordered) =
+                crate::query::planner::lpg::scan::with_smallest_scan_label(filter, store)
+        {
+            *filter = reordered;
+        }
+        // Recurse into children first
+        annotate_pushdown_hints(&mut filter.input, store, choose_labels);
 
-    match op {
-        LogicalOperator::Filter(filter) => {
-            // Recurse into children first
-            annotate_pushdown_hints(&mut filter.input, store);
-
-            // Annotate this filter if it sits on top of a NodeScan
-            if let LogicalOperator::NodeScan(scan) = filter.input.as_ref() {
-                filter.pushdown_hint = infer_pushdown(&filter.predicate, scan, store);
-            }
+        // Annotate this filter if it sits on top of a NodeScan
+        if let LogicalOperator::NodeScan(scan) = filter.input.as_ref() {
+            filter.pushdown_hint = infer_pushdown(&filter.predicate, scan, store);
         }
-        LogicalOperator::NodeScan(op) => {
-            if let Some(input) = &mut op.input {
-                annotate_pushdown_hints(input, store);
-            }
-        }
-        LogicalOperator::EdgeScan(op) => {
-            if let Some(input) = &mut op.input {
-                annotate_pushdown_hints(input, store);
-            }
-        }
-        LogicalOperator::Expand(op) => annotate_pushdown_hints(&mut op.input, store),
-        LogicalOperator::Project(op) => annotate_pushdown_hints(&mut op.input, store),
-        LogicalOperator::Join(op) => {
-            annotate_pushdown_hints(&mut op.left, store);
-            annotate_pushdown_hints(&mut op.right, store);
-        }
-        LogicalOperator::Aggregate(op) => annotate_pushdown_hints(&mut op.input, store),
-        LogicalOperator::Limit(op) => annotate_pushdown_hints(&mut op.input, store),
-        LogicalOperator::Skip(op) => annotate_pushdown_hints(&mut op.input, store),
-        LogicalOperator::Sort(op) => annotate_pushdown_hints(&mut op.input, store),
-        LogicalOperator::Distinct(op) => annotate_pushdown_hints(&mut op.input, store),
-        LogicalOperator::Return(op) => annotate_pushdown_hints(&mut op.input, store),
-        LogicalOperator::Union(op) => {
-            for input in &mut op.inputs {
-                annotate_pushdown_hints(input, store);
-            }
-        }
-        LogicalOperator::Apply(op) => {
-            annotate_pushdown_hints(&mut op.input, store);
-            annotate_pushdown_hints(&mut op.subplan, store);
-        }
-        LogicalOperator::Otherwise(op) => {
-            annotate_pushdown_hints(&mut op.left, store);
-            annotate_pushdown_hints(&mut op.right, store);
-        }
-        _ => {}
+        return;
     }
+    let taken = std::mem::replace(op, LogicalOperator::Empty);
+    *op = taken.map_children(|mut child| {
+        annotate_pushdown_hints(&mut child, store, choose_labels);
+        child
+    });
 }
 
 /// Infers the pushdown strategy for a filter predicate over a node scan.

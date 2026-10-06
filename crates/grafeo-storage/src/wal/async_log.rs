@@ -24,6 +24,11 @@ struct AsyncLogFile {
 ///
 /// This manager provides the same durability guarantees as the sync version
 /// but uses tokio's async I/O for better throughput in async contexts.
+///
+/// It has no encryption: every record is written in plaintext. The engine's
+/// databases log through the sync [`WalManager`](super::WalManager), which
+/// encrypts the sidecar WAL of a database with a key; nothing in the engine
+/// opens an async WAL for a database.
 pub struct AsyncWalManager {
     /// Directory for WAL files.
     dir: PathBuf,

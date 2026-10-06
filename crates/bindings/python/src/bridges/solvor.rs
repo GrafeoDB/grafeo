@@ -5,7 +5,7 @@
 //! flow, minimum spanning trees. Results come back in OR-friendly formats
 //! (distances with paths, flows with edge assignments).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -325,7 +325,7 @@ impl PySolvORAdapter {
     ///
     /// Returns:
     ///     Dict mapping node ID to component ID.
-    fn connected_components(&self) -> PyResult<HashMap<u64, u64>> {
+    fn connected_components(&self) -> PyResult<BTreeMap<u64, u64>> {
         use grafeo_adapters::plugins::algorithms;
 
         let db = self.db.read();
@@ -338,7 +338,7 @@ impl PySolvORAdapter {
     ///
     /// Returns:
     ///     Dict mapping node ID to SCC ID.
-    fn strongly_connected_components(&self) -> PyResult<HashMap<u64, u64>> {
+    fn strongly_connected_components(&self) -> PyResult<BTreeMap<u64, u64>> {
         use grafeo_adapters::plugins::algorithms;
 
         let db = self.db.read();
@@ -369,16 +369,24 @@ impl PySolvORAdapter {
     ///     damping: Damping factor (default: 0.85)
     ///     max_iter: Maximum iterations (default: 100)
     ///     tol: Convergence tolerance (default: 1e-6)
+    ///     directed: Follow edge direction (default: True). False walks each
+    ///         pair of connected nodes once, in both directions.
     ///
     /// Returns:
     ///     Dict mapping node ID to PageRank score.
-    #[pyo3(signature = (damping=0.85, max_iter=100, tol=1e-6))]
-    fn pagerank(&self, damping: f64, max_iter: usize, tol: f64) -> PyResult<HashMap<u64, f64>> {
+    #[pyo3(signature = (damping=0.85, max_iter=100, tol=1e-6, directed=true))]
+    fn pagerank(
+        &self,
+        damping: f64,
+        max_iter: usize,
+        tol: f64,
+        directed: bool,
+    ) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
         let db = self.db.read();
         let store = db.store();
-        let result = algorithms::pagerank(&**store, damping, max_iter, tol);
+        let result = algorithms::pagerank(&**store, damping, max_iter, tol, directed);
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
@@ -390,7 +398,7 @@ impl PySolvORAdapter {
     /// Returns:
     ///     Dict mapping node ID to betweenness score.
     #[pyo3(signature = (normalized=true))]
-    fn betweenness_centrality(&self, normalized: bool) -> PyResult<HashMap<u64, f64>> {
+    fn betweenness_centrality(&self, normalized: bool) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
         let db = self.db.read();
@@ -418,7 +426,7 @@ impl PySolvORAdapter {
         let store = db.store();
         let result = algorithms::louvain(&**store, resolution);
 
-        let communities: HashMap<u64, u64> = result
+        let communities: BTreeMap<u64, u64> = result
             .communities
             .into_iter()
             .map(|(n, c)| (n.0, c))

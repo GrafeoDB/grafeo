@@ -30,7 +30,7 @@ jobs:
           args: --release --out dist -m crates/bindings/python/Cargo.toml
           sccache: "true"
           manylinux: auto
-          rust-toolchain: "1.98.1"
+          rust-toolchain: "1.99.0"
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
@@ -58,7 +58,7 @@ jobs:
           args: --release --out dist -m crates/bindings/python/Cargo.toml
           sccache: "true"
           manylinux: musllinux_1_2
-          rust-toolchain: "1.98.1"
+          rust-toolchain: "1.99.0"
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:

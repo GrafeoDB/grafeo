@@ -271,8 +271,8 @@ impl PyGrafeoDB {
     #[cfg(feature = "arrow-export")]
     fn nodes_ipc_bytes(&self) -> PyResult<Vec<u8>> {
         let db = self.inner.read();
-        let store = db.store();
-        let nodes: Vec<_> = store.all_nodes().collect();
+        // As of the current epoch: never part of a commit.
+        let nodes: Vec<_> = db.iter_nodes().collect();
         grafeo_engine::database::arrow::nodes_to_ipc_stream(&nodes).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Arrow export failed: {e}"))
         })
@@ -282,8 +282,8 @@ impl PyGrafeoDB {
     #[cfg(feature = "arrow-export")]
     fn edges_ipc_bytes(&self) -> PyResult<Vec<u8>> {
         let db = self.inner.read();
-        let store = db.store();
-        let edges: Vec<_> = store.all_edges().collect();
+        // As of the current epoch: never part of a commit.
+        let edges: Vec<_> = db.iter_edges().collect();
         grafeo_engine::database::arrow::edges_to_ipc_stream(&edges).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Arrow export failed: {e}"))
         })
@@ -417,11 +417,14 @@ impl PyGrafeoDB {
 
     /// Open an existing database in read-only mode.
     ///
-    /// Uses a shared file lock, so multiple processes can read the same
-    /// .grafeo file concurrently. Mutations will raise an error.
+    /// Takes a shared lock on a database file, so multiple processes can read
+    /// the same file concurrently. A 0.5.x WAL directory is read in place
+    /// without a lock: when another process migrates it meanwhile, the open
+    /// fails. Mutations will raise an error.
     ///
     /// Args:
-    ///     path: Path to the .grafeo database file.
+    ///     path: Path to the database (a file, or a 0.5.x WAL directory,
+    ///         read in place).
     ///
     /// Examples:
     ///     db = GrafeoDB.open_read_only("./my_graph.grafeo")
@@ -1267,8 +1270,9 @@ impl PyGrafeoDB {
     /// ```
     fn create_property_index(&self, property: &str) -> PyResult<()> {
         let db = self.inner.read();
-        db.create_property_index(property);
-        Ok(())
+        Ok(db
+            .create_property_index(property)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Create a vector similarity index on a node property.
@@ -1324,9 +1328,11 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     removed = db.drop_vector_index("Doc", "embedding")
-    fn drop_vector_index(&self, label: &str, property: &str) -> bool {
+    fn drop_vector_index(&self, label: &str, property: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        db.drop_vector_index(label, property)
+        Ok(db
+            .drop_vector_index(label, property)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Rebuild a vector index by rescanning all matching nodes.
@@ -1710,9 +1716,11 @@ impl PyGrafeoDB {
     ///     label: Node label of the index
     ///     property: Property name of the index
     #[cfg(feature = "text-index")]
-    fn drop_text_index(&self, label: &str, property: &str) -> bool {
+    fn drop_text_index(&self, label: &str, property: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        db.drop_text_index(label, property)
+        Ok(db
+            .drop_text_index(label, property)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Rebuild a text index by rescanning all matching nodes.
@@ -1949,7 +1957,9 @@ impl PyGrafeoDB {
     /// ```
     fn drop_property_index(&self, property: &str) -> PyResult<bool> {
         let db = self.inner.read();
-        Ok(db.drop_property_index(property))
+        Ok(db
+            .drop_property_index(property)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Check if a property has an index.
@@ -2441,7 +2451,8 @@ impl PyGrafeoDB {
     /// - If in-memory: creates a new persistent database at path
     /// - If file-backed: creates a copy at the new path
     ///
-    /// The original database remains unchanged.
+    /// The copy is a single file, whatever the extension; fails if `path`
+    /// exists. The original database remains unchanged.
     ///
     /// Example:
     ///     db = GrafeoDB()  # in-memory
@@ -2592,10 +2603,15 @@ impl PyGrafeoDB {
     /// Get the algorithms interface.
     ///
     /// Returns an Algorithms object providing access to all graph algorithms.
+    /// They read the graph ``set_graph()`` selects (the default graph when none
+    /// is selected); every method takes ``projection=`` to read a projection
+    /// instead. ``db.graph(name).algorithms`` reads one named graph.
     ///
     /// Example:
     ///     pr = db.algorithms.pagerank()
     ///     path = db.algorithms.dijkstra(1, 5)
+    ///     db.create_projection("extraction", node_labels=["Graph"])
+    ///     scores = db.algorithms.pagerank(projection="extraction", directed=False)
     #[cfg(feature = "algos")]
     #[getter]
     fn algorithms(&self) -> PyAlgorithms {
@@ -3390,8 +3406,12 @@ impl PyGrafeoDB {
 
     /// Drops a named graph. Returns ``True`` if dropped, ``False`` if it did
     /// not exist.
-    fn drop_graph(&self, name: &str) -> bool {
-        self.inner.read().drop_graph(name)
+    fn drop_graph(&self, name: &str) -> PyResult<bool> {
+        Ok(self
+            .inner
+            .read()
+            .drop_graph(name)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Returns a list of all named graph names.
@@ -3406,13 +3426,19 @@ impl PyGrafeoDB {
     /// Creates a named graph projection. Returns ``True`` if created, ``False``
     /// if a projection with that name already exists.
     ///
-    /// A projection is a read-only, filtered view of the default graph. Only
-    /// nodes with matching labels and edges with matching types are visible.
+    /// A projection is a read-only, filtered view of the graph ``set_graph()``
+    /// selects when it is created (the default graph when none is selected);
+    /// it keeps reading that graph whatever is selected later. Only nodes with
+    /// matching labels and edges with matching types are visible. Graph
+    /// algorithms run on it with ``db.algorithms.<name>(projection=...)``.
     ///
     /// Args:
     ///     name: Projection name.
     ///     node_labels: Node labels to include (empty means all).
     ///     edge_types: Edge types to include (empty means all).
+    ///
+    /// Raises:
+    ///     GrafeoError: The selected graph no longer exists.
     ///
     /// Example:
     ///     db.create_projection("social", node_labels=["Person"], edge_types=["KNOWS"])
@@ -3422,7 +3448,7 @@ impl PyGrafeoDB {
         name: &str,
         node_labels: Vec<String>,
         edge_types: Vec<String>,
-    ) -> bool {
+    ) -> PyResult<bool> {
         use grafeo_core::graph::ProjectionSpec;
 
         let mut spec = ProjectionSpec::new();
@@ -3432,7 +3458,11 @@ impl PyGrafeoDB {
         if !edge_types.is_empty() {
             spec = spec.with_edge_types(edge_types);
         }
-        self.inner.read().create_projection(name, spec)
+        Ok(self
+            .inner
+            .read()
+            .create_projection(name, spec)
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Drops a named graph projection. Returns ``True`` if it existed, ``False``
@@ -3466,7 +3496,8 @@ impl PyGrafeoDB {
     /// Sets the current graph for subsequent ``execute()`` calls.
     ///
     /// Equivalent to running ``USE GRAPH <name>`` but persists across calls.
-    /// Use ``reset_graph()`` to clear it.
+    /// Use ``reset_graph()`` to clear it. The direct API, ``db.algorithms``,
+    /// ``CALL`` procedures and ``create_projection()`` follow it too.
     ///
     /// Example:
     ///     db.set_graph("social")
@@ -3533,7 +3564,7 @@ fn extract_isolation_level(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<
     from_py_object,
     rename_all = "SCREAMING_SNAKE_CASE"
 )]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum PyIsolationLevel {
     /// Each statement sees committed writes from other transactions.
     ReadCommitted = 0,
@@ -3544,7 +3575,7 @@ pub enum PyIsolationLevel {
 }
 
 impl PyIsolationLevel {
-    fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             Self::ReadCommitted => "read_committed",
             Self::Snapshot => "snapshot",
@@ -3555,7 +3586,6 @@ impl PyIsolationLevel {
 
 #[pymethods]
 impl PyIsolationLevel {
-    #[allow(clippy::trivially_copy_pass_by_ref)]
     fn __repr__(&self) -> &'static str {
         match self {
             Self::ReadCommitted => "IsolationLevel.READ_COMMITTED",
@@ -3564,7 +3594,6 @@ impl PyIsolationLevel {
         }
     }
 
-    #[allow(clippy::trivially_copy_pass_by_ref)]
     fn __str__(&self) -> &'static str {
         self.as_str()
     }

@@ -4,9 +4,11 @@
 // parameterized xUnit tests that execute queries and assert expected results.
 
 using System;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 using Grafeo;
 
@@ -309,10 +311,52 @@ public class SpecTests : IDisposable
         return result;
     }
 
+    // The number syntax of the Rust reference runner (crates/grafeo-spec-tests/
+    // build.rs): decimal only. double.TryParse also reads "Infinity" and "NaN",
+    // which the reference runner keeps as strings.
+    private static readonly Regex DecimalInteger = new(@"^[+-]?[0-9]+\z");
+    private static readonly Regex DecimalNumber =
+        new(@"^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?\z");
+
     /// <summary>
-    /// Coerce raw string parameter values to typed C# objects.
-    /// Mirrors the Rust build.rs coercion order: int, float, bool, string.
-    /// Returns null when the params dict is empty (so callers can skip it).
+    /// The value of a parameter written as <paramref name="text"/> in a .gtest
+    /// file, by the rule of the Rust reference runner that every runner
+    /// follows: a quoted value is a string, whatever it reads like; a bare
+    /// value starting with <c>[</c> or <c>{</c> is JSON; a bare decimal integer
+    /// that fits a long is a long and any other bare decimal number a double; a
+    /// bare <c>true</c> or <c>false</c> is a bool; any other bare value is a
+    /// string.
+    /// </summary>
+    internal static object? ParamValue(string text)
+    {
+        text = text.Trim();
+        if (GtestParser.IsQuoted(text))
+            return GtestParser.Unquote(text);
+        if (text.StartsWith('[') || text.StartsWith('{'))
+        {
+            using var doc = JsonDocument.Parse(text);
+            return FromJson(doc.RootElement);
+        }
+        if (DecimalInteger.IsMatch(text) &&
+            long.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var l))
+        {
+            return l;
+        }
+        if (DecimalNumber.IsMatch(text))
+        {
+            var d = double.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture);
+            if (!double.IsFinite(d))
+                throw new FormatException($"parameter {text} is out of the f64 range");
+            return d;
+        }
+        if (text is "true" or "false")
+            return text == "true";
+        return text;
+    }
+
+    /// <summary>
+    /// Type each parameter by <see cref="ParamValue"/>. Returns null when there
+    /// are none (so callers can skip them).
     /// </summary>
     private static Dictionary<string, object?>? CoerceParams(Dictionary<string, string> rawParams)
     {
@@ -320,33 +364,40 @@ public class SpecTests : IDisposable
             return null;
 
         var coerced = new Dictionary<string, object?>(rawParams.Count);
-        foreach (var (key, value) in rawParams)
-        {
-            if (long.TryParse(value, System.Globalization.NumberStyles.Integer,
-                    System.Globalization.CultureInfo.InvariantCulture, out var l))
-            {
-                coerced[key] = l;
-            }
-            else if (double.TryParse(value, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var d))
-            {
-                coerced[key] = d;
-            }
-            else if (value == "true")
-            {
-                coerced[key] = true;
-            }
-            else if (value == "false")
-            {
-                coerced[key] = false;
-            }
-            else
-            {
-                coerced[key] = value;
-            }
-        }
-
+        foreach (var (key, text) in rawParams)
+            coerced[key] = ParamValue(text);
         return coerced;
+    }
+
+    /// <summary>
+    /// A JSON value as the objects the binding converts: a list, a map with
+    /// string keys, a string, a long or double, a bool, or null.
+    /// </summary>
+    private static object? FromJson(JsonElement element) =>
+        element.ValueKind switch
+        {
+            JsonValueKind.Array => element.EnumerateArray().Select(FromJson).ToList(),
+            JsonValueKind.Object => element.EnumerateObject()
+                .ToDictionary(property => property.Name, property => FromJson(property.Value)),
+            JsonValueKind.String => element.GetString(),
+            JsonValueKind.Number => JsonNumber(element),
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => null,
+        };
+
+    /// <summary>
+    /// A JSON number by the rule of a bare one: a long when it is an integer
+    /// that fits, else a double, an error past the double range
+    /// (<c>1e400</c>, which the Rust runner refuses too).
+    /// </summary>
+    private static object JsonNumber(JsonElement element)
+    {
+        if (element.TryGetInt64(out var l))
+            return l;
+        if (element.TryGetDouble(out var d) && double.IsFinite(d))
+            return d;
+        throw new FormatException($"parameter {element.GetRawText()} is out of the f64 range");
     }
 
     /// <summary>Check if a feature (language or capability) is available.</summary>
@@ -831,5 +882,36 @@ public class SpecTests : IDisposable
         // Fallback: relative from source file location
         return Path.GetFullPath(Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", ".."));
+    }
+}
+
+/// <summary>
+/// The typing of parameter values that no .gtest file can hold: a number past
+/// the double range fails the Rust runner's build, so this runner tests it.
+/// </summary>
+public class ParamValueTests
+{
+    [Fact]
+    public void AJsonIntegerThatFits64BitsIsALong()
+    {
+        var values = Assert.IsType<List<object?>>(SpecTests.ParamValue("[3, -5000000000, 9223372036854775807]"));
+        Assert.Equal(new object?[] { 3L, -5000000000L, 9223372036854775807L }, values);
+    }
+
+    [Fact]
+    public void AJsonIntegerPast64BitsIsADouble()
+    {
+        var values = Assert.IsType<List<object?>>(SpecTests.ParamValue("[9223372036854775808]"));
+        Assert.Equal(9223372036854775808.0, Assert.IsType<double>(values[0]));
+    }
+
+    [Theory]
+    [InlineData("[1e400]")]
+    [InlineData("{\"tiny\": [-1e400]}")]
+    [InlineData("1e999")]
+    public void ANumberPastTheDoubleRangeIsAnError(string text)
+    {
+        var error = Assert.Throws<FormatException>(() => SpecTests.ParamValue(text));
+        Assert.Contains("out of the f64 range", error.Message);
     }
 }

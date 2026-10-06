@@ -468,7 +468,7 @@ mod tests {
         assert!(encoded.is_empty());
 
         let decoded = encoded.decode();
-        assert!(decoded.is_empty());
+        assert!(decoded.is_empty(), "{decoded:?}");
     }
 
     #[test]

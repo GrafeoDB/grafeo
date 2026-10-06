@@ -762,7 +762,7 @@ fn test_full_pipeline_chain() {
         )
         .unwrap();
 
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     // Eng has 2 employees, should be first
     assert_eq!(result.rows()[0][0].as_str().unwrap(), "Eng");
     assert_eq!(result.rows()[0][1], Value::Int64(2));

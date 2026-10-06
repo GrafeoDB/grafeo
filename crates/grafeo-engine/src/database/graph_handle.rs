@@ -1,9 +1,11 @@
 //! Handles on one named graph, for working in several graphs at once.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
+use grafeo_core::graph::GraphStoreSearch;
 use grafeo_core::graph::lpg::{Edge, Node};
 
 use super::direct::{BatchEdge, DirectCalls, DirectTarget, missing_graph};
@@ -93,6 +95,18 @@ impl GraphHandle<'_> {
     #[must_use]
     pub fn schema(&self) -> Option<&str> {
         self.schema.as_deref()
+    }
+
+    /// The graph's store, for reads such as graph algorithms.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the graph no longer exists.
+    pub fn graph_store(&self) -> Result<Arc<dyn GraphStoreSearch>> {
+        self.db.read_store(DirectTarget::Named {
+            schema: self.schema.as_deref(),
+            name: &self.name,
+        })
     }
 
     /// Opens a session working in this graph.

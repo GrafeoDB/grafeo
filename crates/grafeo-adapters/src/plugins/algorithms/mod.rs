@@ -40,6 +40,7 @@ mod community;
 mod components;
 mod flow;
 mod isomorphism;
+mod key_order;
 pub mod metrics;
 mod mst;
 mod shortest_path;
@@ -70,8 +71,11 @@ pub use shortest_path::{
 // Centrality algorithms
 pub use centrality::{
     DegreeCentralityResult, betweenness_centrality, closeness_centrality, degree_centrality,
-    degree_centrality_normalized, pagerank,
+    degree_centrality_normalized, pagerank, pagerank_in_order,
 };
+
+// Node order by a key (#566 `key=`)
+pub use key_order::{KeyOrderError, order_by_key};
 
 // Clustering algorithms
 pub use clustering::{
@@ -83,8 +87,9 @@ pub use clustering::{clustering_coefficient_parallel, total_triangles_parallel};
 
 // Community detection algorithms
 pub use community::{
-    LouvainResult, StochasticBlockPartitionResult, community_count, label_propagation, louvain,
-    stochastic_block_partition, stochastic_block_partition_incremental,
+    LouvainResult, StochasticBlockPartitionResult, community_count, label_propagation,
+    label_propagation_in_order, louvain, louvain_in_order, stochastic_block_partition,
+    stochastic_block_partition_incremental,
 };
 
 // Minimum Spanning Tree algorithms

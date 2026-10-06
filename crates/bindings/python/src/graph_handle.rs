@@ -80,6 +80,20 @@ impl PyGraphHandle {
 
 #[pymethods]
 impl PyGraphHandle {
+    /// Graph algorithms on this graph, whatever graph ``set_graph()`` selects.
+    ///
+    /// Example:
+    ///     db.graph("model").algorithms.pagerank()
+    #[cfg(feature = "algos")]
+    #[getter]
+    fn algorithms(&self) -> crate::bridges::PyAlgorithms {
+        crate::bridges::PyAlgorithms::for_graph(
+            Arc::clone(&self.db),
+            self.schema.clone(),
+            self.name.clone(),
+        )
+    }
+
     /// The graph's name.
     #[getter]
     fn name(&self) -> &str {
@@ -378,15 +392,20 @@ impl PyGraphHandle {
     /// Creates an index on a node property of this graph.
     fn create_property_index(&self, property: &str) -> PyResult<()> {
         self.with_session(|session| {
-            session.create_property_index(property);
-            Ok(())
+            Ok(session
+                .create_property_index(property)
+                .map_err(PyGrafeoError::from)?)
         })
     }
 
     /// Drops the index on a node property of this graph; returns whether
     /// there was one.
     fn drop_property_index(&self, property: &str) -> PyResult<bool> {
-        self.with_session(|session| Ok(session.drop_property_index(property)))
+        self.with_session(|session| {
+            Ok(session
+                .drop_property_index(property)
+                .map_err(PyGrafeoError::from)?)
+        })
     }
 
     /// Returns whether a node property of this graph has an index.

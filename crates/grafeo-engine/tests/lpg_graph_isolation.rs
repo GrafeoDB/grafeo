@@ -557,7 +557,7 @@ fn drop_graph_resets_active_context() {
     db.set_current_graph(Some("ephemeral")).unwrap();
     assert_eq!(db.current_graph(), Some("ephemeral".to_string()));
 
-    db.drop_graph("ephemeral");
+    db.drop_graph("ephemeral").unwrap();
     assert_eq!(
         db.current_graph(),
         None,
@@ -572,7 +572,7 @@ fn drop_graph_preserves_context_for_other_graph() {
     db.execute("CREATE GRAPH other").unwrap();
     db.set_current_graph(Some("keep")).unwrap();
 
-    db.drop_graph("other");
+    db.drop_graph("other").unwrap();
     assert_eq!(
         db.current_graph(),
         Some("keep".to_string()),

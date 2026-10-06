@@ -189,29 +189,59 @@ fn read_inline_u32(data: &[u8], pos: &mut usize) -> Result<u32, &'static str> {
     Ok(u32::from_le_bytes(bytes))
 }
 
-/// Computes per-block zone maps for a column codec.
+/// Computes the zone map of a whole column: min and max over the rows that
+/// have a value, the other rows counted as nulls.
+#[must_use]
+pub fn compute_zone_map(column: &super::column::CompactColumn) -> ZoneMap {
+    let mut zm = ZoneMap {
+        row_count: column.len(),
+        ..ZoneMap::default()
+    };
+    for row in 0..column.len() {
+        match column.get(row) {
+            Some(value) => update_block_min_max(&mut zm, &value),
+            None => zm.null_count += 1,
+        }
+    }
+    zm
+}
+
+/// Computes per-block zone maps for a column.
 ///
 /// Walks each block's row range, tracking min/max/null_count for the
-/// orderable scalar types (`Int64`, `Float64`, `String`, `Bool`).
-/// Vector and list columns produce zone maps with `None` min/max but
-/// still track row and null counts.
+/// orderable scalar types (`Int64`, `Float64`, `String`, `Bool`). A row
+/// without a value counts as a null. Vector and list columns produce zone
+/// maps with `None` min/max but still track row and null counts.
 ///
 /// Empty columns produce a single zero-row block (matching
 /// [`ColumnCodec::block_count`](super::column::ColumnCodec::block_count)).
 #[must_use]
-pub fn compute_block_zone_maps(codec: &super::column::ColumnCodec) -> Vec<ZoneMap> {
-    let block_count = codec.block_count();
+pub fn compute_block_zone_maps(column: &super::column::CompactColumn) -> Vec<ZoneMap> {
+    block_zone_maps(column.block_count(), column.len(), |row| column.get(row))
+}
+
+/// [`compute_block_zone_maps`] for a bare codec, where every row has a value.
+#[must_use]
+pub(super) fn compute_codec_block_zone_maps(codec: &super::column::ColumnCodec) -> Vec<ZoneMap> {
+    block_zone_maps(codec.block_count(), codec.len(), |row| codec.get(row))
+}
+
+fn block_zone_maps(
+    block_count: usize,
+    len: usize,
+    get: impl Fn(usize) -> Option<Value>,
+) -> Vec<ZoneMap> {
     let block_rows = crate::codec::DEFAULT_BLOCK_ROWS as usize;
     let mut result = Vec::with_capacity(block_count);
     for i in 0..block_count {
         let start = i * block_rows;
-        let end = (start + block_rows).min(codec.len());
+        let end = (start + block_rows).min(len);
         let mut zm = ZoneMap {
             row_count: end - start,
             ..ZoneMap::default()
         };
         for j in start..end {
-            match codec.get(j) {
+            match get(j) {
                 Some(value) => update_block_min_max(&mut zm, &value),
                 None => zm.null_count += 1,
             }

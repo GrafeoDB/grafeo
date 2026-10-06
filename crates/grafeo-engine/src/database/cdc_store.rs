@@ -288,12 +288,26 @@ impl GraphStore for CdcGraphStore {
         self.inner.get_node_property(id, key)
     }
 
+    // Forwarded, so search reads a spilled vector in place through this
+    // wrapper too (the default would copy it).
+    fn with_node_vector(&self, id: NodeId, key: &PropertyKey, f: &mut dyn FnMut(&[f32])) -> bool {
+        grafeo_core::graph::GraphStore::with_node_vector(&*self.inner, id, key, f)
+    }
+
     fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
         self.inner.get_edge_property(id, key)
     }
 
     fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
         self.inner.get_node_property_batch(ids, key)
+    }
+
+    fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+    ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
+        self.inner.try_get_node_property_batch(ids, key)
     }
 
     fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
@@ -695,9 +709,12 @@ impl GraphStoreMut for CdcGraphStore {
         id: NodeId,
         epoch: EpochId,
         transaction_id: TransactionId,
-    ) -> bool {
+    ) -> grafeo_common::utils::error::Result<bool> {
         let node = self.node_as_seen(id, Some(transaction_id));
-        let deleted = self.inner.delete_node_versioned(id, epoch, transaction_id);
+        // A refused delete records no event.
+        let deleted = self
+            .inner
+            .delete_node_versioned(id, epoch, transaction_id)?;
         if deleted {
             let mut event = make_event(
                 EntityId::Node(id),
@@ -710,7 +727,7 @@ impl GraphStoreMut for CdcGraphStore {
             }
             self.buffer_event(event);
         }
-        deleted
+        Ok(deleted)
     }
 
     fn delete_node_edges(&self, node_id: NodeId) {
@@ -833,10 +850,11 @@ impl GraphStoreMut for CdcGraphStore {
         key: &str,
         value: Value,
         transaction_id: TransactionId,
-    ) {
+    ) -> grafeo_common::utils::error::Result<()> {
         let old_value = self.inner.get_node_property(id, &PropertyKey::new(key));
+        // A refused write records no event.
         self.inner
-            .set_node_property_versioned(id, key, value.clone(), transaction_id);
+            .set_node_property_versioned(id, key, value.clone(), transaction_id)?;
         let epoch = self.inner.current_epoch();
         let mut event = make_event(
             EntityId::Node(id),
@@ -853,6 +871,7 @@ impl GraphStoreMut for CdcGraphStore {
         after.insert(key.to_string(), value);
         event.after = Some(after);
         self.buffer_event(event);
+        Ok(())
     }
 
     fn set_edge_property_versioned(
@@ -883,8 +902,13 @@ impl GraphStoreMut for CdcGraphStore {
         self.buffer_event(event);
     }
 
-    fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
-        let removed = self.inner.remove_node_property(id, key);
+    fn remove_node_property(
+        &self,
+        id: NodeId,
+        key: &str,
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
+        // A refused removal records no event.
+        let removed = self.inner.remove_node_property(id, key)?;
         if let Some(ref old_val) = removed {
             let epoch = self.inner.current_epoch();
             let mut event = make_event(
@@ -898,11 +922,15 @@ impl GraphStoreMut for CdcGraphStore {
             event.before = Some(before);
             self.record_directly(event);
         }
-        removed
+        Ok(removed)
     }
 
-    fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value> {
-        let removed = self.inner.remove_edge_property(id, key);
+    fn remove_edge_property(
+        &self,
+        id: EdgeId,
+        key: &str,
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
+        let removed = self.inner.remove_edge_property(id, key)?;
         if let Some(ref old_val) = removed {
             let epoch = self.inner.current_epoch();
             let mut event = make_event(
@@ -916,7 +944,7 @@ impl GraphStoreMut for CdcGraphStore {
             event.before = Some(before);
             self.record_directly(event);
         }
-        removed
+        Ok(removed)
     }
 
     fn remove_node_property_versioned(
@@ -924,10 +952,11 @@ impl GraphStoreMut for CdcGraphStore {
         id: NodeId,
         key: &str,
         transaction_id: TransactionId,
-    ) -> Option<Value> {
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
+        // A refused removal records no event.
         let removed = self
             .inner
-            .remove_node_property_versioned(id, key, transaction_id);
+            .remove_node_property_versioned(id, key, transaction_id)?;
         if let Some(ref old_val) = removed {
             let epoch = self.inner.current_epoch();
             let mut event = make_event(
@@ -941,7 +970,7 @@ impl GraphStoreMut for CdcGraphStore {
             event.before = Some(before);
             self.buffer_event(event);
         }
-        removed
+        Ok(removed)
     }
 
     fn remove_edge_property_versioned(
@@ -949,10 +978,10 @@ impl GraphStoreMut for CdcGraphStore {
         id: EdgeId,
         key: &str,
         transaction_id: TransactionId,
-    ) -> Option<Value> {
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let removed = self
             .inner
-            .remove_edge_property_versioned(id, key, transaction_id);
+            .remove_edge_property_versioned(id, key, transaction_id)?;
         if let Some(ref old_val) = removed {
             let epoch = self.inner.current_epoch();
             let mut event = make_event(
@@ -966,7 +995,7 @@ impl GraphStoreMut for CdcGraphStore {
             event.before = Some(before);
             self.buffer_event(event);
         }
-        removed
+        Ok(removed)
     }
 
     // --- Label mutation ---
@@ -1080,6 +1109,40 @@ mod tests {
         (cdc, log)
     }
 
+    /// A write the store refuses (an old value it cannot read, which a
+    /// rollback could not restore) records no change event (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn a_refused_write_records_no_event() {
+        use super::super::test_backing::{Unreadable, spill};
+
+        let store = Arc::new(LpgStore::new().unwrap());
+        let cdc = CdcGraphStore::new(
+            Arc::clone(&store) as Arc<dyn GraphStoreMut>,
+            Arc::new(CdcLog::new()),
+        );
+        let alix = store.create_node(&["Item"]);
+        store.set_node_property(alix, "embedding", Value::Vector(vec![3.0, 19.0].into()));
+        spill(&store, "embedding", Arc::new(Unreadable(alix)));
+
+        let transaction = TransactionId::new(19);
+        let vector = Value::Vector(vec![88.0, 3.19].into());
+        assert!(
+            cdc.set_node_property_versioned(alix, "embedding", vector, transaction)
+                .is_err()
+        );
+        assert!(
+            cdc.remove_node_property_versioned(alix, "embedding", transaction)
+                .is_err()
+        );
+        let epoch = store.current_epoch();
+        assert!(cdc.delete_node_versioned(alix, epoch, transaction).is_err());
+        assert!(
+            cdc.pending_events().lock().is_empty(),
+            "a refused write recorded an event"
+        );
+    }
+
     // ---------------------------------------------------------------
     // Constructor and accessors
     // ---------------------------------------------------------------
@@ -1155,7 +1218,7 @@ mod tests {
         let (cdc, _log) = setup();
         let a = cdc.create_node(&["City"]);
         assert!(cdc.nodes_by_label("City").contains(&a));
-        assert!(cdc.nodes_by_label("Unknown").is_empty());
+        assert!(cdc.nodes_by_label("Unknown").is_empty(), "expected empty");
     }
 
     #[test]
@@ -1174,7 +1237,10 @@ mod tests {
         let b = cdc.create_node(&[]);
         cdc.create_edge(a, b, "E");
         assert!(cdc.neighbors(a, Direction::Outgoing).contains(&b));
-        assert!(!cdc.edges_from(a, Direction::Outgoing).is_empty());
+        assert!(
+            !cdc.edges_from(a, Direction::Outgoing).is_empty(),
+            "expected non-empty"
+        );
     }
 
     #[test]
@@ -1552,7 +1618,7 @@ mod tests {
         let (cdc, log) = setup();
         let id = cdc.create_node(&[]);
         cdc.set_node_property(id, "x", Value::Int64(42));
-        let removed = cdc.remove_node_property(id, "x");
+        let removed = cdc.remove_node_property(id, "x").unwrap();
         assert_eq!(removed, Some(Value::Int64(42)));
 
         let events = log.history(EntityId::Node(id));
@@ -1569,7 +1635,7 @@ mod tests {
     fn remove_node_property_no_event_when_missing() {
         let (cdc, log) = setup();
         let id = cdc.create_node(&[]);
-        let removed = cdc.remove_node_property(id, "nope");
+        let removed = cdc.remove_node_property(id, "nope").unwrap();
         assert!(removed.is_none());
         // Only the Create event, no Update
         let events = log.history(EntityId::Node(id));
@@ -1583,7 +1649,7 @@ mod tests {
         let b = cdc.create_node(&[]);
         let eid = cdc.create_edge(a, b, "E");
         cdc.set_edge_property(eid, "w", Value::Float64(19.88));
-        let removed = cdc.remove_edge_property(eid, "w");
+        let removed = cdc.remove_edge_property(eid, "w").unwrap();
         assert_eq!(removed, Some(Value::Float64(19.88)));
 
         let events = log.history(EntityId::Edge(eid));
@@ -1601,7 +1667,7 @@ mod tests {
         let a = cdc.create_node(&[]);
         let b = cdc.create_node(&[]);
         let eid = cdc.create_edge(a, b, "E");
-        let removed = cdc.remove_edge_property(eid, "nope");
+        let removed = cdc.remove_edge_property(eid, "nope").unwrap();
         assert!(removed.is_none());
         // Only Create event
         let events = log.history(EntityId::Edge(eid));
@@ -1711,7 +1777,7 @@ mod tests {
 
         let epoch = EpochId(2);
         let tx = TransactionId::new(1);
-        let deleted = cdc.delete_node_versioned(id, epoch, tx);
+        let deleted = cdc.delete_node_versioned(id, epoch, tx).unwrap();
         assert!(deleted);
 
         let pending = cdc.pending_events().lock().clone();
@@ -1731,7 +1797,9 @@ mod tests {
     fn delete_node_versioned_no_buffer_when_not_found() {
         let (cdc, _log) = setup();
         let tx = TransactionId::new(1);
-        let deleted = cdc.delete_node_versioned(NodeId::new(999), EpochId(1), tx);
+        let deleted = cdc
+            .delete_node_versioned(NodeId::new(999), EpochId(1), tx)
+            .unwrap();
         assert!(!deleted);
         assert!(cdc.pending_events().lock().is_empty());
     }
@@ -1779,7 +1847,8 @@ mod tests {
         cdc.set_node_property(id, "x", Value::Int64(1));
 
         let tx = TransactionId::new(1);
-        cdc.set_node_property_versioned(id, "x", Value::Int64(2), tx);
+        cdc.set_node_property_versioned(id, "x", Value::Int64(2), tx)
+            .unwrap();
 
         let pending = cdc.pending_events().lock().clone();
         assert_eq!(pending.len(), 1);
@@ -1829,7 +1898,7 @@ mod tests {
         cdc.set_node_property(id, "x", Value::Int64(42));
 
         let tx = TransactionId::new(1);
-        let removed = cdc.remove_node_property_versioned(id, "x", tx);
+        let removed = cdc.remove_node_property_versioned(id, "x", tx).unwrap();
         assert_eq!(removed, Some(Value::Int64(42)));
 
         let pending = cdc.pending_events().lock().clone();
@@ -1847,7 +1916,7 @@ mod tests {
         let (cdc, _log) = setup();
         let id = cdc.create_node(&[]);
         let tx = TransactionId::new(1);
-        let removed = cdc.remove_node_property_versioned(id, "nope", tx);
+        let removed = cdc.remove_node_property_versioned(id, "nope", tx).unwrap();
         assert!(removed.is_none());
         assert!(cdc.pending_events().lock().is_empty());
     }
@@ -1861,7 +1930,7 @@ mod tests {
         cdc.set_edge_property(eid, "w", Value::Int64(7));
 
         let tx = TransactionId::new(1);
-        let removed = cdc.remove_edge_property_versioned(eid, "w", tx);
+        let removed = cdc.remove_edge_property_versioned(eid, "w", tx).unwrap();
         assert_eq!(removed, Some(Value::Int64(7)));
 
         let pending = cdc.pending_events().lock().clone();
@@ -1883,7 +1952,7 @@ mod tests {
         let b = cdc.create_node(&[]);
         let eid = cdc.create_edge(a, b, "E");
         let tx = TransactionId::new(1);
-        let removed = cdc.remove_edge_property_versioned(eid, "nope", tx);
+        let removed = cdc.remove_edge_property_versioned(eid, "nope", tx).unwrap();
         assert!(removed.is_none());
         assert!(cdc.pending_events().lock().is_empty());
     }
@@ -1965,8 +2034,9 @@ mod tests {
         let tx = TransactionId::new(7);
         let epoch = cdc.current_epoch();
         let id = cdc.create_node_versioned(&["Person"], epoch, tx);
-        cdc.set_node_property_versioned(id, "name", Value::from("Alix"), tx);
-        assert!(cdc.delete_node_versioned(id, epoch, tx));
+        cdc.set_node_property_versioned(id, "name", Value::from("Alix"), tx)
+            .unwrap();
+        assert!(cdc.delete_node_versioned(id, epoch, tx).unwrap());
 
         let pending = cdc.pending_events().lock().clone();
         let delete = pending
@@ -2138,7 +2208,7 @@ mod tests {
     fn batch_create_edges_empty_slice_records_nothing() {
         let (cdc, _log) = setup();
         let ids = cdc.batch_create_edges(&[]);
-        assert!(ids.is_empty());
+        assert!(ids.is_empty(), "{ids:?}");
         // No transactional buffering either (batch uses direct recording).
         assert!(cdc.pending_events().lock().is_empty());
     }
@@ -2157,7 +2227,7 @@ mod tests {
             .labels
             .as_ref()
             .expect("labels must be Some even with empty input");
-        assert!(labels.is_empty());
+        assert!(labels.is_empty(), "{labels:?}");
     }
 
     // ---------------------------------------------------------------

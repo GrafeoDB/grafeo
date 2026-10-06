@@ -18,42 +18,11 @@ use grafeo_common::utils::error::Error;
 use grafeo_common::utils::error::Result;
 
 impl super::GrafeoDB {
-    /// Creates a vector accessor for the given label/property, using spilled
-    /// MmapStorage if the index has been spilled to disk.
-    #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
-    fn make_vector_accessor<'a>(
-        &'a self,
-        label: &str,
-        property: &str,
-    ) -> grafeo_core::index::vector::VectorAccessorKind<'a> {
-        let key = format!("{label}:{property}");
-        if let Some(ref spill_map) = self.vector_spill_storages {
-            let map = spill_map.read();
-            if let Some(storage) = map.get(&key) {
-                return grafeo_core::index::vector::VectorAccessorKind::Spilled(
-                    grafeo_core::index::vector::SpillableVectorAccessor::new(
-                        self.graph_store_ref(),
-                        property,
-                        std::sync::Arc::clone(storage)
-                            as std::sync::Arc<dyn grafeo_core::index::vector::VectorStorage>,
-                    ),
-                );
-            }
-        }
-        grafeo_core::index::vector::VectorAccessorKind::Property(
-            grafeo_core::index::vector::PropertyVectorAccessor::new(
-                self.graph_store_ref(),
-                property,
-            ),
-        )
-    }
-
-    /// Creates a vector accessor (no spill support when mmap or temporal unavailable).
-    #[cfg(not(all(feature = "vector-index", feature = "mmap", not(feature = "temporal"))))]
+    /// Creates the vector accessor for an indexed property: the property
+    /// store, which reads a spilled column through its cache file in place.
     #[cfg(feature = "vector-index")]
     fn make_vector_accessor<'a>(
         &'a self,
-        _label: &str,
         property: &str,
     ) -> grafeo_core::index::vector::VectorAccessorKind<'a> {
         grafeo_core::index::vector::VectorAccessorKind::Property(
@@ -159,7 +128,7 @@ impl super::GrafeoDB {
             ))
         })?;
 
-        let accessor = self.make_vector_accessor(label, property);
+        let accessor = self.make_vector_accessor(property);
 
         let results = match self.compute_filter_allowlist(label, filters) {
             Some(allowlist) => match ef {
@@ -209,7 +178,7 @@ impl super::GrafeoDB {
             ))
         })?;
 
-        let accessor = self.make_vector_accessor(label, property);
+        let accessor = self.make_vector_accessor(property);
 
         let results = match self.compute_filter_allowlist(label, filters) {
             Some(allowlist) => match ef {
@@ -274,7 +243,7 @@ impl super::GrafeoDB {
             ))
         })?;
 
-        let accessor = self.make_vector_accessor(label, property);
+        let accessor = self.make_vector_accessor(property);
 
         let fetch_k = fetch_k.unwrap_or(k.saturating_mul(4).max(k));
         let lambda = lambda.unwrap_or(0.5);
@@ -409,7 +378,7 @@ impl super::GrafeoDB {
         if let Some(query_vec) = query_vector
             && let Some(vector_index) = self.lpg_store().get_vector_index(label, vector_property)
         {
-            let accessor = self.make_vector_accessor(label, vector_property);
+            let accessor = self.make_vector_accessor(vector_property);
             let vector_results = vector_index.search(query_vec, k * 2, &accessor);
             if !vector_results.is_empty() {
                 // Negate distances so that "closer = higher score", matching

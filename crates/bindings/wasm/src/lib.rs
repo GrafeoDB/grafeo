@@ -242,36 +242,7 @@ impl Database {
         self.check_open()?;
         let result = self.run_query(query)?;
 
-        let obj = js_sys::Object::new();
-
-        // columns: string[]
-        let cols = Array::new_with_length(result.columns.len() as u32);
-        for (i, col) in result.columns.iter().enumerate() {
-            cols.set(i as u32, JsValue::from_str(col));
-        }
-        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("columns"), &cols);
-
-        // rows: any[][]
-        let rows = Array::new_with_length(result.rows().len() as u32);
-        for (i, row) in result.rows().iter().enumerate() {
-            let js_row = Array::new_with_length(row.len() as u32);
-            for (j, val) in row.iter().enumerate() {
-                js_row.set(j as u32, types::value_to_js(val));
-            }
-            rows.set(i as u32, js_row.into());
-        }
-        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &rows);
-
-        // executionTimeMs?: number
-        if let Some(ms) = result.execution_time_ms {
-            let _ = js_sys::Reflect::set(
-                &obj,
-                &JsValue::from_str("executionTimeMs"),
-                &JsValue::from_f64(ms),
-            );
-        }
-
-        Ok(obj.into())
+        Ok(raw_result_to_js(&result))
     }
 
     /// Returns the number of nodes in the database.
@@ -485,10 +456,16 @@ impl Database {
     /// Drops a text index on a label+property pair.
     ///
     /// Returns `true` if the index existed and was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if the index cannot be dropped.
     #[cfg(feature = "text-index")]
     #[wasm_bindgen(js_name = "dropTextIndex")]
-    pub fn drop_text_index(&self, label: &str, property: &str) -> bool {
-        self.inner.drop_text_index(label, property)
+    pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool, JsError> {
+        self.inner
+            .drop_text_index(label, property)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Rebuilds a text index by re-scanning all matching nodes.
@@ -653,10 +630,16 @@ impl Database {
     /// Drops a vector index on a label+property pair.
     ///
     /// Returns `true` if the index existed and was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if the index cannot be dropped.
     #[cfg(feature = "vector-index")]
     #[wasm_bindgen(js_name = "dropVectorIndex")]
-    pub fn drop_vector_index(&self, label: &str, property: &str) -> bool {
-        self.inner.drop_vector_index(label, property)
+    pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool, JsError> {
+        self.inner
+            .drop_vector_index(label, property)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Rebuilds a vector index by re-scanning all matching nodes.
@@ -915,48 +898,65 @@ impl Database {
     ///
     /// # Errors
     ///
-    /// Returns `JsError` if the language is unsupported or the query fails to parse or execute.
+    /// Returns `JsError` if the database is closed, the language is unsupported, or the query
+    /// fails to parse or execute.
     #[wasm_bindgen(js_name = "executeRawWithLanguage")]
     pub fn execute_raw_with_language(
         &self,
         query: &str,
         language: &str,
     ) -> Result<JsValue, JsError> {
-        let result = self
-            .inner
-            .execute_language(query, language, None)
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.check_open()?;
+        // In the open transaction, if there is one, like the other execute methods.
+        let result = self.run_language_query(query, language, None)?;
+        Ok(raw_result_to_js(&result))
+    }
 
-        let obj = js_sys::Object::new();
+    /// Executes a GQL query with parameters and returns raw columns, rows, and
+    /// metadata, like `executeRaw`.
+    ///
+    /// ```js
+    /// const raw = db.executeRawWithParams("RETURN $tags AS tags", { tags: ["a", "b"] });
+    /// // { columns: ["tags"], rows: [[["a", "b"]]], executionTimeMs: 0.1 }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if `params` is not a valid object, or if the query fails to parse or execute.
+    #[wasm_bindgen(js_name = "executeRawWithParams")]
+    pub fn execute_raw_with_params(
+        &self,
+        query: &str,
+        params: JsValue,
+    ) -> Result<JsValue, JsError> {
+        self.execute_raw_with_language_and_params(query, "gql", params)
+    }
 
-        // columns: string[]
-        let cols = Array::new_with_length(result.columns.len() as u32);
-        for (i, col) in result.columns.iter().enumerate() {
-            cols.set(i as u32, JsValue::from_str(col));
-        }
-        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("columns"), &cols);
-
-        // rows: any[][]
-        let rows = Array::new_with_length(result.rows().len() as u32);
-        for (i, row) in result.rows().iter().enumerate() {
-            let js_row = Array::new_with_length(row.len() as u32);
-            for (j, val) in row.iter().enumerate() {
-                js_row.set(j as u32, types::value_to_js(val));
-            }
-            rows.set(i as u32, js_row.into());
-        }
-        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &rows);
-
-        // executionTimeMs?: number
-        if let Some(ms) = result.execution_time_ms {
-            let _ = js_sys::Reflect::set(
-                &obj,
-                &JsValue::from_str("executionTimeMs"),
-                &JsValue::from_f64(ms),
-            );
-        }
-
-        Ok(obj.into())
+    /// Executes a query in a specific language with parameters and returns raw
+    /// columns, rows, and metadata, like `executeRawWithLanguage`.
+    ///
+    /// ```js
+    /// const raw = db.executeRawWithLanguageAndParams(
+    ///   "RETURN $city AS city",
+    ///   "cypher",
+    ///   { city: { name: "Amsterdam" } }
+    /// );
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if `params` is invalid, the language is unsupported, or the query fails.
+    #[wasm_bindgen(js_name = "executeRawWithLanguageAndParams")]
+    pub fn execute_raw_with_language_and_params(
+        &self,
+        query: &str,
+        language: &str,
+        params: JsValue,
+    ) -> Result<JsValue, JsError> {
+        self.check_open()?;
+        let param_map = Self::convert_params(Some(params))?;
+        let result = self.run_language_query(query, language, param_map)?;
+        Ok(raw_result_to_js(&result))
     }
 
     /// Batch-imports LPG (Labeled Property Graph) data from a structured object.
@@ -1119,7 +1119,10 @@ impl Database {
             grafeo_core::graph::rdf::Triple::new(subject, predicate, object)
         });
 
-        let inserted = self.inner.batch_insert_rdf(triples);
+        let inserted = self
+            .inner
+            .batch_insert_rdf(triples)
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
         let result = js_sys::Object::new();
         let _ = js_sys::Reflect::set(
@@ -1337,19 +1340,20 @@ impl Database {
     /// Creates a named graph projection. Returns `true` if created, `false`
     /// if a projection with that name already exists.
     ///
-    /// A projection is a read-only, filtered view of the default graph.
-    /// Only nodes with matching labels and edges with matching types are visible.
+    /// A projection is a read-only, filtered view of the graph selected when
+    /// it is created (the default graph when none is selected). Only nodes
+    /// with matching labels and edges with matching types are visible.
     ///
     /// # Errors
     ///
-    /// This method does not currently return errors.
+    /// Returns `JsError` if the selected graph no longer exists.
     #[wasm_bindgen(js_name = "createProjection")]
     pub fn create_projection(
         &self,
         name: &str,
         node_labels: Option<Vec<String>>,
         edge_types: Option<Vec<String>>,
-    ) -> bool {
+    ) -> Result<bool, JsError> {
         use grafeo_engine::ProjectionSpec;
 
         let mut spec = ProjectionSpec::new();
@@ -1359,7 +1363,9 @@ impl Database {
         if let Some(types) = edge_types.filter(|t| !t.is_empty()) {
             spec = spec.with_edge_types(types);
         }
-        self.inner.create_projection(name, spec)
+        self.inner
+            .create_projection(name, spec)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Drops a named graph projection. Returns `true` if it existed.
@@ -1415,6 +1421,41 @@ impl Database {
             serde_wasm_bindgen::from_value(js_val).map_err(|e| JsError::new(&e.to_string()))?;
         json_params_to_map(Some(&json_val)).map_err(|e| JsError::new(&e))
     }
+}
+
+/// Converts a query result to `{ columns: string[], rows: any[][], executionTimeMs?: number }`,
+/// the shape of the `executeRaw*` methods.
+fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
+    let obj = js_sys::Object::new();
+
+    // columns: string[]
+    let cols = Array::new_with_length(result.columns.len() as u32);
+    for (i, col) in result.columns.iter().enumerate() {
+        cols.set(i as u32, JsValue::from_str(col));
+    }
+    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("columns"), &cols);
+
+    // rows: any[][]
+    let rows = Array::new_with_length(result.rows().len() as u32);
+    for (i, row) in result.rows().iter().enumerate() {
+        let js_row = Array::new_with_length(row.len() as u32);
+        for (j, val) in row.iter().enumerate() {
+            js_row.set(j as u32, types::value_to_js(val));
+        }
+        rows.set(i as u32, js_row.into());
+    }
+    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &rows);
+
+    // executionTimeMs?: number
+    if let Some(ms) = result.execution_time_ms {
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("executionTimeMs"),
+            &JsValue::from_f64(ms),
+        );
+    }
+
+    obj.into()
 }
 
 // ---------------------------------------------------------------------------
@@ -2430,7 +2471,7 @@ mod tests {
                 ),
             ];
 
-            let inserted = db.batch_insert_rdf(triples);
+            let inserted = db.batch_insert_rdf(triples).unwrap();
             assert_eq!(inserted, 2);
         }
 
@@ -2445,17 +2486,17 @@ mod tests {
                 Term::literal("Alix"),
             );
 
-            let first = db.batch_insert_rdf(vec![triple.clone()]);
+            let first = db.batch_insert_rdf(vec![triple.clone()]).unwrap();
             assert_eq!(first, 1);
 
-            let second = db.batch_insert_rdf(vec![triple]);
+            let second = db.batch_insert_rdf(vec![triple]).unwrap();
             assert_eq!(second, 0, "duplicate triple should be skipped");
         }
 
         #[test]
         fn batch_insert_rdf_empty() {
             let db = GrafeoDB::new_in_memory();
-            let inserted = db.batch_insert_rdf(Vec::new());
+            let inserted = db.batch_insert_rdf(Vec::new()).unwrap();
             assert_eq!(inserted, 0);
         }
 
@@ -2477,7 +2518,7 @@ mod tests {
                 ),
             ];
 
-            let inserted = db.batch_insert_rdf(triples);
+            let inserted = db.batch_insert_rdf(triples).unwrap();
             assert_eq!(inserted, 2);
         }
 
@@ -2499,7 +2540,7 @@ mod tests {
                 ),
             ];
 
-            let inserted = db.batch_insert_rdf(triples);
+            let inserted = db.batch_insert_rdf(triples).unwrap();
             assert_eq!(inserted, 2);
         }
 
@@ -2518,7 +2559,7 @@ mod tests {
                 })
                 .collect();
 
-            let inserted = db.batch_insert_rdf(triples);
+            let inserted = db.batch_insert_rdf(triples).unwrap();
             assert_eq!(inserted, 1000);
         }
 
@@ -2534,7 +2575,9 @@ mod tests {
             );
 
             // Same triple 3 times in one batch
-            let inserted = db.batch_insert_rdf(vec![triple.clone(), triple.clone(), triple]);
+            let inserted = db
+                .batch_insert_rdf(vec![triple.clone(), triple.clone(), triple])
+                .unwrap();
             assert_eq!(
                 inserted, 1,
                 "duplicates within same batch should be deduped"

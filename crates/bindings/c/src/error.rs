@@ -29,11 +29,14 @@ impl From<&grafeo_common::utils::error::Error> for GrafeoStatus {
         match classify_error(err) {
             ErrorCategory::Query => GrafeoStatus::ErrorQuery,
             ErrorCategory::Transaction => GrafeoStatus::ErrorTransaction,
+            // Not the transaction status, which wrappers retry on conflicts:
+            // no retry opens a closed database. No status of its own, so the
+            // C ABI stays as it is; the message names it (GRAFEO-T007).
+            ErrorCategory::DatabaseClosed | ErrorCategory::Database => GrafeoStatus::ErrorDatabase,
             ErrorCategory::Storage => GrafeoStatus::ErrorStorage,
             ErrorCategory::Io => GrafeoStatus::ErrorIo,
             ErrorCategory::Serialization => GrafeoStatus::ErrorSerialization,
             ErrorCategory::Internal => GrafeoStatus::ErrorInternal,
-            ErrorCategory::Database => GrafeoStatus::ErrorDatabase,
         }
     }
 }
@@ -89,4 +92,34 @@ pub fn str_from_ptr<'a>(ptr: *const c_char) -> Result<&'a str, GrafeoStatus> {
         set_last_error("Invalid UTF-8 in string");
         GrafeoStatus::ErrorInvalidUtf8
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use grafeo_common::utils::error::{Error, TransactionError};
+
+    use super::GrafeoStatus;
+
+    /// A closed database or a commit that did not complete is no transaction
+    /// error: wrappers (C#, Dart) raise a transaction exception for that
+    /// status, which conflict-retry loops retry forever. Both get the generic
+    /// database status, and the message names them.
+    #[test]
+    fn errors_a_retry_cannot_fix_get_the_database_status() {
+        for error in [
+            Error::Transaction(TransactionError::DatabaseClosed),
+            Error::Transaction(TransactionError::IncompleteCommit),
+        ] {
+            assert_eq!(
+                GrafeoStatus::from(&error),
+                GrafeoStatus::ErrorDatabase,
+                "{error}"
+            );
+        }
+        assert_eq!(
+            GrafeoStatus::from(&Error::Transaction(TransactionError::Conflict)),
+            GrafeoStatus::ErrorTransaction,
+            "a conflict stays a transaction error"
+        );
+    }
 }

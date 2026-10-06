@@ -1468,7 +1468,7 @@ mod tests {
     fn test_compute_path_multiplicities_empty() {
         let chunk = FactorizedChunk::empty();
         let mults = chunk.compute_path_multiplicities();
-        assert!(mults.is_empty());
+        assert!(mults.is_empty(), "{mults:?}");
     }
 
     #[test]

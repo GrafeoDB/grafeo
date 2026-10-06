@@ -6,9 +6,11 @@ use std::time::Duration;
 
 /// Encryption-at-rest configuration.
 ///
-/// Provides the key chain that derives per-component data encryption keys (DEKs)
-/// from a master encryption key (ME) via HKDF-SHA256. Each storage component
-/// (WAL, sections, vector pages) gets its own DEK.
+/// Provides the key chain that derives the data encryption keys from a master
+/// encryption key via HKDF-SHA256: one for the `.grafeo` file
+/// (`"grafeo-container"`) and one for its sidecar WAL (`"grafeo-wal"`), each
+/// with the database id of the file header, so every database has keys of its
+/// own. See [`Config::encryption`].
 ///
 /// Wrapped in `Arc` internally so `Config` can remain `Clone` without
 /// duplicating key material.
@@ -68,8 +70,11 @@ pub enum AccessMode {
     #[default]
     ReadWrite,
     /// Read-only access. Acquires a shared file lock, allowing concurrent
-    /// readers. The database loads the last checkpoint snapshot but does not
-    /// replay the WAL or allow mutations.
+    /// readers. The database loads the last checkpoint and replays the
+    /// sidecar WAL into memory, writes nothing, and allows no mutations. A
+    /// build without the `wal` feature refuses a file whose sidecar WAL holds
+    /// commits to replay (a non-empty log file; for a 0.5.x file, any file),
+    /// as a read-write open there does.
     ReadOnly,
 }
 
@@ -84,20 +89,37 @@ impl fmt::Display for AccessMode {
 
 /// Storage format for persistent databases.
 ///
-/// Controls whether the database uses a single `.grafeo` file or a legacy
-/// WAL directory. The default (`Auto`) auto-detects based on the path:
-/// files ending in `.grafeo` use single-file format, directories use WAL.
+/// Since 0.6 every database is a single file (its WAL is the sidecar
+/// directory `<path>.wal/` while it is open), and the format only decides
+/// what happens at a path where nothing exists yet. An existing path always
+/// opens as what it holds, whatever the format: a 0.6 file opens, and a
+/// database written by 0.5.x (a file, or a WAL directory) is migrated to a
+/// single 0.6 file at the same path by a read-write open and read in place by
+/// a read-only open.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum StorageFormat {
-    /// Auto-detect based on path: `.grafeo` extension = single file,
-    /// existing directory = WAL directory, new path without extension = WAL directory.
+    /// A new path becomes a single file, whatever its extension (`.grafeo`,
+    /// `.db` or none). An existing path opens as what it holds.
     #[default]
     Auto,
-    /// Legacy WAL directory format (directory with `wal/` subdirectory).
+    /// The 0.5.x WAL-directory format (a directory holding `wal/`). WAL
+    /// directories are no longer created: on a new path the open fails, use
+    /// [`StorageFormat::Auto`] instead. An existing path opens as what it
+    /// holds, as with `Auto`: a 0.5.x WAL directory is migrated to a single
+    /// file at the same path.
+    #[deprecated(
+        since = "0.6.0",
+        note = "WAL directories are migrated to a single file on open and no longer created; removed in 0.7.0"
+    )]
     WalDirectory,
-    /// Single `.grafeo` file with a sidecar `.grafeo.wal/` directory during operation.
-    /// At rest (after checkpoint), only the `.grafeo` file exists.
+    /// A new path becomes a single file, as with [`StorageFormat::Auto`]. An
+    /// existing path opens as what it holds. Since every database is a single
+    /// file, it does the same as `Auto`.
+    #[deprecated(
+        since = "0.6.0",
+        note = "every database is a single file, so it does the same as `StorageFormat::Auto`; removed in 0.7.0"
+    )]
     SingleFile,
 }
 
@@ -105,7 +127,15 @@ impl fmt::Display for StorageFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Auto => write!(f, "auto"),
+            #[allow(
+                deprecated,
+                reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
+            )]
             Self::WalDirectory => write!(f, "wal-directory"),
+            #[allow(
+                deprecated,
+                reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
+            )]
             Self::SingleFile => write!(f, "single-file"),
         }
     }
@@ -160,6 +190,17 @@ pub enum ConfigError {
     ZeroAdaptiveFlushInterval,
     /// RDF graph model requires the `rdf` feature flag.
     RdfFeatureRequired,
+    /// `encryption` is set without a persistent `path`: an in-memory database
+    /// writes nothing to disk to encrypt.
+    EncryptionRequiresPersistentPath,
+    /// `encryption` is set together with a `spill_path`: spill files are not
+    /// encrypted, so an encrypted database spills nothing.
+    EncryptionWithSpillPath,
+    /// `encryption` is set and a section is pinned to
+    /// [`TierOverride::ForceDisk`](grafeo_common::storage::TierOverride::ForceDisk):
+    /// an encrypted database spills nothing to disk, so the override could
+    /// not be honored.
+    EncryptionWithForceDisk(grafeo_common::storage::SectionType),
 }
 
 impl fmt::Display for ConfigError {
@@ -180,6 +221,21 @@ impl fmt::Display for ConfigError {
                     "RDF graph model requires the `rdf` feature flag to be enabled"
                 )
             }
+            Self::EncryptionRequiresPersistentPath => write!(
+                f,
+                "encryption at rest requires a persistent database path: an in-memory \
+                 database writes nothing to disk to encrypt"
+            ),
+            Self::EncryptionWithSpillPath => write!(
+                f,
+                "encryption at rest cannot be combined with a spill_path: spill files are \
+                 not encrypted, so an encrypted database spills nothing to disk"
+            ),
+            Self::EncryptionWithForceDisk(section_type) => write!(
+                f,
+                "encryption at rest cannot be combined with TierOverride::ForceDisk for the \
+                 {section_type:?} section: an encrypted database spills nothing to disk"
+            ),
         }
     }
 }
@@ -204,7 +260,18 @@ pub struct Config {
     /// Number of worker threads for query execution.
     pub threads: usize,
 
-    /// Whether to enable WAL for durability.
+    /// Whether new commits are logged to the sidecar WAL (`<path>.wal/`) for
+    /// durability, in a build with the `wal` feature (a build without it logs
+    /// no commit, whatever this says). With it off, a commit reaches the file
+    /// only at the next checkpoint (`close()`, `wal_checkpoint()` or the
+    /// periodic one), so a crash loses the commits since the last one.
+    ///
+    /// It never hides commits already in a WAL: in a build with the `wal`
+    /// feature an open replays a sidecar WAL that a writer left without
+    /// `close()` either way. A read-write open with it off then writes those
+    /// commits to the file and removes the WAL before it returns, so no later
+    /// crash can replay that WAL over newer data; a read-only open only
+    /// replays them into memory.
     pub wal_enabled: bool,
 
     /// WAL flush interval in milliseconds.
@@ -241,10 +308,11 @@ pub struct Config {
     /// WAL durability mode. Only used when `wal_enabled` is true.
     pub wal_durability: DurabilityMode,
 
-    /// Storage format for persistent databases.
+    /// Storage format for persistent databases: what a new path becomes.
     ///
-    /// `Auto` (default) detects the format from the path: `.grafeo` extension
-    /// uses single-file format, directories use the legacy WAL directory.
+    /// With `Auto` (the default) a new path is a single file whatever its
+    /// extension; an existing path opens as what it holds (see
+    /// [`StorageFormat`]).
     pub storage_format: StorageFormat,
 
     /// Whether to enable catalog schema constraint enforcement.
@@ -325,13 +393,31 @@ pub struct Config {
     /// only happen on explicit `wal_checkpoint()` or database close.
     pub checkpoint_interval: Option<Duration>,
 
-    /// Encryption configuration.
+    /// Encryption at rest.
     ///
-    /// When set, all data written to disk (WAL records, sections, snapshots) is
-    /// encrypted with AES-256-GCM. The key chain derives per-component keys from
-    /// a master encryption key via HKDF-SHA256.
+    /// When set, the database file (`.grafeo`) and its sidecar WAL are
+    /// encrypted with AES-256-GCM, with keys the key chain derives for this
+    /// database (see [`EncryptionConfig`]). A new database is created
+    /// encrypted; an encrypted database opens only with the key chain it was
+    /// created with, and an unencrypted one only without a key. A database
+    /// written by 0.5.x (a file or a WAL directory) is migrated into an
+    /// encrypted file by a read-write open (the kept `.pre-0.6` copy stays
+    /// unencrypted).
     ///
-    /// Requires the `encryption` feature flag. Without it, this field is ignored.
+    /// Requires a persistent database: [`validate`](Self::validate) refuses
+    /// it without a path.
+    ///
+    /// An encrypted database spills nothing to disk: it gets no default spill
+    /// path, and [`validate`](Self::validate) refuses an explicit
+    /// [`spill_path`](Self::spill_path) and a section pinned to
+    /// [`TierOverride::ForceDisk`](grafeo_common::storage::TierOverride::ForceDisk)
+    /// in [`section_configs`](Self::section_configs), because spill files are
+    /// not encrypted. A memory limit therefore cannot move its data to disk.
+    ///
+    /// Not encrypted: the bytes of
+    /// [`export_snapshot`](crate::GrafeoDB::export_snapshot), and an
+    /// in-memory copy made with [`to_memory`](crate::GrafeoDB::to_memory)
+    /// (it has no key, so a copy saved from it is plaintext).
     #[cfg(feature = "encryption")]
     pub encryption: Option<EncryptionConfig>,
 }
@@ -750,6 +836,29 @@ impl Config {
             return Err(ConfigError::RdfFeatureRequired);
         }
 
+        #[cfg(feature = "encryption")]
+        if self.encryption.is_some() {
+            if self.path.is_none() {
+                return Err(ConfigError::EncryptionRequiresPersistentPath);
+            }
+            if self.spill_path.is_some() {
+                return Err(ConfigError::EncryptionWithSpillPath);
+            }
+            // The first such section in section type order, so the error
+            // does not depend on the map's iteration order.
+            let forced_to_disk = self
+                .section_configs
+                .iter()
+                .filter(|(_, section)| {
+                    section.tier == grafeo_common::storage::TierOverride::ForceDisk
+                })
+                .map(|(section_type, _)| *section_type)
+                .min_by_key(|section_type| section_type.to_u8());
+            if let Some(section_type) = forced_to_disk {
+                return Err(ConfigError::EncryptionWithForceDisk(section_type));
+            }
+        }
+
         Ok(())
     }
 }
@@ -1118,6 +1227,93 @@ mod tests {
         );
     }
 
+    /// Encryption needs a path to write the encrypted file to: an in-memory
+    /// configuration with a key is invalid, a persistent or read-only one is
+    /// not.
+    #[cfg(all(feature = "encryption", not(miri)))]
+    #[test]
+    fn encryption_without_a_persistent_path_is_invalid() {
+        let encryption = EncryptionConfig {
+            key_chain: std::sync::Arc::new(grafeo_common::encryption::KeyChain::new([3; 32])),
+        };
+        let mut in_memory = Config::in_memory();
+        in_memory.encryption = Some(encryption.clone());
+        assert_eq!(
+            in_memory.validate(),
+            Err(ConfigError::EncryptionRequiresPersistentPath)
+        );
+        assert!(
+            ConfigError::EncryptionRequiresPersistentPath
+                .to_string()
+                .contains("requires a persistent database path")
+        );
+        for mut config in [
+            Config::persistent("amsterdam.grafeo"),
+            Config::read_only("amsterdam.grafeo"),
+        ] {
+            config.encryption = Some(encryption.clone());
+            assert_eq!(config.validate(), Ok(()), "{:?}", config.path);
+        }
+    }
+
+    /// Spill files are not encrypted: a spill path with encryption is invalid.
+    #[cfg(all(feature = "encryption", not(miri)))]
+    #[test]
+    fn encryption_with_a_spill_path_is_invalid() {
+        let mut config = Config::persistent("berlin.grafeo").with_spill_path("berlin.spill");
+        assert_eq!(config.validate(), Ok(()), "a spill path alone is fine");
+        config.encryption = Some(EncryptionConfig {
+            key_chain: std::sync::Arc::new(grafeo_common::encryption::KeyChain::new([19; 32])),
+        });
+        assert_eq!(config.validate(), Err(ConfigError::EncryptionWithSpillPath));
+        assert!(
+            ConfigError::EncryptionWithSpillPath
+                .to_string()
+                .contains("spill files are not encrypted")
+        );
+    }
+
+    /// An encrypted database spills nothing to disk, so a section pinned to
+    /// disk could not be honored: `TierOverride::ForceDisk` with encryption
+    /// is invalid, while `Auto` and `ForceRam` are fine.
+    #[cfg(all(feature = "encryption", not(miri)))]
+    #[test]
+    fn encryption_with_a_section_forced_to_disk_is_invalid() {
+        use grafeo_common::storage::{SectionType, TierOverride};
+
+        let encryption = EncryptionConfig {
+            key_chain: std::sync::Arc::new(grafeo_common::encryption::KeyChain::new([88; 32])),
+        };
+        let mut config = Config::persistent("prague.grafeo")
+            .with_section_tier(SectionType::VectorStore, TierOverride::ForceRam)
+            .with_section_tier(SectionType::TextIndex, TierOverride::Auto);
+        config.encryption = Some(encryption);
+        assert_eq!(
+            config.validate(),
+            Ok(()),
+            "Auto and ForceRam keep data in RAM"
+        );
+
+        let mut config =
+            config.with_section_tier(SectionType::CompactStore, TierOverride::ForceDisk);
+        let error = config
+            .validate()
+            .expect_err("a section forced to disk on an encrypted database")
+            .to_string();
+        assert!(
+            error.contains("ForceDisk") && error.contains("CompactStore"),
+            "the error names the override and the section: {error}"
+        );
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::EncryptionWithForceDisk(
+                SectionType::CompactStore
+            ))
+        );
+        config.encryption = None;
+        assert_eq!(config.validate(), Ok(()), "ForceDisk alone is fine");
+    }
+
     // --- Builder chaining with new fields ---
 
     #[test]
@@ -1187,6 +1383,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        deprecated,
+        reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
+    )]
     fn test_storage_format_display() {
         assert_eq!(StorageFormat::Auto.to_string(), "auto");
         assert_eq!(StorageFormat::WalDirectory.to_string(), "wal-directory");
@@ -1194,6 +1394,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        deprecated,
+        reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
+    )]
     fn test_config_with_storage_format() {
         let config = Config::in_memory().with_storage_format(StorageFormat::SingleFile);
         assert_eq!(config.storage_format, StorageFormat::SingleFile);
@@ -1224,7 +1428,10 @@ mod tests {
         // Ensure it implements std::error::Error (no source)
         let dyn_err: &dyn std::error::Error = &err;
         assert!(dyn_err.source().is_none());
-        assert!(!dyn_err.to_string().is_empty());
+        assert!(
+            !dyn_err.to_string().is_empty(),
+            "dyn_err.to_string() is empty"
+        );
     }
 
     // --- Validate accepts non-zero memory limit ---

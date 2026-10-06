@@ -8,7 +8,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use grafeo_common::types::{EdgeId, NodeId};
-use grafeo_engine::config::{Config, StorageFormat};
+use grafeo_engine::config::Config;
 use grafeo_engine::database::GrafeoDB;
 
 use crate::error::{GrafeoStatus, set_error, set_last_error, str_from_ptr};
@@ -182,6 +182,10 @@ pub extern "C" fn grafeo_open_memory() -> *mut GrafeoDatabase {
 
 /// Open or create a persistent database at `path`.
 ///
+/// The database is a single file, whatever the extension of `path`; a
+/// database written by 0.5.x (a single file, usually `.grafeo`, or a WAL
+/// directory) is migrated to the 0.6 format when it opens.
+///
 /// Returns an opaque pointer, or null on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_open(path: *const c_char) -> *mut GrafeoDatabase {
@@ -202,7 +206,9 @@ pub extern "C" fn grafeo_open(path: *const c_char) -> *mut GrafeoDatabase {
 /// Open an existing database in read-only mode.
 ///
 /// Uses a shared file lock, so multiple processes can read the same
-/// .grafeo file concurrently. Mutations will return an error.
+/// database file concurrently. Mutations will return an error. A database
+/// written by 0.5.x (a file, or a WAL directory) is read in place and not
+/// migrated.
 ///
 /// Returns an opaque pointer, or null on error.
 #[unsafe(no_mangle)]
@@ -223,10 +229,11 @@ pub extern "C" fn grafeo_open_read_only(path: *const c_char) -> *mut GrafeoDatab
 
 /// Open or create a persistent database at `path` using single-file format.
 ///
-/// The database is stored as a single `.grafeo` file. This is the recommended
-/// format for embedded use (mobile apps, desktop apps). At rest only the
-/// `.grafeo` file exists; a sidecar `.grafeo.wal/` directory is used during
-/// operation and removed automatically on close.
+/// Deprecated since 0.6.0 and removed in 0.7.0: use [`grafeo_open`]. Since
+/// 0.6 every database is a single file, whatever the extension of `path`, so
+/// this is the same as [`grafeo_open`]. At rest only the file exists; a
+/// sidecar `<path>.wal/` directory is used during operation and removed
+/// automatically on close.
 ///
 /// Returns an opaque pointer, or null on error (check `grafeo_last_error()`).
 #[unsafe(no_mangle)]
@@ -234,9 +241,7 @@ pub extern "C" fn grafeo_open_single_file(path: *const c_char) -> *mut GrafeoDat
     let Ok(path_str) = str_from_ptr(path) else {
         return std::ptr::null_mut();
     };
-    match GrafeoDB::with_config(
-        Config::persistent(path_str).with_storage_format(StorageFormat::SingleFile),
-    ) {
+    match GrafeoDB::with_config(Config::persistent(path_str)) {
         Ok(db) => Box::into_raw(Box::new(GrafeoDatabase {
             inner: Arc::new(RwLock::new(db)),
         })),
@@ -1226,11 +1231,15 @@ pub extern "C" fn grafeo_create_property_index(
         Ok(s) => s,
         Err(e) => return e,
     };
-    db.inner.read().create_property_index(prop_str);
-    GrafeoStatus::Ok
+    match db.inner.read().create_property_index(prop_str) {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(e) => set_error(&e),
+    }
 }
 
-/// Drop a property index. Returns 1 if dropped, 0 if not found.
+/// Drop a property index. Returns 1 if dropped, 0 if not found, -1 on error
+/// (check `grafeo_last_error()`): a null pointer, a name that is not UTF-8, or
+/// a database error such as a closed database.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_drop_property_index(
     db: *mut GrafeoDatabase,
@@ -1245,7 +1254,13 @@ pub extern "C" fn grafeo_drop_property_index(
     let Ok(prop_str) = str_from_ptr(property) else {
         return -1;
     };
-    i32::from(db.inner.read().drop_property_index(prop_str))
+    match db.inner.read().drop_property_index(prop_str) {
+        Ok(dropped) => i32::from(dropped),
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
 }
 
 /// Check if a property index exists. Returns 1 if exists, 0 otherwise.
@@ -1381,7 +1396,9 @@ pub extern "C" fn grafeo_create_vector_index(
 }
 
 /// Drop a vector index for the given label and property.
-/// Returns 1 if removed, 0 if not found.
+/// Returns 1 if removed, 0 if not found, -1 on error (check
+/// `grafeo_last_error()`): a null pointer, a name that is not UTF-8, or a
+/// database error such as a closed database.
 #[cfg(feature = "vector-index")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_drop_vector_index(
@@ -1391,17 +1408,23 @@ pub extern "C" fn grafeo_drop_vector_index(
 ) -> i32 {
     if db.is_null() {
         set_last_error("Null database pointer");
-        return 0;
+        return -1;
     }
     // SAFETY: Caller guarantees valid pointer from grafeo_open*.
     let db = unsafe { &*db };
     let Ok(label_str) = str_from_ptr(label) else {
-        return 0;
+        return -1;
     };
     let Ok(prop_str) = str_from_ptr(property) else {
-        return 0;
+        return -1;
     };
-    i32::from(db.inner.read().drop_vector_index(label_str, prop_str))
+    match db.inner.read().drop_vector_index(label_str, prop_str) {
+        Ok(removed) => i32::from(removed),
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
 }
 
 /// Rebuild a vector index by rescanning all matching nodes.
@@ -2090,8 +2113,10 @@ pub extern "C" fn grafeo_compact(db: *mut GrafeoDatabase) -> GrafeoStatus {
 // Graph Projections
 // =========================================================================
 
-/// Creates a named graph projection. Returns `true` if created, `false` if a
-/// projection with that name already exists.
+/// Creates a named graph projection over the graph selected now (the default
+/// graph when none is selected). Returns 1 if created, 0 if a projection with
+/// that name already exists, -1 on error (check `grafeo_last_error()`), such as
+/// a selected graph that no longer exists or an invalid argument.
 ///
 /// `node_labels` and `edge_types` are arrays of null-terminated UTF-8 strings.
 /// Pass null with a count of 0 to include all nodes/edges.
@@ -2109,27 +2134,29 @@ pub extern "C" fn grafeo_create_projection(
     num_labels: usize,
     edge_types: *const *const c_char,
     num_types: usize,
-) -> bool {
+) -> i32 {
     use grafeo_core::graph::ProjectionSpec;
 
     if db.is_null() || name.is_null() {
         set_last_error("Null pointer argument");
-        return false;
+        return -1;
     }
     // SAFETY: Caller guarantees valid pointers.
     let db = unsafe { &*db };
     let Ok(name_str) = str_from_ptr(name) else {
-        return false;
+        return -1;
     };
 
     let mut spec = ProjectionSpec::new();
 
     // Reject null pointer with non-zero count (caller error)
     if node_labels.is_null() && num_labels > 0 {
-        return false;
+        set_last_error("Null node_labels with a non-zero count");
+        return -1;
     }
     if edge_types.is_null() && num_types > 0 {
-        return false;
+        set_last_error("Null edge_types with a non-zero count");
+        return -1;
     }
 
     if !node_labels.is_null() && num_labels > 0 {
@@ -2138,7 +2165,7 @@ pub extern "C" fn grafeo_create_projection(
             // SAFETY: Caller guarantees node_labels[0..num_labels] are valid.
             let ptr = unsafe { *node_labels.add(i) };
             let Ok(s) = str_from_ptr(ptr) else {
-                return false;
+                return -1;
             };
             labels.push(s.to_owned());
         }
@@ -2151,33 +2178,40 @@ pub extern "C" fn grafeo_create_projection(
             // SAFETY: Caller guarantees edge_types[0..num_types] are valid.
             let ptr = unsafe { *edge_types.add(i) };
             let Ok(s) = str_from_ptr(ptr) else {
-                return false;
+                return -1;
             };
             types.push(s.to_owned());
         }
         spec = spec.with_edge_types(types);
     }
 
-    db.inner.read().create_projection(name_str, spec)
+    match db.inner.read().create_projection(name_str, spec) {
+        Ok(created) => i32::from(created),
+        Err(e) => {
+            set_error(&e);
+            -1
+        }
+    }
 }
 
-/// Drops a named graph projection. Returns `true` if it existed.
+/// Drops a named graph projection. Returns 1 if it existed, 0 if not, -1 on
+/// an invalid argument (check `grafeo_last_error()`).
 ///
 /// # Safety
 /// `db` must be a valid pointer returned by `grafeo_open*`. `name` must be a
 /// valid null-terminated UTF-8 string.
 #[unsafe(no_mangle)]
-pub extern "C" fn grafeo_drop_projection(db: *mut GrafeoDatabase, name: *const c_char) -> bool {
+pub extern "C" fn grafeo_drop_projection(db: *mut GrafeoDatabase, name: *const c_char) -> i32 {
     if db.is_null() || name.is_null() {
         set_last_error("Null pointer argument");
-        return false;
+        return -1;
     }
     // SAFETY: Caller guarantees valid pointers.
     let db = unsafe { &*db };
     let Ok(name_str) = str_from_ptr(name) else {
-        return false;
+        return -1;
     };
-    db.inner.read().drop_projection(name_str)
+    i32::from(db.inner.read().drop_projection(name_str))
 }
 
 /// Returns the names of all graph projections as a JSON array string.
@@ -2220,6 +2254,131 @@ pub extern "C" fn grafeo_free_string(s: *mut c_char) {
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    /// After `grafeo_close` the handle lives on until `grafeo_free_database`:
+    /// the index calls on it fail, and a drop returns -1 (not 0, "nothing to
+    /// drop"), which the Go, Dart and C# wrappers read as an error.
+    #[test]
+    fn index_calls_after_close_return_an_error() {
+        let dir = std::env::temp_dir().join(format!("grafeo-c-closed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = CString::new(dir.join("amsterdam.grafeo").to_str().unwrap()).unwrap();
+        let db = grafeo_open(path.as_ptr());
+        assert!(!db.is_null());
+        assert_eq!(grafeo_close(db), GrafeoStatus::Ok);
+
+        let last_error = || {
+            // SAFETY: the pointer is valid until the next call on this thread.
+            unsafe { std::ffi::CStr::from_ptr(crate::error::grafeo_last_error()) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let property = CString::new("name").unwrap();
+        assert_eq!(
+            grafeo_create_property_index(db, property.as_ptr()),
+            GrafeoStatus::ErrorDatabase
+        );
+        assert!(last_error().contains("GRAFEO-T007"), "{}", last_error());
+        assert_eq!(grafeo_drop_property_index(db, property.as_ptr()), -1);
+        assert!(last_error().contains("GRAFEO-T007"), "{}", last_error());
+        #[cfg(feature = "vector-index")]
+        {
+            let label = CString::new("Person").unwrap();
+            assert_eq!(
+                grafeo_drop_vector_index(db, label.as_ptr(), property.as_ptr()),
+                -1
+            );
+            assert!(last_error().contains("GRAFEO-T007"), "{}", last_error());
+        }
+        grafeo_free_database(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A drop with a null pointer or a name that is not UTF-8 returns -1, as
+    /// every other error does, and sets `grafeo_last_error`: 0 means only
+    /// "there was nothing to drop".
+    #[test]
+    fn a_drop_with_a_bad_argument_returns_an_error() {
+        let db = grafeo_open_memory();
+        let name = CString::new("name").unwrap();
+        let not_utf8 = CString::new(vec![b'a', 0xff]).unwrap();
+
+        let mut failures = Vec::new();
+        let mut check = |call: &str, drop: &dyn Fn() -> i32| {
+            crate::error::grafeo_clear_error();
+            let result = drop();
+            if result != -1 {
+                failures.push(format!("{call}: returned {result}"));
+            } else if crate::error::grafeo_last_error().is_null() {
+                failures.push(format!("{call}: no last error"));
+            }
+        };
+        check("property: null database", &|| {
+            grafeo_drop_property_index(std::ptr::null_mut(), name.as_ptr())
+        });
+        check("property: null name", &|| {
+            grafeo_drop_property_index(db, std::ptr::null())
+        });
+        check("property: not UTF-8", &|| {
+            grafeo_drop_property_index(db, not_utf8.as_ptr())
+        });
+        #[cfg(feature = "vector-index")]
+        {
+            let label = CString::new("Person").unwrap();
+            for (call, label, property) in [
+                ("vector: null label", std::ptr::null(), name.as_ptr()),
+                ("vector: null property", label.as_ptr(), std::ptr::null()),
+                ("vector: label not UTF-8", not_utf8.as_ptr(), name.as_ptr()),
+                (
+                    "vector: property not UTF-8",
+                    label.as_ptr(),
+                    not_utf8.as_ptr(),
+                ),
+            ] {
+                check(call, &|| grafeo_drop_vector_index(db, label, property));
+            }
+            check("vector: null database", &|| {
+                grafeo_drop_vector_index(std::ptr::null_mut(), label.as_ptr(), name.as_ptr())
+            });
+            assert_eq!(
+                grafeo_drop_vector_index(db, label.as_ptr(), name.as_ptr()),
+                0,
+                "no such index: 0"
+            );
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+        grafeo_close(db);
+        grafeo_free_database(db);
+    }
+
+    /// `grafeo_create_projection` returns 1 when created, 0 when the name is
+    /// taken, -1 with a last error on an invalid argument; `grafeo_drop_projection`
+    /// returns 1 when it dropped one, 0 when there was none, -1 on an invalid
+    /// argument.
+    #[test]
+    fn create_projection_returns_a_status() {
+        let db = grafeo_open_memory();
+        let name = CString::new("people").unwrap();
+        let label = CString::new("Person").unwrap();
+        let labels = [label.as_ptr()];
+        let create = |labels: *const *const c_char, count: usize| {
+            grafeo_create_projection(db, name.as_ptr(), labels, count, std::ptr::null(), 0)
+        };
+        assert_eq!(create(labels.as_ptr(), 1), 1);
+        assert_eq!(create(labels.as_ptr(), 1), 0);
+        assert_eq!(create(std::ptr::null(), 2), -1);
+        // SAFETY: the pointer is valid until the next call on this thread.
+        let error = unsafe { std::ffi::CStr::from_ptr(crate::error::grafeo_last_error()) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(error.contains("node_labels"), "{error}");
+        assert_eq!(grafeo_drop_projection(db, name.as_ptr()), 1);
+        assert_eq!(grafeo_drop_projection(db, name.as_ptr()), 0);
+        assert_eq!(grafeo_drop_projection(db, std::ptr::null()), -1);
+        grafeo_close(db);
+        grafeo_free_database(db);
+    }
 
     #[test]
     fn test_open_memory_and_close() {
@@ -2399,7 +2558,7 @@ mod tests {
         assert!(!v.is_null());
         // SAFETY: Static string, always valid.
         let version_str = unsafe { std::ffi::CStr::from_ptr(v) }.to_str().unwrap();
-        assert!(!version_str.is_empty());
+        assert!(!version_str.is_empty(), "version_str is empty");
     }
 
     // ── Edge property CRUD ──

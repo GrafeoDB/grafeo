@@ -1,0 +1,160 @@
+//! A statement that spills nothing touches no spill directory (#565): every
+//! GQL statement on a file database created and removed `<file>.spill/query_<n>`
+//! (about 0.25 ms each) and left `<file>.spill` next to the database.
+
+#![cfg(all(
+    feature = "lpg",
+    feature = "gql",
+    feature = "grafeo-file",
+    feature = "spill"
+))]
+
+use std::collections::HashMap;
+
+use grafeo_common::types::{PropertyKey, Value};
+use grafeo_engine::GrafeoDB;
+
+#[test]
+fn statements_that_spill_nothing_leave_no_spill_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("amsterdam.grafeo");
+    let spill = dir.path().join("amsterdam.grafeo.spill");
+
+    let db = GrafeoDB::open(&path).unwrap();
+    db.create_property_index("name").unwrap();
+    db.execute("INSERT (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'})")
+        .unwrap();
+    db.execute("MATCH (c:City) RETURN c.name ORDER BY c.name")
+        .unwrap();
+    db.execute_with_params(
+        "MATCH (c:City {name: $name}) SET c.visited = true",
+        HashMap::from([("name".to_string(), Value::from("Prague"))]),
+    )
+    .unwrap();
+    let row = HashMap::from([
+        (PropertyKey::new("name"), Value::from("Paris")),
+        (PropertyKey::new("country"), Value::from("France")),
+    ]);
+    db.upsert_nodes(&["City"], "name", vec![row], false)
+        .unwrap();
+    assert!(!spill.exists(), "a statement created {}", spill.display());
+
+    db.close().unwrap();
+    assert!(!spill.exists(), "close left {}", spill.display());
+}
+
+/// A clean close of a database that ran nothing leaves only the file.
+#[test]
+fn opening_and_closing_leaves_no_spill_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("berlin.grafeo");
+    let db = GrafeoDB::open(&path).unwrap();
+    db.close().unwrap();
+    drop(db);
+    assert!(!dir.path().join("berlin.grafeo.spill").exists());
+}
+
+/// A read-only open writes nothing beside the database, also when it runs
+/// queries.
+#[test]
+fn a_read_only_open_creates_no_spill_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prague.grafeo");
+    let spill = dir.path().join("prague.grafeo.spill");
+    {
+        let db = GrafeoDB::open(&path).unwrap();
+        db.execute("INSERT (:City {name: 'Prague'})").unwrap();
+        db.close().unwrap();
+    }
+    assert!(!spill.exists());
+
+    let db = GrafeoDB::open_read_only(&path).unwrap();
+    let rows = db.execute("MATCH (c:City) RETURN c.name").unwrap();
+    assert_eq!(rows.rows().len(), 1);
+    #[cfg(feature = "cypher")]
+    db.execute_cypher("MATCH (c:City) RETURN c.name").unwrap();
+    assert!(
+        !spill.exists(),
+        "a read-only query created {}",
+        spill.display()
+    );
+    drop(db);
+    assert!(!spill.exists());
+}
+
+/// A query of a read-only open that spills writes into the open's own
+/// directory in the system temp directory, never beside the database, and
+/// that directory goes with the database.
+#[test]
+fn a_read_only_open_spills_into_the_temp_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("barcelona.grafeo");
+    {
+        let db = GrafeoDB::open(&path).unwrap();
+        db.execute("INSERT (:City {name: 'Barcelona'})").unwrap();
+        db.close().unwrap();
+    }
+
+    let db = GrafeoDB::open_read_only(&path).unwrap();
+    let spill = db
+        .buffer_manager()
+        .config()
+        .spill_path
+        .clone()
+        .expect("a read-only open can spill");
+    assert_eq!(spill.parent(), Some(std::env::temp_dir().as_path()));
+    let name = spill.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        name.starts_with(&format!("grafeo-barcelona.grafeo-{}-", std::process::id())),
+        "{name}"
+    );
+    // What a spilling query leaves once its own subdirectory is gone.
+    std::fs::create_dir_all(&spill).unwrap();
+    drop(db);
+    assert!(!spill.exists(), "the temp directory went with the database");
+    assert!(!dir.path().join("barcelona.grafeo.spill").exists());
+}
+
+/// A query of a read-only open that spills (an ORDER BY over more rows than
+/// the memory limit holds) writes its files into a directory of its own in
+/// the open's temp directory, and removes them and that directory when it
+/// ends; the temp directory goes with the database (#594).
+#[test]
+fn a_spilling_query_of_a_read_only_open_leaves_nothing() {
+    use grafeo_engine::config::Config;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paris.grafeo");
+    {
+        let db = GrafeoDB::open(&path).unwrap();
+        db.execute("INSERT (:City {name: 'Paris'})").unwrap();
+        db.close().unwrap();
+    }
+
+    // A memory limit of one byte: every query is under pressure, and spills.
+    let db = GrafeoDB::with_config(Config::read_only(&path).with_memory_limit(1)).unwrap();
+    let spill = db
+        .buffer_manager()
+        .config()
+        .spill_path
+        .clone()
+        .expect("a read-only open can spill");
+    // The open made the directory, empty; a spilling query makes it again,
+    // which shows that it spilled.
+    std::fs::remove_dir(&spill).unwrap();
+    let rows = db
+        .execute("UNWIND range(1, 3000) AS i RETURN i ORDER BY i DESC")
+        .unwrap();
+    assert_eq!(rows.rows().len(), 3000);
+    assert_eq!(rows.rows()[0][0], Value::Int64(3000));
+    assert!(spill.is_dir(), "the query spilled into {}", spill.display());
+    let left: Vec<_> = std::fs::read_dir(&spill)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert!(left.is_empty(), "the query left {left:?}");
+    drop(db);
+    assert!(!spill.exists(), "the temp directory went with the database");
+    assert!(!dir.path().join("paris.grafeo.spill").exists());
+}

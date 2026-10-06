@@ -51,7 +51,7 @@ fn test_return_star() {
         .unwrap();
     assert_eq!(result.rows().len(), 1);
     // Should have at least the 'n' variable
-    assert!(!result.columns.is_empty());
+    assert!(!result.columns.is_empty(), "result.columns is empty");
 }
 
 #[test]
@@ -217,7 +217,7 @@ fn test_like_no_match() {
     let result = session
         .execute("MATCH (n:Person) WHERE n.name LIKE 'X%' RETURN n.name")
         .unwrap();
-    assert!(result.rows().is_empty());
+    assert!(result.rows().is_empty(), "{:?}", result.rows());
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,7 +1247,7 @@ fn test_path_length_function() {
              RETURN length(p) AS len",
         )
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     assert_eq!(
         result.rows()[0][0],
         Value::Int64(1),
@@ -1267,7 +1267,7 @@ fn test_path_nodes_function() {
              RETURN nodes(p) AS node_list",
         )
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     match &result.rows()[0][0] {
         Value::List(items) => {
             assert_eq!(items.len(), 2, "Single-hop path should have 2 nodes");
@@ -1288,7 +1288,7 @@ fn test_path_edges_function() {
              RETURN edges(p) AS edge_list",
         )
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     match &result.rows()[0][0] {
         Value::List(items) => {
             assert_eq!(items.len(), 1, "Single-hop path should have 1 edge");
@@ -1309,7 +1309,7 @@ fn test_path_is_acyclic() {
              RETURN isAcyclic(p) AS is_acyclic_result",
         )
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     assert_eq!(
         result.rows()[0][0],
         Value::Bool(true),
@@ -1329,7 +1329,7 @@ fn test_path_is_simple() {
              RETURN isSimple(p) AS is_simple_result",
         )
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     assert_eq!(
         result.rows()[0][0],
         Value::Bool(true),
@@ -1349,7 +1349,7 @@ fn test_path_is_trail() {
              RETURN isTrail(p) AS is_trail_result",
         )
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     assert_eq!(
         result.rows()[0][0],
         Value::Bool(true),
@@ -1367,7 +1367,7 @@ fn test_path_constructor() {
     let result = session
         .execute("MATCH (n:Person {name: 'Alix'}) RETURN path([1, 2, 3], ['a', 'b']) AS p")
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     match &result.rows()[0][0] {
         Value::Path { nodes, edges } => {
             assert_eq!(nodes.len(), 3, "path should have 3 nodes");
@@ -1390,7 +1390,7 @@ fn test_path_constructor_from_match() {
              RETURN isSimple(rebuilt) AS is_simple",
         )
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     assert_eq!(
         result.rows()[0][0],
         Value::Bool(true),
@@ -1411,7 +1411,7 @@ fn test_path_equality() {
              RETURN p = p AS self_equal",
         )
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     assert_eq!(
         result.rows()[0][0],
         Value::Bool(true),
@@ -1540,7 +1540,7 @@ fn test_aggregate_in_order_by() {
              ORDER BY friend_count DESC",
         )
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
 }
 
 // ISO: GF20
@@ -1556,7 +1556,7 @@ fn test_aggregate_order_by_alias() {
              ORDER BY friend_count DESC",
         )
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
 }
 
 // =========================================================================
@@ -2389,7 +2389,7 @@ fn test_db_labels_with_yield() {
     let result = session
         .execute("CALL db.labels() YIELD label RETURN label")
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     assert_eq!(result.columns, vec!["label"]);
 }
 
@@ -3164,7 +3164,7 @@ fn test_viewing_epoch_limits_visibility() {
     session.set_viewing_epoch(grafeo_common::types::EpochId(1));
     // Query with viewing epoch set should not panic
     let result = session.execute("MATCH (m:Marker) RETURN count(m)").unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     session.clear_viewing_epoch();
 }
 

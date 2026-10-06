@@ -516,7 +516,7 @@ mod tests {
         let dir = SectionDirectory::default();
         assert!(dir.is_empty());
         assert_eq!(dir.len(), 0);
-        assert!(dir.entries().is_empty());
+        assert!(dir.entries().is_empty(), "{:?}", dir.entries());
     }
 
     #[test]

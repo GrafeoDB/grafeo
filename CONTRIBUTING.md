@@ -10,7 +10,7 @@ cd grafeo
 cargo build --workspace
 ```
 
-You'll need **Rust 1.91.1+** and optionally **Python 3.12+** / **Node.js 20+** for the bindings.
+You'll need **Rust 1.99.0+** and optionally **Python 3.12+** / **Node.js 20+** for the bindings.
 
 ## Branching
 
@@ -169,6 +169,19 @@ npm install
 npm run build
 npm test
 ```
+
+## Versioning
+
+Grafeo follows the rules in [Versioning and Compatibility](https://grafeo.dev/versioning/). In short, for a
+pull request:
+
+- A breaking change to the stable surface (the `grafeo` crate and its re-exports, the bindings, the CLI, the file
+  format) or a higher minimum Rust version goes into a minor release (`0.6` to `0.7`). Mark its CHANGELOG entry
+  **Breaking**; patch releases have none.
+- Changes inside the implementation crates (`grafeo-common`, `grafeo-core`, `grafeo-storage`, `grafeo-adapters`,
+  `grafeo-engine`) that do not reach the stable surface can go into any release.
+- Bug fixes go into patch releases, also when they change query results.
+- Deprecate before removing: name the replacement, and remove it at the earliest in the next minor release.
 
 ## Ecosystem Projects
 

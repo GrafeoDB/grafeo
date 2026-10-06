@@ -127,7 +127,7 @@ fn test_text_index_add_label() {
 
     // Not searchable under Article index
     let results = db.text_search("Article", "content", "Rust", 10).unwrap();
-    assert!(results.is_empty());
+    assert!(results.is_empty(), "{results:?}");
 
     // Add the Article label
     let added = db.add_node_label(id, "Article").unwrap();

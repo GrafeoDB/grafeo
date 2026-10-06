@@ -1,5 +1,5 @@
-[![CI](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml/badge.svg)](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml)
-[![grafeo.dev](https://github.com/GrafeoDB/grafeo/actions/workflows/docs.yml/badge.svg)](https://grafeo.dev)
+[![CI](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![grafeo.dev](https://github.com/GrafeoDB/grafeo/actions/workflows/docs.yml/badge.svg?branch=main&event=push)](https://grafeo.dev)
 [![codecov](https://codecov.io/gh/GrafeoDB/grafeo/graph/badge.svg)](https://codecov.io/gh/GrafeoDB/grafeo)
 [![CodSpeed Badge](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/GrafeoDB/grafeo?utm_source=badge)
 [![Crates.io](https://img.shields.io/crates/v/grafeo.svg?color=00ADD8)](https://crates.io/crates/grafeo)
@@ -12,7 +12,7 @@
 [![Web](https://img.shields.io/npm/v/@grafeo-db/web.svg?label=web&color=7c4dff)](https://www.npmjs.com/package/@grafeo-db/web)
 [![Server](https://img.shields.io/github/v/release/GrafeoDB/grafeo-server?label=server&color=7c4dff)](https://github.com/GrafeoDB/grafeo-server)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.91.1-blue)](https://www.rust-lang.org)
+[![MSRV](https://img.shields.io/badge/MSRV-1.99.0-blue)](https://www.rust-lang.org)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/nqU6RUVaxW)
 

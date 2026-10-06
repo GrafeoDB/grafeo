@@ -103,11 +103,23 @@ impl Session {
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // A write needs a writable session: a writing role, and no read-only
-        // transaction or database (skip the tree walk when neither can fail).
-        if (!self.identity.can_admin() || *self.read_only_tx.lock())
-            && optimized_plan.root.has_mutations()
-        {
+        // transaction or database.
+        let mutates = optimized_plan.root.has_mutations();
+        if mutates && (!self.identity.can_admin() || *self.read_only_tx.lock()) {
             self.check_writable()?;
+        }
+
+        // Fails once the database is closed, and holds commits off while an
+        // update outside a transaction runs (see `hold_for_rdf_update`).
+        let held = if mutates {
+            self.hold_for_rdf_update()?
+        } else {
+            None
+        };
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        if held.is_some() {
+            grafeo_common::testing::commit_hook::run_during_held_change();
         }
 
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
@@ -125,6 +137,8 @@ impl Session {
         // Without a transaction, the statement's WAL records form their own group.
         #[cfg(feature = "wal")]
         self.flush_wal_outside_transaction();
+        // The update and its WAL group are written: commits may go on.
+        drop(held);
 
         #[cfg(feature = "metrics")]
         {
@@ -169,10 +183,9 @@ impl Session {
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // A write needs a writable session: a writing role, and no read-only
-        // transaction or database (skip the tree walk when neither can fail).
-        if (!self.identity.can_admin() || *self.read_only_tx.lock())
-            && optimized_plan.root.has_mutations()
-        {
+        // transaction or database.
+        let mutates = optimized_plan.root.has_mutations();
+        if mutates && (!self.identity.can_admin() || *self.read_only_tx.lock()) {
             self.check_writable()?;
         }
 
@@ -180,6 +193,19 @@ impl Session {
         if optimized_plan.explain {
             use crate::query::processor::explain_result;
             return Ok(explain_result(&optimized_plan));
+        }
+
+        // Fails once the database is closed, and holds commits off while an
+        // update outside a transaction runs (see `hold_for_rdf_update`).
+        let held = if mutates {
+            self.hold_for_rdf_update()?
+        } else {
+            None
+        };
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        if held.is_some() {
+            grafeo_common::testing::commit_hook::run_during_held_change();
         }
 
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
@@ -197,6 +223,8 @@ impl Session {
         // Without a transaction, the statement's WAL records form their own group.
         #[cfg(feature = "wal")]
         self.flush_wal_outside_transaction();
+        // The update and its WAL group are written: commits may go on.
+        drop(held);
 
         #[cfg(feature = "metrics")]
         {
@@ -232,10 +260,9 @@ impl Session {
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // A write needs a writable session: a writing role, and no read-only
-        // transaction or database (skip the tree walk when neither can fail).
-        if (!self.identity.can_admin() || *self.read_only_tx.lock())
-            && optimized_plan.root.has_mutations()
-        {
+        // transaction or database.
+        let mutates = optimized_plan.root.has_mutations();
+        if mutates && (!self.identity.can_admin() || *self.read_only_tx.lock()) {
             self.check_writable()?;
         }
 
@@ -243,6 +270,19 @@ impl Session {
         if optimized_plan.explain {
             use crate::query::processor::explain_result;
             return Ok(explain_result(&optimized_plan));
+        }
+
+        // Fails once the database is closed, and holds commits off while an
+        // update outside a transaction runs (see `hold_for_rdf_update`).
+        let held = if mutates {
+            self.hold_for_rdf_update()?
+        } else {
+            None
+        };
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        if held.is_some() {
+            grafeo_common::testing::commit_hook::run_during_held_change();
         }
 
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
@@ -260,6 +300,8 @@ impl Session {
         // Without a transaction, the statement's WAL records form their own group.
         #[cfg(feature = "wal")]
         self.flush_wal_outside_transaction();
+        // The update and its WAL group are written: commits may go on.
+        drop(held);
 
         #[cfg(feature = "metrics")]
         {
@@ -300,10 +342,9 @@ impl Session {
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // A write needs a writable session: a writing role, and no read-only
-        // transaction or database (skip the tree walk when neither can fail).
-        if (!self.identity.can_admin() || *self.read_only_tx.lock())
-            && optimized_plan.root.has_mutations()
-        {
+        // transaction or database.
+        let mutates = optimized_plan.root.has_mutations();
+        if mutates && (!self.identity.can_admin() || *self.read_only_tx.lock()) {
             self.check_writable()?;
         }
 
@@ -311,6 +352,19 @@ impl Session {
         if optimized_plan.explain {
             use crate::query::processor::explain_result;
             return Ok(explain_result(&optimized_plan));
+        }
+
+        // Fails once the database is closed, and holds commits off while an
+        // update outside a transaction runs (see `hold_for_rdf_update`).
+        let held = if mutates {
+            self.hold_for_rdf_update()?
+        } else {
+            None
+        };
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        if held.is_some() {
+            grafeo_common::testing::commit_hook::run_during_held_change();
         }
 
         let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
@@ -328,6 +382,8 @@ impl Session {
         // Without a transaction, the statement's WAL records form their own group.
         #[cfg(feature = "wal")]
         self.flush_wal_outside_transaction();
+        // The update and its WAL group are written: commits may go on.
+        drop(held);
 
         #[cfg(feature = "metrics")]
         {

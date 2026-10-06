@@ -116,6 +116,15 @@ impl CheckpointTimer {
                 #[cfg(feature = "wal")]
                 wal,
             ) {
+                // After a commit that did not complete, no checkpoint can
+                // ever succeed (it would write the commit's stamped part):
+                // say so once and stop.
+                if sources.transaction_manager.has_incomplete_commit() {
+                    grafeo_common::grafeo_error!(
+                        "periodic checkpoints stop: {e}; the file keeps its last checkpoint"
+                    );
+                    break;
+                }
                 eprintln!("periodic checkpoint failed: {e}");
             }
         }
@@ -127,14 +136,9 @@ impl CheckpointTimer {
         sources: &CheckpointSources,
         #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::LpgWal>,
     ) -> Result<()> {
-        let sections = sources.sections();
-        let section_refs: Vec<&dyn grafeo_common::storage::Section> =
-            sections.iter().map(|s| s.as_ref()).collect();
-
         super::flush::flush(
             file_manager,
-            &section_refs,
-            &sources.context(),
+            sources,
             #[cfg(feature = "wal")]
             wal,
         )
@@ -188,7 +192,9 @@ mod tests {
     fn timer_stops_promptly() {
         let store = Arc::new(LpgStore::new().unwrap());
         let dir = tempfile::TempDir::new().unwrap();
-        let fm = Arc::new(GrafeoFileManager::create(dir.path().join("timer_test.grafeo")).unwrap());
+        let fm = Arc::new(
+            GrafeoFileManager::create(dir.path().join("timer_test.grafeo"), None).unwrap(),
+        );
 
         // Long interval
         let mut timer = start(Duration::from_mins(1), &fm, &store);
@@ -204,21 +210,36 @@ mod tests {
         );
     }
 
+    /// Waits until a checkpoint moved the file's header past `iteration`,
+    /// for up to ten seconds (a loaded machine may run the timer late).
+    fn wait_for_a_checkpoint(fm: &GrafeoFileManager, iteration: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while fm.active_header().iteration == iteration {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the timer never checkpointed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn timer_checkpoints_on_interval() {
         let store = Arc::new(LpgStore::new().unwrap());
         let dir = tempfile::TempDir::new().unwrap();
-        let fm =
-            Arc::new(GrafeoFileManager::create(dir.path().join("interval_test.grafeo")).unwrap());
+        let fm = Arc::new(
+            GrafeoFileManager::create(dir.path().join("interval_test.grafeo"), None).unwrap(),
+        );
 
         // Add some data so sections have content
         store.create_node(&["Test"]);
 
         // Short interval for testing
+        let created = fm.active_header().iteration;
         let mut timer = start(Duration::from_millis(200), &fm, &store);
 
-        // Wait for at least one checkpoint cycle (200ms interval + margin)
-        std::thread::sleep(Duration::from_millis(500));
+        // Wait for the first checkpoint, however loaded the machine is.
+        wait_for_a_checkpoint(&fm, created);
         timer.stop();
 
         // Verify that a checkpoint happened (iteration > 0)
@@ -235,12 +256,14 @@ mod tests {
     fn timer_runs_on_an_empty_database() {
         let store = Arc::new(LpgStore::new().unwrap());
         let dir = tempfile::TempDir::new().unwrap();
-        let fm = Arc::new(GrafeoFileManager::create(dir.path().join("clean_test.grafeo")).unwrap());
+        let fm = Arc::new(
+            GrafeoFileManager::create(dir.path().join("clean_test.grafeo"), None).unwrap(),
+        );
 
         let created = fm.active_header().iteration;
         let mut timer = start(Duration::from_millis(200), &fm, &store);
 
-        std::thread::sleep(Duration::from_millis(500));
+        wait_for_a_checkpoint(&fm, created);
         timer.stop();
 
         let header = fm.active_header();

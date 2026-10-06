@@ -143,11 +143,14 @@ pub fn articulation_points(store: &dyn GraphStore) -> FxHashSet<NodeId> {
 ///
 /// # Arguments
 ///
-/// * `store` - The graph store (treated as undirected)
+/// * `store` - The graph store, treated as simple and undirected: edge
+///   direction is ignored, parallel edges count as one and self-loops are
+///   ignored
 ///
 /// # Returns
 ///
-/// List of bridges as (source, target) pairs.
+/// List of bridges as (source, target) pairs, the smaller node id first, in
+/// node-id order.
 ///
 /// # Panics
 ///
@@ -155,7 +158,7 @@ pub fn articulation_points(store: &dyn GraphStore) -> FxHashSet<NodeId> {
 ///
 /// # Complexity
 ///
-/// O(V + E)
+/// O(V + E), the bridges put in node-id order by counting sort.
 pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
     let nodes = store.node_ids();
     let n = nodes.len();
@@ -164,24 +167,7 @@ pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
         return Vec::new();
     }
 
-    // Build node index mapping
-    let mut node_to_idx: FxHashMap<NodeId, usize> = FxHashMap::default();
-    let mut idx_to_node: Vec<NodeId> = Vec::with_capacity(n);
-    for (idx, &node) in nodes.iter().enumerate() {
-        node_to_idx.insert(node, idx);
-        idx_to_node.push(node);
-    }
-
-    // Build undirected adjacency list
-    let mut adj: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); n];
-    for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
-            if let Some(&j) = node_to_idx.get(&neighbor) {
-                adj[i].insert(j);
-                adj[j].insert(i);
-            }
-        }
-    }
+    let adj = simple_undirected_adjacency(store, &nodes);
 
     let mut visited = vec![false; n];
     let mut disc = vec![0usize; n];
@@ -195,6 +181,7 @@ pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
             continue;
         }
 
+        // (node, index of its next neighbour to visit)
         let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
 
         while let Some(&(u, idx)) = stack.last() {
@@ -205,10 +192,7 @@ pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
                 time += 1;
             }
 
-            let neighbors: Vec<usize> = adj[u].iter().copied().collect();
-
-            if idx < neighbors.len() {
-                let v = neighbors[idx];
+            if let Some(&v) = adj[u].get(idx) {
                 stack.last_mut().expect("DFS: stack non-empty").1 += 1;
 
                 if !visited[v] {
@@ -232,10 +216,77 @@ pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
         }
     }
 
+    // `node_ids` is in node-id order, so the index pairs in index order are
+    // the bridges in node-id order.
+    sort_index_pairs(&mut bridge_list, n);
     bridge_list
         .into_iter()
-        .map(|(i, j)| (idx_to_node[i], idx_to_node[j]))
+        .map(|(i, j)| (nodes[i], nodes[j]))
         .collect()
+}
+
+/// The simple undirected graph of `nodes` (in the order of `node_ids`) as
+/// adjacency lists of indices into `nodes`: edge direction is ignored, each
+/// neighbour is listed once however many edges join the two, and self-loops
+/// are left out. O(V + E).
+fn simple_undirected_adjacency(store: &dyn GraphStore, nodes: &[NodeId]) -> Vec<Vec<usize>> {
+    let n = nodes.len();
+    let node_to_idx: FxHashMap<NodeId, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, &node)| (node, i))
+        .collect();
+
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, &node) in nodes.iter().enumerate() {
+        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+            if let Some(&j) = node_to_idx.get(&neighbor)
+                && j != i
+            {
+                adj[i].push(j);
+                adj[j].push(i);
+            }
+        }
+    }
+    // Drop parallel edges in linear time: `last_seen[u]` is the last vertex
+    // whose list kept u, so a second u in the same list is a duplicate.
+    let mut last_seen = vec![usize::MAX; n];
+    for (v, neighbors) in adj.iter_mut().enumerate() {
+        neighbors.retain(|&u| {
+            let first = last_seen[u] != v;
+            last_seen[u] = v;
+            first
+        });
+    }
+    adj
+}
+
+/// Sorts pairs of indices below `n` by first, then second index, in
+/// O(n + pairs) with two stable counting-sort passes (least significant index
+/// first), where a comparison sort would take O(pairs log pairs).
+fn sort_index_pairs(pairs: &mut Vec<(usize, usize)>, n: usize) {
+    fn by_index(
+        pairs: &[(usize, usize)],
+        n: usize,
+        index: impl Fn(&(usize, usize)) -> usize,
+    ) -> Vec<(usize, usize)> {
+        let mut start = vec![0usize; n + 1];
+        for pair in pairs {
+            start[index(pair) + 1] += 1;
+        }
+        for i in 0..n {
+            start[i + 1] += start[i];
+        }
+        let mut sorted = vec![(0, 0); pairs.len()];
+        for pair in pairs {
+            let slot = &mut start[index(pair)];
+            sorted[*slot] = *pair;
+            *slot += 1;
+        }
+        sorted
+    }
+    let by_second = by_index(pairs, n, |&(_, second)| second);
+    *pairs = by_index(&by_second, n, |&(first, _)| first);
 }
 
 // ============================================================================
@@ -252,22 +303,30 @@ pub struct KCoreResult {
 }
 
 impl KCoreResult {
-    /// Returns nodes in the k-core (nodes with core number >= k).
+    /// Returns nodes in the k-core (nodes with core number >= k), in node-id
+    /// order.
     pub fn k_core(&self, k: usize) -> Vec<NodeId> {
-        self.core_numbers
+        let mut nodes: Vec<NodeId> = self
+            .core_numbers
             .iter()
             .filter(|&(_, core)| *core >= k)
             .map(|(&node, _)| node)
-            .collect()
+            .collect();
+        nodes.sort_unstable();
+        nodes
     }
 
-    /// Returns the k-shell (nodes with core number exactly k).
+    /// Returns the k-shell (nodes with core number exactly k), in node-id
+    /// order.
     pub fn k_shell(&self, k: usize) -> Vec<NodeId> {
-        self.core_numbers
+        let mut nodes: Vec<NodeId> = self
+            .core_numbers
             .iter()
             .filter(|&(_, core)| *core == k)
             .map(|(&node, _)| node)
-            .collect()
+            .collect();
+        nodes.sort_unstable();
+        nodes
     }
 }
 
@@ -276,112 +335,84 @@ impl KCoreResult {
 /// The k-core is the maximal subgraph where every vertex has degree at least k.
 /// The core number of a vertex is the largest k such that it belongs to the k-core.
 ///
+/// The graph is treated as simple and undirected: edge direction is ignored, parallel
+/// edges between two nodes count once, and self-loops are ignored. The decomposition is
+/// unique, so the result does not depend on node or edge order.
+///
 /// # Arguments
 ///
-/// * `store` - The graph store (treated as undirected)
+/// * `store` - The graph store
 ///
 /// # Returns
 ///
 /// Core numbers for all nodes and the maximum core number.
 ///
-/// # Panics
-///
-/// Panics if the internal degree-bucket state is inconsistent (internal invariant).
-///
 /// # Complexity
 ///
-/// O(V + E)
+/// O(V + E), the bin-sort peeling of Batagelj and Zaversnik.
 pub fn kcore_decomposition(store: &dyn GraphStore) -> KCoreResult {
     let nodes = store.node_ids();
     let n = nodes.len();
 
-    if n == 0 {
-        return KCoreResult {
-            core_numbers: FxHashMap::default(),
-            max_core: 0,
-        };
+    // Simple undirected adjacency: no self-loops, each neighbour once.
+    let adj = simple_undirected_adjacency(store, &nodes);
+
+    // `degree[v]` starts as the degree and ends as the core number of v.
+    let mut degree: Vec<usize> = adj.iter().map(Vec::len).collect();
+    let max_degree = degree.iter().copied().max().unwrap_or(0);
+
+    // Bin sort: `order` holds the vertices by current degree, `bin_start[d]` is where
+    // degree d starts in `order`, `position[v]` is where v sits in `order`.
+    let mut bin_start = vec![0usize; max_degree + 1];
+    for &d in &degree {
+        bin_start[d] += 1;
+    }
+    let mut start = 0;
+    for count in &mut bin_start {
+        let size = *count;
+        *count = start;
+        start += size;
+    }
+    let mut position = vec![0usize; n];
+    let mut order = vec![0usize; n];
+    let mut next_free = bin_start.clone();
+    for v in 0..n {
+        position[v] = next_free[degree[v]];
+        order[position[v]] = v;
+        next_free[degree[v]] += 1;
     }
 
-    // Build node index mapping
-    let mut node_to_idx: FxHashMap<NodeId, usize> = FxHashMap::default();
-    let mut idx_to_node: Vec<NodeId> = Vec::with_capacity(n);
-    for (idx, &node) in nodes.iter().enumerate() {
-        node_to_idx.insert(node, idx);
-        idx_to_node.push(node);
-    }
-
-    // Build undirected adjacency list and compute degrees
-    let mut adj: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); n];
-    for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
-            if let Some(&j) = node_to_idx.get(&neighbor) {
-                adj[i].insert(j);
-                adj[j].insert(i);
-            }
-        }
-    }
-
-    let mut degree: Vec<usize> = adj.iter().map(|neighbors| neighbors.len()).collect();
-    let mut core = vec![0usize; n];
-    let mut removed = vec![false; n];
-
-    // Find maximum degree for bucket initialization
-    let max_degree = *degree.iter().max().unwrap_or(&0);
-    if max_degree == 0 {
-        return KCoreResult {
-            core_numbers: nodes.iter().map(|&n| (n, 0)).collect(),
-            max_core: 0,
-        };
-    }
-
-    // Buckets for O(1) retrieval of minimum degree vertices
-    let mut buckets: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); max_degree + 1];
-    for (i, &d) in degree.iter().enumerate() {
-        buckets[d].insert(i);
-    }
-
-    let mut max_core_val = 0;
-
-    // Process vertices in order of increasing degree
-    for _ in 0..n {
-        // Find minimum degree bucket
-        let mut min_deg = 0;
-        while min_deg <= max_degree && buckets[min_deg].is_empty() {
-            min_deg += 1;
-        }
-
-        if min_deg > max_degree {
-            break;
-        }
-
-        // Pick a vertex from the minimum degree bucket
-        let v = *buckets[min_deg]
-            .iter()
-            .next()
-            .expect("k-core: bucket non-empty at min_deg");
-        buckets[min_deg].remove(&v);
-        removed[v] = true;
-        core[v] = min_deg;
-        max_core_val = max_core_val.max(min_deg);
-
-        // Update degrees of neighbors
+    // Peel vertices in order of current degree. Moving a neighbour u from degree d to
+    // d - 1 swaps it with the first vertex of bin d and shifts that bin's start by one.
+    for i in 0..n {
+        let v = order[i];
         for &u in &adj[v] {
-            if !removed[u] && degree[u] > 0 {
-                let old_deg = degree[u];
-                buckets[old_deg].remove(&u);
+            if degree[u] > degree[v] {
+                let du = degree[u];
+                let first = bin_start[du];
+                let w = order[first];
+                if u != w {
+                    order[position[u]] = w;
+                    position[w] = position[u];
+                    order[first] = u;
+                    position[u] = first;
+                }
+                bin_start[du] += 1;
                 degree[u] -= 1;
-                let new_deg = degree[u];
-                buckets[new_deg].insert(u);
             }
         }
     }
 
-    let core_numbers: FxHashMap<NodeId, usize> =
-        (0..n).map(|i| (idx_to_node[i], core[i])).collect();
+    let max_core = degree.iter().copied().max().unwrap_or(0);
+    let core_numbers: FxHashMap<NodeId, usize> = nodes
+        .iter()
+        .zip(&degree)
+        .map(|(&node, &core)| (node, core))
+        .collect();
 
     KCoreResult {
         core_numbers,
-        max_core: max_core_val,
+        max_core,
     }
 }
 
@@ -406,13 +437,17 @@ pub struct KTrussResult {
 }
 
 impl KTrussResult {
-    /// Returns edges in the k-truss (edges with truss number >= k).
+    /// Returns edges in the k-truss (edges with truss number >= k), in node-id
+    /// order.
     pub fn k_truss(&self, k: usize) -> Vec<(NodeId, NodeId)> {
-        self.truss_numbers
+        let mut edges: Vec<(NodeId, NodeId)> = self
+            .truss_numbers
             .iter()
             .filter(|&(_, &truss)| truss >= k)
             .map(|(&edge, _)| edge)
-            .collect()
+            .collect();
+        edges.sort_unstable();
+        edges
     }
 }
 
@@ -670,6 +705,7 @@ impl_algorithm! {
             result.add_row(vec![Value::Int64(node.0 as i64)]);
         }
 
+        result.sort_by_id_columns(1);
         Ok(result)
     }
 }
@@ -700,6 +736,7 @@ impl_algorithm! {
             result.add_row(vec![Value::Int64(src.0 as i64), Value::Int64(dst.0 as i64)]);
         }
 
+        result.sort_by_id_columns(2);
         Ok(result)
     }
 }
@@ -761,6 +798,7 @@ impl GraphAlgorithm for KCoreAlgorithm {
                 result.add_row(vec![Value::Int64(node.0 as i64), Value::Bool(true)]);
             }
 
+            result.sort_by_id_columns(1);
             Ok(result)
         } else {
             // Return full decomposition
@@ -778,6 +816,7 @@ impl GraphAlgorithm for KCoreAlgorithm {
                 ]);
             }
 
+            result.sort_by_id_columns(1);
             Ok(result)
         }
     }
@@ -840,6 +879,7 @@ impl GraphAlgorithm for KTrussAlgorithm {
                 result.add_row(vec![Value::Int64(src.0 as i64), Value::Int64(dst.0 as i64)]);
             }
 
+            result.sort_by_id_columns(2);
             Ok(result)
         } else {
             // Return full decomposition
@@ -857,6 +897,7 @@ impl GraphAlgorithm for KTrussAlgorithm {
                 ]);
             }
 
+            result.sort_by_id_columns(2);
             Ok(result)
         }
     }
@@ -990,14 +1031,14 @@ mod tests {
         let br = bridges(&store);
 
         // Diamond has no bridges (every edge is part of a cycle)
-        assert!(br.is_empty());
+        assert!(br.is_empty(), "{br:?}");
     }
 
     #[test]
     fn test_bridges_empty() {
         let store = LpgStore::new().unwrap();
         let br = bridges(&store);
-        assert!(br.is_empty());
+        assert!(br.is_empty(), "{br:?}");
     }
 
     #[test]
@@ -1005,11 +1046,10 @@ mod tests {
         let store = create_simple_path();
         let result = kcore_decomposition(&store);
 
-        // In a path using peeling algorithm, most nodes have core number 1
-        // At least some nodes should have core number >= 1
-        let max_core = result.core_numbers.values().copied().max().unwrap_or(0);
-        assert!(max_core >= 1);
-        assert_eq!(result.max_core, max_core);
+        // Every node of a path is in the 1-core and none is in the 2-core.
+        assert_eq!(result.core_numbers.len(), 4);
+        assert!(result.core_numbers.values().all(|&core| core == 1));
+        assert_eq!(result.max_core, 1);
     }
 
     #[test]
@@ -1028,10 +1068,9 @@ mod tests {
 
         let result = kcore_decomposition(&store);
 
-        // Triangle: max core should be at least 1 (nodes have degree 2)
-        assert!(result.max_core >= 1);
-        // All nodes should be decomposed
-        assert_eq!(result.core_numbers.len(), 3);
+        // Edges in both directions count once: every node of a triangle has core number 2.
+        assert_eq!(core_numbers_in_order(&result, &[n0, n1, n2]), vec![2, 2, 2]);
+        assert_eq!(result.max_core, 2);
     }
 
     #[test]
@@ -1082,6 +1121,132 @@ mod tests {
         // Total nodes in all shells should equal total nodes
         let total_in_shells: usize = (0..=result.max_core).map(|k| result.k_shell(k).len()).sum();
         assert_eq!(total_in_shells, 4);
+    }
+
+    /// Builds a store with `n` nodes and one directed edge per pair in `edges`.
+    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (LpgStore, Vec<NodeId>) {
+        let store = LpgStore::new().unwrap();
+        let nodes: Vec<NodeId> = (0..n).map(|_| store.create_node(&["Node"])).collect();
+        for &(u, v) in edges {
+            store.create_edge(nodes[u], nodes[v], "EDGE");
+        }
+        (store, nodes)
+    }
+
+    fn core_numbers_in_order(result: &KCoreResult, nodes: &[NodeId]) -> Vec<usize> {
+        nodes.iter().map(|node| result.core_numbers[node]).collect()
+    }
+
+    #[test]
+    fn test_kcore_core_numbers_on_small_shapes() {
+        // (node count, one directed edge per pair, expected core number per node)
+        let cases: [(usize, Vec<(usize, usize)>, Vec<usize>); 4] = [
+            (3, vec![(0, 1), (1, 2), (2, 0)], vec![2, 2, 2]),
+            (4, vec![(0, 1), (1, 2), (2, 0), (2, 3)], vec![2, 2, 2, 1]),
+            (4, vec![(0, 1), (0, 2), (0, 3)], vec![1, 1, 1, 1]),
+            (
+                4,
+                vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)],
+                vec![3, 3, 3, 3],
+            ),
+        ];
+        for (n, edges, expected) in cases {
+            let (store, nodes) = store_from_edges(n, &edges);
+            for _ in 0..3 {
+                let result = kcore_decomposition(&store);
+                assert_eq!(
+                    core_numbers_in_order(&result, &nodes),
+                    expected,
+                    "{edges:?}"
+                );
+                assert_eq!(
+                    result.max_core,
+                    *expected.iter().max().unwrap(),
+                    "{edges:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_kcore_ignores_self_loops_and_parallel_edges() {
+        // A triangle with a self-loop on node 0 and every edge doubled in both directions,
+        // plus a node whose only edge is a self-loop.
+        let edges = [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (0, 1),
+            (1, 2),
+            (2, 1),
+            (2, 0),
+            (0, 2),
+            (3, 3),
+        ];
+        let (store, nodes) = store_from_edges(4, &edges);
+        let result = kcore_decomposition(&store);
+        assert_eq!(core_numbers_in_order(&result, &nodes), vec![2, 2, 2, 0]);
+        assert_eq!(result.max_core, 2);
+    }
+
+    /// Core numbers by definition: the largest k for which the node survives repeatedly
+    /// removing every node with fewer than k neighbours (self-loops and parallel edges ignored).
+    fn reference_core_numbers(n: usize, edges: &[(usize, usize)]) -> Vec<usize> {
+        let mut adjacency: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); n];
+        for &(u, v) in edges {
+            if u != v {
+                adjacency[u].insert(v);
+                adjacency[v].insert(u);
+            }
+        }
+        let mut core = vec![0; n];
+        for k in 1..=n {
+            let mut alive = vec![true; n];
+            loop {
+                let doomed: Vec<usize> = (0..n)
+                    .filter(|&v| alive[v] && adjacency[v].iter().filter(|&&u| alive[u]).count() < k)
+                    .collect();
+                if doomed.is_empty() {
+                    break;
+                }
+                for v in doomed {
+                    alive[v] = false;
+                }
+            }
+            if !alive.contains(&true) {
+                break;
+            }
+            for v in (0..n).filter(|&v| alive[v]) {
+                core[v] = k;
+            }
+        }
+        core
+    }
+
+    #[test]
+    fn test_kcore_matches_reference_on_random_graphs() {
+        // xorshift64: a fixed seed keeps the graphs the same on every run.
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            usize::try_from(state % bound as u64).unwrap()
+        };
+        for case in 0..200 {
+            let n = 1 + next(40);
+            let edge_count = next(n * 4 + 1);
+            let edges: Vec<(usize, usize)> = (0..edge_count).map(|_| (next(n), next(n))).collect();
+            let (store, nodes) = store_from_edges(n, &edges);
+            let result = kcore_decomposition(&store);
+            let expected = reference_core_numbers(n, &edges);
+            assert_eq!(
+                core_numbers_in_order(&result, &nodes),
+                expected,
+                "case {case}: n={n} edges={edges:?}"
+            );
+            assert_eq!(result.max_core, expected.iter().copied().max().unwrap_or(0));
+        }
     }
 
     // ---- K-Truss tests ----
@@ -1173,7 +1338,7 @@ mod tests {
 
         let edges_5 = k_truss(&store, 5);
         // No edges should be in 5-truss for K_4
-        assert!(edges_5.is_empty());
+        assert!(edges_5.is_empty(), "{edges_5:?}");
     }
 
     #[test]
@@ -1381,10 +1546,110 @@ mod tests {
         let lpg = create_complete(4);
         let lpg_result = kcore_decomposition(&lpg);
 
-        assert_eq!(
-            rdf_result.max_core, lpg_result.max_core,
-            "RDF ({}) and LPG ({}) max_core must match for K_4",
-            rdf_result.max_core, lpg_result.max_core
+        // Every node of K_4 has core number 3, in both models.
+        assert_eq!(rdf_result.core_numbers.len(), 4);
+        assert!(rdf_result.core_numbers.values().all(|&core| core == 3));
+        assert!(lpg_result.core_numbers.values().all(|&core| core == 3));
+        assert_eq!(rdf_result.max_core, 3);
+        assert_eq!(lpg_result.max_core, 3);
+    }
+
+    /// The bridges of `store` by definition: the simple undirected edges whose
+    /// removal disconnects their two ends, in node-id order.
+    fn bridges_by_definition(store: &LpgStore) -> Vec<(NodeId, NodeId)> {
+        let mut edges: std::collections::BTreeSet<(NodeId, NodeId)> =
+            std::collections::BTreeSet::new();
+        for node in store.node_ids() {
+            for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+                if neighbor != node {
+                    edges.insert((node.min(neighbor), node.max(neighbor)));
+                }
+            }
+        }
+        let connected_without = |removed: (NodeId, NodeId)| {
+            let mut seen = std::collections::BTreeSet::from([removed.0]);
+            let mut stack = vec![removed.0];
+            while let Some(u) = stack.pop() {
+                for &(a, b) in &edges {
+                    if (a, b) == removed {
+                        continue;
+                    }
+                    let next = if a == u {
+                        b
+                    } else if b == u {
+                        a
+                    } else {
+                        continue;
+                    };
+                    if seen.insert(next) {
+                        stack.push(next);
+                    }
+                }
+            }
+            seen.contains(&removed.1)
+        };
+        edges
+            .iter()
+            .copied()
+            .filter(|&edge| !connected_without(edge))
+            .collect()
+    }
+
+    /// Bridges are the edges whose removal disconnects the graph, in node-id
+    /// order, on graphs with parallel edges (which count once), self-loops
+    /// and several components.
+    #[test]
+    fn bridges_match_the_definition_in_node_id_order() {
+        let mut state: u64 = 0x0003_0019_0088;
+        let mut next = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        for round in 0..19 {
+            let store = LpgStore::new().unwrap();
+            let nodes: Vec<NodeId> = (0..40).map(|_| store.create_node(&["Node"])).collect();
+            for _ in 0..(30 + round * 2) {
+                let a = nodes[usize::try_from(next(40)).unwrap()];
+                let b = nodes[usize::try_from(next(40)).unwrap()];
+                store.create_edge(a, b, "EDGE");
+                if next(19) == 0 {
+                    store.create_edge(b, a, "EDGE");
+                }
+            }
+            assert_eq!(
+                bridges(&store),
+                bridges_by_definition(&store),
+                "round {round}"
+            );
+        }
+    }
+
+    /// Bridges stay O(V + E) at a node of high degree: a star of 50,000
+    /// leaves (every edge a bridge) takes milliseconds. A search that copied a
+    /// node's neighbours at every step took O(degree squared) there.
+    #[test]
+    fn bridges_of_a_high_degree_star_take_milliseconds() {
+        let store = LpgStore::new().unwrap();
+        let hub = store.create_node(&["Node"]);
+        for leaf in 0..50_000 {
+            // With `tiered-storage` (on under the workspace's --all-features),
+            // the records of one epoch must fit its arena chunk.
+            if leaf % 1_000 == 0 {
+                store.new_epoch();
+            }
+            let leaf = store.create_node(&["Node"]);
+            store.create_edge(hub, leaf, "EDGE");
+        }
+        let started = std::time::Instant::now();
+        let found = bridges(&store);
+        let elapsed = started.elapsed();
+        assert_eq!(found.len(), 50_000);
+        assert!(found.windows(2).all(|w| w[0] < w[1]), "in node-id order");
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "bridges of a 50,000-leaf star took {elapsed:?}"
         );
     }
 }

@@ -26,6 +26,13 @@ extern "C" {
 
 /* ---- Status codes -------------------------------------------------------- */
 
+/* GRAFEO_ERROR_TRANSACTION covers errors a retry of the transaction can
+   fix (conflicts) and invalid transaction states. A write to a closed
+   database (GRAFEO-T007 in the message), and after a commit that did not
+   complete every later commit and every call that persists or copies the
+   store (GRAFEO-T008: reopen the database; transactions still begin and
+   reads still work), return GRAFEO_ERROR_DATABASE: no retry fixes them. */
+
 typedef enum {
     GRAFEO_OK                  = 0,
     GRAFEO_ERROR_DATABASE      = 1,
@@ -61,11 +68,21 @@ typedef struct GrafeoStream      GrafeoStream;
 const char* grafeo_last_error(void);
 void        grafeo_clear_error(void);
 
+/* Marks a function that a later release removes; compilers warn on its use. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define GRAFEO_DEPRECATED(message) __attribute__((deprecated(message)))
+#elif defined(_MSC_VER)
+#  define GRAFEO_DEPRECATED(message) __declspec(deprecated(message))
+#else
+#  define GRAFEO_DEPRECATED(message)
+#endif
+
 /* ---- Lifecycle ----------------------------------------------------------- */
 
 GrafeoDatabase* grafeo_open_memory(void);
 GrafeoDatabase* grafeo_open(const char* path);
 GrafeoDatabase* grafeo_open_read_only(const char* path);
+GRAFEO_DEPRECATED("same as grafeo_open since 0.6.0; removed in 0.7.0")
 GrafeoDatabase* grafeo_open_single_file(const char* path);
 GrafeoStatus    grafeo_close(GrafeoDatabase* db);
 void            grafeo_free_database(GrafeoDatabase* db);
@@ -172,6 +189,13 @@ GrafeoStatus grafeo_create_property_index(GrafeoDatabase* db, const char* proper
 int32_t      grafeo_drop_property_index(GrafeoDatabase* db, const char* property);
 int32_t      grafeo_has_property_index(GrafeoDatabase* db, const char* property);
 GrafeoStatus grafeo_find_nodes_by_property(GrafeoDatabase* db, const char* property, const char* value_json, uint64_t** out_ids, size_t* out_count);
+
+/* ---- Graph projections ---------------------------------------------------- */
+
+/* Return 1 (created / dropped), 0 (name taken / no such projection), -1 on error (grafeo_last_error). */
+int32_t      grafeo_create_projection(GrafeoDatabase* db, const char* name, const char* const* node_labels, size_t num_labels, const char* const* edge_types, size_t num_types);
+int32_t      grafeo_drop_projection(GrafeoDatabase* db, const char* name);
+char*        grafeo_list_projections(GrafeoDatabase* db);   /* JSON array of names, NULL on error; free with grafeo_free_string */
 void         grafeo_free_node_ids(uint64_t* ids, size_t count);
 
 /* ---- Vector operations --------------------------------------------------- */

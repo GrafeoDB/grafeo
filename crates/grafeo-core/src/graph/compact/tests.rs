@@ -378,7 +378,7 @@ fn test_nodes_by_label() {
 #[test]
 fn test_nodes_by_label_nonexistent() {
     let store = build_test_store();
-    assert!(store.nodes_by_label("Vehicle").is_empty());
+    assert!(store.nodes_by_label("Vehicle").is_empty(), "expected empty");
 }
 
 #[test]
@@ -538,7 +538,7 @@ fn test_find_nodes_by_properties_multi() {
         ("name", Value::String(ArcStr::from("Alix"))),
         ("age", Value::Int64(99)),
     ]);
-    assert!(no_match.is_empty());
+    assert!(no_match.is_empty(), "{no_match:?}");
 }
 
 #[test]
@@ -739,9 +739,13 @@ fn test_empty_store() {
     let store = CompactStoreBuilder::new().build().unwrap();
     assert_eq!(store.node_count(), 0);
     assert_eq!(store.edge_count(), 0);
-    assert!(store.node_ids().is_empty());
-    assert!(store.all_labels().is_empty());
-    assert!(store.all_edge_types().is_empty());
+    assert!(store.node_ids().is_empty(), "{:?}", store.node_ids());
+    assert!(store.all_labels().is_empty(), "{:?}", store.all_labels());
+    assert!(
+        store.all_edge_types().is_empty(),
+        "{:?}",
+        store.all_edge_types()
+    );
     assert!(store.get_node(NodeId::new(0)).is_none());
     assert!(store.get_edge(EdgeId::new(0)).is_none());
     assert_eq!(store.current_epoch(), EpochId(1));
@@ -810,7 +814,7 @@ fn test_edges_from_both_combines_directions() {
 fn test_find_nodes_by_property_no_match() {
     let store = build_test_store();
     let results = store.find_nodes_by_property("age", &Value::Int64(999));
-    assert!(results.is_empty());
+    assert!(results.is_empty(), "{results:?}");
 }
 
 #[test]
@@ -957,7 +961,7 @@ fn test_value_in_range_incomparable() {
         true,
         true,
     );
-    assert!(results.is_empty());
+    assert!(results.is_empty(), "{results:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,7 +1031,7 @@ fn test_find_nodes_by_property_zone_map_prunes() {
     // Search for age = 999, which is outside the zone map [25, 45].
     // The zone map should prune the Person table entirely.
     let results = store.find_nodes_by_property("age", &Value::Int64(999));
-    assert!(results.is_empty());
+    assert!(results.is_empty(), "{results:?}");
 }
 
 #[test]
@@ -1035,7 +1039,7 @@ fn test_find_nodes_by_property_nonexistent_property() {
     let store = build_test_store();
     // Property "color" doesn't exist: no zone map, no column, no results.
     let results = store.find_nodes_by_property("color", &Value::Int64(1));
-    assert!(results.is_empty());
+    assert!(results.is_empty(), "{results:?}");
 }
 
 #[test]
@@ -1049,7 +1053,7 @@ fn test_find_nodes_in_range_zone_map_prunes_min() {
         true,
         true,
     );
-    assert!(results.is_empty());
+    assert!(results.is_empty(), "{results:?}");
 }
 
 #[test]
@@ -1063,7 +1067,7 @@ fn test_find_nodes_in_range_zone_map_prunes_max() {
         true,
         true,
     );
-    assert!(results.is_empty());
+    assert!(results.is_empty(), "{results:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1126,7 +1130,7 @@ fn vincent_find_nodes_in_range_iter_whole_table_pruned() {
     let result: Vec<NodeId> = store
         .find_nodes_in_range_iter("age", Some(&min), Some(&max), true, true)
         .collect();
-    assert!(result.is_empty());
+    assert!(result.is_empty(), "{result:?}");
 }
 
 #[test]
@@ -1148,7 +1152,7 @@ fn mia_find_nodes_in_range_iter_missing_property_yields_nothing() {
     let result: Vec<NodeId> = store
         .find_nodes_in_range_iter("nonexistent", Some(&min), Some(&max), true, true)
         .collect();
-    assert!(result.is_empty());
+    assert!(result.is_empty(), "{result:?}");
 }
 
 #[test]
@@ -1301,9 +1305,9 @@ fn test_csr_neighbors_out_of_bounds() {
 
     let csr = CsrAdjacency::from_sorted_edges(2, &[(0, 1)]);
     assert_eq!(csr.neighbors(0), &[1]);
-    assert!(csr.neighbors(1).is_empty());
+    assert!(csr.neighbors(1).is_empty(), "expected empty");
     // Node 99 is out of bounds: should return empty.
-    assert!(csr.neighbors(99).is_empty());
+    assert!(csr.neighbors(99).is_empty(), "expected empty");
 }
 
 #[test]
@@ -1422,7 +1426,10 @@ fn test_from_graph_store_nodes_without_edges() {
     let ids = compact.nodes_by_label("Orphan");
     assert_eq!(ids.len(), 1);
     assert_eq!(compact.edge_count(), 0);
-    assert!(compact.edges_from(ids[0], Direction::Outgoing).is_empty());
+    assert!(
+        compact.edges_from(ids[0], Direction::Outgoing).is_empty(),
+        "expected empty"
+    );
 }
 
 /// Regression test for GrafeoDB/grafeo#221: `compact()` fails with
@@ -1822,5 +1829,5 @@ fn test_raw_i64_inline_and_mapped_find_eq_match() {
 
     let target = Value::Int64(7);
     assert_eq!(inline.find_eq(&target), mapped.find_eq(&target));
-    assert!(!inline.find_eq(&target).is_empty());
+    assert!(!inline.find_eq(&target).is_empty(), "expected non-empty");
 }

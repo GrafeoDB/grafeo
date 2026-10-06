@@ -35,7 +35,14 @@ impl super::GrafeoDB {
     ///
     /// After creating an index, calls to [`Self::find_nodes_by_property`] will be
     /// O(1) instead of O(n) for this property. The index is automatically
-    /// maintained when properties are set or removed.
+    /// maintained when properties are set or removed. Commits are held off
+    /// while it is built, as for `CREATE INDEX`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database-closed error after `close()` of a persistent
+    /// database, and the incomplete-commit error after a commit that did not
+    /// complete.
     ///
     /// # Example
     ///
@@ -44,20 +51,42 @@ impl super::GrafeoDB {
     /// # use grafeo_common::types::Value;
     /// # let db = GrafeoDB::new_in_memory();
     /// // Create an index on the 'email' property
-    /// db.create_property_index("email");
+    /// db.create_property_index("email")?;
     ///
     /// // Now lookups by email are O(1)
     /// let nodes = db.find_nodes_by_property("email", &Value::from("alix@example.com"));
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
-    pub fn create_property_index(&self, property: &str) {
+    pub fn create_property_index(&self, property: &str) -> Result<()> {
+        let _held = self.transaction_manager.hold_commits_for_change()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
         self.current_lpg_store().create_property_index(property);
+        Ok(())
     }
 
     /// Drops an index on a node property of the current graph.
     ///
     /// Returns `true` if the index existed and was removed.
-    pub fn drop_property_index(&self, property: &str) -> bool {
-        self.current_lpg_store().drop_property_index(property)
+    ///
+    /// # Errors
+    ///
+    /// As [`create_property_index`](Self::create_property_index).
+    pub fn drop_property_index(&self, property: &str) -> Result<bool> {
+        let _held = self.transaction_manager.hold_commits_for_change()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
+        Ok(self.current_lpg_store().drop_property_index(property))
+    }
+
+    /// Fails before an index is built when it could not be installed: after
+    /// `close()` of a persistent database, or after a commit that did not
+    /// complete. The install checks again, holding commits off.
+    fn check_index_change(&self) -> Result<()> {
+        self.transaction_manager.check_no_incomplete_commit()?;
+        self.transaction_manager.check_open()
     }
 
     /// Returns `true` if the property has an index in the current graph.
@@ -78,10 +107,11 @@ impl super::GrafeoDB {
     /// # use grafeo_common::types::Value;
     /// # let db = GrafeoDB::new_in_memory();
     /// // Create index for fast lookups (optional but recommended)
-    /// db.create_property_index("city");
+    /// db.create_property_index("city")?;
     ///
-    /// // Find all nodes where city = "NYC"
-    /// let nyc_nodes = db.find_nodes_by_property("city", &Value::from("NYC"));
+    /// // Find all nodes where city = "Amsterdam"
+    /// let in_amsterdam = db.find_nodes_by_property("city", &Value::from("Amsterdam"));
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     #[must_use]
     pub fn find_nodes_by_property(
@@ -91,11 +121,12 @@ impl super::GrafeoDB {
     ) -> Vec<grafeo_common::types::NodeId> {
         // The index also holds nodes created by transactions that have not
         // committed yet; return only what a reader at the current epoch sees.
+        let epoch = self.read_epoch();
         let Ok(store) = self.read_store(super::direct::DirectTarget::Current) else {
             return Vec::new();
         };
         let candidates = store.find_nodes_by_property(property, value);
-        store.filter_visible_node_ids(&candidates, store.current_epoch())
+        store.filter_visible_node_ids(&candidates, epoch)
     }
 
     // =========================================================================
@@ -119,10 +150,15 @@ impl super::GrafeoDB {
     /// * `quantization` - Quantization mode: `None` (default), `"scalar"`, `"binary"`, or `"product"`.
     ///   Quantized indexes use less memory at the cost of slightly lower recall.
     ///
+    /// The index is built without holding commits off, and installed (in
+    /// place of an index on the same label and property) holding them off.
+    ///
     /// # Errors
     ///
     /// Returns an error if the metric is invalid, no vectors are found, or
-    /// dimensions don't match.
+    /// dimensions don't match; the database-closed error after `close()` of a
+    /// persistent database, and the incomplete-commit error after a commit
+    /// that did not complete.
     #[allow(clippy::too_many_arguments)]
     pub fn create_vector_index(
         &self,
@@ -184,6 +220,7 @@ impl super::GrafeoDB {
         use grafeo_common::types::{PropertyKey, Value};
         use grafeo_core::index::vector::DistanceMetric;
 
+        self.check_index_change()?;
         let metric = match metric {
             Some(m) => DistanceMetric::from_str(m).ok_or_else(|| {
                 grafeo_common::utils::error::Error::Internal(format!(
@@ -242,6 +279,10 @@ impl super::GrafeoDB {
                         quantization_type,
                         0,
                     );
+                    let _held = self.transaction_manager.hold_commits_for_change()?;
+                    // Tests start a checkpoint or `close()` here, which must wait.
+                    #[cfg(feature = "testing-statement-injection")]
+                    grafeo_common::testing::commit_hook::run_during_held_change();
                     target.add_vector_index(label, property, Arc::new(index));
                 }
 
@@ -287,6 +328,10 @@ impl super::GrafeoDB {
                 }
             }
 
+            let _held = self.transaction_manager.hold_commits_for_change()?;
+            // Tests start a checkpoint or `close()` here, which must wait.
+            #[cfg(feature = "testing-statement-injection")]
+            grafeo_common::testing::commit_hook::run_during_held_change();
             target.add_vector_index(label, property, Arc::new(index));
         }
 
@@ -355,13 +400,45 @@ impl super::GrafeoDB {
     ///
     /// After dropping, [`vector_search`](Self::vector_search) for this
     /// label+property pair will return an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database-closed error after `close()` of a persistent
+    /// database, and the incomplete-commit error after a commit that did not
+    /// complete.
     #[cfg(feature = "vector-index")]
-    pub fn drop_vector_index(&self, label: &str, property: &str) -> bool {
+    pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool> {
+        let _held = self.transaction_manager.hold_commits_for_change()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
         let removed = self.lpg_store().remove_vector_index(label, property);
         if removed {
             grafeo_info!("Vector index dropped: :{label}({property})");
+            // A spilled column no index reads any more comes back from its
+            // cache file: nothing else would reload it (#594).
+            #[cfg(all(feature = "vector-index", not(feature = "temporal")))]
+            self.reload_unindexed_column(property);
         }
-        removed
+        Ok(removed)
+    }
+
+    /// Reloads the spilled column `property` when no vector index uses it any
+    /// more. A column that cannot be read stays spilled (and readable).
+    #[cfg(all(feature = "vector-index", not(feature = "temporal")))]
+    fn reload_unindexed_column(&self, property: &str) {
+        let store = self.lpg_store();
+        let still_indexed = store.vector_index_entries().iter().any(|(key, _)| {
+            key.split_once(':')
+                .is_some_and(|(_, indexed)| indexed == property)
+        });
+        if still_indexed {
+            return;
+        }
+        let key = grafeo_common::types::PropertyKey::new(property);
+        if let Err(error) = store.reload_node_property_column(&key) {
+            grafeo_common::grafeo_warn!("the column {property} stays spilled: {error}");
+        }
     }
 
     /// Drops and recreates a vector index, rescanning all matching nodes.
@@ -382,12 +459,14 @@ impl super::GrafeoDB {
     /// When the index still exists, the previous configuration (dimensions,
     /// metric, M, ef\_construction) is preserved. When it has already been
     /// dropped, dimensions are inferred from existing data and default
-    /// parameters are used.
+    /// parameters are used. The new index replaces the old one once it is
+    /// built; a rebuild that fails leaves the old one.
     ///
     /// # Errors
     ///
     /// Returns an error if the rebuild fails (e.g., no matching vectors found
-    /// and no dimensions can be inferred).
+    /// and no dimensions can be inferred), and the errors of
+    /// [`create_vector_index`](Self::create_vector_index).
     #[cfg(feature = "vector-index")]
     pub fn rebuild_vector_index(&self, label: &str, property: &str) -> Result<()> {
         // Preserve config and quantization type from existing index if available
@@ -400,8 +479,7 @@ impl super::GrafeoDB {
             (None, None)
         };
 
-        self.lpg_store().remove_vector_index(label, property);
-
+        // The new index replaces the old one when it is installed.
         if let Some(config) = config {
             self.create_vector_index(
                 label,
@@ -429,9 +507,15 @@ impl super::GrafeoDB {
     /// or deleted. Use [`rebuild_text_index`](Self::rebuild_text_index) only
     /// if the index was created before existing data was loaded.
     ///
+    /// The index is built without holding commits off, and installed (in
+    /// place of an index on the same label and property) holding them off.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the label has no nodes or the property contains no text values.
+    /// Returns an error if the label has no nodes or the property contains no
+    /// text values; the database-closed error after `close()` of a persistent
+    /// database, and the incomplete-commit error after a commit that did not
+    /// complete.
     #[cfg(feature = "text-index")]
     pub fn create_text_index(&self, label: &str, property: &str) -> Result<()> {
         self.create_text_index_in(None, label, property)
@@ -449,6 +533,7 @@ impl super::GrafeoDB {
         use grafeo_common::types::{PropertyKey, Value};
         use grafeo_core::index::text::{BM25Config, InvertedIndex};
 
+        self.check_index_change()?;
         let mut index = InvertedIndex::new(BM25Config::default());
         let prop_key = PropertyKey::new(property);
 
@@ -461,6 +546,10 @@ impl super::GrafeoDB {
             }
         }
 
+        let _held = self.transaction_manager.hold_commits_for_change()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
         target.add_text_index(label, property, Arc::new(RwLock::new(index)));
         Ok(())
     }
@@ -468,21 +557,31 @@ impl super::GrafeoDB {
     /// Drops a text index on a label+property pair.
     ///
     /// Returns `true` if the index existed and was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database-closed error after `close()` of a persistent
+    /// database, and the incomplete-commit error after a commit that did not
+    /// complete.
     #[cfg(feature = "text-index")]
-    pub fn drop_text_index(&self, label: &str, property: &str) -> bool {
-        self.lpg_store().remove_text_index(label, property)
+    pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool> {
+        let _held = self.transaction_manager.hold_commits_for_change()?;
+        // Tests start a checkpoint or `close()` here, which must wait.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
+        Ok(self.lpg_store().remove_text_index(label, property))
     }
 
-    /// Rebuilds a text index by re-scanning all matching nodes.
+    /// Rebuilds a text index by re-scanning all matching nodes: the new index
+    /// replaces the old one once it is built.
     ///
     /// Use after bulk property updates to keep the index current.
     ///
     /// # Errors
     ///
-    /// Returns an error if no text index exists for this label+property.
+    /// The errors of [`create_text_index`](Self::create_text_index).
     #[cfg(feature = "text-index")]
     pub fn rebuild_text_index(&self, label: &str, property: &str) -> Result<()> {
-        self.lpg_store().remove_text_index(label, property);
         self.create_text_index(label, property)
     }
 }

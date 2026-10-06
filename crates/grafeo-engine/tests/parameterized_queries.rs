@@ -163,7 +163,7 @@ fn parameterized_writes_are_tracked_per_graph() {
 #[test]
 fn a_cached_plan_does_not_keep_the_values() {
     let db = GrafeoDB::new_in_memory();
-    db.create_property_index("id");
+    db.create_property_index("id").unwrap();
     db.execute("UNWIND range(0, 9) AS i INSERT (:Doc {id: 'd' + toString(i), n: i})")
         .unwrap();
     let query = "MATCH (n:Doc {id: $id}) RETURN n.n";
@@ -277,6 +277,67 @@ fn dotted_access_reads_a_map_parameter() {
             .execute_cypher_with_params("RETURN $meta.route.to AS to", params(&[("meta", meta)]))
             .unwrap();
         assert_eq!(result.rows(), [[Value::from("Prague")]]);
+    }
+}
+
+/// A list, map or bytes parameter returned as it is comes back as given
+/// (#574): it came back as `''`. Directly, through WITH, through UNWIND,
+/// nested, and in Cypher.
+#[test]
+fn list_and_map_parameters_are_returned_as_given() {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use grafeo_common::types::PropertyKey;
+
+    let list = Value::List(vec![Value::Int64(1), Value::Int64(2)].into());
+    let map = Value::Map(Arc::new(BTreeMap::from([
+        (PropertyKey::new("city"), Value::from("Amsterdam")),
+        (PropertyKey::new("tags"), list.clone()),
+    ])));
+    let rows = Value::List(vec![map.clone(), map.clone()].into());
+    let bytes = Value::Bytes(vec![0x47, 0x00, 0xff].into());
+
+    let db = GrafeoDB::new_in_memory();
+    for (query, value, expected) in [
+        ("RETURN $x AS v", &list, vec![list.clone()]),
+        ("RETURN $x AS v", &map, vec![map.clone()]),
+        ("RETURN $x AS v", &bytes, vec![bytes.clone()]),
+        (
+            "UNWIND [0] AS i WITH $x AS w RETURN w AS v",
+            &list,
+            vec![list.clone()],
+        ),
+        (
+            "UNWIND [0] AS i WITH $x AS w RETURN w AS v",
+            &map,
+            vec![map.clone()],
+        ),
+        (
+            "UNWIND $x AS v RETURN v",
+            &rows,
+            vec![map.clone(), map.clone()],
+        ),
+        (
+            "RETURN [$x] AS v",
+            &map,
+            vec![Value::List(vec![map.clone()].into())],
+        ),
+    ] {
+        let result = db
+            .execute_with_params(query, params(&[("x", value.clone())]))
+            .unwrap();
+        let got: Vec<Value> = result.rows().iter().map(|row| row[0].clone()).collect();
+        assert_eq!(got, expected, "{query} with {value:?}");
+        #[cfg(feature = "cypher")]
+        {
+            let result = db
+                .session()
+                .execute_cypher_with_params(query, params(&[("x", value.clone())]))
+                .unwrap();
+            let got: Vec<Value> = result.rows().iter().map(|row| row[0].clone()).collect();
+            assert_eq!(got, expected, "Cypher: {query} with {value:?}");
+        }
     }
 }
 

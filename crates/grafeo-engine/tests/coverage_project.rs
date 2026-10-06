@@ -116,7 +116,7 @@ fn return_star_expands_all_user_columns() {
         .unwrap();
     assert_eq!(result.rows().len(), 1);
     // `n` should be the single expanded column.
-    assert!(!result.columns.is_empty());
+    assert!(!result.columns.is_empty(), "result.columns is empty");
     assert!(
         result
             .columns
@@ -145,7 +145,7 @@ fn return_star_skips_internal_underscore_columns() {
             "internal column leaked into RETURN *: {col}"
         );
     }
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
 }
 
 // ============================================================================
@@ -177,7 +177,7 @@ fn return_length_of_path_variable() {
              RETURN length(p) AS len ORDER BY len",
         )
         .unwrap();
-    assert!(!result.rows().is_empty());
+    assert!(!result.rows().is_empty(), "result.rows() is empty");
     let lengths: Vec<i64> = result
         .rows()
         .iter()

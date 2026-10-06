@@ -1,6 +1,6 @@
 //! Persistence, snapshots, and data export for GrafeoDB.
 
-#[cfg(feature = "wal")]
+#[cfg(any(feature = "wal", feature = "grafeo-file"))]
 use std::path::Path;
 
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
@@ -10,9 +10,6 @@ use grafeo_common::utils::error::{Error, Result};
 use hashbrown::HashSet;
 
 use crate::config::Config;
-
-#[cfg(feature = "wal")]
-use grafeo_storage::wal::WalRecord;
 
 use crate::catalog::{
     EdgeTypeDefinition, GraphTypeDefinition, NodeTypeDefinition, ProcedureDefinition,
@@ -119,38 +116,48 @@ struct SnapshotEdge {
 ///
 /// With `temporal`: stores full property version history.
 /// Without: wraps each current value as a single-entry version list at epoch 0.
-fn collect_snapshot_nodes(store: &grafeo_core::graph::lpg::LpgStore) -> Vec<SnapshotNode> {
-    let mut nodes: Vec<SnapshotNode> = store
-        .all_nodes()
-        .map(|n| {
-            #[cfg(feature = "temporal")]
-            let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = store
-                .node_property_history(n.id)
-                .into_iter()
-                .map(|(k, entries)| (k.to_string(), entries))
-                .collect();
+/// The nodes of `store` as a snapshot holds them, read one at a time. A node
+/// record or a spilled property value that cannot be read fails the export
+/// instead of leaving the copy without it.
+fn collect_snapshot_nodes(store: &grafeo_core::graph::lpg::LpgStore) -> Result<Vec<SnapshotNode>> {
+    // With `temporal` the snapshot holds each property's history, read
+    // below: the current values are not read.
+    #[cfg(feature = "temporal")]
+    let source = store
+        .try_nodes_without_properties()?
+        .map(Ok::<_, grafeo_common::utils::error::Error>);
+    #[cfg(not(feature = "temporal"))]
+    let source = store.try_nodes()?;
+    let mut nodes: Vec<SnapshotNode> = Vec::new();
+    for n in source {
+        let n = n?;
+        #[cfg(feature = "temporal")]
+        let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = store
+            .node_property_history(n.id)
+            .into_iter()
+            .map(|(k, entries)| (k.to_string(), entries))
+            .collect();
 
-            #[cfg(not(feature = "temporal"))]
-            let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = n
-                .properties
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), vec![(EpochId::new(0), v)]))
-                .collect();
+        #[cfg(not(feature = "temporal"))]
+        let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = n
+            .properties
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), vec![(EpochId::new(0), v)]))
+            .collect();
 
-            properties.sort_by(|(a, _), (b, _)| a.cmp(b));
+        properties.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-            let mut labels: Vec<String> = n.labels.iter().map(|l| l.to_string()).collect();
-            labels.sort();
+        let mut labels: Vec<String> = n.labels.iter().map(|l| l.to_string()).collect();
+        labels.sort();
 
-            SnapshotNode {
-                id: n.id,
-                labels,
-                properties,
-            }
-        })
-        .collect();
+        nodes.push(SnapshotNode {
+            id: n.id,
+            labels,
+            properties,
+        });
+    }
     nodes.sort_by_key(|n| n.id);
-    nodes
+    Ok(nodes)
 }
 
 /// Collects all edges from a store into snapshot format.
@@ -391,7 +398,19 @@ fn copy_graph_data(
     source: &grafeo_core::graph::lpg::LpgStore,
     target: &grafeo_core::graph::lpg::LpgStore,
 ) -> Result<()> {
-    for node in source.all_nodes() {
+    // A node record or a spilled value that cannot be read fails the copy
+    // instead of leaving it out. The nodes are read one at a time, each just
+    // before it is written, so the copy never holds them all. With
+    // `temporal` each property's history is copied: the current values are
+    // not read.
+    #[cfg(feature = "temporal")]
+    let nodes = source
+        .try_nodes_without_properties()?
+        .map(Ok::<_, grafeo_common::utils::error::Error>);
+    #[cfg(not(feature = "temporal"))]
+    let nodes = source.try_nodes()?;
+    for node in nodes {
+        let node = node?;
         let labels: Vec<&str> = node.labels.iter().map(|label| &**label).collect();
         target.create_node_with_id(node.id, &labels)?;
         #[cfg(feature = "temporal")]
@@ -569,211 +588,101 @@ impl super::GrafeoDB {
     // ADMIN API: Persistence Control
     // =========================================================================
 
-    /// Saves the database to a file path.
+    /// Saves a copy of the database to a new single file at `path`, whatever
+    /// its extension (`.grafeo`, `.db` or none): a database of its own, with
+    /// every graph, the schema and the indexes, and no sidecar WAL. Works the
+    /// same for an in-memory and a persistent database; the original stays
+    /// as it is.
     ///
-    /// - If the path ends in `.grafeo`: creates a single-file database
-    /// - Otherwise: creates a WAL directory-backed database at the path
-    /// - If in-memory: creates a new persistent database at path
-    /// - If file-backed: creates a copy at the new path
-    ///
-    /// The original database remains unchanged.
+    /// The copy of an encrypted database (`Config::encryption`) is encrypted
+    /// with the same key chain: it has a new database id and so its own
+    /// keys.
     ///
     /// # Errors
     ///
-    /// Returns an error if the save operation fails.
+    /// Returns an error if `path` already exists, if the file cannot be
+    /// written, after a commit that did not complete (see
+    /// [`TransactionManager`](crate::transaction::TransactionManager)), and
+    /// the database-closed error after `close()` of a persistent database.
     ///
     /// Requires the `wal` feature for persistence support.
     #[cfg(feature = "wal")]
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-
-        // Single-file format: export snapshot directly to a .grafeo file
-        #[cfg(feature = "grafeo-file")]
-        if path.extension().is_some_and(|ext| ext == "grafeo") {
-            return self.save_as_grafeo_file(path);
-        }
-
-        // Create target database with WAL enabled
-        let target_config = Config::persistent(path);
-        let target = Self::with_config(target_config)?;
-
-        // Copy all nodes using WAL-enabled methods
-        for node in self.lpg_store().all_nodes() {
-            let label_refs: Vec<&str> = node.labels.iter().map(|s| &**s).collect();
-            target
-                .lpg_store()
-                .create_node_with_id(node.id, &label_refs)?;
-
-            // Log to WAL
-            target.log_wal(&WalRecord::CreateNode {
-                id: node.id,
-                labels: node.labels.iter().map(|s| s.to_string()).collect(),
-            })?;
-
-            // Copy properties
-            for (key, value) in node.properties {
-                target
-                    .lpg_store()
-                    .set_node_property(node.id, key.as_str(), value.clone());
-                target.log_wal(&WalRecord::SetNodeProperty {
-                    id: node.id,
-                    key: key.to_string(),
-                    value,
-                })?;
-            }
-        }
-
-        // Copy all edges using WAL-enabled methods
-        for edge in self.lpg_store().all_edges() {
-            target
-                .lpg_store()
-                .create_edge_with_id(edge.id, edge.src, edge.dst, &edge.edge_type)?;
-
-            // Log to WAL
-            target.log_wal(&WalRecord::CreateEdge {
-                id: edge.id,
-                src: edge.src,
-                dst: edge.dst,
-                edge_type: edge.edge_type.to_string(),
-            })?;
-
-            // Copy properties
-            for (key, value) in edge.properties {
-                target
-                    .lpg_store()
-                    .set_edge_property(edge.id, key.as_str(), value.clone());
-                target.log_wal(&WalRecord::SetEdgeProperty {
-                    id: edge.id,
-                    key: key.to_string(),
-                    value,
-                })?;
-            }
-        }
-
-        // Copy named graphs
-        for graph_name in self.lpg_store().graph_names() {
-            if let Some(src_graph) = self.lpg_store().graph(&graph_name) {
-                target.log_wal(&WalRecord::CreateNamedGraph {
-                    name: graph_name.clone(),
-                })?;
-                target
-                    .lpg_store()
-                    .create_graph(&graph_name)
-                    .map_err(|e| Error::Internal(e.to_string()))?;
-
-                if let Some(dst_graph) = target.lpg_store().graph(&graph_name) {
-                    // Switch WAL context to this named graph
-                    target.log_wal(&WalRecord::SwitchGraph {
-                        name: Some(graph_name.clone()),
-                    })?;
-
-                    for node in src_graph.all_nodes() {
-                        let label_refs: Vec<&str> = node.labels.iter().map(|s| &**s).collect();
-                        dst_graph.create_node_with_id(node.id, &label_refs)?;
-                        target.log_wal(&WalRecord::CreateNode {
-                            id: node.id,
-                            labels: node.labels.iter().map(|s| s.to_string()).collect(),
-                        })?;
-                        for (key, value) in node.properties {
-                            dst_graph.set_node_property(node.id, key.as_str(), value.clone());
-                            target.log_wal(&WalRecord::SetNodeProperty {
-                                id: node.id,
-                                key: key.to_string(),
-                                value,
-                            })?;
-                        }
-                    }
-                    for edge in src_graph.all_edges() {
-                        dst_graph.create_edge_with_id(
-                            edge.id,
-                            edge.src,
-                            edge.dst,
-                            &edge.edge_type,
-                        )?;
-                        target.log_wal(&WalRecord::CreateEdge {
-                            id: edge.id,
-                            src: edge.src,
-                            dst: edge.dst,
-                            edge_type: edge.edge_type.to_string(),
-                        })?;
-                        for (key, value) in edge.properties {
-                            dst_graph.set_edge_property(edge.id, key.as_str(), value.clone());
-                            target.log_wal(&WalRecord::SetEdgeProperty {
-                                id: edge.id,
-                                key: key.to_string(),
-                                value,
-                            })?;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Switch WAL context back to default graph
-        if !self.lpg_store().graph_names().is_empty() {
-            target.log_wal(&WalRecord::SwitchGraph { name: None })?;
-        }
-
-        // Copy RDF data with WAL logging
-        #[cfg(feature = "triple-store")]
-        {
-            for triple in self.rdf_store.triples() {
-                let record = WalRecord::InsertRdfTriple {
-                    subject: triple.subject().to_string(),
-                    predicate: triple.predicate().to_string(),
-                    object: triple.object().to_string(),
-                    graph: None,
-                };
-                target.rdf_store.insert((*triple).clone());
-                target.log_wal(&record)?;
-            }
-            for name in self.rdf_store.graph_names() {
-                target.log_wal(&WalRecord::CreateRdfGraph { name: name.clone() })?;
-                if let Some(src_graph) = self.rdf_store.graph(&name) {
-                    let dst_graph = target.rdf_store.graph_or_create(&name);
-                    for triple in src_graph.triples() {
-                        let record = WalRecord::InsertRdfTriple {
-                            subject: triple.subject().to_string(),
-                            predicate: triple.predicate().to_string(),
-                            object: triple.object().to_string(),
-                            graph: Some(name.clone()),
-                        };
-                        dst_graph.insert((*triple).clone());
-                        target.log_wal(&record)?;
-                    }
-                }
-            }
-        }
-
-        // Checkpoint and close the target database
-        target.close()?;
-
-        Ok(())
+        // `close()` waits for the save, and none runs after it.
+        let _open = self.hold_open()?;
+        // The spelling every open uses (see `normalize_path`): `copy/` names
+        // the file `copy`, as an open of `copy/` does.
+        let path = super::normalize_path(path.as_ref())?;
+        self.write_image(&path)
     }
 
-    /// Saves the database to a single `.grafeo` file (see [`save`](Self::save)).
-    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-    fn save_as_grafeo_file(&self, path: &Path) -> Result<()> {
+    /// Writes the database's complete state to a new `.grafeo` file at
+    /// `path` (see [`write_image_with`](Self::write_image_with)), encrypted
+    /// when this database is.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`write_image_with`](Self::write_image_with).
+    #[cfg(feature = "wal")]
+    pub(crate) fn write_image(&self, path: &Path) -> Result<()> {
+        self.write_image_with(
+            path,
+            &super::encryption::DatabaseKeys::from_config(&self.config),
+        )
+    }
+
+    /// Writes the database's complete state to a new `.grafeo` file at
+    /// `path`: every checkpoint section, as one image, with the header
+    /// values of a checkpoint. The file has no sidecar WAL; it holds
+    /// everything.
+    ///
+    /// The file is a database of its own, with a new database id, encrypted
+    /// with the keys `keys` derive for that id (not encrypted when `keys`
+    /// has no key chain).
+    ///
+    /// If writing the image fails, the new file is removed again: it would
+    /// open as an empty database, and a retry would find `path` taken.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `path` already exists, or a section fails to
+    /// serialize, or the file cannot be written.
+    #[cfg(feature = "grafeo-file")]
+    pub(crate) fn write_image_with(
+        &self,
+        path: &Path,
+        keys: &super::encryption::DatabaseKeys,
+    ) -> Result<()> {
         use grafeo_storage::file::GrafeoFileManager;
+        use grafeo_storage::file::v3::header::new_database_id;
 
-        let snapshot_data = self.export_snapshot()?;
-        let epoch = self.lpg_store().current_epoch();
-        let transaction_id = self
-            .transaction_manager
-            .last_assigned_transaction_id()
-            .map_or(0, |t| t.0);
-        let node_count = self.lpg_store().node_count() as u64;
-        let edge_count = self.lpg_store().edge_count() as u64;
-
-        let fm = GrafeoFileManager::create(path)?;
-        fm.write_snapshot(
-            &snapshot_data,
-            epoch.0,
-            transaction_id,
-            node_count,
-            edge_count,
+        // Commits held off until the image is written: it holds every commit
+        // whole, and none that did not complete.
+        let commits = self.transaction_manager.hold_commits()?;
+        let sources = self.checkpoint_sources();
+        let sections = sources.sections(&commits);
+        let section_refs: Vec<&dyn grafeo_common::storage::Section> =
+            sections.iter().map(AsRef::as_ref).collect();
+        let database_id = new_database_id();
+        let fm = GrafeoFileManager::create_with_id(
+            path,
+            database_id,
+            keys.container_cipher(database_id),
         )?;
-        Ok(())
+        let written = fm.write_checkpoint(&section_refs, &sources.context().checkpoint_header());
+        drop(commits);
+        let written = written.and_then(|()| fm.close());
+        if written.is_err() {
+            drop(fm);
+            // Best effort: the error that matters is the one returned.
+            if let Err(error) = std::fs::remove_file(path) {
+                grafeo_common::grafeo_warn!(
+                    "cannot remove the incomplete image {}: {error}",
+                    path.display()
+                );
+            }
+        }
+        written
     }
 
     /// Creates an in-memory copy of this database.
@@ -789,31 +698,21 @@ impl super::GrafeoDB {
     /// - Testing modifications without affecting the original
     /// - Faster operations when persistence isn't needed
     ///
+    /// The copy of an encrypted database has no key (an in-memory database
+    /// cannot carry `Config::encryption`), so a copy saved from it with
+    /// [`save`](Self::save) is not encrypted. For an encrypted copy, call
+    /// `save` on the encrypted database itself.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the copy operation fails.
+    /// Returns an error if the copy operation fails, or after a commit that
+    /// did not complete.
     pub fn to_memory(&self) -> Result<Self> {
-        use grafeo_common::storage::SectionType;
-
         let mut target = Self::with_config(Config::in_memory())?;
-        let mut sections: Vec<(SectionType, Option<Vec<u8>>)> = Vec::new();
-        for section in self.checkpoint_sources().sections() {
-            // The LPG section holds the store's nodes and edges (the overlay's,
-            // after `compact()`): copy them instead, in the section's place.
-            if section.section_type() == SectionType::LpgStore {
-                copy_graph_data(self.lpg_store(), target.lpg_store())?;
-            } else {
-                sections.push((section.section_type(), Some(section.serialize()?)));
-            }
-        }
-
+        // Each section is served once and freed as soon as it is loaded.
+        let image = grafeo_common::storage::ServedOnce::new(self.copy_into(&target)?);
         let loaded = super::sections::load_sections(
-            &mut |section_type| {
-                Ok(sections
-                    .iter_mut()
-                    .find(|(stored, _)| *stored == section_type)
-                    .and_then(|(_, data)| data.take()))
-            },
+            &image,
             target.lpg_store(),
             &target.catalog,
             #[cfg(feature = "triple-store")]
@@ -827,17 +726,79 @@ impl super::GrafeoDB {
         Ok(target)
     }
 
+    /// Copies this database's nodes and edges into `target`, and returns an
+    /// image of every other section of a checkpoint, for
+    /// [`to_memory`](Self::to_memory) to load.
+    ///
+    /// Both are taken under one commit hold, so they hold the same commits:
+    /// every commit whole, and none that did not complete. The LPG section
+    /// (the overlay's, after `compact()`) is left out of the image: its nodes
+    /// and edges are copied from store to store instead, which is much
+    /// faster than encoding them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if commits cannot be held, a section fails to write,
+    /// or the nodes and edges cannot be copied.
+    pub(super) fn copy_into(&self, target: &Self) -> Result<grafeo_common::storage::MemoryImage> {
+        use grafeo_common::storage::{MemoryImage, SectionType};
+
+        let mut image = MemoryImage::new();
+        let commits = self.transaction_manager.hold_commits()?;
+        for section in self.checkpoint_sources().sections(&commits) {
+            if section.section_type() == SectionType::LpgStore {
+                copy_graph_data(self.lpg_store(), target.lpg_store())?;
+            } else {
+                image.begin_section(section.section_type(), section.version())?;
+                section.write_to(&mut image)?;
+            }
+        }
+        Ok(image)
+    }
+
     /// Opens a database file and loads it entirely into memory.
     ///
     /// The returned database has no connection to the original file.
     /// Changes will NOT be written back to the file.
+    ///
+    /// This takes no key, so an encrypted database fails to open here: open
+    /// it with its key ([`with_config`](Self::with_config)) and call
+    /// [`to_memory`](Self::to_memory).
+    ///
+    /// An existing database is read as [`open_read_only`](Self::open_read_only)
+    /// reads it, and nothing on disk changes: a 0.6 file under a shared lock
+    /// (other readers may hold it too) with its sidecar WAL replayed, and no
+    /// checkpoint or WAL removal when it is closed; a database written by 0.5.x
+    /// (a `.grafeo` file or a WAL directory) with its WAL replayed, and not
+    /// migrated. A path whose migration was cut off fails as a read-only open
+    /// does. At a missing path a new, empty database file is created, as
+    /// [`open`](Self::open) creates one.
     ///
     /// # Errors
     ///
     /// Returns an error if the file can't be opened or loaded.
     #[cfg(feature = "wal")]
     pub fn open_in_memory(path: impl AsRef<Path>) -> Result<Self> {
-        // Open the source database (triggers WAL recovery)
+        use grafeo_storage::file::detect::{OnDisk, detect};
+
+        // The spelling every open uses (see `normalize_path`).
+        let path = &super::normalize_path(path.as_ref())?;
+        match detect(path)? {
+            // A missing file next to a cut-off migration or a kept copy
+            // fails as a read-only open does, before anything is created.
+            OnDisk::Missing => super::migration::check_read_only(path)?,
+            // Read as a read-only open reads it: a read-write open would take
+            // the exclusive lock, checkpoint the file and remove its WAL when
+            // it closes, and migrate a 0.5.x database.
+            _ => {
+                let source = Self::with_config(Config::read_only(path))?;
+                let target = source.to_memory()?;
+                source.close()?;
+                return Ok(target);
+            }
+        }
+
+        // A missing path becomes a new, empty database, as `open` creates.
         let source = Self::open(path)?;
 
         // Create in-memory copy
@@ -859,32 +820,37 @@ impl super::GrafeoDB {
     /// restored with [`import_snapshot()`](Self::import_snapshot).
     /// Includes all named graph data.
     ///
+    /// The bytes are never encrypted, also for a database with
+    /// `Config::encryption`: they are the plaintext data, to be stored as
+    /// safely as the data itself. For an encrypted copy, use
+    /// [`save`](Self::save) with a `.grafeo` path.
+    ///
     /// Properties are stored as version-history lists. When `temporal` is
     /// enabled, the full history is captured. Otherwise, each property is
     /// wrapped as a single-entry list at epoch 0.
     ///
     /// # Errors
     ///
-    /// Returns an error if serialization fails.
+    /// Returns an error if serialization fails, or after a commit that did
+    /// not complete.
     pub fn export_snapshot(&self) -> Result<Vec<u8>> {
-        let nodes = collect_snapshot_nodes(self.lpg_store());
+        // The snapshot holds every commit whole, and none that did not
+        // complete (whose stamped part the store holds).
+        let _commits = self.transaction_manager.hold_commits()?;
+        let nodes = collect_snapshot_nodes(self.lpg_store())?;
         let edges = collect_snapshot_edges(self.lpg_store());
 
         // Collect named graphs
-        let named_graphs: Vec<NamedGraphSnapshot> = self
-            .lpg_store()
-            .graph_names()
-            .into_iter()
-            .filter_map(|name| {
-                self.lpg_store()
-                    .graph(&name)
-                    .map(|graph_store| NamedGraphSnapshot {
-                        name,
-                        nodes: collect_snapshot_nodes(&graph_store),
-                        edges: collect_snapshot_edges(&graph_store),
-                    })
-            })
-            .collect();
+        let mut named_graphs: Vec<NamedGraphSnapshot> = Vec::new();
+        for name in self.lpg_store().graph_names() {
+            if let Some(graph_store) = self.lpg_store().graph(&name) {
+                named_graphs.push(NamedGraphSnapshot {
+                    name,
+                    nodes: collect_snapshot_nodes(&graph_store)?,
+                    edges: collect_snapshot_edges(&graph_store),
+                });
+            }
+        }
 
         // Collect RDF triples
         #[cfg(feature = "triple-store")]
@@ -934,7 +900,8 @@ impl super::GrafeoDB {
 
     /// Creates a new in-memory database from a binary snapshot.
     ///
-    /// The `data` must have been produced by [`export_snapshot()`](Self::export_snapshot).
+    /// The `data` must have been produced by [`export_snapshot()`](Self::export_snapshot),
+    /// so it is plaintext (snapshots are never encrypted).
     ///
     /// All edge references are validated before any data is inserted: every
     /// edge's source and destination must reference a node present in the
@@ -1020,7 +987,8 @@ impl super::GrafeoDB {
     /// Replaces the current database contents with data from a binary snapshot.
     ///
     /// The `data` must have been produced by
-    /// [`export_snapshot()`](Self::export_snapshot).
+    /// [`export_snapshot()`](Self::export_snapshot), so it is plaintext
+    /// (snapshots are never encrypted).
     ///
     /// All validation (duplicate IDs, dangling edge references) is performed
     /// before any data is modified. If validation fails, the current database
@@ -1031,8 +999,23 @@ impl super::GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the snapshot is invalid, contains dangling edge
-    /// references, has duplicate IDs, or deserialization fails.
+    /// references, has duplicate IDs, or deserialization fails, after a
+    /// commit that did not complete (the restored database could never be
+    /// checkpointed, see [`TransactionManager`](crate::transaction::TransactionManager)),
+    /// on a read-only database, and the database-closed error after `close()`
+    /// of a persistent database (read-only or not).
     pub fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
+        // A restore writes no WAL record: after `close()` (which releases the
+        // file) nothing would persist it, so it fails then, and `close()`
+        // waits for one in progress.
+        let _open = self.hold_open()?;
+        if self.read_only {
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::ReadOnly,
+            ));
+        }
+        self.transaction_manager.check_no_incomplete_commit()?;
+        self.transaction_manager.check_open()?;
         if data.is_empty() {
             return Err(Error::Internal("empty snapshot data".to_string()));
         }
@@ -1111,18 +1094,30 @@ impl super::GrafeoDB {
     // ADMIN API: Iteration
     // =========================================================================
 
-    /// Returns an iterator over all nodes in the database.
+    /// Returns an iterator over all nodes in the database, as of the current
+    /// epoch (see [`current_epoch`](Self::current_epoch)), in id order.
     ///
     /// Useful for dump/export operations.
     pub fn iter_nodes(&self) -> impl Iterator<Item = grafeo_core::graph::lpg::Node> + '_ {
-        self.lpg_store().all_nodes()
+        let epoch = self.read_epoch();
+        let store = self.lpg_store();
+        store
+            .all_node_ids()
+            .into_iter()
+            .filter_map(move |id| store.get_node_at_epoch(id, epoch))
     }
 
-    /// Returns an iterator over all edges in the database.
+    /// Returns an iterator over all edges in the database, as of the current
+    /// epoch (see [`current_epoch`](Self::current_epoch)), in id order.
     ///
     /// Useful for dump/export operations.
     pub fn iter_edges(&self) -> impl Iterator<Item = grafeo_core::graph::lpg::Edge> + '_ {
-        self.lpg_store().all_edges()
+        let epoch = self.read_epoch();
+        let store = self.lpg_store();
+        // The store numbers its edges densely.
+        (0..store.next_edge_id()).filter_map(move |id| {
+            store.get_edge_at_epoch(grafeo_common::types::EdgeId::new(id), epoch)
+        })
     }
 }
 
@@ -1134,6 +1129,154 @@ mod tests {
     use super::{
         SNAPSHOT_VERSION, Snapshot, SnapshotEdge, SnapshotIndexes, SnapshotNode, SnapshotSchema,
     };
+
+    /// A database with Alix, whose embedding is spilled into a backing that
+    /// cannot be read, and Gus, who has no embedding.
+    #[cfg(not(feature = "temporal"))]
+    fn with_an_unreadable_embedding() -> (GrafeoDB, NodeId) {
+        use grafeo_common::types::PropertyKey;
+
+        let db = GrafeoDB::new_in_memory();
+        let alix = db
+            .create_node_with_props(
+                &["Item"],
+                [
+                    ("name", Value::from("Alix")),
+                    ("embedding", Value::Vector(vec![3.0, 19.0].into())),
+                ],
+            )
+            .unwrap();
+        db.create_node_with_props(&["Item"], [("name", Value::from("Gus"))])
+            .unwrap();
+        assert!(db.export_snapshot().is_ok());
+        let key = PropertyKey::new("embedding");
+        let store = db.lpg_store();
+        let snapshot = store.node_property_column_entries(&key).unwrap();
+        assert!(store.spill_node_property_column(
+            &key,
+            std::sync::Arc::new(super::super::test_backing::Unreadable(alix)),
+            &snapshot
+        ));
+        (db, alix)
+    }
+
+    /// An export reads spilled values, and fails rather than leave out one it
+    /// cannot read (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn an_export_fails_on_a_spilled_value_it_cannot_read() {
+        let (db, _) = with_an_unreadable_embedding();
+        assert!(
+            db.export_snapshot().is_err(),
+            "a snapshot without the embedding"
+        );
+        assert!(db.to_memory().is_err(), "a copy without the embedding");
+    }
+
+    /// A statement that would change a spilled value it cannot read errors and
+    /// changes nothing: its rollback could not restore the value (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn a_statement_on_a_spilled_value_it_cannot_read_errors() {
+        let (db, alix) = with_an_unreadable_embedding();
+        for statement in [
+            "MATCH (n:Item {name: 'Alix'}) SET n.embedding = vector([88.0, 3.19])",
+            "MATCH (n:Item {name: 'Alix'}) REMOVE n.embedding",
+            "MATCH (n:Item {name: 'Alix'}) DELETE n",
+        ] {
+            let error = db.execute(statement).expect_err(statement);
+            assert!(
+                error.to_string().contains("cannot be read"),
+                "{statement}: {error}"
+            );
+        }
+        assert!(db.get_node(alix).is_some(), "Alix was not deleted");
+        db.execute("MATCH (n:Item {name: 'Gus'}) SET n.embedding = vector([88.0, 3.19])")
+            .unwrap();
+    }
+
+    /// A copy takes the nodes in one at a time: it reads a node's values just
+    /// before it writes the node, so it never holds every node of the source
+    /// at once (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn a_copy_reads_each_node_just_before_it_writes_it() {
+        use std::sync::Arc;
+
+        use grafeo_common::types::PropertyKey;
+        use grafeo_core::graph::lpg::{ColumnBacking, LpgStore};
+        use parking_lot::Mutex;
+
+        /// A backing that notes how many nodes the copy's target holds at
+        /// each read.
+        struct Watching {
+            values: std::collections::HashMap<NodeId, Value>,
+            target: Arc<LpgStore>,
+            seen: Mutex<Vec<usize>>,
+        }
+        impl ColumnBacking<NodeId> for Watching {
+            fn get(&self, id: NodeId) -> std::io::Result<Option<Value>> {
+                self.seen.lock().push(self.target.node_count());
+                Ok(self.values.get(&id).cloned())
+            }
+            fn contains(&self, id: NodeId) -> bool {
+                self.values.contains_key(&id)
+            }
+            fn ids(&self) -> Vec<NodeId> {
+                self.values.keys().copied().collect()
+            }
+            fn len(&self) -> usize {
+                self.values.len()
+            }
+            fn heap_bytes(&self) -> usize {
+                0
+            }
+        }
+
+        let source = LpgStore::new().unwrap();
+        for x in [3.0, 19.0, 88.0] {
+            source
+                .create_node_with_props(&["Item"], [("embedding", Value::Vector(vec![x].into()))]);
+        }
+        let key = PropertyKey::new("embedding");
+        let snapshot = source.node_property_column_entries(&key).unwrap();
+        let target = Arc::new(LpgStore::new().unwrap());
+        let backing = Arc::new(Watching {
+            values: snapshot.iter().cloned().collect(),
+            target: Arc::clone(&target),
+            seen: Mutex::new(Vec::new()),
+        });
+        assert!(source.spill_node_property_column(&key, backing.clone(), &snapshot));
+
+        super::copy_graph_data(&source, &target).unwrap();
+        assert_eq!(
+            *backing.seen.lock(),
+            vec![0, 1, 2],
+            "nodes the target held at each read"
+        );
+        assert_eq!(target.node_count(), 3);
+    }
+
+    /// A direct call that removes a spilled value it cannot read (setting it
+    /// to null, outside a transaction) errors and changes nothing: it hid the
+    /// value and reported success while its WAL record and change event were
+    /// left out (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn a_direct_removal_of_a_spilled_value_it_cannot_read_errors() {
+        use grafeo_common::types::PropertyKey;
+
+        let (db, alix) = with_an_unreadable_embedding();
+        let result = db.set_node_property(alix, "embedding", Value::Null);
+        assert!(
+            db.lpg_store()
+                .node_property_column_ids(&PropertyKey::new("embedding"))
+                .contains(&alix),
+            "the call hid the value"
+        );
+        let error = result.expect_err("a removal of a value it cannot read");
+        assert!(error.to_string().contains("cannot be read"), "{error}");
+    }
 
     #[test]
     fn test_restore_snapshot_basic() {
@@ -1539,7 +1682,7 @@ mod tests {
         session
             .execute("INSERT (:Person {name: 'Alix', email: 'alix@example.com'})")
             .unwrap();
-        db.create_property_index("email");
+        db.create_property_index("email").unwrap();
         assert!(db.has_property_index("email"));
 
         let snapshot = db.export_snapshot().unwrap();
@@ -1630,7 +1773,7 @@ mod tests {
         session
             .execute("INSERT (:Person {name: 'Alix', email: 'alix@example.com'})")
             .unwrap();
-        db.create_property_index("email");
+        db.create_property_index("email").unwrap();
 
         let snapshot = db.export_snapshot().unwrap();
 
@@ -1638,11 +1781,48 @@ mod tests {
         session
             .execute("INSERT (:Person {name: 'Gus', email: 'gus@example.com'})")
             .unwrap();
-        db.drop_property_index("email");
+        db.drop_property_index("email").unwrap();
         assert!(!db.has_property_index("email"));
 
         // Restore should bring back the index
         db.restore_snapshot(&snapshot).unwrap();
         assert!(db.has_property_index("email"));
+    }
+
+    /// A `write_image` that fails, before or after the new header is
+    /// written, leaves no file behind: the file `create` made would open as
+    /// an empty database, and a retry would find the path taken. The retry
+    /// then succeeds.
+    #[cfg(all(
+        feature = "wal",
+        feature = "grafeo-file",
+        feature = "testing-crash-injection"
+    ))]
+    #[test]
+    fn a_failed_image_write_leaves_no_file_behind() {
+        use grafeo_common::testing::crash::with_failure_at;
+
+        let db = GrafeoDB::new_in_memory();
+        db.create_node(&["City"]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prague.grafeo");
+        let points = [
+            "checkpoint:after_chunks",
+            "checkpoint:after_data_sync",
+            "checkpoint:after_header",
+            "checkpoint:before_trim",
+        ];
+        for (count, point) in (1..).zip(points) {
+            let error = with_failure_at(count, || db.write_image(&path))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(point), "the original error: {error}");
+            assert!(!path.exists(), "{point}: the failed image is removed");
+        }
+
+        db.write_image(&path).unwrap();
+        let written = GrafeoDB::open(&path).unwrap();
+        assert_eq!(written.node_count(), 1);
+        written.close().unwrap();
     }
 }

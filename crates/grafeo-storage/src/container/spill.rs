@@ -1,8 +1,8 @@
 //! Standalone spill files for individual section eviction.
 //!
-//! The `.grafeo` container's `write_sections` API rewrites the entire
-//! section directory and dual headers, which is too heavyweight for a
-//! single-section eviction triggered by memory pressure. This module
+//! A `.grafeo` checkpoint writes a whole new image and switches the database
+//! header to it, which is too heavyweight for a single-section eviction
+//! triggered by memory pressure. This module
 //! provides a lightweight alternative: write one section's bytes to its
 //! own file, mmap it back, and return an [`MmapSection`] ready for use
 //! with [`MmapPageFetcher`](super::page_fetcher::MmapPageFetcher).

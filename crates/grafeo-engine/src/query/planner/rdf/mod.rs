@@ -7312,7 +7312,7 @@ mod tests {
         let physical = planner
             .plan(&LogicalPlan::new(LogicalOperator::Empty))
             .unwrap();
-        assert!(physical.columns.is_empty());
+        assert!(physical.columns.is_empty(), "{:?}", physical.columns);
     }
 
     #[test]

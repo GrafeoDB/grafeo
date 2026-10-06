@@ -3,7 +3,7 @@
 //! These algorithms find optimal flow through a network with capacity
 //! constraints on edges.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::OnceLock;
 
 use grafeo_common::types::{EdgeId, NodeId, Value};
@@ -60,7 +60,7 @@ fn extract_cost(store: &dyn GraphStore, edge_id: EdgeId, cost_prop: Option<&str>
 pub struct MaxFlowResult {
     /// Maximum flow value.
     pub max_flow: f64,
-    /// Flow on each edge: (source, target, flow)
+    /// Flow on each edge: (source, target, flow), by source, then target.
     pub flow_edges: Vec<(NodeId, NodeId, f64)>,
 }
 
@@ -71,7 +71,9 @@ pub struct MaxFlowResult {
 /// Computes maximum flow using the Edmonds-Karp algorithm.
 ///
 /// Edmonds-Karp is a specific implementation of Ford-Fulkerson that uses
-/// BFS to find augmenting paths, guaranteeing O(VE²) complexity.
+/// BFS to find augmenting paths, so it needs at most O(VE) of them. The search
+/// visits neighbours in node-id order, so of several maximum flows it finds
+/// the same one every call.
 ///
 /// # Arguments
 ///
@@ -82,11 +84,12 @@ pub struct MaxFlowResult {
 ///
 /// # Returns
 ///
-/// Maximum flow value and flow assignment on edges.
+/// Maximum flow value and flow assignment on edges, by source, then target.
 ///
 /// # Complexity
 ///
-/// O(V × E²)
+/// O(V × E × (E + V log V)): O(V × E) augmenting paths, each found by a
+/// search over the residual graph and applied through its ordered maps.
 pub fn max_flow(
     store: &dyn GraphStore,
     source: NodeId,
@@ -120,22 +123,21 @@ pub fn max_flow(
     let sink_idx = *node_to_idx.get(&sink)?;
 
     // Build capacity matrix (using adjacency list for sparse graphs)
-    // capacity[i][j] = capacity of edge i -> j
-    let mut capacity: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); n];
-    let mut edge_map: FxHashMap<(usize, usize), EdgeId> = FxHashMap::default();
+    // capacity[i][j] = capacity of edge i -> j. Ordered maps: the search
+    // and the result follow the indices, which are in node-id order.
+    let mut capacity: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
 
     for (i, &node) in nodes.iter().enumerate() {
         for (neighbor, edge_id) in store.edges_from(node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 let cap = extract_capacity(store, edge_id, capacity_property);
                 *capacity[i].entry(j).or_insert(0.0) += cap;
-                edge_map.insert((i, j), edge_id);
             }
         }
     }
 
     // Residual graph (initially same as capacity)
-    let mut residual: Vec<FxHashMap<usize, f64>> = capacity.clone();
+    let mut residual: Vec<BTreeMap<usize, f64>> = capacity.clone();
 
     // Ensure reverse edges exist in residual (with 0 capacity initially)
     for i in 0..n {
@@ -224,7 +226,8 @@ pub struct MinCostFlowResult {
     pub max_flow: f64,
     /// Total cost of the flow.
     pub total_cost: f64,
-    /// Flow on each edge: (source, target, flow, cost)
+    /// Flow on each edge: (source, target, flow, cost), by source, then
+    /// target.
     pub flow_edges: Vec<(NodeId, NodeId, f64, f64)>,
 }
 
@@ -235,7 +238,9 @@ pub struct MinCostFlowResult {
 /// Computes minimum cost maximum flow using successive shortest paths.
 ///
 /// Finds the maximum flow with minimum total cost by repeatedly finding
-/// the shortest (cheapest) augmenting path using Bellman-Ford.
+/// the shortest (cheapest) augmenting path using Bellman-Ford. The search
+/// relaxes edges in node-id order, so of several cheapest flows it finds the
+/// same one every call.
 ///
 /// # Arguments
 ///
@@ -247,7 +252,8 @@ pub struct MinCostFlowResult {
 ///
 /// # Returns
 ///
-/// Maximum flow value, total cost, and flow assignment on edges.
+/// Maximum flow value, total cost, and flow assignment on edges, by source,
+/// then target.
 ///
 /// # Complexity
 ///
@@ -286,9 +292,10 @@ pub fn min_cost_max_flow(
     let source_idx = *node_to_idx.get(&source)?;
     let sink_idx = *node_to_idx.get(&sink)?;
 
-    // Build capacity and cost matrices
-    let mut capacity: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); n];
-    let mut cost: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); n];
+    // Build capacity and cost matrices. Ordered maps: the search and the
+    // result follow the indices, which are in node-id order.
+    let mut capacity: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
+    let mut cost: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
 
     for (i, &node) in nodes.iter().enumerate() {
         for (neighbor, edge_id) in store.edges_from(node, Direction::Outgoing) {
@@ -302,8 +309,8 @@ pub fn min_cost_max_flow(
     }
 
     // Residual graph
-    let mut residual: Vec<FxHashMap<usize, f64>> = capacity.clone();
-    let mut residual_cost: Vec<FxHashMap<usize, f64>> = cost.clone();
+    let mut residual: Vec<BTreeMap<usize, f64>> = capacity.clone();
+    let mut residual_cost: Vec<BTreeMap<usize, f64>> = cost.clone();
 
     // Ensure reverse edges exist
     for i in 0..n {
@@ -481,6 +488,7 @@ impl_algorithm! {
             ]);
         }
 
+        output.sort_by_id_columns(2);
         Ok(output)
     }
 }
@@ -569,6 +577,7 @@ impl_algorithm! {
             ]);
         }
 
+        output.sort_by_id_columns(2);
         Ok(output)
     }
 }
@@ -771,7 +780,7 @@ mod tests {
 
         // Flow edges should be non-empty if there's positive flow
         assert!(result.max_flow > 0.0);
-        assert!(!result.flow_edges.is_empty());
+        assert!(!result.flow_edges.is_empty(), "result.flow_edges is empty");
 
         // All flow values should be positive
         for (_, _, flow) in &result.flow_edges {
@@ -863,6 +872,105 @@ mod tests {
         // Flow edges should have both flow and cost info
         for (_, _, flow, _cost) in &result.flow_edges {
             assert!(*flow > 0.0);
+        }
+    }
+
+    /// A source feeding a hub that fans out over 19 paths of capacity 1 to
+    /// the sink; `hub_capacity` of them can carry flow. Returns the store,
+    /// the source and the sink.
+    fn fan_out(hub_capacity: f64) -> (LpgStore, NodeId, NodeId) {
+        let store = LpgStore::new().unwrap();
+        let source = store.create_node(&["Node"]);
+        let hub = store.create_node(&["Node"]);
+        let middles: Vec<NodeId> = (0..19).map(|_| store.create_node(&["Node"])).collect();
+        let sink = store.create_node(&["Node"]);
+        let edge = |from, to, capacity: f64| {
+            store.create_edge_with_props(
+                from,
+                to,
+                "EDGE",
+                [
+                    ("capacity", Value::Float64(capacity)),
+                    ("cost", Value::Float64(3.0)),
+                ],
+            );
+        };
+        edge(source, hub, hub_capacity);
+        for &middle in &middles {
+            edge(hub, middle, 1.0);
+            edge(middle, sink, 1.0);
+        }
+        (store, source, sink)
+    }
+
+    /// Max flow lists its flow edges by source, then target, and finds the
+    /// same flow every call: its search walks the residual graph in node-id
+    /// order, not in the order of a hash map (#592). With 3 of 19 equal paths
+    /// in use, the paths it picks are the first 3 by node id.
+    #[test]
+    fn max_flow_edges_come_in_node_id_order_and_are_the_same_every_call() {
+        for hub_capacity in [3.0, 19.0] {
+            let (store, source, sink) = fan_out(hub_capacity);
+            let first = max_flow(&store, source, sink, Some("capacity")).unwrap();
+            assert_eq!(first.max_flow.to_bits(), hub_capacity.to_bits());
+            let pairs: Vec<(NodeId, NodeId)> =
+                first.flow_edges.iter().map(|&(s, t, _)| (s, t)).collect();
+            assert!(
+                pairs.windows(2).all(|w| w[0] < w[1]),
+                "hub capacity {hub_capacity}: flow edges not in node-id order: {pairs:?}"
+            );
+            for _ in 0..5 {
+                let again = max_flow(&store, source, sink, Some("capacity")).unwrap();
+                let again: Vec<(NodeId, NodeId, u64)> = again
+                    .flow_edges
+                    .iter()
+                    .map(|&(s, t, flow)| (s, t, flow.to_bits()))
+                    .collect();
+                let expected: Vec<(NodeId, NodeId, u64)> = first
+                    .flow_edges
+                    .iter()
+                    .map(|&(s, t, flow)| (s, t, flow.to_bits()))
+                    .collect();
+                assert_eq!(again, expected, "hub capacity {hub_capacity}");
+            }
+        }
+        let (store, source, sink) = fan_out(3.0);
+        let hub = NodeId::new(source.as_u64() + 1);
+        let used: Vec<NodeId> = max_flow(&store, source, sink, Some("capacity"))
+            .unwrap()
+            .flow_edges
+            .iter()
+            .filter(|&&(s, _, _)| s == hub)
+            .map(|&(_, t, _)| t)
+            .collect();
+        let first_three: Vec<NodeId> = (2..5).map(|i| NodeId::new(source.as_u64() + i)).collect();
+        assert_eq!(used, first_three, "the paths through the smallest node ids");
+    }
+
+    /// Min-cost max flow lists its flow edges by source, then target, the
+    /// same every call (#592).
+    #[test]
+    fn min_cost_flow_edges_come_in_node_id_order_and_are_the_same_every_call() {
+        for hub_capacity in [3.0, 19.0] {
+            let (store, source, sink) = fan_out(hub_capacity);
+            let run = || -> Vec<(NodeId, NodeId, u64, u64)> {
+                min_cost_max_flow(&store, source, sink, Some("capacity"), Some("cost"))
+                    .unwrap()
+                    .flow_edges
+                    .iter()
+                    .map(|&(s, t, flow, cost)| (s, t, flow.to_bits(), cost.to_bits()))
+                    .collect()
+            };
+            let first = run();
+            assert!(
+                first
+                    .windows(2)
+                    .all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1)),
+                "hub capacity {hub_capacity}: flow edges not in node-id order: {first:?}"
+            );
+            for _ in 0..5 {
+                assert_eq!(run(), first, "hub capacity {hub_capacity}");
+            }
         }
     }
 }

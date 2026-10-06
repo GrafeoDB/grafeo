@@ -416,7 +416,7 @@ mod tests {
         let section = VectorStoreSection::new(vec![(key.clone(), Arc::clone(&index))]);
 
         let bytes = section.serialize().expect("serialize should succeed");
-        assert!(!bytes.is_empty());
+        assert!(!bytes.is_empty(), "bytes is empty");
 
         // Create a fresh index with same config to restore into
         let config = index.config().clone();

@@ -984,7 +984,7 @@ mod tests {
         let allowlist: std::collections::HashSet<NodeId> =
             [1, 10, 25, 40].iter().map(|&i| NodeId::new(i)).collect();
         let results = index.search_with_filter(&vectors[24], 3, &allowlist);
-        assert!(!results.is_empty());
+        assert!(!results.is_empty(), "results is empty");
         assert!(results.len() <= 3);
         for (id, _) in &results {
             assert!(allowlist.contains(id), "result {id:?} not in allowlist");
@@ -1004,7 +1004,7 @@ mod tests {
         let allowlist: std::collections::HashSet<NodeId> =
             [5, 15, 30].iter().map(|&i| NodeId::new(i)).collect();
         let results = index.search_with_ef_and_filter(&vectors[14], 2, 50, &allowlist);
-        assert!(!results.is_empty());
+        assert!(!results.is_empty(), "results is empty");
         assert!(results.len() <= 2);
         for (id, _) in &results {
             assert!(allowlist.contains(id));

@@ -1078,7 +1078,7 @@ impl ColumnCodec {
         let stats: &[super::zone_map::ZoneMap] = match stats_hint {
             Some(hint) if hint.len() == metas.len() => hint,
             _ => {
-                computed = super::zone_map::compute_block_zone_maps(self);
+                computed = super::zone_map::compute_codec_block_zone_maps(self);
                 &computed
             }
         };
@@ -1669,6 +1669,211 @@ impl ColumnCodec {
     }
 }
 
+// ── Columns with missing values ─────────────────────────────────
+
+/// A property column of a compact table: the encoded values and which rows
+/// have one.
+///
+/// A codec holds a value for every row, so a row whose node or edge does not
+/// have the property holds the codec's empty value (`0`, `""`, `false`);
+/// `present` masks those rows out. It is `None` when every row has a value.
+#[derive(Debug, Clone)]
+pub struct CompactColumn {
+    codec: ColumnCodec,
+    present: Option<BitVector>,
+}
+
+impl From<ColumnCodec> for CompactColumn {
+    fn from(codec: ColumnCodec) -> Self {
+        Self::new(codec)
+    }
+}
+
+impl CompactColumn {
+    /// A column where every row has a value.
+    #[must_use]
+    pub fn new(codec: ColumnCodec) -> Self {
+        Self {
+            codec,
+            present: None,
+        }
+    }
+
+    /// A column where only the rows set in `present` (one bit per row) have
+    /// a value.
+    #[must_use]
+    pub fn with_present(codec: ColumnCodec, present: BitVector) -> Self {
+        debug_assert_eq!(present.len(), codec.len(), "one presence bit per row");
+        let present = (present.count_zeros() > 0).then_some(present);
+        Self { codec, present }
+    }
+
+    /// The encoded values, including the empty values of missing rows.
+    #[must_use]
+    pub fn codec(&self) -> &ColumnCodec {
+        &self.codec
+    }
+
+    /// Which rows have a value, or `None` when every row has one.
+    #[must_use]
+    pub fn present(&self) -> Option<&BitVector> {
+        self.present.as_ref()
+    }
+
+    /// Whether row `index` has a value.
+    #[inline]
+    #[must_use]
+    pub fn has_value(&self, index: usize) -> bool {
+        self.present
+            .as_ref()
+            .is_none_or(|present| present.get(index) == Some(true))
+    }
+
+    /// The value at row `index`, or `None` when the row has none or `index`
+    /// is out of bounds.
+    #[inline]
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<Value> {
+        if self.has_value(index) {
+            self.codec.get(index)
+        } else {
+            None
+        }
+    }
+
+    /// The raw `u64` at row `index` of a bit-packed column (see
+    /// [`ColumnCodec::get_raw_u64`]), or `None` when the row has no value.
+    #[inline]
+    #[must_use]
+    pub fn get_raw_u64(&self, index: usize) -> Option<u64> {
+        if self.has_value(index) {
+            self.codec.get_raw_u64(index)
+        } else {
+            None
+        }
+    }
+
+    /// Number of rows.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.codec.len()
+    }
+
+    /// Returns `true` if the column has no rows.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.codec.is_empty()
+    }
+
+    /// Number of logical blocks (see [`ColumnCodec::block_count`]).
+    #[must_use]
+    pub fn block_count(&self) -> usize {
+        self.codec.block_count()
+    }
+
+    /// The rows whose value equals `target` (see [`ColumnCodec::find_eq`]);
+    /// rows without a value never match.
+    pub fn find_eq(&self, target: &Value) -> Vec<usize> {
+        self.keep_present(self.codec.find_eq(target))
+    }
+
+    /// The rows whose value falls in the range (see
+    /// [`ColumnCodec::find_in_range`]); rows without a value never match.
+    pub fn find_in_range(
+        &self,
+        min: Option<&Value>,
+        max: Option<&Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+    ) -> Vec<usize> {
+        self.keep_present(
+            self.codec
+                .find_in_range(min, max, min_inclusive, max_inclusive),
+        )
+    }
+
+    /// Lazy range scan with block skipping (see [`ColumnCodec::range_iter`]);
+    /// rows without a value never match.
+    pub fn range_iter<'a>(
+        &'a self,
+        block_zone_maps: Option<&'a [super::zone_map::ZoneMap]>,
+        min: Option<&'a Value>,
+        max: Option<&'a Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+    ) -> Box<dyn Iterator<Item = usize> + 'a> {
+        let rows = self
+            .codec
+            .range_iter(block_zone_maps, min, max, min_inclusive, max_inclusive);
+        match &self.present {
+            None => rows,
+            Some(_) => Box::new(rows.filter(move |&row| self.has_value(row))),
+        }
+    }
+
+    fn keep_present(&self, mut rows: Vec<usize>) -> Vec<usize> {
+        if let Some(present) = &self.present {
+            rows.retain(|&row| present.get(row) == Some(true));
+        }
+        rows
+    }
+
+    /// Returns an estimate of heap memory used by this column in bytes.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        self.codec.heap_bytes() + self.present.as_ref().map_or(0, |p| p.data_bytes().len())
+    }
+
+    /// Writes which rows have a value (section format v4): a flag byte, then,
+    /// when some row has none, the bitmap as a length and LE `u64` words.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the bitmap does not fit the format's `u32` fields.
+    pub(crate) fn write_present(
+        &self,
+        buf: &mut Vec<u8>,
+    ) -> grafeo_common::utils::error::Result<()> {
+        match &self.present {
+            None => buf.push(0),
+            Some(present) => {
+                buf.push(1);
+                write_usize_as_u32(buf, present.len())?;
+                write_usize_as_u32(buf, present.word_count())?;
+                buf.extend_from_slice(present.data_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads what [`write_present`](Self::write_present) wrote.
+    pub(crate) fn read_present(
+        data: &Bytes,
+        pos: &mut usize,
+    ) -> Result<Option<BitVector>, &'static str> {
+        let bytes: &[u8] = data.as_ref();
+        let flag = *bytes.get(*pos).ok_or("truncated column presence flag")?;
+        *pos += 1;
+        match flag {
+            0 => Ok(None),
+            1 => {
+                let bit_len = read_u32_le(bytes, pos)? as usize;
+                let word_count = read_u32_le(bytes, pos)? as usize;
+                let need = word_count
+                    .checked_mul(8)
+                    .ok_or("column presence word count overflow")?;
+                if *pos + need > bytes.len() {
+                    return Err("truncated column presence bitmap");
+                }
+                let storage = data.slice(*pos..*pos + need);
+                *pos += need;
+                Ok(Some(BitVector::from_bytes_storage(storage, bit_len)))
+            }
+            _ => Err("invalid column presence flag"),
+        }
+    }
+}
+
 // ── v2 block-index helpers ──────────────────────────────────────
 
 /// Per-block metadata in the v2 column index.
@@ -2162,7 +2367,7 @@ mod tests {
         let col = ColumnCodec::BitPacked(BitPackedInts::pack(&values));
 
         let result = col.find_in_range(None, Some(&Value::Int64(-1)), false, true);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     #[test]
@@ -2189,7 +2394,7 @@ mod tests {
         );
         // Fallback uses compare_values which returns None for Int vs String,
         // so no rows match.
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     #[test]
@@ -2201,7 +2406,7 @@ mod tests {
         // Range scan on list values uses compare_values, which returns None
         // for lists, so nothing matches.
         let result = col.find_in_range(Some(&Value::Int64(0)), Some(&Value::Int64(10)), true, true);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     #[test]
@@ -2747,7 +2952,7 @@ mod tests {
         // Bitmap column + Int64 range -> compare returns None -> rows excluded.
         let col = ColumnCodec::Bitmap(BitVector::from_bools(&[true, false, true]));
         let result = col.find_in_range(Some(&Value::Int64(0)), Some(&Value::Int64(5)), true, true);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     // -----------------------------------------------------------------------
@@ -2805,7 +3010,7 @@ mod tests {
 
         // Target "Prague" does not exist in the dictionary, so encode returns None.
         let result = col.find_eq(&Value::String(ArcStr::from("Prague")));
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     // -----------------------------------------------------------------------
@@ -2889,11 +3094,11 @@ mod tests {
 
         // min alone: the None (Uncomparable) branch returns false.
         let result = col.find_in_range(Some(&min), None, true, true);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
 
         // max alone: same story for the max arm.
         let result = col.find_in_range(None, Some(&max), true, true);
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     // -----------------------------------------------------------------------
@@ -3555,7 +3760,7 @@ mod tests {
         // verify find_eq agrees on both forms.
         let target = col.get(42).expect("row 42 exists");
         assert_eq!(decoded.find_eq(&target), col.find_eq(&target));
-        assert!(!col.find_eq(&target).is_empty());
+        assert!(!col.find_eq(&target).is_empty(), "expected non-empty");
     }
 
     #[test]
@@ -3582,7 +3787,7 @@ mod tests {
         // we know is present.
         let target = Value::Float64(0.0);
         assert_eq!(decoded.find_eq(&target), col.find_eq(&target));
-        assert!(!col.find_eq(&target).is_empty());
+        assert!(!col.find_eq(&target).is_empty(), "expected non-empty");
     }
 
     // ── Phase 3a: Bytes-backed fixed-width codecs ─────────────────────
@@ -3689,7 +3894,7 @@ mod tests {
     // the existing eager `find_in_range`, plus pruning behavior on
     // multi-block columns.
 
-    use crate::graph::compact::zone_map::compute_block_zone_maps;
+    use crate::graph::compact::zone_map::compute_codec_block_zone_maps;
 
     fn raw_i64_seq(n: i64) -> ColumnCodec {
         ColumnCodec::raw_i64((0..n).collect())
@@ -3698,7 +3903,7 @@ mod tests {
     #[test]
     fn alix_range_iter_matches_find_in_range_full_scan() {
         let col = raw_i64_seq(50);
-        let zm = compute_block_zone_maps(&col);
+        let zm = compute_codec_block_zone_maps(&col);
         let min = Value::Int64(10);
         let max = Value::Int64(20);
 
@@ -3719,7 +3924,7 @@ mod tests {
         // Query [1500, 1700] hits block 1 only; blocks 0 and 2 must be
         // skipped (their zone maps prove disjointedness).
         let col = raw_i64_seq(3072);
-        let zm = compute_block_zone_maps(&col);
+        let zm = compute_codec_block_zone_maps(&col);
         let min = Value::Int64(1500);
         let max = Value::Int64(1700);
 
@@ -3734,7 +3939,7 @@ mod tests {
     #[test]
     fn vincent_range_iter_open_min_bound() {
         let col = raw_i64_seq(50);
-        let zm = compute_block_zone_maps(&col);
+        let zm = compute_codec_block_zone_maps(&col);
         let max = Value::Int64(10);
         let result: Vec<usize> = col
             .range_iter(Some(&zm), None, Some(&max), false, true)
@@ -3746,7 +3951,7 @@ mod tests {
     #[test]
     fn jules_range_iter_open_max_bound() {
         let col = raw_i64_seq(20);
-        let zm = compute_block_zone_maps(&col);
+        let zm = compute_codec_block_zone_maps(&col);
         let min = Value::Int64(15);
         let result: Vec<usize> = col
             .range_iter(Some(&zm), Some(&min), None, true, false)
@@ -3772,12 +3977,12 @@ mod tests {
     #[test]
     fn butch_range_iter_empty_column_yields_nothing() {
         let col = raw_i64_seq(0);
-        let zm = compute_block_zone_maps(&col);
+        let zm = compute_codec_block_zone_maps(&col);
         let min = Value::Int64(0);
         let result: Vec<usize> = col
             .range_iter(Some(&zm), Some(&min), None, true, false)
             .collect();
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "{result:?}");
     }
 
     #[test]
@@ -3787,7 +3992,7 @@ mod tests {
             b.add(s);
         }
         let col = ColumnCodec::Dict(b.build());
-        let zm = compute_block_zone_maps(&col);
+        let zm = compute_codec_block_zone_maps(&col);
         let min = Value::from("b");
         let max = Value::from("c");
         let from_iter: Vec<usize> = col
@@ -3802,7 +4007,7 @@ mod tests {
         // BitPacked stores u64; a negative min bound must not crash and
         // must match `find_in_range` semantics.
         let col = ColumnCodec::BitPacked(BitPackedInts::pack(&(0..20u64).collect::<Vec<_>>()));
-        let zm = compute_block_zone_maps(&col);
+        let zm = compute_codec_block_zone_maps(&col);
         let min = Value::Int64(-5);
         let max = Value::Int64(10);
         let from_iter: Vec<usize> = col
@@ -3815,7 +4020,7 @@ mod tests {
     #[test]
     fn beatrix_range_iter_exclusive_bounds() {
         let col = raw_i64_seq(50);
-        let zm = compute_block_zone_maps(&col);
+        let zm = compute_codec_block_zone_maps(&col);
         let min = Value::Int64(10);
         let max = Value::Int64(20);
         let result: Vec<usize> = col
@@ -3830,7 +4035,7 @@ mod tests {
         // NaN in a Float64 column is not orderable and must never appear
         // in any range query result.
         let col = ColumnCodec::float64(vec![1.0, f64::NAN, 2.0, 3.0]);
-        let zm = compute_block_zone_maps(&col);
+        let zm = compute_codec_block_zone_maps(&col);
         let min = Value::Float64(0.5);
         let max = Value::Float64(4.0);
         let from_iter: Vec<usize> = col
@@ -3849,7 +4054,7 @@ mod tests {
         // Iterator order matters for downstream chunking; rows must be
         // emitted in increasing offset order.
         let col = raw_i64_seq(2048);
-        let zm = compute_block_zone_maps(&col);
+        let zm = compute_codec_block_zone_maps(&col);
         let min = Value::Int64(500);
         let max = Value::Int64(1500);
         let result: Vec<usize> = col
@@ -3858,5 +4063,66 @@ mod tests {
         let mut sorted = result.clone();
         sorted.sort_unstable();
         assert_eq!(result, sorted, "iterator output must be sorted ascending");
+    }
+
+    /// A bit-packed column whose second row has no value; its stored empty
+    /// value (0) must not show through.
+    fn column_with_a_missing_row() -> CompactColumn {
+        let codec = ColumnCodec::BitPacked(BitPackedInts::pack(&[19, 0, 3, 0]));
+        CompactColumn::with_present(codec, BitVector::from_bools(&[true, false, true, true]))
+    }
+
+    /// A row without a value reads as missing and never matches a search,
+    /// also not for the codec's empty value; a stored 0 still does.
+    #[test]
+    fn compact_column_masks_rows_without_a_value() {
+        let column = column_with_a_missing_row();
+        assert_eq!(column.get(1), None);
+        assert_eq!(column.get_raw_u64(1), None);
+        assert_eq!(column.get(3), Some(Value::Int64(0)));
+        assert_eq!(column.find_eq(&Value::Int64(0)), vec![3]);
+        let three = Value::Int64(3);
+        assert_eq!(
+            column.find_in_range(None, Some(&three), true, true),
+            vec![2, 3]
+        );
+        assert_eq!(
+            column
+                .range_iter(None, None, Some(&three), true, true)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
+
+    /// A column where every row has a value keeps no bitmap and reads like
+    /// its codec.
+    #[test]
+    fn compact_column_with_every_row_present_keeps_no_bitmap() {
+        let codec = ColumnCodec::BitPacked(BitPackedInts::pack(&[19, 0]));
+        let column = CompactColumn::with_present(codec, BitVector::from_bools(&[true, true]));
+        assert!(column.present().is_none());
+        assert_eq!(column.get(1), Some(Value::Int64(0)));
+        assert_eq!(column.find_eq(&Value::Int64(0)), vec![1]);
+    }
+
+    /// The whole-column zone map counts a missing row as a null and leaves
+    /// its empty value out of min and max.
+    #[test]
+    fn compact_column_zone_map_skips_missing_rows() {
+        let zm = crate::graph::compact::zone_map::compute_zone_map(&column_with_a_missing_row());
+        assert_eq!(zm.min, Some(Value::Int64(0)));
+        assert_eq!(zm.max, Some(Value::Int64(19)));
+        assert_eq!(zm.null_count, 1);
+        assert_eq!(zm.row_count, 4);
+
+        let codec = ColumnCodec::BitPacked(BitPackedInts::pack(&[19, 0, 3]));
+        let column =
+            CompactColumn::with_present(codec, BitVector::from_bools(&[true, false, true]));
+        let zm = crate::graph::compact::zone_map::compute_zone_map(&column);
+        assert_eq!(
+            zm.min,
+            Some(Value::Int64(3)),
+            "the missing row's 0 is not a minimum"
+        );
     }
 }

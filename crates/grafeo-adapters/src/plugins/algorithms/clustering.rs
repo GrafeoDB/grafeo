@@ -205,8 +205,27 @@ pub fn global_clustering_coefficient(store: &dyn GraphStore) -> f64 {
         return 0.0;
     }
 
-    let sum: f64 = local.values().sum();
-    sum / local.len() as f64
+    sum_in_node_order(&local) / local.len() as f64
+}
+
+/// The sum of the per-node coefficients, added in node-id order with
+/// Neumaier compensation: a hash map's iteration order changes from call to
+/// call (and the parallel path merges per-thread maps), so summing in it would
+/// change the last bits of the average.
+fn sum_in_node_order(coefficients: &FxHashMap<NodeId, f64>) -> f64 {
+    let mut by_node: Vec<(NodeId, f64)> = coefficients.iter().map(|(&n, &c)| (n, c)).collect();
+    by_node.sort_unstable_by_key(|&(node, _)| node);
+    let (mut sum, mut compensation) = (0.0_f64, 0.0_f64);
+    for (_, value) in by_node {
+        let total = sum + value;
+        if sum.abs() >= value.abs() {
+            compensation += (sum - total) + value;
+        } else {
+            compensation += (value - total) + sum;
+        }
+        sum = total;
+    }
+    sum + compensation
 }
 
 /// Counts the total number of unique triangles in the graph.
@@ -332,7 +351,7 @@ pub fn clustering_coefficient(store: &dyn GraphStore) -> ClusteringCoefficientRe
     let global_coefficient = if n == 0 {
         0.0
     } else {
-        coefficients.values().sum::<f64>() / n as f64
+        sum_in_node_order(&coefficients) / n as f64
     };
 
     ClusteringCoefficientResult {
@@ -422,7 +441,7 @@ pub fn clustering_coefficient_parallel(
     let global_coefficient = if n == 0 {
         0.0
     } else {
-        coefficients.values().sum::<f64>() / n as f64
+        sum_in_node_order(&coefficients) / n as f64
     };
 
     ClusteringCoefficientResult {
@@ -658,6 +677,7 @@ impl GraphAlgorithm for ClusteringCoefficientAlgorithm {
             ]);
         }
 
+        output.sort_by_id_columns(1);
         Ok(output)
     }
 }
@@ -693,6 +713,7 @@ impl ParallelGraphAlgorithm for ClusteringCoefficientAlgorithm {
             ]);
         }
 
+        output.sort_by_id_columns(1);
         Ok(output)
     }
 }
@@ -956,7 +977,10 @@ mod tests {
         let algo = ClusteringCoefficientAlgorithm;
 
         assert_eq!(algo.name(), "clustering_coefficient");
-        assert!(!algo.description().is_empty());
+        assert!(
+            !algo.description().is_empty(),
+            "algo.description() is empty"
+        );
         assert_eq!(algo.parameters().len(), 2);
 
         let params = Parameters::new();

@@ -197,6 +197,7 @@ pub mod parallel;
 #[cfg(feature = "lpg")]
 mod prepared;
 
+pub(crate) use manager::CommitsHeld;
 pub use manager::{
     EntityId, GraphEntity, IsolationLevel, TransactionInfo, TransactionManager, TransactionState,
 };

@@ -126,6 +126,10 @@ pub fn degree_centrality_normalized(store: &dyn GraphStore) -> FxHashMap<NodeId,
 /// * `damping` - Damping factor (typically 0.85)
 /// * `max_iterations` - Maximum number of iterations
 /// * `tolerance` - Convergence tolerance (stop when change < tolerance)
+/// * `directed` - `true` follows edge direction and counts every edge, parallel
+///   edges included; `false` walks the simple undirected graph: each pair of
+///   distinct neighbours once, in both directions, whatever the edge types,
+///   directions or count, with self-loops ignored
 ///
 /// # Returns
 ///
@@ -139,8 +143,36 @@ pub fn pagerank(
     damping: f64,
     max_iterations: usize,
     tolerance: f64,
+    directed: bool,
 ) -> FxHashMap<NodeId, f64> {
-    let nodes = store.node_ids();
+    pagerank_in_order(
+        store,
+        &store.node_ids(),
+        damping,
+        max_iterations,
+        tolerance,
+        directed,
+    )
+}
+
+/// [`pagerank`] over `nodes`, in their order: each node's score sums its
+/// incoming contributions, and the dangling mass sums, in the order of
+/// `nodes`. Given the nodes in the order of a key ([`order_by_key`]), the
+/// scores are bit-identical whatever order the nodes and edges were inserted
+/// in; with keys that sort like the node ids, they equal [`pagerank`]'s.
+///
+/// `nodes` must be the nodes of `store`, each once; an edge to a node not in
+/// `nodes` is not followed.
+///
+/// [`order_by_key`]: super::order_by_key
+pub fn pagerank_in_order(
+    store: &dyn GraphStore,
+    nodes: &[NodeId],
+    damping: f64,
+    max_iterations: usize,
+    tolerance: f64,
+    directed: bool,
+) -> FxHashMap<NodeId, f64> {
     let n = nodes.len();
 
     if n == 0 {
@@ -153,19 +185,35 @@ pub fn pagerank(
         node_to_idx.insert(node, idx);
     }
 
-    // Build adjacency structure
+    // The nodes each node passes its score to.
     let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut out_degree: Vec<usize> = vec![0; n];
-
     for (idx, &node) in nodes.iter().enumerate() {
-        let edges: Vec<usize> = store
-            .edges_from(node, Direction::Outgoing)
-            .into_iter()
-            .filter_map(|(neighbor, _)| node_to_idx.get(&neighbor).copied())
-            .collect();
-        out_degree[idx] = edges.len();
-        out_edges[idx] = edges;
+        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+            let Some(&j) = node_to_idx.get(&neighbor) else {
+                continue;
+            };
+            if directed {
+                out_edges[idx].push(j);
+            } else if j != idx {
+                out_edges[idx].push(j);
+                out_edges[j].push(idx);
+            }
+        }
     }
+    if !directed {
+        // Drop parallel edges in linear time: `last_seen[j]` is the last node
+        // whose list kept j. The scores do not depend on the list order, as
+        // `new_scores[j]` adds its contributions in the order of the nodes.
+        let mut last_seen = vec![usize::MAX; n];
+        for (i, neighbors) in out_edges.iter_mut().enumerate() {
+            neighbors.retain(|&j| {
+                let first = last_seen[j] != i;
+                last_seen[j] = i;
+                first
+            });
+        }
+    }
+    let out_degree: Vec<usize> = out_edges.iter().map(Vec::len).collect();
 
     // Initialize PageRank scores
     let initial_score = 1.0 / n as f64;
@@ -211,9 +259,9 @@ pub fn pagerank(
 
     // Convert back to NodeId map
     nodes
-        .into_iter()
+        .iter()
         .enumerate()
-        .map(|(idx, node)| (node, scores[idx]))
+        .map(|(idx, &node)| (node, scores[idx]))
         .collect()
 }
 
@@ -449,6 +497,14 @@ fn pagerank_params() -> &'static [ParameterDef] {
                 required: false,
                 default: Some("1e-6".to_string()),
             },
+            ParameterDef {
+                name: "directed".to_string(),
+                description: "Follow edge direction (default: true); false walks each neighbour pair once, both ways"
+                    .to_string(),
+                param_type: ParameterType::Boolean,
+                required: false,
+                default: Some("true".to_string()),
+            },
         ]
     })
 }
@@ -466,15 +522,18 @@ impl_algorithm! {
         // Clamp to non-negative: negative iterations treated as 0
         let max_iter = usize::try_from(params.get_int("max_iterations").unwrap_or(100)).unwrap_or(0);
         let tolerance = params.get_float("tolerance").unwrap_or(1e-6);
+        let directed = params.get_bool("directed").unwrap_or(true);
 
-        let scores = pagerank(store, damping, max_iter, tolerance);
+        let scores = pagerank(store, damping, max_iter, tolerance, directed);
 
         let mut builder = NodeValueResultBuilder::with_capacity("pagerank", scores.len());
         for (node, score) in scores {
             builder.push(node, Value::Float64(score));
         }
 
-        Ok(builder.build())
+        let mut result = builder.build();
+        result.sort_by_id_columns(1);
+        Ok(result)
     }
 }
 
@@ -511,7 +570,9 @@ impl_algorithm! {
             builder.push(node, Value::Float64(score));
         }
 
-        Ok(builder.build())
+        let mut result = builder.build();
+        result.sort_by_id_columns(1);
+        Ok(result)
     }
 }
 
@@ -549,7 +610,9 @@ impl_algorithm! {
             builder.push(node, Value::Float64(score));
         }
 
-        Ok(builder.build())
+        let mut result = builder.build();
+        result.sort_by_id_columns(1);
+        Ok(result)
     }
 }
 
@@ -595,7 +658,9 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
             for (node, score) in scores {
                 builder.push(node, Value::Float64(score));
             }
-            Ok(builder.build())
+            let mut result = builder.build();
+            result.sort_by_id_columns(1);
+            Ok(result)
         } else {
             let result = degree_centrality(store);
 
@@ -620,6 +685,7 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
                 ]);
             }
 
+            output.sort_by_id_columns(1);
             Ok(output)
         }
     }
@@ -700,7 +766,7 @@ mod tests {
     #[test]
     fn test_pagerank_basic() {
         let store = create_pagerank_graph();
-        let scores = pagerank(&store, 0.85, 100, 1e-6);
+        let scores = pagerank(&store, 0.85, 100, 1e-6, true);
 
         assert_eq!(scores.len(), 3);
 
@@ -723,7 +789,7 @@ mod tests {
         store.create_edge(a, b, "EDGE");
         // b is dangling
 
-        let scores = pagerank(&store, 0.85, 100, 1e-6);
+        let scores = pagerank(&store, 0.85, 100, 1e-6, true);
         assert_eq!(scores.len(), 2);
 
         // Dangling node should still have positive PageRank
@@ -733,7 +799,7 @@ mod tests {
     #[test]
     fn test_pagerank_empty() {
         let store = LpgStore::new().unwrap();
-        let scores = pagerank(&store, 0.85, 100, 1e-6);
+        let scores = pagerank(&store, 0.85, 100, 1e-6, true);
         assert!(scores.is_empty());
     }
 
@@ -812,7 +878,7 @@ mod tests {
         let degree = degree_centrality(&store);
         assert_eq!(degree.total_degree.len(), 1);
 
-        let pr = pagerank(&store, 0.85, 100, 1e-6);
+        let pr = pagerank(&store, 0.85, 100, 1e-6, true);
         assert_eq!(pr.len(), 1);
 
         let bc = betweenness_centrality(&store, false);
@@ -833,8 +899,15 @@ mod tests {
 
         // Test trait methods
         assert_eq!(algo.name(), "pagerank");
-        assert!(!algo.description().is_empty());
-        assert_eq!(algo.parameters().len(), 3);
+        assert!(
+            !algo.description().is_empty(),
+            "algo.description() is empty"
+        );
+        let names: Vec<&str> = algo.parameters().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["damping", "max_iterations", "tolerance", "directed"]
+        );
 
         // Test execute with default params
         let params = Parameters::new();
@@ -858,7 +931,10 @@ mod tests {
 
         // Test trait methods
         assert_eq!(algo.name(), "betweenness_centrality");
-        assert!(!algo.description().is_empty());
+        assert!(
+            !algo.description().is_empty(),
+            "algo.description() is empty"
+        );
         assert_eq!(algo.parameters().len(), 1);
 
         // Test execute with default params (normalized=true)
@@ -881,7 +957,10 @@ mod tests {
 
         // Test trait methods
         assert_eq!(algo.name(), "closeness_centrality");
-        assert!(!algo.description().is_empty());
+        assert!(
+            !algo.description().is_empty(),
+            "algo.description() is empty"
+        );
         assert_eq!(algo.parameters().len(), 1);
 
         // Test execute with default params (wf_improved=false)
@@ -904,7 +983,10 @@ mod tests {
 
         // Test trait methods
         assert_eq!(algo.name(), "degree_centrality");
-        assert!(!algo.description().is_empty());
+        assert!(
+            !algo.description().is_empty(),
+            "algo.description() is empty"
+        );
         assert_eq!(algo.parameters().len(), 1);
 
         // Test execute with default params (normalized=false) - returns 4 columns
@@ -977,8 +1059,8 @@ mod tests {
     fn test_pagerank_convergence() {
         // Test that PageRank converges with tight tolerance
         let store = create_pagerank_graph();
-        let scores_tight = pagerank(&store, 0.85, 1000, 1e-10);
-        let scores_loose = pagerank(&store, 0.85, 1000, 1e-2);
+        let scores_tight = pagerank(&store, 0.85, 1000, 1e-10, true);
+        let scores_loose = pagerank(&store, 0.85, 1000, 1e-2, true);
 
         // Both should produce valid results
         assert_eq!(scores_tight.len(), 3);
@@ -994,8 +1076,8 @@ mod tests {
     fn test_pagerank_low_damping() {
         // Test with low damping (more teleportation)
         let store = create_pagerank_graph();
-        let scores_low = pagerank(&store, 0.5, 100, 1e-6);
-        let scores_high = pagerank(&store, 0.99, 100, 1e-6);
+        let scores_low = pagerank(&store, 0.5, 100, 1e-6, true);
+        let scores_high = pagerank(&store, 0.99, 100, 1e-6, true);
 
         // Both should be valid
         assert_eq!(scores_low.len(), 3);
@@ -1060,5 +1142,77 @@ mod tests {
         assert_eq!(*result.out_degree.get(&n0).unwrap(), 2); // self + n1
         assert_eq!(*result.in_degree.get(&n0).unwrap(), 1); // self
         assert_eq!(*result.in_degree.get(&n1).unwrap(), 1); // from n0
+    }
+
+    /// Builds a store with `n` nodes and one directed edge per pair in `edges`.
+    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (LpgStore, Vec<NodeId>) {
+        let store = LpgStore::new().unwrap();
+        let nodes: Vec<NodeId> = (0..n).map(|_| store.create_node(&["Node"])).collect();
+        for &(u, v) in edges {
+            store.create_edge(nodes[u], nodes[v], "EDGE");
+        }
+        (store, nodes)
+    }
+
+    #[test]
+    fn test_undirected_pagerank_is_symmetric_on_a_path() {
+        // The path d - a - b - c, created as a -> b, b -> c, a -> d (a = 0, b = 1,
+        // c = 2, d = 3): the inner nodes rank first and equal, the ends last.
+        let (store, nodes) = store_from_edges(4, &[(0, 1), (1, 2), (0, 3)]);
+        let scores = pagerank(&store, 0.85, 100, 1e-12, false);
+        assert!((scores[&nodes[0]] - scores[&nodes[1]]).abs() < 1e-12);
+        assert!((scores[&nodes[2]] - scores[&nodes[3]]).abs() < 1e-12);
+        assert!(scores[&nodes[0]] > scores[&nodes[2]]);
+        assert!((scores.values().sum::<f64>() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_undirected_pagerank_counts_each_pair_once() {
+        // Parallel edges in either direction and a self-loop change nothing.
+        let (once, a) = store_from_edges(3, &[(0, 1), (1, 2)]);
+        let (many, b) = store_from_edges(3, &[(0, 1), (1, 0), (0, 1), (1, 2), (2, 2)]);
+        let x = pagerank(&once, 0.85, 100, 1e-12, false);
+        let y = pagerank(&many, 0.85, 100, 1e-12, false);
+        for i in 0..3 {
+            assert_eq!(x[&a[i]].to_bits(), y[&b[i]].to_bits(), "node {i}");
+        }
+    }
+
+    #[test]
+    fn test_undirected_pagerank_with_isolated_nodes_sums_to_one() {
+        let (store, nodes) = store_from_edges(4, &[(0, 1)]);
+        let scores = pagerank(&store, 0.85, 100, 1e-12, false);
+        assert!((scores.values().sum::<f64>() - 1.0).abs() < 1e-9);
+        assert_eq!(scores[&nodes[2]].to_bits(), scores[&nodes[3]].to_bits());
+        assert!(scores[&nodes[0]] > scores[&nodes[2]]);
+    }
+
+    #[test]
+    fn test_directed_pagerank_keeps_direction_and_parallel_edges() {
+        // a -> b twice, b -> c: c collects the most, and the doubled edge counts twice.
+        let (store, nodes) = store_from_edges(3, &[(0, 1), (0, 1), (1, 2)]);
+        let directed = pagerank(&store, 0.85, 100, 1e-12, true);
+        assert!(directed[&nodes[2]] > directed[&nodes[0]]);
+        let undirected = pagerank(&store, 0.85, 100, 1e-12, false);
+        assert!((undirected[&nodes[0]] - undirected[&nodes[2]]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_pagerank_procedure_takes_directed() {
+        use super::super::traits::GraphAlgorithm;
+
+        let (store, _) = store_from_edges(4, &[(0, 1), (1, 2), (0, 3)]);
+        let mut params = Parameters::new();
+        params.set_bool("directed", false);
+        let result = PageRankAlgorithm.execute(&store, &params).unwrap();
+        let expected = pagerank(&store, 0.85, 100, 1e-6, false);
+        assert_eq!(result.rows.len(), 4);
+        for row in &result.rows {
+            let (Value::Int64(id), Value::Float64(score)) = (&row[0], &row[1]) else {
+                panic!("unexpected row {row:?}");
+            };
+            let node = NodeId::new(u64::try_from(*id).unwrap());
+            assert_eq!(score.to_bits(), expected[&node].to_bits());
+        }
     }
 }

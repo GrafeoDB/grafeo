@@ -14,27 +14,26 @@ use super::page_fetcher::AccessHint;
 
 /// A read-only memory-mapped view of a section in the `.grafeo` container.
 ///
-/// Created by [`GrafeoFileManager::mmap_section`](crate::file::GrafeoFileManager::mmap_section).
-/// The mapping remains valid as long as this struct is alive, independent of
-/// the file manager's mutex. The OS page cache serves reads: warm data is
-/// zero-copy, cold pages fault in transparently from disk.
+/// Created by [`write_and_mmap_spill_file`](super::spill::write_and_mmap_spill_file).
+/// The mapping remains valid as long as this struct is alive. The OS page
+/// cache serves reads: warm data is zero-copy, cold pages fault in
+/// transparently from disk.
 ///
 /// # Lifecycle
 ///
-/// 1. Engine flushes dirty sections to the container via `write_sections()`
-/// 2. Engine calls `mmap_section()` for index sections it wants to keep accessible
-/// 3. Engine drops the in-memory copy of the section data
+/// 1. The engine writes a section it evicts to its own spill file
+/// 2. The spill file is mapped back as an `MmapSection`
+/// 3. The engine drops the in-memory copy of the section data
 /// 4. Reads go through the `MmapSection` (zero-copy from page cache)
-/// 5. On next checkpoint, the engine **drops all mmaps first**, then writes
+/// 5. Before the spill file is rewritten, the engine **drops its mmaps first**
 ///
 /// # Platform note
 ///
 /// On Windows, the OS rejects writes to a file with active memory mappings
-/// (error 1224: `ERROR_USER_MAPPED_FILE`). All `MmapSection` handles must
-/// be dropped before calling `write_sections()` or `write_snapshot()`.
-/// On Linux/macOS, writes succeed with active mappings (old mappings see
-/// stale data), but the drop-before-write lifecycle is used on all platforms
-/// for consistency.
+/// (error 1224: `ERROR_USER_MAPPED_FILE`), so every `MmapSection` of a file
+/// must be dropped before that file is written. On Linux/macOS, writes
+/// succeed with active mappings (old mappings see stale data), but the
+/// drop-before-write lifecycle is used on all platforms for consistency.
 pub struct MmapSection {
     mmap: memmap2::Mmap,
     section_type: SectionType,
@@ -44,8 +43,8 @@ pub struct MmapSection {
 impl MmapSection {
     /// Creates a new `MmapSection`.
     ///
-    /// Called internally by `GrafeoFileManager::mmap_section()` after
-    /// CRC verification.
+    /// Called internally by the spill path, which records the CRC-32 of the
+    /// bytes it wrote.
     pub(crate) fn new(mmap: memmap2::Mmap, section_type: SectionType, checksum: u32) -> Self {
         Self {
             mmap,

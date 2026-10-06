@@ -27,6 +27,7 @@ use crate::index::vector::DistanceMetric;
 use crate::statistics::Statistics;
 use arcstr::ArcStr;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::FxHashMap;
 use std::sync::Arc;
 
@@ -81,11 +82,41 @@ pub trait GraphStore: Send + Sync {
     /// Gets a single property from a node without loading all properties.
     fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value>;
 
+    /// Calls `f` with the vector in a node's property and returns whether
+    /// there was one. Vector search reads every distance through this, so a
+    /// store should lend the vector without copying it; the default reads it
+    /// through [`get_node_property`](Self::get_node_property).
+    fn with_node_vector(&self, id: NodeId, key: &PropertyKey, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self.get_node_property(id, key) {
+            Some(Value::Vector(vector)) => {
+                f(&vector);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Gets a single property from an edge without loading all properties.
     fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value>;
 
     /// Gets a property for multiple nodes in a single batch operation.
     fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>>;
+
+    /// [`get_node_property_batch`](Self::get_node_property_batch) for the
+    /// readers that must tell a value that cannot be read from no value (the
+    /// key of an algorithm's `key=`): a spilled value that cannot be read is
+    /// an error, where the batch read reads it as absent. A store with
+    /// nothing to read from a file returns its batch read; a store that
+    /// wraps another forwards to the inner store's fallible read.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading a spilled value.
+    fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+    ) -> Result<Vec<Option<Value>>>;
 
     /// Gets all properties for multiple nodes in a single batch operation.
     fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>>;
@@ -541,12 +572,18 @@ pub trait GraphStoreMut: GraphStoreSearch {
     fn delete_node(&self, id: NodeId) -> bool;
 
     /// Deletes a node within a transaction context. Returns `true` if the node existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and deletes nothing, when the node's properties
+    /// (which a rollback restores) cannot be read: a spilled value whose file
+    /// cannot be read.
     fn delete_node_versioned(
         &self,
         id: NodeId,
         epoch: EpochId,
         transaction_id: TransactionId,
-    ) -> bool;
+    ) -> Result<bool>;
 
     /// Deletes all edges connected to a node (DETACH DELETE).
     fn delete_node_edges(&self, node_id: NodeId);
@@ -574,14 +611,21 @@ pub trait GraphStoreMut: GraphStoreSearch {
     /// so it can be restored on rollback.
     ///
     /// Default delegates to [`set_node_property`](Self::set_node_property).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the previous value cannot
+    /// be read (a spilled value whose file cannot be read): a rollback could
+    /// not restore it.
     fn set_node_property_versioned(
         &self,
         id: NodeId,
         key: &str,
         value: Value,
         _transaction_id: TransactionId,
-    ) {
+    ) -> Result<()> {
         self.set_node_property(id, key, value);
+        Ok(())
     }
 
     /// Sets an edge property within a transaction, recording the previous value
@@ -599,21 +643,38 @@ pub trait GraphStoreMut: GraphStoreSearch {
     }
 
     /// Removes a property from a node. Returns the previous value if it existed.
-    fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value>;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the value cannot be read
+    /// (a spilled value whose file cannot be read): the caller logs the
+    /// removal, and a hidden value reported absent would not be logged.
+    fn remove_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>>;
 
     /// Removes a property from an edge. Returns the previous value if it existed.
-    fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value>;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the value cannot be read,
+    /// as [`remove_node_property`](Self::remove_node_property) does.
+    fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<Option<Value>>;
 
     /// Removes a node property within a transaction, recording the previous value
-    /// so it can be restored on rollback.
+    /// so it can be restored on rollback. Returns the previous value if it
+    /// existed.
     ///
     /// Default delegates to [`remove_node_property`](Self::remove_node_property).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the previous value cannot
+    /// be read (a spilled value whose file cannot be read).
     fn remove_node_property_versioned(
         &self,
         id: NodeId,
         key: &str,
         _transaction_id: TransactionId,
-    ) -> Option<Value> {
+    ) -> Result<Option<Value>> {
         self.remove_node_property(id, key)
     }
 
@@ -621,12 +682,17 @@ pub trait GraphStoreMut: GraphStoreSearch {
     /// so it can be restored on rollback.
     ///
     /// Default delegates to [`remove_edge_property`](Self::remove_edge_property).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the previous value cannot
+    /// be read.
     fn remove_edge_property_versioned(
         &self,
         id: EdgeId,
         key: &str,
         _transaction_id: TransactionId,
-    ) -> Option<Value> {
+    ) -> Result<Option<Value>> {
         self.remove_edge_property(id, key)
     }
 
@@ -736,6 +802,13 @@ impl GraphStore for NullGraphStore {
     }
     fn get_node_property_batch(&self, ids: &[NodeId], _: &PropertyKey) -> Vec<Option<Value>> {
         vec![None; ids.len()]
+    }
+    fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        _: &PropertyKey,
+    ) -> Result<Vec<Option<Value>>> {
+        Ok(vec![None; ids.len()])
     }
     fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
         vec![FxHashMap::default(); ids.len()]
@@ -876,8 +949,14 @@ mod tests {
         let store = NullGraphStore;
         let nid = NodeId(1);
 
-        assert!(store.neighbors(nid, Direction::Outgoing).is_empty());
-        assert!(store.edges_from(nid, Direction::Incoming).is_empty());
+        assert!(
+            store.neighbors(nid, Direction::Outgoing).is_empty(),
+            "expected empty"
+        );
+        assert!(
+            store.edges_from(nid, Direction::Incoming).is_empty(),
+            "expected empty"
+        );
         assert_eq!(store.out_degree(nid), 0);
         assert_eq!(store.in_degree(nid), 0);
         assert!(!store.has_backward_adjacency());
@@ -887,9 +966,13 @@ mod tests {
     fn null_graph_store_scans_and_counts() {
         let store = NullGraphStore;
 
-        assert!(store.node_ids().is_empty());
-        assert!(store.all_node_ids().is_empty());
-        assert!(store.nodes_by_label("Person").is_empty());
+        assert!(store.node_ids().is_empty(), "{:?}", store.node_ids());
+        assert!(
+            store.all_node_ids().is_empty(),
+            "{:?}",
+            store.all_node_ids()
+        );
+        assert!(store.nodes_by_label("Person").is_empty(), "expected empty");
         assert_eq!(store.node_count(), 0);
         assert_eq!(store.edge_count(), 0);
     }
@@ -904,9 +987,17 @@ mod tests {
         assert!(store.edge_type(eid).is_none());
         assert!(store.edge_type_versioned(eid, epoch, txn).is_none());
         assert!(!store.has_property_index("name"));
-        assert!(store.all_labels().is_empty());
-        assert!(store.all_edge_types().is_empty());
-        assert!(store.all_property_keys().is_empty());
+        assert!(store.all_labels().is_empty(), "{:?}", store.all_labels());
+        assert!(
+            store.all_edge_types().is_empty(),
+            "{:?}",
+            store.all_edge_types()
+        );
+        assert!(
+            store.all_property_keys().is_empty(),
+            "{:?}",
+            store.all_property_keys()
+        );
     }
 
     #[test]
@@ -915,16 +1006,21 @@ mod tests {
         let key = PropertyKey::from("age");
         let val = Value::Int64(30);
 
-        assert!(store.find_nodes_by_property("age", &val).is_empty());
+        assert!(
+            store.find_nodes_by_property("age", &val).is_empty(),
+            "expected empty"
+        );
         assert!(
             store
                 .find_nodes_by_properties(&[("age", val.clone())])
-                .is_empty()
+                .is_empty(),
+            "expected no nodes"
         );
         assert!(
             store
                 .find_nodes_in_range("age", Some(&val), None, true, false)
-                .is_empty()
+                .is_empty(),
+            "expected no nodes"
         );
         assert!(!store.node_property_might_match(&key, CompareOp::Eq, &val));
         assert!(!store.edge_property_might_match(&key, CompareOp::Eq, &val));
@@ -956,12 +1052,14 @@ mod tests {
         assert!(
             store
                 .filter_visible_node_ids(&[nid, NodeId(2)], epoch)
-                .is_empty()
+                .is_empty(),
+            "expected no visible nodes"
         );
         assert!(
             store
                 .filter_visible_node_ids_versioned(&[nid], epoch, txn)
-                .is_empty()
+                .is_empty(),
+            "expected no visible nodes"
         );
     }
 
@@ -1046,6 +1144,13 @@ mod tests {
             ids.iter()
                 .map(|id| self.get_node_property(*id, key))
                 .collect()
+        }
+        fn try_get_node_property_batch(
+            &self,
+            ids: &[NodeId],
+            key: &PropertyKey,
+        ) -> Result<Vec<Option<Value>>> {
+            Ok(self.get_node_property_batch(ids, key))
         }
         fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
             ids.iter()
@@ -1195,8 +1300,8 @@ mod tests {
                 false
             }
         }
-        fn delete_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> bool {
-            self.delete_node(id)
+        fn delete_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> Result<bool> {
+            Ok(self.delete_node(id))
         }
         fn delete_node_edges(&self, node_id: NodeId) {
             let mut inner = self.inner.lock().unwrap();
@@ -1226,21 +1331,21 @@ mod tests {
                 edge.set_property(key, value);
             }
         }
-        fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
+        fn remove_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {
             let mut inner = self.inner.lock().unwrap();
-            inner
+            Ok(inner
                 .nodes
                 .iter_mut()
                 .find(|n| n.id == id)
-                .and_then(|n| n.remove_property(key))
+                .and_then(|n| n.remove_property(key)))
         }
-        fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value> {
+        fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<Option<Value>> {
             let mut inner = self.inner.lock().unwrap();
-            inner
+            Ok(inner
                 .edges
                 .iter_mut()
                 .find(|e| e.id == id)
-                .and_then(|e| e.remove_property(key))
+                .and_then(|e| e.remove_property(key)))
         }
         fn add_label(&self, node_id: NodeId, label: &str) -> bool {
             let mut inner = self.inner.lock().unwrap();
@@ -1273,7 +1378,9 @@ mod tests {
         let txn = TransactionId(7);
 
         // Default impl of set_node_property_versioned calls set_node_property.
-        store.set_node_property_versioned(id, "name", Value::from("Vincent"), txn);
+        store
+            .set_node_property_versioned(id, "name", Value::from("Vincent"), txn)
+            .unwrap();
         assert_eq!(
             store.get_node_property(id, &key),
             Some(Value::from("Vincent"))
@@ -1299,7 +1406,9 @@ mod tests {
 
         let node_id = store.create_node(&["Person"]);
         store.set_node_property(node_id, "city", Value::from("Amsterdam"));
-        let removed = store.remove_node_property_versioned(node_id, "city", txn);
+        let removed = store
+            .remove_node_property_versioned(node_id, "city", txn)
+            .unwrap();
         assert_eq!(removed, Some(Value::from("Amsterdam")));
         assert!(
             store
@@ -1307,16 +1416,22 @@ mod tests {
                 .is_none()
         );
 
-        let missing = store.remove_node_property_versioned(node_id, "absent", txn);
+        let missing = store
+            .remove_node_property_versioned(node_id, "absent", txn)
+            .unwrap();
         assert!(missing.is_none());
 
         let src = store.create_node(&["Person"]);
         let dst = store.create_node(&["Person"]);
         let edge_id = store.create_edge(src, dst, "KNOWS");
         store.set_edge_property(edge_id, "weight", Value::Int64(42));
-        let removed_edge = store.remove_edge_property_versioned(edge_id, "weight", txn);
+        let removed_edge = store
+            .remove_edge_property_versioned(edge_id, "weight", txn)
+            .unwrap();
         assert_eq!(removed_edge, Some(Value::Int64(42)));
-        let removed_again = store.remove_edge_property_versioned(edge_id, "weight", txn);
+        let removed_again = store
+            .remove_edge_property_versioned(edge_id, "weight", txn)
+            .unwrap();
         assert!(removed_again.is_none());
     }
 
@@ -1417,7 +1532,7 @@ mod tests {
         let store: Arc<dyn GraphStoreSearch> = Arc::new(TestMutStore::new());
         assert_eq!(store.node_count(), 0);
         assert_eq!(store.edge_count(), 0);
-        assert!(store.node_ids().is_empty());
+        assert!(store.node_ids().is_empty(), "{:?}", store.node_ids());
         assert!(store.get_node(NodeId(1)).is_none());
         assert_eq!(store.current_epoch(), EpochId(0));
     }

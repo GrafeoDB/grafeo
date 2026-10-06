@@ -164,7 +164,7 @@ mod tests {
         )]);
 
         let bytes = section.serialize().expect("serialize should succeed");
-        assert!(!bytes.is_empty());
+        assert!(!bytes.is_empty(), "bytes is empty");
 
         // Restore into a fresh index
         let fresh = InvertedIndex::new(BM25Config::default());

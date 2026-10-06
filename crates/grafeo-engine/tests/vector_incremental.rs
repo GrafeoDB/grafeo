@@ -235,8 +235,8 @@ fn test_drop_vector_index() {
     );
 
     // Drop
-    assert!(db.drop_vector_index("Doc", "emb"));
-    assert!(!db.drop_vector_index("Doc", "emb")); // second drop returns false
+    assert!(db.drop_vector_index("Doc", "emb").unwrap());
+    assert!(!db.drop_vector_index("Doc", "emb").unwrap()); // second drop returns false
 
     // Search now fails
     assert!(

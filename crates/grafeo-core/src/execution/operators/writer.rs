@@ -298,7 +298,7 @@ impl GraphWriter {
             validator.check_unique_node(labels, &properties, None)?;
         }
         let id = self.insert_node(labels)?;
-        self.write_values(Entity::Node(id), &properties);
+        self.write_values(Entity::Node(id), &properties)?;
         Ok(id)
     }
 
@@ -323,7 +323,7 @@ impl GraphWriter {
             self.check_node_values(validator.as_ref(), labels, &properties, None)?;
         }
         let id = self.insert_node(labels)?;
-        self.write_values(Entity::Node(id), &properties);
+        self.write_values(Entity::Node(id), &properties)?;
 
         let derived = derive(id)?;
         if let Some(validator) = &self.validator {
@@ -332,7 +332,7 @@ impl GraphWriter {
             validator.validate_node_complete(labels, &all)?;
             validator.check_unique_node(labels, &all, Some(id))?;
         }
-        self.write_values(Entity::Node(id), &derived);
+        self.write_values(Entity::Node(id), &derived)?;
         Ok(id)
     }
 
@@ -367,7 +367,7 @@ impl GraphWriter {
                 self.check_node_set(validator.as_ref(), &node, assignments, replace)?;
             }
         }
-        self.apply_set(Entity::Node(id), assignments, replace);
+        self.apply_set(Entity::Node(id), assignments, replace)?;
         Ok(())
     }
 
@@ -395,7 +395,7 @@ impl GraphWriter {
                 false,
             )?;
         }
-        self.remove_value(Entity::Node(id), key);
+        self.remove_value(Entity::Node(id), key)?;
         Ok(true)
     }
 
@@ -492,7 +492,8 @@ impl GraphWriter {
         }
         let deleted = self
             .store
-            .delete_node_versioned(id, self.epoch(), self.transaction());
+            .delete_node_versioned(id, self.epoch(), self.transaction())
+            .map_err(refused)?;
         self.count(|c| &c.nodes_deleted, usize::from(deleted));
         Ok(deleted)
     }
@@ -520,7 +521,7 @@ impl GraphWriter {
             validator.validate_edge_complete(edge_type, &properties)?;
         }
         let id = self.insert_edge(src, dst, edge_type)?;
-        self.write_values(Entity::Edge(id), &properties);
+        self.write_values(Entity::Edge(id), &properties)?;
         Ok(id)
     }
 
@@ -546,7 +547,7 @@ impl GraphWriter {
             }
         }
         let id = self.insert_edge(src, dst, edge_type)?;
-        self.write_values(Entity::Edge(id), &properties);
+        self.write_values(Entity::Edge(id), &properties)?;
 
         let derived = derive(id)?;
         if let Some(validator) = &self.validator {
@@ -555,7 +556,7 @@ impl GraphWriter {
             }
             validator.validate_edge_complete(edge_type, &overlay(properties, &derived))?;
         }
-        self.write_values(Entity::Edge(id), &derived);
+        self.write_values(Entity::Edge(id), &derived)?;
         Ok(id)
     }
 
@@ -582,7 +583,7 @@ impl GraphWriter {
                 validator.validate_edge_property(edge.edge_type.as_str(), &name, &value)?;
             }
         }
-        self.apply_set(Entity::Edge(id), assignments, replace);
+        self.apply_set(Entity::Edge(id), assignments, replace)?;
         Ok(())
     }
 
@@ -605,7 +606,7 @@ impl GraphWriter {
         if let Some(validator) = &self.validator {
             validator.validate_edge_property(edge.edge_type.as_str(), key, &Value::Null)?;
         }
-        self.remove_value(Entity::Edge(id), key);
+        self.remove_value(Entity::Edge(id), key)?;
         Ok(true)
     }
 
@@ -715,24 +716,28 @@ impl GraphWriter {
         Ok(id)
     }
 
-    fn write_values(&self, entity: Entity, values: &[(String, Value)]) {
+    fn write_values(
+        &self,
+        entity: Entity,
+        values: &[(String, Value)],
+    ) -> Result<(), OperatorError> {
         for (name, value) in values {
-            self.write_value(entity, name, value.clone());
+            self.write_value(entity, name, value.clone())?;
         }
+        Ok(())
     }
 
     /// Writes a property value; a null removes the property, since a property
     /// with a null value does not exist.
-    fn write_value(&self, entity: Entity, key: &str, value: Value) {
+    fn write_value(&self, entity: Entity, key: &str, value: Value) -> Result<(), OperatorError> {
         if value.is_null() {
-            self.remove_value(entity, key);
-            return;
+            return self.remove_value(entity, key);
         }
-        self.count(|c| &c.properties_set, 1);
         match (entity, self.transaction_id) {
             (Entity::Node(id), Some(transaction_id)) => {
                 self.store
-                    .set_node_property_versioned(id, key, value, transaction_id);
+                    .set_node_property_versioned(id, key, value, transaction_id)
+                    .map_err(refused)?;
             }
             (Entity::Node(id), None) => self.store.set_node_property(id, key, value),
             (Entity::Edge(id), Some(transaction_id)) => {
@@ -741,9 +746,11 @@ impl GraphWriter {
             }
             (Entity::Edge(id), None) => self.store.set_edge_property(id, key, value),
         }
+        self.count(|c| &c.properties_set, 1);
+        Ok(())
     }
 
-    fn remove_value(&self, entity: Entity, key: &str) {
+    fn remove_value(&self, entity: Entity, key: &str) -> Result<(), OperatorError> {
         let removed =
             match (entity, self.transaction_id) {
                 (Entity::Node(id), Some(transaction_id)) => self
@@ -754,8 +761,10 @@ impl GraphWriter {
                     .store
                     .remove_edge_property_versioned(id, key, transaction_id),
                 (Entity::Edge(id), None) => self.store.remove_edge_property(id, key),
-            };
+            }
+            .map_err(refused)?;
         self.count(|c| &c.properties_set, usize::from(removed.is_some()));
+        Ok(())
     }
 
     fn existing_keys(&self, entity: Entity) -> Vec<String> {
@@ -776,10 +785,15 @@ impl GraphWriter {
     /// Applies a SET: plain assignments write their value, map entries write
     /// theirs or remove the property for a null, and `replace` first removes
     /// every property.
-    fn apply_set(&self, entity: Entity, assignments: &[(String, Value)], replace: bool) {
+    fn apply_set(
+        &self,
+        entity: Entity,
+        assignments: &[(String, Value)],
+        replace: bool,
+    ) -> Result<(), OperatorError> {
         for (name, value) in assignments {
             if name != MAP_ASSIGNMENT {
-                self.write_value(entity, name, value.clone());
+                self.write_value(entity, name, value.clone())?;
                 continue;
             }
             let Value::Map(map) = value else {
@@ -787,18 +801,25 @@ impl GraphWriter {
             };
             if replace {
                 for key in self.existing_keys(entity) {
-                    self.remove_value(entity, &key);
+                    self.remove_value(entity, &key)?;
                 }
             }
             for (key, entry) in map.iter() {
                 if entry.is_null() {
-                    self.remove_value(entity, key.as_str());
+                    self.remove_value(entity, key.as_str())?;
                 } else {
-                    self.write_value(entity, key.as_str(), entry.clone());
+                    self.write_value(entity, key.as_str(), entry.clone())?;
                 }
             }
         }
+        Ok(())
     }
+}
+
+/// The statement error of a write the store refused, such as a spilled
+/// property value whose file cannot be read, which a rollback would lose.
+fn refused(error: grafeo_common::utils::error::Error) -> OperatorError {
+    OperatorError::Execution(error.to_string())
 }
 
 /// The node's labels as strings.

@@ -56,7 +56,8 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the snapshot write fails or the blocking task panics.
+    /// Returns an error if the snapshot write fails or the blocking task
+    /// panics, and the database-closed error after `close()`.
     ///
     /// # Examples
     ///
@@ -74,6 +75,8 @@ impl GrafeoDB {
     pub async fn async_write_snapshot(self: &Arc<Self>) -> Result<()> {
         let db = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
+            // `close()` waits for the write, and none runs after it.
+            let _open = db.hold_open()?;
             // Read-only databases have nothing to flush.
             if db.read_only {
                 return Ok(());
@@ -167,6 +170,36 @@ mod tests {
 
         let header = db.file_manager.as_ref().unwrap().active_header();
         assert_eq!((header.node_count, header.edge_count), (2, 1));
+    }
+
+    /// After `close()` the file is released (another handle may have written
+    /// it since): the snapshot write fails with the database-closed error and
+    /// writes nothing.
+    #[cfg(feature = "grafeo-file")]
+    #[tokio::test]
+    async fn async_write_snapshot_after_close_fails_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("berlin.grafeo");
+        let db = Arc::new(GrafeoDB::open(&path).unwrap());
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.close().unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let error = db
+            .async_write_snapshot()
+            .await
+            .expect_err("a snapshot write after close() fails");
+        assert!(
+            matches!(
+                error,
+                Error::Transaction(grafeo_common::utils::error::TransactionError::DatabaseClosed)
+            ),
+            "{error:?}"
+        );
+        assert!(
+            std::fs::read(&path).unwrap() == before,
+            "the file is unchanged"
+        );
     }
 
     #[cfg(feature = "grafeo-file")]

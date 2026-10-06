@@ -397,7 +397,7 @@ fn export_import_moderate_dataset() {
     }
 
     let bytes = db.export_snapshot().unwrap();
-    assert!(!bytes.is_empty());
+    assert!(!bytes.is_empty(), "bytes is empty");
 
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 

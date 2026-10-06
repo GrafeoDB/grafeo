@@ -4,6 +4,14 @@
 //! operations into a single transaction. This is 10-100x faster than calling
 //! `create_node`/`create_edge` in a loop for large graphs.
 //!
+//! An import first checks that the database takes it: on a read-only
+//! database, after `close()` and after a commit that did not complete it
+//! refuses before it opens or parses anything. It then reads and parses its
+//! input, without blocking anything. While it then changes the store,
+//! commits, new transactions, writes outside a transaction and checkpoints
+//! wait for it: a checkpoint or `close()` holds all of the import or none of
+//! it. Reads outside a transaction go on.
+//!
 //! # Supported Formats
 //!
 //! | Format | Extension | Description |
@@ -39,6 +47,10 @@ impl super::GrafeoDB {
     /// Nodes are created on-demand as new external IDs are encountered.
     /// All nodes get the label `"_Imported"` and all edges get the given `edge_type`.
     ///
+    /// While it changes the store, commits, new transactions and checkpoints
+    /// wait for it; the file is read before, without blocking anything, and
+    /// only once the database takes the import: a refused call opens nothing.
+    ///
     /// # Arguments
     ///
     /// * `path` - Path to the TSV file.
@@ -52,13 +64,19 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be opened or contains malformed lines.
+    /// Returns an error if the file cannot be opened or contains malformed
+    /// lines; the read-only error on a read-only database, the
+    /// database-closed error after `close()` of a persistent database
+    /// (read-only or not), and the incomplete-commit error after a commit
+    /// that did not complete.
     pub fn import_tsv(
         &self,
         path: impl AsRef<Path>,
         edge_type: &str,
         directed: bool,
     ) -> Result<(usize, usize)> {
+        // Refused before the file is opened: a refused import does no work.
+        self.check_import_allowed()?;
         let path = path.as_ref();
         let file = std::fs::File::open(path)
             .map_err(|e| Error::Internal(format!("failed to open {}: {}", path.display(), e)))?;
@@ -74,15 +92,23 @@ impl super::GrafeoDB {
     /// Same format as [`import_tsv`](Self::import_tsv) but reads from a string
     /// instead of a file. Useful for tests and embedded data.
     ///
+    /// While it changes the store, commits, new transactions and checkpoints
+    /// wait for it; the string is parsed before, without blocking anything,
+    /// and only once the database takes the import.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the data contains malformed lines.
+    /// Returns an error if the data contains malformed lines; the read-only
+    /// error on a read-only database, the database-closed error after
+    /// `close()` of a persistent database (read-only or not), and the
+    /// incomplete-commit error after a commit that did not complete.
     pub fn import_tsv_str(
         &self,
         data: &str,
         edge_type: &str,
         directed: bool,
     ) -> Result<(usize, usize)> {
+        self.check_import_allowed()?;
         let reader = BufReader::new(data.as_bytes());
         let edges = parse_edge_list(reader)?;
         self.import_edge_list(&edges, edge_type, directed)
@@ -100,6 +126,10 @@ impl super::GrafeoDB {
     ///
     /// Symmetric matrices automatically create edges in both directions.
     ///
+    /// While it changes the store, commits, new transactions and checkpoints
+    /// wait for it; the file is read before, without blocking anything, and
+    /// only once the database takes the import: a refused call opens nothing.
+    ///
     /// # Arguments
     ///
     /// * `path` - Path to the `.mtx` file.
@@ -111,8 +141,13 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be opened or has an invalid MMIO header or data.
+    /// Returns an error if the file cannot be opened or has an invalid MMIO
+    /// header or data; the read-only error on a read-only database, the
+    /// database-closed error after `close()` of a persistent database
+    /// (read-only or not), and the incomplete-commit error after a commit
+    /// that did not complete.
     pub fn import_mmio(&self, path: impl AsRef<Path>, edge_type: &str) -> Result<(usize, usize)> {
+        self.check_import_allowed()?;
         let path = path.as_ref();
         let file = std::fs::File::open(path)
             .map_err(|e| Error::Internal(format!("failed to open {}: {}", path.display(), e)))?;
@@ -122,13 +157,16 @@ impl super::GrafeoDB {
         self.import_edge_list(&edges, edge_type, !symmetric)
     }
 
-    /// Bulk-imports a pre-parsed edge list into the LPG store.
+    /// Bulk-imports a pre-parsed edge list into the LPG store. The public
+    /// imports call [`check_import_allowed`](Self::check_import_allowed)
+    /// before they read their input; this checks again, under the hold.
     fn import_edge_list(
         &self,
         edges: &[(u64, u64)],
         edge_type: &str,
         directed: bool,
     ) -> Result<(usize, usize)> {
+        let _held = self.hold_commits_for_import()?;
         let store = self.lpg_store();
 
         // Phase 1: Collect unique external IDs and create nodes.
@@ -177,6 +215,10 @@ impl super::GrafeoDB {
     /// Each edge `(src, dst)` becomes a triple:
     /// `<{base_uri}{src}> <{predicate_uri}> <{base_uri}{dst}>`
     ///
+    /// While it changes the store, commits, new transactions and checkpoints
+    /// wait for it; the file is read before, without blocking anything, and
+    /// only once the database takes the import: a refused call opens nothing.
+    ///
     /// # Arguments
     ///
     /// * `path` - Path to the TSV file.
@@ -189,7 +231,11 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be opened or contains malformed lines.
+    /// Returns an error if the file cannot be opened or contains malformed
+    /// lines; the read-only error on a read-only database, the
+    /// database-closed error after `close()` of a persistent database
+    /// (read-only or not), and the incomplete-commit error after a commit
+    /// that did not complete.
     #[cfg(feature = "triple-store")]
     pub fn import_tsv_rdf(
         &self,
@@ -199,6 +245,8 @@ impl super::GrafeoDB {
     ) -> Result<(usize, usize)> {
         use grafeo_core::graph::rdf::{Term, Triple};
 
+        // Refused before the file is opened: a refused import does no work.
+        self.check_import_allowed()?;
         let path = path.as_ref();
         let file = std::fs::File::open(path)
             .map_err(|e| Error::Internal(format!("failed to open {}: {}", path.display(), e)))?;
@@ -222,6 +270,7 @@ impl super::GrafeoDB {
             })
             .collect();
 
+        let _held = self.hold_commits_for_import()?;
         let edge_count = self.rdf_store.batch_insert(triples);
 
         Ok((unique_nodes.len(), edge_count))

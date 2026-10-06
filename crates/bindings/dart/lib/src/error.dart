@@ -64,7 +64,10 @@ class SerializationException extends GrafeoException {
   const SerializationException(super.message, super.status);
 }
 
-/// A generic database error (status 1, 7, 8, 9, or unknown).
+/// A generic database error (status 1, 7, 8, 9, or unknown). A write to a
+/// closed database (GRAFEO-T007 in the message) and a call after a commit that
+/// did not complete (GRAFEO-T008, reopen the database) raise this one, not a
+/// [TransactionException]: no retry fixes them.
 class DatabaseException extends GrafeoException {
   /// Creates a [DatabaseException] with [message] and [status].
   const DatabaseException(super.message, super.status);

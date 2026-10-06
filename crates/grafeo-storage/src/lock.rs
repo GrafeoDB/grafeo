@@ -1,10 +1,12 @@
-//! Exclusive lock for WAL-directory databases.
+//! Exclusive lock for 0.5.x WAL-directory databases.
 //!
-//! A `.grafeo` file locks itself. A WAL-directory database has no single file
-//! to lock, so [`DirectoryLock`] holds an exclusive lock on a `LOCK` file in
-//! the database directory for as long as the database is open for writing.
-//! A second open, from this process or another one, fails instead of later
-//! overwriting the first one's data.
+//! A `.grafeo` file locks itself. A 0.5.x WAL-directory database has no single
+//! file to lock, so 0.5.44 held an exclusive lock on a `LOCK` file in the
+//! database directory for as long as the database was open for writing, and
+//! [`DirectoryLock`] takes that same lock: 0.6 holds it while it reads such a
+//! directory to migrate it to a single file, until right before the directory
+//! moves, so that read and a 0.5.44 writer exclude each other. 0.6 never opens
+//! a directory for writing.
 
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};

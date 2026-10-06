@@ -99,7 +99,7 @@ mod batch_create_with_props {
         let ids = db
             .batch_create_nodes_with_props("Memory", Vec::new())
             .unwrap();
-        assert!(ids.is_empty());
+        assert!(ids.is_empty(), "{ids:?}");
     }
 
     #[test]
@@ -429,7 +429,7 @@ mod temporal_versioning {
     fn property_history_empty_for_nonexistent() {
         let db = db();
         let history = db.get_node_property_history(NodeId(999), "name");
-        assert!(history.is_empty());
+        assert!(history.is_empty(), "{history:?}");
     }
 
     #[test]

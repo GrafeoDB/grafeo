@@ -101,7 +101,7 @@ mod filter_hybrid;
 mod join;
 mod mutation;
 mod project;
-mod scan;
+pub(crate) mod scan;
 pub(crate) mod seek;
 mod subquery;
 
@@ -233,6 +233,10 @@ pub struct Planner {
     /// and text search reach HNSW / BM25 indexes owned by the LPG store).
     #[cfg(feature = "lpg")]
     pub(super) lpg_store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
+    /// The database's named projections, so `CALL grafeo.<algorithm>({projection: ...})`
+    /// can run on one.
+    #[cfg(feature = "lpg")]
+    pub(super) projections: Option<crate::session::ProjectionRegistry>,
     /// Shared parameter state for the currently planning correlated Apply.
     /// Set by `plan_apply` before planning the inner operator, consumed by
     /// `plan_operator` when encountering `ParameterScan`.
@@ -294,6 +298,8 @@ impl Planner {
             catalog: None,
             #[cfg(feature = "lpg")]
             lpg_store: None,
+            #[cfg(feature = "lpg")]
+            projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             profiling: std::cell::Cell::new(false),
@@ -362,6 +368,8 @@ impl Planner {
             catalog: None,
             #[cfg(feature = "lpg")]
             lpg_store: None,
+            #[cfg(feature = "lpg")]
+            projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             profiling: std::cell::Cell::new(false),
@@ -504,6 +512,15 @@ impl Planner {
     #[must_use]
     pub fn with_lpg_store(mut self, lpg_store: Arc<grafeo_core::graph::lpg::LpgStore>) -> Self {
         self.lpg_store = Some(lpg_store);
+        self
+    }
+
+    /// Attaches the database's projections, so `CALL grafeo.<algorithm>({projection: ...})`
+    /// can run on one.
+    #[cfg(feature = "lpg")]
+    #[must_use]
+    pub fn with_projections(mut self, projections: crate::session::ProjectionRegistry) -> Self {
+        self.projections = Some(projections);
         self
     }
 
@@ -738,7 +755,7 @@ impl Planner {
         match op {
             LogicalOperator::NodeScan(scan) => {
                 let estimate = if let Some(label) = &scan.label {
-                    self.store.nodes_by_label(label).len() as f64
+                    self.store.nodes_by_label_count(label) as f64
                 } else {
                     self.store.node_count() as f64
                 };
@@ -843,7 +860,7 @@ impl Planner {
         match op {
             LogicalOperator::NodeScan(scan) => {
                 if let Some(label) = &scan.label {
-                    self.store.nodes_by_label(label).len() as f64
+                    self.store.nodes_by_label_count(label) as f64
                 } else {
                     self.store.node_count() as f64
                 }
@@ -936,6 +953,15 @@ impl Planner {
 
     /// Plans a single logical operator.
     fn plan_operator(&self, op: &LogicalOperator) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // A chain of filters over a node scan reads the label with the fewest
+        // nodes (see `scan.rs`); PROFILE then shows the plan that runs.
+        let reordered = match op {
+            LogicalOperator::Filter(filter) => self
+                .scan_smallest_label(filter)
+                .map(LogicalOperator::Filter),
+            _ => None,
+        };
+        let op = reordered.as_ref().unwrap_or(op);
         let result = match op {
             LogicalOperator::NodeScan(scan) => self.plan_node_scan(scan),
             LogicalOperator::Expand(expand) => {

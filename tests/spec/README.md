@@ -70,7 +70,7 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 | `statements` | List of queries: all execute, last captures result |
 | `setup` | List of queries to run before the test (always in the file's `language`) |
 | `skip` | Reason string: test is ignored with this message |
-| `params` | Key-value map for parameterized queries |
+| `params` | Key-value map for parameterized queries (see "Parameter values") |
 | `variants` | Rosetta map: `{gql: "...", cypher: "..."}` runs the same test in multiple languages |
 | `expect` | Assertion block (see below) |
 
@@ -87,6 +87,25 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 | `hash` | MD5 hex digest of sorted pipe-delimited rows |
 | `precision` | Float tolerance: cells compared within `10^(-precision)` |
 
+### Parameter values
+
+Every runner types a `params` value by the same rule, so a parameter has the same type in every binding:
+
+| Written as | Type | Example |
+|------------|------|---------|
+| Quoted (single or double) | String, whatever it reads like | `"Alix"`, `"[Amsterdam]"`, `"88"` |
+| Bare, starting with `[` or `{` | JSON list or map (must be valid JSON); its numbers are typed as bare ones | `[3, 19, 88]`, `{"city": "Amsterdam"}` |
+| Bare decimal integer that fits 64 bits | Integer | `88`, `-3`, `+19` |
+| Other bare decimal number, representable as a finite f64 | Float | `3.5`, `.5e1`, `19.` |
+| Bare `true` or `false` | Boolean | `true` |
+| Any other bare value | String | `Alix`, `0x1F`, `1_000`, `inf` |
+
+A number past the f64 range, bare (`1e999`) or inside JSON (`[1e400]`), is an error in every runner: the Rust runner refuses it when it builds, so no test can use one.
+
+A value is written on one line: a block scalar (`|` or `>`) is not supported for params, and the Rust runner refuses one when it builds. Write a multi-line string as a double-quoted string with `\n`, and a list or map as JSON.
+
+Do not use a JSON object with a key `$date`, `$time`, `$duration`, `$zoned_datetime` or `$timestamp_us` in params: the runners whose binding takes parameters as JSON (Node.js, WASM, Go, C#, Dart) decode such an object as a temporal value, while the Rust runner keeps it a map, so the same test would mean two things.
+
 ### Value types in rows
 
 | Type | Syntax | Example |
@@ -101,7 +120,7 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 
 ### Block scalar queries
 
-For multi-line queries, use `|`:
+For multi-line queries, use `|` (`query`, `variants` and list items; not `params`, see "Parameter values"):
 
 ```yaml
     query: |

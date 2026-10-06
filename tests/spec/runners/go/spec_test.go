@@ -7,10 +7,13 @@ import (
 	"bufio"
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -81,7 +84,9 @@ type Meta struct {
 	Tags     []string
 }
 
-// TestCase represents a single test within a .gtest file.
+// TestCase represents a single test within a .gtest file. Params holds each
+// value as the file writes it, quotes included: whether it was quoted decides
+// its type (see paramValue).
 type TestCase struct {
 	Name       string
 	Query      string
@@ -144,31 +149,113 @@ func executeQueryWithParams(db *grafeo.Database, language, query, paramsJSON str
 	return db.ExecuteLanguage(key, query, paramsJSON)
 }
 
-// coerceParamsToJSON converts the string-typed params map from gtest files into
-// a JSON string with properly typed values (int, float, bool, or string).
-func coerceParamsToJSON(params map[string]string) string {
+// The number syntax of the Rust reference runner (crates/grafeo-spec-tests/
+// build.rs): decimal only. strconv.ParseFloat also reads "1_000", "inf" and
+// "0x1Fp0", which the reference runner keeps as strings.
+var (
+	decimalInteger = regexp.MustCompile(`^[+-]?[0-9]+$`)
+	decimalNumber  = regexp.MustCompile(`^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$`)
+)
+
+// paramValue returns the value of a parameter written as text in a .gtest
+// file, by the rule of the Rust reference runner that every runner follows: a
+// quoted value is a string, whatever it reads like; a bare value starting with
+// [ or { is JSON, whose numbers follow the rule of bare ones; a bare decimal
+// integer that fits int64 is an integer and any other bare decimal number a
+// float, an error past the float64 range; a bare true or false is a boolean;
+// any other bare value is a string.
+func paramValue(text string) (interface{}, error) {
+	text = strings.TrimSpace(text)
+	if isQuoted(text) {
+		return unquote(text), nil
+	}
+	if strings.HasPrefix(text, "[") || strings.HasPrefix(text, "{") {
+		if !json.Valid([]byte(text)) {
+			return nil, fmt.Errorf("parameter %s is not valid JSON", text)
+		}
+		if err := checkJSONNumbers(text); err != nil {
+			return nil, err
+		}
+		// The binding reads the numbers as written: an integer that fits
+		// int64 as one, any other number as a float64.
+		return json.RawMessage(text), nil
+	}
+	if decimalInteger.MatchString(text) {
+		if n, err := strconv.ParseInt(text, 10, 64); err == nil {
+			return n, nil
+		}
+	}
+	if decimalNumber.MatchString(text) {
+		f, err := strconv.ParseFloat(text, 64)
+		if err != nil || math.IsInf(f, 0) {
+			return nil, fmt.Errorf("parameter %s is out of the f64 range", text)
+		}
+		return f, nil
+	}
+	if text == "true" || text == "false" {
+		return text == "true", nil
+	}
+	return text, nil
+}
+
+// checkJSONNumbers returns an error for a number in the JSON text past the
+// float64 range (1e400), which the Rust reference runner refuses too.
+func checkJSONNumbers(text string) error {
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("parameter %s is not valid JSON: %w", text, err)
+		}
+		if number, ok := token.(json.Number); ok {
+			if f, err := strconv.ParseFloat(number.String(), 64); err != nil && math.IsInf(f, 0) {
+				return fmt.Errorf("parameter %s is out of the f64 range", number)
+			}
+		}
+	}
+}
+
+// TestSpecParamValues checks the typing of parameter values that no .gtest
+// file can hold: a number past the float64 range fails the Rust runner's
+// build. (Named TestSpec... so CI's -run TestSpec runs it.)
+func TestSpecParamValues(t *testing.T) {
+	for _, text := range []string{"[1e400]", `{"tiny": [-1e400]}`, "[1" + strings.Repeat("0", 400) + "]", "1e999"} {
+		if _, err := paramValue(text); err == nil || !strings.Contains(err.Error(), "out of the f64 range") {
+			t.Errorf("paramValue(%.20s...) = %v, want an out of the f64 range error", text, err)
+		}
+	}
+	value, err := paramValue("[3, 9223372036854775807, 9223372036854775808]")
+	if err != nil {
+		t.Fatalf("a list of integers: %v", err)
+	}
+	if raw, ok := value.(json.RawMessage); !ok || string(raw) != "[3, 9223372036854775807, 9223372036854775808]" {
+		t.Errorf("a JSON list goes to the binding as written, got %#v", value)
+	}
+}
+
+// coerceParamsToJSON types each parameter by paramValue and returns them as a
+// JSON object, or "" when there are none.
+func coerceParamsToJSON(params map[string]string) (string, error) {
 	if len(params) == 0 {
-		return ""
+		return "", nil
 	}
 	typed := make(map[string]interface{}, len(params))
-	for k, v := range params {
-		if n, err := strconv.Atoi(v); err == nil {
-			typed[k] = n
-		} else if f, err := strconv.ParseFloat(v, 64); err == nil {
-			typed[k] = f
-		} else if v == "true" {
-			typed[k] = true
-		} else if v == "false" {
-			typed[k] = false
-		} else {
-			typed[k] = v
+	for key, text := range params {
+		value, err := paramValue(text)
+		if err != nil {
+			return "", fmt.Errorf("param %q: %w", key, err)
 		}
+		typed[key] = value
 	}
 	data, err := json.Marshal(typed)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("params: %w", err)
 	}
-	return string(data)
+	return string(data), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -748,7 +835,7 @@ func parseSingleTest(ctx *parseContext) TestCase {
 			ctx.idx++
 		case "params":
 			ctx.idx++
-			tc.Params = parseMap(ctx, 6)
+			tc.Params = parseParams(ctx)
 		case "expect":
 			ctx.idx++
 			tc.Expect = parseExpectBlock(ctx)
@@ -878,20 +965,25 @@ func parseKV(s string) []string {
 	return nil
 }
 
+// isQuoted reports whether s is written in single or double quotes.
+func isQuoted(s string) bool {
+	s = strings.TrimSpace(s)
+	return len(s) >= 2 &&
+		((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\''))
+}
+
 // unquote strips surrounding single or double quotes and handles YAML-level
 // escapes (quotes and backslashes). Does NOT process \n or \t: those are GQL
 // string escapes handled by the engine's parser.
 func unquote(s string) string {
 	s = strings.TrimSpace(s)
-	if len(s) >= 2 {
-		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
-			inner := s[1 : len(s)-1]
-			inner = strings.ReplaceAll(inner, `\\`, "\x00")
-			inner = strings.ReplaceAll(inner, `\"`, `"`)
-			inner = strings.ReplaceAll(inner, `\'`, `'`)
-			inner = strings.ReplaceAll(inner, "\x00", `\`)
-			return inner
-		}
+	if isQuoted(s) {
+		inner := s[1 : len(s)-1]
+		inner = strings.ReplaceAll(inner, `\\`, "\x00")
+		inner = strings.ReplaceAll(inner, `\"`, `"`)
+		inner = strings.ReplaceAll(inner, `\'`, `'`)
+		inner = strings.ReplaceAll(inner, "\x00", `\`)
+		return inner
 	}
 	return s
 }
@@ -1018,6 +1110,31 @@ func parseMap(ctx *parseContext, minIndent int) map[string]string {
 		}
 	}
 	return m
+}
+
+// parseParams parses the params entries (indent 6 or deeper); each value keeps
+// its quotes, so paramValue can tell a quoted string from a bare value.
+func parseParams(ctx *parseContext) map[string]string {
+	params := make(map[string]string)
+	for ctx.idx < len(ctx.lines) {
+		line := ctx.lines[ctx.idx]
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+			ctx.idx++
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if indent < 6 {
+			break
+		}
+		kv := parseKV(trimmed)
+		if kv == nil {
+			break
+		}
+		params[kv[0]] = kv[1]
+		ctx.idx++
+	}
+	return params
 }
 
 // parseBlockScalar parses a YAML block scalar ("|") by collecting subsequent
@@ -1210,8 +1327,11 @@ func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, varian
 
 	exp := tc.Expect
 
-	// Coerce params to JSON for the last query
-	paramsJSON := coerceParamsToJSON(tc.Params)
+	// Type the params and pass them as JSON (every statement gets them)
+	paramsJSON, err := coerceParamsToJSON(tc.Params)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// Error tests
 	if exp.Error != nil {

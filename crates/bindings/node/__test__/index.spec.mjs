@@ -68,6 +68,55 @@ describe('database lifecycle', () => {
     const db = GrafeoDB.create()
     expect(() => db.close()).not.toThrow()
   })
+
+  it('should refuse writes after close of a persistent database', async () => {
+    const fs = await import('fs')
+    const os = await import('os')
+    const path = await import('path')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grafeo-test-'))
+    const dbPath = path.join(dir, 'closed.grafeo')
+
+    const db = GrafeoDB.create(dbPath)
+    db.createNode(['Person'], { name: 'Alix' })
+    db.close()
+
+    expect(() => db.createNode(['Person'], { name: 'Gus' })).toThrow(/Database closed/)
+    await expect(db.execute("INSERT (:Person {name: 'Gus'})")).rejects.toThrow(/Database closed/)
+    expect(db.nodeCount()).toBe(1)
+
+    const reopened = GrafeoDB.open(dbPath)
+    expect(reopened.nodeCount()).toBe(1)
+    reopened.close()
+
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
+  })
+
+  it('should refuse SPARQL updates, checkpoints and saves after close', async () => {
+    const fs = await import('fs')
+    const os = await import('os')
+    const path = await import('path')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grafeo-test-'))
+    const dbPath = path.join(dir, 'closed-rdf.grafeo')
+
+    const db = GrafeoDB.create(dbPath)
+    db.close()
+
+    await expect(
+      db.executeSparql('INSERT DATA { <http://ex.org/gus> <http://ex.org/city> "Berlin" . }'),
+    ).rejects.toThrow(/Database closed/)
+    expect(() => db.walCheckpoint()).toThrow(/Database closed/)
+    expect(() => db.save(path.join(dir, 'copy.grafeo'))).toThrow(/Database closed/)
+    expect(fs.existsSync(path.join(dir, 'copy.grafeo'))).toBe(false)
+
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
+  })
+
+  it('should keep taking writes after close of an in-memory database', () => {
+    const db = GrafeoDB.create()
+    db.close()
+    db.createNode(['Person'], { name: 'Gus' })
+    expect(db.nodeCount()).toBe(1)
+  })
 })
 
 // ── Node CRUD ────────────────────────────────────────────────────────

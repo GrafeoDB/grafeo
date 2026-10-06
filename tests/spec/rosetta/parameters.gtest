@@ -3,7 +3,14 @@
 # A statement that uses a parameter nobody supplied fails with "Missing
 # parameter" before it writes anything, in every path (a write used to store
 # the text "$e"). An unaliased column that reads a parameter is named after
-# the query text ($x), not after the value that replaces it.
+# the query text ($x), not after the value that replaces it. A list or map
+# parameter (written as a JSON value) comes back as given (#574: `RETURN $x`
+# and `WITH $x AS w` returned an empty string).
+#
+# Every runner reads a parameter value the same way: a value in quotes is a
+# string, whatever it reads like; a bare value starting with [ or { is JSON; a
+# bare decimal number is a number, a bare true or false a boolean, and any
+# other bare value a string.
 #
 # Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): Alix (30),
 # Gus (25), Vincent (40), Jules (35) and Mia (28).
@@ -92,3 +99,165 @@ tests:
       columns: [five]
       rows:
         - [5]
+
+  # ---------------------------------------------------------------------------
+  # List and map parameters (#574)
+  # ---------------------------------------------------------------------------
+
+  # The size tells a list from a string that reads the same.
+  - name: a_list_parameter_is_returned_as_given
+    params:
+      x: [3, 19, 88]
+    variants:
+      gql: "RETURN $x AS x, size($x) AS n"
+      cypher: "RETURN $x AS x, size($x) AS n"
+    expect:
+      rows:
+        - ["[3, 19, 88]", 3]
+
+  - name: a_list_parameter_passes_through_with
+    params:
+      x: [3, 19, 88]
+    variants:
+      gql: "UNWIND [0] AS i WITH $x AS w RETURN w, size(w) AS n"
+      cypher: "UNWIND [0] AS i WITH $x AS w RETURN w, size(w) AS n"
+    expect:
+      rows:
+        - ["[3, 19, 88]", 3]
+
+  - name: a_list_parameter_unwinds_to_its_items
+    params:
+      x: [3, 19, 88]
+    variants:
+      gql: "UNWIND $x AS v RETURN v"
+      cypher: "UNWIND $x AS v RETURN v"
+    expect:
+      rows:
+        - [3]
+        - [19]
+        - [88]
+
+  - name: a_list_parameter_filters_with_in
+    params:
+      names: ["Alix", "Mia"]
+    variants:
+      gql: "MATCH (p:Person) WHERE p.name IN $names RETURN p.name AS n"
+      cypher: "MATCH (p:Person) WHERE p.name IN $names RETURN p.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Mia]
+
+  - name: a_map_parameter_reads_its_entries
+    params:
+      m: {"city": "Amsterdam", "tags": [3, 19]}
+    variants:
+      gql: "RETURN $m.city AS city, $m.tags AS tags"
+      cypher: "RETURN $m.city AS city, $m.tags AS tags"
+    expect:
+      rows:
+        - [Amsterdam, "[3, 19]"]
+
+  # The map itself, not only its entries: a map that came back as '' would
+  # still pass the entry test above.
+  - name: a_map_parameter_is_returned_as_given
+    params:
+      m: {"city": "Amsterdam", "tags": [3, 19]}
+    variants:
+      gql: "RETURN $m AS m"
+      cypher: "RETURN $m AS m"
+    expect:
+      rows:
+        - ["{city: Amsterdam, tags: [3, 19]}"]
+
+  - name: a_map_parameter_passes_through_with
+    params:
+      m: {"city": "Amsterdam", "tags": [3, 19]}
+    variants:
+      gql: "UNWIND [0] AS i WITH $m AS w RETURN w, w.city AS city"
+      cypher: "UNWIND [0] AS i WITH $m AS w RETURN w, w.city AS city"
+    expect:
+      rows:
+        - ["{city: Amsterdam, tags: [3, 19]}", Amsterdam]
+
+  # A JSON string may write a character outside the Basic Multilingual Plane as
+  # a surrogate pair: the pair is that one character (U+1F337, a tulip).
+  - name: a_surrogate_pair_in_a_json_parameter_is_its_character
+    params:
+      m: {"flower": "\uD83C\uDF37"}
+    variants:
+      gql: "RETURN $m.flower AS flower"
+      cypher: "RETURN $m.flower AS flower"
+    expect:
+      rows:
+        - ["🌷"]
+
+  # ---------------------------------------------------------------------------
+  # A quoted parameter is a string
+  # ---------------------------------------------------------------------------
+
+  # The size tells a string from the list or map it reads like.
+  - name: a_quoted_parameter_that_reads_like_a_list_is_a_string
+    params:
+      x: "[Amsterdam]"
+      y: "[3, 19]"
+    variants:
+      gql: "RETURN $x AS x, size($x) AS n, $y AS y, size($y) AS m"
+      cypher: "RETURN $x AS x, size($x) AS n, $y AS y, size($y) AS m"
+    expect:
+      rows:
+        - ["[Amsterdam]", 11, "[3, 19]", 7]
+
+  - name: a_quoted_parameter_that_reads_like_a_map_is_a_string
+    params:
+      m: "{x}"
+      j: '{"city": "Amsterdam"}'
+    variants:
+      gql: "RETURN $m AS m, size($m) AS n, $j AS j, size($j) AS k"
+      cypher: "RETURN $m AS m, size($m) AS n, $j AS j, size($j) AS k"
+    expect:
+      rows:
+        - ["{x}", 3, '{"city": "Amsterdam"}', 21]
+
+  - name: a_quoted_parameter_that_reads_like_a_number_or_boolean_is_a_string
+    params:
+      x: "88"
+      y: "true"
+    variants:
+      gql: "RETURN $x AS x, size($x) AS n, $y AS y, size($y) AS m"
+      cypher: "RETURN $x AS x, size($x) AS n, $y AS y, size($y) AS m"
+    expect:
+      rows:
+        - ["88", 2, "true", 4]
+
+  # ---------------------------------------------------------------------------
+  # A bare parameter is a number when it is written in decimal
+  # ---------------------------------------------------------------------------
+
+  # A sign, a bare fraction or a trailing point is still a decimal number.
+  - name: a_bare_decimal_parameter_is_a_number
+    params:
+      x: +19
+      y: .5e1
+      z: 3.
+    variants:
+      gql: "RETURN $x + 3 AS x, $y + 3 AS y, $z + 0.5 AS z"
+      cypher: "RETURN $x + 3 AS x, $y + 3 AS y, $z + 0.5 AS z"
+    expect:
+      rows:
+        - [22, 8, 3.5]
+
+  # Hex, digit separators and the inf that f64::from_str reads are not
+  # decimal numbers: they stay strings. (Not "Infinity" or "NaN": the bindings
+  # that take parameters as JSON read those two strings as floats.)
+  - name: a_bare_parameter_that_is_not_a_decimal_number_is_a_string
+    params:
+      x: 0x1F
+      y: 1_000
+      z: inf
+    variants:
+      gql: "RETURN $x AS x, size($x) AS n, $y AS y, size($y) AS m, $z AS z, size($z) AS k"
+      cypher: "RETURN $x AS x, size($x) AS n, $y AS y, size($y) AS m, $z AS z, size($z) AS k"
+    expect:
+      rows:
+        - ["0x1F", 4, "1_000", 5, "inf", 3]

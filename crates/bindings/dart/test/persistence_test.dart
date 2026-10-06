@@ -50,6 +50,8 @@ void main() {
     test('openSingleFile() produces a single file', () {
       final (dir, dbPath) = _tempDbPath('explicit.grafeo');
       try {
+        // Deprecated, and still works until 0.7.0 removes it.
+        // ignore: deprecated_member_use_from_same_package
         final db = GrafeoDB.openSingleFile(dbPath);
         db.execute("INSERT (:Node {x: 1})");
         db.close();

@@ -55,7 +55,10 @@ fn handles_interleave_without_switching() {
 
     assert_eq!(ids(extraction.execute(ALL_IDS).unwrap()), ["file::a"]);
     assert_eq!(ids(model.execute(ALL_IDS).unwrap()), ["ac::a", "ac::b"]);
-    assert!(ids(db.execute(ALL_IDS).unwrap()).is_empty());
+    assert!(
+        ids(db.execute(ALL_IDS).unwrap()).is_empty(),
+        "expected empty"
+    );
     assert_eq!(db.current_graph(), None);
     assert_eq!(
         extraction
@@ -141,7 +144,10 @@ fn use_graph_in_a_query_stays_in_that_query() {
     model.execute("INSERT (:Component {id: 'ac::a'})").unwrap();
 
     assert_eq!(ids(model.execute(ALL_IDS).unwrap()), ["ac::a"]);
-    assert!(ids(db.graph("extraction").unwrap().execute(ALL_IDS).unwrap()).is_empty());
+    assert!(
+        ids(db.graph("extraction").unwrap().execute(ALL_IDS).unwrap()).is_empty(),
+        "expected empty"
+    );
     assert_eq!(db.current_graph(), None);
 }
 
@@ -166,7 +172,7 @@ fn property_indexes_and_lookups_are_per_graph() {
     let model = db.graph("model").unwrap();
     let extraction = db.graph("extraction").unwrap();
     let session = model.session().unwrap();
-    session.create_property_index("id");
+    session.create_property_index("id").unwrap();
     let component = session
         .create_node_with_props(&["Component"], [("id", Value::from("x"))])
         .unwrap();
@@ -201,7 +207,10 @@ fn a_transaction_on_a_handle_session_groups_writes() {
     assert_eq!(ids(session.execute(ALL_IDS).unwrap()), ["ac::a", "ac::b"]);
     session.rollback().unwrap();
 
-    assert!(ids(model.execute(ALL_IDS).unwrap()).is_empty());
+    assert!(
+        ids(model.execute(ALL_IDS).unwrap()).is_empty(),
+        "expected empty"
+    );
 
     let ids_created = model
         .session()
@@ -321,7 +330,10 @@ fn direct_calls_on_a_handle_stay_in_its_graph() {
         Some(&Value::from("ac::audit"))
     );
     assert!(model.get_edge(uses).unwrap().is_some());
-    assert!(ids(db.execute(ALL_IDS).unwrap()).is_empty());
+    assert!(
+        ids(db.execute(ALL_IDS).unwrap()).is_empty(),
+        "expected empty"
+    );
     assert!(
         db.get_node(billing).is_none(),
         "the default graph got nothing"
@@ -331,7 +343,10 @@ fn direct_calls_on_a_handle_stay_in_its_graph() {
     let err = model.create_node(&["Component"]).unwrap_err();
     assert!(err.to_string().contains("does not exist"), "{err}");
     assert!(model.get_node(billing).is_err());
-    assert!(ids(db.execute(ALL_IDS).unwrap()).is_empty());
+    assert!(
+        ids(db.execute(ALL_IDS).unwrap()).is_empty(),
+        "expected empty"
+    );
 }
 
 #[test]

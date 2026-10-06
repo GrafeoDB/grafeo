@@ -392,14 +392,15 @@ pub(crate) fn value_to_logical_type(value: &grafeo_common::types::Value) -> Logi
         Value::Int64(_) => LogicalType::Int64,
         Value::Float64(_) => LogicalType::Float64,
         Value::String(_) => LogicalType::String,
-        Value::Bytes(_) => LogicalType::String,
+        // Not String: a String column stores only strings and turns any other
+        // value into '' (#574).
+        Value::Bytes(_) => LogicalType::Bytes,
         Value::Timestamp(_) => LogicalType::Timestamp,
         Value::Date(_) => LogicalType::Date,
         Value::Time(_) => LogicalType::Time,
         Value::Duration(_) => LogicalType::Duration,
         Value::ZonedDatetime(_) => LogicalType::ZonedDatetime,
-        Value::List(_) => LogicalType::String,
-        Value::Map(_) => LogicalType::String,
+        Value::List(_) | Value::Map(_) => LogicalType::Any,
         Value::Vector(v) => LogicalType::Vector(v.len()),
         Value::Path { .. } => LogicalType::Any,
         Value::GCounter(_) | Value::OnCounter { .. } => LogicalType::Any,

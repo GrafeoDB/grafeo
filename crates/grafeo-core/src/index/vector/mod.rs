@@ -97,9 +97,7 @@ mod quantized_hnsw;
 #[cfg(feature = "vector-index")]
 pub mod section;
 
-pub use accessor::{
-    PropertyVectorAccessor, SpillableVectorAccessor, VectorAccessor, VectorAccessorKind,
-};
+pub use accessor::{PropertyVectorAccessor, VectorAccessor, VectorAccessorKind};
 pub use distance::{
     DistanceMetric, compute_distance, cosine_distance, cosine_similarity, dot_product,
     euclidean_distance, euclidean_distance_squared, l2_norm, manhattan_distance, normalize,
@@ -589,7 +587,7 @@ mod tests {
         let vectors: Vec<(NodeId, &[f32])> = vec![];
         let query = [0.0f32, 0.0];
         let results = brute_force_knn(vectors.into_iter(), &query, 10, DistanceMetric::Cosine);
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
     }
 
     #[test]
@@ -705,7 +703,7 @@ mod tests {
             let allowlist: HashSet<NodeId> = (1..=10).map(NodeId::new).collect();
             let query = vec![0.1, 0.1, 0.0, 0.0];
             let results = kind.search_with_filter(&query, 5, &allowlist, &NoopAccessor);
-            assert!(!results.is_empty());
+            assert!(!results.is_empty(), "results is empty");
             for (id, _) in &results {
                 assert!(allowlist.contains(id));
             }

@@ -25,10 +25,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial nint grafeo_open_read_only(string path);
 
-    /// <summary>Open or create a single-file database (no WAL sidecar). Returns null on error.</summary>
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial nint grafeo_open_single_file(string path);
-
     /// <summary>Close the database, flushing pending writes. Returns status code.</summary>
     [LibraryImport(LibName)]
     internal static partial int grafeo_close(nint db);
@@ -391,19 +387,18 @@ internal static partial class NativeMethods
     // =========================================================================
 
     /// <summary>Create a named graph projection from label/type filters.
+    /// Returns 1 if created, 0 if the name is taken, -1 on error.
     /// All string pointers are manually marshalled to avoid source-gen issues
     /// with mixed string + pointer parameters.</summary>
     [LibraryImport(LibName)]
-    [return: MarshalAs(UnmanagedType.U1)]
-    internal static unsafe partial bool grafeo_create_projection(
+    internal static unsafe partial int grafeo_create_projection(
         nint db, nint name,
         nint nodeLabels, nuint numLabels,
         nint edgeTypes, nuint numTypes);
 
-    /// <summary>Drop a named graph projection. Returns true if it existed.</summary>
+    /// <summary>Drop a named graph projection. Returns 1 if it existed, 0 if not, -1 on error.</summary>
     [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    [return: MarshalAs(UnmanagedType.U1)]
-    internal static partial bool grafeo_drop_projection(nint db, string name);
+    internal static partial int grafeo_drop_projection(nint db, string name);
 
     /// <summary>List all projections as JSON. Caller must free with grafeo_free_string.</summary>
     [LibraryImport(LibName)]

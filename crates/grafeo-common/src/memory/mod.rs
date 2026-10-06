@@ -18,8 +18,6 @@ pub mod reporter;
 pub mod usage;
 
 pub use arena::{AllocError, Arena, ArenaAllocator};
-#[allow(deprecated)]
-pub use buffer::TieredStore;
 pub use buffer::{
     BufferManager, BufferManagerConfig, BufferStats, MemoryConsumer, MemoryGrant, MemoryRegion,
     PressureLevel, StorageTier,

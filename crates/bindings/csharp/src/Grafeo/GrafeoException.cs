@@ -81,7 +81,13 @@ public class GrafeoException : Exception
 public sealed class QueryException(string message)
     : GrafeoException(message, GrafeoStatus.Query);
 
-/// <summary>Transaction lifecycle error (commit, rollback, isolation).</summary>
+/// <summary>
+/// Transaction lifecycle error (commit, rollback, isolation). A write to a
+/// closed database (GRAFEO-T007 in the message) and a call after a commit that
+/// did not complete (GRAFEO-T008, reopen the database) raise a plain
+/// <see cref="GrafeoException"/> with <see cref="GrafeoStatus.Database"/>
+/// instead: no retry fixes them.
+/// </summary>
 public sealed class TransactionException(string message)
     : GrafeoException(message, GrafeoStatus.Transaction);
 

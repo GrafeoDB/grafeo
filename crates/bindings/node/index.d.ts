@@ -16,7 +16,9 @@ export declare class GrafeoDB {
    * Open an existing database in read-only mode.
    *
    * Uses a shared file lock, so multiple processes can read the same
-   * .grafeo file concurrently. Mutations will throw an error.
+   * database file concurrently. Mutations will throw an error. A database
+   * written by 0.5.x (a file, or a WAL directory) is read in place and not
+   * migrated.
    */
   static openReadOnly(path: string): GrafeoDB
   /** Execute a GQL query. Returns a Promise<QueryResult>. */
@@ -107,7 +109,8 @@ export declare class GrafeoDB {
    *
    * If in-memory, creates a new persistent database at the given path.
    * If file-backed, creates a copy at the new path.
-   * The original database remains unchanged.
+   * The copy is a single file, whatever the extension; fails if `path`
+   * exists. The original database remains unchanged.
    */
   save(path: string): void
   /** Create a full backup of the database. */
@@ -137,8 +140,10 @@ export declare class GrafeoDB {
    * Creates a named graph projection. Returns `true` if created, `false`
    * if a projection with that name already exists.
    *
-   * A projection is a read-only, filtered view of the default graph.
-   * Only nodes with matching labels and edges with matching types are visible.
+   * A projection is a read-only, filtered view of the graph selected when
+   * it is created (the default graph when none is selected). Only nodes
+   * with matching labels and edges with matching types are visible.
+   * Throws if the selected graph no longer exists.
    */
   createProjection(name: string, nodeLabels?: Array<string> | undefined | null, edgeTypes?: Array<string> | undefined | null): boolean
   /** Drops a named graph projection. Returns `true` if it existed. */

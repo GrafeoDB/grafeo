@@ -5,8 +5,24 @@
 //! | Model | When to use | Example use case |
 //! | ----- | ----------- | ---------------- |
 //! | [`lpg`] | Most apps (default) | Social networks, fraud detection |
-//! | [`compact`] | Read-heavy / embedded (feature-gated: `compact-store`) | WASM, edge workers, static snapshots |
-//! | [`rdf`] | Knowledge graphs | Ontologies, linked data (feature-gated) |
+// The feature-gated modules are linked only where they are built: rustdoc
+// fails on a link to a module that is not there.
+#![cfg_attr(
+    feature = "compact-store",
+    doc = "| [`compact`] | Read-heavy / embedded (feature-gated: `compact-store`) | WASM, edge workers, static snapshots |"
+)]
+#![cfg_attr(
+    not(feature = "compact-store"),
+    doc = "| `compact` | Read-heavy / embedded (feature-gated: `compact-store`) | WASM, edge workers, static snapshots |"
+)]
+#![cfg_attr(
+    feature = "triple-store",
+    doc = "| [`rdf`] | Knowledge graphs | Ontologies, linked data (feature-gated: `triple-store`) |"
+)]
+#![cfg_attr(
+    not(feature = "triple-store"),
+    doc = "| `rdf` | Knowledge graphs | Ontologies, linked data (feature-gated: `triple-store`) |"
+)]
 //!
 //! These are separate implementations with no abstraction overhead - you get
 //! the full performance of whichever model you choose.

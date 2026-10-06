@@ -51,7 +51,7 @@ mod vector {
         db.set_node_property(n4, "category", Value::String("science".into()))
             .unwrap();
 
-        db.create_property_index("category");
+        db.create_property_index("category").unwrap();
         db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
             .expect("create vector index");
 
@@ -95,7 +95,7 @@ mod vector {
         // Each query should return up to 2 results
         for result_set in &results {
             assert!(result_set.len() <= 2);
-            assert!(!result_set.is_empty());
+            assert!(!result_set.is_empty(), "result_set is empty");
         }
     }
 
@@ -164,7 +164,7 @@ mod vector {
         assert_eq!(r1.len(), 2);
 
         // Drop index
-        assert!(db.drop_vector_index("Doc", "emb"));
+        assert!(db.drop_vector_index("Doc", "emb").unwrap());
 
         // Search should fail
         let err = db.vector_search("Doc", "emb", &[1.0, 0.0, 0.0], 2, None, None);
@@ -493,10 +493,10 @@ mod text {
 
         // Search works
         let r1 = db.text_search("Article", "title", "Rust", 10).unwrap();
-        assert!(!r1.is_empty());
+        assert!(!r1.is_empty(), "r1 is empty");
 
         // Drop index
-        assert!(db.drop_text_index("Article", "title"));
+        assert!(db.drop_text_index("Article", "title").unwrap());
 
         // Search should fail
         let err = db.text_search("Article", "title", "Rust", 10);
@@ -507,7 +507,7 @@ mod text {
 
         // Search works again
         let r2 = db.text_search("Article", "title", "Rust", 10).unwrap();
-        assert!(!r2.is_empty());
+        assert!(!r2.is_empty(), "r2 is empty");
     }
 }
 

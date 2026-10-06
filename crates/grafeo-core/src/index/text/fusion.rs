@@ -160,7 +160,7 @@ mod tests {
         let results = fuse_results(&[source_a, source_b], &FusionMethod::Rrf { k: 60 }, 10);
 
         // Node 2 appears in both at rank 2 and rank 1 → highest fused score
-        assert!(!results.is_empty());
+        assert!(!results.is_empty(), "results is empty");
         // Find node 2's score, should be highest since it's in both lists
         let node2_score = results.iter().find(|(id, _)| *id == NodeId::new(2));
         let node1_score = results.iter().find(|(id, _)| *id == NodeId::new(1));
@@ -207,7 +207,7 @@ mod tests {
             10,
         );
 
-        assert!(!results.is_empty());
+        assert!(!results.is_empty(), "results is empty");
         // Node 2 appears in both sources with good scores
         let node2 = results.iter().find(|(id, _)| *id == NodeId::new(2));
         assert!(node2.is_some());
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn test_empty_sources() {
         let results = fuse_results(&[], &FusionMethod::default(), 10);
-        assert!(results.is_empty());
+        assert!(results.is_empty(), "{results:?}");
     }
 
     #[test]

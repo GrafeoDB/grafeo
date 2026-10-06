@@ -18,8 +18,8 @@
 
 #![cfg(feature = "grafeo-file")]
 
-use grafeo_storage::file::GrafeoFileManager;
 use grafeo_storage::file::format::{DATA_OFFSET, DB_HEADER_SIZE, FILE_HEADER_SIZE, MAGIC};
+use grafeo_storage::file::legacy::{LegacyContents, LegacyFile};
 
 /// Must match `FORMAT_VERSION` in `format.rs`.
 const EXPECTED_FORMAT_VERSION: u32 = 1;
@@ -27,15 +27,15 @@ const EXPECTED_FORMAT_VERSION: u32 = 1;
 /// Known snapshot payload embedded in the golden fixture.
 const GOLDEN_SNAPSHOT: &[u8] = b"golden-grafeo-file-test-payload-v1";
 
-/// Copy the committed fixture to a temp directory so `GrafeoFileManager::open`
+/// Copy the committed fixture to a temp directory so `LegacyFile::open`
 /// can acquire a file lock.
-fn open_golden_fixture() -> (tempfile::TempDir, GrafeoFileManager) {
+fn open_golden_fixture() -> (tempfile::TempDir, LegacyFile<'static>) {
     let fixture = include_bytes!("fixtures/golden_v1.grafeo");
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("golden.grafeo");
     std::fs::write(&path, fixture).unwrap();
-    let manager = GrafeoFileManager::open(&path).unwrap();
-    (dir, manager)
+    let file = LegacyFile::open(&path, None).unwrap();
+    (dir, file)
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ fn golden_file_size() {
 #[test]
 fn golden_db_header_fields() {
     let (_dir, mgr) = open_golden_fixture();
-    let header = mgr.active_header();
+    let header = mgr.header();
 
     assert_eq!(header.iteration, 1, "expected one checkpoint");
     assert_eq!(
@@ -110,8 +110,12 @@ fn golden_db_header_fields() {
 #[test]
 fn golden_snapshot_payload() {
     let (_dir, mgr) = open_golden_fixture();
-    let data = mgr.read_snapshot().unwrap();
-    assert_eq!(data, GOLDEN_SNAPSHOT, "snapshot payload mismatch");
+    let contents = mgr.contents().unwrap();
+    assert_eq!(
+        contents,
+        LegacyContents::Snapshot(GOLDEN_SNAPSHOT.to_vec()),
+        "snapshot payload mismatch"
+    );
 }
 
 #[test]
@@ -155,12 +159,44 @@ fn golden_dual_header_layout() {
 #[test]
 #[ignore = "one-shot fixture generator, not a regular test"]
 fn regenerate_grafeo_fixture() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    use grafeo_storage::file::format::{DbHeader, FileHeader};
+    use grafeo_storage::file::header::{write_db_header, write_file_header};
+
+    // 0.6.x no longer writes container v1, so the fixture is built from its
+    // layout: the header of one checkpoint in slot 1, the snapshot after the
+    // headers.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("golden.grafeo");
-
-    let mgr = GrafeoFileManager::create(&path).unwrap();
-    mgr.write_snapshot(GOLDEN_SNAPSHOT, 42, 7, 3, 2).unwrap();
-    drop(mgr);
+    {
+        let mut file = std::fs::File::create(&path).unwrap();
+        write_file_header(&mut file, &FileHeader::new()).unwrap();
+        write_db_header(&mut file, 0, &DbHeader::EMPTY).unwrap();
+        write_db_header(
+            &mut file,
+            1,
+            &DbHeader {
+                iteration: 1,
+                checksum: crc32fast::hash(GOLDEN_SNAPSHOT),
+                snapshot_length: GOLDEN_SNAPSHOT.len() as u64,
+                epoch: 42,
+                transaction_id: 7,
+                node_count: 3,
+                edge_count: 2,
+                timestamp_ms: u64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap(),
+            },
+        )
+        .unwrap();
+        file.seek(SeekFrom::Start(DATA_OFFSET)).unwrap();
+        file.write_all(GOLDEN_SNAPSHOT).unwrap();
+    }
 
     let bytes = std::fs::read(&path).unwrap();
     let dest = concat!(

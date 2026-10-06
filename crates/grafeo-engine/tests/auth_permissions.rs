@@ -174,7 +174,7 @@ fn create_and_list_projections() {
         .with_edge_types(["LIVES_IN"]);
 
     assert!(
-        db.create_projection("social", spec),
+        db.create_projection("social", spec).unwrap(),
         "first creation should succeed"
     );
 
@@ -190,9 +190,9 @@ fn create_projection_duplicate_returns_false() {
     let spec1 = grafeo_core::graph::ProjectionSpec::new().with_node_labels(["Person"]);
     let spec2 = grafeo_core::graph::ProjectionSpec::new().with_node_labels(["City"]);
 
-    assert!(db.create_projection("proj", spec1));
+    assert!(db.create_projection("proj", spec1).unwrap());
     assert!(
-        !db.create_projection("proj", spec2),
+        !db.create_projection("proj", spec2).unwrap(),
         "duplicate name should return false"
     );
 }
@@ -202,13 +202,17 @@ fn drop_projection_existing() {
     let db = GrafeoDB::new_in_memory();
 
     let spec = grafeo_core::graph::ProjectionSpec::new().with_node_labels(["Person"]);
-    db.create_projection("temp", spec);
+    db.create_projection("temp", spec).unwrap();
 
     assert!(
         db.drop_projection("temp"),
         "dropping existing projection should return true"
     );
-    assert!(db.list_projections().is_empty());
+    assert!(
+        db.list_projections().is_empty(),
+        "{:?}",
+        db.list_projections()
+    );
 }
 
 #[test]
@@ -229,7 +233,7 @@ fn get_projection_by_name() {
     admin.execute("INSERT (:Person {name: 'Gus'})").unwrap();
 
     let spec = grafeo_core::graph::ProjectionSpec::new().with_node_labels(["Person"]);
-    db.create_projection("people", spec);
+    db.create_projection("people", spec).unwrap();
 
     let proj = db.projection("people");
     assert!(proj.is_some(), "projection should be retrievable");

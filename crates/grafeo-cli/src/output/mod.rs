@@ -206,12 +206,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_format_clone_and_copy() {
+    fn test_format_is_copy() {
         let format = Format::Table;
         let copied = format;
-        let cloned = Clone::clone(&format);
+        // `format` is still usable after the copy.
         assert!(matches!(copied, Format::Table));
-        assert!(matches!(cloned, Format::Table));
+        assert!(matches!(format, Format::Table));
     }
 
     #[test]

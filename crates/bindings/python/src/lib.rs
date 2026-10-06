@@ -160,6 +160,10 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "GrafeoError",
         m.py().get_type::<crate::error::GrafeoError>(),
     )?;
+    m.add(
+        "DatabaseClosedError",
+        m.py().get_type::<crate::error::DatabaseClosedError>(),
+    )?;
     m.add_class::<PyGrafeoDB>()?;
     m.add_class::<graph_handle::PyGraphHandle>()?;
     m.add_class::<PyNode>()?;

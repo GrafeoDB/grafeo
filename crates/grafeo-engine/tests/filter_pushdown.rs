@@ -67,7 +67,7 @@ fn compound_equality_pushdown_without_index() {
 #[test]
 fn equality_filter_pushdown_with_index() {
     let db = setup();
-    db.create_property_index("name");
+    db.create_property_index("name").unwrap();
     let session = db.session();
 
     let result = session
@@ -104,7 +104,7 @@ fn mixed_equality_and_range_no_match() {
         .execute("MATCH (n:Person) WHERE n.city = 'London' AND n.age > 50 RETURN n.name")
         .unwrap();
 
-    assert!(result.rows().is_empty());
+    assert!(result.rows().is_empty(), "{:?}", result.rows());
 }
 
 // ── Range-only pushdown ──
@@ -187,7 +187,7 @@ fn label_narrows_scan_correctly() {
         .execute("MATCH (n:Person) WHERE n.name = 'Acme' RETURN n.name")
         .unwrap();
 
-    assert!(result.rows().is_empty());
+    assert!(result.rows().is_empty(), "{:?}", result.rows());
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn or_filter_matches_no_side() {
         .execute("MATCH (n:Person) WHERE n.name = 'Nobody' OR n.name = 'Ghost' RETURN n.name")
         .unwrap();
 
-    assert!(result.rows().is_empty());
+    assert!(result.rows().is_empty(), "{:?}", result.rows());
 }
 
 #[test]
@@ -324,7 +324,7 @@ fn reversed_range_ge_literal_on_left() {
 #[test]
 fn property_index_with_remaining_predicate() {
     let db = setup();
-    db.create_property_index("city");
+    db.create_property_index("city").unwrap();
     let session = db.session();
 
     // Index pushes equality on city, remaining range predicate on age

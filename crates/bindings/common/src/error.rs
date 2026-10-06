@@ -4,7 +4,7 @@
 //! (Python `PyErr`, Node.js `napi::Error`, C `GrafeoStatus`, etc.) using a
 //! single small match expression.
 
-use grafeo_common::utils::error::Error;
+use grafeo_common::utils::error::{Error, TransactionError};
 
 /// Categories that all bindings map errors into.
 ///
@@ -16,6 +16,8 @@ pub enum ErrorCategory {
     Query,
     /// Transaction conflict, timeout, or invalid state.
     Transaction,
+    /// The database is closed and takes no more writes.
+    DatabaseClosed,
     /// Storage-layer error (disk, memory limit).
     Storage,
     /// I/O error (file, network).
@@ -24,7 +26,8 @@ pub enum ErrorCategory {
     Serialization,
     /// Internal error (should not happen in normal operation).
     Internal,
-    /// Catch-all for other database errors (not found, type mismatch, etc.).
+    /// Catch-all for other database errors (not found, type mismatch, a
+    /// commit that did not complete, etc.).
     Database,
 }
 
@@ -33,6 +36,9 @@ pub enum ErrorCategory {
 pub fn classify_error(err: &Error) -> ErrorCategory {
     match err {
         Error::Query(_) => ErrorCategory::Query,
+        Error::Transaction(TransactionError::DatabaseClosed) => ErrorCategory::DatabaseClosed,
+        // Only a reopen helps, never a retry of the transaction.
+        Error::Transaction(TransactionError::IncompleteCommit) => ErrorCategory::Database,
         Error::Transaction(_) => ErrorCategory::Transaction,
         Error::Storage(_) => ErrorCategory::Storage,
         Error::Io(_) => ErrorCategory::Io,
@@ -66,6 +72,23 @@ mod tests {
     fn classifies_not_found_as_database() {
         let err = Error::NodeNotFound(grafeo_common::types::NodeId(42));
         assert_eq!(classify_error(&err), ErrorCategory::Database);
+    }
+
+    #[test]
+    fn classifies_database_closed_apart_from_other_transaction_errors() {
+        let err = Error::Transaction(TransactionError::DatabaseClosed);
+        assert_eq!(classify_error(&err), ErrorCategory::DatabaseClosed);
+        let err = Error::Transaction(TransactionError::InvalidState("x".into()));
+        assert_eq!(classify_error(&err), ErrorCategory::Transaction);
+    }
+
+    /// A commit that did not complete is no transaction error a retry could
+    /// fix: only a reopen helps, so it is a database error with its own code.
+    #[test]
+    fn classifies_an_incomplete_commit_as_a_database_error() {
+        let err = Error::Transaction(TransactionError::IncompleteCommit);
+        assert_eq!(classify_error(&err), ErrorCategory::Database);
+        assert_eq!(err.error_code().as_str(), "GRAFEO-T008");
     }
 
     #[test]
@@ -105,7 +128,7 @@ mod tests {
     fn error_message_is_non_empty() {
         let err = Error::Internal("something broke".into());
         let msg = error_message(&err);
-        assert!(!msg.is_empty());
+        assert!(!msg.is_empty(), "msg is empty");
         assert!(msg.contains("something broke"));
     }
 }

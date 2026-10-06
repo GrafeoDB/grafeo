@@ -204,7 +204,7 @@ fn streaming_empty_result_yields_no_rows() {
         .into_row_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("row iter");
-    assert!(rows.is_empty());
+    assert!(rows.is_empty(), "{rows:?}");
 }
 
 // -------- Session-scoped streaming (ResultStream<'s> / RowIterator<'s>) ----

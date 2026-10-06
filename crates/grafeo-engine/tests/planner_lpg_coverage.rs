@@ -81,7 +81,7 @@ fn test_project_type_function() {
     let r = session
         .execute("MATCH ()-[r:KNOWS]->() RETURN type(r) AS t")
         .unwrap();
-    assert!(!r.rows().is_empty());
+    assert!(!r.rows().is_empty(), "r.rows() is empty");
     for row in r.rows() {
         assert_eq!(row[0], Value::String("KNOWS".into()));
     }
@@ -97,7 +97,7 @@ fn test_project_length_function() {
              RETURN length(p) AS len ORDER BY len",
         )
         .unwrap();
-    assert!(!r.rows().is_empty());
+    assert!(!r.rows().is_empty(), "r.rows() is empty");
     for row in r.rows() {
         match &row[0] {
             Value::Int64(n) => assert!((1..=3).contains(n)),
@@ -116,7 +116,7 @@ fn test_project_nodes_and_edges_functions() {
              RETURN nodes(p) AS ns, edges(p) AS es",
         )
         .unwrap();
-    assert!(!r.rows().is_empty());
+    assert!(!r.rows().is_empty(), "r.rows() is empty");
     for row in r.rows() {
         let (nodes, edges) = match (&row[0], &row[1]) {
             (Value::List(a), Value::List(b)) => (a, b),
@@ -137,7 +137,7 @@ fn test_project_case_expression_ok() {
              ORDER BY name",
         )
         .unwrap();
-    assert!(!r.rows().is_empty());
+    assert!(!r.rows().is_empty(), "r.rows() is empty");
     for row in r.rows() {
         match &row[1] {
             Value::String(s) => {
@@ -273,7 +273,7 @@ fn test_zone_map_negative_early_exit() {
 #[test]
 fn test_compound_filter_with_remaining_predicate() {
     let db = social_graph();
-    db.create_property_index("name");
+    db.create_property_index("name").unwrap();
     let r = db
         .session()
         .execute("MATCH (n:Person) WHERE n.name = 'Alix' AND n.age > 25 RETURN n.name")
@@ -286,7 +286,7 @@ fn test_compound_filter_with_remaining_predicate() {
 #[test]
 fn test_compound_filter_remaining_predicate_filters_out() {
     let db = social_graph();
-    db.create_property_index("name");
+    db.create_property_index("name").unwrap();
     let r = db
         .session()
         .execute("MATCH (n:Person) WHERE n.name = 'Alix' AND n.age > 35 RETURN n.name")

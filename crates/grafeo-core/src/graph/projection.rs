@@ -191,6 +191,38 @@ impl GraphStore for GraphProjection {
             .and_then(|_| self.inner.get_edge_property(id, key))
     }
 
+    fn try_get_node_property_batch(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+    ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
+        // The nodes in the projection read through the inner store's
+        // fallible read; the others have no value here. Which nodes are in
+        // is decided once: the inner store's labels can change between two
+        // looks, and a second look would hand the values out by a different
+        // mask than the one they were read by.
+        let included: Vec<bool> = ids.iter().map(|&id| self.node_id_matches(id)).collect();
+        let inside: Vec<NodeId> = ids
+            .iter()
+            .zip(&included)
+            .filter_map(|(&id, &included)| included.then_some(id))
+            .collect();
+        let mut values = self
+            .inner
+            .try_get_node_property_batch(&inside, key)?
+            .into_iter();
+        Ok(included
+            .iter()
+            .map(|&included| {
+                if included {
+                    values.next().flatten()
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+
     fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
         let filtered: Vec<_> = ids
             .iter()
@@ -549,8 +581,8 @@ mod tests {
 
         assert_eq!(proj.node_count(), 2);
         assert_eq!(proj.nodes_by_label("Person").len(), 2);
-        assert!(proj.nodes_by_label("City").is_empty());
-        assert!(proj.nodes_by_label("Software").is_empty());
+        assert!(proj.nodes_by_label("City").is_empty(), "expected empty");
+        assert!(proj.nodes_by_label("Software").is_empty(), "expected empty");
     }
 
     #[test]
@@ -827,6 +859,222 @@ mod tests {
     // 5. get_node_property_batch for mixed in/out of projection nodes
 
     #[test]
+    fn try_get_node_property_batch_mixed() {
+        let (store, nodes, _) = setup_social_graph_with_ids();
+        let spec = ProjectionSpec::new().with_node_labels(["Person"]);
+        let proj = GraphProjection::new(store, spec);
+
+        let key = PropertyKey::from("name");
+        // Alix (Person), Amsterdam (City), Gus (Person)
+        let ids = vec![nodes[0], nodes[2], nodes[1]];
+        assert_eq!(
+            proj.try_get_node_property_batch(&ids, &key).unwrap(),
+            proj.get_node_property_batch(&ids, &key)
+        );
+    }
+
+    /// The projection reads its nodes through the inner store's fallible
+    /// read: a spilled value that cannot be read is an error, not a missing
+    /// value. A node outside the projection is not read (#566 `key=`).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn try_get_node_property_batch_reports_a_value_it_cannot_read() {
+        use crate::graph::lpg::test_backing::MemoryBacking;
+
+        let (store, nodes, _) = setup_social_graph_with_ids();
+        let key = PropertyKey::from("name");
+        let snapshot = store.node_property_column_entries(&key).unwrap();
+        let backing = MemoryBacking::of(&snapshot);
+        assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
+        let spec = ProjectionSpec::new().with_node_labels(["Person"]);
+        let proj = GraphProjection::new(store, spec);
+
+        backing.fail_reads(true);
+        // Alix (Person), Amsterdam (City)
+        assert!(
+            proj.try_get_node_property_batch(&[nodes[0], nodes[2]], &key)
+                .is_err()
+        );
+        assert_eq!(
+            proj.try_get_node_property_batch(&[nodes[2]], &key).unwrap(),
+            vec![None],
+            "Amsterdam is outside the projection"
+        );
+    }
+
+    /// An inner store whose label answer for Alix changes between calls (a
+    /// concurrent label write): `City` on the first read, `Person` after.
+    /// Gus is always a `Person`. Every node's `name` reads as its name.
+    struct RelabelingStore {
+        alix: NodeId,
+        gus: NodeId,
+        alix_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl GraphStore for RelabelingStore {
+        fn get_node(&self, id: NodeId) -> Option<Node> {
+            let label = if id == self.alix {
+                let reads = self
+                    .alix_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if reads == 0 { "City" } else { "Person" }
+            } else if id == self.gus {
+                "Person"
+            } else {
+                return None;
+            };
+            Some(Node::with_labels(id, [label]))
+        }
+        fn get_edge(&self, _: EdgeId) -> Option<Edge> {
+            None
+        }
+        fn get_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> Option<Node> {
+            self.get_node(id)
+        }
+        fn get_edge_versioned(&self, _: EdgeId, _: EpochId, _: TransactionId) -> Option<Edge> {
+            None
+        }
+        fn get_node_at_epoch(&self, id: NodeId, _: EpochId) -> Option<Node> {
+            self.get_node(id)
+        }
+        fn get_edge_at_epoch(&self, _: EdgeId, _: EpochId) -> Option<Edge> {
+            None
+        }
+        fn get_node_property(&self, id: NodeId, _: &PropertyKey) -> Option<Value> {
+            if id == self.alix {
+                Some(Value::from("Alix"))
+            } else if id == self.gus {
+                Some(Value::from("Gus"))
+            } else {
+                None
+            }
+        }
+        fn get_edge_property(&self, _: EdgeId, _: &PropertyKey) -> Option<Value> {
+            None
+        }
+        fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
+            ids.iter()
+                .map(|&id| self.get_node_property(id, key))
+                .collect()
+        }
+        fn try_get_node_property_batch(
+            &self,
+            ids: &[NodeId],
+            key: &PropertyKey,
+        ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
+            Ok(self.get_node_property_batch(ids, key))
+        }
+        fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
+            vec![FxHashMap::default(); ids.len()]
+        }
+        fn get_nodes_properties_selective_batch(
+            &self,
+            ids: &[NodeId],
+            _: &[PropertyKey],
+        ) -> Vec<FxHashMap<PropertyKey, Value>> {
+            vec![FxHashMap::default(); ids.len()]
+        }
+        fn get_edges_properties_selective_batch(
+            &self,
+            ids: &[EdgeId],
+            _: &[PropertyKey],
+        ) -> Vec<FxHashMap<PropertyKey, Value>> {
+            vec![FxHashMap::default(); ids.len()]
+        }
+        fn neighbors(&self, _: NodeId, _: Direction) -> Vec<NodeId> {
+            Vec::new()
+        }
+        fn edges_from(&self, _: NodeId, _: Direction) -> Vec<(NodeId, EdgeId)> {
+            Vec::new()
+        }
+        fn out_degree(&self, _: NodeId) -> usize {
+            0
+        }
+        fn in_degree(&self, _: NodeId) -> usize {
+            0
+        }
+        fn has_backward_adjacency(&self) -> bool {
+            false
+        }
+        fn node_ids(&self) -> Vec<NodeId> {
+            vec![self.alix, self.gus]
+        }
+        fn nodes_by_label(&self, _: &str) -> Vec<NodeId> {
+            Vec::new()
+        }
+        fn node_count(&self) -> usize {
+            2
+        }
+        fn edge_count(&self) -> usize {
+            0
+        }
+        fn edge_type(&self, _: EdgeId) -> Option<ArcStr> {
+            None
+        }
+        fn find_nodes_by_property(&self, _: &str, _: &Value) -> Vec<NodeId> {
+            Vec::new()
+        }
+        fn find_nodes_by_properties(&self, _: &[(&str, Value)]) -> Vec<NodeId> {
+            Vec::new()
+        }
+        fn find_nodes_in_range(
+            &self,
+            _: &str,
+            _: Option<&Value>,
+            _: Option<&Value>,
+            _: bool,
+            _: bool,
+        ) -> Vec<NodeId> {
+            Vec::new()
+        }
+        fn node_property_might_match(&self, _: &PropertyKey, _: CompareOp, _: &Value) -> bool {
+            true
+        }
+        fn edge_property_might_match(&self, _: &PropertyKey, _: CompareOp, _: &Value) -> bool {
+            true
+        }
+        fn statistics(&self) -> Arc<Statistics> {
+            Arc::new(Statistics::default())
+        }
+        fn estimate_label_cardinality(&self, _: &str) -> f64 {
+            0.0
+        }
+        fn estimate_avg_degree(&self, _: &str, _: bool) -> f64 {
+            0.0
+        }
+        fn current_epoch(&self) -> EpochId {
+            EpochId(0)
+        }
+    }
+
+    impl GraphStoreSearch for RelabelingStore {}
+
+    /// The fallible batch decides once which nodes are in the projection: a
+    /// label that changes between two reads of it never hands one node's
+    /// value to another. Alix is outside when the batch looks, so she has no
+    /// value, and Gus keeps his own.
+    #[test]
+    fn try_get_node_property_batch_never_hands_a_value_to_another_node() {
+        let (alix, gus) = (NodeId(3), NodeId(19));
+        let inner = Arc::new(RelabelingStore {
+            alix,
+            gus,
+            alix_reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let spec = ProjectionSpec::new().with_node_labels(["Person"]);
+        let proj = GraphProjection::new(inner, spec);
+
+        let values = proj
+            .try_get_node_property_batch(&[alix, gus], &PropertyKey::from("name"))
+            .unwrap();
+        assert_eq!(
+            values,
+            vec![None, Some(Value::from("Gus"))],
+            "Alix was a City when the batch looked, and Gus's name is his"
+        );
+    }
+
+    #[test]
     fn get_node_property_batch_mixed() {
         let (store, nodes, _) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_node_labels(["Person"]);
@@ -924,7 +1172,7 @@ mod tests {
 
         // Amsterdam (City) is filtered out, so edges_from returns empty
         let amsterdam_edges = proj.edges_from(nodes[2], Direction::Outgoing);
-        assert!(amsterdam_edges.is_empty());
+        assert!(amsterdam_edges.is_empty(), "{amsterdam_edges:?}");
     }
 
     // 9. out_degree and in_degree with filtered projection
@@ -1030,7 +1278,7 @@ mod tests {
 
         // "name" = "Amsterdam" exists but on a City node, which is filtered
         let found = proj.find_nodes_by_property("name", &Value::from("Amsterdam"));
-        assert!(found.is_empty());
+        assert!(found.is_empty(), "{found:?}");
     }
 
     // 13. find_nodes_by_properties with label filter
@@ -1049,7 +1297,7 @@ mod tests {
         // Search for city name, filtered out
         let conditions = vec![("name", Value::from("Amsterdam"))];
         let found = proj.find_nodes_by_properties(&conditions);
-        assert!(found.is_empty());
+        assert!(found.is_empty(), "{found:?}");
     }
 
     // 14. find_nodes_in_range with label filter
@@ -1079,7 +1327,7 @@ mod tests {
         let min = Value::from(20);
         let max = Value::from(30);
         let found = proj.find_nodes_in_range("age", Some(&min), Some(&max), true, true);
-        assert!(found.is_empty());
+        assert!(found.is_empty(), "{found:?}");
     }
 
     // 15. node_property_might_match and edge_property_might_match

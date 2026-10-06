@@ -147,10 +147,8 @@ pub fn read_db_headers(file: &mut File) -> Result<(DbHeader, DbHeader)> {
 /// The header with the higher `iteration` counter wins; ties go to slot 0.
 /// Both headers are returned by-value alongside their slot index. Checksum
 /// validation against the data payload is the caller's responsibility (see
-/// [`GrafeoFileManager::read_snapshot`](crate::file::GrafeoFileManager::read_snapshot)
-/// and [`GrafeoFileManager::read_section_directory`](crate::file::GrafeoFileManager::read_section_directory));
-/// this function does not fall back to the other slot on a payload
-/// mismatch.
+/// [`LegacyFile::contents`](crate::file::legacy::LegacyFile::contents)); this
+/// function does not fall back to the other slot on a payload mismatch.
 ///
 /// Returns `(active_slot, header)`.
 #[must_use]

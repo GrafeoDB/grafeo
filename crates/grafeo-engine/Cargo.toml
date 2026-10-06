@@ -88,7 +88,7 @@ shacl = ["grafeo-core/shacl", "sparql"]  # SHACL validation (core constraints + 
 rdf = ["triple-store"]  # Deprecated: use triple-store
 parallel = ["rayon", "crossbeam", "grafeo-core/parallel", "grafeo-adapters/parallel"]  # Parallel execution
 algos = ["grafeo-adapters/algos"]  # Graph algorithm plugin (SSSP, PageRank, etc.)
-wal = ["dep:grafeo-storage", "grafeo-storage/wal"]  # Write-ahead log storage
+wal = ["dep:grafeo-storage", "grafeo-storage/wal", "grafeo-file"]  # Write-ahead log storage (the sidecar WAL of a `.grafeo` file)
 async-storage = ["dep:grafeo-storage", "grafeo-storage/async-storage", "dep:tokio"]  # Async WAL and storage backend
 grafeo-file = ["dep:grafeo-storage", "grafeo-storage/grafeo-file", "dep:crc32fast"]  # Single-file .grafeo format
 encryption = ["dep:grafeo-storage", "grafeo-common/encryption", "grafeo-storage/encryption"]  # AES-256-GCM encryption at rest
@@ -125,7 +125,7 @@ arrow-export = ["dep:arrow-schema", "dep:arrow-array", "dep:arrow-ipc"]  # Arrow
 
 # Testing utilities (zero overhead when disabled)
 testing-crash-injection = ["dep:grafeo-storage", "grafeo-common/testing-crash-injection", "grafeo-storage/testing-crash-injection"]  # Crash injection for recovery testing
-testing-statement-injection = ["grafeo-common/testing-statement-injection"]  # Failure injection at statement / commit entry for rollback atomicity tests
+testing-statement-injection = ["grafeo-common/testing-statement-injection"]  # Failure injection at statement / commit entry for rollback atomicity tests, and a hook inside commit
 
 [lints]
 workspace = true

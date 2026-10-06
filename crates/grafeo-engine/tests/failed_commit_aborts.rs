@@ -124,47 +124,57 @@ fn failed_commit_discards_its_writes() {
     assert_eq!(temp_count(&db), Value::Int64(0));
 }
 
-#[cfg(feature = "wal")]
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+mod common;
+
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod persistent {
     use super::*;
+    use crate::common::replay::reopened_after_crash;
     use grafeo_engine::Config;
     use grafeo_engine::config::StorageFormat;
     use std::path::Path;
 
-    fn configs(dir: &Path) -> Vec<(&'static str, Config)> {
-        let mut configs = vec![(
-            "wal directory",
-            Config::persistent(dir.join("dir-db")).with_storage_format(StorageFormat::WalDirectory),
-        )];
-        #[cfg(feature = "grafeo-file")]
-        configs.push((
-            "single file",
-            Config::persistent(dir.join("single.grafeo"))
-                .with_storage_format(StorageFormat::SingleFile),
-        ));
-        configs
+    fn open(path: &Path) -> GrafeoDB {
+        GrafeoDB::with_config(Config::persistent(path).with_storage_format(StorageFormat::Auto))
+            .unwrap()
+    }
+
+    /// Seeds Alix, loses the conflict, then commits age 33.
+    fn write(db: &GrafeoDB) {
+        seed(db);
+        let _ = lose_conflict(db);
+
+        let mut next = db.session();
+        next.begin_transaction().unwrap();
+        set_age(&next, 33);
+        next.commit().unwrap();
     }
 
     /// The failed transaction's records never reach the WAL: if they did,
     /// recovery would count them into the next commit and resurrect them on
-    /// reopen.
+    /// reopen. A database that crashed replays its sidecar WAL; one that
+    /// closed reads its checkpoint, which must not hold them either.
     #[test]
     fn failed_commit_is_not_recovered_from_wal() {
+        let (_crashed_dir, crashed) = reopened_after_crash(
+            "persistent::failed_commit_is_not_recovered_from_wal",
+            open,
+            write,
+        );
         let dir = tempfile::tempdir().unwrap();
-        for (name, config) in configs(dir.path()) {
-            {
-                let db = GrafeoDB::with_config(config.clone()).unwrap();
-                seed(&db);
-                let _ = lose_conflict(&db);
+        let path = dir.path().join("closed.grafeo");
+        {
+            let db = open(&path);
+            write(&db);
+            db.close().unwrap();
+        }
+        let closed = open(&path);
 
-                let mut next = db.session();
-                next.begin_transaction().unwrap();
-                set_age(&next, 33);
-                next.commit().unwrap();
-                db.close().unwrap();
-            }
-
-            let db = GrafeoDB::with_config(config).unwrap();
+        for (name, db) in [
+            ("after a crash, replayed from the WAL", crashed),
+            ("after close(), read from the checkpoint", closed),
+        ] {
             assert_eq!(age(&db), Value::Int64(33), "{name}: age after reopen");
             assert_eq!(
                 temp_count(&db),

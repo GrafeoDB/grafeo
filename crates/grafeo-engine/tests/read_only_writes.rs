@@ -249,3 +249,128 @@ fn a_read_only_database_rejects_direct_writes() {
 
     assert_eq!(state(&db), seeded_state());
 }
+
+/// A read-only database at a new path, holding nothing.
+#[cfg(all(
+    feature = "grafeo-file",
+    any(feature = "lpg", feature = "triple-store")
+))]
+fn empty_read_only_database(dir: &std::path::Path) -> GrafeoDB {
+    let path = dir.join("empty.grafeo");
+    GrafeoDB::with_config(grafeo_engine::Config::persistent(&path))
+        .unwrap()
+        .close()
+        .unwrap();
+    GrafeoDB::open_read_only(&path).unwrap()
+}
+
+/// Checks that `result` failed with the typed read-only error.
+#[cfg(all(
+    feature = "grafeo-file",
+    any(feature = "lpg", feature = "triple-store")
+))]
+#[track_caller]
+fn assert_read_only_error<T: std::fmt::Debug>(what: &str, result: Result<T>) {
+    use grafeo_common::utils::error::{Error, TransactionError};
+    match result {
+        Err(Error::Transaction(TransactionError::ReadOnly)) => {}
+        other => panic!("{what}: the read-only error, got {other:?}"),
+    }
+}
+
+/// A read-only database refuses an RDF batch insert before it pulls the
+/// caller's iterator, which may parse or compute the triples: a refused call
+/// does no work.
+#[cfg(all(feature = "grafeo-file", feature = "triple-store"))]
+#[test]
+fn a_read_only_database_refuses_an_rdf_batch_insert_without_pulling_its_triples() {
+    use grafeo_core::graph::rdf::{Term, Triple};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = empty_read_only_database(dir.path());
+    let pulled = std::cell::Cell::new(false);
+    let triples = std::iter::once_with(|| {
+        pulled.set(true);
+        Triple::new(
+            Term::iri("http://ex.org/alix"),
+            Term::iri("http://ex.org/city"),
+            Term::literal("Amsterdam"),
+        )
+    });
+
+    assert_read_only_error("batch_insert_rdf", db.batch_insert_rdf(triples));
+    assert!(
+        !pulled.get(),
+        "the refused batch insert pulled the caller's iterator"
+    );
+    assert_eq!(db.rdf_store().len(), 0, "no triple was added");
+}
+
+/// A read-only database refuses an import before it opens its file or parses
+/// its data: a missing file, or malformed data, still gets the read-only
+/// error.
+#[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+#[test]
+fn a_read_only_database_refuses_imports_before_reading_their_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = empty_read_only_database(dir.path());
+    let missing = dir.path().join("missing.tsv");
+    assert!(!missing.exists(), "the input file does not exist");
+
+    assert_read_only_error(
+        "import_tsv of a missing file",
+        db.import_tsv(&missing, "KNOWS", true),
+    );
+    assert_read_only_error(
+        "import_mmio of a missing file",
+        db.import_mmio(dir.path().join("missing.mtx"), "KNOWS"),
+    );
+    assert_read_only_error(
+        "import_tsv_str of malformed data",
+        db.import_tsv_str("Alix\tGus\n", "KNOWS", true),
+    );
+    #[cfg(feature = "triple-store")]
+    assert_read_only_error(
+        "import_tsv_rdf of a missing file",
+        db.import_tsv_rdf(&missing, "http://ex.org/knows", "http://ex.org/"),
+    );
+    assert_eq!(db.node_count(), 0, "nothing was imported");
+}
+
+/// `GrafeoDB::execute_sparql` respects a read-only database, as the session
+/// path does: an update fails and changes nothing, a query still runs.
+#[cfg(all(feature = "grafeo-file", feature = "sparql", feature = "triple-store"))]
+#[test]
+fn a_read_only_database_rejects_sparql_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("triples.grafeo");
+    {
+        let db = GrafeoDB::open(&path).unwrap();
+        db.execute_sparql(r#"INSERT DATA { <http://ex.org/alix> <http://ex.org/name> "Alix" . }"#)
+            .unwrap();
+        db.close().unwrap();
+    }
+
+    let db = GrafeoDB::open_read_only(&path).unwrap();
+    assert_read_only(
+        db.execute_sparql(r#"INSERT DATA { <http://ex.org/gus> <http://ex.org/name> "Gus" . }"#),
+        "GrafeoDB::execute_sparql INSERT DATA",
+    );
+    assert_read_only(
+        db.execute_language(
+            r#"INSERT DATA { <http://ex.org/gus> <http://ex.org/name> "Gus" . }"#,
+            "sparql",
+            None,
+        ),
+        "execute_language sparql INSERT DATA",
+    );
+    assert_eq!(db.rdf_store().len(), 1, "no triple was added");
+    assert_eq!(
+        db.execute_sparql("SELECT ?s WHERE { ?s ?p ?o }")
+            .unwrap()
+            .rows()
+            .len(),
+        1,
+        "queries still run"
+    );
+}

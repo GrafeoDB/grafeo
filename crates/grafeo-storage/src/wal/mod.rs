@@ -49,7 +49,7 @@ pub use async_log::AsyncWalManager;
 #[cfg(feature = "async-storage")]
 pub use async_typed::{AsyncLpgWal, AsyncTypedWal};
 pub use flusher::{AdaptiveFlusher, FlusherStats};
-pub use log::{CheckpointMetadata, DurabilityMode, WalConfig, WalManager};
+pub use log::{CheckpointMetadata, DurabilityMode, WalCipher, WalConfig, WalManager};
 pub use record::{
     GraphTypeAlterationKind, NamedConstraintKind, PropertyAlterationKind, TypeConstraintKind,
     WalEntry, WalRecord,

@@ -135,3 +135,31 @@ fn call_on_a_projection_ignores_the_selected_graph() {
         .unwrap();
     assert_eq!(rows.rows().len(), 1);
 }
+
+/// A `CALL` inside a stored procedure's body sees the database's projections,
+/// as it does at the top level.
+#[cfg(feature = "algos")]
+#[test]
+fn a_procedure_body_runs_an_algorithm_on_a_projection() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute(
+        "INSERT (:Graph {name: 'Alix'})-[:R]->(:Graph {name: 'Gus'}), (:Model {name: 'Mia'})",
+    )
+    .unwrap();
+    db.create_projection(
+        "extraction",
+        ProjectionSpec::new().with_node_labels(["Graph"]),
+    )
+    .unwrap();
+    db.execute(
+        "CREATE PROCEDURE extraction_scores() RETURNS (node_id INTEGER, score FLOAT) AS { \
+         CALL grafeo.pagerank({projection: 'extraction'}) YIELD node_id, score \
+         RETURN node_id, score }",
+    )
+    .unwrap();
+
+    let rows = db
+        .execute("CALL extraction_scores() YIELD node_id, score")
+        .unwrap();
+    assert_eq!(rows.rows().len(), 2);
+}

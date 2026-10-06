@@ -218,13 +218,28 @@ impl SectionDirectoryEntry {
 
 // ── Streaming Chunks ────────────────────────────────────────────────
 
-/// What a chunk holds within its section. Step 2 adds the table kinds.
+/// What a chunk holds within its section.
+///
+/// The byte of each kind is part of the file format and never changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 #[non_exhaustive]
 pub enum ChunkKind {
-    /// Opaque bytes, as produced by [`Section::serialize`].
+    /// A section's bytes in its 0.5.x layout (or a test section's), passed to
+    /// [`Section::deserialize`].
     Raw = 0,
+    /// A section's metadata chunk: its layout byte, the caps it was written
+    /// with, its graphs and columns.
+    Meta = 1,
+    /// One column of a table over a range of rows: presence bitmap, zone map,
+    /// codec body.
+    Column = 2,
+    /// The older versions of a column's values over a range of rows (temporal
+    /// property history).
+    History = 3,
+    /// A piece of a byte stream; `row_start` is the piece's offset in the
+    /// stream, `column_id` the stream.
+    Stream = 4,
 }
 
 impl ChunkKind {
@@ -239,6 +254,10 @@ impl ChunkKind {
     pub fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::Raw),
+            1 => Some(Self::Meta),
+            2 => Some(Self::Column),
+            3 => Some(Self::History),
+            4 => Some(Self::Stream),
             _ => None,
         }
     }
@@ -253,11 +272,13 @@ pub struct ChunkMeta {
     pub codec: u8,
     /// Graph the chunk belongs to (0 when not graph-specific).
     pub graph_id: u32,
-    /// Column the chunk belongs to (0 when not column-specific).
+    /// Column the chunk belongs to (0 when not column-specific); for a
+    /// [`ChunkKind::Stream`] piece, the stream.
     pub column_id: u32,
-    /// First row held by the chunk.
+    /// First row held by the chunk; for a [`ChunkKind::Stream`] piece, its
+    /// byte offset in the stream.
     pub row_start: u64,
-    /// Number of rows held by the chunk.
+    /// Number of rows held by the chunk (0 for a stream piece).
     pub row_count: u32,
 }
 
@@ -273,6 +294,78 @@ impl ChunkMeta {
             row_start: 0,
             row_count: 0,
         }
+    }
+
+    /// Metadata of a section's metadata chunk: kind [`ChunkKind::Meta`],
+    /// everything else zero.
+    #[must_use]
+    pub const fn meta() -> Self {
+        Self {
+            kind: ChunkKind::Meta,
+            ..Self::raw()
+        }
+    }
+
+    /// Metadata of a column chunk: `row_count` rows of column `column_id` of
+    /// graph `graph_id` from row `row_start`, encoded with `codec`.
+    #[must_use]
+    pub const fn column(
+        graph_id: u32,
+        column_id: u32,
+        row_start: u64,
+        row_count: u32,
+        codec: u8,
+    ) -> Self {
+        Self {
+            kind: ChunkKind::Column,
+            codec,
+            graph_id,
+            column_id,
+            row_start,
+            row_count,
+        }
+    }
+
+    /// Metadata of a history chunk: the older versions of the values of the
+    /// column chunk with the same graph, column and rows.
+    #[must_use]
+    pub const fn history(
+        graph_id: u32,
+        column_id: u32,
+        row_start: u64,
+        row_count: u32,
+        codec: u8,
+    ) -> Self {
+        Self {
+            kind: ChunkKind::History,
+            ..Self::column(graph_id, column_id, row_start, row_count, codec)
+        }
+    }
+
+    /// Metadata of a piece of byte stream `stream` of graph `graph_id`,
+    /// starting at byte `offset` of the stream.
+    #[must_use]
+    pub const fn stream_piece(graph_id: u32, stream: u32, offset: u64) -> Self {
+        Self {
+            kind: ChunkKind::Stream,
+            codec: 0,
+            graph_id,
+            column_id: stream,
+            row_start: offset,
+            row_count: 0,
+        }
+    }
+
+    /// What must be unique within a section: (kind byte, graph, column, first
+    /// row). The codec and the row count are not part of it.
+    #[must_use]
+    pub const fn identity(&self) -> (u8, u32, u32, u64) {
+        (
+            self.kind.to_byte(),
+            self.graph_id,
+            self.column_id,
+            self.row_start,
+        )
     }
 }
 
@@ -297,6 +390,67 @@ pub trait SectionSource {
     ///
     /// Returns an error if `index` is out of range or the bytes cannot be read.
     fn fetch(&self, index: usize) -> Result<bytes::Bytes>;
+
+    /// The section version every chunk of the section was written with (0
+    /// for 0.5.x bytes).
+    fn section_version(&self) -> u8;
+}
+
+/// The bytes of a section stored as exactly one raw chunk without a codec
+/// (0.5.x bytes, or a section written through the raw defaults of
+/// [`Section`]), `None` when the section has no raw chunk.
+///
+/// The one raw chunk is [`ChunkMeta::raw`] exactly: no codec, graph, column
+/// or rows. The section version is not checked: a raw chunk is read the same
+/// way whatever version wrote it.
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] when raw chunks come several or next to
+/// chunks of other kinds, or when the one raw chunk has a codec, a graph, a
+/// column or rows; any error from fetching the chunk.
+pub fn legacy_bytes(source: &dyn SectionSource) -> Result<Option<bytes::Bytes>> {
+    let chunks = source.chunks();
+    let raw = chunks
+        .iter()
+        .filter(|meta| meta.kind == ChunkKind::Raw)
+        .count();
+    match chunks {
+        _ if raw == 0 => Ok(None),
+        [meta] if *meta == ChunkMeta::raw() => Ok(Some(source.fetch(0)?)),
+        [meta] => Err(Error::Serialization(format!(
+            "the raw chunk of a section has codec {}, graph {}, column {}, first row {}, \
+             rows {}; the raw chunk of 0.5.x section bytes has all of them 0",
+            meta.codec, meta.graph_id, meta.column_id, meta.row_start, meta.row_count
+        ))),
+        _ => Err(Error::Serialization(format!(
+            "a section holds {raw} raw chunks among {} chunks; 0.5.x section bytes are \
+             exactly one raw chunk",
+            chunks.len()
+        ))),
+    }
+}
+
+/// Refuses a source whose section version is not `expected`, naming the
+/// section and both versions.
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] when the version of `source` differs from
+/// `expected`.
+pub fn check_version(
+    section_type: SectionType,
+    source: &dyn SectionSource,
+    expected: u8,
+) -> Result<()> {
+    let found = source.section_version();
+    if found == expected {
+        Ok(())
+    } else {
+        Err(Error::Serialization(format!(
+            "section {section_type:?} has version {found}, this build reads version {expected}"
+        )))
+    }
 }
 
 // ── Section Trait ───────────────────────────────────────────────────
@@ -837,7 +991,8 @@ mod tests {
         }
     }
 
-    struct VecSource(Vec<ChunkMeta>, Vec<Vec<u8>>);
+    /// Chunk descriptions, chunk bytes and the section version.
+    struct VecSource(Vec<ChunkMeta>, Vec<Vec<u8>>, u8);
 
     impl SectionSource for VecSource {
         fn chunks(&self) -> &[ChunkMeta] {
@@ -845,6 +1000,9 @@ mod tests {
         }
         fn fetch(&self, index: usize) -> Result<bytes::Bytes> {
             Ok(bytes::Bytes::copy_from_slice(&self.1[index]))
+        }
+        fn section_version(&self) -> u8 {
+            self.2
         }
     }
 
@@ -857,6 +1015,7 @@ mod tests {
         back.read_from(&VecSource(
             vec![ChunkMeta::raw()],
             vec![b"Amsterdam".to_vec()],
+            1,
         ))
         .unwrap();
         assert_eq!(back.0, b"Amsterdam");
@@ -866,11 +1025,11 @@ mod tests {
     fn the_raw_adapter_refuses_anything_but_one_raw_chunk() {
         let mut section = Bytes3(Vec::new());
         let none = section
-            .read_from(&VecSource(vec![], vec![]))
+            .read_from(&VecSource(vec![], vec![], 1))
             .unwrap_err()
             .to_string();
         assert!(none.contains("expected one raw chunk"), "{none}");
-        let two = VecSource(vec![ChunkMeta::raw(); 2], vec![vec![1], vec![2]]);
+        let two = VecSource(vec![ChunkMeta::raw(); 2], vec![vec![1], vec![2]], 1);
         let two = section.read_from(&two).unwrap_err().to_string();
         assert!(two.contains("expected one raw chunk"), "{two}");
     }
@@ -883,7 +1042,7 @@ mod tests {
             ..ChunkMeta::raw()
         };
         let error = section
-            .read_from(&VecSource(vec![coded], vec![b"Prague".to_vec()]))
+            .read_from(&VecSource(vec![coded], vec![b"Prague".to_vec()], 1))
             .unwrap_err()
             .to_string();
         assert!(error.contains("codec 3"), "{error}");
@@ -891,11 +1050,168 @@ mod tests {
     }
 
     #[test]
-    fn chunk_kind_round_trips_through_its_byte() {
-        assert_eq!(
-            ChunkKind::from_byte(ChunkKind::Raw.to_byte()),
-            Some(ChunkKind::Raw)
-        );
+    fn every_chunk_kind_round_trips_through_its_byte() {
+        for kind in [
+            ChunkKind::Raw,
+            ChunkKind::Meta,
+            ChunkKind::Column,
+            ChunkKind::History,
+            ChunkKind::Stream,
+        ] {
+            assert_eq!(ChunkKind::from_byte(kind.to_byte()), Some(kind));
+        }
+        assert_eq!(ChunkKind::from_byte(5), None);
         assert_eq!(ChunkKind::from_byte(88), None);
+    }
+
+    #[test]
+    fn chunk_constructors_put_each_argument_in_its_field() {
+        let column = ChunkMeta::column(3, 19, 88, 7, 2);
+        assert_eq!(
+            (
+                column.kind,
+                column.graph_id,
+                column.column_id,
+                column.row_start,
+                column.row_count,
+                column.codec
+            ),
+            (ChunkKind::Column, 3, 19, 88, 7, 2)
+        );
+        let history = ChunkMeta::history(3, 19, 88, 7, 2);
+        assert_eq!(
+            history,
+            ChunkMeta {
+                kind: ChunkKind::History,
+                ..column
+            }
+        );
+        let piece = ChunkMeta::stream_piece(3, 19, 88);
+        assert_eq!(
+            (
+                piece.kind,
+                piece.graph_id,
+                piece.column_id,
+                piece.row_start,
+                piece.row_count,
+                piece.codec
+            ),
+            (ChunkKind::Stream, 3, 19, 88, 0, 0)
+        );
+        assert_eq!(
+            ChunkMeta::meta(),
+            ChunkMeta {
+                kind: ChunkKind::Meta,
+                ..ChunkMeta::raw()
+            }
+        );
+        assert_eq!(column.identity(), (ChunkKind::Column.to_byte(), 3, 19, 88));
+        assert_eq!(
+            ChunkMeta::column(3, 19, 88, 1, 0).identity(),
+            column.identity(),
+            "the row count and the codec are not part of the identity"
+        );
+        assert_ne!(history.identity(), column.identity(), "the kind is");
+    }
+
+    /// Closes the deferred A1 item: the branch for a chunk of another kind.
+    #[test]
+    fn the_raw_adapter_refuses_a_chunk_of_another_kind() {
+        let mut section = Bytes3(Vec::new());
+        let error = section
+            .read_from(&VecSource(
+                vec![ChunkMeta::meta()],
+                vec![b"Gus".to_vec()],
+                1,
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("expected one raw chunk") && error.contains("Meta"),
+            "{error}"
+        );
+        assert!(section.0.is_empty(), "nothing was deserialized");
+    }
+
+    #[test]
+    fn legacy_bytes_are_one_raw_chunk_and_nothing_else() {
+        let one = VecSource(vec![ChunkMeta::raw()], vec![b"Alix".to_vec()], 0);
+        assert_eq!(legacy_bytes(&one).unwrap().as_deref(), Some(&b"Alix"[..]));
+        let chunked = VecSource(vec![ChunkMeta::meta()], vec![vec![1]], 3);
+        assert_eq!(
+            legacy_bytes(&chunked).unwrap(),
+            None,
+            "a chunked section is not 0.5.x bytes"
+        );
+        let two = VecSource(vec![ChunkMeta::raw(); 2], vec![vec![1], vec![2]], 0);
+        assert!(legacy_bytes(&two).is_err());
+        let mixed = VecSource(
+            vec![ChunkMeta::raw(), ChunkMeta::meta()],
+            vec![vec![1], vec![2]],
+            0,
+        );
+        assert!(legacy_bytes(&mixed).is_err());
+        let coded = VecSource(
+            vec![ChunkMeta {
+                codec: 3,
+                ..ChunkMeta::raw()
+            }],
+            vec![b"Paris".to_vec()],
+            0,
+        );
+        let error = legacy_bytes(&coded).unwrap_err().to_string();
+        assert!(error.contains("codec 3"), "{error}");
+        for (case, placed) in [
+            (
+                "graph 3",
+                ChunkMeta {
+                    graph_id: 3,
+                    ..ChunkMeta::raw()
+                },
+            ),
+            (
+                "column 19",
+                ChunkMeta {
+                    column_id: 19,
+                    ..ChunkMeta::raw()
+                },
+            ),
+            (
+                "first row 88",
+                ChunkMeta {
+                    row_start: 88,
+                    ..ChunkMeta::raw()
+                },
+            ),
+            (
+                "rows 19",
+                ChunkMeta {
+                    row_count: 19,
+                    ..ChunkMeta::raw()
+                },
+            ),
+        ] {
+            let source = VecSource(vec![placed], vec![b"Paris".to_vec()], 0);
+            let error = legacy_bytes(&source).map_or_else(
+                |error| error.to_string(),
+                |bytes| format!("accepted {bytes:?}"),
+            );
+            assert!(error.contains(case), "{case}: {error}");
+        }
+    }
+
+    #[test]
+    fn check_version_names_the_section_and_both_versions() {
+        let source = VecSource(vec![ChunkMeta::meta()], vec![vec![1]], 2);
+        check_version(SectionType::Catalog, &source, 2).unwrap();
+        let error = check_version(SectionType::LpgStore, &source, 3)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("LpgStore")
+                && error.contains("version 2")
+                && error.contains("version 3"),
+            "{error}"
+        );
     }
 }

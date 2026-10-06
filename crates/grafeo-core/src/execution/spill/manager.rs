@@ -3,7 +3,7 @@
 use super::file::SpillFile;
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Manages spill file lifecycle for out-of-core processing.
 ///
@@ -27,33 +27,37 @@ pub struct SpillManager {
     total_spilled_bytes: AtomicU64,
     /// Whether `Drop` should remove `spill_dir` itself (non-recursive).
     owns_dir: bool,
+    /// Whether this manager created `spill_dir` (on its first spill file).
+    dir_created: AtomicBool,
 }
 
 impl SpillManager {
     /// Creates a new spill manager with the given directory.
     ///
-    /// Creates the directory if it doesn't exist. The directory is *not*
-    /// removed on drop unless [`with_owned_dir`](Self::with_owned_dir) is
-    /// chained on the result.
+    /// Touches no disk: the directory is created with the first spill file
+    /// ([`create_file`](Self::create_file)), so a query that spills nothing
+    /// costs no filesystem calls. The directory is *not* removed on drop
+    /// unless [`with_owned_dir`](Self::with_owned_dir) is chained on the
+    /// result.
     ///
     /// # Errors
     ///
-    /// Returns an error if the directory cannot be created.
+    /// Never fails today; the `Result` stays for callers that handle a
+    /// directory error.
     pub fn new(spill_dir: impl Into<PathBuf>) -> std::io::Result<Self> {
-        let spill_dir = spill_dir.into();
-        std::fs::create_dir_all(&spill_dir)?;
-
         Ok(Self {
-            spill_dir,
+            spill_dir: spill_dir.into(),
             next_file_id: AtomicU64::new(0),
             active_files: Mutex::new(Vec::new()),
             total_spilled_bytes: AtomicU64::new(0),
             owns_dir: false,
+            dir_created: AtomicBool::new(false),
         })
     }
 
     /// Marks the spill directory as owned by this manager so that `Drop`
-    /// removes it (non-recursive) after spill files are cleaned up.
+    /// removes it (non-recursive) after spill files are cleaned up, if the
+    /// manager created it.
     ///
     /// Use for per-query spill subdirectories (e.g. `<base>/query_<id>/`)
     /// where leaving the empty directory behind would accumulate over time.
@@ -81,14 +85,21 @@ impl SpillManager {
         &self.spill_dir
     }
 
-    /// Creates a new spill file with the given prefix.
+    /// Creates a new spill file with the given prefix, and the spill
+    /// directory with the first one.
     ///
     /// The file name format is: `{prefix}_{file_id}.spill`
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be created.
+    /// Returns an error if the directory or the file cannot be created.
     pub fn create_file(&self, prefix: &str) -> std::io::Result<SpillFile> {
+        if !self.dir_created.load(Ordering::Acquire) {
+            // `create_dir_all` succeeds when the directory exists, so two
+            // threads creating their first files at once are both fine.
+            std::fs::create_dir_all(&self.spill_dir)?;
+            self.dir_created.store(true, Ordering::Release);
+        }
         let file_id = self.next_file_id.fetch_add(1, Ordering::Relaxed);
         let file_name = format!("{prefix}_{file_id}.spill");
         let file_path = self.spill_dir.join(file_name);
@@ -164,7 +175,7 @@ impl Drop for SpillManager {
     fn drop(&mut self) {
         // Best-effort cleanup on drop
         let _ = self.cleanup();
-        if self.owns_dir {
+        if self.owns_dir && self.dir_created.load(Ordering::Acquire) {
             // Non-recursive remove_dir: succeeds only if cleanup left the
             // directory empty. If something else (a stray file, a subdir we
             // didn't track) is in there, the directory is preserved.
@@ -268,13 +279,45 @@ mod tests {
         let dir_path = temp_dir.path().join("shared_spill");
 
         {
-            let _manager = SpillManager::new(&dir_path).unwrap();
+            let manager = SpillManager::new(&dir_path).unwrap();
+            let _file = manager.create_file("sort").unwrap();
         }
 
         assert!(
             dir_path.exists(),
             "default SpillManager must not remove its directory on drop"
         );
+    }
+
+    #[test]
+    fn the_directory_is_created_by_the_first_spill_file() {
+        // A query that spills nothing must not touch the disk (#565): every
+        // statement on a file database created and removed its directory.
+        let temp_dir = TempDir::new().unwrap();
+        let query_dir = temp_dir.path().join("base").join("query_7");
+
+        let manager = SpillManager::new(&query_dir).unwrap().with_owned_dir();
+        assert!(!query_dir.exists(), "new must not create the directory");
+        assert!(!temp_dir.path().join("base").exists());
+
+        let file = manager.create_file("sort").unwrap();
+        assert!(query_dir.is_dir());
+        assert!(file.path().starts_with(&query_dir));
+        let _second = manager.create_file("sort").unwrap();
+        assert_eq!(manager.active_file_count(), 2);
+    }
+
+    #[test]
+    fn an_owned_directory_never_created_is_left_alone() {
+        // Dropping a manager that never spilled removes nothing, not even a
+        // directory of the same name that someone else created meanwhile.
+        let temp_dir = TempDir::new().unwrap();
+        let query_dir = temp_dir.path().join("query_8");
+        {
+            let _manager = SpillManager::new(&query_dir).unwrap().with_owned_dir();
+            std::fs::create_dir(&query_dir).unwrap();
+        }
+        assert!(query_dir.exists());
     }
 
     #[test]

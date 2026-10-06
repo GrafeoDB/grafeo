@@ -168,15 +168,14 @@ impl<'f> ImageReader<'f> {
             .filter(|entry| entry.section_type == section_type)
             .copied()
             .collect();
-        if entries.is_empty() {
-            return None;
-        }
+        let version = entries.first()?.section_version;
         let metas = entries.iter().map(|entry| entry.meta).collect();
         Some(SectionChunks {
             file: self.file,
             cipher: self.cipher,
             entries,
             metas,
+            version,
         })
     }
 }
@@ -187,6 +186,8 @@ pub struct SectionChunks<'r> {
     cipher: Option<&'r ChunkCipher>,
     entries: Vec<DirectoryEntry>,
     metas: Vec<ChunkMeta>,
+    /// The section version of the first chunk.
+    version: u8,
 }
 
 impl SectionSource for SectionChunks<'_> {
@@ -233,6 +234,10 @@ impl SectionSource for SectionChunks<'_> {
             match *cipher {}
         }
         Ok(Bytes::from(stored))
+    }
+
+    fn section_version(&self) -> u8 {
+        self.version
     }
 }
 

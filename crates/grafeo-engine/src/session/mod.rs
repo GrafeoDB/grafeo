@@ -5032,12 +5032,15 @@ impl Session {
     fn make_operator_memory_context(
         &self,
     ) -> Option<grafeo_core::execution::OperatorMemoryContext> {
+        // Numbers the per-query spill directories. Not the commit counter: that
+        // one paces garbage collection, and a query is not a commit (#565).
+        static NEXT_QUERY_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
         let bm = self.buffer_manager.as_ref()?;
         let spill_path = bm.config().spill_path.as_ref()?;
-        // Per-query isolation: create a unique subdirectory
-        let query_id = self
-            .commit_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Per-query isolation: a unique subdirectory, created only if the
+        // query spills (see `SpillManager::create_file`).
+        let query_id = NEXT_QUERY_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let query_dir = spill_path.join(format!("query_{query_id}"));
         let sm = std::sync::Arc::new(
             grafeo_core::execution::SpillManager::new(&query_dir)
@@ -6264,6 +6267,27 @@ mod tests {
     #[cfg(feature = "gql")]
     mod gql_tests {
         use super::*;
+
+        /// A statement's spill directory took its id from the commit counter,
+        /// which also paces garbage collection (#565): every query, reads
+        /// included, counted as a commit.
+        #[cfg(feature = "spill")]
+        #[test]
+        fn queries_do_not_count_as_commits() {
+            use std::sync::atomic::Ordering;
+
+            let dir = tempfile::tempdir().unwrap();
+            let config =
+                crate::config::Config::in_memory().with_spill_path(dir.path().join("spill"));
+            let db = GrafeoDB::with_config(config).unwrap();
+            let session = db.session();
+            let before = session.commit_counter.load(Ordering::Relaxed);
+            for _ in 0..5 {
+                session.execute("MATCH (n) RETURN count(n) AS c").unwrap();
+            }
+            assert_eq!(session.commit_counter.load(Ordering::Relaxed), before);
+            assert!(!dir.path().join("spill").exists());
+        }
 
         #[test]
         fn test_gql_query_execution() {

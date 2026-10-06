@@ -32,6 +32,10 @@ pub struct ProcedureContext {
     pub catalog: Option<Arc<Catalog>>,
     /// The calling statement's write counter: the body's writes count there.
     pub write_counter: Arc<WriteCounter>,
+    /// The database's projections, so a `CALL ... {projection: ...}` in the
+    /// body runs as it does at the top level.
+    #[cfg(feature = "lpg")]
+    pub projections: Option<crate::session::ProjectionRegistry>,
 }
 
 /// An operator that executes a user-defined stored procedure.
@@ -65,6 +69,9 @@ pub struct UserProcedureOperator {
     catalog: Option<Arc<Catalog>>,
     /// The calling statement's write counter.
     write_counter: Arc<WriteCounter>,
+    /// The database's projections, for `CALL ... {projection: ...}` in the body.
+    #[cfg(feature = "lpg")]
+    projections: Option<crate::session::ProjectionRegistry>,
     /// Buffered result rows from execution.
     result_rows: Option<Vec<Vec<Value>>>,
     /// Current row index into buffered results.
@@ -99,6 +106,8 @@ impl UserProcedureOperator {
             viewing_epoch: ctx.viewing_epoch,
             catalog: ctx.catalog,
             write_counter: ctx.write_counter,
+            #[cfg(feature = "lpg")]
+            projections: ctx.projections,
             result_rows: None,
             row_index: 0,
             output_columns,
@@ -145,6 +154,11 @@ impl UserProcedureOperator {
             p
         }
         .with_write_counter(Arc::clone(&self.write_counter));
+        #[cfg(feature = "lpg")]
+        let planner = match &self.projections {
+            Some(projections) => planner.with_projections(Arc::clone(projections)),
+            None => planner,
+        };
 
         let physical = planner
             .plan(&logical_plan)

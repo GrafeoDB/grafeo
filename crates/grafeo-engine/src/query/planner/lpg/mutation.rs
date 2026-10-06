@@ -880,6 +880,8 @@ impl super::Planner {
                 viewing_epoch: self.viewing_epoch,
                 catalog: self.catalog.clone(),
                 write_counter: self.write_counter(),
+                #[cfg(feature = "lpg")]
+                projections: self.projections.clone(),
             },
         ));
 

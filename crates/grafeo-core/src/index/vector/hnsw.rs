@@ -570,12 +570,7 @@ impl HnswIndex {
                         };
                         let distances: Vec<(NodeId, f32)> = neighbor.neighbors[lc]
                             .iter()
-                            .map(|&nid| {
-                                let dist = accessor
-                                    .get_vector(nid)
-                                    .map_or(f32::MAX, |v| self.vector_distance(&base_vec, &v));
-                                (nid, dist)
-                            })
+                            .map(|&nid| (nid, self.node_distance(accessor, &base_vec, nid)))
                             .collect();
                         prune_data.push((*neighbor_id, distances));
                     }
@@ -673,10 +668,10 @@ impl HnswIndex {
                 let distances: Vec<(NodeId, f32)> = node.neighbors[level]
                     .iter()
                     .map(|&candidate| {
-                        let distance = accessor.get_vector(candidate).map_or(f32::MAX, |vector| {
-                            self.vector_distance(&base_vector, &vector)
-                        });
-                        (candidate, distance)
+                        (
+                            candidate,
+                            self.node_distance(accessor, &base_vector, candidate),
+                        )
                     })
                     .collect();
                 prune_data.push((neighbor_id, distances));
@@ -759,9 +754,11 @@ impl HnswIndex {
         let ef_search = ef.max(k);
         let candidates = self.search_layer(&nodes, accessor, query, current_ep, ef_search, 0);
 
-        // Return top k
+        // Return top k, never a node without a vector (a topology saved while
+        // its values could not be read can still name one, #594)
         candidates
             .into_iter()
+            .filter(|n| accessor.with_vector(n.id, &mut |_| {}))
             .take(k)
             .map(|n| (n.id, n.distance))
             .collect()
@@ -853,9 +850,10 @@ impl HnswIndex {
         let candidates = self
             .search_layer_filtered(&nodes, accessor, query, current_ep, ef_search, 0, allowlist);
 
-        // Return top k
+        // Return top k, never a node without a vector (#594)
         candidates
             .into_iter()
+            .filter(|n| accessor.with_vector(n.id, &mut |_| {}))
             .take(k)
             .map(|n| (n.id, n.distance))
             .collect()
@@ -1197,11 +1195,14 @@ impl HnswIndex {
         compute_distance(a, b, self.config.metric)
     }
 
-    /// Computes the distance between a query vector and a stored node.
+    /// Computes the distance between a query vector and a stored node, reading
+    /// the stored vector in place ([`VectorAccessor::with_vector`]).
     fn node_distance(&self, accessor: &impl VectorAccessor, query: &[f32], id: NodeId) -> f32 {
-        accessor
-            .get_vector(id)
-            .map_or(f32::MAX, |v| self.vector_distance(query, &v))
+        let mut distance = f32::MAX;
+        accessor.with_vector(id, &mut |vector| {
+            distance = self.vector_distance(query, vector);
+        });
+        distance
     }
 
     // ========================================================================

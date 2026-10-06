@@ -116,9 +116,13 @@ struct SnapshotEdge {
 ///
 /// With `temporal`: stores full property version history.
 /// Without: wraps each current value as a single-entry version list at epoch 0.
-fn collect_snapshot_nodes(store: &grafeo_core::graph::lpg::LpgStore) -> Vec<SnapshotNode> {
+/// The nodes of `store` as a snapshot holds them. A spilled property value
+/// that cannot be read fails the export instead of leaving the copy without
+/// it.
+fn collect_snapshot_nodes(store: &grafeo_core::graph::lpg::LpgStore) -> Result<Vec<SnapshotNode>> {
     let mut nodes: Vec<SnapshotNode> = store
-        .all_nodes()
+        .try_all_nodes()?
+        .into_iter()
         .map(|n| {
             #[cfg(feature = "temporal")]
             let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = store
@@ -147,7 +151,7 @@ fn collect_snapshot_nodes(store: &grafeo_core::graph::lpg::LpgStore) -> Vec<Snap
         })
         .collect();
     nodes.sort_by_key(|n| n.id);
-    nodes
+    Ok(nodes)
 }
 
 /// Collects all edges from a store into snapshot format.
@@ -388,7 +392,9 @@ fn copy_graph_data(
     source: &grafeo_core::graph::lpg::LpgStore,
     target: &grafeo_core::graph::lpg::LpgStore,
 ) -> Result<()> {
-    for node in source.all_nodes() {
+    // A spilled value that cannot be read fails the copy instead of leaving
+    // it out.
+    for node in source.try_all_nodes()? {
         let labels: Vec<&str> = node.labels.iter().map(|label| &**label).collect();
         target.create_node_with_id(node.id, &labels)?;
         #[cfg(feature = "temporal")]
@@ -815,24 +821,20 @@ impl super::GrafeoDB {
         // The snapshot holds every commit whole, and none that did not
         // complete (whose stamped part the store holds).
         let _commits = self.transaction_manager.hold_commits()?;
-        let nodes = collect_snapshot_nodes(self.lpg_store());
+        let nodes = collect_snapshot_nodes(self.lpg_store())?;
         let edges = collect_snapshot_edges(self.lpg_store());
 
         // Collect named graphs
-        let named_graphs: Vec<NamedGraphSnapshot> = self
-            .lpg_store()
-            .graph_names()
-            .into_iter()
-            .filter_map(|name| {
-                self.lpg_store()
-                    .graph(&name)
-                    .map(|graph_store| NamedGraphSnapshot {
-                        name,
-                        nodes: collect_snapshot_nodes(&graph_store),
-                        edges: collect_snapshot_edges(&graph_store),
-                    })
-            })
-            .collect();
+        let mut named_graphs: Vec<NamedGraphSnapshot> = Vec::new();
+        for name in self.lpg_store().graph_names() {
+            if let Some(graph_store) = self.lpg_store().graph(&name) {
+                named_graphs.push(NamedGraphSnapshot {
+                    name,
+                    nodes: collect_snapshot_nodes(&graph_store)?,
+                    edges: collect_snapshot_edges(&graph_store),
+                });
+            }
+        }
 
         // Collect RDF triples
         #[cfg(feature = "triple-store")]
@@ -1111,6 +1113,71 @@ mod tests {
     use super::{
         SNAPSHOT_VERSION, Snapshot, SnapshotEdge, SnapshotIndexes, SnapshotNode, SnapshotSchema,
     };
+
+    /// A database with Alix, whose embedding is spilled into a backing that
+    /// cannot be read, and Gus, who has no embedding.
+    #[cfg(not(feature = "temporal"))]
+    fn with_an_unreadable_embedding() -> (GrafeoDB, NodeId) {
+        use grafeo_common::types::PropertyKey;
+
+        let db = GrafeoDB::new_in_memory();
+        let alix = db
+            .create_node_with_props(
+                &["Item"],
+                [
+                    ("name", Value::from("Alix")),
+                    ("embedding", Value::Vector(vec![3.0, 19.0].into())),
+                ],
+            )
+            .unwrap();
+        db.create_node_with_props(&["Item"], [("name", Value::from("Gus"))])
+            .unwrap();
+        assert!(db.export_snapshot().is_ok());
+        let key = PropertyKey::new("embedding");
+        let store = db.lpg_store();
+        let snapshot = store.node_property_column_entries(&key);
+        assert!(store.spill_node_property_column(
+            &key,
+            std::sync::Arc::new(super::super::test_backing::Unreadable(alix)),
+            &snapshot
+        ));
+        (db, alix)
+    }
+
+    /// An export reads spilled values, and fails rather than leave out one it
+    /// cannot read (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn an_export_fails_on_a_spilled_value_it_cannot_read() {
+        let (db, _) = with_an_unreadable_embedding();
+        assert!(
+            db.export_snapshot().is_err(),
+            "a snapshot without the embedding"
+        );
+        assert!(db.to_memory().is_err(), "a copy without the embedding");
+    }
+
+    /// A statement that would change a spilled value it cannot read errors and
+    /// changes nothing: its rollback could not restore the value (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn a_statement_on_a_spilled_value_it_cannot_read_errors() {
+        let (db, alix) = with_an_unreadable_embedding();
+        for statement in [
+            "MATCH (n:Item {name: 'Alix'}) SET n.embedding = vector([88.0, 3.19])",
+            "MATCH (n:Item {name: 'Alix'}) REMOVE n.embedding",
+            "MATCH (n:Item {name: 'Alix'}) DELETE n",
+        ] {
+            let error = db.execute(statement).expect_err(statement);
+            assert!(
+                error.to_string().contains("cannot be read"),
+                "{statement}: {error}"
+            );
+        }
+        assert!(db.get_node(alix).is_some(), "Alix was not deleted");
+        db.execute("MATCH (n:Item {name: 'Gus'}) SET n.embedding = vector([88.0, 3.19])")
+            .unwrap();
+    }
 
     #[test]
     fn test_restore_snapshot_basic() {

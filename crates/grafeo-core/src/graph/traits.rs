@@ -27,6 +27,7 @@ use crate::index::vector::DistanceMetric;
 use crate::statistics::Statistics;
 use arcstr::ArcStr;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::FxHashMap;
 use std::sync::Arc;
 
@@ -80,6 +81,20 @@ pub trait GraphStore: Send + Sync {
 
     /// Gets a single property from a node without loading all properties.
     fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value>;
+
+    /// Calls `f` with the vector in a node's property and returns whether
+    /// there was one. Vector search reads every distance through this, so a
+    /// store should lend the vector without copying it; the default reads it
+    /// through [`get_node_property`](Self::get_node_property).
+    fn with_node_vector(&self, id: NodeId, key: &PropertyKey, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self.get_node_property(id, key) {
+            Some(Value::Vector(vector)) => {
+                f(&vector);
+                true
+            }
+            _ => false,
+        }
+    }
 
     /// Gets a single property from an edge without loading all properties.
     fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value>;
@@ -541,12 +556,18 @@ pub trait GraphStoreMut: GraphStoreSearch {
     fn delete_node(&self, id: NodeId) -> bool;
 
     /// Deletes a node within a transaction context. Returns `true` if the node existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and deletes nothing, when the node's properties
+    /// (which a rollback restores) cannot be read: a spilled value whose file
+    /// cannot be read.
     fn delete_node_versioned(
         &self,
         id: NodeId,
         epoch: EpochId,
         transaction_id: TransactionId,
-    ) -> bool;
+    ) -> Result<bool>;
 
     /// Deletes all edges connected to a node (DETACH DELETE).
     fn delete_node_edges(&self, node_id: NodeId);
@@ -574,14 +595,21 @@ pub trait GraphStoreMut: GraphStoreSearch {
     /// so it can be restored on rollback.
     ///
     /// Default delegates to [`set_node_property`](Self::set_node_property).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the previous value cannot
+    /// be read (a spilled value whose file cannot be read): a rollback could
+    /// not restore it.
     fn set_node_property_versioned(
         &self,
         id: NodeId,
         key: &str,
         value: Value,
         _transaction_id: TransactionId,
-    ) {
+    ) -> Result<()> {
         self.set_node_property(id, key, value);
+        Ok(())
     }
 
     /// Sets an edge property within a transaction, recording the previous value
@@ -605,16 +633,22 @@ pub trait GraphStoreMut: GraphStoreSearch {
     fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value>;
 
     /// Removes a node property within a transaction, recording the previous value
-    /// so it can be restored on rollback.
+    /// so it can be restored on rollback. Returns the previous value if it
+    /// existed.
     ///
     /// Default delegates to [`remove_node_property`](Self::remove_node_property).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the previous value cannot
+    /// be read (a spilled value whose file cannot be read).
     fn remove_node_property_versioned(
         &self,
         id: NodeId,
         key: &str,
         _transaction_id: TransactionId,
-    ) -> Option<Value> {
-        self.remove_node_property(id, key)
+    ) -> Result<Option<Value>> {
+        Ok(self.remove_node_property(id, key))
     }
 
     /// Removes an edge property within a transaction, recording the previous value
@@ -1220,8 +1254,8 @@ mod tests {
                 false
             }
         }
-        fn delete_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> bool {
-            self.delete_node(id)
+        fn delete_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> Result<bool> {
+            Ok(self.delete_node(id))
         }
         fn delete_node_edges(&self, node_id: NodeId) {
             let mut inner = self.inner.lock().unwrap();
@@ -1298,7 +1332,9 @@ mod tests {
         let txn = TransactionId(7);
 
         // Default impl of set_node_property_versioned calls set_node_property.
-        store.set_node_property_versioned(id, "name", Value::from("Vincent"), txn);
+        store
+            .set_node_property_versioned(id, "name", Value::from("Vincent"), txn)
+            .unwrap();
         assert_eq!(
             store.get_node_property(id, &key),
             Some(Value::from("Vincent"))
@@ -1324,7 +1360,9 @@ mod tests {
 
         let node_id = store.create_node(&["Person"]);
         store.set_node_property(node_id, "city", Value::from("Amsterdam"));
-        let removed = store.remove_node_property_versioned(node_id, "city", txn);
+        let removed = store
+            .remove_node_property_versioned(node_id, "city", txn)
+            .unwrap();
         assert_eq!(removed, Some(Value::from("Amsterdam")));
         assert!(
             store
@@ -1332,7 +1370,9 @@ mod tests {
                 .is_none()
         );
 
-        let missing = store.remove_node_property_versioned(node_id, "absent", txn);
+        let missing = store
+            .remove_node_property_versioned(node_id, "absent", txn)
+            .unwrap();
         assert!(missing.is_none());
 
         let src = store.create_node(&["Person"]);

@@ -158,6 +158,20 @@ impl LpgStore {
         node_ids.into_iter().filter_map(move |id| self.get_node(id))
     }
 
+    /// [`all_nodes`](Self::all_nodes) for the readers that must not lose a
+    /// value (checkpoints, copies): a spilled property value that cannot be
+    /// read is an error, never left out. Each value is read once.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading a spilled value.
+    pub fn try_all_nodes(&self) -> grafeo_common::utils::error::Result<Vec<Node>> {
+        self.node_ids()
+            .into_iter()
+            .map(|id| self.try_build_node(id))
+            .collect()
+    }
+
     /// Returns an iterator over all edges in the database.
     ///
     /// This creates a snapshot of all visible edges at the current epoch.

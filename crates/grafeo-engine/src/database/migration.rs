@@ -16,13 +16,15 @@
 //!    `<path>.migrating`, and open the image read-only to check it (its counts
 //!    are logged once it is in place).
 //! 2. Move the old file, or the whole directory, to `<path>.pre-0.6`, a
-//!    sidecar WAL `<path>.wal` to `<path>.pre-0.6.wal` and a checkpoint image
-//!    0.5.44 left pending, `<path>.checkpoint`, to `<path>.pre-0.6.checkpoint`,
-//!    syncing the directory after each move: a power loss keeps the first
-//!    moves, never a later one without an earlier one. The old database stays
-//!    locked until it has moved, except a directory on Windows, whose lock is
-//!    released right before it moves (there a directory with an open handle
-//!    inside cannot be renamed).
+//!    sidecar WAL `<path>.wal` to `<path>.pre-0.6.wal`, a checkpoint image
+//!    0.5.44 left pending, `<path>.checkpoint`, to `<path>.pre-0.6.checkpoint`
+//!    and the spill directory `<path>.spill` to `<path>.pre-0.6.spill` (a
+//!    database closed while spilled holds embeddings only there; the read of
+//!    step 1 put them in the image), syncing the directory after each move:
+//!    a power loss keeps the first moves, never a later one without an
+//!    earlier one. The old database stays locked until it has moved, except a
+//!    directory on Windows, whose lock is released right before it moves
+//!    (there a directory with an open handle inside cannot be renamed).
 //! 3. Rename `<path>.migrating` to `<path>` and sync the directory.
 //!
 //! The old files are kept byte for byte. To go back to 0.5.x, move the 0.6
@@ -62,8 +64,8 @@
 //! | Files present | Next read-write open |
 //! | --- | --- |
 //! | `<path>` (0.5.x) and `<path>.migrating` | removes the image, which may be incomplete, and migrates again |
-//! | `<path>` (0.5.x), `<path>.migrating` and a side file under its kept name (`<path>.pre-0.6.wal` or `<path>.pre-0.6.checkpoint`), no `<path>.pre-0.6` | moves the side file back to its 0.5.x name and syncs, then as above (left by a power loss where the side file's move reached the disk and the database file's did not) |
-//! | `<path>.pre-0.6` and `<path>.migrating`, no `<path>` | moves a 0.5.x sidecar WAL or checkpoint image still under the old names to the kept names, syncing after each move, then renames the image to `<path>` |
+//! | `<path>` (0.5.x), `<path>.migrating` and a side file under its kept name (`<path>.pre-0.6.wal`, `<path>.pre-0.6.checkpoint` or `<path>.pre-0.6.spill`), no `<path>.pre-0.6` | moves the side file back to its 0.5.x name and syncs, then as above (left by a power loss where the side file's move reached the disk and the database file's did not) |
+//! | `<path>.pre-0.6` and `<path>.migrating`, no `<path>` | moves a 0.5.x sidecar WAL, checkpoint image or spill directory still under the old names to the kept names, syncing after each move, then renames the image to `<path>` |
 //! | `<path>.migrating`, no `<path>` and no `<path>.pre-0.6` | fails with an error naming the files: the old database is missing, and nothing is guessed |
 //! | `<path>` (0.6) and `<path>.pre-0.6` | nothing to do |
 //!
@@ -362,12 +364,10 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
         kept_file.display()
     );
     if keys.is_encrypted() {
-        // Every kept file that exists (one that cannot be inspected is named
-        // too): each holds 0.5.x data in plaintext.
-        let kept_files: Vec<String> = moves
+        // Each holds 0.5.x data in plaintext.
+        let kept_files: Vec<String> = kept_files_present(path)
             .iter()
-            .filter(|(_, kept, _)| kept.try_exists().unwrap_or(true))
-            .map(|(_, kept, _)| kept.display().to_string())
+            .map(|kept| kept.display().to_string())
             .collect();
         grafeo_warn!(
             "{} is encrypted now, but the 0.5.x files the migration kept are not: {}; \
@@ -377,6 +377,18 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The kept copies of the 0.5.x files of `path` that exist, one that cannot
+/// be inspected included: what the warning after an encrypting migration
+/// names.
+#[cfg(feature = "lpg")]
+fn kept_files_present(path: &Path) -> Vec<PathBuf> {
+    kept_names(path)
+        .into_iter()
+        .filter(|(_, kept, _)| kept.try_exists().unwrap_or(true))
+        .map(|(_, kept, _)| kept)
+        .collect()
 }
 
 /// The suffix of a kept copy: `<path>.pre-0.6`.
@@ -532,12 +544,12 @@ fn resolve(path: &Path) -> Result<()> {
     }
 }
 
-/// Moves each 0.5.x side file of `side_files` (the sidecar WAL and a pending
-/// checkpoint image, with their kept names and crash points, from
-/// [`kept_names`]) that exists to its kept name, syncing the directory of
-/// `path` after each move, so a power loss keeps the first moves and never a
-/// later one without an earlier one. The caller has moved the database file
-/// and synced the directory.
+/// Moves each 0.5.x side file of `side_files` (the sidecar WAL, a pending
+/// checkpoint image and the spill directory, with their kept names and crash
+/// points, from [`kept_names`]) that exists to its kept name, syncing the
+/// directory of `path` after each move, so a power loss keeps the first moves
+/// and never a later one without an earlier one. The caller has moved the
+/// database file and synced the directory.
 ///
 /// # Errors
 ///
@@ -556,18 +568,37 @@ fn move_side_files(path: &Path, side_files: &[(PathBuf, PathBuf, &'static str)])
                 to.display()
             )));
         }
-        rename(from, to, point)?;
+        rename(from, to, point).map_err(|error| side_file_cannot_move(error, from))?;
         sync_parent_dir(path)?;
     }
     Ok(())
 }
 
-/// Moves the 0.5.x side files (sidecar WAL, pending checkpoint image) found
-/// under their kept names back to their 0.5.x names while the database file is
-/// still `<path>`: a power loss kept their move and lost the earlier move of
-/// the database file. The 0.5.x database is then whole again for the
-/// migration to run again. Nothing moves while `<path>.pre-0.6` exists (a kept
-/// copy that is no part of this state, which `migrate` refuses to replace).
+/// Adds to the message of a failed move of a side file why it may fail and
+/// what to do: on Windows a directory (the sidecar WAL, the spill directory)
+/// cannot be renamed while a process has a file in it open, as a 0.5.x
+/// process that still has the database open keeps its spill files. The
+/// database file has moved by then, so the next read-write open finishes the
+/// migration.
+fn side_file_cannot_move(error: Error, side_file: &Path) -> Error {
+    match error {
+        Error::Internal(message) => Error::Internal(format!(
+            "{message}; another process may have {} or a file in it open (a 0.5.x process that \
+             still has the database open keeps its spill files open): stop it, and the next \
+             read-write open finishes the migration",
+            side_file.display()
+        )),
+        other => other,
+    }
+}
+
+/// Moves the 0.5.x side files (sidecar WAL, pending checkpoint image, spill
+/// directory) found under their kept names back to their 0.5.x names while the
+/// database file is still `<path>`: a power loss kept their move and lost the
+/// earlier move of the database file. The 0.5.x database is then whole again
+/// for the migration to run again. Nothing moves while `<path>.pre-0.6` exists
+/// (a kept copy that is no part of this state, which `migrate` refuses to
+/// replace).
 ///
 /// # Errors
 ///
@@ -752,9 +783,12 @@ fn missing_old_database(path: &Path) -> Error {
 }
 
 /// The 0.5.x files of a database, the names they are kept under, and the
-/// crash point after each rename: the file, its sidecar WAL and a pending
-/// checkpoint image.
-fn kept_names(path: &Path) -> [(PathBuf, PathBuf, &'static str); 3] {
+/// crash point after each rename: the file, its sidecar WAL, a pending
+/// checkpoint image and the spill directory (#594: a database closed while
+/// spilled holds the spilled embeddings only there, which 0.5.x reads back
+/// at its next open; 0.5.x derived `<path>.spill` for a file and a WAL
+/// directory alike).
+fn kept_names(path: &Path) -> [(PathBuf, PathBuf, &'static str); 4] {
     let kept = pre_06_path(path);
     [
         (path.to_path_buf(), kept.clone(), "migrate:renamed:.pre-0.6"),
@@ -767,6 +801,11 @@ fn kept_names(path: &Path) -> [(PathBuf, PathBuf, &'static str); 3] {
             with_suffix(path, ".checkpoint"),
             with_suffix(&kept, ".checkpoint"),
             "migrate:renamed:.pre-0.6.checkpoint",
+        ),
+        (
+            with_suffix(path, ".spill"),
+            with_suffix(&kept, ".spill"),
+            "migrate:renamed:.pre-0.6.spill",
         ),
     ]
 }
@@ -1094,6 +1133,25 @@ impl Drop for MigrateLock {
 #[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
+
+    /// The kept copies that exist, in the order the migration keeps them,
+    /// the spill directory included: the list the warning after an
+    /// encrypting migration names.
+    #[test]
+    fn the_kept_files_present_include_the_spill_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("amsterdam.grafeo");
+        assert_eq!(kept_files_present(&path), Vec::<PathBuf>::new());
+        std::fs::write(with_suffix(&path, ".pre-0.6"), b"0.5.x").unwrap();
+        std::fs::create_dir(with_suffix(&path, ".pre-0.6.spill")).unwrap();
+        assert_eq!(
+            kept_files_present(&path),
+            vec![
+                with_suffix(&path, ".pre-0.6"),
+                with_suffix(&path, ".pre-0.6.spill")
+            ]
+        );
+    }
 
     /// `<path>.pre-0.6` is a kept copy whatever the rest of its name holds,
     /// also when it is not valid UTF-8; a bare `.pre-0.6`, and any other

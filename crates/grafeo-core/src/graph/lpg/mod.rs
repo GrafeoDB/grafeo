@@ -30,6 +30,13 @@ pub use node::{Node, NodeFlags, NodeRecord};
 pub use property::ColumnBacking;
 #[cfg(not(feature = "temporal"))]
 pub use property::DecodedBlock;
+#[cfg(all(
+    test,
+    feature = "lpg",
+    feature = "vector-index",
+    not(feature = "temporal")
+))]
+pub(crate) use property::test_backing;
 pub use property::{CompareOp, PropertyStorage};
 
 // Store and section require the lpg feature

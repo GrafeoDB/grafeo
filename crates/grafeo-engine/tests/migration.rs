@@ -68,8 +68,8 @@ enum Entry {
 }
 
 /// Every file and directory under `root`, with the bytes of each file. Leaves out
-/// the spill directories queries create next to a database (scratch space, not
-/// part of it).
+/// the spill directories 0.6 creates next to a database (`<db>.spill`, scratch
+/// space, not part of it), but not a kept `<db>.pre-0.6.spill`, which is.
 fn files(root: &Path) -> BTreeMap<PathBuf, Entry> {
     let mut found = BTreeMap::new();
     let mut pending = vec![root.to_path_buf()];
@@ -78,11 +78,10 @@ fn files(root: &Path) -> BTreeMap<PathBuf, Entry> {
             let path = entry.unwrap().path();
             let relative = path.strip_prefix(root).unwrap().to_path_buf();
             let name = relative.to_string_lossy().into_owned();
-            if relative
-                .components()
-                .next()
-                .is_some_and(|first| first.as_os_str().to_string_lossy().ends_with(".spill"))
-            {
+            if relative.components().next().is_some_and(|first| {
+                let first = first.as_os_str().to_string_lossy();
+                first.ends_with(".spill") && !first.ends_with(".pre-0.6.spill")
+            }) {
                 continue;
             }
             if path.is_dir() {
@@ -125,6 +124,9 @@ struct Contents {
     people: Vec<Vec<Value>>,
     /// The named graphs, with the names of their nodes.
     graphs: Vec<(String, Vec<Vec<Value>>)>,
+    /// Every `:Item` with its embedding ([`spilled_kept`]: some are only in
+    /// the spill directory).
+    items: Vec<Vec<Value>>,
 }
 
 fn rows(db: &GrafeoDB, query: &str) -> Vec<Vec<Value>> {
@@ -165,6 +167,10 @@ fn contents(db: &GrafeoDB) -> Contents {
              ORDER BY name",
         ),
         graphs,
+        items: rows(
+            db,
+            "MATCH (i:Item) RETURN i.name AS name, i.embedding ORDER BY name",
+        ),
     }
 }
 
@@ -238,6 +244,10 @@ struct Kept {
     wal: Option<PathBuf>,
     /// The pending checkpoint image, kept as `<path>.pre-0.6.checkpoint`.
     checkpoint: Option<PathBuf>,
+    /// The spill directory `<path>.spill`, kept as `<path>.pre-0.6.spill`: a
+    /// database closed while spilled holds the spilled embeddings only there
+    /// (#594).
+    spill: Option<PathBuf>,
 }
 
 impl Kept {
@@ -259,6 +269,7 @@ fn fixture_kept() -> Kept {
         file: fixture(),
         wal: Some(with_suffix(&fixture(), ".wal")),
         checkpoint: None,
+        spill: None,
     }
 }
 
@@ -274,6 +285,7 @@ fn directory_kept() -> Kept {
         file: directory(),
         wal: None,
         checkpoint: None,
+        spill: None,
     }
 }
 
@@ -287,6 +299,7 @@ fn directory_0_5_43_kept() -> Kept {
             .join("tests/fixtures/released/0.5.43/directory"),
         wal: None,
         checkpoint: None,
+        spill: None,
     }
 }
 
@@ -299,6 +312,20 @@ fn pending_kept() -> Kept {
         file: released.join("0.5.44/closed.grafeo"),
         wal: None,
         checkpoint: Some(released.join("0.5.43/closed.grafeo")),
+        spill: None,
+    }
+}
+
+/// The 0.5.44 file closed while its vector index was spilled: its embeddings
+/// are only in `<p>.spill/` (see `fixtures/closed-while-spilled/README.md`).
+fn spilled_kept() -> Kept {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/closed-while-spilled/0.5.44");
+    Kept {
+        file: fixture.join("spilled.grafeo"),
+        wal: None,
+        checkpoint: None,
+        spill: Some(fixture.join("spilled.grafeo.spill")),
     }
 }
 
@@ -310,6 +337,9 @@ fn arrange_kept(kept: &Kept, path: &Path) {
     }
     if let Some(image) = &kept.checkpoint {
         copy(image, &with_suffix(path, ".checkpoint"));
+    }
+    if let Some(spill) = &kept.spill {
+        copy(spill, &with_suffix(path, ".spill"));
     }
 }
 
@@ -397,6 +427,23 @@ fn assert_kept_with(path: &Path, kept: &Kept, context: &str, lock_may_remain: bo
         !with_suffix(path, ".checkpoint").exists(),
         "{context}: no 0.5.x checkpoint image is left under the database's name"
     );
+    let kept_spill = with_suffix(path, ".pre-0.6.spill");
+    match &kept.spill {
+        Some(spill) => {
+            assert!(
+                kept_spill.is_dir() && files(&kept_spill) == files(spill),
+                "{context}: <path>.pre-0.6.spill holds the files of the 0.5.x spill directory"
+            );
+            assert!(
+                !with_suffix(path, ".spill").exists(),
+                "{context}: no 0.5.x spill directory is left under the database's name"
+            );
+        }
+        None => assert!(
+            !kept_spill.exists(),
+            "{context}: there was no spill directory to keep"
+        ),
+    }
 }
 
 /// Opens `path` read-write and checks that it holds the `expected` data in the
@@ -481,6 +528,23 @@ const DIRECTORY_MIGRATION_POINTS: [&str; 10] = [
     "checkpoint:before_trim",
     "migrate:after_image",
     "migrate:renamed:.pre-0.6",
+    "migrate:after_old",
+    "migrate:renamed:database",
+    "migrate:after_new",
+];
+
+/// The same for a file closed while spilled ([`spilled_kept`]): its spill
+/// directory moves after the file.
+#[cfg(feature = "testing-crash-injection")]
+const SPILLED_MIGRATION_POINTS: [&str; 11] = [
+    "create:after_write",
+    "checkpoint:after_chunks",
+    "checkpoint:after_data_sync",
+    "checkpoint:after_header",
+    "checkpoint:before_trim",
+    "migrate:after_image",
+    "migrate:renamed:.pre-0.6",
+    "migrate:renamed:.pre-0.6.spill",
     "migrate:after_old",
     "migrate:renamed:database",
     "migrate:after_new",
@@ -602,8 +666,9 @@ fn sweep_crashes(arrange: impl Fn(&Path), points: &[&str], kept: &Kept) {
 /// data, the old files are kept byte for byte, and nothing else is left. A
 /// crash point after each rename pins their order: the 0.5.x side files (the
 /// sidecar WAL of the fixture, the pending checkpoint image of the second
-/// arrangement) are out of the way before the image becomes the database. A
-/// WAL directory goes through the same steps, as one rename of the directory.
+/// arrangement, the spill directory of a database closed while spilled) are
+/// out of the way before the image becomes the database. A WAL directory goes
+/// through the same steps, as one rename of the directory.
 #[test]
 #[cfg(feature = "testing-crash-injection")]
 fn a_crash_at_each_migration_step_recovers() {
@@ -631,6 +696,12 @@ fn a_crash_at_each_migration_step_recovers() {
         &DIRECTORY_MIGRATION_POINTS,
         &without_lock,
     );
+    let spilled = spilled_kept();
+    sweep_crashes(
+        |path| arrange_kept(&spilled, path),
+        &SPILLED_MIGRATION_POINTS,
+        &spilled,
+    );
 }
 
 /// The crash points of an open that finishes a migration cut off between the
@@ -644,6 +715,11 @@ const PENDING_FINISH_POINTS: [&str; 2] = [
     "migrate:renamed:.pre-0.6.checkpoint",
     "migrate:renamed:database",
 ];
+
+/// The same with a spill directory.
+#[cfg(feature = "testing-crash-injection")]
+const SPILLED_FINISH_POINTS: [&str; 2] =
+    ["migrate:renamed:.pre-0.6.spill", "migrate:renamed:database"];
 
 /// Writes the image a migration of the 0.5.x files of `kept` writes, to `to`.
 #[cfg(feature = "testing-crash-injection")]
@@ -668,6 +744,9 @@ fn arrange_between_renames(kept: &Kept, image: &Path, path: &Path) {
     if let Some(checkpoint) = &kept.checkpoint {
         copy(checkpoint, &with_suffix(path, ".checkpoint"));
     }
+    if let Some(spill) = &kept.spill {
+        copy(spill, &with_suffix(path, ".spill"));
+    }
     copy(image, &with_suffix(path, ".migrating"));
     std::fs::write(with_suffix(path, ".migrate.lock"), b"").unwrap();
 }
@@ -677,10 +756,11 @@ fn arrange_between_renames(kept: &Kept, image: &Path, path: &Path) {
 const DIRECTORY_FINISH_POINTS: [&str; 1] = ["migrate:renamed:database"];
 
 /// Finishing a migration cut off between its renames survives a crash at each
-/// of its own renames: the side files (sidecar WAL, pending checkpoint image)
-/// move to their kept names before the image becomes the database, so the 0.6
-/// database never replays the 0.5.x WAL, and no 0.5.x image is left under its
-/// name. A WAL directory moved to `<p>.pre-0.6/` is finished the same way.
+/// of its own renames: the side files (sidecar WAL, pending checkpoint image,
+/// spill directory) move to their kept names before the image becomes the
+/// database, so the 0.6 database never replays the 0.5.x WAL, and no 0.5.x
+/// image is left under its name. A WAL directory moved to `<p>.pre-0.6/` is
+/// finished the same way.
 #[test]
 #[cfg(feature = "testing-crash-injection")]
 fn a_crash_while_finishing_a_migration_recovers() {
@@ -689,6 +769,7 @@ fn a_crash_while_finishing_a_migration_recovers() {
         (fixture_kept(), &FINISH_POINTS[..]),
         (pending_kept(), &PENDING_FINISH_POINTS[..]),
         (directory_kept(), &DIRECTORY_FINISH_POINTS[..]),
+        (spilled_kept(), &SPILLED_FINISH_POINTS[..]),
     ]
     .into_iter()
     .enumerate()
@@ -813,15 +894,18 @@ fn interrupted_migrations_resume_from_the_files_present() {
 }
 
 /// A power loss can keep a later rename of a migration and lose an earlier one:
-/// the sidecar WAL (or the pending checkpoint image) under its kept name while
-/// the 0.5.x file is still `<p>`, next to the image. The next read-write open
-/// moves the side file back and migrates again, so the migrated database holds
-/// the side file's changes, and the files are kept as after any migration.
+/// the sidecar WAL (or the pending checkpoint image, or the spill directory of
+/// a database closed while spilled) under its kept name while the 0.5.x file
+/// is still `<p>`, next to the image. The next read-write open moves the side
+/// file back and migrates again, so the migrated database holds the side
+/// file's changes (or embeddings), and the files are kept as after any
+/// migration.
 #[test]
 fn a_side_file_kept_before_its_database_file_moved_is_moved_back() {
     for (kept, side, kept_side) in [
         (fixture_kept(), ".wal", ".pre-0.6.wal"),
         (pending_kept(), ".checkpoint", ".pre-0.6.checkpoint"),
+        (spilled_kept(), ".spill", ".pre-0.6.spill"),
     ] {
         let expected = kept_contents(&kept);
         let dir = tempfile::tempdir().unwrap();
@@ -840,13 +924,15 @@ fn a_side_file_kept_before_its_database_file_moved_is_moved_back() {
 }
 
 /// In the same state a read-only open (and `open_in_memory`) would read the
-/// 0.5.x file without its sidecar WAL or pending checkpoint image: it fails,
-/// saying a read-write open finishes the migration, and changes nothing.
+/// 0.5.x file without its sidecar WAL, pending checkpoint image or spill
+/// directory: it fails, saying a read-write open finishes the migration, and
+/// changes nothing.
 #[test]
 fn a_read_only_open_refuses_a_side_file_kept_before_its_database_file_moved() {
     for (kept, side, kept_side) in [
         (fixture_kept(), ".wal", ".pre-0.6.wal"),
         (pending_kept(), ".checkpoint", ".pre-0.6.checkpoint"),
+        (spilled_kept(), ".spill", ".pre-0.6.spill"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db.grafeo");
@@ -895,18 +981,22 @@ fn a_read_only_open_of_a_0_6_file_ignores_a_stale_image_and_a_kept_wal() {
 /// an error naming the kept copy, and nothing is created.
 #[test]
 fn a_missing_database_next_to_a_kept_copy_is_never_created() {
-    for kept_suffix in [".pre-0.6", ".pre-0.6.wal"] {
+    for kept_suffix in [".pre-0.6", ".pre-0.6.wal", ".pre-0.6.spill"] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db.grafeo");
         let kept = with_suffix(&path, kept_suffix);
-        if kept_suffix == ".pre-0.6" {
-            copy(&fixture(), &kept);
-        } else {
-            copy(&with_suffix(&fixture(), ".wal"), &kept);
+        match kept_suffix {
+            ".pre-0.6" => copy(&fixture(), &kept),
+            ".pre-0.6.wal" => copy(&with_suffix(&fixture(), ".wal"), &kept),
+            _ => copy(spilled_kept().spill.as_ref().unwrap(), &kept),
         }
         let before = files(dir.path());
         for (open, error) in [
             ("read-write", open_error(&path)),
+            (
+                "read-write as a WAL directory",
+                wal_directory_open_error(&path),
+            ),
             ("read-only", read_only_error(&path)),
             ("in-memory", in_memory_error(&path)),
         ] {
@@ -921,6 +1011,107 @@ fn a_missing_database_next_to_a_kept_copy_is_never_created() {
             );
         }
     }
+}
+
+/// The error of a read-write open of `path` with the deprecated
+/// `StorageFormat::WalDirectory`.
+#[allow(
+    deprecated,
+    reason = "pins what the deprecated `StorageFormat::WalDirectory` still does until 0.7.0"
+)]
+fn wal_directory_open_error(path: &Path) -> String {
+    use grafeo_engine::config::StorageFormat;
+
+    match GrafeoDB::with_config(
+        grafeo_engine::Config::persistent(path).with_storage_format(StorageFormat::WalDirectory),
+    ) {
+        Ok(_) => panic!("the open of {} succeeded", path.display()),
+        Err(error) => error.to_string(),
+    }
+}
+
+/// A side file (or directory) and everything under it, with the bytes of each
+/// file; empty when it does not exist.
+fn tree(path: &Path) -> BTreeMap<PathBuf, Entry> {
+    if path.is_dir() {
+        files(path)
+    } else if path.exists() {
+        BTreeMap::from([(PathBuf::new(), Entry::File(std::fs::read(path).unwrap()))])
+    } else {
+        BTreeMap::new()
+    }
+}
+
+/// Finishing a migration never replaces a kept copy: a side file (sidecar
+/// WAL, pending checkpoint image, spill directory) found under both its 0.5.x
+/// and its kept name, in the cut-off state (`<p>.pre-0.6` and the image, no
+/// `<p>`) and in the power-loss state (`<p>` and the image, no `<p>.pre-0.6`),
+/// fails the read-write open naming both, and changes nothing.
+#[test]
+fn a_side_file_under_both_names_is_never_replaced() {
+    for (kept, side, kept_side) in [
+        (fixture_kept(), ".wal", ".pre-0.6.wal"),
+        (pending_kept(), ".checkpoint", ".pre-0.6.checkpoint"),
+        (spilled_kept(), ".spill", ".pre-0.6.spill"),
+    ] {
+        for state in ["cut off", "power loss"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("db.grafeo");
+            arrange_kept(&kept, &path);
+            if state == "cut off" {
+                std::fs::rename(&path, with_suffix(&path, ".pre-0.6")).unwrap();
+            }
+            copy(&with_suffix(&path, side), &with_suffix(&path, kept_side));
+            write_v3(&with_suffix(&path, ".migrating"), &["Vincent"]);
+            let before = (
+                files(dir.path()),
+                tree(&with_suffix(&path, side)),
+                tree(&with_suffix(&path, kept_side)),
+            );
+
+            let error = open_error(&path);
+            for name in [side, kept_side] {
+                assert!(
+                    error.contains(&with_suffix(&path, name).display().to_string()),
+                    "{state}, {side}: the error names {name}: {error}"
+                );
+            }
+            assert!(
+                (
+                    files(dir.path()),
+                    tree(&with_suffix(&path, side)),
+                    tree(&with_suffix(&path, kept_side)),
+                ) == before,
+                "{state}, {side}: the failed open changes nothing"
+            );
+        }
+    }
+}
+
+/// On Windows a directory cannot be renamed while a process has a file in it
+/// open, as a 0.5.x process that still has the database open keeps its spill
+/// file: the migration stops after the database file moved, with an error
+/// that names the spill directory and says the next open finishes the
+/// migration, which it does once the file is closed.
+#[cfg(windows)]
+#[test]
+fn an_open_spill_file_stops_the_migration_until_it_is_closed() {
+    let kept = spilled_kept();
+    let expected = kept_contents(&kept);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.grafeo");
+    arrange_kept(&kept, &path);
+    let spill = with_suffix(&path, ".spill");
+    let held = std::fs::File::open(spill.join("vectors_Item%3Aembedding.bin")).unwrap();
+
+    let error = open_error(&path);
+    assert!(
+        error.contains(&spill.display().to_string())
+            && error.contains("the next read-write open finishes the migration"),
+        "{error}"
+    );
+    drop(held);
+    assert_migrated(&path, &expected, &kept, "after the spill file was closed");
 }
 
 /// An open of a migration cut between its renames (the old file moved, the image
@@ -1549,6 +1740,53 @@ fn an_existing_kept_copy_is_never_replaced() {
         files(dir.path()) == before,
         "the failed migration changes nothing"
     );
+}
+
+/// The same for the spill directory: with `<p>.pre-0.6.spill` already there,
+/// the migration of a database closed while spilled fails before it writes
+/// anything, and both spill directories stay as they were.
+#[test]
+fn an_existing_kept_spill_directory_is_never_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.grafeo");
+    let spilled = spilled_kept();
+    arrange_kept(&spilled, &path);
+    let kept = with_suffix(&path, ".pre-0.6.spill");
+    std::fs::create_dir(&kept).unwrap();
+    std::fs::write(kept.join("vectors_Doc%3Aembedding.bin"), b"Gus").unwrap();
+    let before = (
+        files(dir.path()),
+        files(&with_suffix(&path, ".spill")),
+        files(&kept),
+    );
+    let error = open_error(&path);
+    assert!(
+        error.contains(&kept.display().to_string()),
+        "the error names the kept spill directory: {error}"
+    );
+    assert!(
+        (
+            files(dir.path()),
+            files(&with_suffix(&path, ".spill")),
+            files(&kept)
+        ) == before,
+        "the failed migration changes nothing"
+    );
+}
+
+/// 0.5.x put the spill directory of a WAL directory next to it too
+/// (`<p>.spill`): a migration keeps it as `<p>.pre-0.6.spill`, with the
+/// directory as `<p>.pre-0.6/`.
+#[test]
+fn the_spill_directory_of_a_wal_directory_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let kept = Kept {
+        spill: spilled_kept().spill,
+        ..directory_kept()
+    };
+    let path = kept.path_in(dir.path());
+    arrange_kept(&kept, &path);
+    assert_migrated(&path, &kept_contents(&kept), &kept, "a WAL directory");
 }
 
 /// A kept copy (`<p>.pre-0.6`, a file or a WAL directory) is a 0.5.x database

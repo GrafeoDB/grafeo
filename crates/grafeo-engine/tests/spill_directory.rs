@@ -81,3 +81,36 @@ fn a_read_only_open_creates_no_spill_directory() {
     drop(db);
     assert!(!spill.exists());
 }
+
+/// A query of a read-only open that spills writes into the open's own
+/// directory in the system temp directory, never beside the database, and
+/// that directory goes with the database.
+#[test]
+fn a_read_only_open_spills_into_the_temp_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("barcelona.grafeo");
+    {
+        let db = GrafeoDB::open(&path).unwrap();
+        db.execute("INSERT (:City {name: 'Barcelona'})").unwrap();
+        db.close().unwrap();
+    }
+
+    let db = GrafeoDB::open_read_only(&path).unwrap();
+    let spill = db
+        .buffer_manager()
+        .config()
+        .spill_path
+        .clone()
+        .expect("a read-only open can spill");
+    assert_eq!(spill.parent(), Some(std::env::temp_dir().as_path()));
+    let name = spill.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        name.starts_with(&format!("grafeo-barcelona.grafeo-{}-", std::process::id())),
+        "{name}"
+    );
+    // What a spilling query leaves once its own subdirectory is gone.
+    std::fs::create_dir_all(&spill).unwrap();
+    drop(db);
+    assert!(!spill.exists(), "the temp directory went with the database");
+    assert!(!dir.path().join("barcelona.grafeo.spill").exists());
+}

@@ -14,18 +14,18 @@ fn deleting_a_node_while_its_column_is_spilled_leaves_no_value() {
     let key = PropertyKey::new("embedding");
     let alix = store.create_node_with_props(
         &["Item"],
-        [("embedding", Value::Vector(vec![1.0, 0.0].into()))],
+        [("embedding", Value::Vector(vec![3.0, 19.0].into()))],
     );
     let gus = store.create_node_with_props(
         &["Item"],
-        [("embedding", Value::Vector(vec![0.0, 1.0].into()))],
+        [("embedding", Value::Vector(vec![88.0, 3.19].into()))],
     );
     let snapshot = store.node_property_column_entries(&key);
     assert!(store.spill_node_property_column(&key, MemoryBacking::of(&snapshot), &snapshot));
     assert_eq!(store.spilled_node_property_columns(), vec![key.clone()]);
     assert_eq!(
         store.with_node_vector(gus, &key, <[f32]>::to_vec),
-        Some(vec![0.0, 1.0])
+        Some(vec![88.0, 3.19])
     );
 
     assert!(store.delete_node(alix));
@@ -40,7 +40,7 @@ fn deleting_a_node_while_its_column_is_spilled_leaves_no_value() {
     assert_eq!(store.get_node_property(alix, &key), None);
     assert_eq!(
         store.get_node_property(gus, &key),
-        Some(Value::Vector(vec![0.0, 1.0].into()))
+        Some(Value::Vector(vec![88.0, 3.19].into()))
     );
     assert_eq!(store.node_property_column_ids(&key), vec![gus]);
 }
@@ -65,12 +65,20 @@ fn a_rollback_while_spilled_restores_the_spilled_values() {
 
     let transaction_id = TransactionId::new(19);
     let epoch = store.current_epoch();
-    store.set_node_property_versioned(alix, "embedding", v(3.19), transaction_id);
+    store
+        .set_node_property_versioned(alix, "embedding", v(3.19), transaction_id)
+        .unwrap();
     assert_eq!(
-        store.remove_node_property_versioned(gus, "embedding", transaction_id),
+        store
+            .remove_node_property_versioned(gus, "embedding", transaction_id)
+            .unwrap(),
         Some(v(19.0))
     );
-    assert!(store.delete_node_transactional(vincent, epoch, transaction_id));
+    assert!(
+        store
+            .delete_node_transactional(vincent, epoch, transaction_id)
+            .unwrap()
+    );
     store.rollback_transaction_properties(transaction_id);
 
     for (id, x) in [(alix, 3.0), (gus, 19.0), (vincent, 88.0)] {
@@ -88,6 +96,209 @@ fn a_rollback_while_spilled_restores_the_spilled_values() {
             "after reload"
         );
     }
+}
+
+/// A transactional write whose old value cannot be read (a spilled value
+/// whose file cannot be read) is refused before it changes anything: the undo
+/// log would miss the value and a rollback would lose it (#594).
+#[cfg(not(feature = "temporal"))]
+#[test]
+fn a_write_whose_old_value_cannot_be_read_is_refused() {
+    use crate::graph::lpg::property::test_backing::MemoryBacking;
+
+    let store = LpgStore::new().unwrap();
+    let key = PropertyKey::new("embedding");
+    let v = |x: f32| Value::Vector(vec![x, 3.0].into());
+    let alix = store.create_node_with_props(&["Item"], [("embedding", v(3.0))]);
+    let gus = store.create_node_with_props(&["Item"], [("embedding", v(19.0))]);
+    let vincent = store.create_node_with_props(&["Item"], [("embedding", v(88.0))]);
+    let snapshot = store.node_property_column_entries(&key);
+    let backing = MemoryBacking::of(&snapshot);
+    assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
+
+    backing.fail_reads(true);
+    let transaction_id = TransactionId::new(19);
+    let epoch = store.current_epoch();
+    assert!(
+        store
+            .set_node_property_versioned(alix, "embedding", v(3.19), transaction_id)
+            .is_err()
+    );
+    assert!(
+        store
+            .remove_node_property_versioned(gus, "embedding", transaction_id)
+            .is_err()
+    );
+    assert!(
+        store
+            .delete_node_transactional(vincent, epoch, transaction_id)
+            .is_err()
+    );
+    assert!(
+        store.get_node(vincent).is_some(),
+        "the node was not deleted"
+    );
+    store.rollback_transaction_properties(transaction_id);
+
+    backing.fail_reads(false);
+    for (id, x) in [(alix, 3.0), (gus, 19.0), (vincent, 88.0)] {
+        assert_eq!(
+            store.get_node_property(id, &key),
+            Some(v(x)),
+            "while spilled"
+        );
+    }
+    assert!(store.reload_node_property_column(&key).unwrap());
+    for (id, x) in [(alix, 3.0), (gus, 19.0), (vincent, 88.0)] {
+        assert_eq!(
+            store.get_node_property(id, &key),
+            Some(v(x)),
+            "after reload"
+        );
+    }
+}
+
+/// Filling values from an old spill file sets only what is missing: a node
+/// that has a value keeps it, a deleted or unknown node gets nothing, and a
+/// second fill changes nothing (#594). A node of another label (one that took
+/// a deleted node's id) gets nothing. A property index on the key sees the
+/// filled values.
+#[test]
+fn filling_missing_values_sets_only_what_is_missing() {
+    let store = LpgStore::new().unwrap();
+    store.create_property_index("embedding");
+    let key = PropertyKey::new("embedding");
+    let v = |x: f32| Value::Vector(vec![x, 3.0].into());
+    let alix = store.create_node(&["Item"]);
+    let gus = store.create_node_with_props(&["Item"], [("embedding", v(1988.0))]);
+    let vincent = store.create_node(&["Item"]);
+    assert!(store.delete_node(vincent));
+    let mia = store.create_node(&["Person"]);
+    let unknown = NodeId::new(88);
+
+    let old = [
+        (alix, v(3.0)),
+        (gus, v(19.0)),
+        (vincent, v(88.0)),
+        (mia, v(319.0)),
+        (unknown, v(3.19)),
+    ];
+    assert_eq!(store.fill_missing_node_values("Item", &key, old.clone()), 1);
+    assert_eq!(store.get_node_property(alix, &key), Some(v(3.0)));
+    assert_eq!(
+        store.get_node_property(gus, &key),
+        Some(v(1988.0)),
+        "the newer value"
+    );
+    assert_eq!(store.get_node_property(vincent, &key), None);
+    assert_eq!(store.get_node_property(mia, &key), None, "another label");
+    assert_eq!(store.get_node_property(unknown, &key), None);
+    assert_eq!(
+        store.find_nodes_by_property("embedding", &v(3.0)),
+        vec![alix],
+        "the property index holds the filled value"
+    );
+    assert_eq!(
+        store.fill_missing_node_values("Item", &key, old),
+        0,
+        "a second fill"
+    );
+}
+
+/// An Item index of 3 dimensions over `embedding` that holds `ids` (as the
+/// topology a checkpoint loaded holds nodes whose values were spilled).
+#[cfg(feature = "vector-index")]
+fn index_holding(
+    store: &LpgStore,
+    ids: &[(NodeId, [f32; 3])],
+) -> Arc<crate::index::vector::VectorIndexKind> {
+    use crate::index::vector::{
+        DistanceMetric, HnswConfig, HnswIndex, PropertyVectorAccessor, VectorIndexKind,
+    };
+    let index = Arc::new(VectorIndexKind::Hnsw(HnswIndex::new(HnswConfig::new(
+        3,
+        DistanceMetric::Euclidean,
+    ))));
+    store.add_vector_index("Item", "embedding", Arc::clone(&index));
+    let accessor = PropertyVectorAccessor::new(store, "embedding");
+    for (id, vector) in ids {
+        index.insert(*id, vector, &accessor);
+    }
+    index
+}
+
+/// A fill never leaves an index pointing at a vector it cannot measure: a
+/// node the index holds whose filled vector has another size is taken out,
+/// and a search still works (#594).
+#[cfg(feature = "vector-index")]
+#[test]
+fn a_filled_vector_of_another_size_takes_its_node_out_of_the_index() {
+    let store = LpgStore::new().unwrap();
+    let key = PropertyKey::new("embedding");
+    let alix = store.create_node(&["Item"]);
+    let gus = store.create_node_with_props(
+        &["Item"],
+        [("embedding", Value::Vector(vec![3.0, 19.0, 88.0].into()))],
+    );
+    let index = index_holding(
+        &store,
+        &[(gus, [3.0, 19.0, 88.0]), (alix, [19.0, 88.0, 3.0])],
+    );
+
+    let filled = store.fill_missing_node_values(
+        "Item",
+        &key,
+        [(alix, Value::Vector(vec![3.0, 19.0].into()))],
+    );
+    assert_eq!(filled, 1);
+    assert!(
+        !index.contains(alix),
+        "a 2-dimension vector in a 3-dimension index"
+    );
+    assert!(index.contains(gus));
+    let accessor = crate::index::vector::PropertyVectorAccessor::new(&store, "embedding");
+    let hits = index.search(&[3.0, 19.0, 88.0], 2, &accessor);
+    assert_eq!(hits.iter().map(|hit| hit.0).collect::<Vec<_>>(), vec![gus]);
+}
+
+/// A vector of another size than its index set on an indexed property never
+/// reaches the index either: the set takes the node out (#594).
+#[cfg(feature = "vector-index")]
+#[test]
+fn a_set_vector_of_another_size_takes_its_node_out_of_the_index() {
+    let store = LpgStore::new().unwrap();
+    let gus = store.create_node_with_props(
+        &["Item"],
+        [("embedding", Value::Vector(vec![3.0, 19.0, 88.0].into()))],
+    );
+    let index = index_holding(&store, &[(gus, [3.0, 19.0, 88.0])]);
+    store.set_node_property(gus, "embedding", Value::Vector(vec![3.0, 19.0].into()));
+    assert!(!index.contains(gus));
+    let accessor = crate::index::vector::PropertyVectorAccessor::new(&store, "embedding");
+    assert_eq!(index.search(&[3.0, 19.0, 88.0], 1, &accessor), Vec::new());
+}
+
+/// A durable read of every node (checkpoints, copies) reads each spilled
+/// value once (#594).
+#[cfg(not(feature = "temporal"))]
+#[test]
+fn reading_every_node_reads_each_spilled_value_once() {
+    use crate::graph::lpg::property::test_backing::MemoryBacking;
+    use std::sync::atomic::Ordering;
+
+    let store = LpgStore::new().unwrap();
+    let key = PropertyKey::new("embedding");
+    for x in [3.0, 19.0, 88.0] {
+        store.create_node_with_props(&["Item"], [("embedding", Value::Vector(vec![x].into()))]);
+    }
+    let snapshot = store.node_property_column_entries(&key);
+    let backing = MemoryBacking::of(&snapshot);
+    assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
+
+    let nodes = store.try_all_nodes().unwrap();
+    assert_eq!(nodes.len(), 3);
+    assert!(nodes.iter().all(|node| node.properties.contains_key(&key)));
+    assert_eq!(backing.copies.load(Ordering::Relaxed), 3);
 }
 
 #[test]
@@ -1198,12 +1409,7 @@ fn test_property_index_restored_when_delete_rolls_back() {
     let node = store.create_node_with_props(&["Graph"], [("id", Value::from("a"))]);
 
     let tx = TransactionId::new(9);
-    assert!(GraphStoreMut::delete_node_versioned(
-        &store,
-        node,
-        store.current_epoch(),
-        tx
-    ));
+    assert!(GraphStoreMut::delete_node_versioned(&store, node, store.current_epoch(), tx).unwrap());
     assert!(
         store
             .find_nodes_by_property("id", &Value::from("a"))
@@ -1228,7 +1434,7 @@ fn test_property_index_restored_when_set_rolls_back() {
     store.new_epoch();
 
     let tx = TransactionId::new(9);
-    GraphStoreMut::set_node_property_versioned(&store, node, "id", Value::from("b"), tx);
+    GraphStoreMut::set_node_property_versioned(&store, node, "id", Value::from("b"), tx).unwrap();
     assert_eq!(
         store.find_nodes_by_property("id", &Value::from("b")),
         vec![node]
@@ -1959,4 +2165,27 @@ mod version_gc {
         assert_eq!(labels_at(jules, epochs[0]), ["Person"]);
         assert!(store.gc_candidates.lock().labels.is_empty());
     }
+}
+
+/// A search never returns a node without a vector, even when the topology
+/// names one (as one saved while the values were spilled can) (#594).
+#[cfg(feature = "vector-index")]
+#[test]
+fn a_search_skips_a_node_without_a_vector() {
+    let store = LpgStore::new().unwrap();
+    let alix = store.create_node(&["Item"]);
+    let gus = store.create_node_with_props(
+        &["Item"],
+        [("embedding", Value::Vector(vec![3.0, 19.0, 88.0].into()))],
+    );
+    // Gus first, so he stays reachable from Alix, whose distances the
+    // accessor cannot measure.
+    let index = index_holding(
+        &store,
+        &[(gus, [19.0, 88.0, 3.0]), (alix, [3.0, 19.0, 88.0])],
+    );
+    assert!(index.contains(alix), "the topology names Alix");
+    let accessor = crate::index::vector::PropertyVectorAccessor::new(&store, "embedding");
+    let hits = index.search(&[3.0, 19.0, 88.0], 2, &accessor);
+    assert_eq!(hits.iter().map(|hit| hit.0).collect::<Vec<_>>(), vec![gus]);
 }

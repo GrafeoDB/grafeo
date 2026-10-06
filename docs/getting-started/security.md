@@ -124,7 +124,7 @@ Grafeo stores no key material: keep the master key safe, as the database cannot 
 | A copy written by `save()` | The bytes `export_snapshot()` returns: plaintext, to be stored as safely as the data |
 | Full backups (`backup_full()`, a copy of the encrypted file) and incremental segments (`backup_incremental()`, encrypted WAL records) | The backup manifest (segment names, epochs, sizes, checksums) |
 | A database restored with `restore_to_epoch_with()`, and the WAL it writes next to it | An in-memory copy made with `to_memory()`: it has no key, so a copy saved from it is plaintext (call `save()` on the encrypted database instead) |
-| | The `.pre-0.6` files a migration keeps of a database written by 0.5.x: the file and, if they existed, its WAL and a pending checkpoint image, or the whole WAL directory |
+| | The `.pre-0.6` files a migration keeps of a database written by 0.5.x: the file and, if they existed, its WAL, a pending checkpoint image and its spill directory, or the whole WAL directory (and its spill directory) |
 
 An encrypted database writes no spill files: spill files are not encrypted, so it gets no spill path (`<file>.spill/` for other databases), and `Config::validate` refuses an explicit `spill_path`, or a section pinned to `TierOverride::ForceDisk`, together with `encryption`. In 0.6.0 a memory limit therefore cannot move the data of an encrypted database to disk.
 
@@ -138,7 +138,7 @@ The key chain derives the keys with HKDF-SHA256, one per database and component:
 - Opening an encrypted database without a key fails with "the database is encrypted and needs its key". With another master key it fails while reading the file ("wrong key or corrupted data"). Neither changes the file.
 - Opening an unencrypted database with a key fails with "the database is not encrypted", so plaintext data is never taken for encrypted data.
 - A read-only open (`Config::read_only`) needs the key as well, and works with it.
-- A database written by 0.5.x is never encrypted. A read-write open with a key migrates it into an encrypted 0.6 file, a WAL directory included. The migration keeps the old files unencrypted: the file as `<file>.pre-0.6`, its WAL as `<file>.pre-0.6.wal` and, if present, a checkpoint 0.5.44 left pending as `<file>.pre-0.6.checkpoint`, or a WAL directory as `<path>.pre-0.6/`. Remove all of them once you no longer need to go back to 0.5.x. A read-only open with a key fails with "the database is not encrypted".
+- A database written by 0.5.x is never encrypted. A read-write open with a key migrates it into an encrypted 0.6 file, a WAL directory included. The migration keeps the old files unencrypted: the file as `<file>.pre-0.6`, its WAL as `<file>.pre-0.6.wal` and, if present, a checkpoint 0.5.44 left pending as `<file>.pre-0.6.checkpoint` and the spill directory (which may hold embeddings) as `<file>.pre-0.6.spill`, or a WAL directory as `<path>.pre-0.6/` (and its spill directory as `<path>.pre-0.6.spill/`). Remove all of them once you no longer need to go back to 0.5.x. A read-only open with a key fails with "the database is not encrypted".
 - Encryption needs a persistent database: `Config::validate` refuses it for an in-memory database.
 - `GrafeoDB::open_in_memory` takes no key: open an encrypted database with its key and call `to_memory()` instead.
 

@@ -31,27 +31,6 @@ use grafeo_common::storage::Section;
     not(feature = "temporal")
 ))]
 use grafeo_common::types::{PropertyKey, Value};
-#[cfg(all(
-    feature = "lpg",
-    feature = "vector-index",
-    feature = "mmap",
-    not(feature = "temporal")
-))]
-use grafeo_core::index::vector::VectorStorage;
-#[cfg(all(
-    feature = "lpg",
-    feature = "vector-index",
-    feature = "mmap",
-    not(feature = "temporal")
-))]
-use parking_lot::RwLock;
-#[cfg(all(
-    feature = "lpg",
-    feature = "vector-index",
-    feature = "mmap",
-    not(feature = "temporal")
-))]
-use std::collections::HashMap;
 
 /// Wraps a [`Section`] as a [`MemoryConsumer`] for the BufferManager.
 ///
@@ -253,10 +232,11 @@ impl MemoryConsumer for SectionConsumer {
 /// Dynamic memory consumer for vector indexes.
 ///
 /// Holds a `Weak<LpgStore>` and re-queries the live index map on each
-/// `memory_usage()` call. On `spill()`, vector embedding property columns
-/// are drained to `MmapStorage` files, freeing heap memory. Search uses
-/// [`SpillableVectorAccessor`](grafeo_core::index::vector::SpillableVectorAccessor)
-/// which checks the spill storage first, then falls back to property storage.
+/// `memory_usage()` call. On `spill()`, each embedding property column of a
+/// vector index moves its vectors into a cache file it reads through
+/// ([`VectorSpillFile`](super::vector_spill::VectorSpillFile)): the values
+/// stay part of the column (queries, checkpoints and copies see them, search
+/// reads them in place), only off the heap. `reload()` moves them back.
 #[cfg(all(
     feature = "lpg",
     feature = "vector-index",
@@ -265,11 +245,8 @@ impl MemoryConsumer for SectionConsumer {
 ))]
 pub struct VectorIndexConsumer {
     store: Weak<grafeo_core::graph::lpg::LpgStore>,
-    /// Directory for spill files. `None` disables spilling.
-    spill_path: Option<PathBuf>,
-    /// Map of "label:property" -> MmapStorage for spilled indexes.
-    /// Shared with the search path so `SpillableVectorAccessor` can read.
-    pub(crate) spilled: Arc<RwLock<HashMap<String, Arc<grafeo_core::index::vector::MmapStorage>>>>,
+    /// Where the cache files go. `None` disables spilling.
+    cache: Option<Arc<super::spill_directory::SpillDirectory>>,
 }
 
 #[cfg(all(
@@ -279,86 +256,79 @@ pub struct VectorIndexConsumer {
     not(feature = "temporal")
 ))]
 impl VectorIndexConsumer {
-    /// Creates a consumer that dynamically queries the store for current vector indexes.
-    pub fn new(
+    /// Creates a consumer that dynamically queries the store for current
+    /// vector indexes and spills their columns into `cache`.
+    pub(crate) fn new(
         store: &Arc<grafeo_core::graph::lpg::LpgStore>,
-        spill_path: Option<PathBuf>,
+        cache: Option<Arc<super::spill_directory::SpillDirectory>>,
     ) -> Self {
         Self {
             store: Arc::downgrade(store),
-            spill_path,
-            spilled: Arc::new(RwLock::new(HashMap::new())),
+            cache,
         }
     }
 
-    /// Returns the shared spill registry for the search path.
-    #[must_use]
-    pub fn spilled_storages(
-        &self,
-    ) -> &Arc<RwLock<HashMap<String, Arc<grafeo_core::index::vector::MmapStorage>>>> {
-        &self.spilled
+    /// The embedding properties of the vector indexes, each once, in order
+    /// (indexes on two labels can share one property column).
+    fn indexed_properties(store: &grafeo_core::graph::lpg::LpgStore) -> Vec<PropertyKey> {
+        let mut properties: Vec<PropertyKey> = store
+            .vector_index_entries()
+            .iter()
+            .filter_map(|(key, _)| {
+                key.split_once(':')
+                    .map(|(_, property)| PropertyKey::new(property))
+            })
+            .collect();
+        properties.sort_unstable();
+        properties.dedup();
+        properties
     }
 
-    /// Spills a single vector index's embeddings to disk.
-    ///
-    /// Returns bytes freed, or an error.
-    fn spill_index(
+    /// The indexed properties whose columns are spilled.
+    fn spilled_properties(store: &grafeo_core::graph::lpg::LpgStore) -> Vec<PropertyKey> {
+        let spilled = store.spilled_node_property_columns();
+        Self::indexed_properties(store)
+            .into_iter()
+            .filter(|property| spilled.contains(property))
+            .collect()
+    }
+
+    /// Spills one embedding column: its vectors go to a cache file the
+    /// column reads through. Returns the bytes of vectors moved off the heap.
+    fn spill_column(
         &self,
         store: &grafeo_core::graph::lpg::LpgStore,
-        key: &str,
-        dimensions: usize,
+        cache: &Arc<super::spill_directory::SpillDirectory>,
+        property: &PropertyKey,
     ) -> Result<usize, SpillError> {
-        let spill_dir = self
-            .spill_path
-            .as_ref()
-            .ok_or(SpillError::NoSpillDirectory)?;
-
-        // Extract property name from key ("label:property" -> "property")
-        let property = key
-            .split(':')
-            .nth(1)
-            .ok_or_else(|| SpillError::IoError(format!("invalid index key: {key}")))?;
-        let prop_key = PropertyKey::new(property);
-
-        // Drain vector values from the property column
-        let drained = store.drain_node_property_column(&prop_key);
-        if drained.is_empty() {
+        // Snapshot under the read lock; the file is written without it, and
+        // what changes meanwhile wins when the backing is installed.
+        let snapshot = store.node_property_column_entries(property);
+        let vectors: Vec<(grafeo_common::types::NodeId, Arc<[f32]>)> = snapshot
+            .iter()
+            .filter_map(|(id, value)| match value {
+                Value::Vector(vector) => Some((*id, Arc::clone(vector))),
+                _ => None,
+            })
+            .collect();
+        if vectors.is_empty() {
             return Ok(0);
         }
-
-        // Create spill directory if needed
-        std::fs::create_dir_all(spill_dir).map_err(|e| SpillError::IoError(e.to_string()))?;
-
-        // Sanitize key for filename ("Label:property" -> "Label%3Aproperty")
-        // Percent-encodes ':' to preserve label case, underscores, and avoid
-        // ambiguity with any separator character.
-        let safe_key = key.replace('%', "%25").replace(':', "%3A");
-        let spill_file = spill_dir.join(format!("vectors_{safe_key}.bin"));
-
-        // Create MmapStorage and write all vectors
-        let mmap_storage = grafeo_core::index::vector::MmapStorage::create(&spill_file, dimensions)
+        let file = super::vector_spill::VectorSpillFile::write(cache, &vectors)
             .map_err(|e| SpillError::IoError(e.to_string()))?;
-
-        let mut freed_bytes = 0;
-        for (id, value) in &drained {
-            if let Value::Vector(vec_data) = value {
-                freed_bytes += vec_data.len() * 4 + std::mem::size_of::<Arc<[f32]>>();
-                mmap_storage
-                    .insert(*id, vec_data)
-                    .map_err(|e| SpillError::IoError(e.to_string()))?;
-            }
-        }
-
-        mmap_storage
-            .flush()
-            .map_err(|e| SpillError::IoError(e.to_string()))?;
-
-        // Register the spill storage
-        self.spilled
-            .write()
-            .insert(key.to_string(), Arc::new(mmap_storage));
-
-        Ok(freed_bytes)
+        let bytes = vectors
+            .iter()
+            .map(|(_, vector)| vector.len() * 4 + std::mem::size_of::<Arc<[f32]>>())
+            .sum();
+        // Refused when another spill got there first; the file then goes
+        // with the refused backing.
+        Ok(
+            if store.spill_node_property_column(property, Arc::new(file), &snapshot) {
+                bytes
+            } else {
+                0
+            },
+        )
     }
 }
 
@@ -396,16 +366,20 @@ impl MemoryConsumer for VectorIndexConsumer {
     }
 
     fn can_spill(&self) -> bool {
-        self.spill_path.is_some()
+        // Not after `close()` (see `SpillDirectory::close_for_writes`).
+        self.cache.as_ref().is_some_and(|cache| !cache.is_closed())
     }
 
     fn current_tier(&self) -> grafeo_common::memory::StorageTier {
         use grafeo_common::memory::StorageTier;
-        // Any spilled per-index storage means at least one index's
-        // embeddings live on disk via MmapStorage. Report OnDisk in
-        // that case; otherwise InMemory if any index has data, else
-        // Uninitialized.
-        if !self.spilled.read().is_empty() {
+        // A spilled embedding column means at least one index reads its
+        // vectors from disk: OnDisk. Otherwise InMemory if any index has
+        // data, else Uninitialized.
+        if self
+            .store
+            .upgrade()
+            .is_some_and(|store| !Self::spilled_properties(&store).is_empty())
+        {
             return StorageTier::OnDisk;
         }
         if self.memory_usage() == 0 {
@@ -416,29 +390,31 @@ impl MemoryConsumer for VectorIndexConsumer {
     }
 
     fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
+        let cache = self.cache.as_ref().ok_or(SpillError::NoSpillDirectory)?;
+        // A closed database spills no more; a reload stays allowed.
+        if cache.is_closed() {
+            return Ok(0);
+        }
         let store = self
             .store
             .upgrade()
             .ok_or(SpillError::IoError("store dropped".to_string()))?;
 
-        let indexes = store.vector_index_entries();
+        let spilled = store.spilled_node_property_columns();
         let mut total_freed = 0;
-
-        for (key, index) in &indexes {
-            // Skip already-spilled indexes
-            if self.spilled.read().contains_key(key) {
+        for property in Self::indexed_properties(&store) {
+            if spilled.contains(&property) {
                 continue;
             }
-
-            let dimensions = index.config().dimensions;
-            match self.spill_index(&store, key, dimensions) {
+            match self.spill_column(&store, cache, &property) {
                 Ok(freed) => total_freed += freed,
                 Err(e) => {
-                    // Log but continue: earlier indexes may have already been
-                    // drained and persisted. Returning Err would discard the
-                    // freed bytes from those, leaving BufferManager with
-                    // incorrect pressure tracking.
-                    eprintln!("failed to spill vector index {key}: {e}");
+                    // Continue: the columns spilled so far count, and this
+                    // one keeps its values on the heap.
+                    grafeo_common::grafeo_warn!(
+                        "failed to spill the vector column {}: {e}",
+                        property.as_str()
+                    );
                 }
             }
         }
@@ -451,31 +427,20 @@ impl MemoryConsumer for VectorIndexConsumer {
             .store
             .upgrade()
             .ok_or(SpillError::IoError("store dropped".to_string()))?;
-
-        let mut spilled = self.spilled.write();
-        for (key, mmap_storage) in spilled.drain() {
-            let property = key
-                .split(':')
-                .nth(1)
-                .ok_or_else(|| SpillError::IoError(format!("invalid index key: {key}")))?;
-            let prop_key = PropertyKey::new(property);
-
-            // Export vectors from mmap, restore to property store
-            let vectors = mmap_storage.export_all();
-            store.restore_node_property_column(
-                &prop_key,
-                vectors
-                    .into_iter()
-                    .map(|(id, vec_data)| (id, Value::Vector(vec_data))),
-            );
-
-            // Delete spill file
-            if let Ok(path) = std::fs::canonicalize(mmap_storage.path()) {
-                let _ = std::fs::remove_file(path);
+        // Each reload lets go of the column's file, which is then deleted. A
+        // column whose file cannot be read stays spilled (nothing is lost);
+        // the others still reload.
+        let mut first_error = None;
+        for property in Self::spilled_properties(&store) {
+            if let Err(e) = store.reload_node_property_column(&property) {
+                grafeo_common::grafeo_warn!(
+                    "the vector column {} stays spilled: {e}",
+                    property.as_str()
+                );
+                first_error.get_or_insert(SpillError::IoError(e.to_string()));
             }
         }
-
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 

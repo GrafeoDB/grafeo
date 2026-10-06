@@ -305,17 +305,23 @@ impl LpgStore {
 
     /// Sets a node property within a transaction, recording the previous value
     /// in the undo log so it can be restored on rollback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the current value cannot
+    /// be read (a spilled value whose file cannot be read): the undo log
+    /// would miss it, and a rollback would lose it.
     pub fn set_node_property_versioned(
         &self,
         id: NodeId,
         key: &str,
         value: Value,
         transaction_id: TransactionId,
-    ) {
+    ) -> grafeo_common::utils::error::Result<()> {
         let prop_key: PropertyKey = key.into();
 
         // Capture the current value before overwriting
-        let old_value = self.node_properties.get(id, &prop_key);
+        let old_value = self.node_properties.try_get(id, &prop_key)?;
 
         // Record in undo log
         self.property_undo_log
@@ -343,6 +349,7 @@ impl LpgStore {
             #[cfg(feature = "vector-index")]
             self.sync_vector_indexes_for_property(id, key);
         }
+        Ok(())
     }
 
     /// Sets an edge property within a transaction, recording the previous value
@@ -384,16 +391,21 @@ impl LpgStore {
 
     /// Removes a node property within a transaction, recording the previous value
     /// in the undo log so it can be restored on rollback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the current value cannot
+    /// be read (a spilled value whose file cannot be read).
     pub fn remove_node_property_versioned(
         &self,
         id: NodeId,
         key: &str,
         transaction_id: TransactionId,
-    ) -> Option<Value> {
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let prop_key: PropertyKey = key.into();
 
         // Capture the current value before removing
-        let old_value = self.node_properties.get(id, &prop_key);
+        let old_value = self.node_properties.try_get(id, &prop_key)?;
 
         // Only record if the property actually exists
         if old_value.is_some() {
@@ -420,10 +432,10 @@ impl LpgStore {
                     .remove(id, &prop_key, grafeo_common::types::EpochId::PENDING);
             #[cfg(feature = "vector-index")]
             self.sync_vector_indexes_for_property(id, key);
-            removed
+            Ok(removed)
         }
         #[cfg(not(feature = "temporal"))]
-        self.remove_node_property(id, key)
+        Ok(self.remove_node_property(id, key))
     }
 
     /// Removes an edge property within a transaction, recording the previous value
@@ -1029,42 +1041,50 @@ impl LpgStore {
         }
     }
 
-    // === Column-Level Spill / Reload ===
+    // === Column reads and spill ===
 
-    /// Drains all values from a node property column, returning them for export.
-    ///
-    /// After this call, `is_node_column_spilled(key)` returns `true` and
-    /// `get_node_property(id, key)` returns `None` for all IDs.
-    /// Used by the vector spill path to export embeddings to `MmapStorage`.
-    #[cfg(not(feature = "temporal"))]
-    pub fn drain_node_property_column(&self, key: &PropertyKey) -> Vec<(NodeId, Value)> {
-        self.node_properties.drain_column(key)
-    }
-
-    /// Restores values into a previously spilled node property column.
-    #[cfg(not(feature = "temporal"))]
-    pub fn restore_node_property_column(
+    /// Fills values of `key` from a spill file an older build left behind
+    /// (#594): a load step, like WAL replay, so no undo entry, WAL record,
+    /// CDC event or new epoch. A value fills only a node that exists, carries
+    /// `label` (the label of the file's vector index, so a node of another
+    /// label that took a deleted node's id gets nothing) and has no value for
+    /// `key` (a value written later is in the store and wins), so a second run
+    /// changes nothing. A vector index on the property that lacks a filled
+    /// node (one rebuilt from the data before the fill) gets it. Returns how
+    /// many values were filled.
+    pub fn fill_missing_node_values(
         &self,
+        label: &str,
         key: &PropertyKey,
-        values: impl Iterator<Item = (NodeId, Value)>,
-    ) {
-        self.node_properties.restore_column(key, values);
-    }
-
-    /// Whether a node property column has been spilled to disk.
-    #[cfg(not(feature = "temporal"))]
-    #[must_use]
-    pub fn is_node_column_spilled(&self, key: &PropertyKey) -> bool {
-        self.node_properties.is_column_spilled(key)
-    }
-
-    /// Marks a node property column as spilled without draining it.
-    ///
-    /// Used during startup to re-establish spill state for columns that
-    /// were already empty (serialized without values in the previous session).
-    #[cfg(not(feature = "temporal"))]
-    pub fn node_properties_mark_spilled(&self, key: &PropertyKey) {
-        self.node_properties.mark_column_spilled(key);
+        values: impl IntoIterator<Item = (NodeId, Value)>,
+    ) -> usize {
+        let Some(label_id) = self.label_registry.read().get_id(label) else {
+            return 0;
+        };
+        let epoch = self.current_epoch();
+        let mut filled = 0;
+        for (id, value) in values {
+            let has_label = self
+                .label_index
+                .read()
+                .get(label_id as usize)
+                .is_some_and(|members| members.contains_key(&id));
+            if !has_label
+                || !self.is_node_visible_at_epoch(id, epoch)
+                || self.node_properties.get(id, key).is_some()
+            {
+                continue;
+            }
+            self.update_property_index_on_set(id, key, &value);
+            #[cfg(not(feature = "temporal"))]
+            self.node_properties.set(id, key.clone(), value);
+            #[cfg(feature = "temporal")]
+            self.node_properties.set(id, key.clone(), value, epoch);
+            #[cfg(feature = "vector-index")]
+            self.index_vector_if_missing(id, key);
+            filled += 1;
+        }
+        filled
     }
 
     /// Returns the nodes with a value for `key`, in id order, spilled values
@@ -1088,7 +1108,9 @@ impl LpgStore {
     }
 
     /// Calls `f` with the vector stored for a node under `key`, without
-    /// copying a spilled vector; `None` when there is no vector.
+    /// copying a spilled vector; `None` when there is no vector. `f` runs
+    /// without the property storage lock held, so it may read the store
+    /// again (pairwise distances do).
     pub fn with_node_vector<R>(
         &self,
         id: NodeId,

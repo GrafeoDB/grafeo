@@ -342,16 +342,19 @@ the varint `0x01` of the bincode format version, in a v3 file the version is
 - A read-write open migrates the file. Under `<file>.migrate.lock`, it reads
   the old database (its sidecar WAL replayed), writes it as a v3 image to
   `<file>.migrating`, renames the old files to `<file>.pre-0.6`,
-  `<file>.pre-0.6.wal` and `<file>.pre-0.6.checkpoint`, and renames the image
-  to `<file>`. The old files are kept byte for byte, and a crash at any step is
-  resolved from the files present at the next read-write open.
+  `<file>.pre-0.6.wal`, `<file>.pre-0.6.checkpoint` and `<file>.pre-0.6.spill`
+  (the spill directory, which may hold embeddings a database closed while
+  spilled has nowhere else), and renames the image to `<file>`. The old files
+  are kept byte for byte, and a crash at any step is resolved from the files
+  present at the next read-write open.
 - A read-only open and `open_in_memory()` read the file in place, with its
   sidecar WAL, and change nothing.
 
 A 0.5.x WAL directory (a directory holding `wal/`, which 0.5.x created by
 default for a path without the `.grafeo` extension) is handled the same way:
 a read-write open replays its WAL into a v3 image, keeps the whole directory
-as `<path>.pre-0.6/` and renames the image to `<path>`, so the database
+as `<path>.pre-0.6/` (and its spill directory `<path>.spill/` as
+`<path>.pre-0.6.spill/`) and renames the image to `<path>`, so the database
 becomes a file at the same path; a read-only open replays it in place. 0.6
 creates no WAL directories.
 

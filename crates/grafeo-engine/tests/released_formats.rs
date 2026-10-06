@@ -240,21 +240,13 @@ fn read_write(check: fn(Fixture, &GrafeoDB)) {
 /// Runs `check` on a read-only open of every fixture (0.5.44 refused read-only opens of
 /// WAL directories; 0.6 reads them in place), and checks that the open wrote nothing:
 /// afterwards every file of the copy holds the same bytes, and no file or directory
-/// came or went.
-///
-/// Queries create their spill directory `<name>.spill` next to a database with a path
-/// (each query removes its own subdirectory again). That scratch space is not part of
-/// the database, so the comparison leaves it out.
+/// came or went (a read-only open spills to the system temp directory, never beside
+/// the database).
 fn read_only(check: fn(Fixture, &GrafeoDB)) {
     each(FIXTURES, |fixture| {
         let name = fixture.name();
         let dir = fixture.copy();
-        let spill = PathBuf::from(format!("{}.spill", fixture.file_name()));
-        let database_files = || {
-            let mut found = files(dir.path());
-            found.retain(|path, _| !path.starts_with(&spill));
-            found
-        };
+        let database_files = || files(dir.path());
         let before = database_files();
         let db = GrafeoDB::open_read_only(dir.path().join(fixture.file_name()))
             .unwrap_or_else(|error| panic!("{name}: read-only: {error}"));

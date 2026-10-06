@@ -415,8 +415,30 @@ impl super::GrafeoDB {
         let removed = self.lpg_store().remove_vector_index(label, property);
         if removed {
             grafeo_info!("Vector index dropped: :{label}({property})");
+            // A spilled column no index reads any more comes back from its
+            // cache file: nothing else would reload it (#594).
+            #[cfg(all(feature = "vector-index", not(feature = "temporal")))]
+            self.reload_unindexed_column(property);
         }
         Ok(removed)
+    }
+
+    /// Reloads the spilled column `property` when no vector index uses it any
+    /// more. A column that cannot be read stays spilled (and readable).
+    #[cfg(all(feature = "vector-index", not(feature = "temporal")))]
+    fn reload_unindexed_column(&self, property: &str) {
+        let store = self.lpg_store();
+        let still_indexed = store.vector_index_entries().iter().any(|(key, _)| {
+            key.split_once(':')
+                .is_some_and(|(_, indexed)| indexed == property)
+        });
+        if still_indexed {
+            return;
+        }
+        let key = grafeo_common::types::PropertyKey::new(property);
+        if let Err(error) = store.reload_node_property_column(&key) {
+            grafeo_common::grafeo_warn!("the column {property} stays spilled: {error}");
+        }
     }
 
     /// Drops and recreates a vector index, rescanning all matching nodes.

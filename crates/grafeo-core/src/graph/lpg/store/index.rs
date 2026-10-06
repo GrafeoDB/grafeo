@@ -173,6 +173,37 @@ impl LpgStore {
         }
     }
 
+    /// Adds a node to the vector indexes on `key` (of its labels) that do not
+    /// hold it yet, with its current vector; one that holds it keeps it,
+    /// unless the vector has another size than the index, which takes it out:
+    /// an index never points at a vector it cannot measure.
+    #[cfg(feature = "vector-index")]
+    pub(super) fn index_vector_if_missing(&self, node_id: NodeId, key: &PropertyKey) {
+        let indexes: Vec<Arc<VectorIndexKind>> = {
+            let all = self.vector_indexes.read();
+            if all.is_empty() {
+                return;
+            }
+            self.node_label_names(node_id)
+                .iter()
+                .filter_map(|label| all.get(&format!("{label}:{}", key.as_str())).cloned())
+                .collect()
+        };
+        if indexes.is_empty() {
+            return;
+        }
+        let accessor = crate::index::vector::PropertyVectorAccessor::new(self, key.as_str());
+        if let Some(vector) = crate::index::vector::VectorAccessor::get_vector(&accessor, node_id) {
+            for index in indexes {
+                if !index.contains(node_id) {
+                    Self::insert_into_vector_index(&index, node_id, &vector, &accessor);
+                } else if vector.len() != index.config().dimensions {
+                    index.remove(node_id);
+                }
+            }
+        }
+    }
+
     /// Adds a node to the text and vector indexes of `label`, which it just
     /// got, with its current values.
     pub(super) fn index_node_under_label(&self, node_id: NodeId, label: &str) {

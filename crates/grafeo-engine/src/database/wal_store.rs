@@ -100,6 +100,12 @@ impl GraphStore for WalGraphStore {
         self.inner.get_node_property(id, key)
     }
 
+    // Forwarded, so search reads a spilled vector in place through this
+    // wrapper too (the default would copy it).
+    fn with_node_vector(&self, id: NodeId, key: &PropertyKey, f: &mut dyn FnMut(&[f32])) -> bool {
+        grafeo_core::graph::GraphStore::with_node_vector(&*self.inner, id, key, f)
+    }
+
     fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
         self.inner.get_edge_property(id, key)
     }
@@ -473,12 +479,15 @@ impl GraphStoreMut for WalGraphStore {
         id: NodeId,
         epoch: EpochId,
         transaction_id: TransactionId,
-    ) -> bool {
-        let deleted = self.inner.delete_node_versioned(id, epoch, transaction_id);
+    ) -> grafeo_common::utils::error::Result<bool> {
+        // A refused delete is not logged.
+        let deleted = self
+            .inner
+            .delete_node_versioned(id, epoch, transaction_id)?;
         if deleted {
             self.log_with_context(WalRecord::DeleteNode { id });
         }
-        deleted
+        Ok(deleted)
     }
 
     fn delete_node_edges(&self, node_id: NodeId) {
@@ -596,14 +605,16 @@ impl GraphStoreMut for WalGraphStore {
         key: &str,
         value: Value,
         transaction_id: TransactionId,
-    ) {
+    ) -> grafeo_common::utils::error::Result<()> {
+        // A refused write is not logged.
         self.inner
-            .set_node_property_versioned(id, key, value.clone(), transaction_id);
+            .set_node_property_versioned(id, key, value.clone(), transaction_id)?;
         self.log_with_context(WalRecord::SetNodeProperty {
             id,
             key: key.to_string(),
             value,
         });
+        Ok(())
     }
 
     fn set_edge_property_versioned(
@@ -627,17 +638,18 @@ impl GraphStoreMut for WalGraphStore {
         id: NodeId,
         key: &str,
         transaction_id: TransactionId,
-    ) -> Option<Value> {
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
+        // A refused removal is not logged.
         let removed = self
             .inner
-            .remove_node_property_versioned(id, key, transaction_id);
+            .remove_node_property_versioned(id, key, transaction_id)?;
         if removed.is_some() {
             self.log_with_context(WalRecord::RemoveNodeProperty {
                 id,
                 key: key.to_string(),
             });
         }
-        removed
+        Ok(removed)
     }
 
     fn remove_edge_property_versioned(
@@ -708,6 +720,34 @@ mod tests {
             TypedWal::open(dir.path()).unwrap(),
         )));
         (WalGraphStore::new(store, Arc::clone(&wal)), wal)
+    }
+
+    /// A write the store refuses (an old value it cannot read, which a
+    /// rollback could not restore) is not logged (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn a_refused_write_is_not_logged() {
+        use super::super::test_backing::{Unreadable, spill};
+
+        let (ws, wal) = setup();
+        let alix = ws.create_node(&["Item"]);
+        ws.set_node_property(alix, "embedding", Value::Vector(vec![3.0, 19.0].into()));
+        spill(&ws.inner, "embedding", Arc::new(Unreadable(alix)));
+        let logged = wal.len();
+
+        let transaction = TransactionId::new(19);
+        let vector = Value::Vector(vec![88.0, 3.19].into());
+        assert!(
+            ws.set_node_property_versioned(alix, "embedding", vector, transaction)
+                .is_err()
+        );
+        assert!(
+            ws.remove_node_property_versioned(alix, "embedding", transaction)
+                .is_err()
+        );
+        let epoch = ws.inner.current_epoch();
+        assert!(ws.delete_node_versioned(alix, epoch, transaction).is_err());
+        assert_eq!(wal.len(), logged, "a refused write was logged");
     }
 
     #[test]
@@ -957,9 +997,10 @@ mod tests {
         let logged = wal.len();
 
         let tx = TransactionId::new(7);
-        ws.set_node_property_versioned(a, "v", Value::Int64(2), tx);
+        ws.set_node_property_versioned(a, "v", Value::Int64(2), tx)
+            .unwrap();
         assert_eq!(
-            ws.remove_node_property_versioned(a, "x", tx),
+            ws.remove_node_property_versioned(a, "x", tx).unwrap(),
             Some(Value::from("keep"))
         );
         ws.set_edge_property_versioned(e, "w", Value::Int64(9), tx);
@@ -972,7 +1013,10 @@ mod tests {
         assert_eq!(wal.len(), logged + 6, "each change is logged");
 
         // No-op changes are not logged.
-        assert_eq!(ws.remove_node_property_versioned(a, "missing", tx), None);
+        assert_eq!(
+            ws.remove_node_property_versioned(a, "missing", tx).unwrap(),
+            None
+        );
         assert!(!ws.add_label_versioned(a, "Extra", tx));
         assert_eq!(wal.len(), logged + 6);
 
@@ -1007,11 +1051,14 @@ mod tests {
         assert_eq!(wal.len(), 1);
 
         // Delete nonexistent: no log
-        assert!(!ws.delete_node_versioned(NodeId::new(999), epoch, tx));
+        assert!(
+            !ws.delete_node_versioned(NodeId::new(999), epoch, tx)
+                .unwrap()
+        );
         assert_eq!(wal.len(), 1);
 
         // Delete real node: logs
-        assert!(ws.delete_node_versioned(id, epoch, tx));
+        assert!(ws.delete_node_versioned(id, epoch, tx).unwrap());
         assert_eq!(wal.len(), 2);
     }
 

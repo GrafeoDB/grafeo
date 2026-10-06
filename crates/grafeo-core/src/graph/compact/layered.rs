@@ -504,6 +504,25 @@ impl GraphStore for LayeredStore {
             .or_else(|| self.overlay.load().get_node_property(id, key))
     }
 
+    // As `get_node_property`, lending the overlay's vector (which a spill may
+    // hold in place) instead of copying it.
+    fn with_node_vector(&self, id: NodeId, key: &PropertyKey, f: &mut dyn FnMut(&[f32])) -> bool {
+        if self.is_node_deleted_from_base(id) {
+            return false;
+        }
+        if self.is_node_dirty(id) {
+            return GraphStore::with_node_vector(&**self.overlay.load(), id, key, f);
+        }
+        match self.base.load().get_node_property(id, key) {
+            Some(Value::Vector(vector)) => {
+                f(&vector);
+                true
+            }
+            Some(_) => false,
+            None => GraphStore::with_node_vector(&**self.overlay.load(), id, key, f),
+        }
+    }
+
     fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
         if self.is_edge_deleted_from_base(id) {
             return None;
@@ -1254,7 +1273,7 @@ impl GraphStoreMut for LayeredStore {
         id: NodeId,
         epoch: EpochId,
         transaction_id: TransactionId,
-    ) -> bool {
+    ) -> grafeo_common::utils::error::Result<bool> {
         let _guard = self.merge_guard.read();
         if self.is_node_dirty(id) {
             return self
@@ -1266,9 +1285,9 @@ impl GraphStoreMut for LayeredStore {
             if self.deleted_from_base_nodes.write().insert(id) {
                 self.deletions_dirty.store(true, Ordering::Release);
             }
-            return true;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
     fn delete_node_edges(&self, node_id: NodeId) {
@@ -1339,12 +1358,12 @@ impl GraphStoreMut for LayeredStore {
         key: &str,
         value: Value,
         transaction_id: TransactionId,
-    ) {
+    ) -> grafeo_common::utils::error::Result<()> {
         let _guard = self.merge_guard.read();
         self.ensure_in_overlay(id);
         self.overlay
             .load()
-            .set_node_property_versioned(id, key, value, transaction_id);
+            .set_node_property_versioned(id, key, value, transaction_id)
     }
 
     fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) {
@@ -1378,7 +1397,7 @@ impl GraphStoreMut for LayeredStore {
         id: NodeId,
         key: &str,
         transaction_id: TransactionId,
-    ) -> Option<Value> {
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let _guard = self.merge_guard.read();
         self.ensure_in_overlay(id);
         self.overlay
@@ -3293,7 +3312,11 @@ mod tests {
 
         let txn_id = TransactionId::from(1);
         let epoch = EpochId::from(u64::MAX);
-        assert!(!layered.delete_node_versioned(missing, epoch, txn_id));
+        assert!(
+            !layered
+                .delete_node_versioned(missing, epoch, txn_id)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -3336,7 +3359,11 @@ mod tests {
         let persons = layered.nodes_by_label("Person");
 
         // Base-path deletion via versioned delete.
-        assert!(layered.delete_node_versioned(persons[0], epoch, txn_id));
+        assert!(
+            layered
+                .delete_node_versioned(persons[0], epoch, txn_id)
+                .unwrap()
+        );
         assert!(layered.get_node(persons[0]).is_none());
     }
 
@@ -3382,7 +3409,9 @@ mod tests {
         let first = persons[0];
 
         // Versioned set promotes the base node into the overlay.
-        layered.set_node_property_versioned(first, "city", Value::from("Paris"), txn_id);
+        layered
+            .set_node_property_versioned(first, "city", Value::from("Paris"), txn_id)
+            .unwrap();
         let city = layered
             .get_node_property(first, &PropertyKey::new("city"))
             .unwrap();
@@ -3415,7 +3444,9 @@ mod tests {
         let mia = layered.create_node(&["Person"]);
         layered.set_node_property(mia, "email", Value::from("mia@example.com"));
 
-        let removed = layered.remove_node_property_versioned(mia, "email", txn_id);
+        let removed = layered
+            .remove_node_property_versioned(mia, "email", txn_id)
+            .unwrap();
         assert_eq!(
             removed,
             Some(Value::String(ArcStr::from("mia@example.com")))

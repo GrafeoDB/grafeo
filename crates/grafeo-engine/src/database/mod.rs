@@ -51,6 +51,8 @@ pub use upsert::{EdgeUpsertOptions, UpsertSummary};
 mod import;
 #[cfg(feature = "lpg")]
 mod index;
+#[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
+mod legacy_spill;
 #[cfg(feature = "grafeo-file")]
 mod migration;
 #[cfg(feature = "lpg")]
@@ -64,8 +66,18 @@ mod schema_replay;
 mod search;
 pub(crate) mod section_consumer;
 mod sections;
+mod spill_directory;
+#[cfg(all(test, feature = "lpg", not(feature = "temporal")))]
+pub(crate) mod test_backing;
 #[cfg(all(feature = "lpg", feature = "gql"))]
 mod upsert;
+#[cfg(all(
+    feature = "lpg",
+    feature = "vector-index",
+    feature = "mmap",
+    not(feature = "temporal")
+))]
+mod vector_spill;
 #[cfg(all(feature = "wal", feature = "lpg"))]
 pub(crate) mod wal_store;
 
@@ -168,16 +180,17 @@ pub struct GrafeoDB {
     /// Wrapped in Mutex because `close()` takes `&self` but stops it.
     #[cfg(feature = "wal")]
     wal_flusher: parking_lot::Mutex<Option<grafeo_storage::wal::AdaptiveFlusher>>,
-    /// Shared registry of spilled vector storages.
-    /// Used by the search path to create `SpillableVectorAccessor` instances.
-    #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
-    vector_spill_storages: Option<
-        Arc<
-            parking_lot::RwLock<
-                std::collections::HashMap<String, Arc<grafeo_core::index::vector::MmapStorage>>,
-            >,
-        >,
-    >,
+    /// The spill directory this open owns (a read-only open's temp
+    /// directory), removed with the database once nothing spills into it.
+    _spill_root: Option<Arc<spill_directory::SpillDirectory>>,
+    /// Where spilled vector columns write their cache files.
+    #[cfg(all(
+        feature = "lpg",
+        feature = "vector-index",
+        feature = "mmap",
+        not(feature = "temporal")
+    ))]
+    vector_cache: Option<Arc<spill_directory::SpillDirectory>>,
     /// External read-only graph store (when using with_store() or with_read_store()).
     /// When set, sessions route queries through this store instead of the built-in LpgStore.
     pub(super) external_read_store: Option<Arc<dyn GraphStoreSearch>>,
@@ -300,8 +313,10 @@ impl GrafeoDB {
     /// a `.grafeo` file, or a WAL directory (a directory holding `wal/`),
     /// which becomes a single file at the same path. The old files are kept,
     /// byte for byte: the file (or the whole directory) as `<path>.pre-0.6`,
-    /// a file's sidecar WAL as `<path>.pre-0.6.wal` and a checkpoint image
-    /// 0.5.44 left pending as `<path>.pre-0.6.checkpoint`. The migration
+    /// a file's sidecar WAL as `<path>.pre-0.6.wal`, a checkpoint image
+    /// 0.5.44 left pending as `<path>.pre-0.6.checkpoint` and the spill
+    /// directory as `<path>.pre-0.6.spill` (embeddings spilled before the
+    /// database was closed are read into the 0.6 file). The migration
     /// refuses to start while one of these names is taken (it never replaces
     /// a kept copy), and an open waits up to five seconds for a migration
     /// another process is running before it fails. A kept copy itself (a
@@ -432,6 +447,25 @@ impl GrafeoDB {
         let rdf_store = Arc::new(RdfStore::new());
         let transaction_manager = Arc::new(TransactionManager::new());
 
+        let is_read_only = config.access_mode == crate::config::AccessMode::ReadOnly;
+
+        // Where this open spills (see `spill_directory`): a read-only open
+        // writes nothing beside its file, and databases sharing an explicit
+        // spill path keep their vector caches apart.
+        let spill_layout = spill_directory::SpillLayout::for_open(
+            config.spill_path.as_deref(),
+            database_path.as_deref().filter(|_| derive_spill_path),
+            is_read_only,
+        );
+        // Where an older build may have spilled embeddings (#594).
+        #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
+        let legacy_spill_directories =
+            legacy_spill::directories(database_path.as_deref(), config.spill_path.as_deref());
+        // Whether this open reads a 0.5.x database in place: only then are old
+        // spill files in a configured spill path its own (see `legacy_spill`).
+        #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
+        let mut reads_a_0_5_database = false;
+
         // Create buffer manager with configured limits
         let buffer_config = BufferManagerConfig {
             budget: config.memory_limit.unwrap_or_else(|| {
@@ -440,20 +474,13 @@ impl GrafeoDB {
                 let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
                 b
             }),
-            spill_path: config.spill_path.clone().or_else(|| {
-                let p = database_path.as_ref().filter(|_| derive_spill_path)?;
-                let parent = p.parent()?;
-                let name = p.file_name()?.to_str()?;
-                Some(parent.join(format!("{name}.spill")))
-            }),
+            spill_path: spill_layout.root.clone(),
             ..BufferManagerConfig::default()
         };
         let buffer_manager = BufferManager::new(buffer_config);
 
         // Create catalog early so WAL replay can restore schema definitions
         let catalog = Arc::new(Catalog::new());
-
-        let is_read_only = config.access_mode == crate::config::AccessMode::ReadOnly;
 
         // The keys of an encrypted database (`Config::encryption`), derived
         // once the database id is known: from the file header of an existing
@@ -538,6 +565,10 @@ impl GrafeoDB {
                             db_path.display(),
                             db_path.display()
                         );
+                        #[cfg(feature = "vector-index")]
+                        {
+                            reads_a_0_5_database = true;
+                        }
                         if on_disk == OnDisk::WalDirectory {
                             Self::load_legacy_directory(
                                 db_path,
@@ -852,8 +883,14 @@ impl GrafeoDB {
             checkpoint_timer: parking_lot::Mutex::new(None),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(wal_flusher),
-            #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
-            vector_spill_storages: None,
+            _spill_root: spill_layout.root_guard.clone(),
+            #[cfg(all(
+                feature = "lpg",
+                feature = "vector-index",
+                feature = "mmap",
+                not(feature = "temporal")
+            ))]
+            vector_cache: spill_layout.vector_cache.clone(),
             external_read_store: None,
             external_write_store: None,
             #[cfg(feature = "metrics")]
@@ -895,21 +932,26 @@ impl GrafeoDB {
             fm.remove_sidecar_wal()?;
         }
 
+        // Embeddings an older build spilled come back into their columns
+        // (#594), before the checkpoint timer could write the store.
+        #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
+        db.fold_in_legacy_spill(
+            &legacy_spill_directories
+                .into_iter()
+                .filter(|directory| directory.derived || reads_a_0_5_database)
+                .collect::<Vec<_>>(),
+        )?;
+
         // Start periodic checkpoint timer if configured (after the layered
         // store is wired, so its checkpoints include the compacted base)
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
         db.start_checkpoint_timer();
 
-        // Discover existing spill files from a previous session.
-        // If vectors were spilled before close, the spill files persist on disk
-        // and need to be re-mapped so search can read from them.
-        #[cfg(all(
-            feature = "lpg",
-            feature = "vector-index",
-            feature = "mmap",
-            not(feature = "temporal")
-        ))]
-        db.restore_spill_files();
+        // A spill cache is never data: what a previous read-write open (or a
+        // crash) left of it goes, under this open's exclusive lock.
+        if let Some(ref stale) = spill_layout.stale_cache {
+            spill_directory::remove_stale_cache(stale);
+        }
 
         // Phase 8a: apply per-section ForceDisk overrides. Each section
         // type configured as ForceDisk triggers a targeted spill of its
@@ -1001,8 +1043,14 @@ impl GrafeoDB {
             checkpoint_timer: parking_lot::Mutex::new(None),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(None),
-            #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
-            vector_spill_storages: None,
+            _spill_root: None,
+            #[cfg(all(
+                feature = "lpg",
+                feature = "vector-index",
+                feature = "mmap",
+                not(feature = "temporal")
+            ))]
+            vector_cache: None,
             external_read_store: Some(Arc::clone(&store) as Arc<dyn GraphStoreSearch>),
             external_write_store: Some(store),
             #[cfg(feature = "metrics")]
@@ -1097,8 +1145,14 @@ impl GrafeoDB {
             checkpoint_timer: parking_lot::Mutex::new(None),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(None),
-            #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
-            vector_spill_storages: None,
+            _spill_root: None,
+            #[cfg(all(
+                feature = "lpg",
+                feature = "vector-index",
+                feature = "mmap",
+                not(feature = "temporal")
+            ))]
+            vector_cache: None,
             external_read_store: Some(store),
             external_write_store: None,
             #[cfg(feature = "metrics")]
@@ -2595,6 +2649,19 @@ impl GrafeoDB {
             return Ok(());
         }
 
+        // A closed handle still reads its spilled columns, but spills no
+        // more: once the lock is released, `<file>.spill/cache/` belongs to
+        // the next read-write open (#594).
+        #[cfg(all(
+            feature = "lpg",
+            feature = "vector-index",
+            feature = "mmap",
+            not(feature = "temporal")
+        ))]
+        if let Some(ref cache) = self.vector_cache {
+            cache.close_for_writes();
+        }
+
         // From here on, commits, writes outside a transaction and schema
         // changes fail: one that ran after the final checkpoint below would be
         // written only to the WAL this close removes (or, without a WAL,
@@ -2854,12 +2921,10 @@ impl GrafeoDB {
             not(feature = "temporal")
         ))]
         if let Some(store) = store_ref {
-            let spill_path = self.buffer_manager.config().spill_path.clone();
             let consumer = Arc::new(section_consumer::VectorIndexConsumer::new(
-                store, spill_path,
+                store,
+                self.vector_cache.clone(),
             ));
-            // Share the spill registry with the search path
-            self.vector_spill_storages = Some(Arc::clone(consumer.spilled_storages()));
             self.buffer_manager.register_consumer(consumer);
         }
 
@@ -2982,97 +3047,6 @@ impl GrafeoDB {
             out.insert(section_type, tier);
         }
         out
-    }
-
-    /// Discovers and re-opens spill files from a previous session.
-    ///
-    /// When the database was closed with spilled vector embeddings, the
-    /// `vectors_*.bin` files persist in the spill directory. This method
-    /// scans for them, opens each as `MmapStorage`, and registers them
-    /// in the `vector_spill_storages` map so search can read from them.
-    #[cfg(all(
-        feature = "lpg",
-        feature = "vector-index",
-        feature = "mmap",
-        not(feature = "temporal")
-    ))]
-    fn restore_spill_files(&mut self) {
-        use grafeo_core::index::vector::MmapStorage;
-
-        let spill_dir = match self.buffer_manager.config().spill_path {
-            Some(ref path) => path.clone(),
-            None => return,
-        };
-
-        if !spill_dir.exists() {
-            return;
-        }
-
-        let spill_map = match self.vector_spill_storages {
-            Some(ref map) => Arc::clone(map),
-            None => return,
-        };
-
-        let Ok(entries) = std::fs::read_dir(&spill_dir) else {
-            return;
-        };
-
-        let Some(ref store) = self.store else {
-            return;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name.to_string(),
-                None => continue,
-            };
-
-            // Match pattern: vectors_{key}.bin where key is percent-encoded
-            if !file_name.starts_with("vectors_")
-                || !std::path::Path::new(&file_name)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("bin"))
-            {
-                continue;
-            }
-
-            // Extract and decode key: "vectors_Label%3Aembedding.bin" -> "Label:embedding"
-            let key_part = &file_name["vectors_".len()..file_name.len() - ".bin".len()];
-
-            // Percent-decode: %3A -> ':', %25 -> '%'
-            let key = key_part.replace("%3A", ":").replace("%25", "%");
-
-            // Key must contain ':' (label:property format)
-            if !key.contains(':') {
-                // Legacy file with old encoding, skip (will be re-created on next spill)
-                continue;
-            }
-
-            // Only restore if the corresponding vector index exists
-            if store.get_vector_index_by_key(&key).is_none() {
-                // Stale spill file (index was dropped), clean it up
-                let _ = std::fs::remove_file(&path);
-                continue;
-            }
-
-            // Open the MmapStorage
-            match MmapStorage::open(&path) {
-                Ok(mmap_storage) => {
-                    // Mark the property column as spilled so get() returns None
-                    let property = key.split(':').nth(1).unwrap_or("");
-                    let prop_key = grafeo_common::types::PropertyKey::new(property);
-                    store.node_properties_mark_spilled(&prop_key);
-
-                    spill_map.write().insert(key, Arc::new(mmap_storage));
-                }
-                Err(e) => {
-                    eprintln!("failed to restore spill file {}: {e}", path.display());
-                    // Remove corrupt spill file
-                    let _ = std::fs::remove_file(&path);
-                }
-            }
-        }
     }
 
     /// What a checkpoint writes: the complete current state (see

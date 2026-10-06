@@ -58,6 +58,10 @@ impl GraphStore for LpgStore {
         LpgStore::get_node_property(self, id, key)
     }
 
+    fn with_node_vector(&self, id: NodeId, key: &PropertyKey, f: &mut dyn FnMut(&[f32])) -> bool {
+        LpgStore::with_node_vector(self, id, key, |vector| f(vector)).is_some()
+    }
+
     fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
         LpgStore::get_edge_property(self, id, key)
     }
@@ -447,9 +451,9 @@ impl GraphStoreMut for LpgStore {
         id: NodeId,
         epoch: EpochId,
         transaction_id: TransactionId,
-    ) -> bool {
+    ) -> grafeo_common::utils::error::Result<bool> {
         if transaction_id == TransactionId::SYSTEM {
-            LpgStore::delete_node_at_epoch(self, id, epoch)
+            Ok(LpgStore::delete_node_at_epoch(self, id, epoch))
         } else {
             LpgStore::delete_node_transactional(self, id, epoch, transaction_id)
         }
@@ -490,8 +494,8 @@ impl GraphStoreMut for LpgStore {
         key: &str,
         value: Value,
         transaction_id: TransactionId,
-    ) {
-        LpgStore::set_node_property_versioned(self, id, key, value, transaction_id);
+    ) -> grafeo_common::utils::error::Result<()> {
+        LpgStore::set_node_property_versioned(self, id, key, value, transaction_id)
     }
 
     fn set_edge_property_versioned(
@@ -517,7 +521,7 @@ impl GraphStoreMut for LpgStore {
         id: NodeId,
         key: &str,
         transaction_id: TransactionId,
-    ) -> Option<Value> {
+    ) -> grafeo_common::utils::error::Result<Option<Value>> {
         LpgStore::remove_node_property_versioned(self, id, key, transaction_id)
     }
 

@@ -3,8 +3,8 @@
 //! This module provides the [`VectorAccessor`] trait, which decouples vector
 //! storage from vector indexing. The HNSW index is topology-only (neighbor
 //! lists only, no stored vectors) and reads vectors through this trait from
-//! [`PropertyStorage`], the single source of truth, halving memory usage
-//! for vector workloads.
+//! the property store, the single source of truth (spilled columns
+//! included), halving memory usage for vector workloads.
 //!
 //! # Example
 //!
@@ -33,6 +33,20 @@ use crate::graph::GraphStore;
 pub trait VectorAccessor: Send + Sync {
     /// Returns the vector associated with the given node ID, if it exists.
     fn get_vector(&self, id: NodeId) -> Option<Arc<[f32]>>;
+
+    /// Calls `f` with the vector of the given node and returns whether there
+    /// was one. Search computes every distance through this, so an accessor
+    /// should lend the vector without copying it (a spilled vector is read
+    /// in place); the default goes through [`get_vector`](Self::get_vector).
+    fn with_vector(&self, id: NodeId, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self.get_vector(id) {
+            Some(vector) => {
+                f(&vector);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Reads vectors from a graph store's property storage for a given property key.
@@ -63,67 +77,34 @@ impl VectorAccessor for PropertyVectorAccessor<'_> {
             _ => None,
         }
     }
-}
 
-/// Reads vectors written after a spill from property storage, and every
-/// other vector from the spill-backed store.
-///
-/// Created by the engine when a vector index has been spilled to disk.
-/// The mmap-backed store serves the bulk of reads (zero-copy from page cache);
-/// the property store holds what was inserted or changed after the spill,
-/// which must win over the spilled value.
-pub struct SpillableVectorAccessor<'a> {
-    store: &'a dyn GraphStore,
-    property: PropertyKey,
-    spill_storage: Arc<dyn super::storage::VectorStorage>,
-}
-
-impl<'a> SpillableVectorAccessor<'a> {
-    /// Creates a new accessor that checks the property store first (writes
-    /// after the spill), then `spill_storage`.
-    #[must_use]
-    pub fn new(
-        store: &'a dyn GraphStore,
-        property: impl Into<PropertyKey>,
-        spill_storage: Arc<dyn super::storage::VectorStorage>,
-    ) -> Self {
-        Self {
-            store,
-            property: property.into(),
-            spill_storage,
-        }
+    fn with_vector(&self, id: NodeId, f: &mut dyn FnMut(&[f32])) -> bool {
+        self.store.with_node_vector(id, &self.property, f)
     }
 }
 
-impl VectorAccessor for SpillableVectorAccessor<'_> {
-    fn get_vector(&self, id: NodeId) -> Option<Arc<[f32]>> {
-        // A vector written after the spill wins over the spilled one.
-        if let Some(Value::Vector(v)) = self.store.get_node_property(id, &self.property) {
-            return Some(v);
-        }
-        self.spill_storage.get(id)
-    }
-}
-
-/// An accessor that dispatches to either a property store or a spill-backed store.
+/// The accessor the engine passes to vector operations.
 ///
-/// This enum avoids dynamic dispatch (`Box<dyn VectorAccessor>`) so it can be
-/// passed to `HnswIndex::search(&impl VectorAccessor)` without requiring `Sized`
-/// workarounds.
+/// An enum rather than `Box<dyn VectorAccessor>`, so it can be passed to
+/// `HnswIndex::search(&impl VectorAccessor)` without `Sized` workarounds. A
+/// spilled column needs no variant of its own: the property store reads
+/// through it.
 #[non_exhaustive]
 pub enum VectorAccessorKind<'a> {
-    /// Direct property store lookup (default, no spill).
+    /// Direct property store lookup.
     Property(PropertyVectorAccessor<'a>),
-    /// Spill-backed: checks the property store first (writes after the
-    /// spill), then the MmapStorage.
-    Spilled(SpillableVectorAccessor<'a>),
 }
 
 impl VectorAccessor for VectorAccessorKind<'_> {
     fn get_vector(&self, id: NodeId) -> Option<Arc<[f32]>> {
         match self {
             Self::Property(a) => a.get_vector(id),
-            Self::Spilled(a) => a.get_vector(id),
+        }
+    }
+
+    fn with_vector(&self, id: NodeId, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self {
+            Self::Property(a) => a.with_vector(id, f),
         }
     }
 }
@@ -181,65 +162,10 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "lpg", feature = "vector-index"))]
-mod spill_tests {
+#[cfg(all(test, feature = "lpg", not(feature = "temporal")))]
+mod borrowed_read_tests {
     use super::*;
     use crate::graph::lpg::LpgStore;
-    use crate::index::vector::storage::{RamStorage, VectorStorage};
-
-    #[test]
-    fn spill_accessor_returns_vector_from_spill_storage() {
-        let store = LpgStore::new().unwrap();
-        let alix_id = store.create_node(&["Person"]);
-        let spill_vec: Vec<f32> = vec![0.1, 0.2, 0.3];
-        let spill = Arc::new(RamStorage::new(3));
-        spill.insert(alix_id, &spill_vec).unwrap();
-
-        let accessor = SpillableVectorAccessor::new(&store as &dyn GraphStore, "embedding", spill);
-        let result = accessor.get_vector(alix_id);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().as_ref(), spill_vec.as_slice());
-    }
-
-    #[test]
-    fn spill_accessor_falls_back_to_property_store() {
-        let store = LpgStore::new().unwrap();
-        let gus_id = store.create_node(&["Person"]);
-        let prop_vec: Arc<[f32]> = vec![0.4, 0.5, 0.6].into();
-        store.set_node_property(gus_id, "embedding", Value::Vector(prop_vec.clone()));
-
-        let spill: Arc<dyn VectorStorage> = Arc::new(RamStorage::new(3));
-        let accessor = SpillableVectorAccessor::new(&store as &dyn GraphStore, "embedding", spill);
-        let result = accessor.get_vector(gus_id);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().as_ref(), prop_vec.as_ref());
-    }
-
-    /// A vector in the property store was written after the spill, so it
-    /// wins over the spilled one.
-    #[test]
-    fn spill_accessor_prefers_a_write_after_the_spill() {
-        let store = LpgStore::new().unwrap();
-        let vincent_id = store.create_node(&["Person"]);
-        let prop_vec: Arc<[f32]> = vec![1.0, 0.0, 0.0].into();
-        store.set_node_property(vincent_id, "embedding", Value::Vector(prop_vec.clone()));
-
-        let spill_vec: Vec<f32> = vec![0.0, 1.0, 0.0];
-        let spill = Arc::new(RamStorage::new(3));
-        spill.insert(vincent_id, &spill_vec).unwrap();
-
-        let accessor = SpillableVectorAccessor::new(&store as &dyn GraphStore, "embedding", spill);
-        let result = accessor.get_vector(vincent_id).unwrap();
-        assert_eq!(result.as_ref(), prop_vec.as_ref());
-    }
-
-    #[test]
-    fn spill_accessor_returns_none_when_missing() {
-        let store = LpgStore::new().unwrap();
-        let spill: Arc<dyn VectorStorage> = Arc::new(RamStorage::new(3));
-        let accessor = SpillableVectorAccessor::new(&store as &dyn GraphStore, "embedding", spill);
-        assert!(accessor.get_vector(NodeId::new(999)).is_none());
-    }
 
     #[test]
     fn accessor_kind_property_dispatches() {
@@ -256,39 +182,61 @@ mod spill_tests {
         assert!(accessor.get_vector(NodeId::new(999)).is_none());
     }
 
+    /// A search over a spilled column reads every vector in place: the
+    /// backing never copies one out (ruling (d) of #594).
+    #[cfg(feature = "vector-index")]
     #[test]
-    fn accessor_kind_spilled_dispatches() {
-        let store = LpgStore::new().unwrap();
-        let mia_id = store.create_node(&["Person"]);
-        let spill_vec: Vec<f32> = vec![0.3, 0.6, 0.9];
-        let spill = Arc::new(RamStorage::new(3));
-        spill.insert(mia_id, &spill_vec).unwrap();
+    fn search_reads_spilled_vectors_without_copying_them() {
+        use crate::graph::lpg::test_backing::MemoryBacking;
+        use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
+        use std::sync::atomic::Ordering;
 
-        let accessor = VectorAccessorKind::Spilled(SpillableVectorAccessor::new(
-            &store as &dyn GraphStore,
-            "embedding",
-            spill,
-        ));
-        let result = accessor.get_vector(mia_id);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().as_ref(), spill_vec.as_slice());
+        let store = LpgStore::new().unwrap();
+        let key = PropertyKey::new("embedding");
+        let vectors = [[3.0, 19.0], [19.0, 88.0], [88.0, 3.0], [3.19, 19.88]];
+        let ids: Vec<NodeId> = vectors
+            .iter()
+            .map(|vector| {
+                store.create_node_with_props(
+                    &["Item"],
+                    [("embedding", Value::Vector(vector.to_vec().into()))],
+                )
+            })
+            .collect();
+        let accessor = PropertyVectorAccessor::new(&store, "embedding");
+        let index = HnswIndex::new(HnswConfig::new(2, DistanceMetric::Euclidean));
+        for (id, vector) in ids.iter().zip(vectors) {
+            index.insert(*id, &vector, &accessor);
+        }
+        let snapshot = store.node_property_column_entries(&key);
+        let backing = MemoryBacking::of(&snapshot);
+        assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
+
+        let hits = index.search(&[3.0, 19.0], 2, &accessor);
+        assert_eq!(hits.first().map(|hit| hit.0), Some(ids[0]));
+        assert_eq!(
+            backing.copies.load(Ordering::Relaxed),
+            0,
+            "a vector was copied"
+        );
     }
 
+    /// The borrowed read hands out the stored vector, and nothing for a
+    /// node without one or a value that is not a vector.
     #[test]
-    fn accessor_kind_spilled_uses_fallback() {
+    fn with_vector_lends_the_stored_vector() {
         let store = LpgStore::new().unwrap();
-        let butch_id = store.create_node(&["Person"]);
-        let prop_vec: Arc<[f32]> = vec![0.2, 0.4, 0.6].into();
-        store.set_node_property(butch_id, "embedding", Value::Vector(prop_vec.clone()));
+        let mia = store.create_node(&["Person"]);
+        let butch = store.create_node(&["Person"]);
+        store.set_node_property(mia, "embedding", Value::Vector(vec![3.0, 19.0].into()));
+        store.set_node_property(butch, "embedding", Value::from("not a vector"));
+        let accessor =
+            VectorAccessorKind::Property(PropertyVectorAccessor::new(&store, "embedding"));
 
-        let spill: Arc<dyn VectorStorage> = Arc::new(RamStorage::new(3));
-        let accessor = VectorAccessorKind::Spilled(SpillableVectorAccessor::new(
-            &store as &dyn GraphStore,
-            "embedding",
-            spill,
-        ));
-        let result = accessor.get_vector(butch_id);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().as_ref(), prop_vec.as_ref());
+        let mut seen = Vec::new();
+        assert!(accessor.with_vector(mia, &mut |v| seen.extend_from_slice(v)));
+        assert_eq!(seen, vec![3.0, 19.0]);
+        assert!(!accessor.with_vector(butch, &mut |_| panic!("not a vector")));
+        assert!(!accessor.with_vector(NodeId::new(999), &mut |_| panic!("no node")));
     }
 }

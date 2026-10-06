@@ -1,7 +1,8 @@
 //! Integration tests for vector embedding spill to disk.
 //!
-//! Tests the full lifecycle: insert vectors, spill to MmapStorage,
-//! search (via SpillableVectorAccessor), and verify correctness.
+//! Tests the full lifecycle: insert vectors, spill them into a cache file
+//! their column reads through, search, and verify correctness (#594 has the
+//! durability tests: `spilled_embeddings.rs`).
 //!
 //! Run with: cargo test -p grafeo-engine --features "embedded,async-storage" --test vector_spill
 
@@ -70,8 +71,8 @@ fn an_embedding_updated_while_spilled_wins() {
     assert_eq!(embedding(&db, ids[1]), Some(vec![1.0, 0.1, 0.0, 0.0]));
 }
 
-/// Closed while spilled: the embeddings stay in the spill file, which the
-/// next open finds again, and one changed while spilled still wins at reload.
+/// Closed while spilled: the database file holds every embedding (the spill
+/// cache is gone), and one changed while spilled is the one it holds.
 #[test]
 #[cfg(all(
     feature = "vector-index",
@@ -93,14 +94,12 @@ fn an_embedding_updated_while_spilled_wins_after_a_reopen() {
         ids
     };
 
+    assert!(!dir.path().join("closed.grafeo.spill").exists());
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-    // The spilled embeddings are found again through the spill file.
     let nearest = db
         .vector_search("Item", "embedding", &[1.0, 0.2, 0.0, 0.0], 1, None, None)
         .unwrap();
     assert_eq!(nearest[0].0, ids[2], "{nearest:?}");
-
-    assert!(db.reload_eligible(1.0) > 0);
     assert_eq!(embedding(&db, ids[0]), Some(moved));
     assert_eq!(embedding(&db, ids[2]), Some(vec![1.0, 0.2, 0.0, 0.0]));
 }
@@ -154,7 +153,7 @@ fn force_disk_spills_and_search_works() {
         spill_dir.display()
     );
 
-    // Vector search should still work (via SpillableVectorAccessor)
+    // Vector search reads the spilled vectors in place
     let query = make_embedding(1, dim);
     let results = db
         .vector_search("Item", "embedding", &query, 5, None, None)

@@ -107,7 +107,18 @@ The reload is synchronous; for large sections, call from a background thread.
 
 ## Spill directory
 
-The spill directory holds mmap-backed files for spilled sections. It's set via `Config::with_spill_path` (or auto-derived from the `.grafeo` file path for persistent databases). After the database closes, the spill files persist; reopening the database re-mmaps them so spilled state survives restarts.
+The spill directory holds the files of spilled sections and of queries that spill. It's set via `Config::with_spill_path`, or derived from the path of a file database.
+
+A spilled vector column keeps its values: the column reads them through a cache file, so queries (`RETURN n.embedding`), vector search, checkpoints and copies (`save`, `to_memory`, backups, snapshots) see them, and the database file always holds them. The cache is never data. A reload deletes its file, and the cache files and their directories are removed when the database is dropped. A closed database still reads its spilled values until then, but spills nothing more. A cache that a crash left in `<file>.spill/cache/` is removed by the next read-write open of the same file; one left in a configured spill path or in the temp directory stays until removed by hand.
+
+| Database | Spill directory | Vector cache |
+| --- | --- | --- |
+| With `Config::with_spill_path(dir)` | `dir` | `dir/grafeo-<name>-<pid>-<random>/`, one per open, so several databases can share `dir` |
+| File database, read-write | `<file>.spill/` | `<file>.spill/cache/` |
+| File database, read-only | `grafeo-<name>-<pid>-<random>.spill/` in the system temp directory | the same directory |
+| In memory, without a spill path | none | none |
+
+A read-only open writes nothing beside the database. Its directory in the temp directory is created at open, under a new random name, and only if no file or link of that name exists, so another user of a shared temp directory cannot prepare it; on Unix only its user can enter it. When it cannot be created (a missing or read-only temp directory, as on read-only media or in a locked-down container), the open warns and opens without spilling. On Linux the system temp directory (`/tmp`) is often RAM-backed (tmpfs), where spilling frees no memory: for large read-only workloads, set a spill path on disk.
 
 An encrypted database (`Config::encryption`) has no spill directory, as spill files are not encrypted: none is derived, and setting one together with `encryption` is a configuration error. Its sections stay in RAM.
 

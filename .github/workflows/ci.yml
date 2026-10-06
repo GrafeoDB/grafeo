@@ -462,6 +462,19 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
+      # The spilled-embedding tests that need more than the shipped set: an
+      # encrypted database never spills, and the crash sweeps of the legacy
+      # spill fold-in and the migration need crash injection.
+      - name: Run spill tests with encryption and crash injection (shipped profile)
+        run: >
+          cargo nextest run -p grafeo-engine
+          --features grafeo-engine/full,grafeo-engine/encryption,grafeo-engine/testing-crash-injection
+          --test spilled_embeddings --test legacy_spill --test migration
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
   # Rust tests (release, ubuntu only)
   # Release-mode catches issues from inlining and overflow checks.
   # These bugs are platform-independent, so one OS is sufficient.
@@ -542,7 +555,7 @@ jobs:
           - profile: enterprise
             features: "--features tracing"
             engine_features: "--features metrics,tracing,async-storage"
-          # Full: all features combined (`full` is a deprecated alias, removed in 0.8.0 per #468; use persona combos)
+          # Full: all features combined (`full` is a deprecated alias, removed in 0.7.0 per #468; use persona combos)
           - profile: full
             features: "--features lpg,languages,triple-store,algos,parallel,vector-index,text-index,hybrid-search,spill,mmap,regex,jsonl-import,parquet-import"
             engine_features: "--features full"

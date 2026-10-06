@@ -1,8 +1,10 @@
 //! Spill backings for tests (#594): one whose reads fail, one that counts the
 //! values copied out of it.
 
+#[cfg(feature = "vector-index")]
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(feature = "vector-index")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grafeo_common::types::{NodeId, PropertyKey, Value};
@@ -35,11 +37,13 @@ impl ColumnBacking<NodeId> for Unreadable {
 
 /// A backing that lends its vectors in place and counts the values `get`
 /// copies out.
+#[cfg(feature = "vector-index")]
 pub(crate) struct Counting {
     vectors: HashMap<NodeId, Arc<[f32]>>,
     pub(crate) copies: AtomicUsize,
 }
 
+#[cfg(feature = "vector-index")]
 impl Counting {
     /// A backing holding the vectors of `entries`.
     pub(crate) fn of(entries: &[(NodeId, Value)]) -> Arc<Self> {
@@ -60,6 +64,7 @@ impl Counting {
     }
 }
 
+#[cfg(feature = "vector-index")]
 impl ColumnBacking<NodeId> for Counting {
     fn get(&self, id: NodeId) -> std::io::Result<Option<Value>> {
         self.copies.fetch_add(1, Ordering::Relaxed);

@@ -38,8 +38,8 @@ The 0.6.0 storage format change is the only planned migration: older files are c
 
 | Release | Focus |
 | --- | --- |
-| [**0.7.0**](https://github.com/GrafeoDB/grafeo/milestone/8) | Release candidate: no new features, blocker review and final audit. If it works in 0.7, it works in 1.0 |
-| [**0.8.0**](https://github.com/GrafeoDB/grafeo/milestone/9) | Per-graph access control with pluggable authentication (JWT, OIDC), reactive event bus, removal of the deprecated feature profile names |
+| [**0.7.0**](https://github.com/GrafeoDB/grafeo/milestone/8) | Release candidate: no new features, blocker review and final audit, removal of the deprecated feature profile names. If it works in 0.7, it works in 1.0 |
+| [**0.8.0**](https://github.com/GrafeoDB/grafeo/milestone/9) | Per-graph access control with pluggable authentication (JWT, OIDC), reactive event bus |
 | **1.0** | Stable: semantic versioning commitment, public API frozen |
 
 **Later, not scheduled**: enterprise authorization (row-level security, property masking, `GRANT`/`REVOKE`, LDAP and SAML), inbound connectors starting with Kafka, distributed deployment, more language bindings.

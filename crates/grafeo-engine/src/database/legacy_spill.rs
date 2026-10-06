@@ -12,10 +12,14 @@
 //! read-only open keeps them. Each file is read in batches of at most
 //! [`BATCH_BYTES`], so the fold needs memory for the values it fills and one
 //! batch, not for the whole file. The vector index of every file found, read
-//! or kept, is rebuilt from the stored values: its topology was saved while
+//! or not, is rebuilt from the stored values: its topology was saved while
 //! the values could not be read, so it can miss an embedding set while
 //! spilled or name a node that has none (a read-write open checkpoints the
-//! rebuilt index, a read-only one keeps it in memory).
+//! rebuilt index, also when nothing was filled, a read-only one keeps it in
+//! memory). A 0.5.x database read in place gets every vector index rebuilt,
+//! with or without an old file: one that reloaded its spilled embeddings
+//! before it closed deleted the file and kept the stale index. A database
+//! written by a 0.6 development build that did so is not covered.
 //!
 //! Old files in a configured spill path are read only while a 0.5.x database
 //! is read in place: by the migration (its read of the old database puts them
@@ -29,20 +33,30 @@
 //! A file stays where it is, and is not read, when this database has no
 //! vector index for its `label:property` (a spill path may be shared, and
 //! another database may own it; one in `<file>.spill` is logged, as a crash
-//! can have lost the index, #401) or when its vectors have another number of
-//! dimensions than the index (a foreign or damaged file, warned). One that
-//! cannot be read stays too (warned).
+//! can have lost the index, #401). One that an I/O error keeps from being
+//! read stays too, warned with its cost: until it can be read or is removed,
+//! every open finds it again, rebuilds its index and (read-write) writes a
+//! checkpoint. A file a later open would find no better is kept instead,
+//! warned with why: one that is not an old spill file or is shorter than its
+//! header says, one whose vectors have another number of dimensions than the
+//! index (a foreign or damaged file), and one read through that held records
+//! of nodes without the index's label (a node that lost the label while
+//! spilled has its embedding only there). A read-write open moves each to
+//! `<file>.spill/kept/` after its checkpoint (under a numeric suffix when
+//! the name is taken, never over another file), so the rebuild and the
+//! checkpoint happen once; [`find`] reads only the top level, so nothing
+//! reads `kept/` again.
 //!
 //! A value fills only a node that carries the label of the file's vector
 //! index. Each file is folded once: `<file>.spill` at the first open (which
-//! deletes it), a configured spill path by the migration. Limits, as the old
-//! files record no removals and no epochs: a property removed while spilled
-//! before 0.6 comes back (its reload brought it back too); 0.5.x databases
-//! sharing one spill path wrote over each other's files, so the files cannot
-//! say which database they came from; and a node of the index's label that
-//! 0.5.x created after a node was deleted while spilled can have taken its id
-//! (ids are not kept across opens), and with it the deleted node's
-//! embedding.
+//! deletes it or moves it to `kept/`), a configured spill path by the
+//! migration. Limits, as the old files record no removals and no epochs: a
+//! property removed while spilled before 0.6 comes back (its reload brought
+//! it back too); 0.5.x databases sharing one spill path wrote over each
+//! other's files, so the files cannot say which database they came from; and
+//! a node of the index's label that 0.5.x created after a node was deleted
+//! while spilled can have taken its id (ids are not kept across opens), and
+//! with it the deleted node's embedding.
 //!
 //! File layout (`MmapStorage` before 0.6, little-endian): a 64-byte header
 //! (magic `GRAFVEC1`, dimensions `u64` at 8, count `u64` at 16), then `count`
@@ -212,12 +226,133 @@ impl OldFile {
     }
 }
 
+/// How many ids of nodes without the label a warning names.
+const FIRST_IDS: usize = 8;
+
+/// The directory in `<file>.spill` that a read-write open moves the old
+/// files it kept to (see [`Folded::kept`]); nothing reads it.
+const KEPT: &str = "kept";
+
+/// The records of an old file that a fold left out only because their node
+/// lacks the label of the file's vector index: the node exists and has no
+/// value, so the file holds the only copy (a node that lost the label while
+/// its embeddings were spilled).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct WithoutLabel {
+    /// How many records.
+    pub(crate) count: usize,
+    /// The node ids of the first [`FIRST_IDS`] of them, in file order.
+    pub(crate) first: Vec<NodeId>,
+}
+
+impl WithoutLabel {
+    fn add(&mut self, id: NodeId) {
+        self.count += 1;
+        if self.first.len() < FIRST_IDS {
+            self.first.push(id);
+        }
+    }
+}
+
+/// Why an old file is kept instead of deleted, for a reason a later open
+/// would find again (the same bytes fold in no more).
+#[derive(Debug)]
+pub(crate) enum KeptBecause {
+    /// It is not an old spill file, or is shorter than its header says.
+    Invalid(io::Error),
+    /// Its vectors have `file` dimensions, the vector index `index`.
+    Dimensions {
+        /// The dimensions of the file's vectors.
+        file: usize,
+        /// The dimensions of the vector index.
+        index: usize,
+    },
+    /// It was read through, and holds the only copy of these records.
+    WithoutLabel(WithoutLabel),
+}
+
+/// An old file a fold refused, or could not take in completely, for a
+/// reason that does not change.
+#[derive(Debug)]
+pub(crate) struct KeptFile {
+    /// The file.
+    pub(crate) file: LegacyVectorFile,
+    /// Why it is kept.
+    pub(crate) because: KeptBecause,
+}
+
+impl KeptFile {
+    /// What a warning says about the file, before where it goes.
+    fn describe(&self) -> String {
+        let file = &self.file;
+        match &self.because {
+            KeptBecause::Invalid(error) => format!("{error}; none of its embeddings are read"),
+            KeptBecause::Dimensions {
+                file: dimensions,
+                index,
+            } => format!(
+                "{} holds embeddings of {dimensions} dimensions, the vector index on :{}({}) \
+                 has {index}; none of them are read",
+                file.path.display(),
+                file.label,
+                file.property.as_str()
+            ),
+            KeptBecause::WithoutLabel(skipped) => format!(
+                "{} holds {} embeddings of nodes without the label :{} (the first ids: {}), \
+                 which only nodes of the label get: a node that lost the label while its \
+                 embeddings were spilled has its embedding only there",
+                file.path.display(),
+                skipped.count,
+                file.label,
+                skipped
+                    .first
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+/// The warning for `file`, which stays where it is after the I/O error
+/// `error`; `filled` values were read into the database before it (`None`
+/// when the file could not be opened). An open finds the file again, so the
+/// warning says what that costs.
+fn stays_after_an_io_error(
+    file: &LegacyVectorFile,
+    error: &io::Error,
+    filled: Option<usize>,
+) -> String {
+    let index = format!(":{}({})", file.label, file.property.as_str());
+    let what = match filled {
+        None => format!(
+            "the embeddings of {index} in {} stay out of the database: {error}",
+            file.path.display()
+        ),
+        Some(filled) => format!(
+            "reading {} stopped: {error}; the {filled} embeddings of {index} read before stay \
+             in the database, the rest stay out",
+            file.path.display()
+        ),
+    };
+    format!(
+        "{what}. The file stays where it is: until it can be read or is removed, every open \
+         rebuilds the vector index on {index}, and every read-write open also writes a \
+         checkpoint"
+    )
+}
+
 /// What a fold did.
 #[derive(Debug, Default)]
 pub(crate) struct Folded {
-    /// The files it read through: safe to delete once the database holds
-    /// their values.
+    /// The files it read through and took in completely: safe to delete once
+    /// the database holds their values.
     pub(crate) files: Vec<LegacyVectorFile>,
+    /// The files it refused, or read through without taking them in
+    /// completely, for a reason a later open would find again: moved to
+    /// `kept/` once the database holds what was taken in.
+    pub(crate) kept: Vec<KeptFile>,
     /// How many values it filled, from every file (a file whose read stopped
     /// partway included).
     pub(crate) filled: usize,
@@ -230,11 +365,13 @@ pub(crate) struct Folded {
 }
 
 /// Folds the `files` whose index `store` has into it, each named in a
-/// warning. A file stays out of the fold, and of [`Folded::files`] (so it is
-/// never deleted), when `store` has no index for it (logged for
-/// `<file>.spill`), when its dimensions differ from the index's, or when it
-/// cannot be read (both warned, naming the file; values read before a read
-/// that stops partway stay, counted in the warning).
+/// warning. A file stays out of [`Folded::files`] (so it is never deleted)
+/// when `store` has no index for it (logged for `<file>.spill`), when an I/O
+/// error stops its read (warned with what that costs; values read before
+/// stay, counted in the warning), and when it goes to [`Folded::kept`]: it is
+/// not an old spill file or is shorter than its header says, its dimensions
+/// differ from the index's, or records of nodes without the index's label
+/// were left out.
 pub(crate) fn fold_in(store: &LpgStore, files: &[LegacyVectorFile]) -> Folded {
     fold_in_batches(store, files, BATCH_BYTES)
 }
@@ -266,81 +403,114 @@ pub(crate) fn fold_in_batches(
         let dimensions = index.config().dimensions;
         let mut old = match OldFile::open(&file.path) {
             Ok(old) => old,
+            // The same bytes are refused at every open.
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                folded.kept.push(KeptFile {
+                    file: file.clone(),
+                    because: KeptBecause::Invalid(error),
+                });
+                continue;
+            }
             Err(error) => {
-                grafeo_common::grafeo_warn!(
-                    "the embeddings of :{}({}) in {} stay out of the database, and the file \
-                     stays: {error}",
-                    file.label,
-                    file.property.as_str(),
-                    file.path.display()
-                );
+                grafeo_common::grafeo_warn!("{}", stays_after_an_io_error(file, &error, None));
                 continue;
             }
         };
         if old.dimensions != dimensions {
-            grafeo_common::grafeo_warn!(
-                "{} stays and none of its embeddings are read: they have {} dimensions, the \
-                 vector index on :{}({}) has {}",
-                file.path.display(),
-                old.dimensions,
-                file.label,
-                file.property.as_str(),
-                dimensions
-            );
+            folded.kept.push(KeptFile {
+                file: file.clone(),
+                because: KeptBecause::Dimensions {
+                    file: old.dimensions,
+                    index: dimensions,
+                },
+            });
             continue;
         }
-        let (filled, batches, stopped) = fill_from(store, file, &mut old, batch_bytes);
-        folded.filled += filled;
-        folded.batches += batches;
-        match stopped {
+        let read = fill_from(store, file, &mut old, batch_bytes);
+        folded.filled += read.filled;
+        folded.batches += read.batches;
+        match read.stopped {
             None => {
                 grafeo_common::grafeo_warn!(
-                    "folded {filled} embeddings of :{}({}) back into the database from {}, \
-                     which an older version spilled them to",
+                    "folded {} embeddings of :{}({}) back into the database from {}, which an \
+                     older version spilled them to",
+                    read.filled,
                     file.label,
                     file.property.as_str(),
                     file.path.display()
                 );
-                folded.files.push(file.clone());
+                if read.without_label.count == 0 {
+                    folded.files.push(file.clone());
+                } else {
+                    folded.kept.push(KeptFile {
+                        file: file.clone(),
+                        because: KeptBecause::WithoutLabel(read.without_label),
+                    });
+                }
             }
             Some(error) => grafeo_common::grafeo_warn!(
-                "reading {} stopped: {error}; the {filled} embeddings of :{}({}) read before \
-                 stay in the database, the rest stay out, and the file stays",
-                file.path.display(),
-                file.label,
-                file.property.as_str()
+                "{}",
+                stays_after_an_io_error(file, &error, Some(read.filled))
             ),
         }
     }
     folded
 }
 
+/// What reading one old file did.
+#[derive(Debug, Default)]
+struct FileFold {
+    /// How many values it filled.
+    filled: usize,
+    /// How many batches it read.
+    batches: usize,
+    /// The records it left out only because their node lacks the label.
+    without_label: WithoutLabel,
+    /// The error that stopped the read, if one did (what was filled before
+    /// stays).
+    stopped: Option<io::Error>,
+}
+
 /// Fills the values of `old` into `store`, at most `batch_bytes` of records
-/// at a time. Returns how many it filled, how many batches it read, and the
-/// error that stopped the read, if one did (what was filled before stays).
+/// at a time, and counts the records left out only because their node lacks
+/// the label: after the fill, a node that exists without a value has no
+/// label to take one (a node of the label would have been filled).
 fn fill_from(
     store: &LpgStore,
     file: &LegacyVectorFile,
     old: &mut OldFile,
     batch_bytes: usize,
-) -> (usize, usize, Option<io::Error>) {
-    let (mut filled, mut batches) = (0, 0);
+) -> FileFold {
+    let mut read = FileFold::default();
     loop {
         let batch = match old.next_batch(batch_bytes) {
             Ok(batch) => batch,
-            Err(error) => return (filled, batches, Some(error)),
+            Err(error) => {
+                read.stopped = Some(error);
+                return read;
+            }
         };
         if batch.is_empty() {
-            return (filled, batches, None);
+            return read;
         }
-        batches += 1;
-        filled += store.fill_missing_node_values(
+        read.batches += 1;
+        let ids: Vec<NodeId> = batch.iter().map(|(id, _)| *id).collect();
+        read.filled += store.fill_missing_node_values(
             &file.label,
             &file.property,
             batch
                 .into_iter()
                 .map(|(id, vector)| (id, Value::Vector(vector.into()))),
         );
+        for id in ids {
+            if store.get_node_property(id, &file.property).is_none()
+                && store
+                    .get_node(id)
+                    .is_some_and(|node| !node.has_label(&file.label))
+            {
+                read.without_label.add(id);
+            }
+        }
     }
 }
 
@@ -445,14 +615,63 @@ pub(crate) fn directories(
     directories
 }
 
+/// Moves the old file at `path` into `kept/` beside it, under its own name
+/// or, when that name is taken, the name with the first free `.1`, `.2`, ...
+/// appended: a kept file is never replaced. The read-write open that calls
+/// this holds the database's exclusive lock, so no other open takes the name
+/// in between. Returns the new path.
+fn move_to_kept(path: &Path) -> io::Result<PathBuf> {
+    let (Some(directory), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} names no file in a directory", path.display()),
+        ));
+    };
+    let kept = directory.join(KEPT);
+    std::fs::create_dir_all(&kept)?;
+    let mut suffix = 0_usize;
+    loop {
+        let mut candidate = name.to_os_string();
+        if suffix > 0 {
+            candidate.push(format!(".{suffix}"));
+        }
+        let target = kept.join(candidate);
+        // A dangling link takes the name too.
+        match std::fs::symlink_metadata(&target) {
+            Ok(_) => suffix += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                std::fs::rename(path, &target)?;
+                return Ok(target);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// The `(label, property)` of every vector index of `store`.
+fn every_vector_index(store: &LpgStore) -> BTreeSet<(String, String)> {
+    store
+        .vector_index_entries()
+        .into_iter()
+        .filter_map(|(key, _)| {
+            let (label, property) = key.split_once(':')?;
+            Some((label.to_string(), property.to_string()))
+        })
+        .collect()
+}
+
 impl super::GrafeoDB {
     /// Folds the embeddings an older build spilled to `directories` back into
     /// their columns (see the module docs; the caller passes a configured
-    /// spill path only when it reads a 0.5.x database). A read-write open then
-    /// makes them durable with a checkpoint and deletes the files it folded
-    /// from `<file>.spill`; a crash before the delete folds them again at the
-    /// next open, which changes nothing and then deletes them. A file in a
-    /// configured spill path stays. A read-only open keeps them in memory.
+    /// spill path only when it reads a 0.5.x database, and sets
+    /// `rebuild_every_index` then, as the database may have reloaded its
+    /// spilled embeddings before it closed and kept a stale index with no old
+    /// file left). A read-write open then makes them durable with a
+    /// checkpoint, deletes the files it folded from `<file>.spill` and moves
+    /// the ones it kept to `<file>.spill/kept/`; a crash before that folds
+    /// them again at the next open, which changes nothing and then deletes or
+    /// moves them. A file in a configured spill path stays. A read-only open
+    /// keeps them in memory.
     ///
     /// # Errors
     ///
@@ -460,16 +679,27 @@ impl super::GrafeoDB {
     pub(super) fn fold_in_legacy_spill(
         &self,
         directories: &[SpillDirectory],
+        rebuild_every_index: bool,
     ) -> grafeo_common::utils::error::Result<()> {
         let files: Vec<LegacyVectorFile> = directories
             .iter()
             .flat_map(|directory| find(&directory.path, directory.derived))
             .collect();
-        if files.is_empty() {
+        if files.is_empty() && !rebuild_every_index {
             return Ok(());
         }
         let folded = fold_in(self.lpg_store(), &files);
-        for (label, property) in &folded.indexes {
+        let mut rebuilt = folded.indexes.clone();
+        if rebuild_every_index {
+            rebuilt.extend(every_vector_index(self.lpg_store()));
+        }
+        for (label, property) in &rebuilt {
+            // A crash point where the rebuild is to be made durable: a
+            // read-only open (the migration's read included) rebuilds in
+            // memory, where a crash changes nothing.
+            if !self.read_only {
+                grafeo_common::testing::crash::maybe_crash("legacy_spill:rebuild");
+            }
             rebuild_index(self.lpg_store(), label, property);
         }
         let shared: Vec<String> = folded
@@ -486,15 +716,22 @@ impl super::GrafeoDB {
                 shared.join(", ")
             );
         }
-        if self.read_only || (folded.files.is_empty() && folded.indexes.is_empty()) {
+        if self.read_only {
+            for kept in &folded.kept {
+                grafeo_common::grafeo_warn!("{}; the file stays", kept.describe());
+            }
+            return Ok(());
+        }
+        // Every file read or kept belongs to an index rebuilt here: with none,
+        // there is nothing to make durable, delete or move.
+        if rebuilt.is_empty() {
             return Ok(());
         }
         // The filled values and the rebuilt indexes are durable before a file
-        // goes.
-        if folded.filled > 0 || !folded.indexes.is_empty() {
-            grafeo_common::testing::crash::maybe_crash("legacy_spill:after_fill");
-            self.wal_checkpoint()?;
-        }
+        // goes, also when nothing was filled: a deleted file no longer
+        // triggers the rebuild.
+        grafeo_common::testing::crash::maybe_crash("legacy_spill:after_fill");
+        self.wal_checkpoint()?;
         grafeo_common::testing::crash::maybe_crash("legacy_spill:before_delete");
         // Only `<file>.spill` is this database's own: in a configured spill
         // path, which databases may share, another one may still need a file.
@@ -504,6 +741,35 @@ impl super::GrafeoDB {
                     "could not remove the folded spill file {}: {error}",
                     file.path.display()
                 );
+            }
+        }
+        // A kept file goes out of the way, so the next open neither reads it
+        // nor rebuilds and checkpoints for it again.
+        for kept in &folded.kept {
+            if !kept.file.derived {
+                grafeo_common::grafeo_warn!("{}; the file stays", kept.describe());
+                continue;
+            }
+            match move_to_kept(&kept.file.path) {
+                Ok(target) => grafeo_common::grafeo_warn!(
+                    "{}; the file moved to {}, which no open reads: check it, and remove it \
+                     once you no longer need it",
+                    kept.describe(),
+                    target.display()
+                ),
+                Err(error) => grafeo_common::grafeo_warn!(
+                    "{}; it could not move to {}: {error}, so it stays where it is: until it \
+                     is removed, every open rebuilds the vector index on :{}({}), and every \
+                     read-write open also writes a checkpoint",
+                    kept.describe(),
+                    kept.file
+                        .path
+                        .parent()
+                        .map_or_else(|| PathBuf::from(KEPT), |parent| parent.join(KEPT))
+                        .display(),
+                    kept.file.label,
+                    kept.file.property.as_str()
+                ),
             }
         }
         for directory in directories.iter().filter(|directory| directory.derived) {
@@ -662,10 +928,11 @@ mod tests {
     }
 
     /// A file whose vectors have another number of dimensions than the index
-    /// (0 and 3 against 2) is not read: it fills nothing and stays out of the
-    /// fold, so it is never deleted.
+    /// (0 and 3 against 2) is not read: it fills nothing, is never deleted,
+    /// and is kept for good (a later open would refuse it again), its index
+    /// rebuilt.
     #[test]
-    fn a_file_of_another_dimension_is_left_out() {
+    fn a_file_of_another_dimension_is_kept_out() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vectors_Item%3Aembedding.bin");
         let db = crate::GrafeoDB::new_in_memory();
@@ -682,11 +949,147 @@ mod tests {
             let folded = fold_in(store, &find(dir.path(), true));
             assert!(folded.files.is_empty(), "{dimensions} dimensions");
             assert_eq!(folded.filled, 0);
+            assert_eq!(folded.kept.len(), 1, "{dimensions} dimensions");
+            assert_eq!(folded.kept[0].file.path, path);
+            assert!(
+                matches!(
+                    folded.kept[0].because,
+                    KeptBecause::Dimensions { file, index: 2 } if file == dimensions
+                ),
+                "{dimensions} dimensions: {:?}",
+                folded.kept[0].because
+            );
+            assert!(
+                folded
+                    .indexes
+                    .contains(&("Item".into(), "embedding".into()))
+            );
             assert_eq!(
                 store.get_node_property(alix, &PropertyKey::new("embedding")),
                 None
             );
         }
+    }
+
+    /// Records of nodes that exist, have no value and lack the index's label
+    /// (Butch and Mia, `:Person`) are left out, counted with their first
+    /// ids, and keep the file read through (they are its only copy). Alix,
+    /// an `:Item`, is filled; Vincent, deleted, is no loss.
+    #[test]
+    fn records_of_nodes_without_the_label_keep_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, items) = items(2);
+        let (alix, vincent) = (items[0], items[1]);
+        assert!(db.delete_node(vincent).unwrap());
+        let butch = db.create_node(&["Person"]).unwrap();
+        let mia = db.create_node(&["Person"]).unwrap();
+        let path = dir.path().join("vectors_Item%3Aembedding.bin");
+        write_old(
+            &path,
+            2,
+            &[
+                (alix.as_u64(), vec![3.0, 19.0]),
+                (butch.as_u64(), vec![19.0, 88.0]),
+                (vincent.as_u64(), vec![88.0, 3.0]),
+                (mia.as_u64(), vec![3.19, 88.3]),
+            ],
+        );
+
+        let folded = fold_in(db.lpg_store(), &find(dir.path(), true));
+        assert_eq!(folded.filled, 1, "Alix");
+        assert!(folded.files.is_empty(), "not deleted");
+        assert_eq!(folded.kept.len(), 1);
+        assert_eq!(folded.kept[0].file.path, path);
+        assert!(
+            matches!(
+                &folded.kept[0].because,
+                KeptBecause::WithoutLabel(skipped)
+                    if *skipped == WithoutLabel { count: 2, first: vec![butch, mia] }
+            ),
+            "{:?}",
+            folded.kept[0].because
+        );
+        let key = PropertyKey::new("embedding");
+        assert_eq!(db.lpg_store().get_node_property(butch, &key), None);
+    }
+
+    /// A warning about a kept file names the file, how many records it left
+    /// out and the first ids, at most [`FIRST_IDS`].
+    #[test]
+    fn the_warning_of_a_kept_file_names_the_count_and_the_first_ids() {
+        let mut skipped = WithoutLabel::default();
+        for id in 3..3 + 19 {
+            skipped.add(NodeId::new(id));
+        }
+        let kept = KeptFile {
+            file: LegacyVectorFile {
+                path: PathBuf::from("vectors_Item%3Aembedding.bin"),
+                label: "Item".to_string(),
+                property: PropertyKey::new("embedding"),
+                derived: true,
+            },
+            because: KeptBecause::WithoutLabel(skipped),
+        };
+        let warning = kept.describe();
+        assert!(
+            warning.contains("vectors_Item%3Aembedding.bin holds 19 embeddings"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("the first ids: 3, 4, 5, 6, 7, 8, 9, 10)"),
+            "{warning}"
+        );
+    }
+
+    /// A file that cannot be opened (here removed after it was found: an I/O
+    /// error, not a file refused for good) stays where it is: it is neither
+    /// deleted nor kept, and its index is rebuilt.
+    #[test]
+    fn a_file_that_cannot_be_opened_stays_where_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, ids) = items(1);
+        let path = dir.path().join("vectors_Item%3Aembedding.bin");
+        write_old(&path, 2, &[(ids[0].as_u64(), vec![3.0, 19.0])]);
+        let found = find(dir.path(), true);
+        std::fs::remove_file(&path).unwrap();
+
+        let folded = fold_in(db.lpg_store(), &found);
+        assert!(folded.files.is_empty(), "not deleted");
+        assert!(folded.kept.is_empty(), "not kept: {:?}", folded.kept);
+        assert!(
+            folded
+                .indexes
+                .contains(&("Item".into(), "embedding".into()))
+        );
+    }
+
+    /// The warning about a file that stays after an I/O error says what that
+    /// costs: every open rebuilds its index, and a read-write one writes a
+    /// checkpoint, until the file can be read or is removed.
+    #[test]
+    fn the_warning_of_a_file_that_cannot_be_read_names_its_cost() {
+        let file = LegacyVectorFile {
+            path: PathBuf::from("vectors_Item%3Aembedding.bin"),
+            label: "Item".to_string(),
+            property: PropertyKey::new("embedding"),
+            derived: true,
+        };
+        let error = io::Error::other("Gus holds it open");
+        for filled in [None, Some(19)] {
+            let warning = stays_after_an_io_error(&file, &error, filled);
+            for part in [
+                "vectors_Item%3Aembedding.bin",
+                "Gus holds it open",
+                "until it can be read or is removed, every open rebuilds the vector index on \
+                 :Item(embedding), and every read-write open also writes a checkpoint",
+            ] {
+                assert!(warning.contains(part), "{filled:?}: {warning}");
+            }
+        }
+        assert!(
+            stays_after_an_io_error(&file, &error, Some(19))
+                .contains("the 19 embeddings of :Item(embedding) read before stay")
+        );
     }
 
     /// Items with a 2-dimension index: an in-memory database and the ids of
@@ -744,15 +1147,19 @@ mod tests {
             .unwrap()
             .set_len(HEADER_BYTES as u64 + 16 * 319)
             .unwrap();
-        let (filled, batches, stopped) = fill_from(db.lpg_store(), &file, &mut old, 16);
-        assert!(stopped.is_some(), "the read stops");
-        assert!(filled > 0 && filled < 1988, "filled {filled}");
-        assert_eq!(filled, batches, "one value a batch");
+        let read = fill_from(db.lpg_store(), &file, &mut old, 16);
+        assert!(read.stopped.is_some(), "the read stops");
+        assert!(
+            read.filled > 0 && read.filled < 1988,
+            "filled {}",
+            read.filled
+        );
+        assert_eq!(read.filled, read.batches, "one value a batch");
     }
 
     /// Only the files of this database's vector indexes are folded; a file
-    /// that cannot be read is neither folded nor reported as folded, so it
-    /// is never deleted.
+    /// that is not an old spill file is neither folded nor reported as
+    /// folded, so it is never deleted: it is kept for good.
     #[test]
     fn folds_the_files_of_its_indexes_and_leaves_the_others() {
         let dir = tempfile::tempdir().unwrap();
@@ -776,6 +1183,14 @@ mod tests {
         let folded = fold_in(store, &find(dir.path(), true));
         let paths: Vec<&PathBuf> = folded.files.iter().map(|file| &file.path).collect();
         assert_eq!(paths, vec![&good]);
+        assert_eq!(folded.kept.len(), 1);
+        assert_eq!(folded.kept[0].file.path, bad);
+        assert!(
+            matches!(&folded.kept[0].because, KeptBecause::Invalid(error)
+                if error.kind() == io::ErrorKind::InvalidData),
+            "{:?}",
+            folded.kept[0].because
+        );
         assert_eq!(folded.filled, 1);
         let key = PropertyKey::new("embedding");
         assert_eq!(

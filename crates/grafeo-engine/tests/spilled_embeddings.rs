@@ -324,8 +324,9 @@ fn a_crash_while_spilled_keeps_embeddings_and_the_next_open_removes_the_cache() 
     let path = dir.path().join("barcelona.grafeo");
     crash_in_child(&path, "while_spilled");
     assert_eq!(names_in(&cache_dir(&path)).len(), 1, "the crash left it");
-    // A 0.5.x spill file beside the cache is not the cache's to remove.
-    let old = spill_dir(&path).join("vectors_Item%3Aembedding.bin");
+    // A 0.5.x spill file beside the cache is not the cache's to remove (one
+    // of an index this database does not have, which the fold leaves alone).
+    let old = spill_dir(&path).join("vectors_Doc%3Aembedding.bin");
     std::fs::write(&old, b"0.5.x").unwrap();
 
     let db = GrafeoDB::open(&path).unwrap();

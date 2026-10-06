@@ -20,6 +20,9 @@
 //! open warns and spills nothing. The other directories are created only
 //! when something spills. Each is removed
 //! (when empty) once the last spilled column reading from it is gone.
+//! `<file>.spill/kept/` is not spilled data: it holds the old spill files of
+//! an older build that an open kept instead of folding them in completely
+//! (see `legacy_spill`), and nothing here reads or removes it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

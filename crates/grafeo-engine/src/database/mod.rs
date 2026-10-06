@@ -462,7 +462,8 @@ impl GrafeoDB {
         let legacy_spill_directories =
             legacy_spill::directories(database_path.as_deref(), config.spill_path.as_deref());
         // Whether this open reads a 0.5.x database in place: only then are old
-        // spill files in a configured spill path its own (see `legacy_spill`).
+        // spill files in a configured spill path its own, and every vector
+        // index is rebuilt (see `legacy_spill`).
         #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
         let mut reads_a_0_5_database = false;
 
@@ -933,13 +934,17 @@ impl GrafeoDB {
         }
 
         // Embeddings an older build spilled come back into their columns
-        // (#594), before the checkpoint timer could write the store.
+        // (#594), before the checkpoint timer could write the store. A 0.5.x
+        // database read in place gets every vector index rebuilt: one that
+        // reloaded its spilled embeddings before it closed left no old file,
+        // and an index that missed the embeddings set while spilled.
         #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
         db.fold_in_legacy_spill(
             &legacy_spill_directories
                 .into_iter()
                 .filter(|directory| directory.derived || reads_a_0_5_database)
                 .collect::<Vec<_>>(),
+            reads_a_0_5_database,
         )?;
 
         // Start periodic checkpoint timer if configured (after the layered

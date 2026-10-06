@@ -361,27 +361,135 @@ fn a_spill_file_without_an_index_here_is_left_alone() {
     drop(dir);
 }
 
-/// An old spill file that does not read as one (here cut short) is kept as
-/// it was, and its embeddings stay out: nothing is deleted that was not
-/// folded.
+/// The directory of `<file>.spill` that old files a read-write open could
+/// not fold in completely move to.
+fn kept_dir(path: &Path) -> PathBuf {
+    spill_dir(path).join("kept")
+}
+
+/// An old spill file that does not read as one (cut short, another magic, no
+/// header, a count no file can hold) is refused for good: its embeddings stay
+/// out, a read-only open leaves it where it is, and a read-write open moves
+/// it to `<file>.spill/kept/`, byte for byte, so no later open reads it again.
 #[test]
-fn an_old_spill_file_that_cannot_be_read_is_kept() {
+fn an_old_spill_file_that_is_not_one_moves_to_kept() {
+    let (_source_dir, source) = fixture("0.6.0-dev");
+    let original = std::fs::read(spill_dir(&source).join(SPILL_FILE)).unwrap();
+    let mut other_magic = original.clone();
+    other_magic[..8].copy_from_slice(b"GRAFVEC0");
+    let mut huge_count = original[..64].to_vec();
+    huge_count[16..24].copy_from_slice(&(u64::MAX / 16).to_le_bytes());
+    for (damage, bytes) in [
+        ("cut short", original[..original.len() - 1].to_vec()),
+        ("another magic", other_magic),
+        ("no header", b"GRAFVEC1".to_vec()),
+        ("a count no file can hold", huge_count),
+    ] {
+        let (_dir, path) = fixture("0.6.0-dev");
+        let old = spill_dir(&path).join(SPILL_FILE);
+        std::fs::write(&old, &bytes).unwrap();
+
+        let db = GrafeoDB::open_read_only(&path).unwrap();
+        assert_eq!(embeddings(&db), unfolded(), "{damage}: read-only");
+        drop(db);
+        assert_eq!(
+            std::fs::read(&old).unwrap(),
+            bytes,
+            "{damage}: a read-only open moves nothing"
+        );
+
+        let db = GrafeoDB::open(&path).unwrap();
+        assert_eq!(embeddings(&db), unfolded(), "{damage}");
+        assert!(!old.exists(), "{damage}: the file left the top level");
+        assert_eq!(
+            std::fs::read(kept_dir(&path).join(SPILL_FILE)).unwrap(),
+            bytes,
+            "{damage}: kept byte for byte"
+        );
+    }
+}
+
+/// A file refused for good (here vectors of 2 dimensions against an index of
+/// 3) costs one rebuild and one checkpoint: the read-write open moves it to
+/// `kept/` once both are done (an injected checkpoint failure ends the first
+/// open and moves nothing), and the next open finds no old file, so it
+/// neither rebuilds the index nor writes a checkpoint (an injected failure
+/// would end it, and it passes no crash point, the rebuild's included).
+#[cfg(feature = "testing-crash-injection")]
+#[test]
+fn a_refused_file_moves_to_kept_and_the_next_open_neither_rebuilds_nor_checkpoints() {
+    use grafeo_common::testing::crash::{CrashResult, with_crash_at, with_failure_at};
+
     let (_dir, path) = fixture("0.6.0-dev");
     let old = spill_dir(&path).join(SPILL_FILE);
+    write_old(&old, 2, &[(0, vec![3.0, 19.0])]);
     let bytes = std::fs::read(&old).unwrap();
-    std::fs::write(&old, &bytes[..bytes.len() - 1]).unwrap();
+    assert!(
+        with_failure_at(1, || GrafeoDB::open(&path)).is_err(),
+        "the first open writes a checkpoint"
+    );
+    assert_eq!(
+        std::fs::read(&old).unwrap(),
+        bytes,
+        "a failed checkpoint moves nothing"
+    );
 
     let db = GrafeoDB::open(&path).unwrap();
+    assert!(!old.exists(), "the file left the top level");
     assert_eq!(
-        embeddings(&db),
-        vec![
-            ("Alix".to_string(), None),
-            ("Gus".to_string(), Some(vec![1988.0, 3.0, 19.0])),
-            ("Jules".to_string(), None),
-        ]
+        std::fs::read(kept_dir(&path).join(SPILL_FILE)).unwrap(),
+        bytes,
+        "kept byte for byte"
     );
+    db.close().unwrap();
     drop(db);
-    assert_eq!(std::fs::read(&old).unwrap(), bytes[..bytes.len() - 1]);
+
+    let reopened = with_failure_at(1, || GrafeoDB::open(&path));
+    assert!(
+        reopened.is_ok(),
+        "the next open writes a checkpoint: {:?}",
+        reopened.err()
+    );
+    drop(reopened);
+    let CrashResult::Completed(reopened) = with_crash_at(1, || GrafeoDB::open(&path)) else {
+        panic!("the next open passed a crash point: a rebuild or a checkpoint");
+    };
+    let db = reopened.unwrap();
+    assert_eq!(
+        search_names(&db, &[1988.0, 3.0, 19.0], 3),
+        vec!["Gus"],
+        "the index rebuilt once"
+    );
+    assert_eq!(
+        std::fs::read(kept_dir(&path).join(SPILL_FILE)).unwrap(),
+        bytes,
+        "nothing reads kept/"
+    );
+}
+
+/// A kept file is never replaced: a name taken in `kept/` gets the first free
+/// numeric suffix.
+#[test]
+fn a_kept_file_never_replaces_another() {
+    let (_dir, path) = fixture("0.6.0-dev");
+    let old = spill_dir(&path).join(SPILL_FILE);
+    write_old(&old, 2, &[(0, vec![3.0, 19.0])]);
+    let bytes = std::fs::read(&old).unwrap();
+    let kept = kept_dir(&path);
+    std::fs::create_dir(&kept).unwrap();
+    std::fs::write(kept.join(SPILL_FILE), b"Vincent").unwrap();
+    std::fs::write(kept.join(format!("{SPILL_FILE}.1")), b"Mia").unwrap();
+
+    drop(GrafeoDB::open(&path).unwrap());
+    assert!(!old.exists(), "the file left the top level");
+    assert_eq!(
+        files(&kept),
+        BTreeMap::from([
+            (PathBuf::from(SPILL_FILE), b"Vincent".to_vec()),
+            (PathBuf::from(format!("{SPILL_FILE}.1")), b"Mia".to_vec()),
+            (PathBuf::from(format!("{SPILL_FILE}.2")), bytes),
+        ])
+    );
 }
 
 /// Folding in is a load step, like WAL replay: no change event and no new
@@ -510,7 +618,11 @@ fn a_crash_while_folding_in_loses_nothing() {
         assert!(point < 500, "the open never completed: {points:?}");
     }
     eprintln!("crash points swept: {points:?}");
-    for expected in ["legacy_spill:after_fill", "legacy_spill:before_delete"] {
+    for expected in [
+        "legacy_spill:rebuild",
+        "legacy_spill:after_fill",
+        "legacy_spill:before_delete",
+    ] {
         assert!(
             points.iter().any(|name| name == expected),
             "the sweep missed {expected}: {points:?}"
@@ -557,9 +669,10 @@ fn write_old(path: &Path, dimensions: usize, records: &[(u64, Vec<f32>)]) {
 /// index (2 and 0 against 3; a foreign or damaged file) is not read, by a
 /// read-only or a read-write open of either fixture: the embeddings it held
 /// stay out (Gus keeps the one the database file holds), the file stays, byte
-/// for byte, and vector search works.
+/// for byte (in `kept/` after a read-write open of a 0.6 file, with the kept
+/// copy after a migration), and vector search works.
 #[test]
-fn a_spill_file_of_another_dimension_is_left_alone() {
+fn a_spill_file_of_another_dimension_is_not_read() {
     let expected = vec![
         ("Alix".to_string(), None),
         ("Gus".to_string(), Some(vec![1988.0, 3.0, 19.0])),
@@ -597,7 +710,7 @@ fn a_spill_file_of_another_dimension_is_left_alone() {
             let kept = if version == "0.5.44" {
                 PathBuf::from(format!("{}.pre-0.6.spill", path.display())).join(SPILL_FILE)
             } else {
-                old.clone()
+                kept_dir(&path).join(SPILL_FILE)
             };
             assert_eq!(
                 std::fs::read(&kept).unwrap(),
@@ -795,4 +908,112 @@ fn search_finds_the_embeddings_the_fold_brings_back() {
             "{version}: nothing folded, reopened"
         );
     }
+}
+
+/// A node that lost the index's label while spilled has its embedding only in
+/// the old file (0.5.x kept a property when a label went, and its reload
+/// brought the value back). The fold fills only nodes of the label, so Butch,
+/// a `:Person` now, gets nothing; the read-write open then moves the file to
+/// `<file>.spill/kept/`, byte for byte, instead of deleting it, so his
+/// embedding is not lost, and no later open reads it.
+#[test]
+fn the_embedding_of_a_node_that_lost_the_label_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paris.grafeo");
+    let db = GrafeoDB::open(&path).unwrap();
+    db.create_node_with_props(
+        &["Item"],
+        [
+            ("name", Value::from("Alix")),
+            ("embedding", Value::Vector(vec![3.0, 19.0, 88.0].into())),
+        ],
+    )
+    .unwrap();
+    let butch = db
+        .create_node_with_props(&["Person"], [("name", Value::from("Butch"))])
+        .unwrap();
+    db.create_vector_index("Item", "embedding", Some(3), None, None, None, None)
+        .unwrap();
+    db.close().unwrap();
+    drop(db);
+    std::fs::create_dir(spill_dir(&path)).unwrap();
+    let old = spill_dir(&path).join(SPILL_FILE);
+    write_old(&old, 3, &[(butch.as_u64(), vec![19.0, 88.0, 3.0])]);
+    let bytes = std::fs::read(&old).unwrap();
+
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(person_embeddings(&db), vec![("Butch".to_string(), None)]);
+    assert!(!old.exists(), "the file left the top level");
+    assert_eq!(
+        std::fs::read(kept_dir(&path).join(SPILL_FILE)).unwrap(),
+        bytes,
+        "Butch's embedding is kept, byte for byte"
+    );
+    db.close().unwrap();
+    drop(db);
+
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(
+        person_embeddings(&db),
+        vec![("Butch".to_string(), None)],
+        "nothing reads kept/"
+    );
+    assert_eq!(
+        files(&kept_dir(&path)),
+        BTreeMap::from([(PathBuf::from(SPILL_FILE), bytes)])
+    );
+}
+
+/// A fold that fills nothing (the file holds only Gus's old embedding, and
+/// the database file holds his newer one) still rebuilds the index, and the
+/// rebuilt index is durable before the file goes: after an open that exits
+/// without a close, the file is gone and a search for Gus's vector finds him.
+#[cfg(feature = "testing-crash-injection")]
+#[test]
+fn a_rebuild_without_a_fill_is_durable() {
+    let (_dir, path) = fixture("0.6.0-dev");
+    write_old(
+        &spill_dir(&path).join(SPILL_FILE),
+        3,
+        &[(1, vec![19.0, 88.0, 3.0])],
+    );
+    assert_eq!(open_in_child(u64::MAX, &path), None, "the open completes");
+    assert!(
+        !spill_dir(&path).join(SPILL_FILE).exists(),
+        "the old file was deleted"
+    );
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(embeddings(&db), unfolded(), "nothing was filled");
+    assert_eq!(search_names(&db, &[1988.0, 3.0, 19.0], 3), vec!["Gus"]);
+}
+
+/// A 0.5.x database that reloaded its spilled embeddings before it closed has
+/// no old file, and the index it saved still misses Gus's embedding, set
+/// while spilled. Every vector index of a 0.5.x database is rebuilt from the
+/// stored values while it is read in place: a read-only open (in memory), the
+/// migration (so the 0.6 file holds the rebuilt index, and its next open
+/// rebuilds nothing) and a read-only open of the kept copy. Alix and Jules
+/// had their embeddings only in the removed file: a search finds only Gus.
+#[test]
+fn a_0_5_database_without_its_spill_file_gets_its_vector_index_rebuilt() {
+    let (dir, path) = fixture("0.5.44");
+    std::fs::remove_dir_all(spill_dir(&path)).unwrap();
+    let gus = [1988.0, 3.0, 19.0];
+
+    let db = GrafeoDB::open_read_only(&path).unwrap();
+    assert_eq!(search_names(&db, &gus, 3), vec!["Gus"], "read-only");
+    drop(db);
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(search_names(&db, &gus, 3), vec!["Gus"], "migrated");
+    db.close().unwrap();
+    drop(db);
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(
+        search_names(&db, &gus, 3),
+        vec!["Gus"],
+        "the 0.6 file holds the rebuilt index"
+    );
+    drop(db);
+    let kept = GrafeoDB::open_read_only(dir.path().join("spilled.grafeo.pre-0.6")).unwrap();
+    assert_eq!(search_names(&kept, &gus, 3), vec!["Gus"], "the kept copy");
 }

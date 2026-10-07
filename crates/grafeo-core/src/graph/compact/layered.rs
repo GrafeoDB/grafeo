@@ -8,7 +8,7 @@
 //! Requires both `compact-store` and `lpg` features.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use arcstr::ArcStr;
@@ -28,9 +28,20 @@ use crate::statistics::Statistics;
 ///
 /// The compact base serves cold reads (immutable, columnar). The LPG overlay
 /// captures all mutations. Reads check the overlay first: if an entity is in
-/// `dirty_node_ids` or `dirty_edge_ids`, the overlay is authoritative. If an
-/// entity is in `deleted_from_base_nodes` or `deleted_from_base_edges`, it has
-/// been deleted and returns `None`. Otherwise, the base is queried.
+/// `dirty_node_ids` or `dirty_edge_ids`, the overlay is authoritative. If a
+/// base entity has a tombstone in the overlay that the read's view counts, it
+/// has been deleted and returns `None`. Otherwise, the base is queried.
+///
+/// A transaction's delete of a base entity writes a pending tombstone, listed
+/// in the overlay's undo log: the transaction's commit stamps it with the
+/// commit epoch, and its rollback (or a savepoint rollback) removes it. So the
+/// three views of the store see base deletes as they see the overlay's own:
+/// a versioned read (`*_versioned`) misses the entity when its transaction
+/// deleted it or the delete is committed at or before its epoch, a read at an
+/// epoch (`*_at_epoch`) when the delete is committed at or before that epoch,
+/// and every other read (current reads: lookups, scans, counts, traversals
+/// and searches) when the delete is committed. A delete outside a transaction
+/// is committed at once.
 pub struct LayeredStore {
     /// Read-only columnar base (cold data).
     ///
@@ -47,20 +58,15 @@ pub struct LayeredStore {
     /// `merge_overlay_in_place` call: existing readers continue holding
     /// the old `Arc` until they finish, while subsequent reads pick up
     /// the empty overlay.
+    ///
+    /// The overlay also keeps the tombstones of deleted base nodes and
+    /// edges, in its undo log while their transaction is open, so a merge's
+    /// publish drops them with it.
     overlay: ArcSwap<LpgStore>,
     /// Node IDs modified or created in the overlay.
     dirty_node_ids: RwLock<FxHashSet<NodeId>>,
     /// Edge IDs modified or created in the overlay.
     dirty_edge_ids: RwLock<FxHashSet<EdgeId>>,
-    /// Base node IDs that have been deleted.
-    deleted_from_base_nodes: RwLock<FxHashSet<NodeId>>,
-    /// Base edge IDs that have been deleted.
-    deleted_from_base_edges: RwLock<FxHashSet<EdgeId>>,
-    /// Tracks whether `deleted_from_base_*` has changed since the last
-    /// flush. The `OverlayDeletionsSection` checks this on each
-    /// `is_dirty()` call so periodic checkpoints skip the write when no
-    /// new deletions have accumulated.
-    deletions_dirty: AtomicBool,
     /// Merge serialization guard (Phase 5d).
     ///
     /// Mutations acquire `read()` for the duration of a single
@@ -117,7 +123,12 @@ impl std::fmt::Debug for LayeredStore {
             .field("dirty_nodes", &self.dirty_node_ids.read().len())
             .field(
                 "deleted_base_nodes",
-                &self.deleted_from_base_nodes.read().len(),
+                &self
+                    .overlay
+                    .load()
+                    .base_tombstones()
+                    .deleted_nodes()
+                    .count(),
             )
             .finish_non_exhaustive()
     }
@@ -157,16 +168,21 @@ impl LayeredStore {
     /// observe an empty set, and return the stale base version of any
     /// modified base node.
     ///
-    /// **Note on deletions:** `deleted_from_base_nodes` /
-    /// `deleted_from_base_edges` are NOT reconstructable from the
-    /// in-memory state alone — a base node that was deleted simply has
-    /// no overlay entry, so the scan can't tell it apart from a base
-    /// node that was never touched. The deletion log is persisted in
-    /// the [`OverlayDeletions`](grafeo_common::storage::section::SectionType::OverlayDeletions)
+    /// **Note on deletions:** the tombstones of deleted base nodes and
+    /// edges are NOT reconstructable from the overlay's data: a base node
+    /// that was deleted simply has no overlay entry, so the scan can't tell
+    /// it apart from a base node that was never touched. The committed
+    /// tombstones are persisted in the
+    /// [`OverlayDeletions`](grafeo_common::storage::section::SectionType::OverlayDeletions)
     /// section; callers should follow `with_overlay` with a call to
     /// [`seed_deleted_from_base`](Self::seed_deleted_from_base) carrying
     /// the snapshot read from that section, when one is present in the
     /// container directory.
+    ///
+    /// The overlay's own nodes and edges (created after `compact()`) are not
+    /// put in the dirty sets here, which then name only the base entities the
+    /// overlay holds a copy of: a write or delete of an id the base does not
+    /// have goes to the overlay, in the dirty sets or not.
     ///
     /// The overlay's id allocator state is preserved as-is; callers
     /// should ensure it has been seeded correctly during deserialization.
@@ -189,9 +205,6 @@ impl LayeredStore {
             overlay: ArcSwap::new(overlay),
             dirty_node_ids: RwLock::new(dirty_nodes),
             dirty_edge_ids: RwLock::new(dirty_edges),
-            deleted_from_base_nodes: RwLock::new(FxHashSet::default()),
-            deleted_from_base_edges: RwLock::new(FxHashSet::default()),
-            deletions_dirty: AtomicBool::new(false),
             merge_guard: RwLock::new(()),
             publish_generation: AtomicU64::new(0),
             #[cfg(test)]
@@ -207,9 +220,6 @@ impl LayeredStore {
             overlay: ArcSwap::new(overlay),
             dirty_node_ids: RwLock::new(FxHashSet::default()),
             dirty_edge_ids: RwLock::new(FxHashSet::default()),
-            deleted_from_base_nodes: RwLock::new(FxHashSet::default()),
-            deleted_from_base_edges: RwLock::new(FxHashSet::default()),
-            deletions_dirty: AtomicBool::new(false),
             merge_guard: RwLock::new(()),
             publish_generation: AtomicU64::new(0),
             #[cfg(test)]
@@ -285,13 +295,13 @@ impl LayeredStore {
         self.overlay.load_full()
     }
 
-    /// Number of dirty (modified/created) entities in the overlay.
+    /// Number of dirty (modified/created) entities in the overlay, and of
+    /// deleted base entities (pending deletes included).
     #[must_use]
     pub fn overlay_mutation_count(&self) -> usize {
         self.dirty_node_ids.read().len()
             + self.dirty_edge_ids.read().len()
-            + self.deleted_from_base_nodes.read().len()
-            + self.deleted_from_base_edges.read().len()
+            + self.overlay.load().base_tombstones().count()
     }
 
     /// Approximate heap bytes of the overlay only (excluding base).
@@ -337,9 +347,10 @@ impl LayeredStore {
     }
 
     /// Swaps in `base` (when given) and a fresh empty overlay whose id
-    /// allocators are seeded from that base, and clears the dirty and
-    /// deleted bookkeeping, as one publish: `publish_generation` is odd while
-    /// it writes, so no read combines one side of it with the other (see
+    /// allocators are seeded from that base (the old overlay's tombstones of
+    /// base deletes go with it), and clears the dirty bookkeeping, as one
+    /// publish: `publish_generation` is odd while it writes, so no read
+    /// combines one side of it with the other (see
     /// [`read_consistent`](Self::read_consistent)). The caller holds the
     /// write side of `merge_guard`, so no writer changes the overlay.
     ///
@@ -383,16 +394,15 @@ impl LayeredStore {
         #[cfg(test)]
         self.run_publish_hook(PublishStep::Began);
         let retired_base = base.map(|base| self.base.swap(base));
-        // The overlay before the deleted sets: the search reads, which run
-        // outside `read_consistent`, rest on this order (see `text_search`).
+        // The tombstones of base deletes are in the overlay, so they swap
+        // with it: the search reads, which run outside `read_consistent`,
+        // filter an overlay's index with that overlay's tombstones (see
+        // `text_search`).
         let retired_overlay = self.overlay.swap(fresh);
         #[cfg(test)]
         self.run_publish_hook(PublishStep::LayersSwapped);
         self.dirty_node_ids.write().clear();
         self.dirty_edge_ids.write().clear();
-        self.deleted_from_base_nodes.write().clear();
-        self.deleted_from_base_edges.write().clear();
-        self.deletions_dirty.store(false, Ordering::Release);
         drop(publishing);
         RetiredLayers {
             _base: retired_base,
@@ -442,35 +452,37 @@ impl LayeredStore {
         }
     }
 
-    /// Returns a snapshot of the base node ids the overlay has marked as
-    /// deleted but not yet merged. Used by the persistence layer to write
-    /// the [`OverlayDeletions`](grafeo_common::storage::section::SectionType::OverlayDeletions)
-    /// section so the deletions survive close/reopen cycles.
+    /// Returns a snapshot of the base node ids whose delete is committed
+    /// and not yet merged. Used by the persistence layer to write the
+    /// [`OverlayDeletions`](grafeo_common::storage::section::SectionType::OverlayDeletions)
+    /// section so the deletions survive close/reopen cycles. A delete of a
+    /// transaction still open is not in it: the transaction may roll back.
     #[must_use]
     pub fn snapshot_deleted_node_ids(&self) -> Vec<NodeId> {
-        self.deleted_from_base_nodes
-            .read()
-            .iter()
-            .copied()
+        self.overlay
+            .load()
+            .base_tombstones()
+            .deleted_nodes()
             .collect()
     }
 
-    /// Snapshot of base edge ids deleted-but-not-merged. See
-    /// [`Self::snapshot_deleted_node_ids`].
+    /// Snapshot of base edge ids whose delete is committed and not merged.
+    /// See [`Self::snapshot_deleted_node_ids`].
     #[must_use]
     pub fn snapshot_deleted_edge_ids(&self) -> Vec<EdgeId> {
-        self.deleted_from_base_edges
-            .read()
-            .iter()
-            .copied()
+        self.overlay
+            .load()
+            .base_tombstones()
+            .deleted_edges()
             .collect()
     }
 
-    /// Seeds the deleted-from-base sets from a previously-persisted
-    /// snapshot (typically the `OverlayDeletions` section). The current
-    /// sets are replaced atomically; any in-memory deletions accumulated
-    /// before the seed are dropped (callers should only seed during
-    /// open, before any new mutations are accepted).
+    /// Seeds the tombstones of deleted base nodes and edges from a
+    /// previously-persisted snapshot (typically the `OverlayDeletions`
+    /// section): committed deletes at [`EpochId::INITIAL`], so every reader
+    /// misses them. The current tombstones are replaced; any in-memory
+    /// deletions accumulated before the seed are dropped (callers should
+    /// only seed during open, before any new mutations are accepted).
     ///
     /// Clears the deletions-dirty flag so the next checkpoint does not
     /// re-write the section just because the seed populated it.
@@ -479,28 +491,22 @@ impl LayeredStore {
         nodes: impl IntoIterator<Item = NodeId>,
         edges: impl IntoIterator<Item = EdgeId>,
     ) {
-        let mut node_set = self.deleted_from_base_nodes.write();
-        node_set.clear();
-        node_set.extend(nodes);
-        let mut edge_set = self.deleted_from_base_edges.write();
-        edge_set.clear();
-        edge_set.extend(edges);
-        self.deletions_dirty.store(false, Ordering::Release);
+        self.overlay.load().seed_base_tombstones(nodes, edges);
     }
 
-    /// Whether the deletion log has changed since the last
+    /// Whether a committed delete was added since the last
     /// [`mark_deletions_clean`](Self::mark_deletions_clean) call. Used by
     /// the `OverlayDeletionsSection` to decide whether a periodic
     /// checkpoint should re-emit the section.
     #[must_use]
     pub fn deletions_dirty(&self) -> bool {
-        self.deletions_dirty.load(Ordering::Acquire)
+        self.overlay.load().base_tombstones_changed()
     }
 
     /// Marks the deletion log as clean. Called by the flush path after a
     /// successful write of the `OverlayDeletions` section.
     pub fn mark_deletions_clean(&self) {
-        self.deletions_dirty.store(false, Ordering::Release);
+        self.overlay.load().mark_base_tombstones_written();
     }
 
     /// Merges the overlay into a fresh `CompactStore`, swaps it in as
@@ -538,37 +544,44 @@ impl LayeredStore {
     fn nodes_by_label_count_in_one_state(&self, label: &str) -> usize {
         let base = self.base.load();
         let overlay = self.overlay_layer();
-        let deleted = self.deleted_from_base_nodes.read();
+        let tombstones = overlay.base_tombstones();
         let dirty = self.dirty_node_ids.read();
 
+        // The deleted base nodes are those whose delete is committed; the
+        // number of tombstones (pending ones too) bounds them.
         let in_base = base.nodes_by_label_count(label);
-        let base_visible = if in_base <= deleted.len() + dirty.len() {
+        let base_visible = if in_base <= tombstones.count() + dirty.len() {
             base.nodes_by_label(label)
                 .iter()
-                .filter(|&id| !deleted.contains(id) && !dirty.contains(id))
+                .filter(|&&id| !tombstones.node_deleted(id) && !dirty.contains(&id))
                 .count()
         } else {
-            let shadowed = deleted
-                .iter()
-                .chain(dirty.iter().filter(|&id| !deleted.contains(id)))
-                .filter(|&&id| base.node_in_label(id, label))
+            let shadowed = tombstones
+                .deleted_nodes()
+                .chain(
+                    dirty
+                        .iter()
+                        .copied()
+                        .filter(|&id| !tombstones.node_deleted(id)),
+                )
+                .filter(|&id| base.node_in_label(id, label))
                 .count();
             // Saturating: a torn read is retried, it must not underflow first.
             in_base.saturating_sub(shadowed)
         };
 
         let in_overlay = overlay.nodes_by_label_count(label);
-        let overlay_visible = if in_overlay <= deleted.len() {
+        let overlay_visible = if in_overlay <= tombstones.count() {
             overlay
                 .nodes_by_label(label)
                 .iter()
-                .filter(|&id| !deleted.contains(id))
+                .filter(|&&id| !tombstones.node_deleted(id))
                 .count()
         } else {
             in_overlay.saturating_sub(
-                deleted
-                    .iter()
-                    .filter(|&&id| overlay.node_in_label(id, label))
+                tombstones
+                    .deleted_nodes()
+                    .filter(|&id| overlay.node_in_label(id, label))
                     .count(),
             )
         };
@@ -590,10 +603,38 @@ impl LayeredStore {
         self.dirty_node_ids.read().contains(&id)
     }
 
-    /// Checks whether a node was deleted from the base.
+    /// Checks whether a base node is deleted for current reads: its delete
+    /// is committed. The tombstones are read from the overlay without the
+    /// test read hook, which runs at a read's loads of the overlay's data.
     #[inline]
     fn is_node_deleted_from_base(&self, id: NodeId) -> bool {
-        self.deleted_from_base_nodes.read().contains(&id)
+        self.overlay.load().base_tombstones().node_deleted(id)
+    }
+
+    /// Checks whether a base node is deleted for a read at `epoch`: its
+    /// delete is committed at or before it.
+    #[inline]
+    fn is_node_deleted_at(&self, id: NodeId, epoch: EpochId) -> bool {
+        self.overlay
+            .load()
+            .base_tombstones()
+            .node_deleted_at(id, epoch)
+    }
+
+    /// Checks whether a base node is deleted for `transaction_id` reading at
+    /// `epoch`: the transaction deleted it, or the delete is committed at or
+    /// before `epoch`.
+    #[inline]
+    fn is_node_deleted_for(
+        &self,
+        id: NodeId,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> bool {
+        self.overlay
+            .load()
+            .base_tombstones()
+            .node_deleted_for(id, epoch, transaction_id)
     }
 
     /// Checks whether an edge ID is in the overlay (dirty or deleted).
@@ -602,10 +643,35 @@ impl LayeredStore {
         self.dirty_edge_ids.read().contains(&id)
     }
 
-    /// Checks whether an edge was deleted from the base.
+    /// Checks whether a base edge is deleted for current reads, as
+    /// [`is_node_deleted_from_base`](Self::is_node_deleted_from_base).
     #[inline]
     fn is_edge_deleted_from_base(&self, id: EdgeId) -> bool {
-        self.deleted_from_base_edges.read().contains(&id)
+        self.overlay.load().base_tombstones().edge_deleted(id)
+    }
+
+    /// Checks whether a base edge is deleted for a read at `epoch`.
+    #[inline]
+    fn is_edge_deleted_at(&self, id: EdgeId, epoch: EpochId) -> bool {
+        self.overlay
+            .load()
+            .base_tombstones()
+            .edge_deleted_at(id, epoch)
+    }
+
+    /// Checks whether a base edge is deleted for `transaction_id` reading at
+    /// `epoch`.
+    #[inline]
+    fn is_edge_deleted_for(
+        &self,
+        id: EdgeId,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> bool {
+        self.overlay
+            .load()
+            .base_tombstones()
+            .edge_deleted_for(id, epoch, transaction_id)
     }
 }
 
@@ -681,7 +747,7 @@ impl GraphStore for LayeredStore {
         transaction_id: TransactionId,
     ) -> Option<Node> {
         self.read_consistent(|| {
-            if self.is_node_deleted_from_base(id) {
+            if self.is_node_deleted_for(id, epoch, transaction_id) {
                 return None;
             }
             if self.is_node_dirty(id) {
@@ -708,7 +774,7 @@ impl GraphStore for LayeredStore {
         transaction_id: TransactionId,
     ) -> Option<Edge> {
         self.read_consistent(|| {
-            if self.is_edge_deleted_from_base(id) {
+            if self.is_edge_deleted_for(id, epoch, transaction_id) {
                 return None;
             }
             if self.is_edge_dirty(id) {
@@ -725,7 +791,7 @@ impl GraphStore for LayeredStore {
 
     fn get_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> Option<Node> {
         self.read_consistent(|| {
-            if self.is_node_deleted_from_base(id) {
+            if self.is_node_deleted_at(id, epoch) {
                 return None;
             }
             if self.is_node_dirty(id) {
@@ -740,7 +806,7 @@ impl GraphStore for LayeredStore {
 
     fn get_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> Option<Edge> {
         self.read_consistent(|| {
-            if self.is_edge_deleted_from_base(id) {
+            if self.is_edge_deleted_at(id, epoch) {
                 return None;
             }
             if self.is_edge_dirty(id) {
@@ -923,8 +989,8 @@ impl GraphStore for LayeredStore {
 
     fn neighbors(&self, node: NodeId, direction: Direction) -> Vec<NodeId> {
         self.read_consistent(|| {
-            let deleted_nodes = self.deleted_from_base_nodes.read();
-            let deleted_edges = self.deleted_from_base_edges.read();
+            let tombstone_layer = self.overlay.load();
+            let tombstones = tombstone_layer.base_tombstones();
 
             let mut results = Vec::new();
 
@@ -932,10 +998,10 @@ impl GraphStore for LayeredStore {
             // copies labels and properties but not adjacency. Derived from base
             // edges so per-edge deletions apply; dirty (promoted) edges are
             // skipped because the overlay copy is authoritative for them.
-            if !deleted_nodes.contains(&node) {
+            if !tombstones.node_deleted(node) {
                 for (target, eid) in self.base.load().edges_from(node, direction) {
-                    if !deleted_nodes.contains(&target)
-                        && !deleted_edges.contains(&eid)
+                    if !tombstones.node_deleted(target)
+                        && !tombstones.edge_deleted(eid)
                         && !self.is_edge_dirty(eid)
                     {
                         results.push(target);
@@ -949,7 +1015,7 @@ impl GraphStore for LayeredStore {
             // corresponding node object; gating on `overlay.get_node(node)`
             // would miss that case.
             for nid in self.overlay_layer().neighbors(node, direction) {
-                if !deleted_nodes.contains(&nid) {
+                if !tombstones.node_deleted(nid) {
                     results.push(nid);
                 }
             }
@@ -962,19 +1028,19 @@ impl GraphStore for LayeredStore {
 
     fn edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
         self.read_consistent(|| {
-            let deleted_nodes = self.deleted_from_base_nodes.read();
-            let deleted_edges = self.deleted_from_base_edges.read();
+            let tombstone_layer = self.overlay.load();
+            let tombstones = tombstone_layer.base_tombstones();
 
             let mut results = Vec::new();
 
             // Base edges, read even when `node` is dirty: `ensure_in_overlay`
             // copies labels and properties but not adjacency. Dirty (promoted)
             // edges are skipped: the overlay copy is authoritative, and deleting
-            // a promoted edge only removes that copy.
-            if !deleted_nodes.contains(&node) {
+            // a promoted edge deletes that copy (and tombstones the base edge).
+            if !tombstones.node_deleted(node) {
                 for (target, eid) in self.base.load().edges_from(node, direction) {
-                    if !deleted_nodes.contains(&target)
-                        && !deleted_edges.contains(&eid)
+                    if !tombstones.node_deleted(target)
+                        && !tombstones.edge_deleted(eid)
                         && !self.is_edge_dirty(eid)
                     {
                         results.push((target, eid));
@@ -990,7 +1056,7 @@ impl GraphStore for LayeredStore {
             // edges, so the unconditional call is cheap when there's nothing
             // to report.
             for (target, eid) in self.overlay_layer().edges_from(node, direction) {
-                if !deleted_nodes.contains(&target) && !deleted_edges.contains(&eid) {
+                if !tombstones.node_deleted(target) && !tombstones.edge_deleted(eid) {
                     results.push((target, eid));
                 }
             }
@@ -1017,14 +1083,15 @@ impl GraphStore for LayeredStore {
 
     fn node_ids(&self) -> Vec<NodeId> {
         self.read_consistent(|| {
-            let deleted = self.deleted_from_base_nodes.read();
+            let tombstone_layer = self.overlay.load();
+            let tombstones = tombstone_layer.base_tombstones();
 
             let mut ids: Vec<NodeId> = self
                 .base
                 .load()
                 .node_ids()
                 .into_iter()
-                .filter(|id| !deleted.contains(id))
+                .filter(|&id| !tombstones.node_deleted(id))
                 .collect();
             ids.extend(self.overlay_layer().node_ids());
             ids.sort_unstable();
@@ -1035,7 +1102,8 @@ impl GraphStore for LayeredStore {
 
     fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
         self.read_consistent(|| {
-            let deleted = self.deleted_from_base_nodes.read();
+            let tombstone_layer = self.overlay.load();
+            let tombstones = tombstone_layer.base_tombstones();
             let dirty = self.dirty_node_ids.read();
 
             let mut ids: Vec<NodeId> = self
@@ -1043,13 +1111,13 @@ impl GraphStore for LayeredStore {
                 .load()
                 .nodes_by_label(label)
                 .into_iter()
-                .filter(|id| !deleted.contains(id) && !dirty.contains(id))
+                .filter(|&id| !tombstones.node_deleted(id) && !dirty.contains(&id))
                 .collect();
             ids.extend(
                 self.overlay_layer()
                     .nodes_by_label(label)
                     .into_iter()
-                    .filter(|id| !deleted.contains(id)),
+                    .filter(|&id| !tombstones.node_deleted(id)),
             );
             ids.sort_unstable();
             ids.dedup();
@@ -1059,11 +1127,11 @@ impl GraphStore for LayeredStore {
 
     /// The number of nodes [`nodes_by_label`](GraphStore::nodes_by_label)
     /// returns, without collecting them: the base's nodes with the label less
-    /// those deleted or shadowed by their copy in the overlay (every base node
-    /// the overlay holds is in `dirty_node_ids`), plus the overlay's nodes with
-    /// the label less any deleted from the base. Each part walks the smaller
-    /// of the label's nodes and the deleted and dirty ids, with an O(1) label
-    /// check per id.
+    /// those deleted (a committed tombstone) or shadowed by their copy in the
+    /// overlay (every base node the overlay holds is in `dirty_node_ids`),
+    /// plus the overlay's nodes with the label less any deleted from the base.
+    /// Each part walks the smaller of the label's nodes and the tombstones and
+    /// dirty ids, with an O(1) label check per id.
     fn nodes_by_label_count(&self, label: &str) -> usize {
         // Base, overlay and the sets from one state: a merge in between
         // would pair the old base with the new, empty overlay.
@@ -1073,15 +1141,18 @@ impl GraphStore for LayeredStore {
     fn node_count(&self) -> usize {
         self.read_consistent(|| {
             let base = self.base.load();
-            let deleted = self.deleted_from_base_nodes.read().len();
+            let tombstone_layer = self.overlay.load();
+            let tombstones = tombstone_layer.base_tombstones();
+            let deleted = tombstones.deleted_nodes().count();
             let overlay_count = self.overlay_layer().node_count();
-            // Dirty nodes that came from the base are counted once in the overlay.
-            // We subtract them from the base total to avoid double counting.
+            // Dirty nodes that came from the base are counted once in the overlay
+            // (a deleted one not at all: its copy went with it). We subtract them
+            // from the base total to avoid double counting.
             let promoted = self
                 .dirty_node_ids
                 .read()
                 .iter()
-                .filter(|id| base.get_node(**id).is_some())
+                .filter(|&&id| !tombstones.node_deleted(id) && base.get_node(id).is_some())
                 .count();
             // Saturating: a read that a merge splits (which `read_consistent`
             // retries) can count more promoted nodes than the base holds, and
@@ -1093,13 +1164,15 @@ impl GraphStore for LayeredStore {
     fn edge_count(&self) -> usize {
         self.read_consistent(|| {
             let base = self.base.load();
-            let deleted = self.deleted_from_base_edges.read().len();
+            let tombstone_layer = self.overlay.load();
+            let tombstones = tombstone_layer.base_tombstones();
+            let deleted = tombstones.deleted_edges().count();
             let overlay_count = self.overlay_layer().edge_count();
             let promoted = self
                 .dirty_edge_ids
                 .read()
                 .iter()
-                .filter(|id| base.get_edge(**id).is_some())
+                .filter(|&&id| !tombstones.edge_deleted(id) && base.get_edge(id).is_some())
                 .count();
             // Saturating, as in `node_count`.
             (base.edge_count() + overlay_count).saturating_sub(deleted + promoted)
@@ -1128,7 +1201,7 @@ impl GraphStore for LayeredStore {
         transaction_id: TransactionId,
     ) -> Option<ArcStr> {
         self.read_consistent(|| {
-            if self.is_edge_deleted_from_base(id) {
+            if self.is_edge_deleted_for(id, epoch, transaction_id) {
                 return None;
             }
             if self.is_edge_dirty(id) {
@@ -1153,7 +1226,8 @@ impl GraphStore for LayeredStore {
 
     fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
         self.read_consistent(|| {
-            let deleted = self.deleted_from_base_nodes.read();
+            let tombstone_layer = self.overlay.load();
+            let tombstones = tombstone_layer.base_tombstones();
             let dirty = self.dirty_node_ids.read();
 
             let mut results: Vec<NodeId> = self
@@ -1161,7 +1235,7 @@ impl GraphStore for LayeredStore {
                 .load()
                 .find_nodes_by_property(property, value)
                 .into_iter()
-                .filter(|id| !deleted.contains(id) && !dirty.contains(id))
+                .filter(|&id| !tombstones.node_deleted(id) && !dirty.contains(&id))
                 .collect();
 
             results.extend(self.overlay_layer().find_nodes_by_property(property, value));
@@ -1174,7 +1248,8 @@ impl GraphStore for LayeredStore {
             if conditions.is_empty() {
                 return self.node_ids();
             }
-            let deleted = self.deleted_from_base_nodes.read();
+            let tombstone_layer = self.overlay.load();
+            let tombstones = tombstone_layer.base_tombstones();
             let dirty = self.dirty_node_ids.read();
 
             let mut results: Vec<NodeId> = self
@@ -1182,7 +1257,7 @@ impl GraphStore for LayeredStore {
                 .load()
                 .find_nodes_by_properties(conditions)
                 .into_iter()
-                .filter(|id| !deleted.contains(id) && !dirty.contains(id))
+                .filter(|&id| !tombstones.node_deleted(id) && !dirty.contains(&id))
                 .collect();
 
             results.extend(self.overlay_layer().find_nodes_by_properties(conditions));
@@ -1199,7 +1274,8 @@ impl GraphStore for LayeredStore {
         max_inclusive: bool,
     ) -> Vec<NodeId> {
         self.read_consistent(|| {
-            let deleted = self.deleted_from_base_nodes.read();
+            let tombstone_layer = self.overlay.load();
+            let tombstones = tombstone_layer.base_tombstones();
             let dirty = self.dirty_node_ids.read();
 
             let mut results: Vec<NodeId> = self
@@ -1207,7 +1283,7 @@ impl GraphStore for LayeredStore {
                 .load()
                 .find_nodes_in_range(property, min, max, min_inclusive, max_inclusive)
                 .into_iter()
-                .filter(|id| !deleted.contains(id) && !dirty.contains(id))
+                .filter(|&id| !tombstones.node_deleted(id) && !dirty.contains(&id))
                 .collect();
 
             results.extend(self.overlay_layer().find_nodes_in_range(
@@ -1341,7 +1417,7 @@ impl GraphStore for LayeredStore {
 
     fn is_node_visible_at_epoch(&self, id: NodeId, epoch: EpochId) -> bool {
         self.read_consistent(|| {
-            if self.is_node_deleted_from_base(id) {
+            if self.is_node_deleted_at(id, epoch) {
                 return false;
             }
             if self.is_node_dirty(id) {
@@ -1371,7 +1447,7 @@ impl GraphStore for LayeredStore {
         transaction_id: TransactionId,
     ) -> bool {
         self.read_consistent(|| {
-            if self.is_node_deleted_from_base(id) {
+            if self.is_node_deleted_for(id, epoch, transaction_id) {
                 return false;
             }
             if self.is_node_dirty(id) {
@@ -1391,7 +1467,7 @@ impl GraphStore for LayeredStore {
 
     fn is_edge_visible_at_epoch(&self, id: EdgeId, epoch: EpochId) -> bool {
         self.read_consistent(|| {
-            if self.is_edge_deleted_from_base(id) {
+            if self.is_edge_deleted_at(id, epoch) {
                 return false;
             }
             if self.is_edge_dirty(id) {
@@ -1413,7 +1489,7 @@ impl GraphStore for LayeredStore {
         transaction_id: TransactionId,
     ) -> bool {
         self.read_consistent(|| {
-            if self.is_edge_deleted_from_base(id) {
+            if self.is_edge_deleted_for(id, epoch, transaction_id) {
                 return false;
             }
             if self.is_edge_dirty(id) {
@@ -1480,21 +1556,20 @@ impl GraphStoreSearch for LayeredStore {
     // Not under `read_consistent`: see `text_search`.
     #[cfg(feature = "text-index")]
     fn score_text(&self, node_id: NodeId, label: &str, property: &str, query: &str) -> Option<f64> {
-        if self.is_node_deleted_from_base(node_id) {
+        let overlay = self.overlay_layer();
+        if overlay.base_tombstones().node_deleted(node_id) {
             return None;
         }
-        self.overlay_layer()
-            .score_text(node_id, label, property, query)
+        overlay.score_text(node_id, label, property, query)
     }
 
     // The search reads (this one, `text_search_with_threshold`, `score_text`,
     // `vector_search` and `vector_search_with_threshold`) are not under
-    // `read_consistent`: they read the overlay's index and drop the base
-    // nodes deleted since the last merge, and a publish swaps the overlay
-    // before it clears the deleted sets. A read that sees the sets cleared
-    // reads the new overlay, and one that sees them with the new overlay
-    // drops ids the merge removed. The other order would pair the old
-    // overlay's index with the cleared sets and find a deleted base node.
+    // `read_consistent`: they read one overlay's index and drop the base
+    // nodes that overlay holds a committed tombstone for. A publish swaps the
+    // overlay and its tombstones together, so a search never pairs an
+    // overlay's index with the tombstones of another and never finds a
+    // deleted base node.
     #[cfg(feature = "text-index")]
     fn text_search(
         &self,
@@ -1503,11 +1578,11 @@ impl GraphStoreSearch for LayeredStore {
         query: &str,
         k: usize,
     ) -> Vec<(NodeId, f64)> {
-        let deleted = self.deleted_from_base_nodes.read();
-        let mut results =
-            self.overlay_layer()
-                .text_search(label, property, query, k + deleted.len());
-        results.retain(|(id, _)| !deleted.contains(id));
+        let overlay = self.overlay_layer();
+        let deleted = overlay.base_tombstones().deleted_nodes().count();
+        let mut results = overlay.text_search(label, property, query, k + deleted);
+        let tombstones = overlay.base_tombstones();
+        results.retain(|&(id, _)| !tombstones.node_deleted(id));
         results.truncate(k);
         results
     }
@@ -1521,11 +1596,10 @@ impl GraphStoreSearch for LayeredStore {
         query: &str,
         threshold: f64,
     ) -> Vec<(NodeId, f64)> {
-        let deleted = self.deleted_from_base_nodes.read();
-        let mut results = self
-            .overlay_layer()
-            .text_search_with_threshold(label, property, query, threshold);
-        results.retain(|(id, _)| !deleted.contains(id));
+        let overlay = self.overlay_layer();
+        let mut results = overlay.text_search_with_threshold(label, property, query, threshold);
+        let tombstones = overlay.base_tombstones();
+        results.retain(|&(id, _)| !tombstones.node_deleted(id));
         results
     }
 
@@ -1555,11 +1629,11 @@ impl GraphStoreSearch for LayeredStore {
     ) -> Vec<(NodeId, f64)> {
         // Forward to overlay, then filter nodes deleted from base so stale hits
         // from the underlying index do not leak through the layered view.
-        let deleted = self.deleted_from_base_nodes.read();
-        let mut results =
-            self.overlay_layer()
-                .vector_search(label, property, query, k + deleted.len(), metric);
-        results.retain(|(id, _)| !deleted.contains(id));
+        let overlay = self.overlay_layer();
+        let deleted = overlay.base_tombstones().deleted_nodes().count();
+        let mut results = overlay.vector_search(label, property, query, k + deleted, metric);
+        let tombstones = overlay.base_tombstones();
+        results.retain(|&(id, _)| !tombstones.node_deleted(id));
         results.truncate(k);
         results
     }
@@ -1574,11 +1648,11 @@ impl GraphStoreSearch for LayeredStore {
         threshold: f64,
         metric: DistanceMetric,
     ) -> Vec<(NodeId, f64)> {
-        let deleted = self.deleted_from_base_nodes.read();
-        let mut results = self
-            .overlay_layer()
-            .vector_search_with_threshold(label, property, query, threshold, metric);
-        results.retain(|(id, _)| !deleted.contains(id));
+        let overlay = self.overlay_layer();
+        let mut results =
+            overlay.vector_search_with_threshold(label, property, query, threshold, metric);
+        let tombstones = overlay.base_tombstones();
+        results.retain(|&(id, _)| !tombstones.node_deleted(id));
         results
     }
 }
@@ -1653,17 +1727,11 @@ impl GraphStoreMut for LayeredStore {
 
     fn delete_node(&self, id: NodeId) -> bool {
         let _guard = self.merge_guard.read();
-        if self.is_node_dirty(id) {
-            // Node is in the overlay: delete from overlay.
-            return self.overlay.load().delete_node(id);
-        }
-        if self.base.load().get_node(id).is_some() {
-            if self.deleted_from_base_nodes.write().insert(id) {
-                self.deletions_dirty.store(true, Ordering::Release);
-            }
-            return true;
-        }
-        false
+        let epoch = self.overlay.load().current_epoch();
+        self.delete_node_from_layers(id, epoch, TransactionId::SYSTEM, |overlay| {
+            Ok(overlay.delete_node(id))
+        })
+        .unwrap_or(false)
     }
 
     fn delete_node_versioned(
@@ -1673,53 +1741,33 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) -> grafeo_common::utils::error::Result<bool> {
         let _guard = self.merge_guard.read();
-        if self.is_node_dirty(id) {
-            return self
-                .overlay
-                .load()
-                .delete_node_versioned(id, epoch, transaction_id);
-        }
-        if self.base.load().get_node(id).is_some() {
-            if self.deleted_from_base_nodes.write().insert(id) {
-                self.deletions_dirty.store(true, Ordering::Release);
-            }
-            return Ok(true);
-        }
-        Ok(false)
+        self.delete_node_from_layers(id, epoch, transaction_id, |overlay| {
+            overlay.delete_node_versioned(id, epoch, transaction_id)
+        })
     }
 
+    // Outside a transaction: the trait gives no transaction here, so the base
+    // edges' tombstones are committed at once. A `DETACH DELETE` in a
+    // transaction deletes each edge with `delete_edge_versioned` instead.
     fn delete_node_edges(&self, node_id: NodeId) {
         let _guard = self.merge_guard.read();
-        // Delete overlay edges.
-        if self.is_node_dirty(node_id) {
-            self.overlay.load().delete_node_edges(node_id);
-        }
-        // Mark base edges as deleted.
-        let mut deleted_any = false;
-        let mut edges = self.deleted_from_base_edges.write();
+        let overlay = self.overlay.load();
+        // The overlay's edges of the node: its own, and the copies of base
+        // edges that writes made. The node need not be dirty: after a reopen
+        // a node created after `compact()` is not.
+        overlay.delete_node_edges(node_id);
+        let epoch = overlay.current_epoch();
         for (_, eid) in self.base.load().edges_from(node_id, Direction::Both) {
-            if edges.insert(eid) {
-                deleted_any = true;
-            }
-        }
-        drop(edges);
-        if deleted_any {
-            self.deletions_dirty.store(true, Ordering::Release);
+            overlay.tombstone_base_edge(eid, epoch, TransactionId::SYSTEM);
         }
     }
 
     fn delete_edge(&self, id: EdgeId) -> bool {
         let _guard = self.merge_guard.read();
-        if self.is_edge_dirty(id) {
-            return self.overlay.load().delete_edge(id);
-        }
-        if self.base.load().get_edge(id).is_some() {
-            if self.deleted_from_base_edges.write().insert(id) {
-                self.deletions_dirty.store(true, Ordering::Release);
-            }
-            return true;
-        }
-        false
+        let epoch = self.overlay.load().current_epoch();
+        self.delete_edge_from_layers(id, epoch, TransactionId::SYSTEM, |overlay| {
+            overlay.delete_edge(id)
+        })
     }
 
     fn delete_edge_versioned(
@@ -1729,25 +1777,16 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) -> bool {
         let _guard = self.merge_guard.read();
-        if self.is_edge_dirty(id) {
-            return self
-                .overlay
-                .load()
-                .delete_edge_versioned(id, epoch, transaction_id);
-        }
-        if self.base.load().get_edge(id).is_some() {
-            if self.deleted_from_base_edges.write().insert(id) {
-                self.deletions_dirty.store(true, Ordering::Release);
-            }
-            return true;
-        }
-        false
+        self.delete_edge_from_layers(id, epoch, transaction_id, |overlay| {
+            overlay.delete_edge_versioned(id, epoch, transaction_id)
+        })
     }
 
     fn set_node_property(&self, id: NodeId, key: &str, value: Value) {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(id);
-        self.overlay.load().set_node_property(id, key, value);
+        if self.ensure_in_overlay(id) {
+            self.overlay.load().set_node_property(id, key, value);
+        }
     }
 
     fn set_node_property_versioned(
@@ -1758,7 +1797,9 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) -> grafeo_common::utils::error::Result<()> {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(id);
+        if !self.ensure_in_overlay(id) {
+            return Ok(());
+        }
         self.overlay
             .load()
             .set_node_property_versioned(id, key, value, transaction_id)
@@ -1766,8 +1807,9 @@ impl GraphStoreMut for LayeredStore {
 
     fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) {
         let _guard = self.merge_guard.read();
-        self.ensure_edge_in_overlay(id);
-        self.overlay.load().set_edge_property(id, key, value);
+        if self.ensure_edge_in_overlay(id) {
+            self.overlay.load().set_edge_property(id, key, value);
+        }
     }
 
     fn set_edge_property_versioned(
@@ -1778,10 +1820,11 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) {
         let _guard = self.merge_guard.read();
-        self.ensure_edge_in_overlay(id);
-        self.overlay
-            .load()
-            .set_edge_property_versioned(id, key, value, transaction_id);
+        if self.ensure_edge_in_overlay(id) {
+            self.overlay
+                .load()
+                .set_edge_property_versioned(id, key, value, transaction_id);
+        }
     }
 
     fn remove_node_property(
@@ -1790,7 +1833,9 @@ impl GraphStoreMut for LayeredStore {
         key: &str,
     ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(id);
+        if !self.ensure_in_overlay(id) {
+            return Ok(None);
+        }
         self.overlay.load().remove_node_property(id, key)
     }
 
@@ -1801,7 +1846,9 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(id);
+        if !self.ensure_in_overlay(id) {
+            return Ok(None);
+        }
         self.overlay
             .load()
             .remove_node_property_versioned(id, key, transaction_id)
@@ -1813,7 +1860,9 @@ impl GraphStoreMut for LayeredStore {
         key: &str,
     ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let _guard = self.merge_guard.read();
-        self.ensure_edge_in_overlay(id);
+        if !self.ensure_edge_in_overlay(id) {
+            return Ok(None);
+        }
         self.overlay.load().remove_edge_property(id, key)
     }
 
@@ -1824,7 +1873,9 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let _guard = self.merge_guard.read();
-        self.ensure_edge_in_overlay(id);
+        if !self.ensure_edge_in_overlay(id) {
+            return Ok(None);
+        }
         self.overlay
             .load()
             .remove_edge_property_versioned(id, key, transaction_id)
@@ -1832,8 +1883,7 @@ impl GraphStoreMut for LayeredStore {
 
     fn add_label(&self, node_id: NodeId, label: &str) -> bool {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(node_id);
-        self.overlay.load().add_label(node_id, label)
+        self.ensure_in_overlay(node_id) && self.overlay.load().add_label(node_id, label)
     }
 
     fn add_label_versioned(
@@ -1843,16 +1893,16 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) -> bool {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(node_id);
-        self.overlay
-            .load()
-            .add_label_versioned(node_id, label, transaction_id)
+        self.ensure_in_overlay(node_id)
+            && self
+                .overlay
+                .load()
+                .add_label_versioned(node_id, label, transaction_id)
     }
 
     fn remove_label(&self, node_id: NodeId, label: &str) -> bool {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(node_id);
-        self.overlay.load().remove_label(node_id, label)
+        self.ensure_in_overlay(node_id) && self.overlay.load().remove_label(node_id, label)
     }
 
     fn remove_label_versioned(
@@ -1862,24 +1912,82 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) -> bool {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(node_id);
-        self.overlay
-            .load()
-            .remove_label_versioned(node_id, label, transaction_id)
+        self.ensure_in_overlay(node_id)
+            && self
+                .overlay
+                .load()
+                .remove_label_versioned(node_id, label, transaction_id)
     }
 }
 
 // ── Private helpers ────────────────────────────────────────────────
 
 impl LayeredStore {
+    /// Deletes node `id` for `transaction_id` (`TransactionId::SYSTEM`
+    /// outside a transaction), which reads at `epoch`.
+    ///
+    /// A node the base does not have was created after `compact()`: the
+    /// overlay holds it, in the dirty set or not (a reopen does not put the
+    /// overlay's own nodes there), and `delete_in_overlay` deletes it. A base
+    /// node gets a tombstone, pending until the transaction commits; if a
+    /// write copied it into the overlay, `delete_in_overlay` deletes that copy
+    /// first, so neither the copy nor the base node is seen after the commit,
+    /// also after a reopen, whose overlay has no copy. A base node with a
+    /// tombstone already is deleted, or being deleted by another transaction
+    /// (whose delete took the copy too): the call returns `false` then.
+    fn delete_node_from_layers(
+        &self,
+        id: NodeId,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+        delete_in_overlay: impl FnOnce(&LpgStore) -> grafeo_common::utils::error::Result<bool>,
+    ) -> grafeo_common::utils::error::Result<bool> {
+        let overlay = self.overlay.load();
+        if self.base.load().get_node(id).is_none() {
+            return delete_in_overlay(&overlay);
+        }
+        if self.is_node_dirty(id) {
+            delete_in_overlay(&overlay)?;
+        }
+        Ok(overlay.tombstone_base_node(id, epoch, transaction_id))
+    }
+
+    /// Deletes edge `id` for `transaction_id`, which reads at `epoch`, as
+    /// [`delete_node_from_layers`](Self::delete_node_from_layers) does a node.
+    fn delete_edge_from_layers(
+        &self,
+        id: EdgeId,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+        delete_in_overlay: impl FnOnce(&LpgStore) -> bool,
+    ) -> bool {
+        let overlay = self.overlay.load();
+        if self.base.load().get_edge(id).is_none() {
+            return delete_in_overlay(&overlay);
+        }
+        if self.is_edge_dirty(id) {
+            delete_in_overlay(&overlay);
+        }
+        overlay.tombstone_base_edge(id, epoch, transaction_id)
+    }
+
     /// Ensures a node exists in the overlay. If the node is base-only,
     /// copies its labels and properties into the overlay and marks it dirty.
-    fn ensure_in_overlay(&self, id: NodeId) {
+    ///
+    /// Returns `false` for a base node with a tombstone, which is not copied:
+    /// a write must not bring a deleted node back, nor copy one another
+    /// transaction is deleting (a copy that outlived the delete would be a
+    /// live overlay node for a deleted base id). The caller then writes
+    /// nothing.
+    fn ensure_in_overlay(&self, id: NodeId) -> bool {
         if self.is_node_dirty(id) {
-            return; // already in overlay
+            return true; // already in overlay
+        }
+        if self.overlay.load().base_tombstones().has_node(id) {
+            return false;
         }
         let Some(base_node) = self.base.load().get_node(id) else {
-            return; // not in base either (new node case handled by caller)
+            return true; // not in base either (new node case handled by caller)
         };
 
         // Copy the node into the overlay at the same ID.
@@ -1902,15 +2010,21 @@ impl LayeredStore {
         }
 
         self.dirty_node_ids.write().insert(id);
+        true
     }
 
-    /// Ensures an edge exists in the overlay.
-    fn ensure_edge_in_overlay(&self, id: EdgeId) {
+    /// Ensures an edge exists in the overlay, as
+    /// [`ensure_in_overlay`](Self::ensure_in_overlay) does a node; `false`
+    /// for a base edge with a tombstone.
+    fn ensure_edge_in_overlay(&self, id: EdgeId) -> bool {
         if self.is_edge_dirty(id) {
-            return;
+            return true;
+        }
+        if self.overlay.load().base_tombstones().has_edge(id) {
+            return false;
         }
         let Some(base_edge) = self.base.load().get_edge(id) else {
-            return;
+            return true;
         };
 
         // Ensure endpoints are in the overlay first.
@@ -1939,6 +2053,7 @@ impl LayeredStore {
         }
 
         self.dirty_edge_ids.write().insert(id);
+        true
     }
 }
 
@@ -1946,6 +2061,8 @@ impl LayeredStore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
     use super::*;
     use crate::graph::compact::from_graph_store_preserving_ids;
 
@@ -4987,13 +5104,16 @@ mod tests {
     }
 
     /// The search reads run outside `read_consistent` and drop the overlay
-    /// index's hits for base nodes deleted since the last merge. A publish
-    /// swaps the overlay before it clears the deleted sets, so a search in
-    /// its middle never pairs the old overlay's index with the cleared sets:
-    /// Gus, deleted from the base, is never found, before the merge, inside
-    /// its publish or after it. The text index holds him as the engine builds
-    /// one over the base, and his embedding copies him into the overlay,
-    /// where he stays deleted, for the vector search to find.
+    /// index's hits for base nodes deleted since the last merge. The overlay
+    /// keeps the tombstones, so a publish swaps them with its index and a
+    /// search in its middle never pairs the old overlay's index with the new
+    /// overlay's (empty) tombstones: Gus, deleted from the base, is never
+    /// found, before the merge, inside its publish or after it. The text
+    /// index holds him as the engine builds one over the base, and his
+    /// embedding copies him into the overlay for the vector search to find;
+    /// the tombstone is written after the copy, beside it, as a delete never
+    /// leaves one (it deletes the copy too), so the overlay's own searches
+    /// still find him.
     #[cfg(any(feature = "text-index", feature = "vector-index"))]
     #[test]
     fn a_search_inside_a_publish_never_finds_a_deleted_base_node() {
@@ -5010,11 +5130,16 @@ mod tests {
                 .overlay_store()
                 .add_text_index("Person", "bio", Arc::new(RwLock::new(index)));
         }
-        assert!(layered.delete_node(gus));
         for id in [alix, gus] {
             layered.set_node_property(id, "embedding", Value::Vector(vec![1.0, 0.0].into()));
         }
-        let overlay = search_hits(&*layered.overlay_store(), gus);
+        let overlay_store = layered.overlay_store();
+        assert!(overlay_store.tombstone_base_node(
+            gus,
+            overlay_store.current_epoch(),
+            TransactionId::SYSTEM
+        ));
+        let overlay = search_hits(&*overlay_store, gus);
         assert!(
             overlay.iter().all(|(_, ids)| ids.contains(&gus)),
             "the overlay's own searches find Gus: {overlay:?}"
@@ -5363,7 +5488,7 @@ mod tests {
     }
 
     /// Deletes a base node, writes to base nodes (which copies them into the
-    /// overlay, the deleted one included) and relabels them, creates overlay
+    /// overlay, but not the deleted one) and relabels them, creates overlay
     /// nodes and deletes one, checking the counts after each step; returns the
     /// store.
     fn change_layers(layered: LayeredStore) -> LayeredStore {
@@ -5372,8 +5497,7 @@ mod tests {
         let repository = layered.nodes_by_label("Repository");
         assert!(layered.delete_node(graph[0]));
         assert_label_counts(&layered, "after a base node was deleted");
-        // A write to the deleted node copies it into the overlay, where it
-        // stays deleted.
+        // A write to the deleted node does not bring it back.
         layered.set_node_property(graph[0], "n", Value::Int64(88));
         assert!(layered.get_node(graph[0]).is_none());
         assert_label_counts(&layered, "after a write to the deleted node");
@@ -5437,5 +5561,340 @@ mod tests {
         let layered = change_layers(LayeredStore::new(compact, max_node_id, 0).unwrap());
         assert_eq!(layered.nodes_by_label_count("Graph"), 19);
         assert_eq!(layered.nodes_by_label_count("Repository"), 4);
+    }
+
+    // ── Base deletes follow the transaction (tombstones) ──────────────
+
+    /// The transaction that deletes in the tombstone tests.
+    const DELETER: TransactionId = TransactionId::new(3);
+    /// A transaction that only reads.
+    const READER: TransactionId = TransactionId::new(19);
+
+    /// The fixture with Gus, his base `LIVES_IN` edge and the overlay's epoch.
+    fn gus_and_his_edge(layered: &LayeredStore) -> (NodeId, EdgeId, EpochId) {
+        let (_, gus, _, _) = fixture_ids(layered);
+        let (_, edge) = layered.edges_from(gus, Direction::Outgoing)[0];
+        (gus, edge, layered.current_epoch())
+    }
+
+    /// The deleter removes Gus and his edge, as a `DETACH DELETE` does.
+    fn delete_gus_in_a_transaction(layered: &LayeredStore, gus: NodeId, edge: EdgeId) {
+        let epoch = layered.current_epoch();
+        assert!(layered.delete_edge_versioned(edge, epoch, DELETER));
+        assert!(layered.delete_node_versioned(gus, epoch, DELETER).unwrap());
+    }
+
+    /// Whether the readers that see the state before the delete see Gus and
+    /// his edge: other transactions at `epoch`, reads at `epoch` and current
+    /// reads (counts, scans and traversals included).
+    fn assert_others_see_gus(layered: &LayeredStore, gus: NodeId, edge: EdgeId, epoch: EpochId) {
+        let (alix, _, amsterdam, _) = fixture_ids(layered);
+        assert!(layered.get_node_versioned(gus, epoch, READER).is_some());
+        assert!(layered.is_node_visible_versioned(gus, epoch, READER));
+        assert!(layered.get_edge_versioned(edge, epoch, READER).is_some());
+        assert!(layered.is_edge_visible_versioned(edge, epoch, READER));
+        assert!(layered.get_node_at_epoch(gus, epoch).is_some());
+        assert!(layered.is_node_visible_at_epoch(gus, epoch));
+        assert!(layered.get_edge_at_epoch(edge, epoch).is_some());
+        assert!(layered.is_edge_visible_at_epoch(edge, epoch));
+        assert!(layered.get_node(gus).is_some(), "current read of Gus");
+        assert!(layered.get_edge(edge).is_some(), "current read of his edge");
+        assert_eq!(
+            layered.get_node_property(gus, &name_key()),
+            Some(Value::from("Gus"))
+        );
+        assert_eq!(layered.node_count(), 3);
+        assert_eq!(layered.edge_count(), 2);
+        assert_eq!(layered.nodes_by_label_count("Person"), 2);
+        assert_eq!(
+            sorted(layered.nodes_by_label("Person")),
+            sorted(vec![alix, gus])
+        );
+        assert_eq!(
+            sorted(layered.neighbors(amsterdam, Direction::Incoming)),
+            sorted(vec![alix, gus])
+        );
+    }
+
+    /// A pending delete of a base node and edge hides them from the deleting
+    /// transaction only: other transactions, reads at an epoch and current
+    /// reads still see them, and nothing is there for a checkpoint to write.
+    #[test]
+    fn a_pending_base_delete_hides_the_entity_only_from_its_transaction() {
+        let layered = build_test_layered();
+        let (gus, edge, epoch) = gus_and_his_edge(&layered);
+        let (alix, ..) = fixture_ids(&layered);
+        delete_gus_in_a_transaction(&layered, gus, edge);
+
+        assert!(layered.get_node_versioned(gus, epoch, DELETER).is_none());
+        assert!(!layered.is_node_visible_versioned(gus, epoch, DELETER));
+        assert!(layered.get_edge_versioned(edge, epoch, DELETER).is_none());
+        assert!(!layered.is_edge_visible_versioned(edge, epoch, DELETER));
+        assert!(layered.edge_type_versioned(edge, epoch, DELETER).is_none());
+        assert_eq!(
+            layered.filter_visible_node_ids_versioned(&[alix, gus], epoch, DELETER),
+            vec![alix]
+        );
+        assert!(
+            !layered.delete_node_versioned(gus, epoch, DELETER).unwrap(),
+            "a second delete in the same transaction deletes nothing"
+        );
+
+        assert_others_see_gus(&layered, gus, edge, epoch);
+        assert_eq!(layered.snapshot_deleted_node_ids(), Vec::<NodeId>::new());
+        assert_eq!(layered.snapshot_deleted_edge_ids(), Vec::<EdgeId>::new());
+        assert!(!layered.deletions_dirty(), "nothing committed to write");
+    }
+
+    /// The commit stamps the tombstones with its epoch: reads at an earlier
+    /// epoch still see the entity, reads from the commit on and current reads
+    /// do not, and the deletions are there for a checkpoint to write.
+    #[test]
+    fn a_committed_base_delete_hides_the_entity_from_its_commit_epoch_on() {
+        let layered = build_test_layered();
+        let (gus, edge, start) = gus_and_his_edge(&layered);
+        let (alix, _, amsterdam, _) = fixture_ids(&layered);
+        delete_gus_in_a_transaction(&layered, gus, edge);
+        let overlay = layered.overlay_store();
+        let commit = EpochId::new(start.as_u64() + 3);
+        overlay.finalize_version_epochs(DELETER, commit);
+        overlay.commit_transaction_properties(DELETER);
+        let before = EpochId::new(commit.as_u64() - 1);
+
+        assert!(layered.get_node_at_epoch(gus, before).is_some());
+        assert!(layered.is_edge_visible_at_epoch(edge, before));
+        assert!(layered.get_node_versioned(gus, before, READER).is_some());
+        assert!(layered.get_edge_versioned(edge, before, READER).is_some());
+        assert!(layered.get_node_at_epoch(gus, commit).is_none());
+        assert!(!layered.is_edge_visible_at_epoch(edge, commit));
+        assert!(layered.get_node_versioned(gus, commit, READER).is_none());
+        assert!(!layered.is_node_visible_versioned(gus, commit, READER));
+        assert!(layered.get_edge_versioned(edge, commit, READER).is_none());
+
+        assert!(layered.get_node(gus).is_none());
+        assert!(layered.get_edge(edge).is_none());
+        assert_eq!(layered.get_node_property(gus, &name_key()), None);
+        assert_eq!(layered.node_count(), 2);
+        assert_eq!(layered.edge_count(), 1);
+        assert_eq!(layered.nodes_by_label("Person"), vec![alix]);
+        assert_eq!(layered.nodes_by_label_count("Person"), 1);
+        assert_eq!(
+            layered.neighbors(amsterdam, Direction::Incoming),
+            vec![alix]
+        );
+        assert!(!layered.node_ids().contains(&gus));
+
+        assert_eq!(layered.snapshot_deleted_node_ids(), vec![gus]);
+        assert_eq!(layered.snapshot_deleted_edge_ids(), vec![edge]);
+        assert!(layered.deletions_dirty());
+    }
+
+    /// A rollback removes the tombstones: everyone sees the entity again,
+    /// the deleting transaction too, and it can be deleted again.
+    #[test]
+    fn rolling_back_a_base_delete_restores_the_entity_for_everyone() {
+        let layered = build_test_layered();
+        let (gus, edge, epoch) = gus_and_his_edge(&layered);
+        delete_gus_in_a_transaction(&layered, gus, edge);
+        layered
+            .overlay_store()
+            .rollback_transaction_properties(DELETER);
+
+        assert!(layered.get_node_versioned(gus, epoch, DELETER).is_some());
+        assert!(layered.get_edge_versioned(edge, epoch, DELETER).is_some());
+        assert_others_see_gus(&layered, gus, edge, epoch);
+        assert_eq!(layered.snapshot_deleted_node_ids(), Vec::<NodeId>::new());
+        assert!(!layered.deletions_dirty());
+        assert!(
+            layered.delete_node_versioned(gus, epoch, READER).unwrap(),
+            "the rolled back delete left no tombstone behind"
+        );
+    }
+
+    /// A savepoint rollback removes the tombstones written after the
+    /// savepoint and keeps the earlier ones, which the commit then stamps.
+    #[test]
+    fn a_savepoint_rollback_restores_only_the_later_base_deletes() {
+        let layered = build_test_layered();
+        let (alix, _, _, alix_edge) = fixture_ids(&layered);
+        let (gus, gus_edge, epoch) = gus_and_his_edge(&layered);
+        let overlay = layered.overlay_store();
+        assert!(layered.delete_edge_versioned(alix_edge, epoch, DELETER));
+        let savepoint = overlay.property_undo_log_position(DELETER);
+        delete_gus_in_a_transaction(&layered, gus, gus_edge);
+        overlay.rollback_transaction_properties_to(DELETER, savepoint);
+
+        assert!(layered.get_node_versioned(gus, epoch, DELETER).is_some());
+        assert!(
+            layered
+                .get_edge_versioned(gus_edge, epoch, DELETER)
+                .is_some()
+        );
+        assert!(
+            layered
+                .get_edge_versioned(alix_edge, epoch, DELETER)
+                .is_none(),
+            "the delete before the savepoint stays"
+        );
+
+        let commit = EpochId::new(epoch.as_u64() + 1);
+        overlay.finalize_version_epochs(DELETER, commit);
+        overlay.commit_transaction_properties(DELETER);
+        assert!(layered.get_edge(alix_edge).is_none());
+        assert!(layered.get_node(alix).is_some());
+        assert!(layered.get_node(gus).is_some());
+        assert!(layered.get_edge(gus_edge).is_some());
+        assert_eq!(layered.snapshot_deleted_node_ids(), Vec::<NodeId>::new());
+        assert_eq!(layered.snapshot_deleted_edge_ids(), vec![alix_edge]);
+    }
+
+    /// A delete outside a transaction is committed at once, at the overlay's
+    /// current epoch: reads at an earlier epoch still see the entity.
+    #[test]
+    fn a_base_delete_outside_a_transaction_takes_effect_at_the_current_epoch() {
+        let layered = build_test_layered();
+        let (gus, edge, _) = gus_and_his_edge(&layered);
+        layered.overlay_store().sync_epoch(EpochId::new(3));
+        assert!(layered.delete_edge(edge));
+        assert!(layered.delete_node(gus));
+        assert!(!layered.delete_node(gus), "deleted once");
+
+        let earlier = EpochId::new(2);
+        assert!(layered.get_node_at_epoch(gus, earlier).is_some());
+        assert!(layered.is_edge_visible_at_epoch(edge, earlier));
+        assert!(layered.get_node_at_epoch(gus, EpochId::new(3)).is_none());
+        assert!(layered.get_node(gus).is_none());
+        assert_eq!(layered.snapshot_deleted_node_ids(), vec![gus]);
+        assert_eq!(layered.snapshot_deleted_edge_ids(), vec![edge]);
+        assert!(layered.deletions_dirty());
+    }
+
+    /// Tombstones seeded from a file hide the entity at every epoch and
+    /// count as written.
+    #[test]
+    fn seeded_tombstones_hide_the_entity_at_every_epoch() {
+        let layered = build_test_layered();
+        let (gus, edge, _) = gus_and_his_edge(&layered);
+        layered.overlay_store().sync_epoch(EpochId::new(19));
+        layered.seed_deleted_from_base([gus], [edge]);
+
+        assert!(!layered.deletions_dirty(), "the seed is on disk already");
+        assert!(layered.get_node_at_epoch(gus, EpochId::INITIAL).is_none());
+        assert!(
+            layered
+                .get_node_versioned(gus, EpochId::INITIAL, READER)
+                .is_none()
+        );
+        assert!(!layered.is_edge_visible_at_epoch(edge, EpochId::INITIAL));
+        assert!(layered.get_node(gus).is_none());
+        assert_eq!(layered.snapshot_deleted_node_ids(), vec![gus]);
+        assert_eq!(layered.snapshot_deleted_edge_ids(), vec![edge]);
+    }
+
+    /// Deleting a promoted base node or edge deletes the overlay copy and also
+    /// writes a tombstone for the base id: the deletion log holds it, so a
+    /// reopen (whose overlay no longer has the copy) does not bring the base
+    /// entity back (N1).
+    #[test]
+    fn deleting_a_promoted_base_entity_records_its_base_id() {
+        let layered = build_test_layered();
+        let (gus, edge, epoch) = gus_and_his_edge(&layered);
+        layered.set_node_property(gus, "age", Value::Int64(88));
+        layered.set_edge_property(edge, "since", Value::Int64(2019));
+        assert!(layered.is_node_dirty(gus) && layered.is_edge_dirty(edge));
+
+        delete_gus_in_a_transaction(&layered, gus, edge);
+        assert!(
+            layered.snapshot_deleted_node_ids().is_empty(),
+            "not before the commit"
+        );
+        let overlay = layered.overlay_store();
+        let commit = EpochId::new(epoch.as_u64() + 1);
+        overlay.finalize_version_epochs(DELETER, commit);
+        overlay.commit_transaction_properties(DELETER);
+        assert!(layered.get_node(gus).is_none());
+        assert_eq!(layered.node_count(), 2);
+        assert_eq!(layered.edge_count(), 1);
+        assert_eq!(layered.snapshot_deleted_node_ids(), vec![gus]);
+        assert_eq!(layered.snapshot_deleted_edge_ids(), vec![edge]);
+
+        // A reopen: the base, an overlay without the deleted copies, and the
+        // deletion log.
+        let reopened = LayeredStore::with_overlay(
+            layered.base_store_arc(),
+            Arc::new(LpgStore::new().unwrap()),
+        );
+        reopened.seed_deleted_from_base(
+            layered.snapshot_deleted_node_ids(),
+            layered.snapshot_deleted_edge_ids(),
+        );
+        assert!(reopened.get_node(gus).is_none());
+        assert!(reopened.get_edge(edge).is_none());
+        assert_eq!(reopened.node_count(), 2);
+    }
+
+    /// The same for a delete outside a transaction.
+    #[test]
+    fn deleting_a_promoted_base_node_outside_a_transaction_records_its_base_id() {
+        let layered = build_test_layered();
+        let (gus, _, _) = gus_and_his_edge(&layered);
+        layered.set_node_property(gus, "age", Value::Int64(88));
+        assert!(layered.delete_node(gus));
+        assert!(layered.get_node(gus).is_none());
+        assert_eq!(layered.node_count(), 2);
+        assert_eq!(layered.snapshot_deleted_node_ids(), vec![gus]);
+    }
+
+    /// After a reopen the overlay's own nodes are not in the dirty set (it
+    /// holds the base ids the overlay copies): deleting one, its edges
+    /// included, still goes to the overlay (N6).
+    #[test]
+    fn an_overlay_node_is_deleted_after_a_reopen() {
+        let layered = build_test_layered();
+        let (alix, ..) = fixture_ids(&layered);
+        let vincent = layered.create_node(&["Person"]);
+        let knows = layered.create_edge(vincent, alix, "KNOWS");
+        let mia = layered.create_node(&["Person"]);
+        let jules = layered.create_node(&["Person"]);
+
+        let reopened =
+            LayeredStore::with_overlay(layered.base_store_arc(), layered.overlay_store());
+        assert!(!reopened.is_node_dirty(vincent));
+        reopened.delete_node_edges(vincent);
+        assert!(
+            reopened.get_edge(knows).is_none(),
+            "the overlay edge is gone"
+        );
+        assert!(reopened.delete_node(vincent));
+        assert!(reopened.get_node(vincent).is_none());
+
+        let epoch = reopened.current_epoch();
+        assert!(reopened.delete_node_versioned(mia, epoch, DELETER).unwrap());
+        assert!(reopened.get_node_versioned(mia, epoch, DELETER).is_none());
+        let jules_edge = reopened.create_edge(jules, alix, "KNOWS");
+        let reopened =
+            LayeredStore::with_overlay(reopened.base_store_arc(), reopened.overlay_store());
+        assert!(reopened.delete_edge(jules_edge));
+        assert!(reopened.get_edge(jules_edge).is_none());
+    }
+
+    /// A base node whose delete is committed is not copied into the overlay
+    /// by a later write: it stays deleted and the overlay stays without it.
+    #[test]
+    fn a_deleted_base_node_is_not_promoted_again() {
+        let layered = build_test_layered();
+        let (gus, edge, _) = gus_and_his_edge(&layered);
+        assert!(layered.delete_node(gus));
+        assert!(layered.delete_edge(edge));
+        layered.set_node_property(gus, "age", Value::Int64(19));
+        layered.add_label(gus, "Director");
+        layered.set_edge_property(edge, "since", Value::Int64(88));
+
+        assert!(!layered.is_node_dirty(gus));
+        assert!(!layered.is_edge_dirty(edge));
+        assert_eq!(layered.overlay_store().node_count(), 0);
+        assert!(layered.get_node(gus).is_none());
+        assert_eq!(layered.nodes_by_label("Director"), Vec::<NodeId>::new());
+        assert_eq!(layered.node_count(), 2);
     }
 }

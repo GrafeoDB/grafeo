@@ -14,6 +14,7 @@ mod graph_store_impl;
 mod index;
 mod memory;
 mod node_ops;
+mod open_changes;
 mod property_ops;
 mod schema;
 mod search;
@@ -23,6 +24,8 @@ mod versioning;
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) use open_changes::OpenChanges;
 
 use super::PropertyStorage;
 #[cfg(not(feature = "tiered-storage"))]
@@ -126,6 +129,57 @@ pub enum PropertyUndoEntry {
         /// The properties the edge had before deletion.
         properties: Vec<(PropertyKey, Value)>,
     },
+    /// A node of a compacted base was deleted: this store, the base's
+    /// overlay, keeps a tombstone for it until the transaction ends.
+    BaseNodeDeleted {
+        /// The base node.
+        node_id: NodeId,
+    },
+    /// An edge of a compacted base was deleted, as
+    /// [`BaseNodeDeleted`](Self::BaseNodeDeleted).
+    BaseEdgeDeleted {
+        /// The base edge.
+        edge_id: EdgeId,
+    },
+}
+
+/// A delete of a node or an edge of a compacted base, which the base's
+/// overlay store keeps until a merge rebuilds the base without the entity.
+///
+/// A transaction's delete is pending until its commit stamps the commit
+/// epoch: until then only that transaction misses the entity, and a rollback
+/// removes the tombstone. A delete outside a transaction, and one loaded from
+/// a file, is committed when it is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BaseTombstone {
+    /// The epoch from which the entity is deleted: the commit epoch of the
+    /// deleting transaction, [`EpochId::PENDING`] until it commits.
+    pub(crate) epoch: EpochId,
+    /// The transaction that deleted the entity; [`TransactionId::SYSTEM`] for
+    /// a delete outside a transaction and for one loaded from a file.
+    pub(crate) by: TransactionId,
+}
+
+impl BaseTombstone {
+    /// Whether the delete is committed, so every reader from its epoch on
+    /// misses the entity.
+    #[must_use]
+    pub(crate) fn is_committed(self) -> bool {
+        self.epoch != EpochId::PENDING
+    }
+}
+
+/// The tombstones of a compacted base's nodes and edges (see
+/// [`BaseTombstone`]), kept by the base's overlay store.
+#[derive(Debug, Default)]
+pub(crate) struct BaseTombstones {
+    /// The deleted base nodes.
+    pub(crate) nodes: FxHashMap<NodeId, BaseTombstone>,
+    /// The deleted base edges.
+    pub(crate) edges: FxHashMap<EdgeId, BaseTombstone>,
+    /// Whether a committed tombstone was added since the deletion log was
+    /// last written.
+    pub(crate) changed: bool,
 }
 
 /// Compares two values for ordering (used for range checks).
@@ -496,6 +550,15 @@ pub struct LpgStore {
     /// entries; rollback replays them in reverse. Both cost O(changes).
     /// Lock order: 10 (after named_graphs, independent of other locks)
     property_undo_log: RwLock<FxHashMap<TransactionId, Vec<PropertyUndoEntry>>>,
+
+    /// The deleted nodes and edges of a compacted base, when this store is
+    /// its overlay (empty otherwise). A transaction's tombstones are listed
+    /// in its undo log, so commit stamps them and rollback removes them in
+    /// O(changes).
+    /// Lock order: 11, a leaf for writers: no other lock is taken while it
+    /// is held for writing, so a reader may hold it while it reads the rest
+    /// of the store.
+    base_tombstones: RwLock<BaseTombstones>,
 }
 
 impl LpgStore {
@@ -560,6 +623,7 @@ impl LpgStore {
             statistics: RwLock::new(Arc::new(Statistics::new())),
             named_graphs: RwLock::new(FxHashMap::default()),
             property_undo_log: RwLock::new(FxHashMap::default()),
+            base_tombstones: RwLock::new(BaseTombstones::default()),
         })
     }
 
@@ -672,6 +736,7 @@ impl LpgStore {
 
         // Level 5: Undo log
         self.property_undo_log.write().clear();
+        *self.base_tombstones.write() = BaseTombstones::default();
     }
 
     /// Returns whether backward adjacency (incoming edge index) is available.

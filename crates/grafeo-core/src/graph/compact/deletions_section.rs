@@ -2,17 +2,20 @@
 //! the layered overlay deletion log.
 //!
 //! The [`LayeredStore`](crate::graph::compact::layered::LayeredStore)
-//! tracks deletions of base-store entities in the in-memory
-//! `deleted_from_base_nodes` / `deleted_from_base_edges` sets. Without
-//! this section, those sets are lost across a close/reopen cycle: the
-//! overlay scan in `LayeredStore::with_overlay` cannot distinguish a
-//! deleted base node (which has no overlay entry) from a base node that
-//! was never modified, so previously-deleted base entities would silently
-//! reappear after reload until the next `compact()` merges the overlay
-//! into the base.
+//! tracks deletions of base-store entities as tombstones in its overlay:
+//! a transaction's are pending until its commit stamps them, and a
+//! rollback removes them. Without this section, the committed ones are
+//! lost across a close/reopen cycle: the overlay scan in
+//! `LayeredStore::with_overlay` cannot distinguish a deleted base node
+//! (which has no overlay entry) from a base node that was never modified,
+//! so previously-deleted base entities would silently reappear after
+//! reload until the next `compact()` merges the overlay into the base.
 //!
 //! This section persists the deletion log alongside the rest of the
-//! container so that reload restores the deleted sets verbatim.
+//! container: the ids of the committed tombstones only, as a checkpoint
+//! writes the committed state and an open transaction may still roll its
+//! deletes back. Reload restores them as tombstones committed at the
+//! initial epoch, deleted for every reader.
 //!
 //! The section (version 2, since 0.6) is a metadata chunk (`DeletionsMeta`)
 //! with the counts, then stream 0 with the node ids and stream 1 with the
@@ -73,8 +76,9 @@ struct DeletionsMeta {
     edges: u64,
 }
 
-/// Snapshot of the layered overlay's deletion log, ready to be serialized
-/// into the container or to seed a freshly-loaded `LayeredStore`.
+/// Snapshot of the layered overlay's deletion log (its committed
+/// tombstones), ready to be serialized into the container or to seed a
+/// freshly-loaded `LayeredStore`.
 ///
 /// When constructed via [`Self::from_layered`], `is_dirty` / `mark_clean`
 /// delegate to the layered store's own deletions-dirty flag so checkpoint
@@ -103,8 +107,8 @@ struct DeletionsPayload {
 }
 
 impl OverlayDeletionsSection {
-    /// Creates a section by snapshotting the layered store's current
-    /// deletion sets. The snapshot is sorted (and deduplicated) so the
+    /// Creates a section by snapshotting the layered store's committed
+    /// deletes. The snapshot is sorted (and deduplicated) so the
     /// on-disk byte representation is stable for the same set of ids.
     /// `is_dirty` / `mark_clean` proxy to the layered store, so a
     /// checkpoint that finds the deletion log unchanged since the last

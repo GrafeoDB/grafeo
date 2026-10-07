@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use grafeo_common::types::{EdgeId, EpochId, NodeId, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_common::utils::hash::FxHashMap;
-use parking_lot::{Mutex, MutexGuard, RwLock};
+use grafeo_core::execution::operators::WriteInProgress;
+use parking_lot::{Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 
 /// State of a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,10 +220,29 @@ pub struct TransactionManager {
     /// no image holds part of one.
     ///
     /// Lock order: a checkpoint takes the file's checkpoint guard before this
-    /// lock, and the idle gate comes before it too. Nothing that holds it
-    /// waits for the checkpoint timer thread (`close()` and `compact()` stop
-    /// the timer before they take it).
+    /// lock, and the idle gate comes before it too; the write freeze comes
+    /// after it. Nothing that holds it waits for the checkpoint timer thread
+    /// (`close()` and `compact()` stop the timer before they take it).
     commit_lock: Mutex<()>,
+    /// The write freeze: held shared by every store change of an open
+    /// transaction while it runs (a write, see
+    /// [`write_in_progress`](Self::write_in_progress), and the undo of a
+    /// rollback or a rollback to a savepoint), and exclusively by a
+    /// checkpoint or a copy of the store while it builds its image (see
+    /// [`hold_commits`](Self::hold_commits)) and by a merge of a compacted
+    /// store's overlay (see [`try_hold_commits`](Self::try_hold_commits)):
+    /// they read a store and change logs that do not move. Changes outside
+    /// any commit ([`hold_commits_for_change`](Self::hold_commits_for_change))
+    /// do not take it: they hold the commit lock, which already keeps every
+    /// checkpoint out.
+    ///
+    /// Lock order: the commit lock before this one, so a checkpoint that
+    /// holds the commit lock waits here only for store changes in progress,
+    /// which never wait for the commit lock, the checkpoint guard or anything
+    /// else a checkpoint holds. It is not reentrant (a fair lock): no thread
+    /// asks for it while it holds it, in either mode, because a checkpoint
+    /// waiting in between would block the second request.
+    write_freeze: RwLock<()>,
     /// Set when a commit did not complete (its [`CommitGuard`] was dropped
     /// without `complete`): no commit can run afterwards.
     poisoned: AtomicBool,
@@ -234,9 +254,14 @@ pub struct TransactionManager {
 
 /// Commits held off (see [`TransactionManager::hold_commits`]): while this
 /// lives, no commit is between its epoch and its completion, and no commit,
-/// transaction start or write outside a transaction can begin.
+/// transaction start or write outside a transaction can begin. Held for a
+/// checkpoint or a copy of the store, it also freezes the store: no store
+/// change of an open transaction is in progress or can begin.
 #[must_use = "commits are held off only while the guard lives"]
 pub(crate) struct CommitsHeld<'a> {
+    // Fields drop in order: the freeze is released before the commit lock,
+    // the reverse of the order they are taken in.
+    _writes: Option<RwLockWriteGuard<'a, ()>>,
     _commit: MutexGuard<'a, ()>,
 }
 
@@ -330,6 +355,7 @@ impl TransactionManager {
             committed_epochs: RwLock::new(FxHashMap::default()),
             idle_gate: Mutex::new(()),
             commit_lock: Mutex::new(()),
+            write_freeze: RwLock::new(()),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         }
@@ -607,17 +633,30 @@ impl TransactionManager {
     /// Holds commits off for a checkpoint or a copy of the store: while the
     /// returned guard lives, no commit is between its epoch and its
     /// completion, and no commit, transaction start or write outside a
-    /// transaction can begin. Waits for a commit in progress to complete.
+    /// transaction can begin. It also freezes the store (see `write_freeze`):
+    /// no store change of an open transaction, a write or the undo of a
+    /// rollback, is in progress or can begin, so the image is read from a
+    /// store and change logs that do not move. Waits for a commit in
+    /// progress to complete, then for the store changes in progress.
+    ///
+    /// Lock order: the commit lock, then the write freeze. The calling
+    /// thread must not have a write in progress (see
+    /// [`write_in_progress`](Self::write_in_progress)): it would wait for
+    /// itself.
     ///
     /// # Errors
     ///
-    /// Fails, once the lock is held, when a commit did not complete (see
-    /// [`check_no_incomplete_commit`](Self::check_no_incomplete_commit)):
+    /// Fails, once the commit lock is held, when a commit did not complete
+    /// (see [`check_no_incomplete_commit`](Self::check_no_incomplete_commit)):
     /// the store holds its stamped versions, which no image may contain.
     pub(crate) fn hold_commits(&self) -> Result<CommitsHeld<'_>> {
         let commit = self.commit_lock.lock();
         self.check_no_incomplete_commit()?;
-        Ok(CommitsHeld { _commit: commit })
+        let writes = self.write_freeze.write();
+        Ok(CommitsHeld {
+            _writes: Some(writes),
+            _commit: commit,
+        })
     }
 
     /// Holds commits off for a change that takes effect at once and logs its
@@ -628,30 +667,60 @@ impl TransactionManager {
     /// the database is closed (see [`check_open`](Self::check_open)) or after
     /// a commit that did not complete.
     ///
+    /// It does not freeze the store (see `write_freeze`): the writes of open
+    /// transactions go on meanwhile.
+    ///
     /// # Errors
     ///
     /// [`TransactionError::IncompleteCommit`] or
     /// [`TransactionError::DatabaseClosed`].
     pub(crate) fn hold_commits_for_change(&self) -> Result<CommitsHeld<'_>> {
-        let held = self.hold_commits()?;
+        let commit = self.commit_lock.lock();
+        self.check_no_incomplete_commit()?;
         self.check_open()?;
-        Ok(held)
+        Ok(CommitsHeld {
+            _writes: None,
+            _commit: commit,
+        })
     }
 
     /// [`hold_commits`](Self::hold_commits) without waiting: `None` while a
-    /// commit (or anything else holding commits off) is in progress, also
-    /// one on the calling thread.
+    /// commit (or anything else holding commits off) is in progress, or a
+    /// store change of an open transaction, also one on the calling thread
+    /// (a write that asks for memory, which merges a compacted store's
+    /// overlay, never waits for itself).
     ///
     /// # Errors
     ///
-    /// As [`hold_commits`](Self::hold_commits), when the lock is free.
+    /// As [`hold_commits`](Self::hold_commits), when the commit lock is free.
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
     pub(crate) fn try_hold_commits(&self) -> Result<Option<CommitsHeld<'_>>> {
         let Some(commit) = self.commit_lock.try_lock() else {
             return Ok(None);
         };
         self.check_no_incomplete_commit()?;
-        Ok(Some(CommitsHeld { _commit: commit }))
+        let Some(writes) = self.write_freeze.try_write() else {
+            return Ok(None);
+        };
+        Ok(Some(CommitsHeld {
+            _writes: Some(writes),
+            _commit: commit,
+        }))
+    }
+
+    /// Marks a store change of an open transaction as in progress, for as
+    /// long as the returned guard lives: a write (through a
+    /// [`TransactionWriteTracker`](super::TransactionWriteTracker)), or the
+    /// undo of a rollback or a rollback to a savepoint. It waits while a
+    /// checkpoint or a copy of the store holds commits off (see
+    /// [`hold_commits`](Self::hold_commits)), and they wait for it.
+    ///
+    /// Not reentrant: the calling thread must not hold one already, nor
+    /// hold commits off for a checkpoint or a copy (see `write_freeze`). It
+    /// may hold the commit lock (taken before this), but nothing else a
+    /// checkpoint waits for while it holds commits off.
+    pub(crate) fn write_in_progress(&self) -> WriteInProgress<'_> {
+        self.write_freeze.read()
     }
 
     /// Closes the database for writes: from now on every commit and every
@@ -1762,5 +1831,117 @@ mod tests {
         assert!(mgr.idle_gate().is_some());
         let next = mgr.begin();
         mgr.record_write(next, NodeId::new(1)).unwrap();
+    }
+
+    /// How long work that should wait gets to finish anyway.
+    const BRIEFLY: std::time::Duration = std::time::Duration::from_millis(100);
+
+    /// Runs `work` on a scoped thread; returns whether it finished within
+    /// [`BRIEFLY`], and its handle.
+    fn spawn_and_wait_briefly<'scope, T: Send + 'scope>(
+        scope: &'scope std::thread::Scope<'scope, '_>,
+        work: impl FnOnce() -> T + Send + 'scope,
+    ) -> (bool, std::thread::ScopedJoinHandle<'scope, T>) {
+        let (done, finished) = std::sync::mpsc::channel();
+        let handle = scope.spawn(move || {
+            let result = work();
+            let _ = done.send(());
+            result
+        });
+        (finished.recv_timeout(BRIEFLY).is_ok(), handle)
+    }
+
+    /// A checkpoint's hold waits for a store change of an open transaction
+    /// in progress, and once it holds commits off, a store change waits for
+    /// it: the image is read from a store that does not move.
+    #[test]
+    fn a_checkpoint_hold_and_a_write_in_progress_wait_for_each_other() {
+        let mgr = TransactionManager::new();
+        let manager = &mgr;
+        std::thread::scope(|scope| {
+            let writing = mgr.write_in_progress();
+            let (finished, checkpoint) = spawn_and_wait_briefly(scope, move || {
+                drop(manager.hold_commits().unwrap());
+            });
+            assert!(!finished, "the hold waits for the write in progress");
+            drop(writing);
+            checkpoint.join().unwrap();
+
+            let held = mgr.hold_commits().unwrap();
+            let (finished, write) = spawn_and_wait_briefly(scope, move || {
+                drop(manager.write_in_progress());
+            });
+            assert!(!finished, "a write waits for the checkpoint's hold");
+            drop(held);
+            write.join().unwrap();
+        });
+    }
+
+    /// Writes in progress do not wait for each other, and a change outside
+    /// any commit (a schema statement, a direct write outside a transaction)
+    /// holds commits off without freezing the store: writes of open
+    /// transactions go on, and it does not wait for them.
+    #[test]
+    fn a_change_outside_a_commit_does_not_freeze_the_store() {
+        let mgr = TransactionManager::new();
+        let manager = &mgr;
+        std::thread::scope(|scope| {
+            let writing = mgr.write_in_progress();
+            let (finished, other) = spawn_and_wait_briefly(scope, move || {
+                drop(manager.write_in_progress());
+            });
+            assert!(finished, "another write runs alongside");
+            other.join().unwrap();
+
+            let (finished, change) = spawn_and_wait_briefly(scope, move || {
+                drop(manager.hold_commits_for_change().unwrap());
+            });
+            assert!(finished, "the change does not wait for the write");
+            change.join().unwrap();
+            drop(writing);
+
+            let held = mgr.hold_commits_for_change().unwrap();
+            let (finished, write) = spawn_and_wait_briefly(scope, move || {
+                drop(manager.write_in_progress());
+            });
+            assert!(finished, "a write does not wait for the change");
+            write.join().unwrap();
+            drop(held);
+        });
+    }
+
+    /// The merge of a compacted store's overlay holds commits off and
+    /// freezes the store without waiting: while a write is in progress, also
+    /// one on the calling thread (a write that asks for memory), it gets
+    /// `None` at once and leaves the commit lock free; otherwise it holds
+    /// both, and a write waits for it.
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    #[test]
+    fn the_merge_hold_never_waits_for_a_write_in_progress() {
+        let mgr = TransactionManager::new();
+        let writing = mgr.write_in_progress();
+        assert!(
+            mgr.try_hold_commits().unwrap().is_none(),
+            "no merge while a write is in progress on this thread"
+        );
+        assert!(
+            mgr.commit_lock.try_lock().is_some(),
+            "the commit lock is free again"
+        );
+        drop(writing);
+
+        let manager = &mgr;
+        std::thread::scope(|scope| {
+            let held = mgr
+                .try_hold_commits()
+                .unwrap()
+                .expect("the merge holds commits off when nothing is in progress");
+            let (finished, write) = spawn_and_wait_briefly(scope, move || {
+                drop(manager.write_in_progress());
+            });
+            assert!(!finished, "a write waits for the merge");
+            drop(held);
+            write.join().unwrap();
+        });
     }
 }

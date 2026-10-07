@@ -528,6 +528,12 @@ impl LpgStore {
                     PropertyUndoEntry::EdgeCreated { edge_id } => {
                         self.discard_created_edge(edge_id, transaction_id);
                     }
+                    PropertyUndoEntry::BaseNodeDeleted { node_id } => {
+                        self.discard_base_node_tombstone(node_id, transaction_id);
+                    }
+                    PropertyUndoEntry::BaseEdgeDeleted { edge_id } => {
+                        self.discard_base_edge_tombstone(edge_id, transaction_id);
+                    }
                     PropertyUndoEntry::NodeProperty {
                         node_id,
                         key,
@@ -612,6 +618,12 @@ impl LpgStore {
                     }
                     PropertyUndoEntry::EdgeCreated { edge_id } => {
                         self.discard_created_edge(edge_id, transaction_id);
+                    }
+                    PropertyUndoEntry::BaseNodeDeleted { node_id } => {
+                        self.discard_base_node_tombstone(node_id, transaction_id);
+                    }
+                    PropertyUndoEntry::BaseEdgeDeleted { edge_id } => {
+                        self.discard_base_edge_tombstone(edge_id, transaction_id);
                     }
                     PropertyUndoEntry::NodeProperty { node_id, key, .. } => {
                         node_props.insert((node_id, key));
@@ -761,6 +773,12 @@ impl LpgStore {
                     PropertyUndoEntry::EdgeCreated { edge_id } => {
                         self.discard_created_edge(edge_id, transaction_id);
                     }
+                    PropertyUndoEntry::BaseNodeDeleted { node_id } => {
+                        self.discard_base_node_tombstone(node_id, transaction_id);
+                    }
+                    PropertyUndoEntry::BaseEdgeDeleted { edge_id } => {
+                        self.discard_base_edge_tombstone(edge_id, transaction_id);
+                    }
                     PropertyUndoEntry::NodeProperty {
                         node_id,
                         key,
@@ -851,6 +869,12 @@ impl LpgStore {
                     }
                     PropertyUndoEntry::EdgeCreated { edge_id } => {
                         self.discard_created_edge(edge_id, transaction_id);
+                    }
+                    PropertyUndoEntry::BaseNodeDeleted { node_id } => {
+                        self.discard_base_node_tombstone(node_id, transaction_id);
+                    }
+                    PropertyUndoEntry::BaseEdgeDeleted { edge_id } => {
+                        self.discard_base_edge_tombstone(edge_id, transaction_id);
                     }
                     PropertyUndoEntry::NodeProperty { node_id, key, .. } => {
                         *node_prop_counts.entry((node_id, key)).or_default() += 1;

@@ -1,14 +1,17 @@
-//! Checkpoints never capture part of a commit.
+//! Checkpoints never capture part of a commit, or part of a change of an
+//! open transaction.
 //!
 //! A checkpoint holds commits off while it builds and writes its image: it
 //! waits for a commit in progress (between its epoch and its completion) to
 //! complete, and no commit, transaction start or write outside a transaction
-//! runs until the image is written. These tests start a checkpoint from
-//! inside a commit, and commits from inside a checkpoint, with the
-//! `testing-statement-injection` hooks, and check what the image holds. Work
-//! that should wait gets 300 ms to finish in the middle; the child-process
-//! tests exit without `close()`, so a reopen reads the image and what is left
-//! of the WAL.
+//! runs until the image is written. It also freezes the store: the writes of
+//! open transactions and their rollbacks wait too, so the image is read from
+//! a store and change logs that do not move. These tests start a checkpoint
+//! from inside a commit, and commits, writes and rollbacks from inside a
+//! checkpoint, with the `testing-statement-injection` hooks, and check what
+//! the image holds. Work that should wait gets 300 ms to finish in the
+//! middle; the child-process tests exit without `close()`, so a reopen reads
+//! the image and what is left of the WAL.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test checkpoint_during_commit
@@ -33,7 +36,7 @@ use grafeo_common::testing::commit_hook::{
     after_next_commit_epoch, after_next_commit_stamped, during_next_checkpoint,
 };
 use grafeo_common::types::Value;
-use grafeo_engine::GrafeoDB;
+use grafeo_engine::{GrafeoDB, Session};
 
 #[path = "common/image.rs"]
 mod image;
@@ -220,32 +223,165 @@ fn commits_wait_for_a_checkpoint_and_stay_out_of_its_image() {
     db.close().unwrap();
 }
 
+/// Inside a checkpoint, while it holds commits off: the writes of
+/// transactions that began before it (one that wrote before the checkpoint,
+/// one that did not, one through the direct API), a rollback and a rollback
+/// to a savepoint, each started from another thread, finish only once the
+/// image is written, and then succeed.
+#[test]
+fn writes_and_rollbacks_of_open_transactions_wait_for_a_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("amsterdam.grafeo");
+    database_with_alix(&path);
+    let db = Arc::new(GrafeoDB::open(&path).unwrap());
+
+    // Each work hands its session back: dropping a session whose
+    // transaction is open rolls it back, which waits for the checkpoint too.
+    type Work = Box<dyn FnOnce() -> (Result<(), String>, Session) + Send>;
+    let begun = || {
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        session
+    };
+    let mut works: Vec<(&str, Work)> = Vec::new();
+
+    let first_write = begun();
+    works.push((
+        "the first write of a transaction",
+        Box::new(move || {
+            let written = first_write
+                .execute("MATCH (a:Person {name: 'Alix'}) SET a.city = 'Berlin'")
+                .map(drop)
+                .map_err(|e| e.to_string());
+            (written, first_write)
+        }),
+    ));
+
+    let second_write = begun();
+    second_write
+        .execute("INSERT (:Person {name: 'Gus'})")
+        .unwrap();
+    works.push((
+        "a later write of a transaction that wrote before",
+        Box::new(move || {
+            let written = second_write
+                .execute("MATCH (g:Person {name: 'Gus'}) SET g.city = 'Paris', g:Traveller")
+                .map(drop)
+                .map_err(|e| e.to_string());
+            (written, second_write)
+        }),
+    ));
+
+    let direct_write = begun();
+    works.push((
+        "a direct write in a transaction",
+        Box::new(move || {
+            let written = direct_write
+                .create_node_with_props(&["Person"], [("name", Value::from("Jules"))])
+                .map(drop)
+                .map_err(|e| e.to_string());
+            (written, direct_write)
+        }),
+    ));
+
+    let mut rolled_back = begun();
+    rolled_back
+        .execute("INSERT (:Person {name: 'Vincent'})")
+        .unwrap();
+    works.push((
+        "a rollback",
+        Box::new(move || {
+            let undone = rolled_back.rollback().map_err(|e| e.to_string());
+            (undone, rolled_back)
+        }),
+    ));
+
+    let to_savepoint = begun();
+    to_savepoint.savepoint("before_mia").unwrap();
+    to_savepoint
+        .execute("INSERT (:Person {name: 'Mia'})")
+        .unwrap();
+    works.push((
+        "a rollback to a savepoint",
+        Box::new(move || {
+            let undone = to_savepoint
+                .rollback_to_savepoint("before_mia")
+                .map_err(|e| e.to_string());
+            (undone, to_savepoint)
+        }),
+    ));
+
+    let (sender, started) = mpsc::channel();
+    during_next_checkpoint(move || {
+        let works: Vec<_> = works
+            .into_iter()
+            .map(|(name, work)| (name, Started::spawn(work)))
+            .collect();
+        let finished: Vec<_> = works
+            .iter()
+            .map(|(name, work)| (*name, work.finishes_briefly()))
+            .collect();
+        sender.send((works, finished)).unwrap();
+    });
+    db.wal_checkpoint().unwrap();
+
+    let (works, finished) = started.recv().expect("the checkpoint ran the hook");
+    for (name, finished) in finished {
+        assert!(!finished, "{name} waits for the checkpoint");
+    }
+    let mut sessions = Vec::new();
+    for (name, work) in works {
+        let (result, session) = work.join();
+        result.unwrap_or_else(|error| panic!("{name} succeeds after the checkpoint: {error}"));
+        sessions.push(session);
+    }
+    drop(sessions);
+    db.close().unwrap();
+}
+
 // =========================================================================
 // Child processes: exit without close, reopen
 // =========================================================================
 
 /// The database path a child process works on.
 const PATH_VAR: &str = "GRAFEO_CHECKPOINT_DURING_COMMIT_PATH";
-/// Which child: "failing", "graphs", "open" or "busy".
+/// Which child: "failing", "graphs", "open", "frozen" or "busy".
 const CHILD_VAR: &str = "GRAFEO_CHECKPOINT_DURING_COMMIT_CHILD";
 /// Exit code of a child that reached its end.
 const EXITED: i32 = 19;
+/// Exit code of the "frozen" child when a write or the rollback finished
+/// inside the checkpoint, before its image was written.
+const FINISHED_INSIDE: i32 = 88;
 
 /// Runs the child `which` on the database at `path`.
 fn run_child(which: &str, path: &Path) {
-    let output = child_process::output(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "checkpoint_child", "--nocapture"])
-            .env(CHILD_VAR, which)
-            .env(PATH_VAR, path),
-    )
-    .unwrap();
+    let output = run_child_output(which, path);
     assert_eq!(
         output.status.code(),
         Some(EXITED),
         "the child {which} exited early:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Runs the child `which` on the database at `path` and returns how it
+/// ended.
+fn run_child_output(which: &str, path: &Path) -> std::process::Output {
+    child_process::output(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "checkpoint_child", "--nocapture"])
+            .env(CHILD_VAR, which)
+            .env(PATH_VAR, path),
+    )
+    .unwrap()
+}
+
+/// The sidecar WAL of the database file at `path`, which a process that ends
+/// without `close()` leaves behind.
+fn sidecar_wal(path: &Path) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(".wal");
+    PathBuf::from(sidecar)
 }
 
 /// Child-process entry for [`run_child`]; a no-op when run directly.
@@ -311,6 +447,48 @@ fn checkpoint_child() {
             };
             with_chunk_caps(tiny, || checkpointer.wal_checkpoint()).unwrap();
             std::process::exit(EXITED);
+        }
+        // Inside a checkpoint, the open transaction (it created Gus) rolls
+        // back, and another one, begun before the checkpoint, deletes
+        // Vincent and moves Alix to Berlin, each from another thread; the
+        // process ends once the checkpoint and both are done, with the
+        // second transaction open. Exits with `FINISHED_INSIDE` when one
+        // finished before the image was written.
+        "frozen" => {
+            let mut writer = db.session();
+            writer.begin_transaction().unwrap();
+            let (sender, started) = mpsc::channel();
+            during_next_checkpoint(move || {
+                let mut rolled_back = session;
+                let rollback =
+                    Started::spawn(move || rolled_back.rollback().map_err(|e| e.to_string()));
+                let write = Started::spawn(move || {
+                    let written = writer
+                        .execute("MATCH (v:Person {name: 'Vincent'}) DETACH DELETE v")
+                        .and_then(|_| {
+                            writer.execute("MATCH (a:Person {name: 'Alix'}) SET a.city = 'Berlin'")
+                        })
+                        .map(drop)
+                        .map_err(|e| e.to_string());
+                    // The transaction stays open until the process ends.
+                    (written, writer)
+                });
+                let rollback_finished = rollback.finishes_briefly();
+                let write_finished = write.finishes_briefly();
+                sender
+                    .send((rollback, write, rollback_finished || write_finished))
+                    .unwrap();
+            });
+            checkpointer.wal_checkpoint().unwrap();
+            let (rollback, write, finished_inside) = started.recv().unwrap();
+            rollback.join().expect("the rollback succeeds");
+            let (written, _open) = write.join();
+            written.expect("the writes succeed");
+            std::process::exit(if finished_inside {
+                FINISHED_INSIDE
+            } else {
+                EXITED
+            });
         }
         // Transactions commit, roll back or stay open on three threads while
         // checkpoints with tiny chunks run; the process ends without close.
@@ -401,9 +579,10 @@ fn busy_worker(db: &GrafeoDB, stop: &std::sync::atomic::AtomicBool, worker: u64)
 
 /// A checkpoint while a transaction is open (it created a node, a label, a
 /// property key and an edge type) writes a file that opens after the
-/// process ends, with the committed data. With `temporal` it holds none of
-/// the open transaction's changes; without, the store keeps no versions and
-/// its in-place changes to committed nodes reach the image (a known gap).
+/// process ends, with the committed data and none of the open
+/// transaction's changes: without `temporal` the store keeps no versions and
+/// changes committed nodes in place, and the image holds them as they were
+/// before the transaction all the same (#412).
 #[test]
 fn a_checkpoint_during_an_open_transaction_writes_a_file_that_reopens() {
     let dir = tempfile::tempdir().unwrap();
@@ -423,20 +602,93 @@ fn a_checkpoint_during_an_open_transaction_writes_a_file_that_reopens() {
         Value::Int64(0),
         "the open transaction's edge is not in the file"
     );
-    #[cfg(feature = "temporal")]
-    {
-        let alix = db
-            .execute("MATCH (a:Person) RETURN labels(a) AS labels, a.city AS city")
-            .unwrap()
-            .rows()[0]
-            .clone();
-        assert_eq!(
-            alix,
-            [Value::List(vec![Value::from("Person")].into()), Value::Null],
-            "the open transaction's label and value are not in the file"
-        );
-    }
+    let alix = db
+        .execute("MATCH (a:Person) RETURN labels(a) AS labels, a.city AS city")
+        .unwrap()
+        .rows()[0]
+        .clone();
+    assert_eq!(
+        alix,
+        [Value::List(vec![Value::from("Person")].into()), Value::Null],
+        "the open transaction's label and value are not in the file"
+    );
     db.close().unwrap();
+}
+
+/// Inserts Alix, in Amsterdam, who knows Vincent.
+fn insert_alix_and_vincent(db: &GrafeoDB) {
+    db.execute(
+        "INSERT (:Person {name: 'Alix', city: 'Amsterdam'})-[:KNOWS]->(:Person {name: 'Vincent'})",
+    )
+    .unwrap();
+}
+
+/// Runs the "frozen" child on the database at `path` (Alix, in Amsterdam,
+/// who knows Vincent) and checks the file it leaves: the image holds the
+/// committed state, as the deletion of Vincent, the move of Alix and the
+/// rollback waited for it, and the open transaction's changes made after it
+/// are not in the WAL.
+fn check_the_frozen_child(path: &Path) {
+    let output = run_child_output("frozen", path);
+    assert!(
+        sidecar_wal(path).exists(),
+        "the child ended without close(): the reopen recovers from its WAL"
+    );
+    let db = GrafeoDB::open(path).unwrap();
+    assert_eq!(
+        people(&db),
+        [Value::from("Alix"), Value::from("Vincent")],
+        "Vincent, whom the open transaction deleted, is in the file, Gus, whom the rolled \
+         back one created, is not"
+    );
+    let knows = db
+        .execute(
+            "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(v:Person) \
+             RETURN a.city AS city, v.name AS name",
+        )
+        .unwrap();
+    assert_eq!(
+        knows.rows().to_vec(),
+        vec![vec![Value::from("Amsterdam"), Value::from("Vincent")]],
+        "Alix is in Amsterdam and knows Vincent, as committed"
+    );
+    db.close().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(EXITED),
+        "the writes and the rollback finish only once the image is written \
+         (exit code {FINISHED_INSIDE}: one finished inside the checkpoint):\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A checkpoint freezes the store: an open transaction's writes (a DETACH
+/// DELETE and a SET) and another one's rollback, started inside it, wait for
+/// its image, which holds the committed state; the process then ends
+/// without close, and the reopened file holds that state.
+#[test]
+fn writes_and_a_rollback_inside_a_checkpoint_wait_for_its_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("berlin.grafeo");
+    let db = GrafeoDB::open(&path).unwrap();
+    insert_alix_and_vincent(&db);
+    db.close().unwrap();
+    check_the_frozen_child(&path);
+}
+
+/// As [`writes_and_a_rollback_inside_a_checkpoint_wait_for_its_image`], on a
+/// compacted database: Vincent and Alix are in the compacted base, which the
+/// deletion and the SET (a promotion into the overlay) change.
+#[cfg(feature = "compact-store")]
+#[test]
+fn writes_inside_a_checkpoint_of_a_compacted_database_wait_for_its_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prague.grafeo");
+    let mut db = GrafeoDB::open(&path).unwrap();
+    insert_alix_and_vincent(&db);
+    db.compact().unwrap();
+    db.close().unwrap();
+    check_the_frozen_child(&path);
 }
 
 /// Checkpoints with tiny chunks among transactions that commit, roll back

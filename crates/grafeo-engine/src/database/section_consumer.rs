@@ -681,13 +681,14 @@ impl MemoryConsumer for CompactStoreConsumer {
 /// rebuilding the base, so this is the last-resort spill before query
 /// failure under sustained mutation pressure.
 ///
-/// The merge runs with commits held off (see
+/// The merge runs with commits held off and the store frozen (see
 /// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager)):
 /// the base has no versions, so a commit in the middle of being written, or
-/// one that did not complete, would become visible in it. It does not wait:
-/// while a commit is in progress (possibly on the thread that asks for
-/// memory), nothing is merged, and after a commit that did not complete, the
-/// spill fails.
+/// one that did not complete, would become visible in it, and a write of an
+/// open transaction must not change the overlay while it is merged. It does
+/// not wait: while a commit or such a write is in progress (possibly on the
+/// thread that asks for memory), nothing is merged, and after a commit that
+/// did not complete, the spill fails.
 #[cfg(all(feature = "compact-store", feature = "lpg"))]
 pub struct OverlayConsumer {
     layered: Weak<grafeo_core::graph::compact::layered::LayeredStore>,
@@ -755,7 +756,8 @@ impl MemoryConsumer for OverlayConsumer {
             .try_hold_commits()
             .map_err(|error| SpillError::IoError(error.to_string()))?
         else {
-            // A commit is in progress: merge later.
+            // A commit or a write of an open transaction is in progress:
+            // merge later.
             return Ok(0);
         };
 

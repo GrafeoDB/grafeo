@@ -5,6 +5,9 @@
 //! session. For each write it records the entity for write-conflict
 //! detection, checks the schema and constraints, and writes with the
 //! transaction's versioning, so the rules for a valid write live in one place.
+//! A transaction's store changes run as a write in progress (see
+//! [`WriteTracker::write_in_progress`](super::WriteTracker::write_in_progress)),
+//! which a checkpoint waits for and which waits for a checkpoint.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +17,7 @@ use grafeo_common::types::{
     EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, TransactionId, Value,
 };
 
-use super::{ConstraintValidator, OperatorError, SharedWriteTracker};
+use super::{ConstraintValidator, OperatorError, SharedWriteTracker, WriteInProgress};
 use crate::graph::lpg::{Edge, Node};
 use crate::graph::{Direction, GraphStoreMut};
 
@@ -278,6 +281,24 @@ impl GraphWriter {
         Ok(())
     }
 
+    /// Marks this writer's store changes as in progress while the guard
+    /// lives (see [`WriteTracker::write_in_progress`](super::WriteTracker::write_in_progress)):
+    /// a checkpoint or a copy of the store waits for them, and they wait for
+    /// one. `None` for a writer without a transaction or a write tracker: a
+    /// write outside a transaction holds commits off itself, and with them
+    /// checkpoints.
+    ///
+    /// Each public write method takes it once, right before its first store
+    /// change; the methods it calls never take it again (it is not
+    /// reentrant), and the expressions a `derive` of
+    /// [`create_node_with`](Self::create_node_with) evaluates run without it.
+    fn write_in_progress(&self) -> Option<WriteInProgress<'_>> {
+        match (&self.write_tracker, self.transaction_id) {
+            (Some(tracker), Some(_)) => Some(tracker.write_in_progress()),
+            _ => None,
+        }
+    }
+
     // === Nodes ===
 
     /// Creates a node after checking it against the schema: allowed labels,
@@ -299,6 +320,7 @@ impl GraphWriter {
             validator.validate_node_complete(labels, &properties)?;
             validator.check_unique_node(labels, &properties, None)?;
         }
+        let _writing = self.write_in_progress();
         let id = self.insert_node(labels)?;
         self.write_values(Entity::Node(id), &properties)?;
         Ok(id)
@@ -325,9 +347,14 @@ impl GraphWriter {
             validator.inject_defaults(labels, &mut properties);
             self.check_node_values(validator.as_ref(), labels, &properties, None)?;
         }
-        let id = self.insert_node(labels)?;
-        self.write_values(Entity::Node(id), &properties)?;
+        let id = {
+            let _writing = self.write_in_progress();
+            let id = self.insert_node(labels)?;
+            self.write_values(Entity::Node(id), &properties)?;
+            id
+        };
 
+        // Evaluates expressions: no write is in progress meanwhile.
         let derived = derive(id)?;
         refuse_too_deep(plain_values(&derived))?;
         if let Some(validator) = &self.validator {
@@ -336,6 +363,7 @@ impl GraphWriter {
             validator.validate_node_complete(labels, &all)?;
             validator.check_unique_node(labels, &all, Some(id))?;
         }
+        let _writing = self.write_in_progress();
         self.write_values(Entity::Node(id), &derived)?;
         Ok(id)
     }
@@ -372,6 +400,7 @@ impl GraphWriter {
                 self.check_node_set(validator.as_ref(), &node, assignments, replace)?;
             }
         }
+        let _writing = self.write_in_progress();
         self.apply_set(Entity::Node(id), assignments, replace)?;
         Ok(())
     }
@@ -400,6 +429,7 @@ impl GraphWriter {
                 false,
             )?;
         }
+        let _writing = self.write_in_progress();
         self.remove_value(Entity::Node(id), key)?;
         Ok(true)
     }
@@ -435,6 +465,7 @@ impl GraphWriter {
                 validator.check_unique_node(&added, &values, Some(id))?;
             }
         }
+        let _writing = self.write_in_progress();
         let mut added = 0;
         for label in labels {
             let new = match self.transaction_id {
@@ -459,6 +490,7 @@ impl GraphWriter {
         if self.node(id).is_none() {
             return Ok(0);
         }
+        let _writing = self.write_in_progress();
         let mut removed = 0;
         for label in labels {
             let had = match self.transaction_id {
@@ -481,14 +513,15 @@ impl GraphWriter {
     /// Returns a write conflict, or an error for a node with edges and no `detach`.
     pub fn delete_node(&self, id: NodeId, detach: bool) -> Result<bool, OperatorError> {
         self.record(Entity::Node(id))?;
+        let _writing = self.write_in_progress();
         if detach {
             let outgoing = self.store.edges_from(id, Direction::Outgoing);
             let incoming = self.store.edges_from(id, Direction::Incoming);
             for (_, edge) in outgoing.into_iter().chain(incoming) {
-                self.delete_edge(edge)?;
+                self.remove_edge(edge)?;
             }
-        } else {
-            let degree = self.store.out_degree(id) + self.store.in_degree(id);
+        } else if self.store.out_degree(id) + self.store.in_degree(id) > 0 {
+            let degree = self.connected_edge_count(id);
             if degree > 0 {
                 return Err(OperatorError::ConstraintViolation(format!(
                     "Cannot delete node with {degree} connected edge(s). Use DETACH DELETE."
@@ -501,6 +534,31 @@ impl GraphWriter {
             .map_err(refused)?;
         self.count(|c| &c.nodes_deleted, usize::from(deleted));
         Ok(deleted)
+    }
+
+    /// The edges of node `id` that a delete without `DETACH` refuses: those
+    /// the store lists for it, less the ones this writer's transaction
+    /// deleted itself. The base of a compacted store lists a transaction's
+    /// deletes until it commits, as other readers still see them; an edge the
+    /// transaction deleted is one visible at its snapshot that it no longer
+    /// sees. Edges others created or committed after the snapshot still
+    /// count.
+    fn connected_edge_count(&self, id: NodeId) -> usize {
+        let outgoing = self.store.edges_from(id, Direction::Outgoing);
+        let incoming = self.store.edges_from(id, Direction::Incoming);
+        let edges = outgoing.into_iter().chain(incoming).map(|(_, edge)| edge);
+        let (Some(epoch), Some(transaction_id)) = (self.viewing_epoch, self.transaction_id) else {
+            return edges.count();
+        };
+        edges
+            .filter(|&edge| {
+                let deleted_by_this_transaction = self.store.is_edge_visible_at_epoch(edge, epoch)
+                    && !self
+                        .store
+                        .is_edge_visible_versioned(edge, epoch, transaction_id);
+                !deleted_by_this_transaction
+            })
+            .count()
     }
 
     // === Edges ===
@@ -526,6 +584,7 @@ impl GraphWriter {
             }
             validator.validate_edge_complete(edge_type, &properties)?;
         }
+        let _writing = self.write_in_progress();
         let id = self.insert_edge(src, dst, edge_type)?;
         self.write_values(Entity::Edge(id), &properties)?;
         Ok(id)
@@ -553,9 +612,14 @@ impl GraphWriter {
                 validator.validate_edge_property(edge_type, name, value)?;
             }
         }
-        let id = self.insert_edge(src, dst, edge_type)?;
-        self.write_values(Entity::Edge(id), &properties)?;
+        let id = {
+            let _writing = self.write_in_progress();
+            let id = self.insert_edge(src, dst, edge_type)?;
+            self.write_values(Entity::Edge(id), &properties)?;
+            id
+        };
 
+        // Evaluates expressions: no write is in progress meanwhile.
         let derived = derive(id)?;
         refuse_too_deep(plain_values(&derived))?;
         if let Some(validator) = &self.validator {
@@ -564,6 +628,7 @@ impl GraphWriter {
             }
             validator.validate_edge_complete(edge_type, &overlay(properties, &derived))?;
         }
+        let _writing = self.write_in_progress();
         self.write_values(Entity::Edge(id), &derived)?;
         Ok(id)
     }
@@ -592,6 +657,7 @@ impl GraphWriter {
                 validator.validate_edge_property(edge.edge_type.as_str(), &name, &value)?;
             }
         }
+        let _writing = self.write_in_progress();
         self.apply_set(Entity::Edge(id), assignments, replace)?;
         Ok(())
     }
@@ -615,6 +681,7 @@ impl GraphWriter {
         if let Some(validator) = &self.validator {
             validator.validate_edge_property(edge.edge_type.as_str(), key, &Value::Null)?;
         }
+        let _writing = self.write_in_progress();
         self.remove_value(Entity::Edge(id), key)?;
         Ok(true)
     }
@@ -625,6 +692,13 @@ impl GraphWriter {
     ///
     /// Returns a write conflict.
     pub fn delete_edge(&self, id: EdgeId) -> Result<bool, OperatorError> {
+        let _writing = self.write_in_progress();
+        self.remove_edge(id)
+    }
+
+    /// [`delete_edge`](Self::delete_edge), for a caller whose write is
+    /// already in progress.
+    fn remove_edge(&self, id: EdgeId) -> Result<bool, OperatorError> {
         self.record(Entity::Edge(id))?;
         let deleted = self
             .store
@@ -930,11 +1004,15 @@ fn overlay(mut base: Vec<(String, Value)>, changes: &[(String, Value)]) -> Vec<(
 #[cfg(all(test, feature = "lpg"))]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
-    use grafeo_common::types::{PropertyKey, Value};
+    use grafeo_common::types::{EdgeId, NodeId, PropertyKey, TransactionId, Value};
+    use parking_lot::RwLock;
 
-    use super::GraphWriter;
+    use super::{GraphWriter, OperatorError, WriteInProgress, node_labels, property_list};
+    use crate::execution::operators::WriteTracker;
     use crate::graph::GraphStoreMut;
     use crate::graph::lpg::LpgStore;
 
@@ -1045,6 +1123,261 @@ mod tests {
                 )))
                 .is_err(),
             "a derived edge value"
+        );
+    }
+
+    // === Writes in progress ===
+
+    /// How long a write that should wait gets to finish anyway.
+    const BRIEFLY: Duration = Duration::from_millis(100);
+
+    /// A write tracker with a write freeze of its own: it counts the writes
+    /// in progress it is asked for, and notes one asked for while the freeze
+    /// is taken already (on one thread, a nested request).
+    #[derive(Default)]
+    struct Freeze {
+        lock: RwLock<()>,
+        requests: AtomicUsize,
+        taken_already: AtomicBool,
+    }
+
+    impl WriteTracker for Freeze {
+        fn write_in_progress(&self) -> WriteInProgress<'_> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            if self.lock.is_locked() {
+                self.taken_already.store(true, Ordering::SeqCst);
+            }
+            self.lock.read()
+        }
+
+        fn record_node_write(&self, _: TransactionId, _: NodeId) -> Result<(), OperatorError> {
+            Ok(())
+        }
+
+        fn record_edge_write(&self, _: TransactionId, _: EdgeId) -> Result<(), OperatorError> {
+            Ok(())
+        }
+    }
+
+    /// The committed graph a transaction writes to: Alix (in Amsterdam), who
+    /// knows Gus since 3, and Vincent, who has no edges.
+    struct People {
+        alix: NodeId,
+        gus: NodeId,
+        vincent: NodeId,
+        knows: EdgeId,
+    }
+
+    /// A store holding [`People`], and a writer of transaction 19 with a
+    /// [`Freeze`] as its write tracker.
+    fn transaction_writer() -> (Arc<LpgStore>, Arc<Freeze>, GraphWriter, People) {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Person"]);
+        store.set_node_property(alix, "city", Value::from("Amsterdam"));
+        let gus = store.create_node(&["Person"]);
+        let vincent = store.create_node(&["Person"]);
+        let knows = store.create_edge(alix, gus, "KNOWS");
+        store.set_edge_property(knows, "since", Value::Int64(3));
+        let freeze = Arc::new(Freeze::default());
+        let target: Arc<dyn GraphStoreMut> = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
+        let writer = GraphWriter::new(target)
+            .with_transaction_context(store.current_epoch(), Some(TransactionId::new(19)))
+            .with_write_tracker(Arc::clone(&freeze) as Arc<dyn WriteTracker>);
+        let people = People {
+            alix,
+            gus,
+            vincent,
+            knows,
+        };
+        (store, freeze, writer, people)
+    }
+
+    /// What the writer's transaction sees of the store: the next ids, and
+    /// the labels and properties of [`People`]'s nodes and edge.
+    fn seen(store: &LpgStore, writer: &GraphWriter, people: &People) -> String {
+        let sorted = |mut properties: Vec<(String, Value)>| {
+            properties.sort_by(|a, b| a.0.cmp(&b.0));
+            properties
+        };
+        let node = |id| {
+            writer.node(id).map(|node| {
+                let mut labels = node_labels(&node);
+                labels.sort();
+                (labels, sorted(property_list(&node.properties)))
+            })
+        };
+        let knows = writer
+            .edge(people.knows)
+            .map(|edge| sorted(property_list(&edge.properties)));
+        format!(
+            "ids {} {}, alix {:?}, gus {:?}, vincent {:?}, knows {knows:?}",
+            store.next_node_id(),
+            store.next_edge_id(),
+            node(people.alix),
+            node(people.gus),
+            node(people.vincent),
+        )
+    }
+
+    /// A write method of a transaction, called on [`People`].
+    type Write = fn(&GraphWriter, &People) -> Result<(), OperatorError>;
+
+    /// Every write method of [`GraphWriter`], each changing what the
+    /// transaction sees.
+    fn every_write() -> Vec<(&'static str, Write)> {
+        vec![
+            ("create_node", |writer, _| {
+                writer
+                    .create_node(&labels(&["Person"]), pairs("name", &Value::from("Mia")))
+                    .map(drop)
+            }),
+            ("create_node_with", |writer, _| {
+                writer
+                    .create_node_with(&labels(&["Person"]), Vec::new(), |_| {
+                        Ok(pairs("name", &Value::from("Jules")))
+                    })
+                    .map(drop)
+            }),
+            ("set_node_properties", |writer, people| {
+                writer.set_node_properties(
+                    people.alix,
+                    &pairs("city", &Value::from("Prague")),
+                    false,
+                )
+            }),
+            ("remove_node_property", |writer, people| {
+                writer.remove_node_property(people.alix, "city").map(drop)
+            }),
+            ("add_labels", |writer, people| {
+                writer
+                    .add_labels(people.alix, &labels(&["Traveller"]))
+                    .map(drop)
+            }),
+            ("remove_labels", |writer, people| {
+                writer
+                    .remove_labels(people.alix, &labels(&["Person"]))
+                    .map(drop)
+            }),
+            ("delete_node detaching", |writer, people| {
+                writer.delete_node(people.gus, true).map(drop)
+            }),
+            ("delete_node", |writer, people| {
+                writer.delete_node(people.vincent, false).map(drop)
+            }),
+            ("create_edge", |writer, people| {
+                writer
+                    .create_edge(
+                        people.alix,
+                        people.vincent,
+                        "KNOWS",
+                        pairs("since", &Value::Int64(19)),
+                    )
+                    .map(drop)
+            }),
+            ("create_edge_with", |writer, people| {
+                writer
+                    .create_edge_with(people.alix, people.vincent, "KNOWS", Vec::new(), |_| {
+                        Ok(pairs("since", &Value::Int64(88)))
+                    })
+                    .map(drop)
+            }),
+            ("set_edge_properties", |writer, people| {
+                writer.set_edge_properties(people.knows, &pairs("since", &Value::Int64(88)), false)
+            }),
+            ("remove_edge_property", |writer, people| {
+                writer.remove_edge_property(people.knows, "since").map(drop)
+            }),
+            ("delete_edge", |writer, people| {
+                writer.delete_edge(people.knows).map(drop)
+            }),
+        ]
+    }
+
+    /// Every write of a transaction waits while the store is frozen (a
+    /// checkpoint holds the freeze), and changes nothing the transaction
+    /// sees until the freeze is released.
+    #[test]
+    fn every_write_of_a_transaction_waits_while_the_store_is_frozen() {
+        for (name, write) in every_write() {
+            let (store, freeze, writer, people) = transaction_writer();
+            let before = seen(&store, &writer, &people);
+            std::thread::scope(|scope| {
+                let frozen = freeze.lock.write();
+                let (done, finished) = std::sync::mpsc::channel();
+                let worker = {
+                    let (writer, people) = (&writer, &people);
+                    scope.spawn(move || {
+                        let result = write(writer, people);
+                        let _ = done.send(());
+                        result
+                    })
+                };
+                assert!(
+                    finished.recv_timeout(BRIEFLY).is_err(),
+                    "{name} finished while the store was frozen"
+                );
+                assert_eq!(
+                    seen(&store, &writer, &people),
+                    before,
+                    "{name} changed the store while it was frozen"
+                );
+                drop(frozen);
+                worker
+                    .join()
+                    .unwrap()
+                    .unwrap_or_else(|error| panic!("{name}: {error}"));
+            });
+            assert_ne!(
+                seen(&store, &writer, &people),
+                before,
+                "{name} changes the store once the freeze is released"
+            );
+        }
+    }
+
+    /// Every write marks itself in progress, and never asks again while it
+    /// is (a checkpoint waiting in between would block the second request
+    /// for good); `derive` evaluates its expressions with no write in
+    /// progress. A writer without a transaction does not ask.
+    #[test]
+    fn every_write_marks_itself_in_progress_once_at_a_time() {
+        for (name, write) in every_write() {
+            let (_store, freeze, writer, people) = transaction_writer();
+            write(&writer, &people).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(
+                freeze.requests.load(Ordering::SeqCst) > 0,
+                "{name} marks its write in progress"
+            );
+            assert!(
+                !freeze.taken_already.load(Ordering::SeqCst),
+                "{name} asked for the freeze while it held it"
+            );
+        }
+
+        let (_store, freeze, writer, _people) = transaction_writer();
+        let frozen_in_derive = AtomicBool::new(true);
+        writer
+            .create_node_with(&labels(&["Person"]), Vec::new(), |_| {
+                frozen_in_derive.store(freeze.lock.is_locked(), Ordering::SeqCst);
+                Ok(Vec::new())
+            })
+            .unwrap();
+        assert!(
+            !frozen_in_derive.load(Ordering::SeqCst),
+            "derive runs with no write in progress"
+        );
+
+        let (store, freeze, _writer, people) = transaction_writer();
+        let target: Arc<dyn GraphStoreMut> = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
+        let outside = GraphWriter::new(target)
+            .with_write_tracker(Arc::clone(&freeze) as Arc<dyn WriteTracker>);
+        outside
+            .set_node_properties(people.alix, &pairs("city", &Value::from("Berlin")), false)
+            .unwrap();
+        assert_eq!(
+            freeze.requests.load(Ordering::SeqCst),
+            0,
+            "a write outside a transaction holds commits off instead"
         );
     }
 }

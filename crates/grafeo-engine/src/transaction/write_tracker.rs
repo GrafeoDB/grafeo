@@ -3,11 +3,13 @@
 use std::sync::Arc;
 
 use grafeo_common::types::{EdgeId, NodeId, TransactionId};
-use grafeo_core::execution::operators::{OperatorError, WriteTracker};
+use grafeo_core::execution::operators::{OperatorError, WriteInProgress, WriteTracker};
 
 use super::{GraphEntity, TransactionManager};
 
-/// Implements [`WriteTracker`] by forwarding to [`TransactionManager::record_write`].
+/// Implements [`WriteTracker`] by forwarding to [`TransactionManager::record_write`],
+/// and marks writes in progress for checkpoints with the manager's write
+/// freeze.
 ///
 /// Created by the planner when a transaction is active, and passed to each
 /// mutation operator so it can record writes for conflict detection.
@@ -37,6 +39,10 @@ impl TransactionWriteTracker {
 }
 
 impl WriteTracker for TransactionWriteTracker {
+    fn write_in_progress(&self) -> WriteInProgress<'_> {
+        self.manager.write_in_progress()
+    }
+
     fn record_node_write(
         &self,
         transaction_id: TransactionId,

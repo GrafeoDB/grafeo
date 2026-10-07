@@ -49,18 +49,28 @@
 //! The chunk sizes follow [`RowsChunker`]: at most `max_rows` rows and
 //! `max_bytes` bytes, a larger value in a chunk of its own. Every order is
 //! defined (ids, names and keys sorted), so the same data gives the same
-//! bytes. Only the nodes and edges visible now are written, with their
-//! properties; a property whose value is null does not exist and is not
-//! written (the direct store API and a 0.5.x load can leave one in a store
-//! without `temporal`). With `temporal` a node's labels are those of the
-//! store's current epoch, so a label set a transaction still open wrote is
-//! not written; without it the store keeps no versions, and such a
-//! transaction's in-place changes reach the section.
+//! bytes.
+//!
+//! The section holds the committed state, also while transactions are open
+//! (a checkpoint holds their writes, not the transactions): the nodes and
+//! edges visible now and those an open transaction deleted, with the labels
+//! and values they were committed with, and nothing an open transaction
+//! created. With `temporal` a node's labels are those of the store's current
+//! epoch and a value's versions those a transaction committed, so what an
+//! open transaction wrote is left out; without it the store keeps no
+//! versions and an open transaction changes values and labels in place, so
+//! the labels and values it replaced come from its undo log
+//! ([`OpenChanges`]), as do the nodes and edges it deleted in both builds. A
+//! property whose value is null does not exist and is not written (the
+//! direct store API and a 0.5.x load can leave one in a store without
+//! `temporal`).
 //!
 //! Memory: the writer holds one open chunk per column of the row group
 //! being written, the sorted ids of the table being written (8 bytes per
-//! node or edge) and, without `temporal`, the sorted ids of each of its
-//! property columns (8 bytes per value); it reads values a batch at a time.
+//! node or edge), the committed state of what open transactions changed
+//! (O(open changes), see [`OpenChanges`]) and, without `temporal`, the
+//! sorted ids of each of its property columns (8 bytes per value); it reads
+//! values a batch at a time.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,8 +83,9 @@ use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 
-use super::LpgStore;
 use super::property::{EntityId, PropertyStorage};
+use super::store::OpenChanges;
+use super::{Edge, LpgStore};
 use crate::codec::column_chunk::{ColumnChunk, decode_column_chunk_bytes};
 use crate::codec::{ChunkColumn, RowsChunker};
 
@@ -174,7 +185,11 @@ pub(crate) struct ColumnMeta {
 // ── Writing ─────────────────────────────────────────────────────────
 
 /// Writes per graph (in id order) the node table's row groups, then the edge
-/// table's, then the metadata chunk.
+/// table's, then the metadata chunk: the committed state (see the module
+/// docs). While transactions are open, the caller holds their writes and
+/// rollbacks and commits (a checkpoint's write freeze) for the whole write:
+/// the committed state is read from the store and the open transactions'
+/// undo logs together ([`LpgStore::open_changes`]).
 ///
 /// # Errors
 ///
@@ -222,8 +237,11 @@ pub(crate) fn write_lpg_chunks(
         // label set is at or below it (the default graph's epoch follows
         // every commit), a pending one is above it.
         let labels_at = EpochId::new(graph.current_epoch().as_u64().max(epoch));
-        let (nodes_end, used_labels) = write_node_table(graph, labels_at, &names, &place, sink)?;
-        let (edges_end, used_edge_types) = write_edge_table(graph, &names, &place, sink)?;
+        // Each graph is a store with its own undo log.
+        let changes = graph.open_changes();
+        let (nodes_end, used_labels) =
+            write_node_table(graph, &changes, labels_at, &names, &place, sink)?;
+        let (edges_end, used_edge_types) = write_edge_table(graph, &changes, &names, &place, sink)?;
         // Read after the rows: every row written is below the next ids, and
         // the registries hold every name the rows use.
         graph_metas.push(GraphMeta {
@@ -251,21 +269,25 @@ fn unused(registered: Vec<String>, list: &NameList, used: &BTreeSet<u32>) -> Res
     Ok(ids.into_iter().collect())
 }
 
-/// Writes the node table of `graph`, each node with the labels it has at
-/// `labels_at` (see [`LpgStore::node_with_labels_at`]); returns one past its
-/// last row (0 for none) and the ids of the labels its nodes have.
+/// Writes the node table of `graph`: the nodes visible now and those an open
+/// transaction deleted (`changes`), each with its committed labels (from
+/// those it has at `labels_at`, see [`LpgStore::node_with_labels_at`]);
+/// returns one past its last row (0 for none) and the ids of the labels its
+/// nodes have.
 fn write_node_table(
     graph: &LpgStore,
+    changes: &OpenChanges,
     labels_at: EpochId,
     names: &Names,
     place: &Place,
     sink: &mut dyn SectionSink,
 ) -> Result<(u64, BTreeSet<u32>)> {
     let used = RefCell::new(BTreeSet::new());
-    let nodes = graph.try_node_ids()?.into_iter().map(|id| {
-        let node = graph.node_with_labels_at(id, labels_at);
-        let mut labels = node
-            .labels
+    let ids = merge_ids(graph.try_node_ids()?, changes.deleted_nodes());
+    let nodes = ids.into_iter().map(|id| {
+        let current = || graph.node_with_labels_at(id, labels_at).labels;
+        let mut labels = changes
+            .committed_labels(id, current)
             .iter()
             .map(|label| names.labels.id(label))
             .collect::<Result<Vec<u32>>>()?;
@@ -276,31 +298,44 @@ fn write_node_table(
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join(",");
-        Ok((node.id, vec![Some((Value::from(text), 0))]))
+        Ok((id, vec![Some((Value::from(text), 0))]))
     });
     let table = TableWriter {
         table: Table::Node,
         fixed: vec![column(COLUMN_LABELS)],
         properties: &graph.node_properties,
+        #[cfg(not(feature = "temporal"))]
+        committed: changes.node_values(),
         names,
     };
     let end = table.write(place, nodes, sink)?;
     Ok((end, used.into_inner()))
 }
 
-/// Writes the edge table of `graph`; returns one past its last row (0 for
-/// none) and the ids of the edge types its edges have.
+/// Writes the edge table of `graph`: the edges visible now and those an open
+/// transaction deleted (`changes`), with the endpoints and type they were
+/// committed with; returns one past its last row (0 for none) and the ids of
+/// the edge types its edges have.
 fn write_edge_table(
     graph: &LpgStore,
+    changes: &OpenChanges,
     names: &Names,
     place: &Place,
     sink: &mut dyn SectionSink,
 ) -> Result<(u64, BTreeSet<u32>)> {
     let used = RefCell::new(BTreeSet::new());
-    let edges = graph
-        .try_edge_ids()?
+    let deleted: Vec<EdgeId> = changes.deleted_edges().iter().map(|edge| edge.id).collect();
+    let edges = merge_ids(graph.try_edge_ids()?, &deleted)
         .into_iter()
-        .filter_map(|id| graph.try_edge_without_properties(id).transpose())
+        .filter_map(|id| match changes.deleted_edge(id) {
+            Some(edge) => Some(Ok(Edge::new(
+                id,
+                edge.src,
+                edge.dst,
+                edge.edge_type.clone(),
+            ))),
+            None => graph.try_edge_without_properties(id).transpose(),
+        })
         .map(|edge| {
             let edge = edge?;
             let endpoint = |node: NodeId, end: &str| {
@@ -336,10 +371,42 @@ fn write_edge_table(
             column(COLUMN_EDGE_TYPE),
         ],
         properties: &graph.edge_properties,
+        #[cfg(not(feature = "temporal"))]
+        committed: changes.edge_values(),
         names,
     };
     let end = table.write(place, edges, sink)?;
     Ok((end, used.into_inner()))
+}
+
+/// The ids in `visible` and in `deleted` (both ascending), ascending and
+/// each once: the rows of a table.
+fn merge_ids<Id: EntityId>(visible: Vec<Id>, deleted: &[Id]) -> Vec<Id> {
+    if deleted.is_empty() {
+        return visible;
+    }
+    let mut ids = Vec::with_capacity(visible.len() + deleted.len());
+    let (mut at_visible, mut at_deleted) = (0, 0);
+    while let (Some(&a), Some(&b)) = (visible.get(at_visible), deleted.get(at_deleted)) {
+        match a.as_u64().cmp(&b.as_u64()) {
+            std::cmp::Ordering::Less => {
+                ids.push(a);
+                at_visible += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                ids.push(b);
+                at_deleted += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                ids.push(a);
+                at_visible += 1;
+                at_deleted += 1;
+            }
+        }
+    }
+    ids.extend_from_slice(&visible[at_visible..]);
+    ids.extend_from_slice(&deleted[at_deleted..]);
+    ids
 }
 
 /// The epoch the section records: the store's with `temporal`.
@@ -563,6 +630,11 @@ struct TableWriter<'s, Id: EntityId> {
     /// The fixed columns of the table.
     fixed: Vec<ChunkColumn>,
     properties: &'s PropertyStorage<Id>,
+    /// Per property key, the committed value of each node or edge whose
+    /// value of it an open transaction replaced in place (`None` when it had
+    /// none), by id ascending: written instead of the store's value.
+    #[cfg(not(feature = "temporal"))]
+    committed: &'s BTreeMap<PropertyKey, Vec<(Id, Option<Value>)>>,
     names: &'s Names,
 }
 
@@ -618,24 +690,6 @@ impl<Id: EntityId> TableWriter<'_, Id> {
         }
     }
 
-    /// The table's property columns as the store holds them now, by key,
-    /// each with the ids that have a value.
-    #[cfg(not(feature = "temporal"))]
-    fn cursors(&self) -> Result<Vec<ColumnCursor<Id>>> {
-        let mut keys = self.properties.keys();
-        keys.sort_unstable();
-        keys.into_iter()
-            .map(|key| {
-                Ok(ColumnCursor {
-                    column_id: self.names.columns.id(self.table, &key)?,
-                    ids: self.properties.column_ids(&key),
-                    key,
-                    next: 0,
-                })
-            })
-            .collect()
-    }
-
     /// Refuses a value a file cannot hold, naming where it is.
     fn refuse_too_deep(
         &self,
@@ -656,6 +710,32 @@ impl<Id: EntityId> TableWriter<'_, Id> {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(not(feature = "temporal"))]
+impl<'s, Id: EntityId> TableWriter<'s, Id> {
+    /// The table's property columns as the store holds them now, by key,
+    /// each with the ids that have a value and the committed values open
+    /// transactions replaced; a key only a replaced value has joins them.
+    fn cursors(&self) -> Result<Vec<ColumnCursor<'s, Id>>> {
+        let committed: &'s BTreeMap<PropertyKey, Vec<(Id, Option<Value>)>> = self.committed;
+        let mut keys = self.properties.keys();
+        keys.extend(committed.keys().cloned());
+        keys.sort_unstable();
+        keys.dedup();
+        keys.into_iter()
+            .map(|key| {
+                Ok(ColumnCursor {
+                    column_id: self.names.columns.id(self.table, &key)?,
+                    ids: self.properties.column_ids(&key),
+                    next: 0,
+                    committed: committed.get(&key).map_or(&[], Vec::as_slice),
+                    next_committed: 0,
+                    key,
+                })
+            })
+            .collect()
     }
 }
 
@@ -789,19 +869,21 @@ impl<'p, Id: EntityId> Group<'p, Id> {
     }
 
     /// Writes the group's open fixed chunks, then its property columns, one
-    /// column at a time, reading the values a batch at a time.
+    /// column at a time, reading the values a batch at a time; a value an
+    /// open transaction replaced is written as it was committed.
     #[cfg(not(feature = "temporal"))]
     fn finish(
         self,
         table: &TableWriter<'_, Id>,
-        cursors: &mut [ColumnCursor<Id>],
+        cursors: &mut [ColumnCursor<'_, Id>],
         sink: &mut dyn SectionSink,
     ) -> Result<()> {
         self.fixed.finish(sink)?;
         let max_rows = u64::from(self.place.caps.max_rows);
         for cursor in cursors {
-            let ids = intersect(cursor.take_group(self.start, max_rows), &self.present);
-            if ids.is_empty() {
+            let (stored, committed) = cursor.take_group(self.start, max_rows);
+            let rows = column_rows(stored, committed, &self.present);
+            if rows.is_empty() {
                 continue;
             }
             let mut chunker = RowsChunker::new(
@@ -810,15 +892,29 @@ impl<'p, Id: EntityId> Group<'p, Id> {
                 self.start,
                 self.place.caps,
             );
-            for batch in ids.chunks(READ_BATCH_ROWS) {
-                let values = table.properties.try_get_batch(batch, &cursor.key)?;
-                for (&id, value) in batch.iter().zip(values) {
+            for batch in rows.chunks(READ_BATCH_ROWS) {
+                let read: Vec<Id> = batch
+                    .iter()
+                    .filter(|(_, cell)| matches!(cell, Cell::Stored))
+                    .map(|(id, _)| *id)
+                    .collect();
+                let mut stored = if read.is_empty() {
+                    Vec::new()
+                } else {
+                    table.properties.try_get_batch(&read, &cursor.key)?
+                }
+                .into_iter();
+                for (id, cell) in batch {
+                    let value = match cell {
+                        Cell::Stored => stored.next().flatten(),
+                        Cell::Committed(value) => Some((*value).clone()),
+                    };
                     // Removed since the ids were listed, or null (a property
                     // whose value is null does not exist): nothing to write.
                     let Some(value) = value.filter(|value| !value.is_null()) else {
                         continue;
                     };
-                    table.refuse_too_deep(self.place, id, &cursor.key, &value, "the value")?;
+                    table.refuse_too_deep(self.place, *id, &cursor.key, &value, "the value")?;
                     chunker.push(sink, id.as_u64(), vec![Some((value, 0))])?;
                 }
             }
@@ -876,22 +972,30 @@ fn history_cell<Id: EntityId>(
     Ok(Value::List(Arc::from(versions)))
 }
 
-/// The ids of one property column, walked group by group.
+/// The ids of one property column, walked group by group, with the
+/// committed values open transactions replaced.
 #[cfg(not(feature = "temporal"))]
-struct ColumnCursor<Id> {
+struct ColumnCursor<'c, Id> {
     key: PropertyKey,
     column_id: u32,
     /// The ids with a value, ascending.
     ids: Vec<Id>,
     /// The first id not walked yet.
     next: usize,
+    /// The committed value of each id whose value an open transaction
+    /// replaced (`None` when it had none), by id ascending.
+    committed: &'c [(Id, Option<Value>)],
+    /// The first committed value not walked yet.
+    next_committed: usize,
 }
 
 #[cfg(not(feature = "temporal"))]
-impl<Id: EntityId> ColumnCursor<Id> {
-    /// The ids of the group `[start, start + max_rows)`, after skipping the
-    /// ids before it (those of groups without a node or edge).
-    fn take_group(&mut self, start: u64, max_rows: u64) -> &[Id] {
+impl<'c, Id: EntityId> ColumnCursor<'c, Id> {
+    /// The ids and the committed values of the group
+    /// `[start, start + max_rows)`, after skipping those before it (of
+    /// groups without a node or edge).
+    fn take_group(&mut self, start: u64, max_rows: u64) -> (&[Id], &'c [(Id, Option<Value>)]) {
+        let in_group = |id: Id| id.as_u64() - start < max_rows;
         while self
             .ids
             .get(self.next)
@@ -900,34 +1004,87 @@ impl<Id: EntityId> ColumnCursor<Id> {
             self.next += 1;
         }
         let first = self.next;
-        while self
-            .ids
-            .get(self.next)
-            .is_some_and(|id| id.as_u64() - start < max_rows)
-        {
+        while self.ids.get(self.next).is_some_and(|id| in_group(*id)) {
             self.next += 1;
         }
-        &self.ids[first..self.next]
+        let committed: &'c [(Id, Option<Value>)] = self.committed;
+        while committed
+            .get(self.next_committed)
+            .is_some_and(|(id, _)| id.as_u64() < start)
+        {
+            self.next_committed += 1;
+        }
+        let first_committed = self.next_committed;
+        while committed
+            .get(self.next_committed)
+            .is_some_and(|(id, _)| in_group(*id))
+        {
+            self.next_committed += 1;
+        }
+        (
+            &self.ids[first..self.next],
+            &committed[first_committed..self.next_committed],
+        )
     }
 }
 
-/// The ids in both `left` and `right`, both ascending.
+/// Where a value of a property column comes from.
 #[cfg(not(feature = "temporal"))]
-fn intersect<Id: EntityId>(left: &[Id], right: &[Id]) -> Vec<Id> {
-    let mut both = Vec::new();
-    let (mut at_left, mut at_right) = (0, 0);
-    while let (Some(a), Some(b)) = (left.get(at_left), right.get(at_right)) {
-        match a.as_u64().cmp(&b.as_u64()) {
-            std::cmp::Ordering::Less => at_left += 1,
-            std::cmp::Ordering::Greater => at_right += 1,
-            std::cmp::Ordering::Equal => {
-                both.push(*a);
-                at_left += 1;
-                at_right += 1;
+enum Cell<'c> {
+    /// The value the store holds.
+    Stored,
+    /// The committed value an open transaction replaced.
+    Committed(&'c Value),
+}
+
+/// The rows of one property column in a group, ascending: the ids with a
+/// value in the store (`stored`) and, in place of those an open transaction
+/// changed, the ids with a committed value (`committed`), of the nodes or
+/// edges written in the group (`present`). All three are ascending.
+#[cfg(not(feature = "temporal"))]
+fn column_rows<'c, Id: EntityId>(
+    stored: &[Id],
+    committed: &'c [(Id, Option<Value>)],
+    present: &[Id],
+) -> Vec<(Id, Cell<'c>)> {
+    let mut rows = Vec::with_capacity(stored.len());
+    let (mut at_stored, mut at_committed) = (0, 0);
+    loop {
+        match (stored.get(at_stored), committed.get(at_committed)) {
+            (None, None) => break,
+            (Some(&id), None) => {
+                rows.push((id, Cell::Stored));
+                at_stored += 1;
+            }
+            (Some(&id), Some((other, _))) if id.as_u64() < other.as_u64() => {
+                rows.push((id, Cell::Stored));
+                at_stored += 1;
+            }
+            (stored_id, Some((id, value))) => {
+                // The committed value replaces the store's value of the id.
+                if stored_id.is_some_and(|stored_id| stored_id.as_u64() == id.as_u64()) {
+                    at_stored += 1;
+                }
+                if let Some(value) = value {
+                    rows.push((*id, Cell::Committed(value)));
+                }
+                at_committed += 1;
             }
         }
     }
-    both
+    let mut at_present = 0;
+    rows.retain(|(id, _)| {
+        while present
+            .get(at_present)
+            .is_some_and(|known| known.as_u64() < id.as_u64())
+        {
+            at_present += 1;
+        }
+        present
+            .get(at_present)
+            .is_some_and(|known| known.as_u64() == id.as_u64())
+    });
+    rows
 }
 
 // ── Reading ─────────────────────────────────────────────────────────
@@ -3243,6 +3400,224 @@ mod tests {
                 ),
             ],
             "the committed label sets"
+        );
+    }
+
+    /// Alix -KNOWS-> Gus -KNOWS-> Mia, with values on the nodes and the
+    /// edges, and Prague -ROUTE-> Berlin in graph "trips": the committed
+    /// state the transactions below begin from.
+    fn travellers() -> LpgStore {
+        let store = LpgStore::new().unwrap();
+        let alix = store.create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::from("Alix")),
+                ("age", Value::Int64(19)),
+                ("city", Value::from("Amsterdam")),
+            ],
+        );
+        let gus = store.create_node_with_props(
+            &["Person", "Employee"],
+            [
+                ("name", Value::from("Gus")),
+                ("age", Value::Int64(3)),
+                ("city", Value::from("Paris")),
+            ],
+        );
+        let mia = store.create_node_with_props(
+            &["Person", "Employee"],
+            [("name", Value::from("Mia")), ("age", Value::Int64(88))],
+        );
+        store.create_edge_with_props(alix, gus, "KNOWS", [("since", Value::Int64(1988))]);
+        store.create_edge_with_props(gus, mia, "KNOWS", [("since", Value::Int64(319))]);
+        store.create_graph("trips").unwrap();
+        let trips = store.graph("trips").unwrap();
+        let prague = trips.create_node_with_props(&["City"], [("name", Value::from("Prague"))]);
+        let berlin = trips.create_node_with_props(&["City"], [("name", Value::from("Berlin"))]);
+        trips.create_edge_with_props(prague, berlin, "ROUTE", [("hours", Value::Int64(3))]);
+        store
+    }
+
+    /// The ids [`travellers`] gives Alix, Gus and Mia, and the edges from
+    /// Alix to Gus and from Gus to Mia.
+    const ALIX: NodeId = NodeId(0);
+    const GUS: NodeId = NodeId(1);
+    const MIA: NodeId = NodeId(2);
+    const ALIX_GUS: EdgeId = EdgeId(0);
+    const GUS_MIA: EdgeId = EdgeId(1);
+
+    /// A write while a transaction is open holds the committed state: a value
+    /// the transaction set twice, added or removed, labels it added and
+    /// removed, a node and its edges it deleted after changing them, and the
+    /// node and edge it created; in the default graph and in a named graph,
+    /// each from its own log.
+    #[test]
+    fn a_write_holds_the_committed_state_of_what_open_transactions_changed() {
+        use grafeo_common::types::TransactionId;
+
+        let store = travellers();
+        let epoch = store.current_epoch();
+        let transaction = TransactionId::new(19);
+        // Alix: a value set twice, one added, one removed.
+        for age in [88, 3] {
+            store
+                .set_node_property_versioned(ALIX, "age", Value::Int64(age), transaction)
+                .unwrap();
+        }
+        store
+            .set_node_property_versioned(ALIX, "nickname", Value::from("Al"), transaction)
+            .unwrap();
+        store
+            .remove_node_property_versioned(ALIX, "city", transaction)
+            .unwrap();
+        // Mia: a label added then removed, one removed then added back, one
+        // removed.
+        assert!(store.add_label_versioned(MIA, "Traveller", transaction));
+        assert!(store.remove_label_versioned(MIA, "Traveller", transaction));
+        assert!(store.remove_label_versioned(MIA, "Person", transaction));
+        assert!(store.add_label_versioned(MIA, "Person", transaction));
+        assert!(store.remove_label_versioned(MIA, "Employee", transaction));
+        // Gus: values and labels changed, then deleted with his edges
+        // (DETACH DELETE), one of them changed first.
+        store
+            .set_node_property_versioned(GUS, "age", Value::Int64(19), transaction)
+            .unwrap();
+        store
+            .set_node_property_versioned(GUS, "nickname", Value::from("G"), transaction)
+            .unwrap();
+        assert!(store.add_label_versioned(GUS, "Traveller", transaction));
+        assert!(store.remove_label_versioned(GUS, "Employee", transaction));
+        store.set_edge_property_versioned(ALIX_GUS, "since", Value::Int64(3), transaction);
+        store.set_edge_property_versioned(ALIX_GUS, "note", Value::from("Paris"), transaction);
+        assert!(store.delete_edge_transactional(ALIX_GUS, epoch, transaction));
+        assert!(store.delete_edge_transactional(GUS_MIA, epoch, transaction));
+        assert!(
+            store
+                .delete_node_transactional(GUS, epoch, transaction)
+                .unwrap()
+        );
+        // Nodes and edges the transaction created, and some of them deleted.
+        let vincent = store.create_node_versioned(&["Person"], epoch, transaction);
+        store
+            .set_node_property_versioned(vincent, "name", Value::from("Vincent"), transaction)
+            .unwrap();
+        store.create_edge_versioned(vincent, MIA, "KNOWS", epoch, transaction);
+        let jules = store.create_node_versioned(&["Person"], epoch, transaction);
+        store
+            .set_node_property_versioned(jules, "name", Value::from("Jules"), transaction)
+            .unwrap();
+        let visited = store.create_edge_versioned(ALIX, MIA, "VISITED", epoch, transaction);
+        store.set_edge_property_versioned(visited, "since", Value::Int64(88), transaction);
+        assert!(store.delete_edge_transactional(visited, epoch, transaction));
+        assert!(
+            store
+                .delete_node_transactional(jules, epoch, transaction)
+                .unwrap()
+        );
+        // The named graph: a value changed, an edge and a node deleted.
+        let trips = store.graph("trips").unwrap();
+        trips
+            .set_node_property_versioned(NodeId(0), "name", Value::from("Paris"), transaction)
+            .unwrap();
+        assert!(trips.delete_edge_transactional(EdgeId(0), epoch, transaction));
+        assert!(
+            trips
+                .delete_node_transactional(NodeId(1), epoch, transaction)
+                .unwrap()
+        );
+
+        for caps in [caps(2, 1 << 20), caps(1, 64), ChunkCaps::DEFAULT] {
+            assert_layout(&chunks(&store, caps));
+            assert_same_graph(&travellers(), &round_trip(&store, caps));
+        }
+    }
+
+    /// A savepoint rollback restores what the transaction changed after the
+    /// savepoint and truncates its log: a write then holds the committed
+    /// state of what the log keeps, of what the rollback restored, and of
+    /// what the transaction changed after it.
+    #[test]
+    fn a_write_after_a_savepoint_rollback_holds_the_committed_state() {
+        use grafeo_common::types::TransactionId;
+
+        let store = travellers();
+        let epoch = store.current_epoch();
+        let transaction = TransactionId::new(88);
+        store
+            .set_node_property_versioned(GUS, "age", Value::Int64(19), transaction)
+            .unwrap();
+        let savepoint = store.property_undo_log_position(transaction);
+        store
+            .set_node_property_versioned(ALIX, "age", Value::Int64(88), transaction)
+            .unwrap();
+        assert!(store.delete_edge_transactional(ALIX_GUS, epoch, transaction));
+        assert!(store.delete_edge_transactional(GUS_MIA, epoch, transaction));
+        assert!(
+            store
+                .delete_node_transactional(GUS, epoch, transaction)
+                .unwrap()
+        );
+        store.rollback_transaction_properties_to(transaction, savepoint);
+        assert_eq!(
+            store.property_undo_log_position(transaction),
+            savepoint,
+            "the rollback truncated the log"
+        );
+        assert!(store.get_node(GUS).is_some(), "the rollback restored Gus");
+        assert!(store.add_label_versioned(ALIX, "Traveller", transaction));
+        store
+            .set_node_property_versioned(MIA, "age", Value::Int64(3), transaction)
+            .unwrap();
+
+        for caps in [caps(2, 1 << 20), ChunkCaps::DEFAULT] {
+            assert_layout(&chunks(&store, caps));
+            assert_same_graph(&travellers(), &round_trip(&store, caps));
+        }
+    }
+
+    /// A key that only a committed value an open transaction replaced has
+    /// (no column of the store holds it) joins the property columns, after
+    /// the names the write began with, and its value is written.
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn a_key_only_a_replaced_value_has_joins_the_columns() {
+        use super::{Names, Place, TableWriter, column, describe_graph};
+
+        let store = LpgStore::new().unwrap();
+        let names = Names::begin(&[("", &store)]);
+        let key = PropertyKey::new("nickname");
+        let committed = BTreeMap::from([(key.clone(), vec![(GUS, Some(Value::from("G")))])]);
+        let table = TableWriter {
+            table: Table::Node,
+            fixed: vec![column(COLUMN_LABELS)],
+            properties: &store.node_properties,
+            committed: &committed,
+            names: &names,
+        };
+        let place = Place {
+            graph_id: 0,
+            graph: describe_graph(0, ""),
+            caps: ChunkCaps::DEFAULT,
+        };
+        let mut image = MemoryImage::new();
+        image
+            .begin_section(SectionType::LpgStore, LPG_SECTION_VERSION)
+            .unwrap();
+        let rows = [Ok((GUS, vec![Some((Value::from(""), 0))]))];
+        assert_eq!(
+            table.write(&place, rows.into_iter(), &mut image).unwrap(),
+            2
+        );
+        let section = image.take_section(SectionType::LpgStore).unwrap();
+        let written: Vec<(ChunkMeta, Bytes)> = (0..section.chunks().len())
+            .map(|index| (section.chunks()[index], section.fetch(index).unwrap()))
+            .collect();
+        let column_id = names.columns.id(Table::Node, &key).unwrap();
+        assert_eq!(column_id, FIRST_PROPERTY_COLUMN, "the first column added");
+        assert_eq!(
+            cells(&written, ChunkKind::Column, 0, column_id),
+            [(1, Value::from("G"), 0)],
+            "the committed value of the key"
         );
     }
 

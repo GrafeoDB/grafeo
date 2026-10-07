@@ -185,6 +185,9 @@ impl Section for LpgStoreSection {
         LPG_SECTION_VERSION
     }
 
+    /// The block layout of 0.5.x, of the store as it is now: the nodes and
+    /// edges visible now with their current values (a checkpoint writes the
+    /// committed state with [`write_to`](Section::write_to)).
     fn serialize(&self) -> Result<Vec<u8>> {
         let nodes = collect_block_nodes(&self.store)?;
         let edges = collect_block_edges(&self.store);
@@ -208,8 +211,11 @@ impl Section for LpgStoreSection {
         block::write_blocks(&nodes, &edges, &named_graphs, epoch)
     }
 
-    /// Streams the store as chunks of version 3: per graph the node and edge
-    /// tables in row groups, then the metadata chunk.
+    /// Streams the store's committed state as chunks of version 3: per graph
+    /// the node and edge tables in row groups, then the metadata chunk. What
+    /// open transactions changed is written as it was committed, from their
+    /// undo logs, so the caller holds their writes and rollbacks and commits
+    /// for the whole write (a checkpoint's write freeze).
     fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
         write_lpg_chunks(&self.store, self.caps, sink)
     }

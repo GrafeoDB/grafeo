@@ -4547,10 +4547,15 @@ impl Session {
     ) -> Result<()> {
         *self.read_only_tx.lock() = self.db_read_only;
 
-        // Discard uncommitted versions in ALL touched LPG stores (cross-graph atomicity).
-        for graph_name in touched {
-            let store = self.resolve_store(graph_name);
-            store.discard_uncommitted_versions(transaction_id);
+        // Discard uncommitted versions in ALL touched LPG stores (cross-graph
+        // atomicity), as a store change in progress: a checkpoint never reads
+        // the store or the change logs halfway through the undo.
+        {
+            let _writing = self.transaction_manager.write_in_progress();
+            for graph_name in touched {
+                let store = self.resolve_store(graph_name);
+                store.discard_uncommitted_versions(transaction_id);
+            }
         }
 
         #[cfg(feature = "triple-store")]
@@ -4680,6 +4685,11 @@ impl Session {
     /// buffered WAL records.
     #[cfg(feature = "lpg")]
     fn restore_savepoint(&self, transaction_id: TransactionId, sp_state: &SavepointState) {
+        let touched = self.touched_graphs.lock().clone();
+        // The undo is a store change in progress: a checkpoint never reads
+        // the store or the change logs halfway through it.
+        let writing = self.transaction_manager.write_in_progress();
+
         // Roll back each graph that was captured in the savepoint.
         for gs in &sp_state.graph_snapshots {
             let store = self.resolve_store(&gs.graph_name);
@@ -4691,7 +4701,6 @@ impl Session {
         // Also roll back any graphs that were touched AFTER the savepoint
         // but not captured in it. These need full discard since the savepoint
         // didn't include them.
-        let touched = self.touched_graphs.lock().clone();
         for graph_name in &touched {
             let already_captured = sp_state
                 .graph_snapshots
@@ -4702,6 +4711,7 @@ impl Session {
                 store.discard_uncommitted_versions(transaction_id);
             }
         }
+        drop(writing);
 
         // Truncate CDC event buffer to the savepoint position.
         #[cfg(feature = "cdc")]

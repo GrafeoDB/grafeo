@@ -131,12 +131,33 @@ use super::DataChunk;
 use super::chunk_state::ChunkState;
 use super::factorized_chunk::FactorizedChunk;
 
+/// A store change of an open transaction in progress (see
+/// [`WriteTracker::write_in_progress`]): a shared hold on the database's
+/// write freeze, which a checkpoint or a copy of the store holds exclusively
+/// while it reads the store. Released when dropped.
+///
+/// Not reentrant: a thread that holds one must not ask for another, since a
+/// checkpoint waiting for the first would block the second request, and the
+/// thread would wait for itself.
+pub type WriteInProgress<'a> = parking_lot::RwLockReadGuard<'a, ()>;
+
 /// Trait for recording write operations during query execution.
 ///
 /// This bridges `grafeo-core` mutation operators (which perform writes) with
 /// `grafeo-engine`'s `TransactionManager` (which tracks write sets for conflict
-/// detection). The trait lives in `grafeo-core` to avoid circular dependencies.
+/// detection, and freezes the store for checkpoints). The trait lives in
+/// `grafeo-core` to avoid circular dependencies.
 pub trait WriteTracker: Send + Sync {
+    /// Marks a store change of the writing transaction as in progress, for
+    /// as long as the returned guard lives: no checkpoint or copy of the
+    /// store starts reading the store meanwhile, and one that is reading it
+    /// is waited for, so none sees part of a change or of the change log
+    /// entry that undoes it.
+    ///
+    /// [`GraphWriter`] takes it once per write method, around its store
+    /// changes, and never twice on one thread (see [`WriteInProgress`]).
+    fn write_in_progress(&self) -> WriteInProgress<'_>;
+
     /// Records that a node was written (created, deleted, or modified).
     ///
     /// # Errors

@@ -207,10 +207,238 @@ which is still written as one raw chunk (`chunk_kind` 0) holding its
 serialized bytes. A file written by 0.5.x holds every section as one raw
 chunk, which the section's 0.5.x reader reads.
 
-The container has no 4 GiB limit: chunk offsets and lengths are 64-bit. The LPG
-section's own block directory currently uses 32-bit offsets, so a single LPG
-section is limited to 4 GiB; a checkpoint over that limit fails with an error
-that names it and keeps the WAL ([#392](https://github.com/GrafeoDB/grafeo/issues/392)).
+| Kind | Name | Holds | Written by |
+|------|------|-------|------------|
+| 0 | `Raw` | A section's bytes, whole | `CATALOG`, and every section of a 0.5.x file |
+| 1 | `Meta` | The section's metadata: a layout byte, the caps it was written with, and its graphs, columns or streams | Every other section, once |
+| 2 | `Column` | The values of one column over a range of rows | `LPG_STORE` and `RDF_STORE` |
+| 3 | `History` | The older versions of one property column's values over a range of rows | `LPG_STORE`, in builds with the `temporal` feature |
+| 4 | `Stream` | A piece of a byte stream | The [stream sections](#stream-sections) |
+
+A raw or metadata chunk has every other field of its directory entry set to 0.
+All chunks of a section carry the same `section_version`, and no two of them
+have the same kind, graph, column and first row: a reader refuses a section
+that breaks either rule.
+
+### Caps
+
+A chunk holds at most **65,536 rows and 1 MiB** (the caps). A row whose values
+pass the byte cap gets a chunk of its own, and every piece of a stream but the
+last holds exactly 1 MiB. A section's metadata chunk records the caps it was
+written with, and its reader checks the chunks against those. The metadata
+chunks and the raw `CATALOG` chunk are not cut: they hold as many names,
+graphs and definitions as the database has.
+
+**No 4 GiB limit** ([#392](https://github.com/GrafeoDB/grafeo/issues/392)).
+Chunk offsets, chunk lengths and first rows are 64-bit, and the 32-bit counts
+and lengths inside a chunk count only within that chunk. So a database, a
+section, a graph and a table can pass 4 GiB and 2^32 rows, and a node can
+have any number of labels. What stays limited is a single value (lengths and
+counts of at most 2^32 - 1, nesting of at most 128 levels, see
+[Value Encoding](#value-encoding)), and the encodings inside two stream
+sections: the compacted base in `COMPACT_STORE` keeps its 32-bit counts and
+lengths (see [Stream Sections](#stream-sections)), and the RDF ring index
+holds at most 2^32 - 1 terms and triples. A checkpoint that meets a value past
+these limits fails and keeps the WAL.
+
+### Column Chunks
+
+A `Column` or `History` chunk holds the values of one column for a range of
+rows of a table: only the rows that have a value, in row order, behind a
+presence bitmap, so a row without a value costs one bit. Its directory entry
+names the graph (`graph_id`), the column (`column_id`), the first row
+(`row_start`), the rows from the first to the last it covers (`row_count`, at
+most the row cap) and the codec (`codec`). The chunk repeats the codec and the
+row count, and a reader refuses a chunk that disagrees with its entry.
+Layout, little-endian:
+
+| Field | Size | Meaning |
+|-------|------|---------|
+| `codec` | `u8` | The codec, equal to the directory entry's |
+| `flags` | `u8` | Bit 0: presence bitmap; bit 1: zone map; bit 2: epochs. A reader refuses other bits |
+| (reserved) | `u16` | Zero, ignored by readers |
+| `row_count` | `u32` | Equal to the directory entry's |
+| `value_count` | `u32` | At least 1, at most `row_count` |
+| presence bitmap | `ceil(row_count / 64)` `u64` words | Only when `value_count` is below `row_count`: bit `r` is set when row `r` has a value; bits past the rows are 0 |
+| zone map | two values | The minimum and the maximum of the values, in the [value encoding](#value-encoding) |
+| epochs | a `BitPacked` body | One epoch per value, only when one of them is not 0 |
+| body | | The values, in the codec's body |
+
+| Codec | Name | Values | Body |
+|-------|------|--------|------|
+| 1 | `BitPacked` | Non-negative `Int64` | Bits per value `u8`, count `u32`, word count `u32`, `u64` words |
+| 2 | `Dict` | `String` | Entry count `u32`, each entry a length `u32` and UTF-8, then a code count `u32` and one `u32` code per value |
+| 3 | `Bitmap` | `Bool` | Bit count `u32`, word count `u32`, `u64` words |
+| 4 | `Float64` | `Float64` | Count `u32`, then each value's `f64` bits |
+| 5 | `RawI64` | `Int64` | Count `u32`, then each `i64` |
+| 6 | `Float32Vector` | Vectors of one dimension count, 1 to 65,535 | Dimensions `u16`, component count `u32`, then each component's `f32` bits |
+| 7 | `Values` | Any | Count `u32`, then each value in the [value encoding](#value-encoding) |
+
+A writer picks a typed codec (1 to 6) only when every value of the chunk has
+its kind, and `Values` otherwise, so every value reads back exactly as it was
+written: an `Int64` next to a `Float64` stays an `Int64`.
+
+**Zone maps.** A chunk of the codecs `BitPacked`, `RawI64`, `Float64`,
+`Bitmap` and `Dict` carries the minimum and the maximum of its values: NaN is
+left out (a chunk of NaN only has no zone map), strings compare by their
+bytes, and a `Dict` chunk has a zone map only when both strings are at most 64
+bytes. `Float32Vector` and `Values` chunks have none. A reader refuses a zone
+map other than the one the values give, so it can be trusted. See
+[Zone Maps](zone-maps.md).
+
+**Epochs.** In a build with the `temporal` feature, each property value
+carries the epoch it was set at, in its `Column` chunk's epochs. A chunk whose
+epochs are all 0 carries none, and a reader refuses epochs that are all 0. The
+fixed columns and the `History` chunks never carry epochs: a history value
+holds the epochs of its versions itself.
+
+### Value Encoding
+
+The `Values` codec, the zone maps and the history values store each value as
+a tag byte followed by its fields, little-endian. Every kind reads back
+exactly: floats by their bits (NaN payloads and -0.0 included), times and
+zoned datetimes with their offsets, counters with every replica.
+
+| Tag | Kind | Fields |
+|-----|------|--------|
+| 0 | Null | None |
+| 1 | Bool | `u8`, 0 or 1 |
+| 2 | Int64 | `i64` |
+| 3 | Float64 | `u64` bits |
+| 4 | String | Length `u32`, UTF-8 |
+| 5 | Bytes | Length `u32`, bytes |
+| 6 | Date | `i32` days since 1970-01-01 |
+| 7 | Time | `u64` nanoseconds since midnight, `u8` has an offset (0 or 1), `i32` offset seconds (0 without one) |
+| 8 | Timestamp | `i64` microseconds since the Unix epoch |
+| 9 | ZonedDatetime | `i64` UTC microseconds, `i32` offset seconds |
+| 10 | Duration | `i64` months, `i64` days, `i64` nanoseconds |
+| 11 | List | Count `u32`, then the values |
+| 12 | Map | Count `u32`, then per entry its key (length `u32` and UTF-8) and its value |
+| 13 | Vector | Dimensions `u32`, then each component's `f32` bits |
+| 14 | Path | Node count `u32`, the nodes, edge count `u32`, the edges |
+| 15 | GCounter | Count `u32`, then per entry its replica (length `u32` and UTF-8) and its `u64` count, sorted by replica |
+| 16 | OnCounter | The positive entries, then the negative entries, each as in 15 |
+
+A reader checks every length and count against the bytes left before it
+allocates, and refuses an unknown tag, a field the kind does not accept (such
+as a bool other than 0 or 1, or a time of a full day or more), map keys or
+counter replicas that are not strictly increasing, and lists, maps and paths
+nested more than 130 levels deep, so each value has exactly one encoding.
+Property values nest at most 128 levels: a write of a deeper value fails
+(`GRAFEO-V001`), and the two levels above it hold the lists of a history
+value.
+
+### Table Sections
+
+`LPG_STORE` and `RDF_STORE` hold their data as tables of `Column` (and
+`History`) chunks. A table is cut into row groups of `max_rows` rows: group
+`k` holds rows `[k * max_rows, (k + 1) * max_rows)`. Only the groups that hold
+a row are written, and the chunks of one group come together. Every order is
+defined (ids, names, keys and terms sorted), so the same data gives the same
+bytes.
+
+#### `LPG_STORE` (version 3)
+
+Per graph in id order, the section holds its node table and then its edge
+table, and it ends with its metadata chunk. Graph 0 is the default graph, then
+come the named graphs in name order: a graph's id is its position in the
+metadata, so the ids are this checkpoint's. A row is a node or edge id. The
+columns:
+
+| Column | Table | Values |
+|--------|-------|--------|
+| 0 | Node | The node's label ids, ascending, in decimal, joined by `,` (`""` for a node without labels), as a `String` |
+| 1 | Edge | The source node id, as an `Int64` |
+| 2 | Edge | The target node id, as an `Int64` |
+| 3 | Edge | The edge type id, as an `Int64` |
+| 16 and up | Node or edge | A property column, as the metadata lists it |
+
+Ids 4 to 15 are reserved for fixed columns. A label's or an edge type's id is
+its position in the metadata's list of names. Within a row group, a column's
+`Column` chunks, and its `History` chunks, each come in row order without
+overlapping; a property column has chunks only where it has values; and the
+edge columns 1, 2 and 3 come as three chunks of one range in a row. Only the
+nodes and edges visible at the checkpoint are written, with their properties.
+A property whose value is null does not exist and is not written.
+
+With the `temporal` feature, a `Column` chunk of a property holds its current
+values with their epochs, and its older versions go to a `History` chunk
+written right before it: a history value is a list of `[epoch, value]` lists,
+with `Int64` epochs, ascending. A property removed last (its latest version
+null) has no current value: its history holds every version. A `History`
+chunk and the `Column` chunk after it cover the same rows, and either can come
+alone. Versions of transactions that did not commit are not written. A build
+without `temporal` checks the `History` chunks and does not apply them.
+
+The metadata chunk, little-endian:
+
+| Field | Encoding |
+|-------|----------|
+| layout | `u8`, `1` |
+| `max_rows`, `max_bytes` | `u32` each: the caps |
+| epoch | `u64`: the store's epoch with `temporal`, 0 without |
+| labels, edge types | Each a count `u32`, then per name its length `u32` and UTF-8 |
+| graphs | A count `u32`, then per graph its name (as above, empty for graph 0), next node id `u64`, next edge id `u64`, and its unused label ids and unused edge type ids (each a count `u32`, then `u32` ids, ascending) |
+| columns | A count `u32`, then per column its id `u32`, its table `u8` (0 node, 1 edge) and its property key (as above) |
+
+The layout has no size limit of its own: a reader checks every count and
+length against the bytes left, so the chunk holds as many names as the store
+has. It comes last because it lists every name the chunks use: commits wait
+while a checkpoint writes, but a transaction still open can create a label, an
+edge type or a property key meanwhile, and the write meets it. The names are
+those the store held when the write began, sorted (labels and edge types by
+name, property columns by table and key), followed by the names met during the
+write, in the order met. A graph's next node and edge ids are at least one
+past its last row, so no id is given out twice across a reopen. Each graph
+also lists the labels and edge types it has registered that none of its nodes
+or edges use (those of deleted nodes and edges, or of a transaction that
+rolled back), and the reader registers them in that graph, so every graph's
+names come back as they were. A reader fetches the metadata chunk first, then
+the other chunks in order.
+
+A reader refuses, naming the graph, the column and the rows: a last chunk that
+is not the section's only metadata chunk; a chunk of another kind than
+`Column` or `History` (`History` only for property columns), of an unknown
+graph or column, holding no rows or more than `max_rows`, crossing its row
+group or reaching past its table's next id; groups out of order (by graph,
+then table, then row group), or overlapping chunks of one column; edge columns
+that do not come as three chunks of one range; a property value of a row
+whose node or edge is not in its group; labels that are not ascending ids
+below the number of labels, negative endpoints, and edge type ids past the
+number of edge types; epochs on a fixed column or a `History` chunk; a null
+property value; and history epochs that go back.
+
+#### `RDF_STORE` (version 3)
+
+The section starts with its metadata chunk, little-endian:
+
+| Field | Encoding |
+|-------|----------|
+| layout | `u8`, `1` |
+| `max_rows`, `max_bytes` | `u32` each: the caps |
+| graphs | A count `u32`, then per graph its name (a length `u32` and UTF-8, empty for graph 0) and its number of triples `u64` |
+
+Graph 0 is the default graph, then come the named graphs in name order; a
+graph's id is its position, and a named graph with an empty name stays apart
+from the default graph. Then, per graph in id order, its triple table: one row
+per triple, from row 0, in a fixed order (by subject, predicate and object).
+Its columns are 0 (subject), 1 (predicate) and 2 (object), and each value is
+the term in N-Triples syntax, as a `String`. Their chunks are therefore `Dict`
+chunks, each holding the dictionary of its own terms, and the section has no
+term table of its own. The three columns share their chunk boundaries: their
+chunks come as three in a row with one range, and every row has a value. A
+graph without triples writes no chunk; the metadata lists it, so an open
+creates it.
+
+A reader refuses, naming the graph and the rows: a first chunk other than the
+metadata chunk, or a second metadata chunk; a chunk of another kind than
+`Column`; a graph the metadata does not list, or whose chunks come after those
+of a later graph; a range that does not start where the graph's rows before it
+end, holds more than `max_rows` rows, crosses a row group or reaches past the
+graph's number of triples; a subject chunk not followed by the predicate and
+object chunks of its range; epochs, a row without a value, or a value that is
+not a string holding an N-Triples term; and a graph whose rows stop short of
+its number of triples.
 
 ### Stream Sections
 
@@ -426,11 +654,12 @@ is stopped before the final checkpoint to prevent races.
 |-----------|------|
 | Fixed overhead (file header and database headers) | 12 KiB |
 | New database | 16 KiB (the headers and one directory block page) |
-| After the first checkpoint | A few pages more: the `CATALOG` and `LPG_STORE` sections are always written |
+| Empty database after its first checkpoint | 28 KiB: a page each for the `CATALOG` chunk, the `LPG_STORE` metadata chunk and the directory block, and the page of the image before |
 | Per chunk | 48 bytes (directory entry) plus padding to a page boundary; 28 bytes more when encrypted |
+| Per column chunk | A 12-byte header, a presence bitmap (8 bytes per 64 rows) when some rows have no value, a zone map, and the codec body: for example 1 bit per `Bool`, 8 bytes per `Float64`, the bit width of the largest value per non-negative `Int64`, a 4-byte code per `String` plus each distinct string of the chunk once |
 | Per directory block | 32-byte header, up to 1,364 entries (64 KiB) |
-| Typical 10K-node LPG | about 1 to 5 MB |
-| 1M-vector HNSW index (384-dim, f32) | about 1.5 GB |
+| 10K nodes with four properties (a short string, an integer, a float and one of five city names) and 30K edges with one integer property | about 0.6 MB |
+| 1M vectors (384-dim, f32) with an HNSW index (default `m` of 16) | about 1.5 GB of embeddings (node properties) plus about 0.2 GB of HNSW topology |
 | During a checkpoint | up to the active image plus the new one |
 
 ---
@@ -477,4 +706,4 @@ for what users need to do.
 |---------|--------|------------|-------|
 | v1 | Monolithic blob after the headers | 0.5.21 to 0.5.34 | Single bincode snapshot; read by 0.6 only to migrate |
 | v2 | Section directory at `0x3000` | 0.5.35 to 0.5.44 | Independent sections; read by 0.6 only to migrate |
-| v3 | Copy-on-write pages, chained directory | 0.6.0 and later | Checksummed chunks, per-chunk encryption |
+| v3 | Copy-on-write pages, chained directory | 0.6.0 and later | Checksummed chunks of at most 64Ki rows and 1 MiB, 64-bit offsets (no 4 GiB limit), per-chunk encryption |

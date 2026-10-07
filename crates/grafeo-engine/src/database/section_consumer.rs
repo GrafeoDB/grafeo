@@ -777,7 +777,9 @@ impl MemoryConsumer for OverlayConsumer {
 mod tests {
     use super::*;
     use grafeo_common::storage::page_fetcher::PageFetcher;
-    use grafeo_common::storage::section::SectionType;
+    use grafeo_common::storage::section::{
+        SectionSink, SectionSource, SectionType, read_raw, write_raw,
+    };
     use grafeo_common::utils::error::Result;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -826,6 +828,12 @@ mod tests {
         }
         fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
             Ok(())
+        }
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            write_raw(self, sink)
+        }
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
         fn is_dirty(&self) -> bool {
             false
@@ -1023,6 +1031,12 @@ mod tests {
         }
         fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
             Ok(())
+        }
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            write_raw(self, sink)
+        }
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
         fn is_dirty(&self) -> bool {
             self.dirty.load(Ordering::Relaxed)

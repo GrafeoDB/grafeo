@@ -1,10 +1,15 @@
 //! RDF section serializer for the `.grafeo` container format.
 //!
-//! Implements the [`Section`] trait for RDF triple data (triples, named graphs).
-//! Uses a block-based binary format (v2) with a shared string table for
-//! efficient serialization and CRC integrity checking.
+//! Implements the [`Section`] trait for RDF triple data (triples, named
+//! graphs). A checkpoint streams the section as chunks (version 3, see the
+//! `chunked` submodule), at most one open chunk per column.
+//! [`Section::serialize`] and [`Section::deserialize`] keep the block-based
+//! format of 0.5.x (version 2, below), which 0.5.x files hold: a shared
+//! string table and CRC integrity checking. (The RDF section is registered
+//! without a spill path, so nothing writes the block format at a
+//! checkpoint.)
 //!
-//! # Layout
+//! # Layout of the block format
 //!
 //! ```text
 //! [Header 32B: magic "RDFB", version, triple_count, graph_count]
@@ -18,13 +23,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::codec::limits::checked_u32;
-use grafeo_common::storage::section::{Section, SectionType};
+use grafeo_common::storage::ChunkCaps;
+use grafeo_common::storage::section::{
+    Section, SectionSink, SectionSource, SectionType, check_version, legacy_bytes,
+};
 use grafeo_common::utils::error::{Error, Result};
 
+use super::chunked::{RDF_SECTION_VERSION, read_rdf_chunks, write_rdf_chunks};
 use crate::graph::rdf::{RdfStore, Term, Triple};
 
-/// Current RDF section format version (v2 = block-based).
-const RDF_SECTION_VERSION: u8 = 2;
+/// The version byte in the header of the block format (0.5.x).
+const RDF_BLOCK_VERSION: u8 = 2;
 
 /// Magic bytes for the RDF block format.
 const RDF_BLOCK_MAGIC: [u8; 4] = *b"RDFB";
@@ -188,7 +197,7 @@ fn write_rdf_blocks(store: &RdfStore, named_graphs: &[(String, Arc<RdfStore>)]) 
 
     // Write header
     buf.extend_from_slice(&RDF_BLOCK_MAGIC);
-    buf.push(RDF_SECTION_VERSION);
+    buf.push(RDF_BLOCK_VERSION);
     buf.push(0); // flags
     buf.extend_from_slice(&checked_u32(triples.len(), "RDF triple count")?.to_le_bytes());
     buf.extend_from_slice(&checked_u32(named_graphs.len(), "RDF named graph count")?.to_le_bytes());
@@ -226,7 +235,8 @@ fn write_rdf_blocks(store: &RdfStore, named_graphs: &[(String, Arc<RdfStore>)]) 
 
 // ── Deserialization ────────────────────────────────────────────────
 
-fn read_rdf_blocks(data: &[u8], store: &RdfStore) -> Result<()> {
+/// Reads the block format into `store`; `graph` names the graph in errors.
+fn read_rdf_blocks(data: &[u8], store: &RdfStore, graph: &str) -> Result<()> {
     if data.len() < HEADER_SIZE {
         return Err(Error::Serialization(
             "RDF block section too short for header".to_string(),
@@ -296,7 +306,7 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore) -> Result<()> {
 
     // Parse triples
     let mut tp = 0;
-    for _ in 0..triple_count {
+    for index in 0..triple_count {
         if tp + 12 > triple_data.len() {
             return Err(Error::Serialization(
                 "RDF triple data truncated".to_string(),
@@ -319,13 +329,19 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore) -> Result<()> {
             .get(o_idx)
             .ok_or_else(|| Error::Serialization(format!("invalid object string index {o_idx}")))?;
 
-        if let (Some(s), Some(p), Some(o)) = (
-            Term::from_ntriples(s_str),
-            Term::from_ntriples(p_str),
-            Term::from_ntriples(o_str),
-        ) {
-            store.insert(Triple::new(s, p, o));
-        }
+        let term = |text: &str, role: &str| {
+            Term::from_ntriples(text).map_err(|error| {
+                Error::Serialization(format!(
+                    "RDF section (0.5.x), {graph}, triple {index}, {role}: {error}"
+                ))
+            })
+        };
+        // Unchecked: the store holds what it was given, as it wrote it.
+        store.insert(Triple::new_unchecked(
+            term(s_str, "subject")?,
+            term(p_str, "predicate")?,
+            term(o_str, "object")?,
+        ));
     }
 
     // Read named graphs
@@ -361,7 +377,7 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore) -> Result<()> {
 
         store.create_graph(graph_name);
         if let Some(graph_store) = store.graph(graph_name) {
-            read_rdf_blocks(graph_data, &graph_store)?;
+            read_rdf_blocks(graph_data, &graph_store, &format!("graph {graph_name:?}"))?;
         }
     }
 
@@ -371,17 +387,32 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore) -> Result<()> {
 // ── Section implementation ──────────────────────────────────────────
 
 /// RDF store section for the `.grafeo` container.
+///
+/// Wraps an `Arc<RdfStore>` and implements the [`Section`] trait: it streams
+/// the store as chunks (version 3) of at most the [`ChunkCaps`] it was built
+/// with, and serializes and deserializes the block-based format of 0.5.x
+/// (version 2).
 pub struct RdfStoreSection {
     store: Arc<RdfStore>,
     dirty: AtomicBool,
+    caps: ChunkCaps,
 }
 
 impl RdfStoreSection {
-    /// Create a new RDF section wrapping the given store.
+    /// Create a new RDF section wrapping the given store, writing chunks of
+    /// at most [`ChunkCaps::current`] (the caps a test set on this thread, or
+    /// the default ones).
     pub fn new(store: Arc<RdfStore>) -> Self {
+        Self::with_caps(store, ChunkCaps::current())
+    }
+
+    /// Create a new RDF section wrapping the given store, writing chunks of
+    /// at most `caps`.
+    pub fn with_caps(store: Arc<RdfStore>, caps: ChunkCaps) -> Self {
         Self {
             store,
             dirty: AtomicBool::new(false),
+            caps,
         }
     }
 
@@ -422,7 +453,23 @@ impl Section for RdfStoreSection {
     }
 
     fn deserialize(&mut self, data: &[u8]) -> Result<()> {
-        read_rdf_blocks(data, &self.store)
+        read_rdf_blocks(data, &self.store, "the default graph")
+    }
+
+    /// Streams the store as chunks of version 3: a metadata chunk, then per
+    /// graph its triples.
+    fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+        write_rdf_chunks(&self.store, self.caps, sink)
+    }
+
+    /// Reads 0.5.x bytes (one raw chunk) with [`deserialize`](Section::deserialize),
+    /// and chunks of version 3 one at a time.
+    fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+        if let Some(bytes) = legacy_bytes(source)? {
+            return self.deserialize(&bytes);
+        }
+        check_version(SectionType::RdfStore, source, RDF_SECTION_VERSION)?;
+        read_rdf_chunks(&self.store, source)
     }
 
     fn is_dirty(&self) -> bool {
@@ -632,5 +679,91 @@ mod tests {
         let mut section2 = RdfStoreSection::new(store2);
         section2.deserialize(&bytes).unwrap();
         assert_eq!(section2.store().len(), 100);
+    }
+
+    /// 0.5.x section bytes in the block layout: one triple of these
+    /// N-Triples strings, and the named graphs given as their names and
+    /// nested block bytes.
+    fn block_bytes(terms: [&str; 3], graphs: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut strings = StringTableBuilder::new();
+        let mut triple = Vec::new();
+        for term in terms {
+            triple.extend_from_slice(&strings.intern(term).to_le_bytes());
+        }
+        let names: Vec<u32> = graphs
+            .iter()
+            .map(|(name, _)| strings.intern(name))
+            .collect();
+        let table = strings.serialize().unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&RDF_BLOCK_MAGIC);
+        bytes.extend_from_slice(&[RDF_BLOCK_VERSION, 0]);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(graphs.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 18]);
+        for block in [&table, &triple] {
+            bytes.extend_from_slice(&u32::try_from(block.len()).unwrap().to_le_bytes());
+            bytes.extend_from_slice(block);
+            bytes.extend_from_slice(&crc32fast::hash(block).to_le_bytes());
+        }
+        for (name, (_, nested)) in names.iter().zip(graphs) {
+            bytes.extend_from_slice(&name.to_le_bytes());
+            bytes.extend_from_slice(&u32::try_from(nested.len()).unwrap().to_le_bytes());
+            bytes.extend_from_slice(nested);
+            bytes.extend_from_slice(&crc32fast::hash(nested).to_le_bytes());
+        }
+        bytes
+    }
+
+    /// A 0.5.x section is written by the terms' `Display`, so every term it
+    /// holds reads back; a term that does not (a damaged file) fails the
+    /// load, naming the graph and the triple, where 0.5.x dropped the triple.
+    #[test]
+    fn a_0_5_term_that_does_not_parse_is_refused_not_dropped() {
+        let alix = ["<http://example.org/alix>", "<http://example.org/name>"];
+        let good = block_bytes([alix[0], alix[1], "\"Kraków\"@pl"], &[]);
+        let store = Arc::new(RdfStore::new());
+        RdfStoreSection::new(Arc::clone(&store))
+            .deserialize(&good)
+            .unwrap();
+        assert!(store.contains(&Triple::new(
+            Term::iri("http://example.org/alix"),
+            Term::iri("http://example.org/name"),
+            Term::lang_literal("Kraków", "pl"),
+        )));
+
+        let bad = block_bytes([alix[0], alix[1], "<<not a term"], &[]);
+        let error = RdfStoreSection::new(Arc::new(RdfStore::new()))
+            .deserialize(&bad)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("RDF section (0.5.x), the default graph, triple 0, object")
+                && error.contains("<<not a term"),
+            "{error}"
+        );
+
+        let nested = block_bytes(["Alix", alix[1], "\"Gus\""], &[]);
+        let outer = block_bytes(
+            [alix[0], alix[1], "\"Alix\""],
+            &[("http://example.org/trips", nested)],
+        );
+        let error = RdfStoreSection::new(Arc::new(RdfStore::new()))
+            .deserialize(&outer)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("graph \"http://example.org/trips\", triple 0, subject"),
+            "{error}"
+        );
+    }
+
+    /// The block layout keeps its version byte 2 (0.5.x files and spill files
+    /// hold it), while the section is version 3.
+    #[test]
+    fn the_block_layout_keeps_version_2() {
+        let store = Arc::new(RdfStore::new());
+        let bytes = RdfStoreSection::new(store).serialize().unwrap();
+        assert_eq!(bytes[4], 2, "the block layout's version byte");
     }
 }

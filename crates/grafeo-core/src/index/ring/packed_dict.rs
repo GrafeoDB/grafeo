@@ -137,14 +137,15 @@ impl PackedTermDictionary {
         std::str::from_utf8(bytes).ok()
     }
 
-    /// Returns the parsed [`Term`] for the given id.
+    /// Returns the parsed [`Term`] for the given id, or `None` if the id is
+    /// out of range or its string is not an N-Triples term.
     ///
     /// Combines [`get_term_str`](Self::get_term_str) with N-Triples
     /// parsing. Allocates one `Term`.
     #[must_use]
     pub fn get_term(&self, id: u32) -> Option<Term> {
         let s = self.get_term_str(id)?;
-        Term::from_ntriples(s)
+        Term::from_ntriples(s).ok()
     }
 
     /// Returns the id of the term whose N-Triples encoding equals `s`,

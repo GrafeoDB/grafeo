@@ -843,7 +843,10 @@ mod tests {
     #[cfg(feature = "testing-crash-injection")]
     use std::panic::AssertUnwindSafe;
 
-    use grafeo_common::storage::{ChunkMeta, Section, SectionSink, SectionType, legacy_bytes};
+    use grafeo_common::storage::{
+        ChunkMeta, Section, SectionSink, SectionSource, SectionType, legacy_bytes, read_raw,
+        write_raw,
+    };
     use tempfile::TempDir;
 
     use super::super::v3::directory::{ENTRY_CHUNK_OPTIONAL, ENTRY_SECTION_OPTIONAL};
@@ -868,6 +871,14 @@ mod tests {
         fn deserialize(&mut self, data: &[u8]) -> Result<()> {
             self.data = data.to_vec();
             Ok(())
+        }
+
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            write_raw(self, sink)
+        }
+
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
 
         fn is_dirty(&self) -> bool {
@@ -909,6 +920,10 @@ mod tests {
             )
         }
 
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
+        }
+
         fn is_dirty(&self) -> bool {
             true
         }
@@ -941,6 +956,10 @@ mod tests {
                 sink.write_chunk(ChunkMeta::stream_piece(0, 3, offset), &[19])?;
             }
             Ok(())
+        }
+
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
 
         fn is_dirty(&self) -> bool {

@@ -922,7 +922,9 @@ mod tests {
     #[cfg(feature = "testing-crash-injection")]
     #[test]
     fn a_full_backup_records_the_epoch_of_the_image_it_copied() {
-        use grafeo_common::storage::{Section, SectionType};
+        use grafeo_common::storage::{
+            Section, SectionSink, SectionSource, SectionType, read_raw, write_raw,
+        };
         use grafeo_common::testing::crash::with_failure_at;
         use grafeo_storage::file::CheckpointHeader;
 
@@ -940,6 +942,14 @@ mod tests {
 
             fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
                 Ok(())
+            }
+
+            fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+                write_raw(self, sink)
+            }
+
+            fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+                read_raw(self, source)
             }
 
             fn is_dirty(&self) -> bool {

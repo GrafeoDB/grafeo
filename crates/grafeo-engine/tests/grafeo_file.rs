@@ -478,6 +478,75 @@ fn open_nonexistent_creates_new() {
     db.close().unwrap();
 }
 
+/// The names `CALL db.labels()` and `CALL db.relationshipTypes()` list in
+/// the default graph and in graph "trips", sorted.
+fn catalog_names(db: &GrafeoDB) -> Vec<Vec<String>> {
+    let names = |rows: Vec<Vec<grafeo_common::types::Value>>| {
+        let mut names: Vec<String> = rows
+            .iter()
+            .map(|row| match &row[0] {
+                grafeo_common::types::Value::String(name) => name.to_string(),
+                other => panic!("a name: {other:?}"),
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    let trips = db.graph("trips").unwrap();
+    vec![
+        names(db.execute("CALL db.labels()").unwrap().rows().to_vec()),
+        names(
+            db.execute("CALL db.relationshipTypes()")
+                .unwrap()
+                .rows()
+                .to_vec(),
+        ),
+        names(trips.execute("CALL db.labels()").unwrap().rows().to_vec()),
+        names(
+            trips
+                .execute("CALL db.relationshipTypes()")
+                .unwrap()
+                .rows()
+                .to_vec(),
+        ),
+    ]
+}
+
+/// The labels and edge types a graph lists stay with that graph across a
+/// reopen, also those no node or edge has any more: a label used in the
+/// default graph and only left behind in a named one, and the other way.
+#[test]
+fn every_graph_lists_the_same_names_after_a_reopen() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("names.grafeo");
+    let db = GrafeoDB::open(&path).unwrap();
+    db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        .unwrap();
+    db.execute("INSERT (:Ghost:City {name: 'Prague'})-[:OLD]->(:Ghost {name: 'Vincent'})")
+        .unwrap();
+    db.execute("MATCH (g:Ghost) DETACH DELETE g").unwrap();
+    db.create_graph("trips").unwrap();
+    let trips = db.graph("trips").unwrap();
+    trips
+        .execute("INSERT (:City {name: 'Berlin'})-[:KNOWS]->(:City {name: 'Paris'})")
+        .unwrap();
+    trips
+        .execute("INSERT (:Museum:Person {name: 'Mia'})-[:FERRY]->(:City {name: 'Amsterdam'})")
+        .unwrap();
+    trips.execute("MATCH (m:Museum) DETACH DELETE m").unwrap();
+    let before = catalog_names(&db);
+    assert!(
+        before[0].contains(&"Ghost".to_string()) && before[2].contains(&"Museum".to_string()),
+        "{before:?}"
+    );
+    db.close().unwrap();
+    drop(db);
+
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(catalog_names(&db), before);
+    db.close().unwrap();
+}
+
 #[test]
 fn file_grows_and_shrinks_with_data() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -487,12 +556,13 @@ fn file_grows_and_shrinks_with_data() {
     let fm = db.file_manager().unwrap();
     let initial_size = fm.file_size().unwrap();
 
-    // Add substantial data
+    // Add substantial data: distinct strings, which a dictionary-encoded
+    // column chunk does not store once for all nodes.
     let session = db.session();
     for i in 0..100 {
         session
             .execute(&format!(
-                "INSERT (:Node {{idx: {i}, data: '{}'}})",
+                "INSERT (:Node {{idx: {i}, data: '{i}{}'}})",
                 "x".repeat(1000)
             ))
             .unwrap();

@@ -91,6 +91,7 @@ Features:
 
 - Two alternating database headers, and a CRC-32 checksum on every header and every piece of data
 - Checkpoints are copy-on-write: a checkpoint writes the new state into space in the file that the last good state does not use, and switches the database header to it only once it is on disk. A checkpoint that fails or is cut off by a crash (for example on a full disk) leaves the last good state readable. A checkpoint needs free disk space for a second copy of the data while it runs; the next checkpoint reuses the space of the older copy.
+- A checkpoint writes the data in chunks of at most 1 MiB as it goes, without first encoding whole sections in memory. While it writes a vector or text index, changes to that index (inserting, updating or removing a node's vector or text) wait until the index is written, and so do searches of that index that arrive after a waiting change.
 - Exclusive file locking prevents multiple processes from opening the same file simultaneously
 
 ### Storage Format Setting (Rust)

@@ -744,10 +744,11 @@ fn person_embeddings(db: &GrafeoDB) -> Vec<(String, Option<Vec<f32>>)> {
 }
 
 /// After the migration of a 0.5.x database with a configured spill path, a
-/// removed embedding stays removed, and new nodes that took the ids of
-/// deleted nodes (Vincent's, deleted in 0.5.x, and Jules's, deleted in 0.6)
-/// get no old embedding, open after open, while the old file holding those
-/// ids is still in the path.
+/// removed embedding stays removed, and new nodes get no old embedding, open
+/// after open, while the old file holding the ids of deleted nodes
+/// (Vincent's, deleted in 0.5.x, and Jules's, deleted in 0.6) is still in the
+/// path. Since 0.6 a reopen keeps each graph's next id, so the new nodes take
+/// ids above every id the old file holds instead of those of deleted nodes.
 #[test]
 fn reused_ids_get_no_old_embedding_after_a_migration() {
     let (dir, path) = fixture("0.5.44");
@@ -779,8 +780,8 @@ fn reused_ids_get_no_old_embedding_after_a_migration() {
         .collect();
     assert_eq!(
         ids,
-        vec![Value::Int64(2), Value::Int64(3)],
-        "the new nodes took ids the old file holds"
+        vec![Value::Int64(4), Value::Int64(5)],
+        "the new nodes take fresh ids, not those of deleted nodes the old file holds"
     );
     db.close().unwrap();
     drop(db);

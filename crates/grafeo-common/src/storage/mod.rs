@@ -22,6 +22,9 @@ pub use image::{ImageSource, MemoryImage, MemorySection, ServedOnce};
 pub use page_fetcher::{AccessHint, PageFetcher};
 pub use section::{
     ChunkKind, ChunkMeta, Section, SectionDirectoryEntry, SectionFlags, SectionMemoryConfig,
-    SectionSink, SectionSource, SectionType, TierOverride, check_version, legacy_bytes,
+    SectionSink, SectionSource, SectionType, TierOverride, check_version, legacy_bytes, read_raw,
+    write_raw,
 };
-pub use value_codec::{MAX_VALUE_DEPTH, decode_value, encode_value, encoded_len};
+pub use value_codec::{
+    MAX_PROPERTY_VALUE_DEPTH, MAX_VALUE_DEPTH, decode_value, encode_value, encoded_len,
+};

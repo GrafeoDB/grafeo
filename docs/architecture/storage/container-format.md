@@ -161,23 +161,34 @@ block.
 
 ## Section Types
 
-| Value | Name | Description |
-|-------|------|-------------|
-| 1 | `CATALOG` | Schema definitions, index metadata, epoch, configuration |
-| 2 | `LPG_STORE` | Nodes, edges, properties, named graphs |
-| 3 | `RDF_STORE` | RDF triples, named graphs |
-| 4 | `COMPACT_STORE` | Columnar base of the layered compact store |
-| 5 | `OVERLAY_DELETIONS` | Base entities the compact store's overlay deleted |
-| 10 | `VECTOR_STORE` | Embeddings and HNSW topology |
-| 11 | `TEXT_INDEX` | BM25 postings and term dictionary |
-| 12 | `RDF_RING` | Wavelet trees and dictionary |
-| 20 | `PROPERTY_INDEX` | Property hash and btree indexes |
+| Value | Name | Version | Description |
+|-------|------|---------|-------------|
+| 1 | `CATALOG` | 1 | Schema definitions, index definitions, epoch |
+| 2 | `LPG_STORE` | 3 | Nodes, edges, properties, named graphs |
+| 3 | `RDF_STORE` | 3 | RDF triples, named graphs |
+| 4 | `COMPACT_STORE` | 5 | Columnar base of the layered compact store |
+| 5 | `OVERLAY_DELETIONS` | 2 | Base entities the compact store's overlay deleted |
+| 10 | `VECTOR_STORE` | 3 | HNSW topology of each vector index (the embeddings are node properties) |
+| 11 | `TEXT_INDEX` | 2 | BM25 document lengths and posting lists |
+| 12 | `RDF_RING` | 3 | Term dictionary, wavelet trees and permutations of the RDF ring |
+| 20 | `PROPERTY_INDEX` | - | Reserved, never written |
 
 **Type ranges:**
 
 - 1-9: Data sections (authoritative, cannot be rebuilt)
 - 10-19: Index sections (derived, can be rebuilt from data)
 - 20+: Acceleration structures
+
+**Versions.** The version is the one 0.6.0 writes, in the `section_version`
+byte of every directory entry of the section. A reader accepts its section's
+version and refuses any other, naming the section and both versions. The one
+exception is a section stored as one raw chunk (see [Chunks](#chunks)), which
+holds 0.5.x bytes and is read by the 0.5.x reader of its section, whatever its
+version byte.
+
+**`PROPERTY_INDEX` is reserved:** no checkpoint writes it. Property indexes are
+built from the data when a database opens, from their definitions in the
+catalog.
 
 **Sections without data** (indexes, RDF data, overlay deletions) are left out
 of the image: if no RDF data exists, there is no `RDF_STORE` chunk. The
@@ -189,13 +200,107 @@ of the image: if no RDF data exists, there is no `RDF_STORE` chunk. The
 
 A section is written as a stream of chunks, which the reader gathers back by
 section type. The chunk fields (graph, column, rows, codec) let a section split
-its data into many independently addressable chunks. Currently every section
-is written as one raw chunk holding its serialized bytes.
+its data into many independently addressable chunks. Every section of a
+checkpoint writes a metadata chunk (`chunk_kind` 1), first (in `LPG_STORE`
+last), and its data in chunks of their own, except the `CATALOG` section,
+which is still written as one raw chunk (`chunk_kind` 0) holding its
+serialized bytes. A file written by 0.5.x holds every section as one raw
+chunk, which the section's 0.5.x reader reads.
 
 The container has no 4 GiB limit: chunk offsets and lengths are 64-bit. The LPG
 section's own block directory currently uses 32-bit offsets, so a single LPG
 section is limited to 4 GiB; a checkpoint over that limit fails with an error
 that names it and keeps the WAL ([#392](https://github.com/GrafeoDB/grafeo/issues/392)).
+
+### Stream Sections
+
+The index sections (`VECTOR_STORE`, `TEXT_INDEX`, `RDF_RING`), `COMPACT_STORE`
+and `OVERLAY_DELETIONS` hold their data as byte streams. Such a section is its
+metadata chunk, then the pieces of its streams, stream after stream:
+
+- The metadata chunk (`chunk_kind` 1, every other field 0) is the bincode
+  encoding (bincode 2, standard configuration: variable-length little-endian
+  integers) of the section's metadata, which starts with a layout byte (`1`;
+  a reader refuses another layout) and the byte cap the streams were cut with.
+- A stream piece (`chunk_kind` 4) belongs to graph 0; its `column_id` is the
+  stream, its `row_start` the piece's byte offset in the stream, and its
+  `row_count` and `codec` are 0. Every piece but the last of a stream holds
+  exactly the byte cap (1 MiB by default), and an empty stream has no piece.
+- A reader refuses a section whose first chunk is not its metadata chunk, a
+  chunk of another kind or graph after it, a piece of a stream the metadata
+  does not list, a piece that does not start where the pieces before it end,
+  a stream that ends before its contents do, and bytes after them.
+
+All numbers inside the streams are little-endian.
+
+**`VECTOR_STORE` (version 3).** The metadata lists the HNSW indexes in strictly
+increasing key order (`Label:property`), each with its dimensions, its metric
+(`0` cosine, `1` Euclidean, `2` dot product, `3` Manhattan), `m` and
+`ef_construction`. Stream `i` holds the topology of index `i`:
+`[has_entry_point u8][entry_point u64][max_level u32][node_count u64]`, then
+`node_count` records `[id u64][level_count u32]`, each level followed by
+`[neighbor_count u32]` and that many `[neighbor u64]`, ids strictly
+increasing. There is an entry point exactly when there are nodes; it has
+`max_level + 1` levels, and every node has 1 to `max_level + 1`. Quantized
+indexes are not written: an open builds them from the data. A topology is
+restored only into an index with the same dimensions and metric.
+
+**`TEXT_INDEX` (version 2).** The metadata lists the index keys in strictly
+increasing order. Stream `i` holds the index of key `i`:
+`[k1 f64][b f64][total_length u64][doc_count u64][term_count u64]`, then
+`doc_count` document lengths `[node u64][length u32]`, then `term_count` posting
+lists `[term_length u32][term][count u64]`, each followed by `count` postings
+`[node u64][term_frequency u32]`. The stream is canonical: node ids strictly
+increase among the document lengths and within each list, terms (UTF-8)
+strictly increase, every length, count and term frequency is at least 1, every
+posting's node has a document length, and the document lengths and the term
+frequencies each add up to `total_length`.
+
+**`RDF_RING` (version 3).** The metadata holds the number of triples. Streams
+0 to 5 hold the six parts of the ring, each in its packed format: the term
+dictionary, the wavelet trees of the subjects, predicates and objects, and the
+permutations from SPO to POS and to OSP order. A store without a ring writes no
+`RDF_RING` section.
+
+**`COMPACT_STORE` (version 5).** Stream 0 holds the compact store's own
+encoding (version 4, magic `GCST`): a header, the node tables, the relationship
+tables, the id maps, and a CRC-32 of all of it. Its counts and lengths are
+32-bit and its names have 16-bit lengths, so a compacted base with a column or
+table past those limits (4 GiB, 2^32 rows, or a name over 64 KiB) fails the
+checkpoint with an error that names it.
+
+**`OVERLAY_DELETIONS` (version 2).** The metadata holds the number of deleted
+base nodes and edges. Stream 0 holds the node ids and stream 1 the edge ids,
+each a `u64`, strictly increasing; a stream that holds another number of ids
+than the metadata counts is refused.
+
+An index section that can be read but does not decode is no error: a warning
+is logged and the index is built from the data. A chunk that cannot be read
+(a checksum mismatch, an I/O error) fails the open, as in any other section.
+
+### Memory
+
+A checkpoint writes one section at a time and holds, besides the database,
+about one chunk per column of a table's row group, or one piece of a stream,
+plus the 48-byte directory entries of the chunks written so far. An open reads
+one chunk at a time (the three chunks of one range for the columns that come
+together) and holds what it builds from them. These sections hold more, in
+proportion to their data:
+
+| Section | Writing | Reading |
+|---------|---------|---------|
+| `LPG_STORE` | The sorted ids of the table being written (8 bytes per node or edge) and, without `temporal`, of each of its property columns (8 bytes per value) | |
+| `RDF_STORE` | A reference to every triple, sorted (8 bytes per triple) | |
+| `VECTOR_STORE` | A reference to every node of an in-memory topology, sorted by id | |
+| `TEXT_INDEX` | References to the terms (16 bytes per term), a copy of the document lengths (16 bytes per document) and, for a posting list not held in node order, a sorted copy of it (16 bytes per posting) | |
+| `RDF_RING` | The packed term dictionary, built whole before it is written | Each of the six streams in one buffer, which becomes that part of the ring |
+| `COMPACT_STORE` | Each column and each adjacency, encoded whole before it is written | The stream in one buffer, which becomes the store's column storage |
+
+**Locks.** A checkpoint holds a vector or text index's read lock while it
+writes that index's stream. Changes to that index (a node's vector or text
+inserted, updated or removed) wait until the stream is written, and so do
+searches of the index that arrive after a waiting change, as its locks are
+fair.
 
 ### Encryption
 
@@ -219,8 +324,10 @@ Every checkpoint writes the whole database as a new image:
 ```text
 Checkpoint:
   1. (Engine) Start a new WAL file
-  2. (Engine) Serialize every section
-  3. Write each section's chunks into free pages (CRC-32, encrypted if enabled)
+  2. (Engine) Hand every section to the container; commits wait until the
+     image is written
+  3. Stream each section's chunks, one section at a time, into free pages as
+     the section writes them (CRC-32, encrypted if enabled)
   4. Write the directory blocks into free pages
   5. fsync
   6. Write the new database header (iteration + 1, the new root) into the

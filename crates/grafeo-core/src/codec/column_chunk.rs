@@ -251,6 +251,17 @@ pub fn encode_column_chunk(
 /// that does not hold the header's number of values of the codec's kind,
 /// truncated input, or bytes after the body.
 pub fn decode_column_chunk(bytes: &[u8], codec: u8, row_count: u32) -> Result<ColumnChunk> {
+    decode_column_chunk_bytes(&Bytes::copy_from_slice(bytes), codec, row_count)
+}
+
+/// [`decode_column_chunk`] of a chunk held in `Bytes` (as a section source
+/// fetches it), read without a copy.
+///
+/// # Errors
+///
+/// As [`decode_column_chunk`].
+pub fn decode_column_chunk_bytes(data: &Bytes, codec: u8, row_count: u32) -> Result<ColumnChunk> {
+    let bytes: &[u8] = data;
     let entry_codec = codec;
     let codec = ChunkCodec::from_byte(entry_codec)
         .ok_or_else(|| corrupt(0, format!("unknown codec {entry_codec}")))?;
@@ -322,14 +333,12 @@ pub fn decode_column_chunk(bytes: &[u8], codec: u8, row_count: u32) -> Result<Co
         }
     }
     let zone_end = pos;
-    // The shared body readers slice a `Bytes`.
-    let data = Bytes::copy_from_slice(bytes);
     let epochs = if flags & FLAG_EPOCHS == 0 {
         None
     } else {
-        Some(read_epochs(&data, &mut pos, value_count as usize)?)
+        Some(read_epochs(data, &mut pos, value_count as usize)?)
     };
-    let values = read_values(codec, &data, &mut pos, value_count as usize)?;
+    let values = read_values(codec, data, &mut pos, value_count as usize)?;
     if pos != bytes.len() {
         return Err(corrupt(
             pos,

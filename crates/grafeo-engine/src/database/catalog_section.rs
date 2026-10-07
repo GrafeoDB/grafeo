@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use grafeo_common::storage::section::{Section, SectionType};
+use grafeo_common::storage::section::{
+    Section, SectionSink, SectionSource, SectionType, read_raw, write_raw,
+};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::graph::lpg::LpgStore;
 use grafeo_core::index::vector::{DistanceMetric, QuantizationType};
@@ -451,6 +453,20 @@ impl Section for CatalogSection {
         };
 
         Ok(())
+    }
+
+    /// The catalog is still written whole: [`serialize`](Section::serialize)
+    /// as one raw chunk, the only section of a checkpoint written so. The
+    /// catalog records of version 2 (#517) replace this and
+    /// [`read_from`](Section::read_from).
+    fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+        write_raw(self, sink)
+    }
+
+    /// The one raw chunk a checkpoint writes and a 0.5.x file holds, passed
+    /// to [`deserialize`](Section::deserialize).
+    fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+        read_raw(self, source)
     }
 
     fn is_dirty(&self) -> bool {

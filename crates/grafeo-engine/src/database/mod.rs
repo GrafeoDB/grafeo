@@ -1552,7 +1552,7 @@ impl GrafeoDB {
                 | WalRecord::ClearRdfGraph { .. }
                 | WalRecord::CreateRdfGraph { .. }
                 | WalRecord::DropRdfGraph { .. } => {
-                    rdf_ops::replay_rdf_wal_record(rdf_store, record);
+                    rdf_ops::replay_rdf_wal_record(rdf_store, record)?;
                 }
                 #[cfg(not(feature = "triple-store"))]
                 WalRecord::InsertRdfTriple { .. }

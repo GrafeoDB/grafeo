@@ -26,7 +26,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, mpsc};
 
+use grafeo_common::storage::ChunkCaps;
 use grafeo_common::testing::child_process;
+use grafeo_common::testing::chunk_caps::with_chunk_caps;
 use grafeo_common::testing::commit_hook::{
     after_next_commit_epoch, after_next_commit_stamped, during_next_checkpoint,
 };
@@ -224,7 +226,7 @@ fn commits_wait_for_a_checkpoint_and_stay_out_of_its_image() {
 
 /// The database path a child process works on.
 const PATH_VAR: &str = "GRAFEO_CHECKPOINT_DURING_COMMIT_PATH";
-/// Which child: "failing" or "graphs".
+/// Which child: "failing", "graphs", "open" or "busy".
 const CHILD_VAR: &str = "GRAFEO_CHECKPOINT_DURING_COMMIT_CHILD";
 /// Exit code of a child that reached its end.
 const EXITED: i32 = 19;
@@ -290,9 +292,177 @@ fn checkpoint_child() {
             );
             std::process::exit(EXITED);
         }
+        // The open transaction also adds a label, a property key and an
+        // edge type, then a checkpoint runs (tiny chunks, so the names come
+        // as rows are written) and the process ends without a commit.
+        "open" => {
+            session
+                .execute("MATCH (a:Person {name: 'Alix'}) SET a:Explorer, a.city = 'Berlin'")
+                .unwrap();
+            session
+                .execute(
+                    "MATCH (a:Person {name: 'Alix'}), (g:Person {name: 'Gus'}) \
+                     INSERT (a)-[:VISITED {year: 2019}]->(g)",
+                )
+                .unwrap();
+            let tiny = ChunkCaps {
+                max_rows: 2,
+                max_bytes: 128,
+            };
+            with_chunk_caps(tiny, || checkpointer.wal_checkpoint()).unwrap();
+            std::process::exit(EXITED);
+        }
+        // Transactions commit, roll back or stay open on three threads while
+        // checkpoints with tiny chunks run; the process ends without close.
+        "busy" => {
+            drop(session);
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let workers: Vec<_> = (0..3u64)
+                .map(|worker| {
+                    let db = Arc::clone(&db);
+                    let stop = Arc::clone(&stop);
+                    std::thread::spawn(move || busy_worker(&db, &stop, worker))
+                })
+                .collect();
+            let tiny = ChunkCaps {
+                max_rows: 3,
+                max_bytes: 160,
+            };
+            // At least three checkpoints, however long each takes on a busy
+            // machine, and checkpoints for at least 600 ms.
+            let start = std::time::Instant::now();
+            let mut checkpoints = 0;
+            while checkpoints < 3 || start.elapsed() < std::time::Duration::from_millis(600) {
+                with_chunk_caps(tiny, || checkpointer.wal_checkpoint()).unwrap();
+                checkpoints += 1;
+            }
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            for worker in workers {
+                worker.join().unwrap();
+            }
+            std::process::exit(EXITED);
+        }
         other => panic!("unknown child {other}"),
     }
     unreachable!("the child exits from the commit");
+}
+
+/// One thread of the "busy" child: transactions that add nodes with new
+/// labels and keys, set labels, delete nodes and add edges of new types,
+/// and then commit, roll back or stay open for a moment before rolling back.
+fn busy_worker(db: &GrafeoDB, stop: &std::sync::atomic::AtomicBool, worker: u64) {
+    let mut i = worker * 1_000_000;
+    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        i += 1;
+        let mut session = db.session();
+        if session.begin_transaction().is_err() {
+            continue;
+        }
+        for statement in [
+            format!(
+                "INSERT (:L{} {{k{}: {i}, name: 'Gus {i}'}})",
+                i % 13,
+                i % 17
+            ),
+            format!(
+                "MATCH (n:Person) WHERE n.n = {} SET n:M{}, n.k{} = 'v{i}'",
+                i % 40,
+                i % 11,
+                i % 19
+            ),
+            format!(
+                "MATCH (n:Person) WHERE n.n = {} DETACH DELETE n",
+                (i * 7) % 40
+            ),
+            format!(
+                "MATCH (a:Person), (b:Person) WHERE a.n = {} AND b.n = {} \
+                 INSERT (a)-[:T{} {{w: {i}}}]->(b)",
+                i % 40,
+                (i + 3) % 40,
+                i % 9
+            ),
+        ] {
+            let _ = session.execute(&statement);
+        }
+        match i % 3 {
+            0 => {
+                let _ = session.commit();
+            }
+            1 => {
+                let _ = session.rollback();
+            }
+            _ => {
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                let _ = session.rollback();
+            }
+        }
+    }
+}
+
+/// A checkpoint while a transaction is open (it created a node, a label, a
+/// property key and an edge type) writes a file that opens after the
+/// process ends, with the committed data. With `temporal` it holds none of
+/// the open transaction's changes; without, the store keeps no versions and
+/// its in-place changes to committed nodes reach the image (a known gap).
+#[test]
+fn a_checkpoint_during_an_open_transaction_writes_a_file_that_reopens() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("amsterdam.grafeo");
+    database_with_alix(&path);
+    run_child("open", &path);
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(
+        people(&db),
+        [Value::from("Alix")],
+        "Gus, whom the open transaction created, is not in the file"
+    );
+    assert_eq!(
+        db.execute("MATCH ()-[r]->() RETURN count(r) AS c")
+            .unwrap()
+            .rows()[0][0],
+        Value::Int64(0),
+        "the open transaction's edge is not in the file"
+    );
+    #[cfg(feature = "temporal")]
+    {
+        let alix = db
+            .execute("MATCH (a:Person) RETURN labels(a) AS labels, a.city AS city")
+            .unwrap()
+            .rows()[0]
+            .clone();
+        assert_eq!(
+            alix,
+            [Value::List(vec![Value::from("Person")].into()), Value::Null],
+            "the open transaction's label and value are not in the file"
+        );
+    }
+    db.close().unwrap();
+}
+
+/// Checkpoints with tiny chunks among transactions that commit, roll back
+/// and stay open, on three threads, then a process end without close: the
+/// file always opens.
+#[test]
+fn checkpoints_among_open_transactions_always_leave_a_file_that_opens() {
+    for round in 0..3 {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("busy.grafeo");
+        {
+            let db = GrafeoDB::open(&path).unwrap();
+            for n in 0..40 {
+                db.execute(&format!("INSERT (:Person {{name: 'Alix {n}', n: {n}}})"))
+                    .unwrap();
+            }
+            db.execute("MATCH (a:Person), (b:Person) WHERE a.n + 1 = b.n INSERT (a)-[:KNOWS]->(b)")
+                .unwrap();
+            db.close().unwrap();
+        }
+        run_child("busy", &path);
+        let db = GrafeoDB::open(&path)
+            .unwrap_or_else(|error| panic!("round {round}: the file does not open: {error}"));
+        db.execute("MATCH (n) RETURN count(n) AS c").unwrap();
+        db.close().unwrap();
+    }
 }
 
 /// A process that ends inside a commit, with a checkpoint started in it,

@@ -472,7 +472,9 @@ impl TripleRing {
         for id in (0u32..).take(dict_len) {
             let missing = TripleRingInvariantError::DictionaryMissingTerm { id };
             let text = packed_dict.get_term_str(id).ok_or(missing.clone())?;
-            let term = Term::from_ntriples(text).ok_or(missing)?;
+            // A string that does not parse cannot come back as its term either.
+            let term = Term::from_ntriples(text)
+                .map_err(|_| TripleRingInvariantError::TermDoesNotRoundTrip { id })?;
             if term.to_string() != text {
                 return Err(TripleRingInvariantError::TermDoesNotRoundTrip { id });
             }
@@ -1644,6 +1646,31 @@ mod tests {
             assert_eq!(
                 assemble(&ring, dictionary_of(&strings), ring.subjects_wt().clone()).unwrap_err(),
                 TripleRingInvariantError::TermDoesNotRoundTrip { id: 5 }
+            );
+        }
+
+        /// A string that parses, but not to the string its term prints as (a
+        /// character written as an escape), is refused too: one term has one
+        /// string in the dictionary.
+        #[test]
+        fn a_term_written_another_way_is_refused() {
+            let ring = TripleRing::from_triples(sixty().into_iter());
+            let mut strings = strings_of(&ring);
+            let (id, literal) = strings
+                .iter()
+                .enumerate()
+                .find_map(|(id, text)| {
+                    let rest = text.strip_prefix('"')?;
+                    let first = rest.chars().next().filter(char::is_ascii_alphanumeric)?;
+                    Some((id, (first, rest[first.len_utf8()..].to_string())))
+                })
+                .expect("a literal that starts with a letter or digit");
+            let (first, rest) = literal;
+            strings[id] = format!("\"\\u{:04X}{rest}", u32::from(first));
+            let id = u32::try_from(id).unwrap();
+            assert_eq!(
+                assemble(&ring, dictionary_of(&strings), ring.subjects_wt().clone()).unwrap_err(),
+                TripleRingInvariantError::TermDoesNotRoundTrip { id }
             );
         }
 

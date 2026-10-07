@@ -222,7 +222,9 @@ impl CheckpointSources {
 #[cfg(all(test, feature = "grafeo-file"))]
 mod tests {
     use super::*;
-    use grafeo_common::storage::{SectionType, legacy_bytes};
+    use grafeo_common::storage::{
+        SectionSink, SectionSource, SectionType, legacy_bytes, read_raw, write_raw,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A section holding fixed bytes, with its own dirty flag.
@@ -254,6 +256,14 @@ mod tests {
         fn deserialize(&mut self, data: &[u8]) -> Result<()> {
             self.data = data.to_vec();
             Ok(())
+        }
+
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            write_raw(self, sink)
+        }
+
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
 
         fn is_dirty(&self) -> bool {

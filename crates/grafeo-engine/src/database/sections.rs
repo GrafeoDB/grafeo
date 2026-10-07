@@ -1048,6 +1048,9 @@ mod tests {
             }
             Ok(())
         }
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            grafeo_common::storage::read_raw(self, source)
+        }
         fn is_dirty(&self) -> bool {
             true
         }
@@ -1472,6 +1475,9 @@ mod tests {
             fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
                 Ok(())
             }
+            fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+                grafeo_common::storage::write_raw(self, sink)
+            }
             fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
                 self.0 = Some(source.section_version());
                 Ok(())
@@ -1667,6 +1673,129 @@ mod tests {
                 error.contains(&format!("{unreadable:?}")) && error.contains("fails its checksum"),
                 "the fetch error of {unreadable:?} is returned: {error}"
             );
+        }
+    }
+
+    /// A database whose checkpoint holds every section of this build but the
+    /// compacted ones: the catalog, the LPG store with a named graph, a vector
+    /// and a text index and, with the features for them, RDF triples in the
+    /// default and a named graph, with their ring.
+    fn database_with_every_section() -> GrafeoDB {
+        let db = indexed_database();
+        db.create_graph("travel").unwrap();
+        db.graph("travel")
+            .unwrap()
+            .execute("INSERT (:City {name: 'Prague'})-[:ROUTE {km: 88}]->(:City {name: 'Paris'})")
+            .unwrap();
+        #[cfg(all(feature = "sparql", feature = "triple-store"))]
+        {
+            db.execute_sparql(
+                "INSERT DATA { <http://example.org/mia> <http://example.org/lives_in> \
+                 <http://example.org/prague> . GRAPH <http://example.org/trips> { \
+                 <http://example.org/jules> <http://example.org/visited> \
+                 <http://example.org/berlin> } }",
+            )
+            .unwrap();
+            #[cfg(feature = "ring-index")]
+            db.rdf_store().rebuild_ring();
+        }
+        db
+    }
+
+    /// A compacted database whose overlay holds a node and deleted a base
+    /// node and its edge.
+    #[cfg(feature = "compact-store")]
+    fn compacted_database_with_deletions() -> GrafeoDB {
+        let mut db = GrafeoDB::new_in_memory();
+        db.execute(
+            "INSERT (:City {name: 'Amsterdam'})-[:ROUTE {km: 653}]->(:City {name: 'Berlin'}), \
+             (:City {name: 'Paris'})",
+        )
+        .unwrap();
+        db.compact().unwrap();
+        db.execute("MATCH (c:City {name: 'Berlin'}) DETACH DELETE c")
+            .unwrap();
+        db.execute("INSERT (:City {name: 'Prague'})").unwrap();
+        db
+    }
+
+    /// Every section a checkpoint writes streams chunks: none is one raw
+    /// chunk, which only 0.5.x bytes are. Each holds one metadata chunk, first
+    /// (the LPG store's last: it lists the names met while the chunks before
+    /// it were written). The catalog is the one exception until it is written
+    /// as records (#517): it must still be exactly one raw chunk, so this test
+    /// fails, and is to be updated, when that changes.
+    #[test]
+    fn no_production_section_writes_a_raw_chunk() {
+        let mut uncompacted = vec![
+            SectionType::Catalog,
+            SectionType::LpgStore,
+            SectionType::VectorStore,
+            SectionType::TextIndex,
+        ];
+        #[cfg(all(feature = "sparql", feature = "triple-store"))]
+        uncompacted.push(SectionType::RdfStore);
+        #[cfg(all(feature = "sparql", feature = "ring-index"))]
+        uncompacted.push(SectionType::RdfRing);
+        let mut databases = vec![(database_with_every_section(), by_byte(uncompacted))];
+        #[cfg(feature = "compact-store")]
+        databases.push((
+            compacted_database_with_deletions(),
+            by_byte(vec![
+                SectionType::Catalog,
+                SectionType::LpgStore,
+                SectionType::CompactStore,
+                SectionType::OverlayDeletions,
+            ]),
+        ));
+        for (db, expected) in databases {
+            let commits = db.transaction_manager.hold_commits().unwrap();
+            let sections = db.checkpoint_sources().sections(&commits);
+            let refs: Vec<&dyn Section> = sections.iter().map(AsRef::as_ref).collect();
+            let image = MemoryImage::from_sections(&refs).unwrap();
+            drop(commits);
+            assert_eq!(
+                by_byte(image.section_types()),
+                expected,
+                "the checkpoint holds every section the database has"
+            );
+            for section_type in image.section_types() {
+                let source = image.section_source(section_type).unwrap();
+                let chunks = source.chunks();
+                if section_type == SectionType::Catalog {
+                    assert_eq!(
+                        chunks,
+                        [ChunkMeta::raw()],
+                        "the catalog is one raw chunk until it is written as records"
+                    );
+                    continue;
+                }
+                assert!(
+                    chunks.iter().all(|meta| meta.kind != ChunkKind::Raw),
+                    "{section_type:?} writes no raw chunk: {chunks:?}"
+                );
+                let metadata: Vec<usize> = chunks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, meta)| meta.kind == ChunkKind::Meta)
+                    .map(|(index, _)| index)
+                    .collect();
+                let place = if section_type == SectionType::LpgStore {
+                    chunks.len() - 1
+                } else {
+                    0
+                };
+                assert_eq!(
+                    metadata,
+                    [place],
+                    "{section_type:?} has one metadata chunk, at {place} of its {} chunks",
+                    chunks.len()
+                );
+                assert!(
+                    chunks.len() > 1,
+                    "{section_type:?} holds its data in chunks of their own"
+                );
+            }
         }
     }
 }

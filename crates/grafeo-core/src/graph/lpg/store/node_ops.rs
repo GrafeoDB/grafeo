@@ -98,6 +98,35 @@ impl LpgStore {
         Ok(node)
     }
 
+    /// A `Node` with the labels `id` has at `epoch` and no properties: with
+    /// `temporal`, the label set visible at that epoch, so a set a
+    /// transaction still open wrote (at `EpochId::PENDING`) is left out;
+    /// without it, the current set (the store keeps no label versions).
+    #[cfg(feature = "temporal")]
+    pub(crate) fn node_with_labels_at(&self, id: NodeId, epoch: EpochId) -> Node {
+        let mut node = Node::new(id);
+        let registry = self.label_registry.read();
+        let node_labels = self.node_labels.read();
+        if let Some(log) = node_labels.get(&id)
+            && let Some(label_ids) = log.at(epoch)
+        {
+            for &label_id in label_ids {
+                if let Some(label) = registry.get_name(label_id) {
+                    node.labels.push(label.clone());
+                }
+            }
+        }
+        node
+    }
+
+    /// A `Node` with the labels `id` has at `epoch` and no properties: with
+    /// `temporal`, the label set visible at that epoch; without it, the
+    /// current set (the store keeps no label versions).
+    #[cfg(not(feature = "temporal"))]
+    pub(crate) fn node_with_labels_at(&self, id: NodeId, _epoch: EpochId) -> Node {
+        self.node_with_labels(id)
+    }
+
     /// A `Node` with the current labels of `id` and no properties yet.
     pub(super) fn node_with_labels(&self, id: NodeId) -> Node {
         let mut node = Node::new(id);

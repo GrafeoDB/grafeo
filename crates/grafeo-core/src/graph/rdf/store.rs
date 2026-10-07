@@ -540,6 +540,61 @@ impl RdfStore {
         self.triples.read().iter().cloned().collect()
     }
 
+    /// The bytes the triple set and index maps of this graph (not its named
+    /// graphs) have allocated.
+    #[cfg(test)]
+    pub(crate) fn index_allocation_bytes(&self) -> usize {
+        self.triples.read().allocation_size()
+            + self.subject_index.read().allocation_size()
+            + self.predicate_index.read().allocation_size()
+            + self
+                .object_index
+                .read()
+                .as_ref()
+                .map_or(0, hashbrown::HashMap::allocation_size)
+            + self.sp_index.read().allocation_size()
+            + self.po_index.read().allocation_size()
+            + self.os_index.read().allocation_size()
+    }
+
+    /// Calls `visit` for every triple of this graph (not its named graphs),
+    /// in the order of [`sorted_triples`](Self::sorted_triples), which it
+    /// takes first: writers wait only while its references are taken, not
+    /// while `visit` runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error of `visit`, which ends the walk.
+    pub fn for_each_triple(
+        &self,
+        visit: &mut dyn FnMut(&Triple) -> grafeo_common::utils::error::Result<()>,
+    ) -> grafeo_common::utils::error::Result<()> {
+        for triple in &self.sorted_triples() {
+            visit(triple)?;
+        }
+        Ok(())
+    }
+
+    /// The triples of this graph (not its named graphs) present now, in a
+    /// defined order: by subject, then predicate, then object, a term
+    /// ordered by its kind (IRIs, blank nodes, literals) and then by its
+    /// strings (a literal by value, datatype and language). Stores that hold
+    /// the same triples give them in the same order, whatever order the
+    /// triples came in.
+    ///
+    /// Takes one reference per triple under one read lock, then sorts them
+    /// after releasing it.
+    #[must_use]
+    pub fn sorted_triples(&self) -> Vec<Arc<Triple>> {
+        let mut triples = self.triples();
+        triples.sort_unstable_by(|a, b| {
+            term_order(a.subject(), b.subject())
+                .then_with(|| term_order(a.predicate(), b.predicate()))
+                .then_with(|| term_order(a.object(), b.object()))
+        });
+        triples
+    }
+
     /// Returns triples matching the given pattern.
     ///
     /// Uses composite indexes for 2-bound and 3-bound queries (O(1) lookup),
@@ -949,9 +1004,9 @@ impl RdfStore {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let triple = parse_ntriples_line(trimmed).ok_or_else(|| NTriplesError::Parse {
+            let triple = parse_ntriples_line(trimmed).map_err(|reason| NTriplesError::Parse {
                 line: line_no + 1,
-                content: line.clone(),
+                content: format!("{reason}: {line}"),
             })?;
             triples.push(triple);
         }
@@ -1031,9 +1086,9 @@ impl RdfStore {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let triple = parse_ntriples_line(trimmed).ok_or_else(|| NTriplesError::Parse {
+            let triple = parse_ntriples_line(trimmed).map_err(|reason| NTriplesError::Parse {
                 line: line_no + 1,
-                content: line.clone(),
+                content: format!("{reason}: {line}"),
             })?;
             sink.emit(triple).map_err(|e| NTriplesError::Parse {
                 line: line_no + 1,
@@ -1069,6 +1124,16 @@ impl RdfStore {
     // Named graph support
     // =========================================================================
 
+    /// The configuration of a new named graph: this store's, with indexes
+    /// that start empty and grow as triples arrive (a store can hold many
+    /// named graphs, most of them small or empty).
+    fn named_graph_config(&self) -> RdfStoreConfig {
+        RdfStoreConfig {
+            initial_capacity: 0,
+            ..self.config.clone()
+        }
+    }
+
     /// Returns a named graph by IRI, or `None` if it doesn't exist.
     #[must_use]
     pub fn graph(&self, name: &str) -> Option<Arc<RdfStore>> {
@@ -1087,7 +1152,7 @@ impl RdfStore {
         Arc::clone(
             graphs
                 .entry(name.to_string())
-                .or_insert_with(|| Arc::new(RdfStore::with_config(self.config.clone()))),
+                .or_insert_with(|| Arc::new(RdfStore::with_config(self.named_graph_config()))),
         )
     }
 
@@ -1099,7 +1164,7 @@ impl RdfStore {
         }
         graphs.insert(
             name.to_string(),
-            Arc::new(RdfStore::with_config(self.config.clone())),
+            Arc::new(RdfStore::with_config(self.named_graph_config())),
         );
         true
     }
@@ -1482,7 +1547,9 @@ pub enum NTriplesError {
     Parse {
         /// 1-based line number.
         line: usize,
-        /// The raw line content.
+        /// What is wrong: for a line that is not an N-Triples triple, the
+        /// reason followed by the line; otherwise the parser's or the sink's
+        /// message.
         content: String,
     },
 }
@@ -1507,6 +1574,29 @@ impl std::error::Error for NTriplesError {
     }
 }
 
+/// The order of [`RdfStore::for_each_triple`]: IRIs, then blank nodes, then
+/// literals; within a kind by the IRI, the id, or a literal's value,
+/// datatype and language. Only equal terms compare equal.
+fn term_order(a: &Term, b: &Term) -> std::cmp::Ordering {
+    fn rank(term: &Term) -> u8 {
+        match term {
+            Term::Iri(_) => 0,
+            Term::BlankNode(_) => 1,
+            Term::Literal(_) => 2,
+        }
+    }
+    match (a, b) {
+        (Term::Iri(a), Term::Iri(b)) => a.as_str().cmp(b.as_str()),
+        (Term::BlankNode(a), Term::BlankNode(b)) => a.id().cmp(b.id()),
+        (Term::Literal(a), Term::Literal(b)) => a
+            .value()
+            .cmp(b.value())
+            .then_with(|| a.datatype().cmp(b.datatype()))
+            .then_with(|| a.language().cmp(&b.language())),
+        _ => rank(a).cmp(&rank(b)),
+    }
+}
+
 /// Extracts the next N-Triples term from a string, returning `(term_str, rest)`.
 fn next_ntriples_term(s: &str) -> Option<(&str, &str)> {
     let s = s.trim_start();
@@ -1524,7 +1614,9 @@ fn next_ntriples_term(s: &str) -> Option<(&str, &str)> {
         let mut pos = 1;
         while pos < bytes.len() {
             if bytes[pos] == b'\\' {
-                pos += 2; // skip escape sequence
+                // Skip the escape sequence; an escape at the end of the
+                // line ends the term, which then has no closing quote.
+                pos = (pos + 2).min(bytes.len());
             } else if bytes[pos] == b'"' {
                 pos += 1;
                 // Check for datatype or language suffix
@@ -1552,21 +1644,29 @@ fn next_ntriples_term(s: &str) -> Option<(&str, &str)> {
 /// Parses a single N-Triples line into a `Triple`.
 ///
 /// Expected format: `<subject> <predicate> <object> .`
-fn parse_ntriples_line(line: &str) -> Option<Triple> {
-    let (subj_str, rest) = next_ntriples_term(line)?;
-    let (pred_str, rest) = next_ntriples_term(rest)?;
-    let (obj_str, rest) = next_ntriples_term(rest)?;
+///
+/// # Errors
+///
+/// Returns what is wrong: a line that is not three terms followed by `.`,
+/// or the term that does not parse, with its [`TermParseError`](super::TermParseError).
+fn parse_ntriples_line(line: &str) -> Result<Triple, String> {
+    let shape = || "expected three terms followed by '.'".to_string();
+    let (subj_str, rest) = next_ntriples_term(line).ok_or_else(shape)?;
+    let (pred_str, rest) = next_ntriples_term(rest).ok_or_else(shape)?;
+    let (obj_str, rest) = next_ntriples_term(rest).ok_or_else(shape)?;
+
+    let term = |text: &str, role: &str| {
+        Term::from_ntriples(text).map_err(|error| format!("{role}: {error}"))
+    };
+    let subject = term(subj_str, "subject")?;
+    let predicate = term(pred_str, "predicate")?;
+    let object = term(obj_str, "object")?;
 
     // Expect trailing ` .`
-    let rest = rest.trim();
-    if !rest.starts_with('.') {
-        return None;
+    if !rest.trim().starts_with('.') {
+        return Err(shape());
     }
-
-    let subject = Term::from_ntriples(subj_str)?;
-    let predicate = Term::from_ntriples(pred_str)?;
-    let object = Term::from_ntriples(obj_str)?;
-    Some(Triple::new(subject, predicate, object))
+    Ok(Triple::new(subject, predicate, object))
 }
 
 #[cfg(test)]
@@ -1596,6 +1696,188 @@ mod tests {
                 Term::literal("Gus"),
             ),
         ]
+    }
+
+    #[test]
+    fn for_each_triple_visits_this_graph_in_term_order() {
+        let iri = |local: &str| Term::iri(format!("http://example.org/{local}"));
+        let expected = vec![
+            Triple::new(iri("alix"), iri("knows"), iri("gus")),
+            Triple::new(iri("alix"), iri("knows"), Term::blank("b0")),
+            Triple::new(
+                iri("alix"),
+                iri("knows"),
+                Term::typed_literal("Gus", "http://example.org/name"),
+            ),
+            Triple::new(iri("alix"), iri("knows"), Term::literal("Gus")),
+            Triple::new(iri("alix"), iri("knows"), Term::literal("Gus ")),
+            Triple::new(iri("alix"), iri("likes"), iri("amsterdam")),
+            Triple::new(iri("gus"), iri("knows"), iri("alix")),
+            Triple::new(Term::blank("b0"), iri("knows"), iri("alix")),
+        ];
+        let store = RdfStore::new();
+        for triple in expected.iter().rev() {
+            store.insert(triple.clone());
+        }
+        store
+            .graph_or_create("http://example.org/trips")
+            .insert(Triple::new(iri("mia"), iri("visits"), iri("paris")));
+        let mut visited = Vec::new();
+        store
+            .for_each_triple(&mut |triple| {
+                visited.push(triple.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(visited, expected, "in term order, without the named graph");
+
+        // The first error ends the walk.
+        let mut seen = 0;
+        let error = store
+            .for_each_triple(&mut |_| {
+                seen += 1;
+                if seen == 2 {
+                    Err(grafeo_common::utils::error::Error::Internal(
+                        "Mia stops here".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert_eq!(seen, 2);
+        assert!(error.to_string().contains("Mia stops here"), "{error}");
+    }
+
+    #[test]
+    fn ntriples_lines_decode_non_ascii_text_and_refuse_bad_escapes() {
+        // `~` stands for a backslash.
+        let input = concat!(
+            "<http://example.org/Kraków> <http://example.org/name> \"Krak~u00F3w\"@pl .\n",
+            "_:b0 <http://example.org/name> \"Kraków 🚲\" .\n",
+        )
+        .replace('~', "\\");
+        let store = RdfStore::new();
+        store.load_ntriples(input.as_bytes()).unwrap();
+        assert!(store.contains(&Triple::new(
+            Term::iri("http://example.org/Kraków"),
+            Term::iri("http://example.org/name"),
+            Term::lang_literal("Kraków", "pl"),
+        )));
+        assert!(store.contains(&Triple::new(
+            Term::blank("b0"),
+            Term::iri("http://example.org/name"),
+            Term::literal("Kraków 🚲"),
+        )));
+        let bad = "<http://example.org/a> <http://example.org/b> \"~x\" .\n".replace('~', "\\");
+        assert!(matches!(
+            RdfStore::new().load_ntriples(bad.as_bytes()),
+            Err(NTriplesError::Parse { line: 1, .. })
+        ));
+    }
+
+    /// A literal that ends in a backslash ran the N-Triples term scanner past
+    /// the end of the line, which panicked; it is a parse error naming why.
+    #[test]
+    fn a_literal_ending_in_a_backslash_is_a_parse_error() {
+        // `~` stands for a backslash.
+        for line in [
+            "<http://example.org/a> <http://example.org/b> \"abc~",
+            "<http://example.org/a> <http://example.org/b> \"~",
+            "<http://example.org/a> <http://example.org/b> \"Kraków~",
+        ] {
+            let line = line.replace('~', "\\");
+            match RdfStore::new().load_ntriples(line.as_bytes()) {
+                Err(NTriplesError::Parse { line: 1, content }) => assert!(
+                    content.contains("an escape without its character"),
+                    "{line}: {content}"
+                ),
+                other => panic!("{line}: {other:?}"),
+            }
+            match RdfStore::new().load_ntriples_streaming(line.as_bytes(), 3) {
+                Err(NTriplesError::Parse { line: 1, content }) => assert!(
+                    content.contains("an escape without its character"),
+                    "{line}: {content}"
+                ),
+                other => panic!("{line}: {other:?}"),
+            }
+        }
+    }
+
+    /// A parse error says what is wrong with the line, not only which line.
+    #[test]
+    fn an_ntriples_parse_error_keeps_its_reason() {
+        let bad = "<http://example.org/a> <http://example.org/b> \"~x\" .\n".replace('~', "\\");
+        match RdfStore::new().load_ntriples(bad.as_bytes()) {
+            Err(NTriplesError::Parse { line: 1, content }) => assert!(
+                content.contains("object: not an N-Triples term (an unknown escape")
+                    && content.contains("<http://example.org/a>"),
+                "{content}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        let short = "<http://example.org/a> <http://example.org/b> .\n";
+        match RdfStore::new().load_ntriples(short.as_bytes()) {
+            Err(NTriplesError::Parse { line: 1, content }) => {
+                assert!(content.contains("three terms"), "{content}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Named graphs start with empty indexes, which grow as triples arrive;
+    /// the default graph keeps the capacity of its configuration. Each named
+    /// graph used to preallocate about 1.3 MB.
+    #[test]
+    fn named_graphs_start_without_preallocated_indexes() {
+        let store = RdfStore::new();
+        assert!(
+            store.index_allocation_bytes() > 0,
+            "the default graph keeps its capacity"
+        );
+        for index in 0..300 {
+            store.create_graph(&format!("http://example.org/trips/{index}"));
+            store.graph_or_create(&format!("http://example.org/visits/{index}"));
+        }
+        assert_eq!(store.graph_count(), 600);
+        for name in store.graph_names() {
+            let graph = store.graph(&name).unwrap();
+            assert_eq!(graph.index_allocation_bytes(), 0, "{name}");
+        }
+        let trips = store.graph("http://example.org/trips/3").unwrap();
+        let visit = Triple::new(
+            Term::iri("http://example.org/mia"),
+            Term::iri("http://example.org/visits"),
+            Term::iri("http://example.org/prague"),
+        );
+        trips.insert(visit.clone());
+        assert!(trips.contains(&visit));
+        assert_eq!(trips.triples_with_subject(visit.subject()).len(), 1);
+    }
+
+    /// `term_order` calls two terms equal exactly when they are equal, so the
+    /// order of `for_each_triple` never depends on the hash set's order.
+    #[test]
+    fn term_order_is_equal_exactly_for_equal_terms() {
+        let mut terms = crate::graph::rdf::term::unusual_terms();
+        terms.extend([
+            Term::lang_literal("Praha", "cs"),
+            Term::lang_literal("Praha", "sk"),
+            Term::lang_literal("Praha", "CS"),
+            Term::typed_literal("19", crate::graph::rdf::Literal::XSD_INTEGER),
+            Term::typed_literal("19", crate::graph::rdf::Literal::XSD_DECIMAL),
+            Term::literal("19"),
+            Term::typed_literal("19", crate::graph::rdf::Literal::XSD_STRING),
+            Term::iri("19"),
+            Term::blank("19"),
+        ]);
+        for a in &terms {
+            for b in &terms {
+                let order = term_order(a, b);
+                assert_eq!(order == std::cmp::Ordering::Equal, a == b, "{a} and {b}");
+                assert_eq!(order, term_order(b, a).reverse(), "{a} and {b}");
+            }
+        }
     }
 
     #[test]
@@ -2282,7 +2564,7 @@ mod tests {
         let triple = parse_ntriples_line(
             r#"<http://example.org/alix> <http://xmlns.com/foaf/0.1/name> "Alix" ."#,
         );
-        assert!(triple.is_some());
+        assert!(triple.is_ok());
         let triple = triple.unwrap();
         assert_eq!(triple.subject(), &Term::iri("http://example.org/alix"));
         assert_eq!(
@@ -2295,7 +2577,7 @@ mod tests {
         let triple = parse_ntriples_line(
             r#"<http://example.org/alix> <http://xmlns.com/foaf/0.1/age> "30"^^<http://www.w3.org/2001/XMLSchema#integer> ."#,
         );
-        assert!(triple.is_some());
+        assert!(triple.is_ok());
         let triple = triple.unwrap();
         assert_eq!(
             triple.object(),
@@ -2306,19 +2588,19 @@ mod tests {
         let triple = parse_ntriples_line(
             r#"<http://example.org/alix> <http://xmlns.com/foaf/0.1/name> "Alix"@en ."#,
         );
-        assert!(triple.is_some());
+        assert!(triple.is_ok());
         assert_eq!(triple.unwrap().object(), &Term::lang_literal("Alix", "en"));
 
         // Blank node subject
         let triple = parse_ntriples_line(r#"_:b0 <http://xmlns.com/foaf/0.1/name> "Gus" ."#);
-        assert!(triple.is_some());
+        assert!(triple.is_ok());
         assert_eq!(triple.unwrap().subject(), &Term::blank("b0"));
 
         // IRI object
         let triple = parse_ntriples_line(
             r#"<http://example.org/alix> <http://xmlns.com/foaf/0.1/knows> <http://example.org/gus> ."#,
         );
-        assert!(triple.is_some());
+        assert!(triple.is_ok());
         assert_eq!(
             triple.unwrap().object(),
             &Term::iri("http://example.org/gus")
@@ -2326,7 +2608,7 @@ mod tests {
 
         // Invalid line (no dot)
         assert!(
-            parse_ntriples_line(r#"<http://example.org/s> <http://example.org/p> "v""#,).is_none()
+            parse_ntriples_line(r#"<http://example.org/s> <http://example.org/p> "v""#,).is_err()
         );
     }
 

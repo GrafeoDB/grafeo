@@ -3,7 +3,7 @@
 use super::{LpgStore, PropertyUndoEntry};
 #[cfg(feature = "temporal")]
 use grafeo_common::types::EpochId;
-use grafeo_common::types::{NodeId, TransactionId};
+use grafeo_common::types::{NodeId, PropertyKey, TransactionId};
 use grafeo_common::utils::hash::FxHashMap;
 
 impl LpgStore {
@@ -253,6 +253,37 @@ impl LpgStore {
             keys.insert(key.to_string());
         }
         keys.into_iter().collect()
+    }
+
+    /// Registers `label` without giving it to a node, as a load does for a
+    /// label its file lists and no node has (one whose nodes were deleted).
+    pub(crate) fn register_label(&self, label: &str) {
+        self.get_or_create_label_id(label);
+    }
+
+    /// Registers `edge_type` without an edge, as
+    /// [`register_label`](Self::register_label) does for labels.
+    pub(crate) fn register_edge_type(&self, edge_type: &str) {
+        self.get_or_create_edge_type_id(edge_type);
+    }
+
+    /// Returns the keys of the node property columns, in key order. A column
+    /// is listed once it was created, also when no node has a value for it
+    /// any more.
+    #[must_use]
+    pub fn node_property_keys(&self) -> Vec<PropertyKey> {
+        let mut keys = self.node_properties.keys();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// Returns the keys of the edge property columns, in key order, as
+    /// [`node_property_keys`](Self::node_property_keys) does for nodes.
+    #[must_use]
+    pub fn edge_property_keys(&self) -> Vec<PropertyKey> {
+        let mut keys = self.edge_properties.keys();
+        keys.sort_unstable();
+        keys
     }
 
     /// Returns the next node ID that will be allocated.

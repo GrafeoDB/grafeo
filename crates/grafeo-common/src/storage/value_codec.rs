@@ -47,9 +47,15 @@ use crate::utils::error::{Error, Result};
 /// Deepest nesting of lists, maps and paths a decode accepts.
 ///
 /// A list of scalars is 1 deep, a list holding that list 2 deep.
-/// [`encode_value`] refuses a value nested deeper. 128 is the nesting the
-/// GQL parser accepts.
-pub const MAX_VALUE_DEPTH: usize = 128;
+/// [`encode_value`] refuses a value nested deeper. Two levels above
+/// [`MAX_PROPERTY_VALUE_DEPTH`], so the history of a property (a list of
+/// `[epoch, value]` lists) of any value a write accepts encodes.
+pub const MAX_VALUE_DEPTH: usize = MAX_PROPERTY_VALUE_DEPTH + 2;
+
+/// Deepest nesting of lists, maps and paths a property value may have when
+/// it is written: 128, the nesting the GQL parser accepts. See
+/// [`nests_too_deep`].
+pub const MAX_PROPERTY_VALUE_DEPTH: usize = 128;
 
 const TAG_NULL: u8 = 0;
 const TAG_BOOL: u8 = 1;
@@ -234,6 +240,28 @@ fn put_counter(counts: &HashMap<String, u64>, out: &mut Vec<u8>) -> Result<()> {
         out.extend_from_slice(&count.to_le_bytes());
     }
     Ok(())
+}
+
+/// Whether `value` nests lists, maps and paths deeper than
+/// [`MAX_PROPERTY_VALUE_DEPTH`], the deepest property value a write accepts.
+///
+/// Writes refuse such a value before it reaches a store, so a checkpoint
+/// never meets one. Looks at most `MAX_PROPERTY_VALUE_DEPTH + 1` levels down,
+/// so a value nested far deeper costs no deeper recursion.
+#[must_use]
+pub fn nests_too_deep(value: &Value) -> bool {
+    deeper_than(value, MAX_PROPERTY_VALUE_DEPTH)
+}
+
+/// Whether `value` nests lists, maps and paths more than `room` levels deep.
+fn deeper_than(value: &Value, room: usize) -> bool {
+    let inner = |item: &Value| deeper_than(item, room - 1);
+    match value {
+        Value::List(items) => room == 0 || items.iter().any(inner),
+        Value::Map(map) => room == 0 || map.values().any(inner),
+        Value::Path { nodes, edges } => room == 0 || nodes.iter().chain(edges.iter()).any(inner),
+        _ => false,
+    }
 }
 
 /// The number of bytes `encode_value` appends for `value`.
@@ -1225,6 +1253,63 @@ mod tests {
         let one_deeper = [&[11u8, 1, 0, 0, 0][..], &bytes].concat();
         let error = decode_value(&one_deeper, &mut 0).unwrap_err().to_string();
         assert!(error.contains("deeper"), "{error}");
+    }
+
+    /// The write limit leaves two levels below the codec's: a history value
+    /// (a list of `[epoch, value]` lists) of any value a write accepts still
+    /// encodes and decodes.
+    #[test]
+    fn nests_too_deep_holds_values_two_levels_below_the_codec_limit() {
+        assert_eq!(
+            MAX_PROPERTY_VALUE_DEPTH, 128,
+            "the GQL parser's nesting limit"
+        );
+        assert_eq!(MAX_VALUE_DEPTH, MAX_PROPERTY_VALUE_DEPTH + 2);
+        for depth in [
+            0,
+            1,
+            3,
+            MAX_PROPERTY_VALUE_DEPTH,
+            MAX_PROPERTY_VALUE_DEPTH + 1,
+            MAX_VALUE_DEPTH,
+            MAX_VALUE_DEPTH + 1,
+            300,
+        ] {
+            let value = nested(depth);
+            assert_eq!(
+                nests_too_deep(&value),
+                depth > MAX_PROPERTY_VALUE_DEPTH,
+                "{depth} deep: refused by writes"
+            );
+            assert_eq!(
+                encode_value(&value, &mut Vec::new()).is_err(),
+                depth > MAX_VALUE_DEPTH,
+                "{depth} deep: refused by the encoder"
+            );
+        }
+        let deepest = nested(MAX_PROPERTY_VALUE_DEPTH);
+        let version = list(vec![Value::Int64(88), deepest]);
+        let history = list(vec![version]);
+        let bytes = encoded(&history);
+        let back = decode_value(&bytes, &mut 0).unwrap();
+        assert!(
+            same(&history, &back),
+            "a history value of the deepest value"
+        );
+
+        // Width does not count, and each container kind adds a level.
+        let wide = list((0..=MAX_VALUE_DEPTH).map(|_| nested(3)).collect());
+        assert!(!nests_too_deep(&wide), "a list of shallow values");
+        let in_map = map(vec![("Mia", nested(MAX_PROPERTY_VALUE_DEPTH))]);
+        assert!(nests_too_deep(&in_map), "a map around the deepest value");
+        let in_path = Value::Path {
+            nodes: Arc::from(vec![Value::Int64(3)]),
+            edges: Arc::from(vec![nested(MAX_PROPERTY_VALUE_DEPTH)]),
+        };
+        assert!(nests_too_deep(&in_path), "a path around the deepest value");
+        assert!(!nests_too_deep(&Value::Vector(Arc::from(vec![
+            3.0f32, 19.0
+        ]))));
     }
 
     /// Every `Time` is within a day, the decoder's condition, so the encoder

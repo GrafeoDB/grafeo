@@ -246,6 +246,7 @@ fn validate_snapshot_data(nodes: &[SnapshotNode], edges: &[SnapshotEdge]) -> Res
                 node.id
             )));
         }
+        refuse_too_deep("node", node.id.as_u64(), &node.properties)?;
     }
     let mut edge_ids = HashSet::with_capacity(edges.len());
     for edge in edges {
@@ -255,6 +256,7 @@ fn validate_snapshot_data(nodes: &[SnapshotNode], edges: &[SnapshotEdge]) -> Res
                 edge.id
             )));
         }
+        refuse_too_deep("edge", edge.id.as_u64(), &edge.properties)?;
         if !node_ids.contains(&edge.src) {
             return Err(Error::Internal(format!(
                 "snapshot edge {} references non-existent source node {}",
@@ -265,6 +267,28 @@ fn validate_snapshot_data(nodes: &[SnapshotNode], edges: &[SnapshotEdge]) -> Res
             return Err(Error::Internal(format!(
                 "snapshot edge {} references non-existent destination node {}",
                 edge.id, edge.dst
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a property version of snapshot `entity` `id` nested deeper than a
+/// database can store (see [`nests_too_deep`]), naming the entity and the
+/// property, as a write of the value would be refused.
+fn refuse_too_deep(
+    entity: &str,
+    id: u64,
+    properties: &[(String, Vec<(EpochId, Value)>)],
+) -> Result<()> {
+    use grafeo_common::storage::value_codec::{MAX_PROPERTY_VALUE_DEPTH, nests_too_deep};
+
+    for (key, versions) in properties {
+        if versions.iter().any(|(_, value)| nests_too_deep(value)) {
+            return Err(Error::InvalidValue(format!(
+                "snapshot {entity} {id}, property {key:?}: the value nests lists, maps and \
+                 paths more than {MAX_PROPERTY_VALUE_DEPTH} levels deep, deeper than a database \
+                 can store"
             )));
         }
     }
@@ -285,18 +309,83 @@ fn collect_rdf_triples(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<Snapsho
         .collect()
 }
 
-/// Populates an RDF store from snapshot triples.
+/// The RDF graphs of a snapshot with their terms read: the default graph's
+/// triples, then each named graph's name and triples.
 #[cfg(feature = "triple-store")]
-fn populate_rdf_store(store: &grafeo_core::graph::rdf::RdfStore, triples: &[SnapshotTriple]) {
+struct RdfSnapshotGraphs {
+    default: Vec<grafeo_core::graph::rdf::Triple>,
+    named: Vec<(String, Vec<grafeo_core::graph::rdf::Triple>)>,
+}
+
+/// Reads the terms of every RDF triple of a snapshot, before anything is
+/// changed, so a snapshot that holds a term that does not parse changes
+/// nothing.
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] naming the graph, the triple and the term
+/// when a term is not an N-Triples term: a snapshot never loses a triple.
+#[cfg(feature = "triple-store")]
+fn read_rdf_snapshot(
+    triples: &[SnapshotTriple],
+    named: &[RdfNamedGraphSnapshot],
+) -> Result<RdfSnapshotGraphs> {
+    Ok(RdfSnapshotGraphs {
+        default: read_rdf_triples(None, triples)?,
+        named: named
+            .iter()
+            .map(|graph| {
+                Ok((
+                    graph.name.clone(),
+                    read_rdf_triples(Some(&graph.name), &graph.triples)?,
+                ))
+            })
+            .collect::<Result<_>>()?,
+    })
+}
+
+/// The triples of one graph of a snapshot (`None`: the default graph), their
+/// terms read from their N-Triples strings.
+#[cfg(feature = "triple-store")]
+fn read_rdf_triples(
+    graph: Option<&str>,
+    triples: &[SnapshotTriple],
+) -> Result<Vec<grafeo_core::graph::rdf::Triple>> {
     use grafeo_core::graph::rdf::{Term, Triple};
-    for triple in triples {
-        if let (Some(s), Some(p), Some(o)) = (
-            Term::from_ntriples(&triple.subject),
-            Term::from_ntriples(&triple.predicate),
-            Term::from_ntriples(&triple.object),
-        ) {
-            store.insert(Triple::new(s, p, o));
-        }
+
+    triples
+        .iter()
+        .enumerate()
+        .map(|(index, triple)| {
+            let term = |text: &str, role: &str| {
+                Term::from_ntriples(text).map_err(|error| {
+                    let graph = graph.map_or_else(
+                        || "the default graph".to_string(),
+                        |name| format!("graph {name:?}"),
+                    );
+                    Error::Serialization(format!(
+                        "snapshot RDF triple {index} of {graph}, {role}: {error}"
+                    ))
+                })
+            };
+            // Unchecked: the store holds what it was given, as it was
+            // exported.
+            Ok(Triple::new_unchecked(
+                term(&triple.subject, "subject")?,
+                term(&triple.predicate, "predicate")?,
+                term(&triple.object, "object")?,
+            ))
+        })
+        .collect()
+}
+
+/// Populates an RDF store from the graphs of a snapshot, creating its named
+/// graphs.
+#[cfg(feature = "triple-store")]
+fn populate_rdf_store(store: &grafeo_core::graph::rdf::RdfStore, graphs: RdfSnapshotGraphs) {
+    store.batch_insert(graphs.default);
+    for (name, triples) in graphs.named {
+        store.graph_or_create(&name).batch_insert(triples);
     }
 }
 
@@ -319,6 +408,8 @@ pub(super) fn load_snapshot_into_store(
         bincode::serde::decode_from_slice::<Snapshot, _>(data, config).map_err(|e| {
             Error::Serialization(format!("failed to decode snapshot from .grafeo file: {e}"))
         })?;
+    #[cfg(feature = "triple-store")]
+    let rdf_graphs = read_rdf_snapshot(&snapshot.rdf_triples, &snapshot.rdf_named_graphs)?;
 
     populate_store_from_snapshot_ref(store, &snapshot.nodes, &snapshot.edges)?;
 
@@ -342,13 +433,7 @@ pub(super) fn load_snapshot_into_store(
     // Restore RDF triples
     #[cfg(feature = "triple-store")]
     {
-        populate_rdf_store(rdf_store, &snapshot.rdf_triples);
-        for rdf_graph in &snapshot.rdf_named_graphs {
-            rdf_store.create_graph(&rdf_graph.name);
-            if let Some(graph_store) = rdf_store.graph(&rdf_graph.name) {
-                populate_rdf_store(&graph_store, &rdf_graph.triples);
-            }
-        }
+        populate_rdf_store(rdf_store, rdf_graphs);
     }
 
     Ok(())
@@ -911,7 +996,8 @@ impl super::GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the snapshot is invalid, contains dangling edge
-    /// references, has duplicate IDs, or deserialization fails.
+    /// references, has duplicate IDs, holds an RDF term that is not an
+    /// N-Triples term, or deserialization fails.
     pub fn import_snapshot(data: &[u8]) -> Result<Self> {
         if data.is_empty() {
             return Err(Error::Internal("empty snapshot data".to_string()));
@@ -935,6 +1021,8 @@ impl super::GrafeoDB {
         for ng in &snapshot.named_graphs {
             validate_snapshot_data(&ng.nodes, &ng.edges)?;
         }
+        #[cfg(feature = "triple-store")]
+        let rdf_graphs = read_rdf_snapshot(&snapshot.rdf_triples, &snapshot.rdf_named_graphs)?;
 
         let db = Self::new_in_memory();
         populate_store_from_snapshot(db.lpg_store(), snapshot.nodes, snapshot.edges)?;
@@ -968,11 +1056,7 @@ impl super::GrafeoDB {
         // Restore RDF triples
         #[cfg(feature = "triple-store")]
         {
-            populate_rdf_store(&db.rdf_store, &snapshot.rdf_triples);
-            for rng in &snapshot.rdf_named_graphs {
-                let graph = db.rdf_store.graph_or_create(&rng.name);
-                populate_rdf_store(&graph, &rng.triples);
-            }
+            populate_rdf_store(&db.rdf_store, rdf_graphs);
         }
 
         // Restore schema
@@ -990,8 +1074,8 @@ impl super::GrafeoDB {
     /// [`export_snapshot()`](Self::export_snapshot), so it is plaintext
     /// (snapshots are never encrypted).
     ///
-    /// All validation (duplicate IDs, dangling edge references) is performed
-    /// before any data is modified. If validation fails, the current database
+    /// All validation (duplicate IDs, dangling edge references, RDF terms) is
+    /// performed before any data is modified. If validation fails, the current database
     /// is left unchanged. If validation passes, the store is cleared and
     /// rebuilt from the snapshot atomically (from the perspective of
     /// subsequent queries).
@@ -999,9 +1083,10 @@ impl super::GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the snapshot is invalid, contains dangling edge
-    /// references, has duplicate IDs, or deserialization fails, after a
-    /// commit that did not complete (the restored database could never be
-    /// checkpointed, see [`TransactionManager`](crate::transaction::TransactionManager)),
+    /// references, has duplicate IDs, holds an RDF term that is not an
+    /// N-Triples term, or deserialization fails, after a commit that did not
+    /// complete (the restored database could never be checkpointed, see
+    /// [`TransactionManager`](crate::transaction::TransactionManager)),
     /// on a read-only database, and the database-closed error after `close()`
     /// of a persistent database (read-only or not).
     pub fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
@@ -1036,6 +1121,8 @@ impl super::GrafeoDB {
         for ng in &snapshot.named_graphs {
             validate_snapshot_data(&ng.nodes, &ng.edges)?;
         }
+        #[cfg(feature = "triple-store")]
+        let rdf_graphs = read_rdf_snapshot(&snapshot.rdf_triples, &snapshot.rdf_named_graphs)?;
 
         // Drop all existing named graphs, then clear default store
         for name in self.lpg_store().graph_names() {
@@ -1074,11 +1161,7 @@ impl super::GrafeoDB {
             for name in self.rdf_store.graph_names() {
                 self.rdf_store.drop_graph(&name);
             }
-            populate_rdf_store(&self.rdf_store, &snapshot.rdf_triples);
-            for rng in &snapshot.rdf_named_graphs {
-                let graph = self.rdf_store.graph_or_create(&rng.name);
-                populate_rdf_store(&graph, &rng.triples);
-            }
+            populate_rdf_store(&self.rdf_store, rdf_graphs);
         }
 
         // Restore schema
@@ -1546,6 +1629,117 @@ mod tests {
 
         // DB unchanged
         assert_eq!(db.lpg_store().node_count(), 1);
+    }
+
+    /// A snapshot holding a value nested deeper than a database can store is
+    /// refused before anything is imported, naming the node or edge and the
+    /// property, as a write of the value is.
+    #[test]
+    fn a_snapshot_with_a_value_nested_too_deep_is_refused() {
+        use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
+        use grafeo_common::types::EpochId;
+
+        let mut deep = Value::from("Berlin");
+        for _ in 0..=MAX_PROPERTY_VALUE_DEPTH {
+            deep = Value::List(vec![deep].into());
+        }
+        let node = |id: u64, value: &Value| SnapshotNode {
+            id: NodeId::new(id),
+            labels: vec!["City".into()],
+            properties: vec![(
+                "trips".into(),
+                vec![
+                    (EpochId::new(3), value.clone()),
+                    (EpochId::new(19), Value::Int64(88)),
+                ],
+            )],
+        };
+        let deep_node = make_snapshot(
+            SNAPSHOT_VERSION,
+            vec![node(0, &Value::Null), node(3, &deep)],
+            vec![],
+        );
+        let deep_edge = make_snapshot(
+            SNAPSHOT_VERSION,
+            vec![node(0, &Value::Null)],
+            vec![SnapshotEdge {
+                id: EdgeId::new(19),
+                src: NodeId::new(0),
+                dst: NodeId::new(0),
+                edge_type: "ROUTE".into(),
+                properties: vec![("stops".into(), vec![(EpochId::new(3), deep.clone())])],
+            }],
+        );
+        for (bytes, words) in [
+            (&deep_node, "node 3, property \"trips\""),
+            (&deep_edge, "edge 19, property \"stops\""),
+        ] {
+            let error = GrafeoDB::import_snapshot(bytes).err().expect(words);
+            assert!(
+                matches!(error, grafeo_common::utils::error::Error::InvalidValue(_)),
+                "an invalid value: {error:?}"
+            );
+            let error = error.to_string();
+            assert!(error.contains(words), "{words}: {error}");
+            let db = GrafeoDB::new_in_memory();
+            db.execute("INSERT (:City {name: 'Amsterdam'})").unwrap();
+            let error = db.restore_snapshot(bytes).unwrap_err().to_string();
+            assert!(error.contains(words), "{words}: {error}");
+            assert_eq!(
+                db.lpg_store().node_count(),
+                1,
+                "a refused restore changes nothing"
+            );
+        }
+    }
+
+    /// The direct API and statements (through a parameter, the way a value
+    /// deeper than any literal reaches them) refuse a value nested deeper
+    /// than a database can store, and write nothing; the deepest one passes.
+    #[test]
+    fn writes_refuse_a_value_nested_too_deep() {
+        use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
+
+        let nested = |depth: usize| {
+            let mut value = Value::from("Paris");
+            for _ in 0..depth {
+                value = Value::List(vec![value].into());
+            }
+            value
+        };
+        // A limit on input: an invalid value, never an internal error.
+        let invalid = |error: grafeo_common::utils::error::Error, what: &str| {
+            assert!(
+                matches!(error, grafeo_common::utils::error::Error::InvalidValue(_)),
+                "{what}: {error:?}"
+            );
+            let message = error.to_string();
+            assert!(message.contains("\"trips\""), "{what}: {message}");
+            assert!(message.contains("GRAFEO-V"), "{what}: {message}");
+        };
+        let db = GrafeoDB::new_in_memory();
+        let alix = db.create_node(&["Person"]).unwrap();
+        let too_deep = nested(MAX_PROPERTY_VALUE_DEPTH + 1);
+        invalid(
+            db.set_node_property(alix, "trips", too_deep.clone())
+                .unwrap_err(),
+            "set_node_property",
+        );
+        invalid(
+            db.create_node_with_props(&["Person"], [("trips", too_deep.clone())])
+                .unwrap_err(),
+            "create_node_with_props",
+        );
+        let params = [("trips".to_string(), too_deep)].into_iter().collect();
+        invalid(
+            db.execute_with_params("INSERT (:Person {trips: $trips})", params)
+                .unwrap_err(),
+            "an INSERT parameter",
+        );
+        assert_eq!(db.node_count(), 1, "nothing was written");
+
+        db.set_node_property(alix, "trips", nested(MAX_PROPERTY_VALUE_DEPTH))
+            .unwrap();
     }
 
     #[test]

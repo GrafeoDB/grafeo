@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use grafeo_common::storage::value_codec::{MAX_PROPERTY_VALUE_DEPTH, nests_too_deep};
 use grafeo_common::types::{
     EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, TransactionId, Value,
 };
@@ -290,6 +291,7 @@ impl GraphWriter {
         labels: &[String],
         mut properties: Vec<(String, Value)>,
     ) -> Result<NodeId, OperatorError> {
+        refuse_too_deep(plain_values(&properties))?;
         if let Some(validator) = &self.validator {
             validator.validate_node_labels_allowed(labels)?;
             validator.inject_defaults(labels, &mut properties);
@@ -317,6 +319,7 @@ impl GraphWriter {
         mut properties: Vec<(String, Value)>,
         derive: impl FnOnce(NodeId) -> Result<Vec<(String, Value)>, OperatorError>,
     ) -> Result<NodeId, OperatorError> {
+        refuse_too_deep(plain_values(&properties))?;
         if let Some(validator) = &self.validator {
             validator.validate_node_labels_allowed(labels)?;
             validator.inject_defaults(labels, &mut properties);
@@ -326,6 +329,7 @@ impl GraphWriter {
         self.write_values(Entity::Node(id), &properties)?;
 
         let derived = derive(id)?;
+        refuse_too_deep(plain_values(&derived))?;
         if let Some(validator) = &self.validator {
             self.check_node_values(validator.as_ref(), labels, &derived, Some(id))?;
             let all = overlay(properties, &derived);
@@ -353,6 +357,7 @@ impl GraphWriter {
         assignments: &[(String, Value)],
         replace: bool,
     ) -> Result<(), OperatorError> {
+        refuse_too_deep(assigned_values(assignments))?;
         self.require_node(id)?;
         self.record(Entity::Node(id))?;
         if let Some(validator) = &self.validator {
@@ -513,6 +518,7 @@ impl GraphWriter {
         edge_type: &str,
         properties: Vec<(String, Value)>,
     ) -> Result<EdgeId, OperatorError> {
+        refuse_too_deep(plain_values(&properties))?;
         if let Some(validator) = &self.validator {
             self.check_new_edge(validator.as_ref(), src, dst, edge_type)?;
             for (name, value) in &properties {
@@ -540,6 +546,7 @@ impl GraphWriter {
         properties: Vec<(String, Value)>,
         derive: impl FnOnce(EdgeId) -> Result<Vec<(String, Value)>, OperatorError>,
     ) -> Result<EdgeId, OperatorError> {
+        refuse_too_deep(plain_values(&properties))?;
         if let Some(validator) = &self.validator {
             self.check_new_edge(validator.as_ref(), src, dst, edge_type)?;
             for (name, value) in &properties {
@@ -550,6 +557,7 @@ impl GraphWriter {
         self.write_values(Entity::Edge(id), &properties)?;
 
         let derived = derive(id)?;
+        refuse_too_deep(plain_values(&derived))?;
         if let Some(validator) = &self.validator {
             for (name, value) in &derived {
                 validator.validate_edge_property(edge_type, name, value)?;
@@ -573,6 +581,7 @@ impl GraphWriter {
         assignments: &[(String, Value)],
         replace: bool,
     ) -> Result<(), OperatorError> {
+        refuse_too_deep(assigned_values(assignments))?;
         self.require_edge(id)?;
         self.record(Entity::Edge(id))?;
         if let Some(validator) = &self.validator
@@ -838,6 +847,27 @@ fn property_list(properties: &PropertyMap) -> Vec<(String, Value)> {
         .collect()
 }
 
+/// Refuses a property value nested deeper than a database can store
+/// ([`MAX_PROPERTY_VALUE_DEPTH`] lists, maps and paths), before anything is
+/// written, so a checkpoint never meets one. A limit on input, reported as
+/// the property size limit is: a constraint violation (an invalid value).
+fn refuse_too_deep<'v>(
+    mut values: impl Iterator<Item = (&'v str, &'v Value)>,
+) -> Result<(), OperatorError> {
+    match values.find(|(_, value)| nests_too_deep(value)) {
+        Some((key, _)) => Err(OperatorError::ConstraintViolation(format!(
+            "property {key:?}: the value nests lists, maps and paths more than \
+             {MAX_PROPERTY_VALUE_DEPTH} levels deep, deeper than a database can store"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// The `(key, value)` pairs of a property list, as written.
+fn plain_values(properties: &[(String, Value)]) -> impl Iterator<Item = (&str, &Value)> {
+    properties.iter().map(|(key, value)| (key.as_str(), value))
+}
+
 /// The `(key, value)` pairs a SET writes: the entries of a map assignment,
 /// and every other assignment itself.
 fn assigned_values(assignments: &[(String, Value)]) -> impl Iterator<Item = (&str, &Value)> {
@@ -895,4 +925,126 @@ fn overlay(mut base: Vec<(String, Value)>, changes: &[(String, Value)]) -> Vec<(
         base.push((name.clone(), value.clone()));
     }
     base
+}
+
+#[cfg(all(test, feature = "lpg"))]
+mod tests {
+    use std::sync::Arc;
+
+    use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
+    use grafeo_common::types::{PropertyKey, Value};
+
+    use super::GraphWriter;
+    use crate::graph::GraphStoreMut;
+    use crate::graph::lpg::LpgStore;
+
+    /// A string inside `depth` lists.
+    fn nested(depth: usize) -> Value {
+        let mut value = Value::from("Prague");
+        for _ in 0..depth {
+            value = Value::List(Arc::from(vec![value]));
+        }
+        value
+    }
+
+    fn writer() -> (Arc<LpgStore>, GraphWriter) {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let target: Arc<dyn GraphStoreMut> = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
+        (store, GraphWriter::new(target))
+    }
+
+    fn labels(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    fn pairs(key: &str, value: &Value) -> Vec<(String, Value)> {
+        vec![(key.to_string(), value.clone())]
+    }
+
+    #[test]
+    fn values_nested_deeper_than_a_file_holds_are_refused_before_any_write() {
+        let (store, writer) = writer();
+        let too_deep = nested(MAX_PROPERTY_VALUE_DEPTH + 1);
+        let trips = PropertyKey::new("trips");
+
+        let mut properties = pairs("name", &Value::from("Alix"));
+        properties.extend(pairs("trips", &too_deep));
+        let error = writer
+            .create_node(&labels(&["Person"]), properties)
+            .unwrap_err();
+        assert!(
+            matches!(error, super::OperatorError::ConstraintViolation(_)),
+            "an invalid value, not an internal error: {error:?}"
+        );
+        let error = error.to_string();
+        assert!(
+            error.contains("\"trips\"") && error.contains(&MAX_PROPERTY_VALUE_DEPTH.to_string()),
+            "the error names the property and the limit: {error}"
+        );
+        assert_eq!(store.node_count(), 0, "a refused node is not created");
+
+        let deepest = nested(MAX_PROPERTY_VALUE_DEPTH);
+        let alix = writer
+            .create_node(&labels(&["Person"]), pairs("trips", &deepest))
+            .expect("the deepest value a file holds is accepted");
+        assert!(
+            writer
+                .set_node_properties(alix, &pairs("trips", &too_deep), false)
+                .is_err(),
+            "SET n.trips"
+        );
+        let map = Value::Map(Arc::new(
+            [(trips.clone(), too_deep.clone())].into_iter().collect(),
+        ));
+        assert!(
+            writer
+                .set_node_properties(alix, &pairs("*", &map), false)
+                .is_err(),
+            "SET n += {{trips: ...}}"
+        );
+        assert_eq!(
+            store.get_node_property(alix, &trips),
+            Some(deepest),
+            "a refused SET leaves the value as it was"
+        );
+        assert!(
+            writer
+                .create_node_with(&labels(&["Person"]), Vec::new(), |_| Ok(pairs(
+                    "trips", &too_deep
+                )))
+                .is_err(),
+            "a derived value of MERGE ... ON CREATE SET"
+        );
+
+        let gus = writer
+            .create_node(&labels(&["Person"]), Vec::new())
+            .unwrap();
+        let edges_before = store.edge_count();
+        assert!(
+            writer
+                .create_edge(alix, gus, "KNOWS", pairs("route", &too_deep))
+                .is_err(),
+            "CREATE ()-[{{route: ...}}]->()"
+        );
+        assert_eq!(
+            store.edge_count(),
+            edges_before,
+            "a refused edge is not created"
+        );
+        let knows = writer.create_edge(alix, gus, "KNOWS", Vec::new()).unwrap();
+        assert!(
+            writer
+                .set_edge_properties(knows, &pairs("route", &too_deep), false)
+                .is_err(),
+            "SET r.route"
+        );
+        assert!(
+            writer
+                .create_edge_with(alix, gus, "KNOWS", Vec::new(), |_| Ok(pairs(
+                    "route", &too_deep
+                )))
+                .is_err(),
+            "a derived edge value"
+        );
+    }
 }

@@ -18,7 +18,8 @@
 
 use std::time::{Duration, Instant};
 
-use grafeo_common::storage::SectionType;
+use grafeo_common::storage::{ChunkCaps, SectionType};
+use grafeo_common::testing::chunk_caps::with_chunk_caps;
 use grafeo_common::types::Value;
 use grafeo_engine::config::StorageFormat;
 use grafeo_engine::{Config, GrafeoDB};
@@ -263,38 +264,85 @@ fn assert_every_kind_of_section(db: &GrafeoDB, what: &str) {
     );
 }
 
-/// A database file is written in container v3, and every kind of section
-/// comes back from it.
-#[test]
+/// Writes every kind of section into a new database file with `caps` (the
+/// final checkpoint, which `close()` runs on this thread, cuts the sections
+/// with them) and reopens it with the default caps: the file is in container
+/// v3 and every kind of section comes back from it. Returns how many chunks
+/// each section has in the file.
 #[cfg(all(feature = "sparql", feature = "vector-index", feature = "text-index"))]
-fn every_kind_of_section_survives_a_reopen() {
+fn every_kind_of_section_after_a_reopen(caps: ChunkCaps) -> Vec<(SectionType, usize)> {
     use grafeo_storage::file::detect::{OnDisk, detect};
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db.grafeo");
-    {
+    with_chunk_caps(caps, || {
         let db = GrafeoDB::with_config(config(&path)).unwrap();
         write_every_kind_of_section(&db);
         db.close().unwrap();
-    }
+    });
     assert_eq!(detect(&path).unwrap(), OnDisk::Current, "a v3 file");
 
     let db = GrafeoDB::with_config(config(&path)).unwrap();
     let fm = db.file_manager().unwrap();
-    for section_type in [
+    let chunks: Vec<(SectionType, usize)> = [
         SectionType::Catalog,
         SectionType::LpgStore,
         SectionType::RdfStore,
         SectionType::VectorStore,
         SectionType::TextIndex,
-    ] {
-        assert!(
-            holds(fm, section_type),
-            "the file holds the {section_type:?} section"
-        );
+    ]
+    .into_iter()
+    .map(|section_type| {
+        let count = fm
+            .read_image(|image| {
+                Ok(image
+                    .section_source(section_type)
+                    .map_or(0, |source| source.chunks().len()))
+            })
+            .unwrap();
+        (section_type, count)
+    })
+    .collect();
+    for (section_type, count) in &chunks {
+        assert!(*count > 0, "the file holds the {section_type:?} section");
     }
     assert_every_kind_of_section(&db, "reopened");
     db.close().unwrap();
+    chunks
+}
+
+/// A database file is written in container v3, and every kind of section
+/// comes back from it.
+#[test]
+#[cfg(all(feature = "sparql", feature = "vector-index", feature = "text-index"))]
+fn every_kind_of_section_survives_a_reopen() {
+    every_kind_of_section_after_a_reopen(ChunkCaps::DEFAULT);
+}
+
+/// Every kind of section written in chunks of one row and 64 bytes (each
+/// row, and each 64 bytes of an index stream, in a chunk of its own) comes
+/// back with the default caps. The small caps cut the LPG store and the index
+/// sections into more chunks than the default caps do. (Chunks of three rows
+/// and 1 KiB would cut none of them: each graph has two nodes, each index
+/// stream is shorter. The catalog is still one raw chunk, and one triple is
+/// one row of the RDF store; `chunked_sections.rs` cuts RDF graphs.)
+#[test]
+#[cfg(all(feature = "sparql", feature = "vector-index", feature = "text-index"))]
+fn every_kind_of_section_survives_a_reopen_in_small_chunks() {
+    let small = every_kind_of_section_after_a_reopen(ChunkCaps {
+        max_rows: 1,
+        max_bytes: 64,
+    });
+    let default = every_kind_of_section_after_a_reopen(ChunkCaps::DEFAULT);
+    for ((section_type, small), (_, default)) in small.iter().zip(&default) {
+        if !matches!(section_type, SectionType::Catalog | SectionType::RdfStore) {
+            assert!(
+                small > default,
+                "{section_type:?}: {small} chunks with the small caps, {default} with the \
+                 default caps"
+            );
+        }
+    }
 }
 
 /// A compacted database's v3 file holds the compacted base and the

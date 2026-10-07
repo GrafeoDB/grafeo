@@ -274,10 +274,12 @@ impl SectionSource for BorrowedSection<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::section::{ChunkMeta, Section, SectionSink, SectionType, legacy_bytes};
+    use crate::storage::section::{
+        ChunkMeta, Section, SectionSink, SectionType, legacy_bytes, read_raw, write_raw,
+    };
     use crate::utils::error::Result;
 
-    /// A test section writing its bytes as one raw chunk (the trait defaults).
+    /// A test section writing its bytes as one raw chunk.
     struct Raw(SectionType, Vec<u8>);
 
     impl Section for Raw {
@@ -290,6 +292,12 @@ mod tests {
         fn deserialize(&mut self, data: &[u8]) -> Result<()> {
             self.1 = data.to_vec();
             Ok(())
+        }
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            write_raw(self, sink)
+        }
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
         fn is_dirty(&self) -> bool {
             false

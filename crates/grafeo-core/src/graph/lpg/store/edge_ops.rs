@@ -10,6 +10,16 @@ use grafeo_common::mvcc::VersionChain;
 #[cfg(feature = "tiered-storage")]
 use grafeo_common::mvcc::{HotVersionRef, VersionIndex, VersionRef};
 
+/// The error of an edge whose record cannot be read (a cold one that does not
+/// decode).
+#[cfg(feature = "tiered-storage")]
+fn unreadable_edge_record(id: EdgeId) -> grafeo_common::utils::error::Error {
+    grafeo_common::utils::error::Error::Internal(format!(
+        "the record of edge {} cannot be read",
+        id.as_u64()
+    ))
+}
+
 impl LpgStore {
     /// Builds an `Edge` from a record, resolving the type name and loading properties.
     fn build_edge(&self, id: EdgeId, record: &EdgeRecord) -> Option<Edge> {
@@ -658,6 +668,105 @@ impl LpgStore {
                 })
             })
             .count()
+    }
+
+    /// The ids of the edges visible now, in id order, for the readers that
+    /// must not lose an edge (checkpoints). Every record of this build is in
+    /// memory, so it never fails.
+    ///
+    /// # Errors
+    ///
+    /// None in this build; see the tiered storage version.
+    #[cfg(not(feature = "tiered-storage"))]
+    pub fn try_edge_ids(&self) -> grafeo_common::utils::error::Result<Vec<EdgeId>> {
+        let epoch = self.current_epoch();
+        let mut ids: Vec<EdgeId> = self
+            .edges
+            .read()
+            .iter()
+            .filter(|(_, chain)| chain.visible_at(epoch).is_some_and(|r| !r.is_deleted()))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// The ids of the edges visible now, in id order, for the readers that
+    /// must not lose an edge (checkpoints): a record that cannot be read (a
+    /// cold one that does not decode) is an error, never left out.
+    /// (Tiered storage version)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the first edge whose record cannot be read.
+    #[cfg(feature = "tiered-storage")]
+    pub fn try_edge_ids(&self) -> grafeo_common::utils::error::Result<Vec<EdgeId>> {
+        let epoch = self.current_epoch();
+        let versions = self.edge_versions.read();
+        let mut ids = Vec::with_capacity(versions.len());
+        for (id, index) in versions.iter() {
+            let Some(version_ref) = index.visible_at(epoch) else {
+                continue;
+            };
+            let record = self
+                .read_edge_record(&version_ref)
+                .ok_or_else(|| unreadable_edge_record(*id))?;
+            if !record.is_deleted() {
+                ids.push(*id);
+            }
+        }
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// The edge `id` as it is now, with its endpoints and type and without
+    /// its property values (a checkpoint reads those column by column), or
+    /// `None` when no version of it is visible now.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the edge's record cannot be read (tiered
+    /// storage: a cold one that does not decode) or names a type the type
+    /// registry lacks.
+    pub(crate) fn try_edge_without_properties(
+        &self,
+        id: EdgeId,
+    ) -> grafeo_common::utils::error::Result<Option<Edge>> {
+        let epoch = self.current_epoch();
+        #[cfg(not(feature = "tiered-storage"))]
+        let record = {
+            let edges = self.edges.read();
+            match edges.get(&id).and_then(|chain| chain.visible_at(epoch)) {
+                Some(record) => *record,
+                None => return Ok(None),
+            }
+        };
+        #[cfg(feature = "tiered-storage")]
+        let record = {
+            let versions = self.edge_versions.read();
+            let Some(version_ref) = versions.get(&id).and_then(|index| index.visible_at(epoch))
+            else {
+                return Ok(None);
+            };
+            self.read_edge_record(&version_ref)
+                .ok_or_else(|| unreadable_edge_record(id))?
+        };
+        if record.is_deleted() {
+            return Ok(None);
+        }
+        let edge_type = self
+            .id_to_edge_type
+            .read()
+            .get(record.type_id as usize)
+            .cloned()
+            .ok_or_else(|| {
+                grafeo_common::utils::error::Error::Internal(format!(
+                    "edge {} has type id {}, which the edge type registry lacks",
+                    id.as_u64(),
+                    record.type_id
+                ))
+            })?;
+        Ok(Some(Edge::new(id, record.src, record.dst, edge_type)))
     }
 
     /// Creates multiple edges in batch, significantly faster than calling

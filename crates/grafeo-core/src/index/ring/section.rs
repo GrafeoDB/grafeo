@@ -1272,13 +1272,13 @@ mod tests {
         }
     }
 
-    /// Terms whose N-Triples string does not parse back to them (whitespace
-    /// that parsing trims, a character it does not decode) are refused when
-    /// read, so the ring is built again from the triples instead of
-    /// answering for other terms. Two blank nodes that differ only in a
-    /// trailing space would parse to one term and shift every later id.
+    /// Terms that older parsing lost (trailing whitespace in a blank node id
+    /// or a language tag, characters outside ASCII) come back from their
+    /// N-Triples string as themselves, so a ring holding them reads back
+    /// whole: two blank nodes that differ only in a trailing space stay two
+    /// terms.
     #[test]
-    fn terms_that_do_not_survive_their_string_are_refused() {
+    fn terms_with_whitespace_and_non_ascii_text_survive_the_ring() {
         let blank_space = vec![
             Triple::new(
                 Term::blank("b"),
@@ -1308,16 +1308,18 @@ mod tests {
         ] {
             let mut triples = extra;
             triples.extend(five_hundred_triples());
+            let count = triples.len();
             let store = Arc::new(RdfStore::new());
             store.bulk_load(triples);
+            let terms = store.ring().map(|ring| ring.num_terms());
             let image = image_of(&RdfRingSection::with_caps(store, TINY));
-            let error = read_back(&image)
-                .map(|restored| restored.ring().map(|ring| ring.len()))
-                .expect_err(case)
-                .to_string();
-            assert!(
-                error.contains("RdfRing") && error.contains("dictionary"),
-                "{case}: {error}"
+            let restored = read_back(&image).unwrap_or_else(|error| panic!("{case}: {error}"));
+            let ring = restored.ring().expect(case);
+            assert_eq!(ring.len(), count, "{case}: every triple comes back");
+            assert_eq!(
+                Some(ring.num_terms()),
+                terms,
+                "{case}: no two terms collapse"
             );
         }
     }
